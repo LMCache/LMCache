@@ -1,2 +1,2 @@
-torch>=2.3.0
+torch>=2.2.0
 pytest>=7.0

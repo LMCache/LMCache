@@ -1,4 +1,6 @@
 import pytest
+import time
+import os
 import torch
 from lmcache.cache_engine import LMCacheEngine
 
@@ -19,6 +21,16 @@ def generate_kv_cache(num_tokens, fmt, device):
 
 def generate_tokens(num_tokens, device):
     return torch.randint(0, 10000, size=[num_tokens]).to(device)
+
+def concatenate_kv_caches(kv_chunks, fmt):
+    dim = 1 if fmt == "huggingface" else 0
+    ret = []
+    for kv_layer in zip(*kv_chunks):
+        klist, vlist = zip(*kv_layer)
+        klayer = torch.cat(klist, dim=dim)
+        vlayer = torch.cat(vlist, dim=dim)
+        ret.append((klayer, vlayer))
+    return tuple(ret)
 
 def check_kv_cache_equal(left, right, num_tokens, fmt):
     """
@@ -125,3 +137,73 @@ def test_mixed_retrive(fmt, chunk_size):
 
     assert length == new_num_tokens
     check_kv_cache_equal(retrived_cache, new_kv_cache, length, fmt)
+
+    ''' insert the mixed kv cache '''
+    final_tokens = torch.cat([tokens, new_tokens])
+    final_kv_cache = concatenate_kv_caches([kv_cache, generate_kv_cache(new_num_tokens, fmt, device)], fmt)
+    engine.store(final_tokens, final_kv_cache, fmt)
+
+    ''' should retrive the mixed version '''
+    retrived_cache, length = engine.retrive(final_tokens, fmt, device)
+    assert length == num_tokens + new_num_tokens
+    check_kv_cache_equal(retrived_cache, final_kv_cache, length, fmt)
+
+@pytest.mark.parametrize("fmt", ["vllm", "huggingface"])
+def test_persist(fmt):
+    device = "cuda"
+    num_tokens = 1000
+    chunk_size = 256
+    persist_path = "/tmp/test-engine.pth"
+
+    tokens = generate_tokens(num_tokens, device)
+    kv_cache = generate_kv_cache(num_tokens, fmt, device)
+    
+    ''' initialize the engine '''
+    engine = LMCacheEngine(chunk_size = chunk_size, persist_path = persist_path)
+
+    ''' store and persist '''
+    engine.store(tokens, kv_cache, fmt)
+    engine.persist()
+
+    ''' test load and retrive '''
+    engine2 = LMCacheEngine(chunk_size = chunk_size, persist_path = persist_path)
+
+    retrived_cache, length = engine2.retrive(tokens, fmt, device)
+
+    assert length == num_tokens
+    check_kv_cache_equal(retrived_cache, kv_cache, num_tokens, fmt)
+    
+    os.remove(persist_path)
+
+@pytest.mark.parametrize("fmt", ["vllm", "huggingface"])
+def test_skipping(fmt):
+    device = "cuda"
+    num_tokens = 12000
+    new_num_tokens = 200
+    chunk_size = 256
+    persist_path = "/tmp/test-engine.pth"
+
+    tokens = generate_tokens(num_tokens, device)
+    kv_cache = generate_kv_cache(num_tokens, fmt, device)
+    new_tokens = generate_tokens(new_num_tokens, device)
+    new_kv_cache = generate_kv_cache(new_num_tokens, fmt, device)
+    final_tokens = torch.cat([tokens, new_tokens])
+    final_kv_cache = concatenate_kv_caches([kv_cache, new_kv_cache], fmt)
+    
+    ''' initialize the engine '''
+    engine1 = LMCacheEngine(chunk_size = chunk_size, persist_path = persist_path)
+    engine2 = LMCacheEngine(chunk_size = chunk_size, persist_path = persist_path)
+
+    ''' store and persist '''
+    engine1.store(tokens, kv_cache, fmt)
+    engine2.store(tokens, kv_cache, fmt)
+
+    ''' store final '''
+    t1 = time.perf_counter()
+    engine1.store(final_tokens, final_kv_cache, fmt, skip_existing=True)
+    t2 = time.perf_counter()
+    engine2.store(final_tokens, final_kv_cache, fmt, skip_existing=False)
+    t3 = time.perf_counter()
+
+    print("With skip:", t2 - t1)
+    print("No skip:", t3 - t2)
