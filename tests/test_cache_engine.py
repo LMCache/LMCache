@@ -2,7 +2,7 @@ import pytest
 import time
 import os
 import torch
-from lmcache.cache_engine import LMCacheEngine
+from lmcache.cache_engine import LMCacheEngine, LMCacheEngineConfig, LMCacheEngineBuilder
 
 def generate_kv_cache(num_tokens, fmt, device):
     ret = []
@@ -68,7 +68,8 @@ def test_same_retrive_store(fmt):
     kv_cache = generate_kv_cache(num_tokens, fmt, device)
     
     ''' initialize the engine '''
-    engine = LMCacheEngine(chunk_size = 256)
+    cfg = LMCacheEngineConfig.from_defaults(chunk_size = 256)
+    engine = LMCacheEngine(cfg)
 
     ''' test store '''
     engine.store(tokens, kv_cache, fmt)
@@ -92,7 +93,8 @@ def test_retrive_prefix(fmt, chunk_size):
     new_kv_cache = generate_kv_cache(new_num_tokens, fmt, device)
     
     ''' initialize the engine '''
-    engine = LMCacheEngine(chunk_size = chunk_size)
+    cfg = LMCacheEngineConfig.from_defaults(chunk_size = chunk_size)
+    engine = LMCacheEngine(cfg)
 
     ''' test store '''
     engine.store(tokens, kv_cache, fmt)
@@ -118,7 +120,8 @@ def test_mixed_retrive(fmt, chunk_size):
     new_kv_cache = generate_kv_cache(new_num_tokens, fmt, device)
     
     ''' initialize the engine '''
-    engine = LMCacheEngine(chunk_size = chunk_size)
+    cfg = LMCacheEngineConfig.from_defaults(chunk_size = chunk_size)
+    engine = LMCacheEngine(cfg)
 
     ''' test store '''
     engine.store(tokens, kv_cache, fmt)
@@ -159,14 +162,15 @@ def test_persist(fmt):
     kv_cache = generate_kv_cache(num_tokens, fmt, device)
     
     ''' initialize the engine '''
-    engine = LMCacheEngine(chunk_size = chunk_size, persist_path = persist_path)
+    cfg = LMCacheEngineConfig.from_defaults(chunk_size = chunk_size, persist_path = persist_path)
+    engine = LMCacheEngine(cfg)
 
     ''' store and persist '''
     engine.store(tokens, kv_cache, fmt)
     engine.persist()
 
     ''' test load and retrive '''
-    engine2 = LMCacheEngine(chunk_size = chunk_size, persist_path = persist_path)
+    engine2 = LMCacheEngine(cfg)
 
     retrived_cache, length = engine2.retrive(tokens, fmt, device)
 
@@ -191,8 +195,9 @@ def test_skipping(fmt):
     final_kv_cache = concatenate_kv_caches([kv_cache, new_kv_cache], fmt)
     
     ''' initialize the engine '''
-    engine1 = LMCacheEngine(chunk_size = chunk_size, persist_path = persist_path)
-    engine2 = LMCacheEngine(chunk_size = chunk_size, persist_path = persist_path)
+    cfg = LMCacheEngineConfig.from_defaults(chunk_size = chunk_size, persist_path = persist_path)
+    engine1 = LMCacheEngine(cfg)
+    engine2 = LMCacheEngine(cfg)
 
     ''' store and persist '''
     engine1.store(tokens, kv_cache, fmt)

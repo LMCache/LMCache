@@ -2,7 +2,8 @@ import torch
 import time
 import os
 import hashlib
-from typing import Tuple, List, Union, Iterator
+from typing import Tuple, List, Union, Iterator, Optional
+from dataclasses import dataclass
 import logging
 
 logging.basicConfig(format='\033[33m%(levelname)s LMCache: \033[0m%(message)s', level=logging.INFO)
@@ -18,23 +19,42 @@ logger = logging.getLogger(__name__)
 # TODO: (usability) global getter for the LMCacheEngine object
 
 KVCache = Tuple[Tuple[torch.Tensor, torch.Tensor], ...]
+
+@dataclass
+class LMCacheEngineConfig:
+    chunk_size: int 
+    backend: str
+    persist_path: str
+
+    def from_defaults(
+            chunk_size: int = 256,
+            backend: str = "cuda",
+            persist_path: str = None
+        ) -> 'LMCacheEngineConfig':
+        return LMCacheEngineConfig(chunk_size, backend, persist_path)
+
+
 class LMCacheEngine:
-    def __init__(self, chunk_size: int = 256, persist_path: str = None):
+    def __init__(
+            self, 
+            config: LMCacheEngineConfig
+        ):
+
         # TODO: remove persist_path in the future
-        self.chunk_size = chunk_size
-        self.persist_path = persist_path
+        self.chunk_size = config.chunk_size 
+        self.persist_path = config.persist_path
+        self.backend = config.backend
         self.dict = {}
-        self.backend = "cuda"
-        if persist_path is not None and os.path.isfile(persist_path):
-            logger.info(f"Found persisted file at {persist_path}, loading it right now...")
-            self.dict = torch.load(persist_path)
+        if self.persist_path is not None and os.path.isfile(self.persist_path):
+            logger.info(f"Found persisted file at {self.persist_path}, loading it right now...")
+            self.dict = torch.load(self.persist_path)
             logger.info(f"Loaded {len(self.dict)} chunks")
 
     def _num_tokens_in_kv(
             self,
             kv_tensors: KVCache,
             fmt: str
-    ) -> int:
+        ) -> int:
         if fmt == "huggingface":
             return kv_tensors[0][0].shape[1]
         elif fmt == "vllm":
@@ -45,11 +65,19 @@ class LMCacheEngine:
     def _get_init_hash(self) -> str:
         return ""
 
-    def _hash(self, tokens: torch.Tensor, prefix_hash: str) -> str:
+    def _hash(
+            self, 
+            tokens: torch.Tensor, 
+            prefix_hash: str,
+        ) -> str:
         # TODO: change it to a more efficient hash function
         return hashlib.sha256(prefix_hash.encode("ascii") + tokens.cpu().numpy().tobytes()).hexdigest()
 
-    def _chunk_tokens(self, tokens: torch.Tensor, device) -> Iterator[torch.Tensor]:
+    def _chunk_tokens(
+            self, 
+            tokens: torch.Tensor, 
+            device
+        ) -> Iterator[torch.Tensor]:
         """
         Chunk the tokens into chunks of size self.chunk_size.
         
@@ -66,7 +94,7 @@ class LMCacheEngine:
     def _prefix_hash(
             self, 
             token_chunks: Iterator[torch.Tensor]
-    ) -> Iterator[str]:
+        ) -> Iterator[str]:
         prefix_hash = self._get_init_hash()
         for token_chunk in token_chunks:
             prefix_hash = self._hash(token_chunk, prefix_hash)
@@ -78,7 +106,8 @@ class LMCacheEngine:
             end_idx: int,
             kv_tensors: KVCache,
             fmt: str,
-            device) -> KVCache:
+            device
+        ) -> KVCache:
         """
         Slice the kv cache of tokens between [start_idx:end_idx]
         """
@@ -94,10 +123,12 @@ class LMCacheEngine:
             case _:
                 raise ValueError(f"Invalid format: {fmt}")
 
-    def _chunk_kv(self, 
-                  kv_tensors: KVCache,
-                  fmt: str,
-                  device) -> Iterator[KVCache]:
+    def _chunk_kv(
+            self, 
+            kv_tensors: KVCache,
+            fmt: str,
+            device
+        ) -> Iterator[KVCache]:
         """
         Chunk the kv cache into chunks of size self.chunk_size.
 
@@ -120,7 +151,7 @@ class LMCacheEngine:
             kv_tensors: KVCache,
             fmt: str,
             device
-    ) -> Iterator[Tuple[torch.Tensor, KVCache]]:
+        ) -> Iterator[Tuple[torch.Tensor, KVCache]]:
         """
         Skip the existing chunks and return the rest of the chunks
         """
@@ -139,7 +170,7 @@ class LMCacheEngine:
             fmt: str,
             device,
             skip_existing = True,
-    ) -> Iterator[Tuple[torch.Tensor, KVCache]]:
+        ) -> Iterator[Tuple[torch.Tensor, KVCache]]:
         """
         Returns a generator of zipped (chunk_hash, chunk_kv) tuples
         """
@@ -154,7 +185,7 @@ class LMCacheEngine:
             dim: int,
             fmt: str,
             device,
-    ) -> KVCache:
+        ) -> KVCache:
         for kv_layer in zip(*kv_chunks):
             klist, vlist = zip(*kv_layer)
             klayer = torch.cat(klist, dim=dim).to(device)
@@ -167,7 +198,7 @@ class LMCacheEngine:
             kv_tensors: KVCache,
             fmt: str,
             skip_existing = True,
-    ) -> None:
+        ) -> None:
         """
         Store the KV cache of the tokens into the cache engine.
 
@@ -206,7 +237,7 @@ class LMCacheEngine:
                 tokens: torch.Tensor,
                 fmt: str,
                 device: str = 'cuda'
-                ) -> Tuple[KVCache, int]:
+        ) -> Tuple[KVCache, int]:
         """
         Retrive the KV cache of the tokens from the cache engine. The retrived KV cache 
         should be a prefix of the input tokens.
@@ -261,3 +292,27 @@ class LMCacheEngine:
         else:
             raise RuntimeError("Persist path not found, please set self.persist_path")
 
+
+class LMCacheEngineBuilder:
+    _instances = {}
+
+    @classmethod
+    def build(
+            cls, 
+            config: LMCacheEngineConfig, 
+            instance_id: str
+        ) -> LMCacheEngine:
+        """Builds a new LMCacheEngine instance if it doesn't already exist for the given ID."""
+        if instance_id not in cls._instances:
+            engine = LMCacheEngine(config)
+            cls._instances[instance_id] = engine
+            return engine
+        else:
+            return cls._instances[instance_id]
+
+    @classmethod
+    def get(cls, 
+            instance_id: str
+        ) -> Optional[LMCacheEngine]:
+        """Returns the LMCacheEngine instance associated with the instance ID, or None if not found."""
+        return cls._instances.get(instance_id)
