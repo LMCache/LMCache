@@ -212,3 +212,16 @@ def test_skipping(fmt):
 
     print("With skip:", t2 - t1)
     print("No skip:", t3 - t2)
+
+def test_builder():
+    instance_id = "test"
+    cfg = LMCacheEngineConfig.from_defaults(chunk_size = 256, persist_path = "/tmp/a.txt")
+    cfg2 = LMCacheEngineConfig.from_defaults(chunk_size = 512, persist_path = "/tmp/a.txt")
+    should_be_none = LMCacheEngineBuilder.get(instance_id)
+    assert should_be_none is None
+
+    engine = LMCacheEngineBuilder.get_or_create(instance_id, cfg)
+    engine2 = LMCacheEngineBuilder.get(instance_id)
+
+    with pytest.raises(ValueError):
+        LMCacheEngineBuilder.get_or_create(instance_id, cfg2)

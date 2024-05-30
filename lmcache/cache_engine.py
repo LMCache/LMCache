@@ -39,15 +39,22 @@ class LMCacheEngine:
             self, 
             config: LMCacheEngineConfig
         ):
+        """
+        Throws:
+            RuntimeError if the loaded configuration does not match the current configuration
+        """
 
         # TODO: remove persist_path in the future
         self.chunk_size = config.chunk_size 
         self.persist_path = config.persist_path
         self.backend = config.backend
+        self.config = config
         self.dict = {}
         if self.persist_path is not None and os.path.isfile(self.persist_path):
             logger.info(f"Found persisted file at {self.persist_path}, loading it right now...")
-            self.dict = torch.load(self.persist_path)
+            self.dict, loaded_config = torch.load(self.persist_path)
+            if loaded_config != self.config:
+                raise RuntimeError(f"Loaded configuration {loaded_config} does not match the current configuration {self.config}")
             logger.info(f"Loaded {len(self.dict)} chunks")
 
     def _num_tokens_in_kv(
@@ -287,7 +294,7 @@ class LMCacheEngine:
         Temporary function of persisting
         """
         if self.persist_path is not None:
-            torch.save(self.dict, self.persist_path)
+            torch.save((self.dict, self.config), self.persist_path)
             logger.info(f"Persisted the cache to {self.persist_path}. {os.path.getsize(self.persist_path) / 1e6} MBytes in total")
         else:
             raise RuntimeError("Persist path not found, please set self.persist_path")
@@ -295,19 +302,28 @@ class LMCacheEngine:
 
 class LMCacheEngineBuilder:
     _instances = {}
+    _cfgs = {}
 
     @classmethod
-    def build(
+    def get_or_create(
             cls, 
+            instance_id: str,
             config: LMCacheEngineConfig, 
-            instance_id: str
         ) -> LMCacheEngine:
-        """Builds a new LMCacheEngine instance if it doesn't already exist for the given ID."""
+        """
+        Builds a new LMCacheEngine instance if it doesn't already exist for the given ID.
+
+        Raises:
+            ValueError if the instance already exists with a different configuration.
+        """
         if instance_id not in cls._instances:
             engine = LMCacheEngine(config)
             cls._instances[instance_id] = engine
+            cls._cfgs[instance_id] = config
             return engine
         else:
+            if cls._cfgs[instance_id] != config:
+                raise ValueError(f"Instance {instance_id} already exists with a different configuration.")
             return cls._instances[instance_id]
 
     @classmethod
