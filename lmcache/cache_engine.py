@@ -24,6 +24,7 @@ class LMCacheEngine:
         self.chunk_size = chunk_size
         self.persist_path = persist_path
         self.dict = {}
+        self.backend = "cuda"
         if persist_path is not None and os.path.isfile(persist_path):
             logger.info(f"Found persisted file at {persist_path}, loading it right now...")
             self.dict = torch.load(persist_path)
@@ -46,7 +47,7 @@ class LMCacheEngine:
 
     def _hash(self, tokens: torch.Tensor, prefix_hash: str) -> str:
         # TODO: change it to a more efficient hash function
-        return hashlib.sha256(prefix_hash.encode("ascii") + tokens.numpy().tobytes()).hexdigest()
+        return hashlib.sha256(prefix_hash.encode("ascii") + tokens.cpu().numpy().tobytes()).hexdigest()
 
     def _chunk_tokens(self, tokens: torch.Tensor, device) -> Iterator[torch.Tensor]:
         """
@@ -60,7 +61,7 @@ class LMCacheEngine:
             a generator of chunks of tokens, each with shape [chunk_size]
         """
         for i in range(0, len(tokens), self.chunk_size):
-            yield tokens[i:i+self.chunk_size].cpu()
+            yield tokens[i:i+self.chunk_size].to(device)
 
     def _prefix_hash(
             self, 
@@ -136,7 +137,7 @@ class LMCacheEngine:
             tokens: torch.Tensor,
             kv_tensors: KVCache,
             fmt: str,
-            device = 'cpu',
+            device,
             skip_existing = True,
     ) -> Iterator[Tuple[torch.Tensor, KVCache]]:
         """
@@ -190,7 +191,7 @@ class LMCacheEngine:
         # TODO: check shapes
 
         ''' chunk the tokens and the kv caches '''
-        chunk_hashes_and_kvs = self._make_chunks(tokens, kv_tensors, fmt, device='cpu', skip_existing=skip_existing)
+        chunk_hashes_and_kvs = self._make_chunks(tokens, kv_tensors, fmt, device=self.backend, skip_existing=skip_existing)
 
         ''' store them into the dictionary '''
         n_chunks = 0
@@ -221,7 +222,7 @@ class LMCacheEngine:
             num_tokens: the number of tokens in the kv cache
         """
         st = time.perf_counter()
-        chunk_hashes = self._prefix_hash(self._chunk_tokens(tokens, device='cpu'))
+        chunk_hashes = self._prefix_hash(self._chunk_tokens(tokens, device=self.backend))
         retrived_kv_chunks: List[KVCache] = []
 
         ''' retrive the kv cache '''
