@@ -6,22 +6,16 @@ from typing import Tuple, List, Union, Iterator, Optional
 from dataclasses import dataclass
 import logging
 
-from .cache_engine_impl import LMCacheInterface, LMLocalCahe, LMRedisCache, LMCacheEngineConfig
+from lmcache.storage_backend import LMCLocalBackend, LMCRedisBackend, LMCBackendInterface
+from lmcache.config import LMCacheEngineConfig
+from lmcache.types import KVCache
+from lmcache.logging import init_logger
 
-logging.basicConfig(format='\033[33m%(levelname)s LMCache: \033[0m%(message)s', level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-# FIXME: currently is v0.1: store the kv cache in CPU memory in a dictionary
-
-# TODO: (performance) don't do anything about the tensor if the key is already in the cache 
-# TODO: (functionality) store to redis
-# TODO: (functionality) configuration class
+# TODO: (functionality) configuration class for backend implementations
 # TODO: (functionality) the model name should also be the key
 # TODO: (functionality) the chunk size should also be related to the key
-# TODO: (usability) global getter for the LMCacheEngine object
 
-KVCache = Tuple[Tuple[torch.Tensor, torch.Tensor], ...]
-
+logger = init_logger(__name__)
 
 class LMCacheEngine:
     def __init__(
@@ -33,20 +27,40 @@ class LMCacheEngine:
             RuntimeError if the loaded configuration does not match the current configuration
         """
 
-        # TODO: remove persist_path in the future
-        self.chunk_size = config.chunk_size 
-        self.persist_path = config.persist_path
-        self.backend = config.backend
         self.config = config
-        self.device = "cpu" if self.backend == "cpu" else "cuda"
+        self.chunk_size = config.chunk_size 
+
+        match self.config.local_device:
+            case "cpu":
+                self.device = "cpu"
+            case _:
+                self.device = "cuda"
+
+        match self.config:
+            case LMCacheEngineConfig(_, local_device=None, remote_url=str(p)) if p is not None:
+                # remote only
+                logger.info("Initializing redis connection")
+                self.engine_ = LMCRedisBackend(config)
+            case LMCacheEngineConfig(_, local_device=str(p), remote_url=None) if p is not None:
+                # local only
+                logger.info("Initializing local backend")
+                self.engine_ = LMCLocalBackend(config)
+            case LMCacheEngineConfig(_, local_device=str(p), remote_url=str(q)) if p is not None and q is not None:
+                # TODO: hybrid
+                self.engine_ = LMCRedisBackend(config)
+            case _:
+                raise ValueError(f"Invalid configuration: {config}")
+
+        #self.backend = config.backend
+        #self.device = "cpu" if self.backend == "cpu" else "cuda"
 
         # TODO: use a backend build to build the LMCacheInterface object
-        if self.backend == "cuda" or self.backend == "cpu":
-            self.engine_ = LMLocalCahe(config)
-        elif self.backend.startswith("redis://"):
-            self.engine_ = LMRedisCache(config)
-        else:
-            raise ValueError(f"Invalid backend: {self.backend}")
+        #if self.backend == "cuda" or self.backend == "cpu":
+        #    self.engine_ = LMCLocalBackend(config)
+        #elif self.backend.startswith("redis://"):
+        #    self.engine_ = LMCRedisBackend(config)
+        #else:
+        #    raise ValueError(f"Invalid backend: {self.backend}")
 
 
     def _num_tokens_in_kv(
@@ -273,7 +287,8 @@ class LMCacheEngine:
                     For vllm, it should have the shape of [num_tokens, num_heads, head_size]
 
         Output: 
-            kv_tensors: the kv cache of the tokens, in the format of nested tuples
+            kv_tensors: the kv cache of the tokens, in the format of nested tuples.
+                        Will be an empty tuple if no kv cache is retrived.
             num_tokens: the number of tokens in the kv cache
         """
         st = time.perf_counter()
@@ -302,6 +317,10 @@ class LMCacheEngine:
             case _:
                 raise ValueError(f"Invalid format: {fmt}")
 
+        if len(retrived_kv_chunks) == 0:
+            logging.info("Retrived 0 chunks")
+            return (), 0
+
         st2 = time.perf_counter()
         #ret = tuple(self._concat_kv_chunks(retrived_kv_chunks, dim, fmt, device))
         ret = self._blob_to_tuple_kv(torch.cat(retrived_kv_chunks, dim=dim + 2))
@@ -317,11 +336,6 @@ class LMCacheEngine:
         Temporary function of persisting
         """
         self.engine_.persist()
-        #if self.persist_path is not None:
-        #    torch.save((self.dict, self.config), self.persist_path)
-        #    logger.info(f"Persisted the cache to {self.persist_path}. {os.path.getsize(self.persist_path) / 1e6} MBytes in total")
-        #else:
-        #    raise RuntimeError("Persist path not found, please set self.persist_path")
 
 
 class LMCacheEngineBuilder:

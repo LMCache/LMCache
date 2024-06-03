@@ -53,3 +53,7 @@ cover/
 
 # Vim temporary files
 .*.sw*
+
+# misc
+outdated/
+perf-test.py

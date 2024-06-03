@@ -2,8 +2,8 @@ import pytest
 import time
 import os
 import torch
-from lmcache.cache_engine import LMCacheEngine, LMCacheEngineConfig, LMCacheEngineBuilder
-from lmcache.cache_engine_impl import LMCacheEngineConfig
+from lmcache.config import LMCacheEngineConfig
+from lmcache.cache_engine import LMCacheEngine, LMCacheEngineBuilder
 
 def generate_kv_cache(num_tokens, fmt, device):
     ret = []
@@ -70,8 +70,13 @@ def test_same_retrive_store(fmt, backend):
     kv_cache = generate_kv_cache(num_tokens, fmt, device)
     
     ''' initialize the engine '''
-    cfg = LMCacheEngineConfig.from_defaults(chunk_size = 256, backend = backend)
+    cfg = LMCacheEngineConfig.from_legacy(chunk_size = 256, backend = backend)
     engine = LMCacheEngine(cfg)
+
+    ''' test retrive empty '''
+    retrived_cache, length = engine.retrive(tokens, fmt, device)
+    assert len(retrived_cache) == 0
+    assert length == 0
 
     ''' test store '''
     engine.store(tokens, kv_cache, fmt)
@@ -96,7 +101,7 @@ def test_retrive_prefix(fmt, chunk_size, backend):
     new_kv_cache = generate_kv_cache(new_num_tokens, fmt, device)
     
     ''' initialize the engine '''
-    cfg = LMCacheEngineConfig.from_defaults(chunk_size = chunk_size, backend=backend)
+    cfg = LMCacheEngineConfig.from_legacy(chunk_size = chunk_size, backend=backend)
     engine = LMCacheEngine(cfg)
 
     ''' test store '''
@@ -124,7 +129,7 @@ def test_mixed_retrive(fmt, chunk_size, backend):
     new_kv_cache = generate_kv_cache(new_num_tokens, fmt, device)
     
     ''' initialize the engine '''
-    cfg = LMCacheEngineConfig.from_defaults(chunk_size = chunk_size, backend = backend)
+    cfg = LMCacheEngineConfig.from_legacy(chunk_size = chunk_size, backend = backend)
     engine = LMCacheEngine(cfg)
 
     ''' test store '''
@@ -156,34 +161,6 @@ def test_mixed_retrive(fmt, chunk_size, backend):
     check_kv_cache_equal(retrived_cache, final_kv_cache, length, fmt)
 
 @pytest.mark.parametrize("fmt", ["vllm", "huggingface"])
-def test_persist(fmt):
-    device = "cuda"
-    num_tokens = 1000
-    chunk_size = 256
-    persist_path = "/tmp/test-engine.pth"
-
-    tokens = generate_tokens(num_tokens, device)
-    kv_cache = generate_kv_cache(num_tokens, fmt, device)
-    
-    ''' initialize the engine '''
-    cfg = LMCacheEngineConfig.from_defaults(chunk_size = chunk_size, persist_path = persist_path)
-    engine = LMCacheEngine(cfg)
-
-    ''' store and persist '''
-    engine.store(tokens, kv_cache, fmt)
-    engine.persist()
-
-    ''' test load and retrive '''
-    engine2 = LMCacheEngine(cfg)
-
-    retrived_cache, length = engine2.retrive(tokens, fmt, device)
-
-    assert length == num_tokens
-    check_kv_cache_equal(retrived_cache, kv_cache, num_tokens, fmt)
-    
-    os.remove(persist_path)
-
-@pytest.mark.parametrize("fmt", ["vllm", "huggingface"])
 def test_skipping(fmt):
     device = "cuda"
     num_tokens = 12000
@@ -199,7 +176,7 @@ def test_skipping(fmt):
     final_kv_cache = concatenate_kv_caches([kv_cache, new_kv_cache], fmt)
     
     ''' initialize the engine '''
-    cfg = LMCacheEngineConfig.from_defaults(chunk_size = chunk_size, persist_path = persist_path)
+    cfg = LMCacheEngineConfig.from_legacy(chunk_size = chunk_size, persist_path = persist_path)
     engine1 = LMCacheEngine(cfg)
     engine2 = LMCacheEngine(cfg)
 
@@ -219,8 +196,8 @@ def test_skipping(fmt):
 
 def test_builder():
     instance_id = "test"
-    cfg = LMCacheEngineConfig.from_defaults(chunk_size = 256, persist_path = "/tmp/a.txt")
-    cfg2 = LMCacheEngineConfig.from_defaults(chunk_size = 512, persist_path = "/tmp/a.txt")
+    cfg = LMCacheEngineConfig.from_legacy(chunk_size = 256, persist_path = "/tmp/a.txt")
+    cfg2 = LMCacheEngineConfig.from_legacy(chunk_size = 512, persist_path = "/tmp/a.txt")
     should_be_none = LMCacheEngineBuilder.get(instance_id)
     assert should_be_none is None
 
