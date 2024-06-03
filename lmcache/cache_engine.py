@@ -6,6 +6,8 @@ from typing import Tuple, List, Union, Iterator, Optional
 from dataclasses import dataclass
 import logging
 
+from .cache_engine_impl import LMCacheInterface, LMLocalCahe, LMRedisCache, LMCacheEngineConfig
+
 logging.basicConfig(format='\033[33m%(levelname)s LMCache: \033[0m%(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -19,19 +21,6 @@ logger = logging.getLogger(__name__)
 # TODO: (usability) global getter for the LMCacheEngine object
 
 KVCache = Tuple[Tuple[torch.Tensor, torch.Tensor], ...]
-
-@dataclass
-class LMCacheEngineConfig:
-    chunk_size: int 
-    backend: str
-    persist_path: str
-
-    def from_defaults(
-            chunk_size: int = 256,
-            backend: str = "cuda",
-            persist_path: str = None
-        ) -> 'LMCacheEngineConfig':
-        return LMCacheEngineConfig(chunk_size, backend, persist_path)
 
 
 class LMCacheEngine:
@@ -49,13 +38,16 @@ class LMCacheEngine:
         self.persist_path = config.persist_path
         self.backend = config.backend
         self.config = config
-        self.dict = {}
-        if self.persist_path is not None and os.path.isfile(self.persist_path):
-            logger.info(f"Found persisted file at {self.persist_path}, loading it right now...")
-            self.dict, loaded_config = torch.load(self.persist_path)
-            if loaded_config != self.config:
-                raise RuntimeError(f"Loaded configuration {loaded_config} does not match the current configuration {self.config}")
-            logger.info(f"Loaded {len(self.dict)} chunks")
+        self.device = "cpu" if self.backend == "cpu" else "cuda"
+
+        # TODO: use a backend build to build the LMCacheInterface object
+        if self.backend == "cuda" or self.backend == "cpu":
+            self.engine_ = LMLocalCahe(config)
+        elif self.backend.startswith("redis://"):
+            self.engine_ = LMRedisCache(config)
+        else:
+            raise ValueError(f"Invalid backend: {self.backend}")
+
 
     def _num_tokens_in_kv(
             self,
@@ -106,6 +98,26 @@ class LMCacheEngine:
         for token_chunk in token_chunks:
             prefix_hash = self._hash(token_chunk, prefix_hash)
             yield prefix_hash
+
+    def _tuple_kv_to_blob(
+            self,
+            kv_tensor: KVCache,
+        ) -> torch.Tensor:
+        """
+        Convert the nested tuple of kv tensors to a single big tensor with 2 extra dimensions
+        """
+        return torch.stack([torch.stack(inner_tuple, dim=0) for inner_tuple in kv_tensor], dim=0)
+
+    def _blob_to_tuple_kv(
+            self,
+            blob: torch.Tensor,
+        ) -> KVCache:
+        """
+        Convert a single big tensor to the nested tuple of kv tensors
+        """
+        outer_unbound = torch.unbind(blob, dim=0)
+        return tuple((inner_tensor[0], inner_tensor[1]) for inner_tensor in outer_unbound)
+
 
     def _slice_kv_at(
             self,
@@ -166,8 +178,11 @@ class LMCacheEngine:
         num_tokens = self._num_tokens_in_kv(kv_tensors, fmt)
 
         for chunk_hash, idx in zip(chunk_hashes, range(0, num_tokens, self.chunk_size)):
-            if (chunk_hash, fmt) not in self.dict:
+            if not self.engine_.contains((chunk_hash, fmt)):
                 yield chunk_hash, self._slice_kv_at(idx, idx+self.chunk_size, kv_tensors, fmt, device)
+
+            #if (chunk_hash, fmt) not in self.dict:
+            #    yield chunk_hash, self._slice_kv_at(idx, idx+self.chunk_size, kv_tensors, fmt, device)
 
 
     def _make_chunks(
@@ -229,15 +244,17 @@ class LMCacheEngine:
         # TODO: check shapes
 
         ''' chunk the tokens and the kv caches '''
-        chunk_hashes_and_kvs = self._make_chunks(tokens, kv_tensors, fmt, device=self.backend, skip_existing=skip_existing)
+        chunk_hashes_and_kvs = self._make_chunks(tokens, kv_tensors, fmt, device=self.device, skip_existing=skip_existing)
 
         ''' store them into the dictionary '''
         n_chunks = 0
         for chunk_hash, kv_chunk in chunk_hashes_and_kvs:
-            self.dict[(chunk_hash, fmt)] = kv_chunk
+            self.engine_.put((chunk_hash, fmt), self._tuple_kv_to_blob(kv_chunk))
+            #self.dict[(chunk_hash, fmt)] = kv_chunk
             n_chunks += 1
 
-        logger.info(f"Stored/updated {n_chunks} chunks. Currently {len(self.dict)} chunks in the cache")
+        #logger.info(f"Stored/updated {n_chunks} chunks. Currently {len(self.dict)} chunks in the cache")
+        logger.info(f"Stored/updated {n_chunks} chunks")
 
 
     def retrive(self,
@@ -260,15 +277,20 @@ class LMCacheEngine:
             num_tokens: the number of tokens in the kv cache
         """
         st = time.perf_counter()
-        chunk_hashes = self._prefix_hash(self._chunk_tokens(tokens, device=self.backend))
+        chunk_hashes = self._prefix_hash(self._chunk_tokens(tokens, device=self.device))
         retrived_kv_chunks: List[KVCache] = []
 
         ''' retrive the kv cache '''
         for chunk_hash in chunk_hashes:
-            if (chunk_hash, fmt) in self.dict:
-                retrived_kv_chunks.append(self.dict[(chunk_hash, fmt)])
+            if self.engine_.contains((chunk_hash, fmt)):
+                blob_kv = self.engine_.get((chunk_hash, fmt))
+                retrived_kv_chunks.append(blob_kv)
             else:
                 break
+            #if (chunk_hash, fmt) in self.dict:
+            #    retrived_kv_chunks.append(self.dict[(chunk_hash, fmt)])
+            #else:
+            #    break
 
         ''' concatenate the kv cache '''
         dim = None
@@ -281,7 +303,8 @@ class LMCacheEngine:
                 raise ValueError(f"Invalid format: {fmt}")
 
         st2 = time.perf_counter()
-        ret = tuple(self._concat_kv_chunks(retrived_kv_chunks, dim, fmt, device))
+        #ret = tuple(self._concat_kv_chunks(retrived_kv_chunks, dim, fmt, device))
+        ret = self._blob_to_tuple_kv(torch.cat(retrived_kv_chunks, dim=dim + 2))
         ed2 = time.perf_counter()
         logger.info(f"Concatenated {len(retrived_kv_chunks)} chunks -- elapsed time {ed2 - st2}")
         retrived_token_count = 0 if len(ret) == 0 else ret[0][0].shape[dim]
@@ -293,11 +316,12 @@ class LMCacheEngine:
         """
         Temporary function of persisting
         """
-        if self.persist_path is not None:
-            torch.save((self.dict, self.config), self.persist_path)
-            logger.info(f"Persisted the cache to {self.persist_path}. {os.path.getsize(self.persist_path) / 1e6} MBytes in total")
-        else:
-            raise RuntimeError("Persist path not found, please set self.persist_path")
+        self.engine_.persist()
+        #if self.persist_path is not None:
+        #    torch.save((self.dict, self.config), self.persist_path)
+        #    logger.info(f"Persisted the cache to {self.persist_path}. {os.path.getsize(self.persist_path) / 1e6} MBytes in total")
+        #else:
+        #    raise RuntimeError("Persist path not found, please set self.persist_path")
 
 
 class LMCacheEngineBuilder:

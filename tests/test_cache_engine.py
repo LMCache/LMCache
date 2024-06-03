@@ -3,6 +3,7 @@ import time
 import os
 import torch
 from lmcache.cache_engine import LMCacheEngine, LMCacheEngineConfig, LMCacheEngineBuilder
+from lmcache.cache_engine_impl import LMCacheEngineConfig
 
 def generate_kv_cache(num_tokens, fmt, device):
     ret = []
@@ -60,15 +61,16 @@ def check_kv_cache_equal(left, right, num_tokens, fmt):
                 assert (left_v[:num_tokens, :, :] == right_v[:num_tokens, :, :]).all()
 
 @pytest.mark.parametrize("fmt", ["vllm", "huggingface"])
-def test_same_retrive_store(fmt):
-    device = "cuda"
-    num_tokens = 8000
+@pytest.mark.parametrize("backend", ["cuda", "cpu", "redis://localhost:6379"])
+def test_same_retrive_store(fmt, backend):
+    device = "cpu" if backend == "cpu" else "cuda"
+    num_tokens = 2000
 
     tokens = generate_tokens(num_tokens, device)
     kv_cache = generate_kv_cache(num_tokens, fmt, device)
     
     ''' initialize the engine '''
-    cfg = LMCacheEngineConfig.from_defaults(chunk_size = 256)
+    cfg = LMCacheEngineConfig.from_defaults(chunk_size = 256, backend = backend)
     engine = LMCacheEngine(cfg)
 
     ''' test store '''
@@ -82,10 +84,11 @@ def test_same_retrive_store(fmt):
 
 @pytest.mark.parametrize("fmt", ["vllm", "huggingface"])
 @pytest.mark.parametrize("chunk_size", [128, 256])
-def test_retrive_prefix(fmt, chunk_size):
-    device = "cuda"
-    num_tokens = 8000
-    new_num_tokens = 2000
+@pytest.mark.parametrize("backend", ["cuda", "redis://localhost:6379"])
+def test_retrive_prefix(fmt, chunk_size, backend):
+    device = "cpu" if backend == "cpu" else "cuda"
+    num_tokens = 2000
+    new_num_tokens = 1000
 
     tokens = generate_tokens(num_tokens, device)
     kv_cache = generate_kv_cache(num_tokens, fmt, device)
@@ -93,7 +96,7 @@ def test_retrive_prefix(fmt, chunk_size):
     new_kv_cache = generate_kv_cache(new_num_tokens, fmt, device)
     
     ''' initialize the engine '''
-    cfg = LMCacheEngineConfig.from_defaults(chunk_size = chunk_size)
+    cfg = LMCacheEngineConfig.from_defaults(chunk_size = chunk_size, backend=backend)
     engine = LMCacheEngine(cfg)
 
     ''' test store '''
@@ -109,10 +112,11 @@ def test_retrive_prefix(fmt, chunk_size):
 
 @pytest.mark.parametrize("fmt", ["vllm", "huggingface"])
 @pytest.mark.parametrize("chunk_size", [128, 256])
-def test_mixed_retrive(fmt, chunk_size):
+@pytest.mark.parametrize("backend", ["cuda", "redis://localhost:6379"])
+def test_mixed_retrive(fmt, chunk_size, backend):
     device = "cuda"
-    num_tokens = 8000
-    new_num_tokens = 2000
+    num_tokens = 2000
+    new_num_tokens = 1000
 
     tokens = generate_tokens(num_tokens, device)
     kv_cache = generate_kv_cache(num_tokens, fmt, device)
@@ -120,7 +124,7 @@ def test_mixed_retrive(fmt, chunk_size):
     new_kv_cache = generate_kv_cache(new_num_tokens, fmt, device)
     
     ''' initialize the engine '''
-    cfg = LMCacheEngineConfig.from_defaults(chunk_size = chunk_size)
+    cfg = LMCacheEngineConfig.from_defaults(chunk_size = chunk_size, backend = backend)
     engine = LMCacheEngine(cfg)
 
     ''' test store '''
