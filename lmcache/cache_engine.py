@@ -6,7 +6,7 @@ from typing import Tuple, List, Union, Iterator, Optional
 from dataclasses import dataclass
 import logging
 
-from lmcache.storage_backend import LMCLocalBackend, LMCRedisBackend, LMCBackendInterface
+from lmcache.storage_backend import LMCLocalBackend, LMCRemoteBackend, LMCBackendInterface
 from lmcache.config import LMCacheEngineConfig
 from lmcache.types import KVCache
 from lmcache.logging import init_logger
@@ -40,14 +40,14 @@ class LMCacheEngine:
             case LMCacheEngineConfig(_, local_device=None, remote_url=str(p)) if p is not None:
                 # remote only
                 logger.info("Initializing redis connection")
-                self.engine_ = LMCRedisBackend(config)
+                self.engine_ = LMCRemoteBackend(config)
             case LMCacheEngineConfig(_, local_device=str(p), remote_url=None) if p is not None:
                 # local only
                 logger.info("Initializing local backend")
                 self.engine_ = LMCLocalBackend(config)
             case LMCacheEngineConfig(_, local_device=str(p), remote_url=str(q)) if p is not None and q is not None:
                 # TODO: hybrid
-                self.engine_ = LMCRedisBackend(config)
+                self.engine_ = LMCRemoteBackend(config)
             case _:
                 raise ValueError(f"Invalid configuration: {config}")
 
@@ -323,7 +323,7 @@ class LMCacheEngine:
 
         st2 = time.perf_counter()
         #ret = tuple(self._concat_kv_chunks(retrived_kv_chunks, dim, fmt, device))
-        ret = self._blob_to_tuple_kv(torch.cat(retrived_kv_chunks, dim=dim + 2))
+        ret = self._blob_to_tuple_kv(torch.cat(retrived_kv_chunks, dim=dim + 2).to(device))
         ed2 = time.perf_counter()
         logger.info(f"Concatenated {len(retrived_kv_chunks)} chunks -- elapsed time {ed2 - st2}")
         retrived_token_count = 0 if len(ret) == 0 else ret[0][0].shape[dim]

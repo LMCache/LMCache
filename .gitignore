@@ -57,3 +57,4 @@ cover/
 # misc
 outdated/
 perf-test.py
+*.prof
