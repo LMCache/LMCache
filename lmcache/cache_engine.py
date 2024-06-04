@@ -6,7 +6,7 @@ from typing import Tuple, List, Union, Iterator, Optional
 from dataclasses import dataclass
 import logging
 
-from lmcache.storage_backend import LMCLocalBackend, LMCRemoteBackend, LMCBackendInterface
+from lmcache.storage_backend import CreateStorageBackend
 from lmcache.config import LMCacheEngineConfig
 from lmcache.types import KVCache
 from lmcache.logging import init_logger
@@ -35,33 +35,7 @@ class LMCacheEngine:
                 self.device = "cpu"
             case _:
                 self.device = "cuda"
-
-        match self.config:
-            case LMCacheEngineConfig(_, local_device=None, remote_url=str(p)) if p is not None:
-                # remote only
-                logger.info("Initializing redis connection")
-                self.engine_ = LMCRemoteBackend(config)
-            case LMCacheEngineConfig(_, local_device=str(p), remote_url=None) if p is not None:
-                # local only
-                logger.info("Initializing local backend")
-                self.engine_ = LMCLocalBackend(config)
-            case LMCacheEngineConfig(_, local_device=str(p), remote_url=str(q)) if p is not None and q is not None:
-                # TODO: hybrid
-                self.engine_ = LMCRemoteBackend(config)
-            case _:
-                raise ValueError(f"Invalid configuration: {config}")
-
-        #self.backend = config.backend
-        #self.device = "cpu" if self.backend == "cpu" else "cuda"
-
-        # TODO: use a backend build to build the LMCacheInterface object
-        #if self.backend == "cuda" or self.backend == "cpu":
-        #    self.engine_ = LMCLocalBackend(config)
-        #elif self.backend.startswith("redis://"):
-        #    self.engine_ = LMCRedisBackend(config)
-        #else:
-        #    raise ValueError(f"Invalid backend: {self.backend}")
-
+        self.engine_ = CreateStorageBackend(config)
 
     def _num_tokens_in_kv(
             self,

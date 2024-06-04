@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import re
 from typing import Optional
 
 
@@ -24,9 +25,9 @@ class LMCacheEngineConfig:
             case "cpu" | "cuda":
                 local_device = backend
                 remote_url = None
-            case redis_url if redis_url.startswith("redis://"):
+            case url if re.match(r"(.*)://(.*):(\d+)", url):
                 local_device = None
-                remote_url = redis_url
+                remote_url = url 
         return LMCacheEngineConfig(chunk_size, local_device, remote_url)
 
 # Legacy config

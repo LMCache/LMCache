@@ -6,6 +6,7 @@ setup(
     packages=find_packages(),
     install_requires=[
         "torch",
+        "redis",
         # List any dependencies here
         # e.g., "numpy", "requests"
     ],
