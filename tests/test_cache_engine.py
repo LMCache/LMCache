@@ -2,8 +2,11 @@ import pytest
 import time
 import os
 import torch
-from lmcache.config import LMCacheEngineConfig
+from lmcache.config import LMCacheEngineConfig, LMCacheEngineMetadata
 from lmcache.cache_engine import LMCacheEngine, LMCacheEngineBuilder
+
+def dumb_metadata():
+    return LMCacheEngineMetadata("test_model", 123)
 
 def generate_kv_cache(num_tokens, fmt, device):
     ret = []
@@ -71,7 +74,7 @@ def test_same_retrive_store(fmt, backend):
     
     ''' initialize the engine '''
     cfg = LMCacheEngineConfig.from_legacy(chunk_size = 256, backend = backend)
-    engine = LMCacheEngine(cfg)
+    engine = LMCacheEngine(cfg, dumb_metadata())
 
     ''' test retrive empty '''
     retrived_cache, length = engine.retrive(tokens, fmt, device)
@@ -102,7 +105,7 @@ def test_retrive_prefix(fmt, chunk_size, backend):
     
     ''' initialize the engine '''
     cfg = LMCacheEngineConfig.from_legacy(chunk_size = chunk_size, backend=backend)
-    engine = LMCacheEngine(cfg)
+    engine = LMCacheEngine(cfg, dumb_metadata())
 
     ''' test store '''
     engine.store(tokens, kv_cache, fmt)
@@ -130,7 +133,7 @@ def test_mixed_retrive(fmt, chunk_size, backend):
     
     ''' initialize the engine '''
     cfg = LMCacheEngineConfig.from_legacy(chunk_size = chunk_size, backend = backend)
-    engine = LMCacheEngine(cfg)
+    engine = LMCacheEngine(cfg, dumb_metadata())
 
     ''' test store '''
     engine.store(tokens, kv_cache, fmt)
@@ -177,8 +180,8 @@ def test_skipping(fmt):
     
     ''' initialize the engine '''
     cfg = LMCacheEngineConfig.from_legacy(chunk_size = chunk_size, persist_path = persist_path)
-    engine1 = LMCacheEngine(cfg)
-    engine2 = LMCacheEngine(cfg)
+    engine1 = LMCacheEngine(cfg, dumb_metadata())
+    engine2 = LMCacheEngine(cfg, dumb_metadata())
 
     ''' store and persist '''
     engine1.store(tokens, kv_cache, fmt)
@@ -201,8 +204,8 @@ def test_builder():
     should_be_none = LMCacheEngineBuilder.get(instance_id)
     assert should_be_none is None
 
-    engine = LMCacheEngineBuilder.get_or_create(instance_id, cfg)
+    engine = LMCacheEngineBuilder.get_or_create(instance_id, cfg, dumb_metadata())
     engine2 = LMCacheEngineBuilder.get(instance_id)
 
     with pytest.raises(ValueError):
-        LMCacheEngineBuilder.get_or_create(instance_id, cfg2)
+        LMCacheEngineBuilder.get_or_create(instance_id, cfg2, dumb_metadata())

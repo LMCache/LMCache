@@ -4,7 +4,7 @@ import io
 import torch
 import redis
 
-from lmcache.types import KVCache
+from lmcache.utils import CacheEngineKey, KVCache
 from lmcache.config import LMCacheEngineConfig
 from lmcache.storage_backend.abstract_backend import LMCBackendInterface
 from lmcache.logging import init_logger
@@ -31,7 +31,7 @@ class LMCLocalBackend(LMCBackendInterface):
 
     def contains(
             self, 
-            key: Tuple[str, str]
+            key: CacheEngineKey,
         ) -> bool:
         """
         Check if the cache engine contains the key.
@@ -46,7 +46,7 @@ class LMCLocalBackend(LMCBackendInterface):
 
     def put(
             self, 
-            key: Tuple[str, str],
+            key: CacheEngineKey,
             kv_chunk: KVCache
         ) -> None:
         """
@@ -67,7 +67,7 @@ class LMCLocalBackend(LMCBackendInterface):
 
     def get(
             self,
-            key: Tuple[str, str]
+            key: CacheEngineKey,
         ) -> Optional[KVCache]:
         """
         Retrive the KV cache chunk by the given key 

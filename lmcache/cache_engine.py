@@ -7,12 +7,12 @@ from dataclasses import dataclass
 import logging
 
 from lmcache.storage_backend import CreateStorageBackend
-from lmcache.config import LMCacheEngineConfig
-from lmcache.types import KVCache
+from lmcache.config import LMCacheEngineConfig, LMCacheEngineMetadata
+from lmcache.utils import KVCache, CacheEngineKey
 from lmcache.logging import init_logger
 
 # TODO: (functionality) configuration class for backend implementations
-# TODO: (functionality) the model name should also be the key
+# TODO: (functionality) the model name and the distributed rank should also be the key
 # TODO: (functionality) the chunk size should also be related to the key
 
 logger = init_logger(__name__)
@@ -20,7 +20,8 @@ logger = init_logger(__name__)
 class LMCacheEngine:
     def __init__(
             self, 
-            config: LMCacheEngineConfig
+            config: LMCacheEngineConfig,
+            metadata: LMCacheEngineMetadata,
         ):
         """
         Throws:
@@ -28,6 +29,7 @@ class LMCacheEngine:
         """
 
         self.config = config
+        self.metadata = metadata
         self.chunk_size = config.chunk_size 
 
         match self.config.local_device:
@@ -36,6 +38,13 @@ class LMCacheEngine:
             case _:
                 self.device = "cuda"
         self.engine_ = CreateStorageBackend(config)
+
+    def _make_key(
+            self,
+            chunk_hash: str,
+            fmt: str
+        ) -> CacheEngineKey:
+        return CacheEngineKey(fmt, self.metadata.model_name, self.metadata.worker_id, chunk_hash)
 
     def _num_tokens_in_kv(
             self,
@@ -166,7 +175,7 @@ class LMCacheEngine:
         num_tokens = self._num_tokens_in_kv(kv_tensors, fmt)
 
         for chunk_hash, idx in zip(chunk_hashes, range(0, num_tokens, self.chunk_size)):
-            if not self.engine_.contains((chunk_hash, fmt)):
+            if not self.engine_.contains(self._make_key(chunk_hash, fmt)):
                 yield chunk_hash, self._slice_kv_at(idx, idx+self.chunk_size, kv_tensors, fmt, device)
 
             #if (chunk_hash, fmt) not in self.dict:
@@ -237,7 +246,7 @@ class LMCacheEngine:
         ''' store them into the dictionary '''
         n_chunks = 0
         for chunk_hash, kv_chunk in chunk_hashes_and_kvs:
-            self.engine_.put((chunk_hash, fmt), self._tuple_kv_to_blob(kv_chunk))
+            self.engine_.put(self._make_key(chunk_hash, fmt), self._tuple_kv_to_blob(kv_chunk))
             #self.dict[(chunk_hash, fmt)] = kv_chunk
             n_chunks += 1
 
@@ -271,8 +280,8 @@ class LMCacheEngine:
 
         ''' retrive the kv cache '''
         for chunk_hash in chunk_hashes:
-            if self.engine_.contains((chunk_hash, fmt)):
-                blob_kv = self.engine_.get((chunk_hash, fmt))
+            if self.engine_.contains(self._make_key(chunk_hash, fmt)):
+                blob_kv = self.engine_.get(self._make_key(chunk_hash, fmt))
                 retrived_kv_chunks.append(blob_kv)
             else:
                 break
@@ -315,12 +324,14 @@ class LMCacheEngine:
 class LMCacheEngineBuilder:
     _instances = {}
     _cfgs = {}
+    _metadatas = {}
 
     @classmethod
     def get_or_create(
             cls, 
             instance_id: str,
             config: LMCacheEngineConfig, 
+            metadata: LMCacheEngineMetadata
         ) -> LMCacheEngine:
         """
         Builds a new LMCacheEngine instance if it doesn't already exist for the given ID.
@@ -329,13 +340,14 @@ class LMCacheEngineBuilder:
             ValueError if the instance already exists with a different configuration.
         """
         if instance_id not in cls._instances:
-            engine = LMCacheEngine(config)
+            engine = LMCacheEngine(config, metadata)
             cls._instances[instance_id] = engine
             cls._cfgs[instance_id] = config
+            cls._metadatas[instance_id] = metadata
             return engine
         else:
-            if cls._cfgs[instance_id] != config:
-                raise ValueError(f"Instance {instance_id} already exists with a different configuration.")
+            if cls._cfgs[instance_id] != config or cls._metadatas[instance_id] != metadata:
+                raise ValueError(f"Instance {instance_id} already exists with a different configuration or metadata.")
             return cls._instances[instance_id]
 
     @classmethod

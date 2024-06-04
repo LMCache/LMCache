@@ -7,6 +7,7 @@ from lmcache.config import LMCacheEngineConfig
 from lmcache.storage_backend.abstract_backend import LMCBackendInterface
 from lmcache.logging import init_logger
 from lmcache.storage_backend.connector import CreateConnector
+from lmcache.utils import CacheEngineKey
 
 logger = init_logger(__name__)
 
@@ -34,21 +35,21 @@ class LMCRemoteBackend(LMCBackendInterface):
 
     def _combine_key(
             self,
-            key: Tuple[str, str],
+            key: CacheEngineKey,
         ) -> str:
         """
         Convert the tuple key to a single key
         """
-        return ":".join(key)
+        return key.to_string()
 
     def _split_key(
             self,
             key: str,
-        ) -> Tuple[str, str]:
+        ) -> CacheEngineKey:
         """
         Split the single key to a tuple key
         """
-        return tuple(key.split(":"))
+        return CacheEngineKey.from_string(key)
 
     def list(self):
         """
@@ -61,7 +62,7 @@ class LMCRemoteBackend(LMCBackendInterface):
 
     def contains(
             self, 
-            key: Tuple[str, str]
+            key: CacheEngineKey,
         ) -> bool:
         """
         Check if the cache engine contains the key.
@@ -82,7 +83,7 @@ class LMCRemoteBackend(LMCBackendInterface):
 
     def put(
             self, 
-            key: Tuple[str, str],
+            key: CacheEngineKey,
             kv_chunk: torch.Tensor,
         ) -> None:
         """
@@ -115,7 +116,7 @@ class LMCRemoteBackend(LMCBackendInterface):
 
     def get(
             self,
-            key: Tuple[str, str],
+            key: CacheEngineKey,
         ) -> Optional[torch.Tensor]:
         """
         Retrive the KV cache chunk (in a single big tensor) by the given key

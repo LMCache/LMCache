@@ -2,6 +2,10 @@ from dataclasses import dataclass
 import re
 from typing import Optional
 
+@dataclass
+class LMCacheEngineMetadata:
+    model_name: str
+    worker_id: int
 
 @dataclass
 class LMCacheEngineConfig:
