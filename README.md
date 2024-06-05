@@ -12,6 +12,10 @@ pip install -e .
 We have integrated LMCache into vLLM. The following instructions will help test
 its functionality locally or in a containerized environment.
 
+### Envisioned architecture
+
+<img width="817" alt="image" src="https://github.com/LMCache/LMCache/assets/25103655/ab64f84d-26e1-46ce-a503-e7e917b618bc">
+
 ### New args to vLLM
 
 To use LMCache in vLLM with different configurations, we added the following commandline
