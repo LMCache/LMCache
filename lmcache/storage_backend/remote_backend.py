@@ -107,11 +107,13 @@ class LMCRemoteBackend(LMCBackendInterface):
             string = f.read()
             self.connection.set(self._combine_key(key), string)
             end = time.perf_counter()
-            logger.info("Put %.2f MBytes data takes %.2f ms: serialization %.2fms, remote write %.2f ms", 
+            logger.info("Put %.2f MBytes data takes %.2f ms: serialization %.2fms, remote write %.2f ms (rank = %d)", 
                         len(string) / 1e6, 
                         (end - start) * 1e3, 
                         (start2 - start) * 1e3, 
-                        (end - start2) * 1e3)
+                        (end - start2) * 1e3,
+                        key.worker_id
+                        )
         self.existing_keys.add(key)
 
     def get(

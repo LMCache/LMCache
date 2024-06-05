@@ -16,12 +16,12 @@ class CacheEngineKey:
         return hash((self.fmt, self.model_name, self.worker_id, self.chunk_hash))
 
     def to_string(self):
-        return f"{self.fmt}-{self.model_name}-{self.worker_id}-{self.chunk_hash}"
+        return f"{self.fmt}@{self.model_name}@{self.worker_id}@{self.chunk_hash}"
 
     @staticmethod
-    def from_string():
-        parts = self.split("-")
+    def from_string(s):
+        parts = s.split("@")
         if len(parts) != 4:
-            raise ValueError(f"Invalid key string: {key_str}")
+            raise ValueError(f"Invalid key string: {s}")
         return CacheEngineKey(parts[0], parts[1], int(parts[2]), parts[3])
 
