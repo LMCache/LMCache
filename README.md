@@ -2,6 +2,8 @@
 
 ## Installation
 
+**Prerequisite:** Python >= 3.10
+
 ```bash
 pip install -e .
 ```
@@ -36,7 +38,16 @@ arguments to vLLM runtime:
 
 To vLLM + LMCache locally, please follow the following steps:
 
-**NOTE:** We highly recommend running the installation in a newly created python virtual environment
+**NOTE:** We highly recommend running the installation in a newly created python virtual environment. Here are example commands:
+```bash
+# If you are using conda
+conda create -n <your env name> python=3.10
+conda activate <your env name>
+
+# Or, if you are using venv (make sure python version >= 3.10)
+python -m venv <path to your env>
+source <path to you env>/bin/activate
+```
 
 Install LMCache core library
 ```bash
@@ -74,8 +85,8 @@ pip install -e .
 # start LMCache server backend
 python3 -m lmcache_server.server localhost 65432
 
-# start redis server 
-<you command to start the redis server> # Assuming the server is listening at localhost:6379
+# Start Redis server 
+docker run --name my-redis -p 6379:6379 -d redis
 ```
 
 Run vLLM openai api server 
