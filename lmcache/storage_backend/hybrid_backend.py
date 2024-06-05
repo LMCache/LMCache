@@ -33,9 +33,10 @@ class LMCHybridBackend(LMCBackendInterface):
         keys = self.remote_store.list()
         nfetched = 0
         logger.info("Found %d keys in remote backend", len(keys))
+        logger.debug(f"Metadata is {metadata}")
         for key in keys:
             if key.model_name != metadata.model_name or \
-                    key.model_version != metadata.model_version or \
+                    key.worker_id != metadata.worker_id or \
                     key.world_size != metadata.world_size:
                 continue
 

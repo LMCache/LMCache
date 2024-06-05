@@ -24,5 +24,5 @@ class CacheEngineKey:
         parts = s.split("@")
         if len(parts) != 5:
             raise ValueError(f"Invalid key string: {s}")
-        return CacheEngineKey(parts[0], parts[1], parts[2], int(parts[3]), parts[4])
+        return CacheEngineKey(parts[0], parts[1], int(parts[2]), int(parts[3]), parts[4])
 

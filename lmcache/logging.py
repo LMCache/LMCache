@@ -4,4 +4,6 @@ from logging import Logger
 logging.basicConfig(format='\033[33m%(levelname)s LMCache: \033[0m%(message)s', level=logging.INFO)
 
 def init_logger(name: str) -> Logger:
-    return logging.getLogger(name)
+    logger = logging.getLogger(name)
+    logger.setLevel(logging.DEBUG)
+    return logger
