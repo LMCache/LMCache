@@ -7,7 +7,7 @@ from lmcache.storage_backend import CreateStorageBackend
 from lmcache.storage_backend.local_backend import LMCLocalBackend
 from lmcache.storage_backend.remote_backend import LMCRemoteBackend
 from lmcache.storage_backend.hybrid_backend import LMCHybridBackend
-from lmcache.config import LMCacheEngineConfig
+from lmcache.config import LMCacheEngineConfig, LMCacheEngineMetadata
 from lmcache.utils import CacheEngineKey
 
 LMSEVER_URL = "lm://localhost:65432"
@@ -34,16 +34,20 @@ def get_config(t):
             return LMCacheEngineConfig.from_defaults(local_device = "cuda", remote_url="lm://localhost:65432")
         case _:
             raise ValueError(f"Testbed internal error: Unknown config type: {t}")
+
+def get_metadata():
+    return LMCacheEngineMetadata("test-model", -1)
             
 
 def test_creation():
     config_local = LMCacheEngineConfig.from_defaults(local_device = "cuda", remote_url = None)
     config_remote = LMCacheEngineConfig.from_defaults(local_device = None, remote_url="lm://localhost:65432")
     config_hybrid = LMCacheEngineConfig.from_defaults(local_device = "cuda", remote_url="lm://localhost:65432")
+    metadata = get_metadata()
     
-    backend_local = CreateStorageBackend(config_local)
-    backend_remote = CreateStorageBackend(config_remote)
-    backend_hybrid = CreateStorageBackend(config_hybrid)
+    backend_local = CreateStorageBackend(config_local, get_metadata())
+    backend_remote = CreateStorageBackend(config_remote, get_metadata())
+    backend_hybrid = CreateStorageBackend(config_hybrid, get_metadata())
 
     assert isinstance(backend_local, LMCLocalBackend)
     assert isinstance(backend_remote, LMCRemoteBackend)
@@ -51,12 +55,13 @@ def test_creation():
 
     config_fail = LMCacheEngineConfig.from_defaults(local_device = None, remote_url = None)
     with pytest.raises(ValueError):
-        backend_fail = CreateStorageBackend(config_fail)
+        backend_fail = CreateStorageBackend(config_fail, get_metadata())
 
 @pytest.mark.parametrize("backend_type", ["local", "remote", "hybrid"])
 def test_local_backend(backend_type):
     config = get_config(backend_type) #LMCacheEngineConfig.from_defaults(local_device = "cuda", remote_url = None)
-    backend = CreateStorageBackend(config)
+    metadata = get_metadata()
+    backend = CreateStorageBackend(config, metadata)
     
     N = 10
     keys = [generate_random_key() for i in range(N)]
@@ -71,7 +76,8 @@ def test_local_backend(backend_type):
 
 def test_restart():
     config = get_config("hybrid") #LMCacheEngineConfig.from_defaults(local_device = "cuda", remote_url = None)
-    backend = CreateStorageBackend(config)
+    metadata = get_metadata()
+    backend = CreateStorageBackend(config, metadata)
     
     N = 10
     keys = [generate_random_key() for i in range(N)]
@@ -80,7 +86,7 @@ def test_restart():
         backend.put(key, value)
 
 
-    new_backend = CreateStorageBackend(config)
+    new_backend = CreateStorageBackend(config, metadata)
     # it should be able to automatically fetch existing keys
     for key, value in zip(keys, random_tensors):
         assert backend.contains(key)

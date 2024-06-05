@@ -7,7 +7,7 @@ import redis
 import time
 import pickle
 
-from lmcache.config import LMCacheEngineConfig
+from lmcache.config import LMCacheEngineConfig, LMCacheEngineMetadata
 from lmcache.storage_backend.abstract_backend import LMCBackendInterface
 from lmcache.storage_backend.remote_backend import LMCRemoteBackend
 from lmcache.storage_backend.local_backend import LMCLocalBackend
@@ -25,17 +25,24 @@ class LMCHybridBackend(LMCBackendInterface):
     # TODO: LRU eviction policy
     # TODO: async write and read from/to remote backend
 
-    def __init__(self, config: LMCacheEngineConfig):
+    def __init__(self, config: LMCacheEngineConfig, metadata: LMCacheEngineMetadata):
         self.local_store = LMCLocalBackend(config)
         self.remote_store = LMCRemoteBackend(config)
 
         # prefetch
         keys = self.remote_store.list()
+        nfetched = 0
         logger.info("Found %d keys in remote backend", len(keys))
         for key in keys:
+            if key.model_name != metadata.model_name or \
+                    key.model_version != metadata.model_version:
+                continue
+
             retrived_data = self.remote_store.get(key)
             if retrived_data is not None:
                 self.local_store.put(key, retrived_data)
+                nfetched += 1
+        logger.info("Pre-fetched %d keys from remote backend", nfetched)
 
     def contains(
             self,

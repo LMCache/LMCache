@@ -37,7 +37,7 @@ class LMCacheEngine:
                 self.device = "cpu"
             case _:
                 self.device = "cuda"
-        self.engine_ = CreateStorageBackend(config)
+        self.engine_ = CreateStorageBackend(config, metadata)
 
     def _make_key(
             self,

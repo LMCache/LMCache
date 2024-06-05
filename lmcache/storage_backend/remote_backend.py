@@ -107,7 +107,7 @@ class LMCRemoteBackend(LMCBackendInterface):
             string = f.read()
             self.connection.set(self._combine_key(key), string)
             end = time.perf_counter()
-            logger.info("Put %.2f MBytes data takes %.2f ms: serialization %.2fms, remote write %.2f ms (rank = %d)", 
+            logger.debug("Put %.2f MBytes data takes %.2f ms: serialization %.2fms, remote write %.2f ms (rank = %d)", 
                         len(string) / 1e6, 
                         (end - start) * 1e3, 
                         (start2 - start) * 1e3, 
@@ -136,7 +136,7 @@ class LMCRemoteBackend(LMCBackendInterface):
             f.seek(0)
             ret = torch.load(f)
             end2 = time.perf_counter()
-            logger.info("Get %.2f MBytes data takes %.2f ms: remote read %.2fms, deserialization %.2f ms", 
+            logger.debug("Get %.2f MBytes data takes %.2f ms: remote read %.2fms, deserialization %.2f ms", 
                         len(data) / 1e6, 
                         (end2 - start) * 1e3,
                         (end - start) * 1e3,
