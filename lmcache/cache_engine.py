@@ -44,7 +44,7 @@ class LMCacheEngine:
             chunk_hash: str,
             fmt: str
         ) -> CacheEngineKey:
-        return CacheEngineKey(fmt, self.metadata.model_name, self.metadata.worker_id, chunk_hash)
+        return CacheEngineKey(fmt, self.metadata.model_name, self.metadata.world_size, self.metadata.worker_id, chunk_hash)
 
     def _num_tokens_in_kv(
             self,

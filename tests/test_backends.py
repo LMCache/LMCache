@@ -20,9 +20,10 @@ def random_string(N):
 def generate_random_key() -> CacheEngineKey:
     fmt = random.choice(["vllm", "huggingface"])
     model_name = random_string(10).replace("@", "")
+    world_size = 3
     worker_id = random.randint(0, 100)
     chunk_hash = random_string(64)
-    return CacheEngineKey(fmt, model_name, worker_id, chunk_hash)
+    return CacheEngineKey(fmt, model_name, world_size, worker_id, chunk_hash)
 
 def get_config(t):
     match t:
@@ -36,7 +37,7 @@ def get_config(t):
             raise ValueError(f"Testbed internal error: Unknown config type: {t}")
 
 def get_metadata():
-    return LMCacheEngineMetadata("test-model", -1)
+    return LMCacheEngineMetadata("test-model", 1, -1)
             
 
 def test_creation():

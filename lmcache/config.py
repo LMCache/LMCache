@@ -5,6 +5,7 @@ from typing import Optional
 @dataclass
 class LMCacheEngineMetadata:
     model_name: str
+    world_size: int
     worker_id: int
 
 @dataclass
