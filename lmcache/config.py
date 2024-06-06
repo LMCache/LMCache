@@ -35,17 +35,15 @@ class LMCacheEngineConfig:
                 remote_url = url 
         return LMCacheEngineConfig(chunk_size, local_device, remote_url)
 
-# Legacy config
-#@dataclass
-#class LMCacheEngineConfigV1:
-#    chunk_size: int 
-#    backend: str
-#    persist_path: str
-#
-#    def from_defaults(
-#            chunk_size: int = 256,
-#            backend: str = "cuda",
-#            persist_path: str = None
-#        ) -> 'LMCacheEngineConfig':
-#        return LMCacheEngineConfig(chunk_size, backend, persist_path)
+### SOME GLOBAL CONFIGS 
+# TODO: it needs to be manually updated in the code here, but cannot be really configured
+class GlobalConfig:
+    enable_debug: bool = True
 
+    @classmethod
+    def set_debug(cls, enable: bool):
+        cls.enable_debug = enable
+
+    @classmethod
+    def is_debug(cls) -> bool:
+        return cls.enable_debug
