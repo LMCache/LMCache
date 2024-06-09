@@ -1,0 +1,3 @@
+chunk_size: 256
+local_device: "cuda"
+remote_url: "lm://localhost:65432"

@@ -7,6 +7,8 @@ setup(
     install_requires=[
         "torch",
         "redis",
+        "torchac",
+        "pyyaml",
         # List any dependencies here
         # e.g., "numpy", "requests"
     ],

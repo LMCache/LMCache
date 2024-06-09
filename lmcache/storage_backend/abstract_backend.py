@@ -2,7 +2,10 @@ import abc
 import torch
 from lmcache.config import LMCacheEngineConfig
 from lmcache.utils import CacheEngineKey
-from typing import Tuple, Optional
+from lmcache.logging import init_logger
+from typing import Tuple, Optional, Iterator
+
+logger = init_logger(__name__)
 
 class LMCBackendInterface(metaclass=abc.ABCMeta):
 
@@ -53,3 +56,45 @@ class LMCBackendInterface(metaclass=abc.ABCMeta):
             None if the key is not found
         """
         raise NotImplementedError
+
+    def batched_put(
+            self,
+            keys_and_chunks: Iterator[Tuple[CacheEngineKey, torch.Tensor]],
+        ) -> int:
+        """
+        Store the multiple keys and KV cache chunks into the cache engine in a batched manner.
+
+        Input:
+            keys: the iterator of keys of the token chunks, in the format of CacheEngineKey
+            kv_chunks: the iterator of kv cache of the token chunks, in the format of a big tensor
+
+        Returns:
+            the number of chunks are stored
+        """
+        logger.info("Using default batched implementation of the put() method")
+        nchunks = 0
+        for key, kv_chunk in keys_and_chunks:
+            self.put(key, kv_chunk)
+            nchunks += 1
+        return nchunks
+
+    def batched_get(
+            self,
+            keys: Iterator[CacheEngineKey],
+        ) -> Iterator[Optional[torch.Tensor]]:
+        """
+        Retrive the kv cache chunks by the given keys in a batched manner
+
+        Input:
+            keys: the iterator of keys of the token chunks, including prefix hash and format
+
+        Output:
+            the iterator of kv cache of the token chunks, in the format of a big tensor
+            None if the key is not found
+        """
+        logger.info("Using default batched implementation of the get() method")
+        for key in keys:
+            if self.contains(key):
+                yield self.get(key)
+            else:
+                yield None

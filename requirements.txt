@@ -1,3 +1,5 @@
 torch>=2.2.0
+pyyaml
 redis
+torchac
 pytest>=7.0

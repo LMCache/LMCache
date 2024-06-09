@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import yaml
 import re
 from typing import Optional
 
@@ -34,6 +35,20 @@ class LMCacheEngineConfig:
                 local_device = None
                 remote_url = url 
         return LMCacheEngineConfig(chunk_size, local_device, remote_url)
+
+    @staticmethod
+    def from_file(file_path: str) -> 'LMCacheEngineConfig':
+        """
+        Load the config from a yaml file
+        """
+        with open(file_path, 'r') as fin:
+            config = yaml.safe_load(fin)
+
+        chunk_size = config.get("chunk_size", 256)
+        local_device = config.get("local_device", None)
+        remote_url = config.get("remote_url", None)
+        return LMCacheEngineConfig(chunk_size, local_device, remote_url)
+
 
 ### SOME GLOBAL CONFIGS 
 # TODO: it needs to be manually updated in the code here, but cannot be really configured

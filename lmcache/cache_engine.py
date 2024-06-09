@@ -1,4 +1,5 @@
 import torch
+import yaml
 import time
 import os
 import hashlib
@@ -244,11 +245,17 @@ class LMCacheEngine:
         chunk_hashes_and_kvs = self._make_chunks(tokens, kv_tensors, fmt, device=self.device, skip_existing=skip_existing)
 
         ''' store them into the dictionary '''
-        n_chunks = 0
-        for chunk_hash, kv_chunk in chunk_hashes_and_kvs:
-            self.engine_.put(self._make_key(chunk_hash, fmt), self._tuple_kv_to_blob(kv_chunk))
-            #self.dict[(chunk_hash, fmt)] = kv_chunk
-            n_chunks += 1
+        n_chunks = self.engine_.batched_put(
+                (
+                    self._make_key(chunk_hash, fmt), 
+                    self._tuple_kv_to_blob(kv_chunk)
+                ) for chunk_hash, kv_chunk in chunk_hashes_and_kvs
+            )
+        #n_chunks = 0
+        #for chunk_hash, kv_chunk in chunk_hashes_and_kvs:
+        #    self.engine_.put(self._make_key(chunk_hash, fmt), self._tuple_kv_to_blob(kv_chunk))
+        #    #self.dict[(chunk_hash, fmt)] = kv_chunk
+        #    n_chunks += 1
 
         #logger.info(f"Stored/updated {n_chunks} chunks. Currently {len(self.dict)} chunks in the cache")
         logger.info(f"Stored/updated {n_chunks} chunks")
@@ -276,19 +283,27 @@ class LMCacheEngine:
         """
         st = time.perf_counter()
         chunk_hashes = self._prefix_hash(self._chunk_tokens(tokens, device=self.device))
-        retrived_kv_chunks: List[KVCache] = []
-
-        ''' retrive the kv cache '''
-        for chunk_hash in chunk_hashes:
-            if self.engine_.contains(self._make_key(chunk_hash, fmt)):
-                blob_kv = self.engine_.get(self._make_key(chunk_hash, fmt))
-                retrived_kv_chunks.append(blob_kv)
-            else:
+        retrival_iterator = self.engine_.batched_get(
+                self._make_key(chunk_hash, fmt) for chunk_hash in chunk_hashes
+            )
+        retrived_kv_chunks = []
+        for chunk in retrival_iterator:
+            if chunk is None:
                 break
-            #if (chunk_hash, fmt) in self.dict:
-            #    retrived_kv_chunks.append(self.dict[(chunk_hash, fmt)])
-            #else:
-            #    break
+            retrived_kv_chunks.append(chunk)
+        #retrived_kv_chunks: List[KVCache] = []
+
+        #''' retrive the kv cache '''
+        #for chunk_hash in chunk_hashes:
+        #    if self.engine_.contains(self._make_key(chunk_hash, fmt)):
+        #        blob_kv = self.engine_.get(self._make_key(chunk_hash, fmt))
+        #        retrived_kv_chunks.append(blob_kv)
+        #    else:
+        #        break
+        #    #if (chunk_hash, fmt) in self.dict:
+        #    #    retrived_kv_chunks.append(self.dict[(chunk_hash, fmt)])
+        #    #else:
+        #    #    break
 
         ''' concatenate the kv cache '''
         dim = None

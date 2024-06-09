@@ -9,7 +9,7 @@ from lmcache.config import GlobalConfig
 logger = init_logger(__name__)
 
 class TorchSerializer(Serializer):
-    def __init__(self, debug=False):
+    def __init__(self):
         super().__init__()
         self.debug = GlobalConfig.is_debug()
 
@@ -18,7 +18,7 @@ class TorchSerializer(Serializer):
         with io.BytesIO() as f:
             torch.save(t, f)
             end = time.perf_counter()
-            logger.debug("Serialization took: %s", end - start)
+            logger.debug("Serialization took: %.2f", (end - start) * 1000)
             return f.getvalue()
 
     def to_bytes_normal(self, t: torch.Tensor) -> bytes:
@@ -33,16 +33,16 @@ class TorchSerializer(Serializer):
             return self.to_bytes_normal(t)
 
 class TorchDeserializer(Deserializer):
-    def __init__(self, debug=False):
+    def __init__(self):
         super().__init__()
-        self.debug = debug
+        self.debug = GlobalConfig.is_debug()
 
     def from_bytes_debug(self, b: bytes) -> torch.Tensor:
         start = time.perf_counter()
         with io.BytesIO(b) as f:
             t = torch.load(f)
             end = time.perf_counter()
-            logger.debug("Deserialization took: %s", end - start)
+            logger.debug("Deserialization took: %.2f", (end - start) * 1000)
             return t
 
     def from_bytes_normal(self, b: bytes) -> torch.Tensor:

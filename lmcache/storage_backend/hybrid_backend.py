@@ -9,7 +9,7 @@ import pickle
 
 from lmcache.config import LMCacheEngineConfig, LMCacheEngineMetadata
 from lmcache.storage_backend.abstract_backend import LMCBackendInterface
-from lmcache.storage_backend.remote_backend import LMCRemoteBackend
+from lmcache.storage_backend.remote_backend import LMCRemoteBackend, LMCPipelinedRemoteBackend
 from lmcache.storage_backend.local_backend import LMCLocalBackend
 from lmcache.logging import init_logger
 from lmcache.storage_backend.connector import CreateConnector
@@ -34,6 +34,7 @@ class LMCHybridBackend(LMCBackendInterface):
         nfetched = 0
         logger.info("Found %d keys in remote backend", len(keys))
         logger.debug(f"Metadata is {metadata}")
+        start = time.perf_counter()
         for key in keys:
             if key.model_name != metadata.model_name or \
                     key.worker_id != metadata.worker_id or \
@@ -44,7 +45,10 @@ class LMCHybridBackend(LMCBackendInterface):
             if retrived_data is not None:
                 self.local_store.put(key, retrived_data)
                 nfetched += 1
-        logger.info("Pre-fetched %d keys from remote backend", nfetched)
+
+        end = time.perf_counter()
+
+        logger.info("Pre-fetched %d keys from remote backend, used %.2f sec", nfetched, end - start)
 
     def contains(
             self,
@@ -71,3 +75,4 @@ class LMCHybridBackend(LMCBackendInterface):
             if value is not None:
                 self.local_store.put(key, value)
         return value
+
