@@ -8,6 +8,84 @@
 pip install -e .
 ```
 
+## Quickstart
+The following instructions help deploy LMCache + vLLM by docker containers. The architecture of the demo application looks like this:
+
+<img width="817" alt="image" src="https://github.com/LMCache/LMCache/assets/25103655/ab64f84d-26e1-46ce-a503-e7e917b618bc">
+
+
+**Prerequisites**: To run the quickstart demo, your server must have 2 GPUs and the [docker environment](https://docs.docker.com/engine/install/) installed.
+
+
+**Step 1:** Pull docker images
+```bash
+docker pull apostacyh/lmcache-server:latest
+docker pull apostacyh/vllm:lmcache
+```
+
+**Step 2:** Start lmcache server 
+```bash
+docker run --name lmcache-server --network host -d lmcache-server:latest 0.0.0.0 65432
+```
+
+**Step 3:** start 2 vLLM instances
+```bash
+# The first vLLM instance listens at port 8000
+sudo docker run --runtime nvidia --gpus '"device=0"' \
+    -v <Hugging face cache dir on your local machine>:/root/.cache/huggingface \
+    -p 8000:8000 \
+    --env "HF_TOKEN=<Your huggingface token>" \
+    --ipc=host \
+    --network=host \
+    vllm:lmcache \
+    --model lmsys/longchat-7b-16k 0.7 --tensor-parallel-size 2 --port 8000 \
+    --lmcache-config-file /lmcache/LMCache/examples/example.yaml
+```
+
+Now, open another terminal and start another vLLM instance
+```bash
+# The second vLLM instance listens at port 8001
+# The first vLLM instance listens at port 8000
+sudo docker run --runtime nvidia --gpus '"device=1"' \
+    -v <Hugging face cache dir on your local machine>:/root/.cache/huggingface \
+    -p 8001:8001 \
+    --env "HF_TOKEN=<Your huggingface token>" \
+    --ipc=host \
+    --network=host \
+    vllm:lmcache \
+    --model lmsys/longchat-7b-16k 0.7 --tensor-parallel-size 2 --port 8001 \
+    --lmcache-config-file /lmcache/LMCache/examples/example.yaml
+```
+
+The vLLM engines are ready after you see the logs like this:
+```
+INFO:     Started server process [865615]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+```
+
+**Step 4:** Run demo application
+You can run the demo application in the LMCache repo. Please execute the following commands on the host device 
+```bash
+git clone https://github.com/LMCache/LMCache
+cd LMCache/examples/
+```
+
+In one terminal:
+```
+# Connect to the first vLLM engine
+python openai_chat_completion_client.py 8000
+```
+
+In another terminal
+```
+# Connect to the second vLLM engine
+python openai_chat_completion_client.py 8001
+```
+
+You should be able to see the second vLLM engine has much lower response delay.
+This is because the KV cache of the long context can be shared across both vLLM engines by using LMCache.
 
 ## Testing instructions
 
@@ -34,7 +112,7 @@ arguments to vLLM runtime:
                         Set the chunksize of lmcache engine
 ```
 
-### Local testing
+### Local testing (Outdated)
 
 To vLLM + LMCache locally, please follow the following steps:
 
