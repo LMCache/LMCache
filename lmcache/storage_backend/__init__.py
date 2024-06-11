@@ -16,7 +16,7 @@ def CreateStorageBackend(
         case LMCacheEngineConfig(_, local_device=None, remote_url=str(p)) if p is not None:
             # remote only
             logger.info("Initializing remote-only backend")
-            return LMCRemoteBackend(config)
+            return LMCRemoteBackend(config, metadata)
 
         case LMCacheEngineConfig(_, local_device=str(p), remote_url=None) if p is not None:
             # local only

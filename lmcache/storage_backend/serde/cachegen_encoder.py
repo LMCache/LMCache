@@ -193,6 +193,7 @@ def encode_function(kv, config, chunk_size) -> CacheGenEncoderOutput:
     """
     Given the path to the original key value cache, encode the KV cache
     """
+    num_heads, head_size = kv.shape[-2:]
     output_dict = {}
     fp_k, fp_v = _split_kv(kv)
     l = fp_k.shape[0]
@@ -224,7 +225,9 @@ def encode_function(kv, config, chunk_size) -> CacheGenEncoderOutput:
         start_indices = torch.tensor(start_indices).int(),
         cdf = _renorm_cast_cdf_(cdf.float(), 16),
         max_tensors_key = concat_max(encoder.max_tensors_key),
-        max_tensors_value = concat_max(encoder.max_tensors_value)
+        max_tensors_value = concat_max(encoder.max_tensors_value),
+        num_heads = num_heads,
+        head_size = head_size,
     )
     return output
 
@@ -249,10 +252,11 @@ class CacheGenSerializer(Serializer):
         Returns:
             bytes: the serialized bytes
         """
-        print(tensor.shape)
         # TODO: permute is expensive here, need a better way to do it at lower level
         if self.fmt == "huggingface":
             tensor = tensor.permute(0, 1, 3, 2, 4)
 
-        output_dict = encode_function(tensor, self.cachegen_config, self.chunk_size)
+        ''' expecting a tensor of shape [num_layers, 2, num_tokens, num_heads, head_size] '''
+        ntokens = tensor.shape[2]
+        output_dict = encode_function(tensor, self.cachegen_config, ntokens)
         return output_dict.to_bytes()

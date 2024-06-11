@@ -1,5 +1,9 @@
 import abc
 import torch
+import time
+
+from lmcache.logging import init_logger
+logger = init_logger(__name__)
 
 class Serializer(metaclass=abc.ABCMeta):
     @abc.abstractmethod
@@ -17,9 +21,22 @@ class Serializer(metaclass=abc.ABCMeta):
         """
         raise NotImplementedError
 
+class SerializerDebugWrapper(Serializer):
+    def __init__(self, s: Serializer):
+        self.s = s
+
+    def to_bytes(self, t: torch.Tensor) -> bytes:
+        start = time.perf_counter()
+        bs = self.s.to_bytes(t)
+        end = time.perf_counter()
+
+        logger.debug(f"Serialization took {end-start:.2f} seconds")
+        return bs
+
+
 class Deserializer(metaclass=abc.ABCMeta):
     @abc.abstractmethod
-    def from_bytes(self, bs: bytes) -> bytes:
+    def from_bytes(self, bs: bytes) -> torch.Tensor:
         """
         Deserialize a pytorch tensor from bytes. 
 
@@ -30,3 +47,15 @@ class Deserializer(metaclass=abc.ABCMeta):
             torch.Tensor: the deserialized pytorch tensor
         """
         raise NotImplementedError
+
+class DeserializerDebugWrapper(Deserializer):
+    def __init__(self, d: Deserializer):
+        self.d = d
+
+    def from_bytes(self, t: torch.Tensor) -> bytes:
+        start = time.perf_counter()
+        ret = self.d.from_bytes(t)
+        end = time.perf_counter()
+
+        logger.debug(f"Deserialization took {end-start:.2f} seconds")
+        return ret

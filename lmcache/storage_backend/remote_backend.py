@@ -4,11 +4,11 @@ import torch
 import threading
 import queue
 
-from lmcache.config import LMCacheEngineConfig
+from lmcache.config import LMCacheEngineConfig, LMCacheEngineMetadata
 from lmcache.storage_backend.abstract_backend import LMCBackendInterface
 from lmcache.logging import init_logger
 from lmcache.storage_backend.connector import CreateConnector
-from lmcache.storage_backend.serde import TorchSerializer, TorchDeserializer
+from lmcache.storage_backend.serde import TorchSerializer, TorchDeserializer, CacheGenSerializer, CacheGenDeserializer, CreateSerde
 from lmcache.utils import CacheEngineKey
 
 logger = init_logger(__name__)
@@ -20,7 +20,8 @@ class LMCRemoteBackend(LMCBackendInterface):
     """
     def __init__(
             self, 
-            config: LMCacheEngineConfig
+            config: LMCacheEngineConfig,
+            metadata: LMCacheEngineMetadata
         ):
         """
         Throws:
@@ -29,8 +30,11 @@ class LMCRemoteBackend(LMCBackendInterface):
         super().__init__()
         self.existing_keys = set()
         self.connection = CreateConnector(config.remote_url)
-        self.serializer = TorchSerializer()
-        self.deserializer = TorchDeserializer()
+        s, d = CreateSerde("cachegen", config, metadata)
+        self.serializer = s
+        self.deserializer = d
+        #self.serializer = TorchSerializer()
+        #self.deserializer = TorchDeserializer()
 
     def _combine_key(
             self,

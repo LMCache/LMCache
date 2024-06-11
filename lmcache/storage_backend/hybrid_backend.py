@@ -27,7 +27,7 @@ class LMCHybridBackend(LMCBackendInterface):
 
     def __init__(self, config: LMCacheEngineConfig, metadata: LMCacheEngineMetadata):
         self.local_store = LMCLocalBackend(config)
-        self.remote_store = LMCRemoteBackend(config)
+        self.remote_store = LMCRemoteBackend(config, metadata)
 
         # prefetch
         keys = self.remote_store.list()

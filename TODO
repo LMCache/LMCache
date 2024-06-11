@@ -1,3 +1,5 @@
+(functionality) add configuration of serde (torch/cachegen) to config file
+(deployment) Add torchac_cuda installation to Docker deployment and README
 (functionality) Async prefetch during startup
 (modeling) Model the throughput threshold for improvement
 (refactoring, usability) separate repo of vllm driver code + better instructions + better demo
@@ -6,7 +8,7 @@
 (performance) Pipeline get and deserialization
 (functionality) CacheGen GPU compression
 (functionality, correctness, tests) work with vllm's prefix caching -- when seq.num_coomputed_tokens() is not zero
-(functionality, usability) instructions to install CacheGen
+(functionality, usability) instructions to install CacheGen and torchac_cuda
 (functionality) graceful close for the connectors
 (tests) spin-up the redis/lmcache server during testings
 (refactoring, tests) Refactor unit tests for lmcache engine

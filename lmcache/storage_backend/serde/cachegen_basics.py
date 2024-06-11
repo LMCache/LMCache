@@ -46,6 +46,8 @@ class CacheGenEncoderOutput:
     cdf: torch.Tensor
     max_tensors_key: torch.Tensor
     max_tensors_value: torch.Tensor
+    num_heads: int
+    head_size: int
 
     def __getitem__(self, key: str) -> int:
         return getattr(self, key)
