@@ -5,8 +5,8 @@ import torch
 from lmcache.config import LMCacheEngineConfig, LMCacheEngineMetadata
 from lmcache.cache_engine import LMCacheEngine, LMCacheEngineBuilder
 
-def dumb_metadata():
-    return LMCacheEngineMetadata("test_model", 3, 123)
+def dumb_metadata(fmt="vllm"):
+    return LMCacheEngineMetadata("test_model", 3, 123, fmt)
 
 def generate_kv_cache(num_tokens, fmt, device):
     ret = []
@@ -74,18 +74,18 @@ def test_same_retrive_store(fmt, backend):
     
     ''' initialize the engine '''
     cfg = LMCacheEngineConfig.from_legacy(chunk_size = 256, backend = backend)
-    engine = LMCacheEngine(cfg, dumb_metadata())
+    engine = LMCacheEngine(cfg, dumb_metadata(fmt))
 
     ''' test retrive empty '''
-    retrived_cache, length = engine.retrive(tokens, fmt, device)
+    retrived_cache, length = engine.retrive(tokens, device)
     assert len(retrived_cache) == 0
     assert length == 0
 
     ''' test store '''
-    engine.store(tokens, kv_cache, fmt)
+    engine.store(tokens, kv_cache)
 
     ''' test retrive '''
-    retrived_cache, length = engine.retrive(tokens, fmt, device)
+    retrived_cache, length = engine.retrive(tokens, device)
 
     assert length == num_tokens
     check_kv_cache_equal(retrived_cache, kv_cache, num_tokens, fmt)
@@ -105,13 +105,13 @@ def test_retrive_prefix(fmt, chunk_size, backend):
     
     ''' initialize the engine '''
     cfg = LMCacheEngineConfig.from_legacy(chunk_size = chunk_size, backend=backend)
-    engine = LMCacheEngine(cfg, dumb_metadata())
+    engine = LMCacheEngine(cfg, dumb_metadata(fmt))
 
     ''' test store '''
-    engine.store(tokens, kv_cache, fmt)
+    engine.store(tokens, kv_cache)
 
     ''' test retrive '''
-    retrived_cache, length = engine.retrive(torch.cat([tokens, new_tokens]), fmt, device)
+    retrived_cache, length = engine.retrive(torch.cat([tokens, new_tokens]), device)
 
     expected_chunk_cnt = num_tokens // chunk_size
     expected_length = expected_chunk_cnt * chunk_size
@@ -133,14 +133,14 @@ def test_mixed_retrive(fmt, chunk_size, backend):
     
     ''' initialize the engine '''
     cfg = LMCacheEngineConfig.from_legacy(chunk_size = chunk_size, backend = backend)
-    engine = LMCacheEngine(cfg, dumb_metadata())
+    engine = LMCacheEngine(cfg, dumb_metadata(fmt))
 
     ''' test store '''
-    engine.store(tokens, kv_cache, fmt)
-    engine.store(new_tokens, new_kv_cache, fmt)
+    engine.store(tokens, kv_cache)
+    engine.store(new_tokens, new_kv_cache)
 
     ''' test retrive '''
-    retrived_cache, length = engine.retrive(torch.cat([tokens, new_tokens]), fmt, device)
+    retrived_cache, length = engine.retrive(torch.cat([tokens, new_tokens]), device)
 
     expected_chunk_cnt = num_tokens // chunk_size
     expected_length = expected_chunk_cnt * chunk_size
@@ -148,7 +148,7 @@ def test_mixed_retrive(fmt, chunk_size, backend):
     check_kv_cache_equal(retrived_cache, kv_cache, expected_length, fmt)
     
     ''' test another retrive '''
-    retrived_cache, length = engine.retrive(new_tokens, fmt, device)
+    retrived_cache, length = engine.retrive(new_tokens, device)
 
     assert length == new_num_tokens
     check_kv_cache_equal(retrived_cache, new_kv_cache, length, fmt)
@@ -156,10 +156,10 @@ def test_mixed_retrive(fmt, chunk_size, backend):
     ''' insert the mixed kv cache '''
     final_tokens = torch.cat([tokens, new_tokens])
     final_kv_cache = concatenate_kv_caches([kv_cache, generate_kv_cache(new_num_tokens, fmt, device)], fmt)
-    engine.store(final_tokens, final_kv_cache, fmt)
+    engine.store(final_tokens, final_kv_cache)
 
     ''' should retrive the mixed version '''
-    retrived_cache, length = engine.retrive(final_tokens, fmt, device)
+    retrived_cache, length = engine.retrive(final_tokens, device)
     assert length == num_tokens + new_num_tokens
     check_kv_cache_equal(retrived_cache, final_kv_cache, length, fmt)
 
@@ -180,18 +180,18 @@ def test_skipping(fmt):
     
     ''' initialize the engine '''
     cfg = LMCacheEngineConfig.from_legacy(chunk_size = chunk_size, persist_path = persist_path)
-    engine1 = LMCacheEngine(cfg, dumb_metadata())
-    engine2 = LMCacheEngine(cfg, dumb_metadata())
+    engine1 = LMCacheEngine(cfg, dumb_metadata(fmt))
+    engine2 = LMCacheEngine(cfg, dumb_metadata(fmt))
 
     ''' store and persist '''
-    engine1.store(tokens, kv_cache, fmt)
-    engine2.store(tokens, kv_cache, fmt)
+    engine1.store(tokens, kv_cache)
+    engine2.store(tokens, kv_cache)
 
     ''' store final '''
     t1 = time.perf_counter()
-    engine1.store(final_tokens, final_kv_cache, fmt, skip_existing=True)
+    engine1.store(final_tokens, final_kv_cache, skip_existing=True)
     t2 = time.perf_counter()
-    engine2.store(final_tokens, final_kv_cache, fmt, skip_existing=False)
+    engine2.store(final_tokens, final_kv_cache, skip_existing=False)
     t3 = time.perf_counter()
 
     print("With skip:", t2 - t1)

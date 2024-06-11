@@ -38,6 +38,7 @@ class LMCacheEngine:
                 self.device = "cpu"
             case _:
                 self.device = "cuda"
+        logger.info("Using device: %s", self.device)
         self.engine_ = CreateStorageBackend(config, metadata)
 
     def _make_key(
@@ -216,7 +217,6 @@ class LMCacheEngine:
             self, 
             tokens: torch.Tensor,
             kv_tensors: KVCache,
-            fmt: str,
             skip_existing = True,
         ) -> None:
         """
@@ -235,6 +235,8 @@ class LMCacheEngine:
         Note:
             The KV cache should NOT have the "batch" dimension.
         """
+        fmt = self.metadata.fmt
+
         assert len(tokens.shape) == 1, f"Invalid shape of tokens: {tokens.shape}"
         assert len(kv_tensors) > 0, "Empty kv_tensors"
         assert len(tokens) == self._num_tokens_in_kv(kv_tensors, fmt), "Number of tokens in the kv cache does not match the input tokens"
@@ -263,7 +265,6 @@ class LMCacheEngine:
 
     def retrive(self,
                 tokens: torch.Tensor,
-                fmt: str,
                 device: str = 'cuda'
         ) -> Tuple[KVCache, int]:
         """
@@ -282,6 +283,7 @@ class LMCacheEngine:
             num_tokens: the number of tokens in the kv cache
         """
         st = time.perf_counter()
+        fmt = self.metadata.fmt
         chunk_hashes = self._prefix_hash(self._chunk_tokens(tokens, device=self.device))
         retrival_iterator = self.engine_.batched_get(
                 self._make_key(chunk_hash, fmt) for chunk_hash in chunk_hashes
