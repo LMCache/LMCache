@@ -117,35 +117,3 @@ while True:
     chat_session.chat()
     print("")
 
-#start = time.perf_counter()
-#end = None
-#chat_completion = client.chat.completions.create(
-#    messages=[
-#    {
-#        "role": "user",
-#        "content": f"I've got a document, here's the content:```\n{context}\n```."
-#    }, 
-#    {
-#        "role":
-#        "assistant",
-#        "content":
-#        "I've got your document"
-#    }, 
-#    {
-#        "role": "user",
-#        "content": "What does this document mainly talks about?"
-#    }],
-#    model=model,
-#    temperature=0,
-#    stream=True
-#)
-#
-#print("\033[33mChat completion results:\033[0m")
-#for chunk in chat_completion:
-#    chunk_message = chunk.choices[0].delta.content
-#    print(chunk_message, end="", flush=True) if chunk_message is not None else None
-#    if end is None:
-#        end = time.perf_counter()
-#print("")
-#print("\033[33mTTFT:", end - start, "\033[0m")
-#print("Total time:", time.perf_counter() - start)
