@@ -70,6 +70,7 @@ class LMCHybridBackend(LMCBackendInterface):
             p.start()
         '''
         
+        '''
         # prefetch
         keys = self.remote_store.list()
         nfetched = 0
@@ -90,7 +91,7 @@ class LMCHybridBackend(LMCBackendInterface):
         end = time.perf_counter()
 
         logger.info("Pre-fetched %d keys from remote backend, used %.2f sec", nfetched, end - start)
-    
+        '''
            
     
     def contains(
@@ -142,15 +143,18 @@ class LMCHybridBackend(LMCBackendInterface):
         #remote_indices = []
         idx = 0
         logger.debug(f"start retrieving local cache: {fetched_kvs[0] is None}")
+        keys_copy = []
         for key in keys:
-            logger.debug(f"local store idx, key: {(idx, key)}")
+            #logger.debug(f"local store idx, key: {(idx, key)}")
             
             value = self.local_store.get(key) 
             fetched_kvs[idx] = value 
-            logger.debug(f"local chunk is None: {value is None}")
+            #logger.debug(f"local chunk is None: {value is None}")
             idx += 1
+            keys_copy.append(key) #FIXME(Jiayi): This is a hack
+        
         logger.debug(f"First chunk in local cache is None: {fetched_kvs[0] is None}")
         
         # Retrieve from remote cache 
-        self.remote_store.get_all_pipeline(keys, fetched_kvs)
+        self.remote_store.get_all_pipeline(keys_copy, fetched_kvs)
 

@@ -62,7 +62,7 @@ class LMCRemoteBackend(LMCBackendInterface):
         #Initialize network get thread queue
         logger.debug(f"Jiayi: Initializing network thread queue")
         self.network_queue = queue.Queue()
-        num_thread = 5 #FIXME(Jiayi): currently the thread num is set to 5
+        num_thread = 1 #FIXME(Jiayi): currently the thread num is set to 1
         self.network_threads = [
            threading.Thread(
                target=network_worker, args=(self,)
