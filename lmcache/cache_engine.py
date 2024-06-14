@@ -40,6 +40,7 @@ class LMCacheEngine:
                 self.device = "cuda"
         logger.info("Using device: %s", self.device)
         self.engine_ = CreateStorageBackend(config, metadata)
+        logger.debug(f"Current storage backend type {type(self.engine_)}")
 
     def _make_key(
             self,
@@ -285,9 +286,16 @@ class LMCacheEngine:
         st = time.perf_counter()
         fmt = self.metadata.fmt
         chunk_hashes = self._prefix_hash(self._chunk_tokens(tokens, device=self.device))
-        retrival_iterator = self.engine_.batched_get(
-                self._make_key(chunk_hash, fmt) for chunk_hash in chunk_hashes
+        
+        #Jiayi: Pipeline entry is here
+        #retrival_iterator = self.engine_.batched_get(
+        #        self._make_key(chunk_hash, fmt) for chunk_hash in chunk_hashes
+        #    )
+        retrival_iterator = self.engine_.batched_get_pipeline_entry(
+                (self._make_key(chunk_hash, fmt) for chunk_hash in chunk_hashes),
+                num_chunks=102,
             )
+        
         retrived_kv_chunks = []
         for chunk in retrival_iterator:
             if chunk is None:

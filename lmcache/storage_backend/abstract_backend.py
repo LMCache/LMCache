@@ -56,6 +56,7 @@ class LMCBackendInterface(metaclass=abc.ABCMeta):
             None if the key is not found
         """
         raise NotImplementedError
+    
 
     def batched_put(
             self,
@@ -71,13 +72,26 @@ class LMCBackendInterface(metaclass=abc.ABCMeta):
         Returns:
             the number of chunks are stored
         """
-        logger.info("Using default batched implementation of the put() method")
+        #logger.info("Using default batched implementation of the put() method")
+        logger.debug("Jiayi: Using async implementation of the put_async() method")
         nchunks = 0
         for key, kv_chunk in keys_and_chunks:
-            self.put(key, kv_chunk)
+            #self.put(key, kv_chunk)
+            self.put_async(key, kv_chunk)
             nchunks += 1
         return nchunks
-
+    
+    def batched_get_pipeline_entry(
+        self,
+        keys: Iterator[CacheEngineKey],
+        num_chunks,
+    ):
+        logger.info("Using pipelined batched implementation of the get() method")
+        fetched_kvs = [None] * num_chunks
+        self.batched_get_pipeline(keys, fetched_kvs)
+        for fetched_kv in fetched_kvs:
+            yield fetched_kv
+    
     def batched_get(
             self,
             keys: Iterator[CacheEngineKey],
@@ -94,7 +108,7 @@ class LMCBackendInterface(metaclass=abc.ABCMeta):
         """
         logger.info("Using default batched implementation of the get() method")
         for key in keys:
-            if self.contains(key):
+            if self.contains(key): # Jiayi: This seems to be redundant?
                 yield self.get(key)
             else:
                 yield None
