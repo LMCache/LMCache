@@ -30,7 +30,7 @@ class LMCRemoteBackend(LMCBackendInterface):
         super().__init__()
         self.existing_keys = set()
         self.connection = CreateConnector(config.remote_url)
-        s, d = CreateSerde("cachegen", config, metadata)
+        s, d = CreateSerde(config.remote_serde, config, metadata)
         self.serializer = s
         self.deserializer = d
         #self.serializer = TorchSerializer()
