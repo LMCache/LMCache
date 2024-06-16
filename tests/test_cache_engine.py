@@ -64,7 +64,8 @@ def check_kv_cache_equal(left, right, num_tokens, fmt):
                 assert (left_v[:num_tokens, :, :] == right_v[:num_tokens, :, :]).all()
 
 @pytest.mark.parametrize("fmt", ["vllm", "huggingface"])
-@pytest.mark.parametrize("backend", ["cuda", "cpu", "redis://localhost:6379"])
+@pytest.mark.parametrize("backend", ["cuda", "cpu", "redis://localhost:6379", "lm://localhost:65000"])
+@pytest.mark.usefixtures("lmserver_process")
 def test_same_retrive_store(fmt, backend):
     device = "cpu" if backend == "cpu" else "cuda"
     num_tokens = 2000
@@ -92,7 +93,8 @@ def test_same_retrive_store(fmt, backend):
 
 @pytest.mark.parametrize("fmt", ["vllm", "huggingface"])
 @pytest.mark.parametrize("chunk_size", [128, 256])
-@pytest.mark.parametrize("backend", ["cuda", "redis://localhost:6379"])
+@pytest.mark.parametrize("backend", ["cuda", "redis://localhost:6379", "lm://localhost:65000"])
+@pytest.mark.usefixtures("lmserver_process")
 def test_retrive_prefix(fmt, chunk_size, backend):
     device = "cpu" if backend == "cpu" else "cuda"
     num_tokens = 2000
@@ -120,7 +122,8 @@ def test_retrive_prefix(fmt, chunk_size, backend):
 
 @pytest.mark.parametrize("fmt", ["vllm", "huggingface"])
 @pytest.mark.parametrize("chunk_size", [128, 256])
-@pytest.mark.parametrize("backend", ["cuda", "redis://localhost:6379"])
+@pytest.mark.parametrize("backend", ["cuda", "redis://localhost:6379", "lm://localhost:65000"])
+@pytest.mark.usefixtures("lmserver_process")
 def test_mixed_retrive(fmt, chunk_size, backend):
     device = "cuda"
     num_tokens = 2000
