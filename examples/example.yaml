@@ -1,3 +1,3 @@
-chunk_size: 256
+chunk_size: 2000
 local_device: "cpu"
 remote_url: "lm://localhost:12345"

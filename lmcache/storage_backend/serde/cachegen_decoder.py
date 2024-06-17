@@ -8,6 +8,9 @@ from typing import Tuple, List, Any
 from lmcache.storage_backend.serde.cachegen_basics import CacheGenConfig, CacheGenEncoderOutput
 from lmcache.storage_backend.serde.serde import Deserializer
 from lmcache.config import LMCacheEngineConfig, LMCacheEngineMetadata
+from lmcache.logging import init_logger
+
+logger = init_logger(__name__)
 
 def quant(bins: int, xq: torch.Tensor, max1: float):
     C = bins // 2 - 1
@@ -53,10 +56,25 @@ def decode_function_gpu(
     max_tensors_k = max_tensors_k.cuda()
     max_tensors_v = max_tensors_v.cuda()
 
+    '''
     num_threads = chunk_size
     num_blocks = nlayers
+    
+    # FIXME(Jiayi): scale*num_thread = chunk_size; num_thread<1000 (32X)
     scale = 1
-
+    '''
+    
+    num_blocks = nlayers
+    
+    if chunk_size < 1000:
+        num_threads = chunk_size
+        scale = 1
+    elif chunk_size % 1000 == 0:
+        num_threads = 1000
+        scale = int(chunk_size/num_threads)
+    else:
+        raise Exception(f"The current cuda kernel does not support chunk size {chunk_size}") 
+    
     torchac_cuda.decode_fast(
             output,
             cdf.unsqueeze(0),

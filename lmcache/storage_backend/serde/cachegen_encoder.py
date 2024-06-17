@@ -9,6 +9,9 @@ from typing import Tuple, List, Any
 from lmcache.storage_backend.serde.cachegen_basics import CacheGenConfig, CacheGenEncoderOutput
 from lmcache.storage_backend.serde.serde import Serializer
 from lmcache.config import LMCacheEngineConfig, LMCacheEngineMetadata
+from lmcache.logging import init_logger
+
+logger = init_logger(__name__)
 
 def torch_quant(bins: int, qA: torch.Tensor) -> Tuple[torch.Tensor, float]:
     """
@@ -193,6 +196,7 @@ def encode_function(kv, config, chunk_size) -> CacheGenEncoderOutput:
     """
     Given the path to the original key value cache, encode the KV cache
     """
+    logger.debug(f"Jiayi: encode chunk size: {chunk_size}")
     num_heads, head_size = kv.shape[-2:]
     output_dict = {}
     fp_k, fp_v = _split_kv(kv)
