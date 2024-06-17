@@ -14,7 +14,29 @@ from lmcache.utils import _lmcache_nvtx_annotate
 
 logger = init_logger(__name__)
 
+# FIXME(Jiayi): Put the following worker function(s) into class
+# FIXME(Jiayi): Needs to consider concurrent setting (private queue?)
+def network_worker(
+    remote_store
+):
+    while True:
+        item = remote_store.network_queue.get()
+        key, idx, fetched_kvs = item
 
+        if remote_store.contains(key):
+            data = remote_store.connection.get(remote_store._combine_key(key))
+            remote_store.deserialize_queue.put_nowait((idx, data, fetched_kvs))
+        remote_store.network_queue.task_done()
+def deserialize_worker(
+    remote_store
+):
+    while True:
+        item = remote_store.deserialize_queue.get()
+        idx, data, fetched_kvs = item
+        if data is not None:
+            fetched_kvs[idx] = remote_store.deserializer.from_bytes(data)
+        remote_store.deserialize_queue.task_done()
+        
 class LMCRemoteBackend(LMCBackendInterface):
     """
     Cache engine for storing the KV cache of the tokens in the Redis.
@@ -36,6 +58,32 @@ class LMCRemoteBackend(LMCBackendInterface):
         self.deserializer = d
         #self.serializer = TorchSerializer()
         #self.deserializer = TorchDeserializer()
+        
+        
+        #Initialize network get thread queue
+        logger.debug(f"Jiayi: Initializing network thread queue")
+        self.network_queue = queue.Queue()
+        num_thread = 1 #FIXME(Jiayi): currently the thread num is set to 1
+        self.network_threads = [
+           threading.Thread(
+               target=network_worker, args=(self,)
+           ) for i in range(num_thread)
+        ]
+        for t in self.network_threads:
+            t.start()
+        
+        #Initialize network get thread queue
+        logger.debug(f"Jiayi: Initializing deserial thread queue")
+        self.deserialize_queue = queue.Queue()
+        num_thread = 1 #FIXME(Jiayi): currently the thread num is set to 1
+        self.deserialize_threads = [
+           threading.Thread(
+               target=deserialize_worker, args=(self,)
+           ) for i in range(num_thread)
+        ]
+        for t in self.deserialize_threads:
+            t.start()
+        
 
     def _combine_key(
             self,
@@ -107,6 +155,19 @@ class LMCRemoteBackend(LMCBackendInterface):
         self.connection.set(self._combine_key(key), bs)
 
         self.existing_keys.add(key)
+
+
+    def get_all_pipeline(
+        self,
+        keys,
+        fetched_kvs,
+    ):
+        for idx, key in enumerate(keys):
+            if fetched_kvs[idx] is None:
+                self.network_queue.put_nowait((key, idx, fetched_kvs))
+                #self.deserialize_queue.put_nowait((idx, buffer_kvs, fetched_kvs))
+        self.network_queue.join()
+        self.deserialize_queue.join()
 
     @_lmcache_nvtx_annotate
     def get(
@@ -226,7 +287,7 @@ class LMCPipelinedRemoteBackend(LMCRemoteBackend):
         for key, kv_chunk in keys_and_chunks:
             self.serializer_queue.put((key, kv_chunk))
             count += 1
-
+            logger.debug(f"Jiayi: Store put count {count} chunks")
         # Wait for all tasks to complete
         self.serializer_queue.join()
         return count

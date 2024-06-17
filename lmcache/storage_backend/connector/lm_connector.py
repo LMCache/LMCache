@@ -35,7 +35,7 @@ class LMCServerConnector(RemoteConnector):
         self.send_all(obj)
         response = self.client_socket.recv(ServerMetaMessage.packlength())
         if ServerMetaMessage.deserialize(response).code != Constants.SERVER_SUCCESS:
-            raise RuntimeError("Failed to set key")
+            raise RuntimeError(f"Failed to set key: {ServerMetaMessage.deserialize(response).code}")
 
     @_lmcache_nvtx_annotate
     def get(self, key: str) -> Optional[bytes]:
