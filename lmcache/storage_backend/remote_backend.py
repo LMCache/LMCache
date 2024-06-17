@@ -10,6 +10,7 @@ from lmcache.logging import init_logger
 from lmcache.storage_backend.connector import CreateConnector
 from lmcache.storage_backend.serde import TorchSerializer, TorchDeserializer, CacheGenSerializer, CacheGenDeserializer, CreateSerde
 from lmcache.utils import CacheEngineKey
+from lmcache.utils import _lmcache_nvtx_annotate
 
 logger = init_logger(__name__)
 
@@ -107,6 +108,7 @@ class LMCRemoteBackend(LMCBackendInterface):
 
         self.existing_keys.add(key)
 
+    @_lmcache_nvtx_annotate
     def get(
             self,
             key: CacheEngineKey,

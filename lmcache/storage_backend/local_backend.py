@@ -8,6 +8,7 @@ from lmcache.utils import CacheEngineKey, KVCache
 from lmcache.config import LMCacheEngineConfig
 from lmcache.storage_backend.abstract_backend import LMCBackendInterface
 from lmcache.logging import init_logger
+from lmcache.utils import _lmcache_nvtx_annotate
 
 logger = init_logger(__name__)
 
@@ -65,6 +66,7 @@ class LMCLocalBackend(LMCBackendInterface):
         self.dict[key] = kv_chunk
 
 
+    @_lmcache_nvtx_annotate
     def get(
             self,
             key: CacheEngineKey,

@@ -13,6 +13,7 @@ from lmcache.storage_backend.remote_backend import LMCRemoteBackend, LMCPipeline
 from lmcache.storage_backend.local_backend import LMCLocalBackend
 from lmcache.logging import init_logger
 from lmcache.storage_backend.connector import CreateConnector
+from lmcache.utils import _lmcache_nvtx_annotate
 
 logger = init_logger(__name__)
 
@@ -65,6 +66,7 @@ class LMCHybridBackend(LMCBackendInterface):
         # TODO: considering async write to remote backend
         self.remote_store.put(key, value)
 
+    @_lmcache_nvtx_annotate
     def get(
             self,
             key: Tuple[str, str],

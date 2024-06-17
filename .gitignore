@@ -58,3 +58,4 @@ cover/
 outdated/
 perf-test.py
 *.prof
+*.so
