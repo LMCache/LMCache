@@ -8,13 +8,31 @@ from typing import Tuple, List, Any
 from lmcache.storage_backend.serde.cachegen_basics import CacheGenConfig, CacheGenEncoderOutput
 from lmcache.storage_backend.serde.serde import Deserializer
 from lmcache.config import LMCacheEngineConfig, LMCacheEngineMetadata
+from lmcache.utils import _lmcache_nvtx_annotate
+from lmcache.logging import init_logger
+import nvtx
 
+logger = init_logger(__name__)
+
+@_lmcache_nvtx_annotate
 def quant(bins: int, xq: torch.Tensor, max1: float):
     C = bins // 2 - 1
-    x = (xq / C * max1).to(torch.float16)
+    x = (xq / C * max1)#.to(torch.float16)
     return x
 
+def do_dequantize(t: torch.Tensor, bins: torch.Tensor, maxtensors: torch.Tensor):
+    """
+    t: [nlayers, ntokens, nchannels]
+    bins: [nlayers]
+    maxtensors: [nlayers, ntokens, 1]
+    """
+    C = (bins // 2 - 1)[:, None, None]
+    t = t - C
+    t = t / C
+    t = t * maxtensors
+    return t
 
+@_lmcache_nvtx_annotate
 def decode_function_gpu(
         cdf: torch.Tensor, 
         bits: bytes, 
@@ -24,7 +42,9 @@ def decode_function_gpu(
         quantization_config: CacheGenConfig, 
         chunk_size: int, 
         output: torch.Tensor, 
-        chunk_id):
+        key_bins: torch.Tensor,
+        value_bins: torch.Tensor,
+    ):
     # TODO: dtype and shape -- still have 128 and 8
     """
     Given the path to the encoded KV bytestream, decode the KV cache
@@ -37,8 +57,10 @@ def decode_function_gpu(
         max_tensors_k: the max tensor for key in shape [nlayers, ntokens, 1]
         max_tensors_v: the max tensor for value in shape [nlayers, ntokens, 1]
         quantization_config: the quantization config
-        output: output buffer, in shape [ntokens, 2 * nlayers * nchannels]
         chunk_size: the chunk_size
+        output: output buffer, in shape [ntokens, 2 * nlayers * nchannels]
+        key_bins: the number of bins for key tensor, shape is [nlayers]
+        value_bins: the number of bins for value tensor, shape is [nlayers]
 
     Outputs:
         key: the decoded key tensor in the shape of (layers, tokens, nchannels)
@@ -49,9 +71,6 @@ def decode_function_gpu(
     concated_string = torch.from_numpy(np_array)
     nlayers, nchannels, _ = cdf.shape
 
-    start_indices = torch.tensor(start_indices).cuda()
-    max_tensors_k = max_tensors_k.cuda()
-    max_tensors_v = max_tensors_v.cuda()
 
     num_threads = chunk_size
     num_blocks = nlayers
@@ -59,8 +78,8 @@ def decode_function_gpu(
 
     torchac_cuda.decode_fast(
             output,
-            cdf.unsqueeze(0),
-            concated_string,
+            cdf.unsqueeze(0).cuda(),
+            concated_string.cuda(),
             start_indices,
             chunk_size,
             num_blocks,
@@ -69,29 +88,7 @@ def decode_function_gpu(
 
     out = output.reshape((2, max_tensors_k.shape[0], chunk_size, nchannels))
     key, value = out.float()
-    for l in range(key.shape[0]):
-        if l < config["key_first_layers"]:
-            bins = config["key_first_bins"]
-        elif l < config["key_second_layers"]:
-            bins = config["key_second_bins"]
-        else:
-            bins = config["key_third_bins"]
-        key[l] = quant(bins, key[l] - (bins // 2 - 1), max_tensors_k[l, chunk_id * chunk_size: (chunk_id + 1) * chunk_size])
 
-    for l in range(value.shape[0]):
-        if l < config["value_first_layers"]:
-            bins = config["value_first_bins"]
-        else:
-            bins = config["value_second_bins"]
-        value[l] = quant(bins, value[l] - (bins // 2 - 1), max_tensors_v[l, chunk_id * chunk_size: (chunk_id + 1) * chunk_size])
-    key = key.reshape(
-        key.shape[0],
-        key.shape[1],
-        nchannels)
-    value = value.reshape(
-        value.shape[0],
-        value.shape[1],
-        nchannels)
     return key, value
 
 class CacheGenDeserializer(Deserializer):
@@ -100,14 +97,36 @@ class CacheGenDeserializer(Deserializer):
         self.chunk_size = config.chunk_size
         self.output_buffer = None
         self.fmt = metadata.fmt
+        self.key_bins = self.make_key_bins(self.cachegen_config)
+        self.value_bins = self.make_value_bins(self.cachegen_config)
+
+
+    def make_key_bins(self, config: CacheGenConfig) -> torch.Tensor:
+        ret = torch.zeros(config.key_third_layers)
+        ret.fill_(config.key_third_bins)
+        ret[:config.key_second_layers] = config.key_second_bins
+        ret[:config.key_first_layers] = config.key_first_bins
+        return ret.cuda()
+
+    def make_value_bins(self, config: CacheGenConfig) -> torch.Tensor:
+        ret = torch.zeros(config.key_third_layers)
+        ret.fill_(config.value_second_bins)
+        ret[:config.value_first_layers] = config.value_first_bins
+        return ret.cuda()
+
 
     def get_output_buffer(self, nlayers: int, nchannels: int, ntokens: int):
         if self.output_buffer is None or self.output_buffer.shape[1] != 2 * nlayers * nchannels:
             self.output_buffer = torch.zeros((self.chunk_size, 2 * nlayers * nchannels), dtype=torch.int).cuda()
         return self.output_buffer[:ntokens, :]
 
+    @_lmcache_nvtx_annotate
     def from_bytes(self, bs: bytes) -> torch.Tensor:
         encoder_output = CacheGenEncoderOutput.from_bytes(bs)
+        encoder_output.max_tensors_key = encoder_output.max_tensors_key.cuda()
+        encoder_output.max_tensors_value = encoder_output.max_tensors_value.cuda()
+        encoder_output.start_indices = encoder_output.start_indices.cuda()
+
         ntokens = encoder_output.max_tensors_key.shape[1]
         key, value = decode_function_gpu(
                 encoder_output.cdf,
@@ -118,11 +137,18 @@ class CacheGenDeserializer(Deserializer):
                 self.cachegen_config,
                 ntokens,
                 self.get_output_buffer(encoder_output.cdf.shape[0] // 2, encoder_output.cdf.shape[1], ntokens),
-                0)
+                self.key_bins,
+                self.value_bins
+            )
+
+        key = do_dequantize(key, self.key_bins, encoder_output.max_tensors_key)
+        value = do_dequantize(value, self.value_bins, encoder_output.max_tensors_value)
 
         ''' merge key and value back and reshape '''
         nlayers, ntokens, nchannels = key.shape
+        rng = nvtx.start_range("stack KV")
         blob = torch.stack([key, value]) # [2, nlayers, ntokens, nchannels] 
+        nvtx.end_range(rng)
         blob = blob.reshape((2, nlayers, ntokens, encoder_output.num_heads, encoder_output.head_size))\
         
         match self.fmt:
