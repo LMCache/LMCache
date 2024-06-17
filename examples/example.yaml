@@ -1,3 +1,4 @@
 chunk_size: 256
 local_device: "cpu"
-remote_url: "lm://localhost:12345"
+remote_url: "lm://localhost:65432"
+remote_serde: "cachegen"

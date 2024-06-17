@@ -18,7 +18,7 @@ const int PRECISION = 16;
 const int RENORMALIZATION_FACTOR = 2 << (PRECISION - 1);
 const int STRIDE = 1;
 
-__host__ __device__ cdf_t binsearch_cuda(cdf_t *cdf, cdf_t target, cdf_t max_sym,
+__host__ __device__ cdf_t binsearch_cuda(const cdf_t *cdf, cdf_t target, cdf_t max_sym,
                                          const int offset) /* i * Lp */
 {
     cdf_t left = 0;
@@ -98,7 +98,7 @@ const struct cdf_ptr get_cdf_ptr_cuda(const at::Tensor &cdf)
 __global__ void decode_with_cuda_kernel_layer(
     // int* out_arr, char* in, const int size_in, const cdf_t* cdf, const int N_sym, const int Lp ) {
     int *out_arr, uint8_t *in, const int nlayers, const int in_tot_length, 
-    cdf_t *cdf, const int N_sym, const int Lp, int *start_index_arr_device,
+    const cdf_t *cdf, const int N_sym, const int Lp, int *start_index_arr_device,
     const int scale, const int start_indices_length) {
     int ntokens = blockDim.x;
     int start_layer = blockIdx.x / scale;
@@ -311,18 +311,6 @@ namespace
     }
 }
 
-cdf_t *malloc_cdf(const int N, const int Lp)
-{
-    cdf_t *cdf_mem;
-    cudaMallocManaged(&cdf_mem, N * Lp * sizeof(cdf_t));
-    return cdf_mem;
-}
-
-void free_cdf(cdf_t *cdf_mem)
-{
-    cudaFree(cdf_mem);
-}
-
 template <typename T>
 std::string to_string(const T &object)
 {
@@ -365,68 +353,19 @@ void decode_fast(torch::Tensor out_tensor, const at::Tensor &cdf,
      *     A tensor of shape (all_tokens, N_sym) containing the decoded symbols. 
     */
 
-    // const std::string& in) {
-    // int tot_length = concatenatedString.length();
-    // int tot_length = concated_string.length();
     int tot_length = concated_string.sizes()[0];
-    // std::cout << "tot_length: " << tot_length << std::endl;
-    // char *d_str;
-    // cudaMalloc((void **)&d_str, tot_length * sizeof(char));
-    // cudaMemcpy(d_str, concated_string.c_str() , tot_length * sizeof(char), cudaMemcpyHostToDevice);
-    uint8_t *d_str;
-    cudaMalloc((void **)&d_str, tot_length * sizeof(char));
-    cudaMemcpy(d_str, concated_string.data_ptr<uint8_t>(), tot_length * sizeof(uint8_t), cudaMemcpyHostToDevice);
-    //  = concated_string.data_ptr<uint8_t>();
+    uint8_t *d_str = concated_string.data_ptr<uint8_t>();
     
-    cudaEvent_t start3, stop3;
-    cudaEventCreate(&start3);
-    cudaEventRecord(start3, 0);
-    std::string concatStart;
-    
-    // int *start_index_arr_device;
-    // cudaMalloc((void **)&start_index_arr_device, start_indices.size() * sizeof(int));
-    // cudaMemcpy(start_index_arr_device, start_indices.data(), start_indices.size() * sizeof(int), cudaMemcpyHostToDevice);
-
-    cudaEventCreate(&stop3);
-    cudaEventRecord(stop3, 0);
-    cudaEventSynchronize(stop3);
-    float elapsedTime0;
-    cudaEventElapsedTime(&elapsedTime0, start3, stop3);
-    // std::cout << "time taken for copy data: " << elapsedTime0 << " ms" << std::endl;
-
-
     const auto cdf_ptr = get_cdf_ptr_cuda(cdf);
-    // std::cout << "N_sym: " << cdf_ptr.N_sym << std::endl;
-
-    // std::cout << "N_sym 1: " << cdf_ptr.N_sym << std::endl;
-    cdf_t *cdf_data;
-    size_t size_cdf = blockNum * cdf_ptr.N_sym * cdf_ptr.Lp * sizeof(cdf_t) / scale; // Calculate the size of the array.
-    cudaMalloc(&cdf_data, size_cdf);
-    cudaMemcpy(cdf_data, cdf_ptr.data, size_cdf, cudaMemcpyHostToDevice);
+    const cdf_t *cdf_data = cdf_ptr.data;
     
     int *out_arr = out_tensor.data_ptr<int>();
     const auto start_indices_len = start_indices.sizes();
     int start_indices_length = start_indices_len[0];
     int *start_index_arr_device = start_indices.data_ptr<int>();
-    // std::cout << "N_sym: " << cdf_ptr.N_sym << std::endl;
 
-    cudaEvent_t start2, stop2;
-    cudaEventCreate(&start2);
-    cudaEventRecord(start2, 0);
-    
     decode_with_cuda_kernel_layer<<<blockNum, threadNum>>>(out_arr, d_str, blockNum, tot_length, cdf_data, cdf_ptr.N_sym, 
         cdf_ptr.Lp, start_index_arr_device, scale, start_indices_length);
-
-    cudaEventCreate(&stop2);
-    cudaEventRecord(stop2, 0);
-    cudaEventSynchronize(stop2);
-    float elapsedTime1;
-    cudaEventElapsedTime(&elapsedTime1, start2, stop2);
-    // std::cout << "time taken for compute data: " << elapsedTime1 << " ms" << std::endl;
-
-
-    cudaFree(d_str);
-    cudaFree(cdf_data);
 }
 
 

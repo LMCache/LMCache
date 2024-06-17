@@ -11,6 +11,7 @@ from lmcache.storage_backend import CreateStorageBackend
 from lmcache.config import LMCacheEngineConfig, LMCacheEngineMetadata
 from lmcache.utils import KVCache, CacheEngineKey
 from lmcache.logging import init_logger
+from lmcache.utils import _lmcache_nvtx_annotate
 
 # TODO: (functionality) configuration class for backend implementations
 # TODO: (functionality) the model name and the distributed rank should also be the key
@@ -263,7 +264,7 @@ class LMCacheEngine:
         #logger.info(f"Stored/updated {n_chunks} chunks. Currently {len(self.dict)} chunks in the cache")
         logger.info(f"Stored/updated {n_chunks} chunks")
 
-
+    @_lmcache_nvtx_annotate
     def retrive(self,
                 tokens: torch.Tensor,
                 device: str = 'cuda'

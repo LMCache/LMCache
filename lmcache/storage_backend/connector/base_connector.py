@@ -2,6 +2,7 @@ import abc
 import time
 from typing import Optional, List
 
+from lmcache.utils import _lmcache_nvtx_annotate
 from lmcache.logging import init_logger
 
 logger = init_logger(__name__)
@@ -65,6 +66,7 @@ class RemoteConnectorDebugWrapper(RemoteConnector):
     def exists(self, key: str) -> bool:
         return self.connector.exists(key)
 
+    @_lmcache_nvtx_annotate
     def get(self, key: str) -> Optional[bytes]:
         start = time.perf_counter()
         ret = self.connector.get(key)

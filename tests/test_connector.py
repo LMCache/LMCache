@@ -1,20 +1,24 @@
 import pytest
+import time
+from unittest.mock import patch, MagicMock
 import string
 import random
-
+import subprocess
+import shlex
 from lmcache.storage_backend.connector import CreateConnector
 
 def random_string(N):
-    return ''.join(random.choices(string.ascii_uppercase +
-                             string.digits, k=N))
+    return ''.join(random.choices(string.ascii_uppercase + string.digits, k=N))
 
-@pytest.mark.parametrize("url", 
+
+@pytest.mark.usefixtures("lmserver_process")
+@pytest.mark.parametrize("url",
                          [
-                             "redis://localhost:6379", 
-                             "lm://localhost:65432",
+                             "redis://localhost:6379",
+                             "lm://localhost:65000",
                          ])
-def test_connector(url):
-    # TODO: use mock or use really spin-up the servers during testing
+def test_lm_connector(url):
+    url = "lm://localhost:65000"
     connector = CreateConnector(url)
     
     assert not connector.exists("some-special-key-12345")

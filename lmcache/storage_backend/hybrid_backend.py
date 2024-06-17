@@ -16,6 +16,7 @@ from lmcache.storage_backend.remote_backend import LMCRemoteBackend, LMCPipeline
 from lmcache.storage_backend.local_backend import LMCLocalBackend
 from lmcache.logging import init_logger
 from lmcache.storage_backend.connector import CreateConnector
+from lmcache.utils import _lmcache_nvtx_annotate
 
 logger = init_logger(__name__)
 
@@ -117,7 +118,8 @@ class LMCHybridBackend(LMCBackendInterface):
         #self.local_store.put(key, value)
         self.put_queue.put_nowait((key, value, self.local_store, self.remote_store))
 
-    
+
+    @_lmcache_nvtx_annotate
     def get(
             self,
             key: Tuple[str, str],
