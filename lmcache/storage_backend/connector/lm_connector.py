@@ -2,6 +2,7 @@ from typing import Optional, List
 import socket
 from lmcache.protocol import Constants, ClientMetaMessage, ServerMetaMessage
 from lmcache.storage_backend.connector.base_connector import RemoteConnector
+from lmcache.utils import _lmcache_nvtx_annotate
 from lmcache.logging import init_logger
 
 logger = init_logger(__name__)
@@ -36,6 +37,7 @@ class LMCServerConnector(RemoteConnector):
         if ServerMetaMessage.deserialize(response).code != Constants.SERVER_SUCCESS:
             raise RuntimeError(f"Failed to set key: {ServerMetaMessage.deserialize(response).code}")
 
+    @_lmcache_nvtx_annotate
     def get(self, key: str) -> Optional[bytes]:
         self.send_all(ClientMetaMessage(Constants.CLIENT_GET, key, 0).serialize())
         data = self.client_socket.recv(ServerMetaMessage.packlength())

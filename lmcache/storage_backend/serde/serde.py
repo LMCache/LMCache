@@ -2,6 +2,7 @@ import abc
 import torch
 import time
 
+from lmcache.utils import _lmcache_nvtx_annotate
 from lmcache.logging import init_logger
 logger = init_logger(__name__)
 
@@ -52,10 +53,11 @@ class DeserializerDebugWrapper(Deserializer):
     def __init__(self, d: Deserializer):
         self.d = d
 
+    @_lmcache_nvtx_annotate
     def from_bytes(self, t: torch.Tensor) -> bytes:
         start = time.perf_counter()
         ret = self.d.from_bytes(t)
         end = time.perf_counter()
 
-        logger.debug(f"Deserialization took {end-start:.2f} seconds")
+        logger.debug(f"Deserialization took {(end-start)*1000:.2f} ms")
         return ret

@@ -10,6 +10,7 @@ from lmcache.logging import init_logger
 from lmcache.storage_backend.connector import CreateConnector
 from lmcache.storage_backend.serde import TorchSerializer, TorchDeserializer, CacheGenSerializer, CacheGenDeserializer, CreateSerde
 from lmcache.utils import CacheEngineKey
+from lmcache.utils import _lmcache_nvtx_annotate
 
 logger = init_logger(__name__)
 
@@ -52,7 +53,7 @@ class LMCRemoteBackend(LMCBackendInterface):
         super().__init__()
         self.existing_keys = set()
         self.connection = CreateConnector(config.remote_url)
-        s, d = CreateSerde("cachegen", config, metadata)
+        s, d = CreateSerde(config.remote_serde, config, metadata)
         self.serializer = s
         self.deserializer = d
         #self.serializer = TorchSerializer()
@@ -155,6 +156,7 @@ class LMCRemoteBackend(LMCBackendInterface):
 
         self.existing_keys.add(key)
 
+
     def get_all_pipeline(
         self,
         keys,
@@ -166,6 +168,8 @@ class LMCRemoteBackend(LMCBackendInterface):
                 #self.deserialize_queue.put_nowait((idx, buffer_kvs, fetched_kvs))
         self.network_queue.join()
         self.deserialize_queue.join()
+
+    @_lmcache_nvtx_annotate
     def get(
             self,
             key: CacheEngineKey,

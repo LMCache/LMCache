@@ -10,7 +10,7 @@ from lmcache.storage_backend.hybrid_backend import LMCHybridBackend
 from lmcache.config import LMCacheEngineConfig, LMCacheEngineMetadata
 from lmcache.utils import CacheEngineKey
 
-LMSEVER_URL = "lm://localhost:65432"
+LMSEVER_URL = "lm://localhost:65000"
 REDIS_URL = "redis://localhost:6379"
 
 def random_string(N):
@@ -30,20 +30,21 @@ def get_config(t):
         case "local":
             return LMCacheEngineConfig.from_defaults(local_device = "cuda", remote_url = None)
         case "remote":
-            return LMCacheEngineConfig.from_defaults(local_device = None, remote_url="lm://localhost:65432")
+            return LMCacheEngineConfig.from_defaults(local_device = None, remote_url="lm://localhost:65000")
         case "hybrid":
-            return LMCacheEngineConfig.from_defaults(local_device = "cuda", remote_url="lm://localhost:65432")
+            return LMCacheEngineConfig.from_defaults(local_device = "cuda", remote_url="lm://localhost:65000")
         case _:
             raise ValueError(f"Testbed internal error: Unknown config type: {t}")
 
 def get_metadata():
-    return LMCacheEngineMetadata("test-model", 1, -1, "vllm")
+    return LMCacheEngineMetadata("lmsys/longchat-7b-16k", 1, -1, "vllm")
             
 
+@pytest.mark.usefixtures("lmserver_process")
 def test_creation():
     config_local = LMCacheEngineConfig.from_defaults(local_device = "cuda", remote_url = None)
-    config_remote = LMCacheEngineConfig.from_defaults(local_device = None, remote_url="lm://localhost:65432")
-    config_hybrid = LMCacheEngineConfig.from_defaults(local_device = "cuda", remote_url="lm://localhost:65432")
+    config_remote = LMCacheEngineConfig.from_defaults(local_device = None, remote_url="lm://localhost:65000")
+    config_hybrid = LMCacheEngineConfig.from_defaults(local_device = "cuda", remote_url="lm://localhost:65000")
     metadata = get_metadata()
     
     backend_local = CreateStorageBackend(config_local, get_metadata())
@@ -59,6 +60,7 @@ def test_creation():
         backend_fail = CreateStorageBackend(config_fail, get_metadata())
 
 @pytest.mark.parametrize("backend_type", ["local", "remote", "hybrid"])
+@pytest.mark.usefixtures("lmserver_process")
 def test_local_backend(backend_type):
     config = get_config(backend_type) #LMCacheEngineConfig.from_defaults(local_device = "cuda", remote_url = None)
     metadata = get_metadata()
@@ -66,15 +68,18 @@ def test_local_backend(backend_type):
     
     N = 10
     keys = [generate_random_key() for i in range(N)]
-    random_tensors = [torch.rand((1000, 1000)) for i in range(N)]
+    random_tensors = [torch.rand((16, 2, 128, 4, 128)) for i in range(N)]
     for key, value in zip(keys, random_tensors):
         backend.put(key, value)
 
     for key, value in zip(keys, random_tensors):
         assert backend.contains(key)
         retrived = backend.get(key)
-        assert (value == retrived).all()
+        assert retrived.shape == value.shape
+        if config.remote_serde == "torch":
+            assert torch.equal(value, retrived.to(value.device))
 
+@pytest.mark.usefixtures("lmserver_process")
 def test_restart():
     config = get_config("hybrid") #LMCacheEngineConfig.from_defaults(local_device = "cuda", remote_url = None)
     metadata = get_metadata()
@@ -92,4 +97,6 @@ def test_restart():
     for key, value in zip(keys, random_tensors):
         assert backend.contains(key)
         retrived = backend.get(key)
-        assert (value == retrived).all()
+        assert value.shape == retrived.shape
+        if config.remote_serde == "torch":
+            assert (value == retrived).all()

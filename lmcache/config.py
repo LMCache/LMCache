@@ -22,18 +22,21 @@ class LMCacheEngineConfig:
     chunk_size: int
     local_device: str
     remote_url: str
+    remote_serde: str # Can be "torch" or "cachegen"
 
     def from_defaults(
             chunk_size: int = 256,
             local_device: str = "cuda",
-            remote_url: str = "redis://localhost:6379"
+            remote_url: str = "redis://localhost:6379",
+            remote_serde: str = "torch",
         ) -> 'LMCacheEngineConfig':
-        return LMCacheEngineConfig(chunk_size, local_device, remote_url)
+        return LMCacheEngineConfig(chunk_size, local_device, remote_url, remote_serde)
 
     def from_legacy(
             chunk_size: int = 256,
             backend: str = "cuda",
-            persist_path: str = None
+            persist_path: str = None,
+            remote_serde: str = "torch",
         ) -> 'LMCacheEngineConfig':
         match backend:
             case "cpu" | "cuda":
@@ -42,7 +45,7 @@ class LMCacheEngineConfig:
             case url if re.match(r"(.*)://(.*):(\d+)", url):
                 local_device = None
                 remote_url = url 
-        return LMCacheEngineConfig(chunk_size, local_device, remote_url)
+        return LMCacheEngineConfig(chunk_size, local_device, remote_url, remote_serde)
 
     @staticmethod
     def from_file(file_path: str) -> 'LMCacheEngineConfig':
@@ -55,7 +58,8 @@ class LMCacheEngineConfig:
         chunk_size = config.get("chunk_size", 256)
         local_device = config.get("local_device", None)
         remote_url = config.get("remote_url", None)
-        return LMCacheEngineConfig(chunk_size, local_device, remote_url)
+        remote_serde = config.get("remote_serde", "torch")
+        return LMCacheEngineConfig(chunk_size, local_device, remote_url, remote_serde)
 
 
 ### SOME GLOBAL CONFIGS 

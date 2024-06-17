@@ -37,8 +37,8 @@ sudo docker run --runtime nvidia --gpus '"device=0"' \
     --env "HF_TOKEN=<Your huggingface token>" \
     --ipc=host \
     --network=host \
-    vllm:lmcache \
-    --model lmsys/longchat-7b-16k 0.7 --tensor-parallel-size 2 --port 8000 \
+    apostacyh/vllm:lmcache \
+    --model lmsys/longchat-7b-16k 0.7 --port 8000 \
     --lmcache-config-file /lmcache/LMCache/examples/example.yaml
 ```
 
@@ -52,8 +52,8 @@ sudo docker run --runtime nvidia --gpus '"device=1"' \
     --env "HF_TOKEN=<Your huggingface token>" \
     --ipc=host \
     --network=host \
-    vllm:lmcache \
-    --model lmsys/longchat-7b-16k 0.7 --tensor-parallel-size 2 --port 8001 \
+    apostacyh/vllm:lmcache \
+    --model lmsys/longchat-7b-16k 0.7 --port 8001 \
     --lmcache-config-file /lmcache/LMCache/examples/example.yaml
 ```
 
@@ -70,6 +70,9 @@ You can run the demo application in the LMCache repo. Please execute the followi
 ```bash
 git clone https://github.com/LMCache/LMCache
 cd LMCache/examples/
+
+# Install openai client library
+pip install openai
 ```
 
 In one terminal:
