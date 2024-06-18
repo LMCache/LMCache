@@ -59,3 +59,9 @@ outdated/
 perf-test.py
 *.prof
 *.so
+
+# example
+/examples/example.yaml
+
+# profile report
+.nsys-rep
