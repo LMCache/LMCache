@@ -208,4 +208,4 @@ class LMCPipelinedHybridBackend(LMCHybridBackend):
             fetched_kvs[idx] = value  
         
         # Retrieve from remote cache 
-        self.remote_store.get_all_pipeline(keys, fetched_kvs)
+        self.remote_store.get_all(keys, fetched_kvs)
