@@ -192,7 +192,7 @@ class LMCPipelinedRemoteBackend(LMCBackendInterface):
         self.network_threads = [
            threading.Thread(
                target=network_worker, args=(self,)
-           ) for i in range(num_thread)
+           ) for _ in range(num_thread)
         ]
         for t in self.network_threads:
             t.start()
@@ -204,7 +204,7 @@ class LMCPipelinedRemoteBackend(LMCBackendInterface):
         self.deserialize_threads = [
            threading.Thread(
                target=deserialize_worker, args=(self,)
-           ) for i in range(num_thread)
+           ) for _ in range(num_thread)
         ]
         for t in self.deserialize_threads:
             t.start()

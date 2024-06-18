@@ -145,7 +145,7 @@ class LMCHybridBackend(LMCBackendInterface):
 
 class LMCPipelinedHybridBackend(LMCHybridBackend):
     """
-    A hybrid backend that uses both local and remote backend to store and retrieve data.
+    A pipelined hybrid backend that uses both local and remote backend to store and retrieve data.
     It implements write-through and read-through caching.
     """
 
@@ -164,7 +164,7 @@ class LMCPipelinedHybridBackend(LMCHybridBackend):
         self.put_threads = [
         threading.Thread(
                 target=put_worker, args=(self.put_queue,)
-            ) for i in range(num_thread)
+            ) for _ in range(num_thread)
         ]
         for t in self.put_threads:
             t.start()
