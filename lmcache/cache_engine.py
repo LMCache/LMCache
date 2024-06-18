@@ -288,13 +288,9 @@ class LMCacheEngine:
         fmt = self.metadata.fmt
         chunk_hashes = self._prefix_hash(self._chunk_tokens(tokens, device=self.device))
         
-        #Jiayi: Pipeline entry is here
-        #retrival_iterator = self.engine_.batched_get(
-        #        self._make_key(chunk_hash, fmt) for chunk_hash in chunk_hashes
-        #    )
-        retrival_iterator = self.engine_.batched_get_pipeline_entry(
+
+        retrival_iterator = self.engine_.batched_get(
                 (self._make_key(chunk_hash, fmt) for chunk_hash in chunk_hashes),
-                num_chunks=102,
             )
         
         retrived_kv_chunks = []

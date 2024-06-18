@@ -81,17 +81,6 @@ class LMCBackendInterface(metaclass=abc.ABCMeta):
             nchunks += 1
         return nchunks
     
-    def batched_get_pipeline_entry(
-        self,
-        keys: Iterator[CacheEngineKey],
-        num_chunks,
-    ):
-        logger.info("Using pipelined batched implementation of the get() method")
-        fetched_kvs = [None] * num_chunks
-        self.batched_get_pipeline(keys, fetched_kvs)
-        for fetched_kv in fetched_kvs:
-            yield fetched_kv
-    
     def batched_get(
             self,
             keys: Iterator[CacheEngineKey],
