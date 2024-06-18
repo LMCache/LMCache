@@ -167,6 +167,7 @@ class LMCPipelinedHybridBackend(LMCHybridBackend):
             ) for _ in range(num_thread)
         ]
         for t in self.put_threads:
+            t.daemon = True
             t.start()
         
         '''
@@ -192,7 +193,7 @@ class LMCPipelinedHybridBackend(LMCHybridBackend):
         logger.info("Using pipelined batched implementation of the get() method")
         keys_copy = list(keys)
         fetched_kvs = [None] * len(keys_copy)
-        self.get_all_entry(keys, fetched_kvs)
+        self.get_all_entry(keys_copy, fetched_kvs)
         for fetched_kv in fetched_kvs:
             yield fetched_kv
 
@@ -209,3 +210,8 @@ class LMCPipelinedHybridBackend(LMCHybridBackend):
         
         # Retrieve from remote cache 
         self.remote_store.get_all(keys, fetched_kvs)
+    
+    # FIXME(Jiayi): needs to send flag to queue
+    def close(self):
+        for t in self.put_threads:
+            t.join()

@@ -80,16 +80,18 @@ def decode_function_gpu(
     scale = 1
     '''
     
-    num_blocks = nlayers
     
     if chunk_size < 1000:
         num_threads = chunk_size
         scale = 1
-    elif chunk_size % 1000 == 0:
-        num_threads = 1000
+        num_blocks = nlayers
+    elif chunk_size % 512 == 0:
+        num_threads = 512
         scale = int(chunk_size/num_threads)
+        num_blocks = int(nlayers*scale)
     else:
         raise Exception(f"The current cuda kernel does not support chunk size {chunk_size}") 
+    
     
     torchac_cuda.decode_fast(
             output,

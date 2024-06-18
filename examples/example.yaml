@@ -1,4 +1,4 @@
-chunk_size: 2000
+chunk_size: 3072
 local_device: "cpu"
-remote_url: "lm://localhost:65432"
+remote_url: "lm://localhost:12345"
 remote_serde: "cachegen"

@@ -195,6 +195,7 @@ class LMCPipelinedRemoteBackend(LMCRemoteBackend):
            ) for _ in range(num_thread)
         ]
         for t in self.network_threads:
+            t.daemon = True
             t.start()
         
         #Initialize network get thread queue
@@ -207,6 +208,7 @@ class LMCPipelinedRemoteBackend(LMCRemoteBackend):
            ) for _ in range(num_thread)
         ]
         for t in self.deserialize_threads:
+            t.daemon = True
             t.start()
 
     @_lmcache_nvtx_annotate
@@ -220,6 +222,13 @@ class LMCPipelinedRemoteBackend(LMCRemoteBackend):
                 self.network_queue.put_nowait((key, idx, fetched_kvs))
         self.network_queue.join()
         self.deserialize_queue.join()
+    
+    def close(self):
+        for t in self.network_threads:
+            t.join()
+        for t in self.deserialize_threads:
+            t.join()
+        
 
     
 

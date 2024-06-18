@@ -11,7 +11,7 @@ if len(sys.argv) != 2:
 port = sys.argv[1]
 
 # Get the looooong context
-context_file = "f.txt"
+context_file = "f_old.txt"
 
 # Modify OpenAI's API key and API base to use vLLM's API server.
 openai_api_key = "EMPTY"
@@ -82,7 +82,7 @@ class ChatSession:
         self.messages.append({"role": "assistant", "content": message})
 
     def chat(self):
-        question = input("Input your question: ")
+        question = "What is the document about? "#input("Input your question: ")
         self.on_user_message(question)
 
         self.printer.start()
@@ -113,7 +113,7 @@ class ChatSession:
 
 chat_session = ChatSession(context_file)
 
-while True:
-    chat_session.chat()
-    print("")
+#while True:
+chat_session.chat()
+#    print("")
 

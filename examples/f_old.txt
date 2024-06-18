@@ -2065,35 +2065,6 @@ OPTIONS
 	   If used together with -vcodec copy, it will affect the aspect ratio stored at container level,
 	   but not the aspect ratio stored in encoded frames, if it exists.
 
-       -vn (input/output)
-	   As an input option, blocks all video streams of a file from being filtered or being
-	   automatically selected or mapped for any output. See "-discard" option to disable streams
-	   individually.
-
-       As an output option, disables video recording i.e. automatic selection or mapping of any video
-	   stream. For full manual control see the "-map" option.
-
-       -vcodec codec (output)
-	   Set the video codec. This is an alias for "-codec:v".
-
-       -pass[:stream_specifier] n (output,per-stream)
-	   Select the pass number (1 or 2). It is used to do two-pass video encoding. The statistics of
-	   the video are recorded in the first pass into a log file (see also the option -passlogfile),
-	   and in the second pass that log file is used to generate the video at the exact requested
-	   bitrate.  On pass 1, you may just deactivate audio and set output to null, examples for
-	   Windows and Unix:
-
-		   ffmpeg -i foo.mov -c:v libxvid -pass 1 -an -f rawvideo -y NUL
-		   ffmpeg -i foo.mov -c:v libxvid -pass 1 -an -f rawvideo -y /dev/null
-
-       -passlogfile[:stream_specifier] prefix (output,per-stream)
-	   Set two-pass log file name prefix to prefix, the default file name prefix is ``ffmpeg2pass''.
-	   The complete file name will be PREFIX-N.log, where N is a number specific to the output stream
-
-       -vf filtergraph (output)
-	   Create the filtergraph specified by filtergraph and use it to filter the stream.
-
-	   This is an alias for "-filter:v", see the -filter option.
 
 ===============================================================================
 ===============================================================================

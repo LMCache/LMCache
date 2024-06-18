@@ -63,5 +63,6 @@ perf-test.py
 # example
 /examples/example.yaml
 
-# profile report
+# nvtx profile report
 .nsys-rep
+.sqlite
