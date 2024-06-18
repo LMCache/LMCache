@@ -8,15 +8,9 @@ from typing import Tuple, List, Any
 from lmcache.storage_backend.serde.cachegen_basics import CacheGenConfig, CacheGenEncoderOutput
 from lmcache.storage_backend.serde.serde import Deserializer
 from lmcache.config import LMCacheEngineConfig, LMCacheEngineMetadata
-<<<<<<< HEAD
-from lmcache.logging import init_logger
-
-logger = init_logger(__name__)
-=======
 from lmcache.utils import _lmcache_nvtx_annotate
 from lmcache.logging import init_logger
 import nvtx
->>>>>>> 0ebc39fefacc36c734547f738f95a47faf6d26c3
 
 logger = init_logger(__name__)
 

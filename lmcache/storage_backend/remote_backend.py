@@ -166,7 +166,7 @@ class LMCRemoteBackend(LMCBackendInterface):
 
         return self.deserializer.from_bytes(bs)
 
-class LMCPipelinedRemoteBackend(LMCBackendInterface):
+class LMCPipelinedRemoteBackend(LMCRemoteBackend):
     """
     Cache engine for storing the KV cache of the tokens in the Redis.
     """
