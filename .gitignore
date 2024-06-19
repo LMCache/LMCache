@@ -61,7 +61,8 @@ perf-test.py
 *.so
 
 # example
-/examples/example.yaml
+/examples/example_local.yaml
+/examples/openai_chat_completion_client_local.py
 
 # nvtx profile report
 *.nsys-rep

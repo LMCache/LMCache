@@ -82,7 +82,7 @@ class ChatSession:
         self.messages.append({"role": "assistant", "content": message})
 
     def chat(self):
-        question = "What is the document about? "#input("Input your question: ")
+        question = input("Input your question: ")
         self.on_user_message(question)
 
         self.printer.start()
@@ -113,7 +113,7 @@ class ChatSession:
 
 chat_session = ChatSession(context_file)
 
-#while True:
+while True:
 chat_session.chat()
-#    print("")
+    print("")
 
