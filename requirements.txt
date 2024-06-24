@@ -2,3 +2,4 @@ torch>=2.2.0
 pyyaml
 redis
 torchac
+nvtx

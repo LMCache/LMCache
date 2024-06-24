@@ -72,10 +72,27 @@ def decode_function_gpu(
     nlayers, nchannels, _ = cdf.shape
 
 
+    '''
     num_threads = chunk_size
     num_blocks = nlayers
+    
+    # FIXME(Jiayi): scale*num_thread = chunk_size; num_thread<1000 (32X)
     scale = 1
-
+    '''
+    
+    
+    if chunk_size < 1000:
+        num_threads = chunk_size
+        scale = 1
+        num_blocks = nlayers
+    elif chunk_size % 512 == 0:
+        num_threads = 512
+        scale = int(chunk_size/num_threads)
+        num_blocks = int(nlayers*scale)
+    else:
+        raise Exception(f"The current cuda kernel does not support chunk size {chunk_size}") 
+    
+    
     torchac_cuda.decode_fast(
             output,
             cdf.unsqueeze(0).cuda(),

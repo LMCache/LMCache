@@ -4,13 +4,21 @@ from torch.utils import cpp_extension
 setup(
     name='torchac_cuda',
     ext_modules=[
-        cpp_extension.CUDAExtension('torchac_cuda', 
-                                    ['torchac_kernel.cu']),
+        cpp_extension.CUDAExtension(
+            'torchac_cuda', 
+            ['main.cpp',
+            'torchac_kernel_dec.cu',
+            'torchac_kernel_enc.cu'],
+            include_dirs=['./include']
+            ),
+        
     ],
     cmdclass={
         'build_ext': cpp_extension.BuildExtension
     }
 )
+
+
 
 #setup(
 #    name='torchac_cuda_layer',

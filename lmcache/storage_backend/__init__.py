@@ -1,7 +1,7 @@
 from lmcache.storage_backend.abstract_backend import LMCBackendInterface
 from lmcache.storage_backend.local_backend import LMCLocalBackend
 from lmcache.storage_backend.remote_backend import LMCRemoteBackend
-from lmcache.storage_backend.hybrid_backend import LMCHybridBackend
+from lmcache.storage_backend.hybrid_backend import LMCHybridBackend, LMCPipelinedHybridBackend
 from lmcache.config import LMCacheEngineConfig, LMCacheEngineMetadata
 from lmcache.logging import init_logger
 
@@ -24,8 +24,11 @@ def CreateStorageBackend(
             return LMCLocalBackend(config)
 
         case LMCacheEngineConfig(_, local_device=str(p), remote_url=str(q)) if p is not None and q is not None:
-            logger.info("Initializing hybrid backend")
-            return LMCHybridBackend(config, metadata)
+            # TODO(Jiayi): Might need a config param to indicate whether pipeline is necessary
+            #logger.info("Initializing hybrid backend")
+            #return LMCHybridBackend(config, metadata)
+            logger.info("Initializing pipelined hybrid backend")
+            return LMCPipelinedHybridBackend(config, metadata)
 
         case _:
             raise ValueError(f"Invalid configuration: {config}")

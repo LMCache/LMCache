@@ -11,7 +11,7 @@ if len(sys.argv) != 2:
 port = sys.argv[1]
 
 # Get the looooong context
-context_file = "f.txt"
+context_file = "f_old.txt"
 
 # Modify OpenAI's API key and API base to use vLLM's API server.
 openai_api_key = "EMPTY"

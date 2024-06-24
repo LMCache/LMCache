@@ -16,6 +16,8 @@ logger = init_logger(__name__)
 
 # FIXME(Jiayi): Put the following worker function(s) into class
 # FIXME(Jiayi): Needs to consider concurrent setting (private queue?)
+
+@_lmcache_nvtx_annotate
 def network_worker(
     remote_store
 ):
@@ -27,6 +29,8 @@ def network_worker(
             data = remote_store.connection.get(remote_store._combine_key(key))
             remote_store.deserialize_queue.put_nowait((idx, data, fetched_kvs))
         remote_store.network_queue.task_done()
+        
+@_lmcache_nvtx_annotate
 def deserialize_worker(
     remote_store
 ):
@@ -59,30 +63,6 @@ class LMCRemoteBackend(LMCBackendInterface):
         #self.serializer = TorchSerializer()
         #self.deserializer = TorchDeserializer()
         
-        
-        #Initialize network get thread queue
-        logger.debug(f"Jiayi: Initializing network thread queue")
-        self.network_queue = queue.Queue()
-        num_thread = 1 #FIXME(Jiayi): currently the thread num is set to 1
-        self.network_threads = [
-           threading.Thread(
-               target=network_worker, args=(self,)
-           ) for i in range(num_thread)
-        ]
-        for t in self.network_threads:
-            t.start()
-        
-        #Initialize network get thread queue
-        logger.debug(f"Jiayi: Initializing deserial thread queue")
-        self.deserialize_queue = queue.Queue()
-        num_thread = 1 #FIXME(Jiayi): currently the thread num is set to 1
-        self.deserialize_threads = [
-           threading.Thread(
-               target=deserialize_worker, args=(self,)
-           ) for i in range(num_thread)
-        ]
-        for t in self.deserialize_threads:
-            t.start()
         
 
     def _combine_key(
@@ -186,7 +166,74 @@ class LMCRemoteBackend(LMCBackendInterface):
 
         return self.deserializer.from_bytes(bs)
 
+class LMCPipelinedRemoteBackend(LMCRemoteBackend):
+    """
+    Cache engine for storing the KV cache of the tokens in the Redis.
+    """
+    def __init__(
+            self, 
+            config: LMCacheEngineConfig,
+            metadata: LMCacheEngineMetadata
+        ):
+        """
+        Throws:
+            RuntimeError if the loaded configuration does not match the current configuration
+        """
+        self.existing_keys = set()
+        self.connection = CreateConnector(config.remote_url)
+        s, d = CreateSerde(config.remote_serde, config, metadata)
+        self.serializer = s
+        self.deserializer = d
 
+        #Initialize network get thread queue
+        logger.debug(f"Jiayi: Initializing network thread queue")
+        self.network_queue = queue.Queue()
+        num_thread = 1 #FIXME(Jiayi): currently the thread num is set to 1
+        self.network_threads = [
+           threading.Thread(
+               target=network_worker, args=(self,)
+           ) for _ in range(num_thread)
+        ]
+        for t in self.network_threads:
+            t.daemon = True
+            t.start()
+        
+        #Initialize network get thread queue
+        logger.debug(f"Jiayi: Initializing deserial thread queue")
+        self.deserialize_queue = queue.Queue()
+        num_thread = 1 #FIXME(Jiayi): currently the thread num is set to 1
+        self.deserialize_threads = [
+           threading.Thread(
+               target=deserialize_worker, args=(self,)
+           ) for _ in range(num_thread)
+        ]
+        for t in self.deserialize_threads:
+            t.daemon = True
+            t.start()
+
+    @_lmcache_nvtx_annotate
+    def get_all(
+        self,
+        keys,
+        fetched_kvs,
+    ):
+        for idx, key in enumerate(keys):
+            if fetched_kvs[idx] is None:
+                self.network_queue.put_nowait((key, idx, fetched_kvs))
+        self.network_queue.join()
+        self.deserialize_queue.join()
+    
+    def close(self):
+        for t in self.network_threads:
+            t.join()
+        for t in self.deserialize_threads:
+            t.join()
+        
+
+    
+
+    
+'''
 # TODO: this class is WIP. DO NOT USE IT UNTIL IT FINISHED!
 class LMCPipelinedRemoteBackend(LMCRemoteBackend):
     """
@@ -316,4 +363,4 @@ class LMCPipelinedRemoteBackend(LMCRemoteBackend):
         self.network_put_thread.join()
         self.serializer_thread.join()
         self.deserializer.join()
-
+'''

@@ -59,3 +59,11 @@ outdated/
 perf-test.py
 *.prof
 *.so
+
+# example
+/examples/example_local.yaml
+/examples/openai_chat_completion_client_local.py
+
+# nvtx profile report
+*.nsys-rep
+*.sqlite
