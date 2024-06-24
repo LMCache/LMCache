@@ -29,7 +29,9 @@ def put_worker(
         item = queue.get()
         key, value, local_store, remote_store = item
         #local_store.put(key, value)
-        remote_store.put(key, value)
+        put_stream = torch.cuda.Stream()
+        with torch.cuda.stream(put_stream):
+            remote_store.put(key, value)
         
 class LMCHybridBackend(LMCBackendInterface):
     """

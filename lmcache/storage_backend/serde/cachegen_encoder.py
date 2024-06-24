@@ -1,6 +1,7 @@
 import io
 import pickle
 import torchac
+import torchac_cuda
 import numpy as np
 import torch
 from dataclasses import dataclass
@@ -223,7 +224,90 @@ def encode_function(kv, config, chunk_size) -> CacheGenEncoderOutput:
             length = len(bits)
             start_indices += [current_index]
             current_index += length
+    #print(len(b"".join(bytestreams)))
+    #print(type(bytestreams[0]))
+    #print(len(start_indices))
+    #print(start_indices[:100])
+    #print(bytestreams[0])
+    #print(cdf.shape)
+    output = CacheGenEncoderOutput(
+        bytestream = b"".join(bytestreams),
+        start_indices = torch.tensor(start_indices).int(),
+        cdf = _renorm_cast_cdf_(cdf.float(), 16),
+        max_tensors_key = concat_max(encoder.max_tensors_key),
+        max_tensors_value = concat_max(encoder.max_tensors_value),
+        num_heads = num_heads,
+        head_size = head_size,
+    )
+    return output
 
+#TODO(Jiayi): The current implmentation does not have any performance gain
+def encode_function_gpu(kv, config, chunk_size) -> CacheGenEncoderOutput:
+    """
+    Given the path to the original key value cache, encode the KV cache (with cuda)
+    """
+    logger.debug(f"Jiayi: encode_cuda chunk size: {chunk_size}")
+    num_heads, head_size = kv.shape[-2:]
+    output_dict = {}
+    fp_k, fp_v = _split_kv(kv)
+    l = fp_k.shape[0]
+    encoder = CacheGenEncoderImpl(fp_k=fp_k, fp_v=fp_v, config=config)
+    encoder.quantize()
+    cdf_k = encoder.compute_cdf(is_key=True)
+    encode_input_key = torch.stack(list(encoder.quantized_key.values()))
+    
+    cdf_v = encoder.compute_cdf(is_key=False)
+    encode_input_value = torch.stack(list(encoder.quantized_value.values()))
+    cdf = torch.cat((cdf_k, cdf_v), dim=0)
+    encode_input = torch.cat((encode_input_key, encode_input_value), dim=0).cpu()
+    current_index = 0
+    start_indices = []
+    bytestreams = []
+    #cdf_int = _convert_to_int_and_normalize(cdf, True)
+    #cdf_int = cdf
+    
+    
+    cdf_temp = cdf.unsqueeze(1).repeat(1,chunk_size, 1, 1)
+    encode_input = encode_input.to(torch.int16).squeeze(0)
+    
+    
+    cdf_int = _convert_to_int_and_normalize(cdf_temp, True)
+    
+    Lp = cdf_int.shape[-1]
+    cdf_int = cdf_int.reshape(-1, Lp)
+    encode_input = encode_input.reshape(-1)
+    
+    print(f"cdf_shape: {cdf_int.shape}")
+    print(f"cdf_type: {cdf_int.dtype}")
+    print(f"cdf_device: {cdf_int.device}")
+    print(f"encode_shape: {encode_input.shape}")
+    print(f"encode_type: {encode_input.dtype}")
+    print(f"encode_device: {encode_input.device}")
+    
+    all_bits_cuda = torchac_cuda.encode_fast(cdf_int,
+                                           encode_input,
+                                           max_out_size=10000,
+                                           blockNum=64,
+                                           threadNum=chunk_size)
+    #import mytorchac_cuda
+    #all_bits_cuda = mytorchac_cuda.encode_cuda(cdf_int,
+    #                                        encode_input,
+    #                                        10000,
+    #                                        64,
+    #                                        chunk_size)
+    index = 0
+    for bits in all_bits_cuda:
+        
+        bytestreams.append(bits)
+        start_indices.append(index)
+        index += len(bits)
+    
+    print(len(b"".join(bytestreams)))
+    print(type(bytestreams[0]))
+    print(len(start_indices))
+    print(start_indices[:100])
+    print(bytestreams[0])
+    print(cdf.shape)
     output = CacheGenEncoderOutput(
         bytestream = b"".join(bytestreams),
         start_indices = torch.tensor(start_indices).int(),
@@ -240,7 +324,7 @@ class CacheGenSerializer(Serializer):
         self.cachegen_config = CacheGenConfig.from_model_name(metadata.model_name)
         self.chunk_size = config.chunk_size
         self.fmt = metadata.fmt
-    
+        
     def to_bytes(
             self,
             tensor: torch.Tensor

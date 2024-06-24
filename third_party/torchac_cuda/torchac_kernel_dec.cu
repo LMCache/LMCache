@@ -1,22 +1,24 @@
 /*
  * COPYRIGHT 2019 ETH Zurich
  */
-#include <ATen/ATen.h>
-#include <pybind11/pybind11.h>
-#include <stdint.h>
-#include <cuda.h>
-#include <cuda_runtime.h>
-#include <torch/torch.h>
-#include <cstring>
-#include <vector>
-#include <string>
-#include <iostream>
-const int precision = 16;
-const int N = 1;
-using cdf_t = uint16_t;
-const int PRECISION = 16;
-const int RENORMALIZATION_FACTOR = 2 << (PRECISION - 1);
-const int STRIDE = 1;
+// #include <ATen/ATen.h>
+// #include <pybind11/pybind11.h>
+// #include <stdint.h>
+// #include <cuda.h>
+// #include <cuda_runtime.h>
+// #include <torch/torch.h>
+// #include <cstring>
+// #include <vector>
+// #include <string>
+// #include <iostream>
+// const int precision = 16;
+// const int N = 1;
+// using cdf_t = uint16_t;
+// const int PRECISION = 16;
+// const int RENORMALIZATION_FACTOR = 2 << (PRECISION - 1);
+// const int STRIDE = 1;
+
+# include "torchac_kernel.cuh"
 
 __host__ __device__ cdf_t binsearch_cuda(const cdf_t *cdf, cdf_t target, cdf_t max_sym,
                                          const int offset) /* i * Lp */
@@ -370,9 +372,9 @@ void decode_fast(torch::Tensor out_tensor, const at::Tensor &cdf,
 
 
 
-namespace py = pybind11;
+// namespace py = pybind11;
 
-PYBIND11_MODULE(torchac_cuda, m) {
-    // m.def("decode", &decode, "decode function");
-    m.def("decode_fast", &decode_fast, "Fast decode function");
-}
+// PYBIND11_MODULE(torchac_cuda, m) {
+//     // m.def("decode", &decode, "decode function");
+//     m.def("decode_fast", &decode_fast, "Fast decode function");
+// }

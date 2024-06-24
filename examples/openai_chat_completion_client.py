@@ -114,6 +114,6 @@ class ChatSession:
 chat_session = ChatSession(context_file)
 
 while True:
-chat_session.chat()
+    chat_session.chat()
     print("")
 
