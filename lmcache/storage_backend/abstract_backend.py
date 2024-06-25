@@ -14,6 +14,7 @@ class LMCBackendInterface(metaclass=abc.ABCMeta):
             self,
             key: CacheEngineKey,
             kv_chunk: torch.Tensor,
+            blocking = True,
         ) -> None:
         """
         Store the KV cache of the tokens into the cache engine.
@@ -21,6 +22,7 @@ class LMCBackendInterface(metaclass=abc.ABCMeta):
         Input:
             key: the key of the token chunk, in the format of CacheEngineKey
             kv_chunk: the kv cache of the token chunk, in the format of a big tensor
+            blocking: whether to block the call before the operation is completed
 
         Returns:
             None
@@ -61,6 +63,7 @@ class LMCBackendInterface(metaclass=abc.ABCMeta):
     def batched_put(
             self,
             keys_and_chunks: Iterator[Tuple[CacheEngineKey, torch.Tensor]],
+            blocking = True,
         ) -> int:
         """
         Store the multiple keys and KV cache chunks into the cache engine in a batched manner.
@@ -68,16 +71,15 @@ class LMCBackendInterface(metaclass=abc.ABCMeta):
         Input:
             keys: the iterator of keys of the token chunks, in the format of CacheEngineKey
             kv_chunks: the iterator of kv cache of the token chunks, in the format of a big tensor
+            blocking: whether to block the call before the operation is completed
 
         Returns:
             the number of chunks are stored
         """
-        #logger.info("Using default batched implementation of the put() method")
-        logger.debug("Jiayi: Using async implementation of the put_async() method")
+        logger.info("Using default batched implementation of the put() method")
         nchunks = 0
         for key, kv_chunk in keys_and_chunks:
-            #self.put(key, kv_chunk)
-            self.put_async(key, kv_chunk)
+            self.put(key, kv_chunk, blocking = blocking)
             nchunks += 1
         return nchunks
     
@@ -101,3 +103,10 @@ class LMCBackendInterface(metaclass=abc.ABCMeta):
                 yield self.get(key)
             else:
                 yield None
+
+    def close(self):
+        """
+        Do the cleanup things
+        Children classes should override this method if necessary
+        """
+        pass

@@ -48,7 +48,8 @@ class LMCLocalBackend(LMCBackendInterface):
     def put(
             self, 
             key: CacheEngineKey,
-            kv_chunk: KVCache
+            kv_chunk: KVCache,
+            blocking: bool = True,
         ) -> None:
         """
         Store the KV cache of the tokens into the cache engine.
@@ -63,6 +64,8 @@ class LMCLocalBackend(LMCBackendInterface):
         Note:
             The KV cache should NOT have the "batch" dimension.
         """
+        if not blocking:
+            logger.warn("Non-blocking is not implemented for local backend")
         self.dict[key] = kv_chunk
 
 

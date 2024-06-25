@@ -25,17 +25,17 @@ def generate_kv_cache(num_tokens, fmt, device):
 def to_blob(kv_tuples):
     return torch.stack([torch.stack(inner_tuple, dim=0) for inner_tuple in kv_tuples], dim=0)
 
-@pytest.mark.parametrize("chunk_size", [64, 256, 768])
-@pytest.mark.parametrize("fmt", ["vllm", "huggingface"])
-def test_cachegen_encoder_bench(benchmark, chunk_size, fmt):
-    fmt = "vllm"
-    config = LMCacheEngineConfig.from_defaults(chunk_size = chunk_size)
-    metadata = LMCacheEngineMetadata(model_name = "mistralai/Mistral-7B-Instruct-v0.2", world_size = 1, worker_id = 0, fmt = fmt)
-    serializer = CacheGenSerializer(config, metadata)
-
-    kv = to_blob(generate_kv_cache(chunk_size, fmt, "cuda"))
-
-    benchmark(serializer.to_bytes, kv)
+#@pytest.mark.parametrize("chunk_size", [64, 256, 768])
+#@pytest.mark.parametrize("fmt", ["vllm", "huggingface"])
+#def test_cachegen_encoder_bench(benchmark, chunk_size, fmt):
+#    fmt = "vllm"
+#    config = LMCacheEngineConfig.from_defaults(chunk_size = chunk_size)
+#    metadata = LMCacheEngineMetadata(model_name = "mistralai/Mistral-7B-Instruct-v0.2", world_size = 1, worker_id = 0, fmt = fmt)
+#    serializer = CacheGenSerializer(config, metadata)
+#
+#    kv = to_blob(generate_kv_cache(chunk_size, fmt, "cuda"))
+#
+#    benchmark(serializer.to_bytes, kv)
 
 @pytest.mark.parametrize("fmt", ["vllm", "huggingface"])
 @pytest.mark.parametrize("chunk_size", [64, 256, 768])

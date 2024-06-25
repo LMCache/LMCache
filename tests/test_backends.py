@@ -1,4 +1,5 @@
 import pytest
+import time
 import torch
 import random
 import string
@@ -33,6 +34,8 @@ def get_config(t):
             return LMCacheEngineConfig.from_defaults(local_device = None, remote_url="lm://localhost:65000")
         case "hybrid":
             return LMCacheEngineConfig.from_defaults(local_device = "cuda", remote_url="lm://localhost:65000")
+        case "hybrid_pipelined":
+            return LMCacheEngineConfig.from_defaults(local_device = "cuda", remote_url="lm://localhost:65000", pipelined_backend=True)
         case _:
             raise ValueError(f"Testbed internal error: Unknown config type: {t}")
 
@@ -59,10 +62,14 @@ def test_creation():
     with pytest.raises(ValueError):
         backend_fail = CreateStorageBackend(config_fail, get_metadata())
 
-@pytest.mark.parametrize("backend_type", ["local", "remote", "hybrid"])
+    backend_local.close()
+    backend_remote.close()
+    backend_hybrid.close()
+
+@pytest.mark.parametrize("backend_type", ["local", "remote", "hybrid", "hybrid_pipelined"])
 @pytest.mark.usefixtures("lmserver_process")
-def test_local_backend(backend_type):
-    config = get_config(backend_type) #LMCacheEngineConfig.from_defaults(local_device = "cuda", remote_url = None)
+def test_backends(backend_type):
+    config = get_config(backend_type) 
     metadata = get_metadata()
     backend = CreateStorageBackend(config, metadata)
     
@@ -78,6 +85,36 @@ def test_local_backend(backend_type):
         assert retrived.shape == value.shape
         if config.remote_serde == "torch":
             assert torch.equal(value, retrived.to(value.device))
+
+    backend.close()
+
+@pytest.mark.parametrize("backend_type", ["local", "remote", "hybrid"])
+@pytest.mark.usefixtures("lmserver_process")
+def test_nonblocking_put(backend_type):
+    config = get_config(backend_type) 
+    metadata = get_metadata()
+    backend = CreateStorageBackend(config, metadata)
+    
+    N = 10
+    keys = [generate_random_key() for i in range(N)]
+    random_tensors = [torch.rand((16, 2, 128, 4, 128)) for i in range(N)]
+
+    start = time.perf_counter()
+    for key, value in zip(keys, random_tensors):
+        backend.put(key, value, blocking=False)
+    end = time.perf_counter()
+    elapsed = end - start
+    assert elapsed < 0.05
+    
+    time.sleep(5)
+    for key, value in zip(keys, random_tensors):
+        assert backend.contains(key)
+        retrived = backend.get(key)
+        assert retrived.shape == value.shape
+        if config.remote_serde == "torch":
+            assert torch.equal(value, retrived.to(value.device))
+
+    backend.close()
 
 @pytest.mark.usefixtures("lmserver_process")
 def test_restart():
@@ -100,3 +137,6 @@ def test_restart():
         assert value.shape == retrived.shape
         if config.remote_serde == "torch":
             assert (value == retrived).all()
+
+    backend.close()
+    new_backend.close()
