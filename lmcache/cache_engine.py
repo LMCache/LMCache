@@ -202,19 +202,6 @@ class LMCacheEngine:
         else:
             return zip(self._prefix_hash(self._chunk_tokens(tokens, device)), self._chunk_kv(kv_tensors, fmt, device))
 
-    def _concat_kv_chunks(
-            self,
-            kv_chunks: List[KVCache],
-            dim: int,
-            fmt: str,
-            device,
-        ) -> KVCache:
-        for kv_layer in zip(*kv_chunks):
-            klist, vlist = zip(*kv_layer)
-            klayer = torch.cat(klist, dim=dim).to(device)
-            vlayer = torch.cat(vlist, dim=dim).to(device)
-            yield (klayer, vlayer)
-
     def store(
             self, 
             tokens: torch.Tensor,
@@ -327,7 +314,6 @@ class LMCacheEngine:
             return (), 0
 
         st2 = time.perf_counter()
-        #ret = tuple(self._concat_kv_chunks(retrived_kv_chunks, dim, fmt, device))
         ret = self._blob_to_tuple_kv(torch.cat(retrived_kv_chunks, dim=dim + 2).to(device))
         ed2 = time.perf_counter()
         logger.info(f"Concatenated {len(retrived_kv_chunks)} chunks -- elapsed time {ed2 - st2}")
@@ -342,6 +328,8 @@ class LMCacheEngine:
         """
         self.engine_.persist()
 
+    def close(self):
+        self.engine_.close()
 
 class LMCacheEngineBuilder:
     _instances = {}

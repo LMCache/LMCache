@@ -1,3 +1,5 @@
+Disk loading in configuration file
+------
 (functionality) add configuration of serde (torch/cachegen) to config file
 (deployment) Add torchac_cuda installation to Docker deployment and README
 (functionality) Async prefetch during startup

@@ -20,18 +20,6 @@ from lmcache.utils import _lmcache_nvtx_annotate, CacheEngineKey
 
 logger = init_logger(__name__)
 
-# FIXME(Jiayi): Put the following worker function(s) into class
-@_lmcache_nvtx_annotate
-def put_worker(
-    queue,
-):
-    while True:
-        item = queue.get()
-        key, value, local_store, remote_store = item
-        #local_store.put(key, value)
-        put_stream = torch.cuda.Stream()
-        with torch.cuda.stream(put_stream):
-            remote_store.put(key, value)
         
 class LMCHybridBackend(LMCBackendInterface):
     """
@@ -40,71 +28,20 @@ class LMCHybridBackend(LMCBackendInterface):
     """
 
     # TODO: LRU eviction policy
-    # TODO: async write and read from/to remote backend
 
     def __init__(self, config: LMCacheEngineConfig, metadata: LMCacheEngineMetadata):
         self.local_store = LMCLocalBackend(config)
-        self.remote_store = LMCRemoteBackend(config, metadata)
+        if config.pipelined_backend:
+            self.remote_store = LMCPipelinedRemoteBackend(config, metadata)
+        else:
+            self.remote_store = LMCRemoteBackend(config, metadata)
         
-        
-        # Initialize put thread queue
-        logger.debug(f"Jiayi: Initializign put thread queue")
-        self.put_queue = queue.Queue()
-        num_thread = 1 #FIXME(Jiayi): currently the thread num is set to 1
-        self.put_threads = [
-        threading.Thread(
-                target=put_worker, args=(self.put_queue,)
-            ) for i in range(num_thread)
-        ]
-        for t in self.put_threads:
-            t.start()
-        
-        '''
-        # Initialize put process queue
-        logger.debug(f"Jiayi: Initializign put proc queue")
-        torch.multiprocessing.set_start_method('spawn')
-        self.put_queue = Queue()
-        num_procs = 1 #FIXME(Jiayi): currently the proc num is set to 1
-        self.put_procs = [
-           Process(
-               target=put_worker, args=(self.put_queue,)
-           ) for i in range(num_procs)
-        ]
-        for p in self.put_procs:
-            p.start()
-        '''
-        
-        # Jiayi: Prefetch is disabled for now
-        # self.prefetch(metadata)
-
+        # TODO add a configuration item to do this
+        self._prefetch(metadata)
            
-    
-    def contains(
-            self,
-            key: Tuple[str, str],
-        ) -> bool:
-        return self.local_store.contains(key) or self.remote_store.contains(key)
-
-    def put(
-            self,
-            key: Tuple[str, str],
-            value: torch.Tensor,
-        ):
-        self.local_store.put(key, value)
-        self.remote_store.put(key, value)
-    
-    def put_async(
-            self,
-            key: Tuple[str, str],
-            value: torch.Tensor,
-        ):
-        #self.local_store.put(key, value)
-        self.put_queue.put_nowait((key, value, self.local_store, self.remote_store))
-
-    # TODO(Jiayi): This prefetch can also be async
-    def prefetch(
+    def _prefetch(
         self,
-        metadata
+        metadata: LMCacheEngineMetadata
     ):
         keys = self.remote_store.list()
         nfetched = 0
@@ -125,6 +62,22 @@ class LMCHybridBackend(LMCBackendInterface):
         end = time.perf_counter()
 
         logger.info("Pre-fetched %d keys from remote backend, used %.2f sec", nfetched, end - start)
+    
+    def contains(
+            self,
+            key: Tuple[str, str],
+        ) -> bool:
+        return self.local_store.contains(key) or self.remote_store.contains(key)
+
+    def put(
+            self,
+            key: Tuple[str, str],
+            value: torch.Tensor,
+            blocking: bool = True,
+        ):
+        self.local_store.put(key, value, blocking = True)
+        self.remote_store.put(key, value, blocking)
+    
         
     @_lmcache_nvtx_annotate
     def get(
@@ -133,87 +86,35 @@ class LMCHybridBackend(LMCBackendInterface):
         ) -> Optional[torch.Tensor]:
         value = self.local_store.get(key)
         if value is None:
-            logger.info("Jiayi: Local cache miss, using remote cache")
             value = self.remote_store.get(key)
             if value is not None:
-                logger.info("Jiayi: Remote cache hit, filling local cache")
                 self.local_store.put(key, value)
-        else:
-            logger.info("Jiayi: Local cache hit")
         return value
     
-    
-
-
-class LMCPipelinedHybridBackend(LMCHybridBackend):
-    """
-    A pipelined hybrid backend that uses both local and remote backend to store and retrieve data.
-    It implements write-through and read-through caching.
-    """
-
-    # TODO: LRU eviction policy
-    # TODO: async write and read from/to remote backend
-
-    def __init__(self, config: LMCacheEngineConfig, metadata: LMCacheEngineMetadata):
-        self.local_store = LMCLocalBackend(config)
-        self.remote_store = LMCPipelinedRemoteBackend(config, metadata)
-        
-        
-        # Initialize put thread queue
-        logger.debug(f"Jiayi: Initializing put thread queue")
-        self.put_queue = queue.Queue()
-        num_thread = 1 #FIXME(Jiayi): currently the thread num is set to 1
-        self.put_threads = [
-        threading.Thread(
-                target=put_worker, args=(self.put_queue,)
-            ) for _ in range(num_thread)
-        ]
-        for t in self.put_threads:
-            t.daemon = True
-            t.start()
-        
-        '''
-        # Initialize put process queue
-        logger.debug(f"Jiayi: Initializign put proc queue")
-        torch.multiprocessing.set_start_method('spawn')
-        self.put_queue = Queue()
-        num_procs = 1 #FIXME(Jiayi): currently the proc num is set to 1
-        self.put_procs = [
-           Process(
-               target=put_worker, args=(self.put_queue,)
-           ) for i in range(num_procs)
-        ]
-        for p in self.put_procs:
-            p.start()
-        '''
 
     @_lmcache_nvtx_annotate
     def batched_get(
-        self,
-        keys: Iterator[CacheEngineKey],
-    ):
-        logger.info("Using pipelined batched implementation of the get() method")
-        keys_copy = list(keys)
-        fetched_kvs = [None] * len(keys_copy)
-        self.get_all_entry(keys_copy, fetched_kvs)
-        for fetched_kv in fetched_kvs:
-            yield fetched_kv
-
-    @_lmcache_nvtx_annotate
-    def get_all_entry(
-        self,
-        keys: List[CacheEngineKey],
-        fetched_kvs: List[Optional[torch.Tensor]],
-    ):
-        # Retrieve from local cache
+            self,
+            keys: Iterator[CacheEngineKey],
+        ) -> Iterator[Optional[torch.Tensor]]:
+        ret = []
+        remote_queries = []
+        remote_query_idxs = []
         for idx, key in enumerate(keys):
-            value = self.local_store.get(key) 
-            fetched_kvs[idx] = value  
-        
-        # Retrieve from remote cache 
-        self.remote_store.get_all(keys, fetched_kvs)
-    
-    # FIXME(Jiayi): needs to send flag to queue
+            value = self.local_store.get(key)
+            if value is None:
+                remote_queries.append(key)
+                remote_query_idxs.append(idx)
+
+        remote_query_results = self.remote_store.batched_get(remote_queries)
+        for idx, key, result in zip(remote_query_idxs, 
+                                    remote_queries, 
+                                    remote_query_results):
+            if result is not None:
+                self.local_store.put(key, result)
+                ret[idx] = result
+        return ret
+
     def close(self):
-        for t in self.put_threads:
-            t.join()
+        self.local_store.close()
+        self.remote_store.close()
