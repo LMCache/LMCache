@@ -241,11 +241,11 @@ class LMCPipelinedRemoteBackend(LMCRemoteBackend):
 
             idx, data = item
             if data is not None:
-               result = remote_store.deserializer.from_bytes(data)
+               result = self.deserializer.from_bytes(data)
             else:
                result = None
             self.result_list.append(result)
-            remote_store.deserialize_queue.task_done()
+            self.deserialize_queue.task_done()
 
     @_lmcache_nvtx_annotate
     def batched_get(
