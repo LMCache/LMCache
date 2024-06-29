@@ -25,7 +25,7 @@ docker pull apostacyh/vllm:lmcache
 
 **Step 2:** Start lmcache server 
 ```bash
-docker run --name lmcache-server --network host -d lmcache-server:latest 0.0.0.0 65432
+docker run --name apostacyh/lmcache-server --network host -d lmcache-server:latest 0.0.0.0 65432
 ```
 
 **Step 3:** start 2 vLLM instances
@@ -38,7 +38,7 @@ sudo docker run --runtime nvidia --gpus '"device=0"' \
     --ipc=host \
     --network=host \
     apostacyh/vllm:lmcache \
-    --model lmsys/longchat-7b-16k 0.7 --port 8000 \
+    --model lmsys/longchat-7b-16k --gpu-memory-utilization 0.7 --port 8000 \
     --lmcache-config-file /lmcache/LMCache/examples/example.yaml
 ```
 
@@ -53,7 +53,7 @@ sudo docker run --runtime nvidia --gpus '"device=1"' \
     --ipc=host \
     --network=host \
     apostacyh/vllm:lmcache \
-    --model lmsys/longchat-7b-16k 0.7 --port 8001 \
+    --model lmsys/longchat-7b-16k --gpu-memory-utilization 0.7 --port 8001 \
     --lmcache-config-file /lmcache/LMCache/examples/example.yaml
 ```
 
