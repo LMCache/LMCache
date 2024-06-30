@@ -207,6 +207,7 @@ class LMCacheEngine:
             tokens: torch.Tensor,
             kv_tensors: KVCache,
             skip_existing = True,
+            blocking = True,
         ) -> None:
         """
         Store the KV cache of the tokens into the cache engine.
@@ -237,10 +238,11 @@ class LMCacheEngine:
 
         ''' store them into the dictionary '''
         n_chunks = self.engine_.batched_put(
-                (
+                ((
                     self._make_key(chunk_hash, fmt), 
                     self._tuple_kv_to_blob(kv_chunk)
-                ) for chunk_hash, kv_chunk in chunk_hashes_and_kvs
+                ) for chunk_hash, kv_chunk in chunk_hashes_and_kvs), 
+                blocking=blocking
             )
         #n_chunks = 0
         #for chunk_hash, kv_chunk in chunk_hashes_and_kvs:

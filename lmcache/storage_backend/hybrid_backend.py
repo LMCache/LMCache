@@ -102,6 +102,7 @@ class LMCHybridBackend(LMCBackendInterface):
         remote_query_idxs = []
         for idx, key in enumerate(keys):
             value = self.local_store.get(key)
+            ret.append(value)
             if value is None:
                 remote_queries.append(key)
                 remote_query_idxs.append(idx)
