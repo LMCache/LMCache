@@ -1,4 +1,4 @@
-# include "torchac_kernel.cuh"
+#include "torchac_kernel.cuh"
 
 struct cdf_ptr
 {
@@ -155,7 +155,6 @@ __device__ void append_to_end_uint(char* out, uint8_t cache,
     // append the null character
     out[device_out_offset + current_out_length + 1] = '\0';
 }
-
 
 
 
