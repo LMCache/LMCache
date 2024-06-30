@@ -6,9 +6,15 @@ setup(
     ext_modules=[
         cpp_extension.CUDAExtension(
             'torchac_cuda', 
-            ['main.cpp',
-            'torchac_kernel_dec.cu',
-            'torchac_kernel_enc.cu'],
+            [
+                'main.cpp',
+                #'torchac_kernel_dec.cu',
+                #'torchac_kernel_enc.cu',
+                'torchac_kernel_enc_new.cu',
+                'torchac_kernel_dec_new.cu',
+            ],
+            #extra_compile_args={'cxx': ['-g'],
+            #                    'nvcc': ['-G', '-g']},
             include_dirs=['./include']
             ),
         

@@ -2,6 +2,9 @@ import torch
 import io
 import pickle
 from dataclasses import dataclass
+from typing import List
+
+CACHEGEN_GPU_MAX_TOKENS_PER_CHUNK = 256
 
 @dataclass
 class CacheGenConfig:
@@ -61,5 +64,37 @@ class CacheGenEncoderOutput:
 
     @staticmethod
     def from_bytes(bs: bytes) -> "CacheGenEncoderOutput":
+        with io.BytesIO(bs) as f:
+            return pickle.load(f)
+
+@dataclass
+class CacheGenGPUBytestream:
+    bytestream: bytes
+    bytestream_lengths: torch.Tensor  # [nlayers, nchannels, bytestream_length]
+    ntokens: int
+
+    def __getitem__(self, key: str) -> int:
+        return getattr(self, key)
+
+@dataclass 
+class CacheGenGPUEncoderOutput:
+    data_chunks: List[CacheGenGPUBytestream]
+    cdf: torch.Tensor
+    max_tensors_key: torch.Tensor
+    max_tensors_value: torch.Tensor
+    num_heads: int
+    head_size: int
+
+    def __getitem__(self, key: str) -> int:
+        return getattr(self, key)
+
+    def to_bytes(self) -> bytes:
+        """ Save the output to a file """
+        with io.BytesIO() as f:
+            pickle.dump(self, f)
+            return f.getvalue()
+
+    @staticmethod
+    def from_bytes(bs: bytes) -> "CacheGenGPUEncoderOutput":
         with io.BytesIO(bs) as f:
             return pickle.load(f)
