@@ -42,6 +42,7 @@ class LMCRemoteBackend(LMCBackendInterface):
         s, d = CreateSerde(config.remote_serde, config, metadata)
         self.serializer = s
         self.deserializer = d
+        self.put_thread = None
 
         # For async put
         self.put_queue = queue.Queue()
@@ -165,7 +166,7 @@ class LMCRemoteBackend(LMCBackendInterface):
         return self.deserializer.from_bytes(bs)
 
     def close(self):
-        if self.put_thread.is_alive():
+        if self.put_thread is not None and self.put_thread.is_alive():
             self.put_queue.put(self._EndSignal())
             self.put_thread.join()
             logger.debug("Closed the put worker")
@@ -190,11 +191,15 @@ class LMCPipelinedRemoteBackend(LMCRemoteBackend):
         Throws:
             RuntimeError if the loaded configuration does not match the current configuration
         """
+        super().__init__(config, metadata)
+
         self.existing_keys = set()
         self.connection = CreateConnector(config.remote_url)
         s, d = CreateSerde(config.remote_serde, config, metadata)
         self.serializer = s
         self.deserializer = d
+        self.network_thread = None
+        self.deserialize_thread = None
 
         #Initialize network get thread queue
         logger.debug(f"Initializing network thread queue")
@@ -241,11 +246,11 @@ class LMCPipelinedRemoteBackend(LMCRemoteBackend):
 
             idx, data = item
             if data is not None:
-               result = remote_store.deserializer.from_bytes(data)
+               result = self.deserializer.from_bytes(data)
             else:
                result = None
             self.result_list.append(result)
-            remote_store.deserialize_queue.task_done()
+            self.deserialize_queue.task_done()
 
     @_lmcache_nvtx_annotate
     def batched_get(
@@ -260,12 +265,14 @@ class LMCPipelinedRemoteBackend(LMCRemoteBackend):
         return self.result_list
     
     def close(self):
-        if self.network_thread.is_alive():
+        super().close()
+
+        if self.network_thread is not None and self.network_thread.is_alive():
             self.network_queue.put(self._EndSignal())
             self.network_thread.join()
             logger.debug("Closed the network worker")
 
-        if self.deserialize_thread.is_alive():
+        if self.deserialize_thread is not None and self.deserialize_thread.is_alive():
             self.deserialize_queue.put(self._EndSignal())
             self.deserialize_thread.join()
             logger.debug("Closed the deserialize worker")
