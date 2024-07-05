@@ -57,7 +57,7 @@ if __name__ == "__main__":
     encode_input = torch.load("/tmp/encode_input.pt")
 
     nlayers = 64
-    nchannels = 1024 - 64
+    nchannels = 1024
     ntokens = 256
     output_buffer_size = 256
 
@@ -85,6 +85,23 @@ if __name__ == "__main__":
 
     decode_buffer = torch.zeros((nlayers, output_buffer_size, nchannels), dtype = torch.uint8, device="cuda")
     start = time.perf_counter()
+    output_lengths_prefsum = output_lengths.flatten().cumsum(0).reshape(output_lengths.shape)
+    torchac_cuda.decode_fast_prefsum(
+            cdf.cuda(),
+            bytes_tensor.cuda(),
+            output_lengths_prefsum.cuda(),
+            decode_buffer
+    )
+
+    torch.cuda.synchronize()
+    end = time.perf_counter();
+
+    print("Equal check:", torch.equal(decode_buffer, encode_input))
+    print("Total decode time: ", end - start)
+    breakpoint()
+
+    decode_buffer = torch.zeros((nlayers, output_buffer_size, nchannels), dtype = torch.uint8, device="cuda")
+    start = time.perf_counter()
     new_output_buffer = recombine_bytes(bytes_tensor, output_lengths, output_buffer_size)
     torchac_cuda.decode_fast_new(
             cdf.cuda(),
@@ -92,6 +109,7 @@ if __name__ == "__main__":
             output_lengths.cuda(),
             decode_buffer
     )
+
     torch.cuda.synchronize()
     end = time.perf_counter();
 

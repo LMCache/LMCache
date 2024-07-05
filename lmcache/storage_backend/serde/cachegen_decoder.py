@@ -59,11 +59,19 @@ def decode_chunk(
     Write the decode output in target_buffer
     Expected shape: [nlayers (kv in total), ntokens, nchannels]
     """
-    recombined_output = recombine_bytes(bytes_to_tensor(data_chunk.bytestream), data_chunk.bytestream_lengths)
-    torchac_cuda.decode_fast_new(
+    #recombined_output = recombine_bytes(bytes_to_tensor(data_chunk.bytestream), data_chunk.bytestream_lengths)
+    #torchac_cuda.decode_fast_new(
+    #        cdf,
+    #        recombined_output,
+    #        data_chunk.bytestream_lengths,
+    #        target_buffer)
+    #bytes_tensor = bytes_to_tensor(data_chunk.bytestream)
+    bytes_tensor = data_chunk.bytestream
+    length_prefsum = data_chunk.bytestream_lengths.flatten().cumsum(0).reshape(data_chunk.bytestream_lengths.shape)
+    torchac_cuda.decode_fast_prefsum(
             cdf,
-            recombined_output,
-            data_chunk.bytestream_lengths,
+            bytes_tensor,
+            length_prefsum,
             target_buffer)
 
 @_lmcache_nvtx_annotate

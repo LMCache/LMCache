@@ -49,9 +49,18 @@ void decode_cuda_new(
         const at::Tensor &lengths,
         at::Tensor &output);
 
+void decode_cuda_prefsum(
+        const at::Tensor &cdf,
+        const at::Tensor &bytestreams,
+        const at::Tensor &lengths,
+        at::Tensor &output);
+
 void decode_fast(torch::Tensor out_tensor, const at::Tensor &cdf,
                      at::Tensor concated_string, const at::Tensor start_indices, const int all_tokens, 
                      const int blockNum, const int threadNum, const int scale);
 
 const struct cdf_ptr get_cdf_ptr_cuda(const at::Tensor &cdf);
 
+at::Tensor calculate_cdf(
+        const at::Tensor &input,
+        const int max_bins);

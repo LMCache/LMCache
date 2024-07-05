@@ -3,6 +3,7 @@ import io
 import pickle
 from dataclasses import dataclass
 from typing import List
+from lmcache.utils import _lmcache_nvtx_annotate
 
 CACHEGEN_GPU_MAX_TOKENS_PER_CHUNK = 256
 
@@ -69,7 +70,7 @@ class CacheGenEncoderOutput:
 
 @dataclass
 class CacheGenGPUBytestream:
-    bytestream: bytes
+    bytestream: torch.Tensor
     bytestream_lengths: torch.Tensor  # [nlayers, nchannels, bytestream_length]
     ntokens: int
 
@@ -88,6 +89,7 @@ class CacheGenGPUEncoderOutput:
     def __getitem__(self, key: str) -> int:
         return getattr(self, key)
 
+    @_lmcache_nvtx_annotate
     def to_bytes(self) -> bytes:
         """ Save the output to a file """
         with io.BytesIO() as f:
@@ -95,6 +97,7 @@ class CacheGenGPUEncoderOutput:
             return f.getvalue()
 
     @staticmethod
+    @_lmcache_nvtx_annotate
     def from_bytes(bs: bytes) -> "CacheGenGPUEncoderOutput":
         with io.BytesIO(bs) as f:
             return pickle.load(f)

@@ -12,6 +12,7 @@ setup(
                 #'torchac_kernel_enc.cu',
                 'torchac_kernel_enc_new.cu',
                 'torchac_kernel_dec_new.cu',
+                'cal_cdf.cu',
             ],
             #extra_compile_args={'cxx': ['-g'],
             #                    'nvcc': ['-G', '-g']},
