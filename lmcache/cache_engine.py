@@ -225,6 +225,7 @@ class LMCacheEngine:
         Note:
             The KV cache should NOT have the "batch" dimension.
         """
+        start_time = time.perf_counter()
         fmt = self.metadata.fmt
 
         assert len(tokens.shape) == 1, f"Invalid shape of tokens: {tokens.shape}"
@@ -236,6 +237,11 @@ class LMCacheEngine:
         ''' chunk the tokens and the kv caches '''
         chunk_hashes_and_kvs = self._make_chunks(tokens, kv_tensors, fmt, device=self.device, skip_existing=skip_existing)
 
+        ''' Issue all the exists() query first if we are doing non-blocking '''
+        if not blocking:
+            chunk_hashes_and_kvs = list(chunk_hashes_and_kvs)
+        end_make_chunks = time.perf_counter()
+
         ''' store them into the dictionary '''
         n_chunks = self.engine_.batched_put(
                 ((
@@ -244,14 +250,9 @@ class LMCacheEngine:
                 ) for chunk_hash, kv_chunk in chunk_hashes_and_kvs), 
                 blocking=blocking
             )
-        #n_chunks = 0
-        #for chunk_hash, kv_chunk in chunk_hashes_and_kvs:
-        #    self.engine_.put(self._make_key(chunk_hash, fmt), self._tuple_kv_to_blob(kv_chunk))
-        #    #self.dict[(chunk_hash, fmt)] = kv_chunk
-        #    n_chunks += 1
 
-        #logger.info(f"Stored/updated {n_chunks} chunks. Currently {len(self.dict)} chunks in the cache")
-        logger.info(f"Stored/updated {n_chunks} chunks")
+        end_time = time.perf_counter()
+        logger.info(f"Stored/updated {n_chunks} chunks, total time {end_time - start_time:.2f}s, make chunks time {end_make_chunks - start_time:.2f}s")
 
     @_lmcache_nvtx_annotate
     def retrive(self,

@@ -1,4 +1,5 @@
 from typing import Optional, List
+import threading
 import socket
 from lmcache.protocol import Constants, ClientMetaMessage, ServerMetaMessage
 from lmcache.storage_backend.connector.base_connector import RemoteConnector
@@ -12,6 +13,7 @@ class LMCServerConnector(RemoteConnector):
     def __init__(self, host, port):
         self.client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.client_socket.connect((host, port))
+        self.socket_lock = threading.Lock()
 
     def receive_all(self, n):
         data = bytearray()
@@ -23,19 +25,25 @@ class LMCServerConnector(RemoteConnector):
         return data
 
     def send_all(self, data):
-        self.client_socket.sendall(data)
+        """
+        Thread-safe function to send the data
+        """
+        with self.socket_lock:
+            self.client_socket.sendall(data)
 
     def exists(self, key: str) -> bool:
+        logger.debug("Call to exists()!")
         self.send_all(ClientMetaMessage(Constants.CLIENT_EXIST, key, 0).serialize())
         response = self.client_socket.recv(ServerMetaMessage.packlength())
         return ServerMetaMessage.deserialize(response).code == Constants.SERVER_SUCCESS
 
     def set(self, key: str, obj: bytes):
+        logger.debug("Call to set()!")
         self.send_all(ClientMetaMessage(Constants.CLIENT_PUT, key, len(obj)).serialize())
         self.send_all(obj)
-        response = self.client_socket.recv(ServerMetaMessage.packlength())
-        if ServerMetaMessage.deserialize(response).code != Constants.SERVER_SUCCESS:
-            raise RuntimeError(f"Failed to set key: {ServerMetaMessage.deserialize(response).code}")
+        #response = self.client_socket.recv(ServerMetaMessage.packlength())
+        #if ServerMetaMessage.deserialize(response).code != Constants.SERVER_SUCCESS:
+        #    raise RuntimeError(f"Failed to set key: {ServerMetaMessage.deserialize(response).code}")
 
     @_lmcache_nvtx_annotate
     def get(self, key: str) -> Optional[bytes]:
