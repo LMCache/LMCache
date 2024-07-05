@@ -346,29 +346,3 @@ class CacheGenSerializer(Serializer):
         output_dict = encode_function(tensor.cuda(), self.cachegen_config, 
                                       self.key_bins, self.value_bins, ntokens)
         return output_dict.to_bytes()
-
-if __name__ == "__main__":
-    import time
-    config = LMCacheEngineConfig.from_defaults()
-    metadata = LMCacheEngineMetadata(model_name = "mistralai/Mistral-7B-Instruct-v0.2", world_size = 1, worker_id = 0, fmt = "vllm")
-    ser = CacheGenSerializer(config, metadata)
-    tensor = torch.load("/tmp/kv.pt").cuda()
-    #tensor = tensor.repeat((1, 1, 2, 1, 1))
-    print(tensor.shape)
-    start = time.perf_counter()
-    for i in range(30):
-        output = ser.to_bytes(tensor)
-    end = time.perf_counter()
-    print(end - start)
-    print(len(output))
-
-    print("---------------")
-
-    from lmcache.storage_backend.serde.cachegen_decoder import CacheGenDeserializer
-    des = CacheGenDeserializer(config, metadata)
-    start = time.perf_counter()
-    for i in range(20):
-        ret = des.from_bytes(output)
-    val = ret.sum()
-    end = time.perf_counter()
-    print(end - start)
