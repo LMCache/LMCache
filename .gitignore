@@ -59,6 +59,7 @@ outdated/
 perf-test.py
 *.prof
 *.so
+.ycm_extra_conf.py
 
 # example
 /examples/example_local.yaml

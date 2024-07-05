@@ -5,7 +5,8 @@ import numpy as np
 import torch
 from typing import Tuple, List, Any
 
-from lmcache.storage_backend.serde.cachegen_basics import CacheGenConfig, CacheGenEncoderOutput
+from lmcache.storage_backend.serde.cachegen_basics import CacheGenConfig, CacheGenEncoderOutput, CacheGenGPUBytestream, CacheGenGPUEncoderOutput
+import lmcache.storage_backend.serde.cachegen_basics as CGBasics
 from lmcache.storage_backend.serde.serde import Deserializer
 from lmcache.config import LMCacheEngineConfig, LMCacheEngineMetadata
 from lmcache.utils import _lmcache_nvtx_annotate
@@ -33,17 +34,53 @@ def do_dequantize(t: torch.Tensor, bins: torch.Tensor, maxtensors: torch.Tensor)
     return t
 
 @_lmcache_nvtx_annotate
+def bytes_to_tensor(bs: bytes, device="cuda") -> torch.Tensor:
+    np_array = np.frombuffer(bs, dtype=np.uint8)
+    concated_string = torch.from_numpy(np_array).to(device)
+    return concated_string
+
+@_lmcache_nvtx_annotate
+def recombine_bytes(bytes_tensor, output_lengths) -> torch.Tensor:
+    output_buffer_size = CGBasics.CACHEGEN_GPU_MAX_TOKENS_PER_CHUNK
+    offsets = output_lengths.flatten().cumsum(0).roll(1).reshape(output_lengths.shape)
+    offsets[0][0] = 0
+    indexes = torch.arange(output_buffer_size, device=offsets.device).tile((output_lengths.shape[0], output_lengths.shape[1], 1))
+    final_indexes = (indexes + offsets[:, :, None]).clamp(max = len(bytes_tensor) - 1)
+    return bytes_tensor[final_indexes]
+
+
+@_lmcache_nvtx_annotate
+def decode_chunk(
+        cdf: torch.Tensor,
+        data_chunk: CacheGenGPUBytestream,
+        target_buffer: torch.Tensor
+    ) -> torch.Tensor:
+    """
+    Write the decode output in target_buffer
+    Expected shape: [nlayers (kv in total), ntokens, nchannels]
+    """
+    #recombined_output = recombine_bytes(bytes_to_tensor(data_chunk.bytestream), data_chunk.bytestream_lengths)
+    #torchac_cuda.decode_fast_new(
+    #        cdf,
+    #        recombined_output,
+    #        data_chunk.bytestream_lengths,
+    #        target_buffer)
+    #bytes_tensor = bytes_to_tensor(data_chunk.bytestream)
+    bytes_tensor = data_chunk.bytestream
+    length_prefsum = data_chunk.bytestream_lengths.flatten().cumsum(0).reshape(data_chunk.bytestream_lengths.shape)
+    torchac_cuda.decode_fast_prefsum(
+            cdf,
+            bytes_tensor,
+            length_prefsum,
+            target_buffer)
+
+@_lmcache_nvtx_annotate
 def decode_function_gpu(
         cdf: torch.Tensor, 
-        bits: bytes, 
-        start_indices: torch.Tensor, 
-        max_tensors_k: torch.Tensor, 
-        max_tensors_v: torch.Tensor, 
-        quantization_config: CacheGenConfig, 
+        data_chunks: List[CacheGenGPUBytestream], 
+        layers_in_key: int,
         chunk_size: int, 
         output: torch.Tensor, 
-        key_bins: torch.Tensor,
-        value_bins: torch.Tensor,
     ):
     # TODO: dtype and shape -- still have 128 and 8
     """
@@ -51,59 +88,25 @@ def decode_function_gpu(
 
     Inputs:
         cdf: the cdf tensor, in shape [2 * nlayers, nchannels, bins + 1]
-        bits: the encoded key value cache bytestream
-        start_indices: start indices of each "bytestream element" in the encoded bytestream.
-                       In shape [2 * nlayers * ntokens]
-        max_tensors_k: the max tensor for key in shape [nlayers, ntokens, 1]
-        max_tensors_v: the max tensor for value in shape [nlayers, ntokens, 1]
-        quantization_config: the quantization config
+        data_chunks: the data_chunks in the encoder's output
+        layers_in_key: number of layers in K (or V) (K/V should have the same number of layers)
         chunk_size: the chunk_size
         output: output buffer, in shape [ntokens, 2 * nlayers * nchannels]
-        key_bins: the number of bins for key tensor, shape is [nlayers]
-        value_bins: the number of bins for value tensor, shape is [nlayers]
 
     Outputs:
         key: the decoded key tensor in the shape of (layers, tokens, nchannels)
         value: the decoded value tensor in the shape of (layers, tokens, nchannels)
     """
-    config = quantization_config
-    np_array = np.frombuffer(bits, dtype=np.uint8)
-    concated_string = torch.from_numpy(np_array)
     nlayers, nchannels, _ = cdf.shape
+    output = output.reshape((nlayers, chunk_size, nchannels))
 
+    start = 0
+    for data_chunk in data_chunks:
+        end = start + data_chunk.ntokens
+        decode_chunk(cdf, data_chunk, output[:, start:end, :])
+        start = end
 
-    '''
-    num_threads = chunk_size
-    num_blocks = nlayers
-    
-    # FIXME(Jiayi): scale*num_thread = chunk_size; num_thread<1000 (32X)
-    scale = 1
-    '''
-    
-    
-    if chunk_size < 1000:
-        num_threads = chunk_size
-        scale = 1
-        num_blocks = nlayers
-    elif chunk_size % 512 == 0:
-        num_threads = 512
-        scale = int(chunk_size/num_threads)
-        num_blocks = int(nlayers*scale)
-    else:
-        raise Exception(f"The current cuda kernel does not support chunk size {chunk_size}") 
-    
-    
-    torchac_cuda.decode_fast(
-            output,
-            cdf.unsqueeze(0).cuda(),
-            concated_string.cuda(),
-            start_indices,
-            chunk_size,
-            num_blocks,
-            num_threads,
-            scale)
-
-    out = output.reshape((2, max_tensors_k.shape[0], chunk_size, nchannels))
+    out = output.reshape((2, layers_in_key, chunk_size, nchannels))
     key, value = out.float()
 
     return key, value
@@ -134,28 +137,23 @@ class CacheGenDeserializer(Deserializer):
 
     def get_output_buffer(self, nlayers: int, nchannels: int, ntokens: int):
         if self.output_buffer is None or self.output_buffer.shape[1] != 2 * nlayers * nchannels:
-            self.output_buffer = torch.zeros((self.chunk_size, 2 * nlayers * nchannels), dtype=torch.int).cuda()
+            self.output_buffer = torch.zeros((self.chunk_size, 2 * nlayers * nchannels), dtype=torch.uint8).cuda()
         return self.output_buffer[:ntokens, :]
 
     @_lmcache_nvtx_annotate
     def from_bytes(self, bs: bytes) -> torch.Tensor:
-        encoder_output = CacheGenEncoderOutput.from_bytes(bs)
+        encoder_output = CacheGenGPUEncoderOutput.from_bytes(bs)
         encoder_output.max_tensors_key = encoder_output.max_tensors_key.cuda()
         encoder_output.max_tensors_value = encoder_output.max_tensors_value.cuda()
-        encoder_output.start_indices = encoder_output.start_indices.cuda()
 
         ntokens = encoder_output.max_tensors_key.shape[1]
+        layers_in_key = encoder_output.max_tensors_key.shape[0]
         key, value = decode_function_gpu(
                 encoder_output.cdf,
-                encoder_output.bytestream,
-                encoder_output.start_indices,
-                encoder_output.max_tensors_key,
-                encoder_output.max_tensors_value,
-                self.cachegen_config,
+                encoder_output.data_chunks,
+                layers_in_key,
                 ntokens,
-                self.get_output_buffer(encoder_output.cdf.shape[0] // 2, encoder_output.cdf.shape[1], ntokens),
-                self.key_bins,
-                self.value_bins
+                self.get_output_buffer(encoder_output.cdf.shape[0] // 2, encoder_output.cdf.shape[1], ntokens)
             )
 
         key = do_dequantize(key, self.key_bins, encoder_output.max_tensors_key)

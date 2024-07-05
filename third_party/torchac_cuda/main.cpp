@@ -9,6 +9,10 @@
 namespace py = pybind11;
 
 PYBIND11_MODULE(torchac_cuda, m) {
-    m.def("decode_fast", &decode_fast);
-    m.def("encode_fast", &encode_cuda);
+    //m.def("decode_fast", &decode_fast);
+    //m.def("encode_fast", &encode_cuda);
+    m.def("encode_fast_new", &encode_cuda_new);
+    m.def("decode_fast_new", &decode_cuda_new);
+    m.def("decode_fast_prefsum", &decode_cuda_prefsum);
+    m.def("calculate_cdf", &calculate_cdf);
 }

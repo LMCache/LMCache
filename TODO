@@ -1,3 +1,7 @@
+fix the bug of async put (the server feedback message channel will be shared and it does not correctly demux to put/get thread)
+speed up encoding
+reuse cdf shared memory to hold the lengths during decoding
+
 Disk loading in configuration file
 ------
 (functionality) add configuration of serde (torch/cachegen) to config file
