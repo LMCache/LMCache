@@ -56,14 +56,14 @@ class LMCRemoteBackend(LMCBackendInterface):
     def put_worker(
             self,
     ):
+        #put_stream = torch.cuda.Stream()
         while True:
             item = self.put_queue.get()
             if isinstance(item, RemoteBackendEndSignal):
                 break
             key, value = item
-            put_stream = torch.cuda.Stream()
-            with torch.cuda.stream(put_stream):
-                self.put(key, value, blocking = True)
+            #with torch.cuda.stream(put_stream):
+            self.put_blocking(key, value)
 
     def _combine_key(
             self,

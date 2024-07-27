@@ -96,9 +96,11 @@ class LMCacheEngine:
             token_chunks: Iterator[torch.Tensor]
         ) -> Iterator[str]:
         prefix_hash = self._get_init_hash()
+        prefix_hashes = []
         for token_chunk in token_chunks:
             prefix_hash = self._hash(token_chunk, prefix_hash)
-            yield prefix_hash
+            prefix_hashes.append(prefix_hash)
+        return prefix_hashes
 
     def _tuple_kv_to_blob(
             self,
@@ -119,7 +121,7 @@ class LMCacheEngine:
         outer_unbound = torch.unbind(blob, dim=0)
         return tuple((inner_tensor[0], inner_tensor[1]) for inner_tensor in outer_unbound)
 
-
+    '''
     def _slice_kv_at(
             self,
             start_idx: int,
@@ -142,7 +144,20 @@ class LMCacheEngine:
                              for kv in kv_tensors)
             case _:
                 raise ValueError(f"Invalid format: {fmt}")
-
+    '''
+    def _slice_kv_at(
+        self,
+        start_idx: int,
+        kv_tensors: KVCache,
+        fmt: str,
+        device
+    ):
+        match fmt:
+            case "vllm":
+                return list(torch.split(kv_tensors[:,:,start_idx:], self.chunk_size, dim=2))
+            case _:
+                raise ValueError(f"Invalid format: {fmt}")
+        
     def _chunk_kv(
             self, 
             kv_tensors: KVCache,
@@ -178,13 +193,21 @@ class LMCacheEngine:
         chunk_hashes = self._prefix_hash(self._chunk_tokens(tokens, device))
         num_tokens = self._num_tokens_in_kv(kv_tensors, fmt)
 
+        start_token_idx = None
+        start_chunk_idx = 0
         for chunk_hash, idx in zip(chunk_hashes, range(0, num_tokens, self.chunk_size)):
             if not self.engine_.contains(self._make_key(chunk_hash, fmt)):
-                yield chunk_hash, self._slice_kv_at(idx, idx+self.chunk_size, kv_tensors, fmt, device)
-
+                #yield chunk_hash, self._slice_kv_at(idx, idx+self.chunk_size, kv_tensors, fmt, device)
+                start_token_idx = idx
+                break
+            start_chunk_idx += 1
             #if (chunk_hash, fmt) not in self.dict:
             #    yield chunk_hash, self._slice_kv_at(idx, idx+self.chunk_size, kv_tensors, fmt, device)
-
+        if start_token_idx is None:
+            return zip([], [])
+        chunk_kvs = self._slice_kv_at(start_token_idx, kv_tensors, fmt, device)
+        chunk_hashes = chunk_hashes[start_chunk_idx:]
+        return zip(chunk_hashes, chunk_kvs)
 
     def _make_chunks(
             self, 
@@ -236,17 +259,24 @@ class LMCacheEngine:
 
         ''' chunk the tokens and the kv caches '''
         chunk_hashes_and_kvs = self._make_chunks(tokens, kv_tensors, fmt, device=self.device, skip_existing=skip_existing)
-
-        ''' Issue all the exists() query first if we are doing non-blocking '''
+        
+        #''' Issue all the exists() query first if we are doing non-blocking '''
         if not blocking:
             chunk_hashes_and_kvs = list(chunk_hashes_and_kvs)
         end_make_chunks = time.perf_counter()
 
         ''' store them into the dictionary '''
+        #n_chunks = self.engine_.batched_put(
+        #        ((
+        #            self._make_key(chunk_hash, fmt), 
+        #            self._tuple_kv_to_blob(kv_chunk)
+        #        ) for chunk_hash, kv_chunk in chunk_hashes_and_kvs), 
+        #        blocking=blocking
+        #    )
         n_chunks = self.engine_.batched_put(
                 ((
                     self._make_key(chunk_hash, fmt), 
-                    self._tuple_kv_to_blob(kv_chunk)
+                    kv_chunk
                 ) for chunk_hash, kv_chunk in chunk_hashes_and_kvs), 
                 blocking=blocking
             )
