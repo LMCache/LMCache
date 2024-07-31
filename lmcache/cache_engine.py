@@ -94,7 +94,7 @@ class LMCacheEngine:
     def _prefix_hash(
             self, 
             token_chunks: Iterator[torch.Tensor]
-        ) -> Iterator[str]:
+        ) -> List[str]:
         prefix_hash = self._get_init_hash()
         prefix_hashes = []
         for token_chunk in token_chunks:
@@ -148,10 +148,10 @@ class LMCacheEngine:
     def _slice_kv_at(
         self,
         start_idx: int,
-        kv_tensors: KVCache,
+        kv_tensors: torch.Tensor,
         fmt: str,
         device
-    ):
+    ) -> List[torch.Tensor]: 
         match fmt:
             case "vllm":
                 return list(torch.split(kv_tensors[:,:,start_idx:], self.chunk_size, dim=2))
@@ -183,10 +183,10 @@ class LMCacheEngine:
     def _make_chunks_skip_exsiting(
             self, 
             tokens: torch.Tensor,
-            kv_tensors: KVCache,
+            kv_tensors: torch.Tensor,
             fmt: str,
             device
-        ) -> Iterator[Tuple[torch.Tensor, KVCache]]:
+        ) -> Iterator[Tuple[torch.Tensor, torch.Tensor]]:
         """
         Skip the existing chunks and return the rest of the chunks
         """
@@ -212,11 +212,11 @@ class LMCacheEngine:
     def _make_chunks(
             self, 
             tokens: torch.Tensor,
-            kv_tensors: KVCache,
+            kv_tensors: torch.Tensor,
             fmt: str,
             device,
             skip_existing = True,
-        ) -> Iterator[Tuple[torch.Tensor, KVCache]]:
+        ) -> Iterator[Tuple[torch.Tensor, torch.Tensor]]:
         """
         Returns a generator of zipped (chunk_hash, chunk_kv) tuples
         """
@@ -256,6 +256,20 @@ class LMCacheEngine:
         assert len(tokens) == self._num_tokens_in_kv(kv_tensors, fmt), "Number of tokens in the kv cache does not match the input tokens"
 
         # TODO: check shapes
+        
+        # HACK(Jiayi): reshape and concatenate `kv_tensors` into a big tensor
+        # Might be better to have a separate function for this
+        k_temp = []
+        v_temp = []
+        for kv_layer in kv_tensors:
+            k_temp.append(kv_layer[0])
+            v_temp.append(kv_layer[1])
+        k_tensor_blob = torch.stack(k_temp)
+        v_tensor_blob = torch.stack(v_temp)
+        
+        # kv_tensors: [num_layer, 2, num_tok, num_kv_head, head_size]
+        kv_tensors = torch.stack((k_tensor_blob, v_tensor_blob))
+        kv_tensors = kv_tensors.permute([1, 0, 2, 3, 4])
 
         ''' chunk the tokens and the kv caches '''
         chunk_hashes_and_kvs = self._make_chunks(tokens, kv_tensors, fmt, device=self.device, skip_existing=skip_existing)

@@ -78,7 +78,7 @@ class LMCHybridBackend(LMCBackendInterface):
         # HACK(Jiayi): skip local cpu cache for now,
         # local cpu cache can be activated with prefetching
         # TODO(Jiayi): write-back/write through should determined by config
-        #self.local_store.put(key, value, blocking = True)
+        self.local_store.put(key, value, blocking = True)
         self.remote_store.put(key, value, blocking)
     
         
@@ -115,7 +115,7 @@ class LMCHybridBackend(LMCBackendInterface):
                                     remote_queries, 
                                     remote_query_results):
             if result is not None:
-                #self.local_store.put(key, result)
+                self.local_store.put(key, result)
                 ret[idx] = result
         return ret
 
