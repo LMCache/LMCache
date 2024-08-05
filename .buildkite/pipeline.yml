@@ -19,7 +19,7 @@ steps:
 
   - label: ":pytest: Run pytest"
     key: "pytest"
-    depends_on: ["pip", "pip-test"]
+    depends_on: ["pip"]
     command: |
       eval "$(conda shell.bash hook)"
       conda activate buildkite
@@ -39,4 +39,4 @@ steps:
     allow_dependency_failure: false
 
   - label: "Clean up"
-    command: conda env remove -n buildkite
+    command: bash .buildkite/cleanup.sh
