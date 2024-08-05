@@ -2,6 +2,7 @@ steps:
   - label: "Create conda env"
     key: "conda"
     command: |
+      source ${HOME}/.bashrc
       conda create -n buildkit python=3.10 -y 
       conda activate buildkit
 
