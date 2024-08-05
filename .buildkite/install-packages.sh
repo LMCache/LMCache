@@ -16,7 +16,14 @@ set -xe
 pip install -r requirements.txt
 pip install -r requirements-test.txt
 
-cd third_party/torchac_cuda
+
+pip install -e third_party/torchac_cuda
 pip install -e .
-cd -
-pip install -e .
+
+git clone https://github.com/LMCache/lmcache-server
+pip install -e lmcache-server/
+
+
+set +x
+echo "Current env:"
+pip freeze 
