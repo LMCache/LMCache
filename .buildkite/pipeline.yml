@@ -4,14 +4,15 @@ steps:
     command: pip install -r requirements.txt
     plugins:
       - docker#v5.9.0:
-          image: "python:3.13"
+          image: "python:3.10-slim"
 
   - label: ":pip: Install test dependencies"
     key: "pip-test"
+    depends_on: ["pip"]
     command: pip install -r requirements-test.txt
     plugins:
       - docker#v5.9.0:
-          image: "python:3.13"
+          image: "python:3.10-slim"
 
 # - label: Lint with Ruff
 #   depends_on: ["pip"]
