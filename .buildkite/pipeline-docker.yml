@@ -1,19 +1,18 @@
 steps:
-  - label: "Create conda env"
-    key: "conda"
-    command: |
-      conda create -n buildkit python=3.10 -y 
-      conda activate buildkit
-
   - label: ":pip: Install dependencies"
     key: "pip"
-    depends_on: ["conda"]
     command: pip install -r requirements.txt
+    plugins:
+      - docker#v5.9.0:
+          image: "python:3.10-slim"
 
   - label: ":pip: Install test dependencies"
     key: "pip-test"
     depends_on: ["pip"]
     command: pip install -r requirements-test.txt
+    plugins:
+      - docker#v5.9.0:
+          image: "python:3.10-slim"
 
 # - label: Lint with Ruff
 #   depends_on: ["pip"]
@@ -32,17 +31,12 @@ steps:
       pytest --junitxml=junit/test-results.xml \
     artifact_paths:
       - junit/test-results.xml
+    plugins:
+      - docker#v5.9.0:
+          image: "python:3.13"
 
   - label: ":junit: Annotate"
     depends_on: ["pytest"]
     plugins:
       - junit-annotate#v2.4.1:
           artifacts: junit/*.xml
-
-  - wait: ~
-    continue_on_failure: true
-    depends_on: ["conda"]
-    allow_dependency_failure: false
-
-  - label: "Clean up"
-    command: conda env remove -n buildkit
