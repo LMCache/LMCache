@@ -23,10 +23,7 @@ steps:
     command: |
       eval "$(conda shell.bash hook)"
       conda activate buildkite
-      ls .
-      pip install -e third_party/torchac_cuda
-      pip install -e .
-      pip insall -e lmcache-server
+      bash .buildkite/install-lmcache.sh
       pytest --junitxml=junit/test-results.xml \
     artifact_paths:
       - junit/test-results.xml

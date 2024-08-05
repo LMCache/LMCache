@@ -13,8 +13,12 @@ conda activate ${CONDA_ENV_NAME}
 
 set -xe 
 
-pip install -r requirements.txt
-pip install -r requirements-test.txt
+pip install -e third_party/torchac_cuda
+pip install -e .
+
+git clone https://github.com/LMCache/lmcache-server
+pip install -e lmcache-server/
+
 
 set +x
 echo "Current env:"
