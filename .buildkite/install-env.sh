@@ -9,12 +9,3 @@ if [[ -n $exist_env ]]; then
 else
     conda create -n ${CONDA_ENV_NAME} python=${PYTHON_VERSION} -y
 fi
-
-set -e
-
-eval "$(conda shell.bash hook)"
-conda activate ${CONDA_ENV_NAME}
-
-pip install -r requirements.txt
-pip install -r requirements-test.txt
-pip freeze 

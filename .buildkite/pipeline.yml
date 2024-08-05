@@ -1,27 +1,12 @@
 steps:
   - label: "Create conda env"
     key: "conda"
-    command: |
-      source ${HOME}/.bashrc
-      conda create -n buildkit python=3.10 -y 
-      eval "$(conda shell.bash hook)"
-      conda activate buildkit
+    command: bash .buildkite/install-env.sh
 
-  - label: ":pip: Install dependencies"
+  - label: ":pip: Install dependencies and LMCache"
     key: "pip"
     depends_on: ["conda"]
-    command: |
-      eval "$(conda shell.bash hook)"
-      conda activate buildkit
-      pip install -r requirements.txt
-
-  - label: ":pip: Install test dependencies"
-    key: "pip-test"
-    depends_on: ["pip"]
-    command: |
-      eval "$(conda shell.bash hook)"
-      conda activate buildkit
-      pip install -r requirements-test.txt
+    command: bash .buildkite/install-packages.sh
 
 # - label: Lint with Ruff
 #   depends_on: ["pip"]
@@ -37,7 +22,7 @@ steps:
     depends_on: ["pip", "pip-test"]
     command: |
       eval "$(conda shell.bash hook)"
-      conda activate buildkit
+      conda activate buildkite
       pytest --junitxml=junit/test-results.xml \
     artifact_paths:
       - junit/test-results.xml
@@ -54,4 +39,4 @@ steps:
     allow_dependency_failure: false
 
   - label: "Clean up"
-    command: conda env remove -n buildkit
+    command: conda env remove -n buildkite
