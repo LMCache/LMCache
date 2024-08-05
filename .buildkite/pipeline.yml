@@ -1,0 +1,41 @@
+steps:
+  - label: ":pip: Install dependencies"
+    key: "pip"
+    command: pip install -r requirements.txt
+    plugins:
+      - docker#v5.9.0:
+          image: "python:3.13"
+
+  - label: ":pip: Install test dependencies"
+    key: "pip-test"
+    command: pip install -r requirements-test.txt
+    plugins:
+      - docker#v5.9.0:
+          image: "python:3.13"
+
+# - label: Lint with Ruff
+#   depends_on: ["pip"]
+#   command: |
+#     pip install ruff
+#     ruff check .
+#   plugins:
+#     - docker#v5.9.0:
+#         image: "python:3.13"
+
+  - label: ":pytest: Run pytest"
+    key: "pytest"
+    depends_on: ["pip", "pip-test"]
+    command: |
+      pip install pytest
+      pytest --junitxml=junit/test-results.xml \
+    artifact_paths:
+      - junit/test-results.xml
+    plugins:
+      - docker#v5.9.0:
+          image: "python:3.13"
+
+  - label: ":junit: Annotate"
+    depends_on: ["pytest"]
+    plugins:
+      - junit-annotate#v2.4.1:
+          artifacts: junit/*.xml
