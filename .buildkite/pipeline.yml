@@ -33,10 +33,10 @@ steps:
       - junit-annotate#v2.4.1:
           artifacts: junit/*.xml
 
-  - wait: ~
-    continue_on_failure: true
-    depends_on: ["conda"]
-    allow_dependency_failure: false
+# - wait: ~
+#   continue_on_failure: true
+#   depends_on: ["conda"]
+#   allow_dependency_failure: false
 
-  - label: "Clean up"
-    command: bash .buildkite/cleanup.sh
+# - label: "Clean up"
+#   command: bash .buildkite/cleanup.sh
