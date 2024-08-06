@@ -8,15 +8,6 @@ steps:
     depends_on: ["conda"]
     command: bash .buildkite/install-packages.sh
 
-# - label: Lint with Ruff
-#   depends_on: ["pip"]
-#   command: |
-#     pip install ruff
-#     ruff check .
-#   plugins:
-#     - docker#v5.9.0:
-#         image: "python:3.13"
-
   - label: ":pytest: Run pytest"
     key: "pytest"
     depends_on: ["pip"]
@@ -34,10 +25,9 @@ steps:
       - junit-annotate#v2.4.1:
           artifacts: junit/*.xml
 
-# - wait: ~
-#   continue_on_failure: true
-#   depends_on: ["conda"]
-#   allow_dependency_failure: false
-
-# - label: "Clean up"
-#   command: bash .buildkite/cleanup.sh
+  - label: "🔨 Test"
+    command: "make test"
+    plugins:
+      - test-collector#v1.0.0:
+          files: "junit/*.xml"
+          format: "junit"
