@@ -19,7 +19,3 @@ pip install -e .
 git clone https://github.com/LMCache/lmcache-server
 pip install -e lmcache-server/
 
-
-set +x
-echo "Current env:"
-pip freeze 
