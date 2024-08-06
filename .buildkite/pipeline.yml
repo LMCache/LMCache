@@ -18,6 +18,10 @@ steps:
       pytest --junitxml=junit/test-results.xml \
     artifact_paths:
       - junit/test-results.xml
+    plugins:
+      - test-collector#v1.0.0:
+          files: "junit/*.xml"
+          format: "junit"
 
   - label: ":junit: Annotate"
     depends_on: ["pytest"]
@@ -25,9 +29,3 @@ steps:
       - junit-annotate#v2.4.1:
           artifacts: junit/*.xml
 
-  - label: "🔨 Test"
-    command: "make test"
-    plugins:
-      - test-collector#v1.0.0:
-          files: "junit/*.xml"
-          format: "junit"
