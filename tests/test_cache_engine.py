@@ -91,7 +91,6 @@ def test_same_retrive_store(fmt, backend, autorelease):
     assert length == num_tokens
     check_kv_cache_equal(retrived_cache, kv_cache, num_tokens, fmt)
 
-    #engine.close()
 
 @pytest.mark.parametrize("fmt", ["vllm", "huggingface"])
 @pytest.mark.parametrize("chunk_size", [128, 256])
@@ -122,7 +121,6 @@ def test_retrive_prefix(fmt, chunk_size, backend, autorelease):
     assert length == expected_length
     check_kv_cache_equal(retrived_cache, kv_cache, expected_length, fmt)
 
-    #engine.close()
 
 @pytest.mark.parametrize("fmt", ["vllm", "huggingface"])
 @pytest.mark.parametrize("chunk_size", [128, 256])
@@ -169,7 +167,6 @@ def test_mixed_retrive(fmt, chunk_size, backend, autorelease):
     retrived_cache, length = engine.retrive(final_tokens, device)
     assert length == num_tokens + new_num_tokens
     check_kv_cache_equal(retrived_cache, final_kv_cache, length, fmt)
-    #engine.close()
 
 @pytest.mark.parametrize("fmt", ["vllm", "huggingface"])
 def test_skipping(fmt, autorelease):
@@ -204,8 +201,6 @@ def test_skipping(fmt, autorelease):
 
     print("With skip:", t2 - t1)
     print("No skip:", t3 - t2)
-    #engine1.close()
-    #engine2.close()
 
 def test_builder(autorelease):
     instance_id = "test"
@@ -219,5 +214,3 @@ def test_builder(autorelease):
 
     with pytest.raises(ValueError):
         LMCacheEngineBuilder.get_or_create(instance_id, cfg2, dumb_metadata())
-    #engine.close()
-    #engine2.close()
