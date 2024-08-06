@@ -152,9 +152,15 @@ class LMCacheEngine:
         fmt: str,
         device
     ) -> List[torch.Tensor]: 
+        """
+        vllm format: [num_layer, 2, num_tokens, num_kv_head, head_size]
+        huggingface format: [num_layer, 2, num_kv_head, num_tokens, head_size]
+        """
         match fmt:
             case "vllm":
-                return list(torch.split(kv_tensors[:,:,start_idx:], self.chunk_size, dim=2))
+                return list(torch.split(kv_tensors[:, :, start_idx:, ...], self.chunk_size, dim=2))
+            case "huggingface":
+                return list(torch.split(kv_tensors[:, :, :, start_idx:, ...], self.chunk_size, dim=3))
             case _:
                 raise ValueError(f"Invalid format: {fmt}")
         
@@ -259,17 +265,19 @@ class LMCacheEngine:
         
         # HACK(Jiayi): reshape and concatenate `kv_tensors` into a big tensor
         # Might be better to have a separate function for this
-        k_temp = []
-        v_temp = []
-        for kv_layer in kv_tensors:
-            k_temp.append(kv_layer[0])
-            v_temp.append(kv_layer[1])
-        k_tensor_blob = torch.stack(k_temp)
-        v_tensor_blob = torch.stack(v_temp)
-        
-        # kv_tensors: [num_layer, 2, num_tok, num_kv_head, head_size]
-        kv_tensors = torch.stack((k_tensor_blob, v_tensor_blob))
-        kv_tensors = kv_tensors.permute([1, 0, 2, 3, 4])
+        # @Jiayi: the next line should work:
+        kv_tensors = self._tuple_kv_to_blob(kv_tensors)
+        #k_temp = []
+        #v_temp = []
+        #for kv_layer in kv_tensors:
+        #    k_temp.append(kv_layer[0])
+        #    v_temp.append(kv_layer[1])
+        #k_tensor_blob = torch.stack(k_temp)
+        #v_tensor_blob = torch.stack(v_temp)
+        #
+        ## kv_tensors: [num_layer, 2, num_tok, num_kv_head, head_size]
+        #kv_tensors = torch.stack((k_tensor_blob, v_tensor_blob))
+        #kv_tensors = kv_tensors.permute([1, 0, 2, 3, 4])
 
         ''' chunk the tokens and the kv caches '''
         chunk_hashes_and_kvs = self._make_chunks(tokens, kv_tensors, fmt, device=self.device, skip_existing=skip_existing)
