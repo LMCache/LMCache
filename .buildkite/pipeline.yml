@@ -12,16 +12,13 @@ steps:
     key: "pytest"
     depends_on: ["pip"]
     command: |
+      export 
       eval "$(conda shell.bash hook)"
       conda activate buildkite
       bash .buildkite/install-lmcache.sh
       pytest --junitxml=junit/test-results.xml \
     artifact_paths:
       - junit/test-results.xml
-    plugins:
-      - test-collector#v1.0.0:
-          files: "junit/*.xml"
-          format: "junit"
 
   - label: ":junit: Annotate"
     depends_on: ["pytest"]
