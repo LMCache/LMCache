@@ -22,6 +22,9 @@ class MockRedis:
         keys = [s.encode("utf-8") for s in self.store.keys()]
         return (0, keys)
 
+    def close(self):
+        pass
+
 @pytest.fixture(scope="function", autouse=True)
 def mock_redis():
     with patch('redis.Redis', new_callable=lambda: MockRedis) as mock:
@@ -41,3 +44,17 @@ def lmserver_process():
     # Terminate the process
     proc.terminate()
     proc.wait()
+
+@pytest.fixture(scope="function")
+def autorelease(request):
+    objects = []
+
+    def _factory(obj):
+        objects.append(obj)
+        return obj
+
+    yield _factory
+
+    # Cleanup all objects created by the factory
+    for obj in objects:
+        obj.close()

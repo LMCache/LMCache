@@ -66,7 +66,7 @@ def check_kv_cache_equal(left, right, num_tokens, fmt):
 @pytest.mark.parametrize("fmt", ["vllm", "huggingface"])
 @pytest.mark.parametrize("backend", ["cuda", "cpu", "redis://localhost:6379", "lm://localhost:65000"])
 @pytest.mark.usefixtures("lmserver_process")
-def test_same_retrive_store(fmt, backend):
+def test_same_retrive_store(fmt, backend, autorelease):
     device = "cpu" if backend == "cpu" else "cuda"
     num_tokens = 2000
 
@@ -75,7 +75,7 @@ def test_same_retrive_store(fmt, backend):
     
     ''' initialize the engine '''
     cfg = LMCacheEngineConfig.from_legacy(chunk_size = 256, backend = backend)
-    engine = LMCacheEngine(cfg, dumb_metadata(fmt))
+    engine = autorelease(LMCacheEngine(cfg, dumb_metadata(fmt)))
 
     ''' test retrive empty '''
     retrived_cache, length = engine.retrive(tokens, device)
@@ -91,13 +91,13 @@ def test_same_retrive_store(fmt, backend):
     assert length == num_tokens
     check_kv_cache_equal(retrived_cache, kv_cache, num_tokens, fmt)
 
-    engine.close()
+    #engine.close()
 
 @pytest.mark.parametrize("fmt", ["vllm", "huggingface"])
 @pytest.mark.parametrize("chunk_size", [128, 256])
 @pytest.mark.parametrize("backend", ["cuda", "redis://localhost:6379", "lm://localhost:65000"])
 @pytest.mark.usefixtures("lmserver_process")
-def test_retrive_prefix(fmt, chunk_size, backend):
+def test_retrive_prefix(fmt, chunk_size, backend, autorelease):
     device = "cpu" if backend == "cpu" else "cuda"
     num_tokens = 2000
     new_num_tokens = 1000
@@ -109,7 +109,7 @@ def test_retrive_prefix(fmt, chunk_size, backend):
     
     ''' initialize the engine '''
     cfg = LMCacheEngineConfig.from_legacy(chunk_size = chunk_size, backend=backend)
-    engine = LMCacheEngine(cfg, dumb_metadata(fmt))
+    engine = autorelease(LMCacheEngine(cfg, dumb_metadata(fmt)))
 
     ''' test store '''
     engine.store(tokens, kv_cache)
@@ -122,13 +122,13 @@ def test_retrive_prefix(fmt, chunk_size, backend):
     assert length == expected_length
     check_kv_cache_equal(retrived_cache, kv_cache, expected_length, fmt)
 
-    engine.close()
+    #engine.close()
 
 @pytest.mark.parametrize("fmt", ["vllm", "huggingface"])
 @pytest.mark.parametrize("chunk_size", [128, 256])
 @pytest.mark.parametrize("backend", ["cuda", "redis://localhost:6379", "lm://localhost:65000"])
 @pytest.mark.usefixtures("lmserver_process")
-def test_mixed_retrive(fmt, chunk_size, backend):
+def test_mixed_retrive(fmt, chunk_size, backend, autorelease):
     device = "cuda"
     num_tokens = 2000
     new_num_tokens = 1000
@@ -140,7 +140,7 @@ def test_mixed_retrive(fmt, chunk_size, backend):
     
     ''' initialize the engine '''
     cfg = LMCacheEngineConfig.from_legacy(chunk_size = chunk_size, backend = backend)
-    engine = LMCacheEngine(cfg, dumb_metadata(fmt))
+    engine = autorelease(LMCacheEngine(cfg, dumb_metadata(fmt)))
 
     ''' test store '''
     engine.store(tokens, kv_cache)
@@ -169,10 +169,10 @@ def test_mixed_retrive(fmt, chunk_size, backend):
     retrived_cache, length = engine.retrive(final_tokens, device)
     assert length == num_tokens + new_num_tokens
     check_kv_cache_equal(retrived_cache, final_kv_cache, length, fmt)
-    engine.close()
+    #engine.close()
 
 @pytest.mark.parametrize("fmt", ["vllm", "huggingface"])
-def test_skipping(fmt):
+def test_skipping(fmt, autorelease):
     device = "cuda"
     num_tokens = 12000
     new_num_tokens = 200
@@ -188,8 +188,8 @@ def test_skipping(fmt):
     
     ''' initialize the engine '''
     cfg = LMCacheEngineConfig.from_legacy(chunk_size = chunk_size, persist_path = persist_path)
-    engine1 = LMCacheEngine(cfg, dumb_metadata(fmt))
-    engine2 = LMCacheEngine(cfg, dumb_metadata(fmt))
+    engine1 = autorelease(LMCacheEngine(cfg, dumb_metadata(fmt)))
+    engine2 = autorelease(LMCacheEngine(cfg, dumb_metadata(fmt)))
 
     ''' store and persist '''
     engine1.store(tokens, kv_cache)
@@ -204,20 +204,20 @@ def test_skipping(fmt):
 
     print("With skip:", t2 - t1)
     print("No skip:", t3 - t2)
-    engine1.close()
-    engine2.close()
+    #engine1.close()
+    #engine2.close()
 
-def test_builder():
+def test_builder(autorelease):
     instance_id = "test"
     cfg = LMCacheEngineConfig.from_legacy(chunk_size = 256, persist_path = "/tmp/a.txt")
     cfg2 = LMCacheEngineConfig.from_legacy(chunk_size = 512, persist_path = "/tmp/a.txt")
     should_be_none = LMCacheEngineBuilder.get(instance_id)
     assert should_be_none is None
 
-    engine = LMCacheEngineBuilder.get_or_create(instance_id, cfg, dumb_metadata())
-    engine2 = LMCacheEngineBuilder.get(instance_id)
+    engine = autorelease(LMCacheEngineBuilder.get_or_create(instance_id, cfg, dumb_metadata()))
+    engine2 = autorelease(LMCacheEngineBuilder.get(instance_id))
 
     with pytest.raises(ValueError):
         LMCacheEngineBuilder.get_or_create(instance_id, cfg2, dumb_metadata())
-    engine.close()
-    engine2.close()
+    #engine.close()
+    #engine2.close()
