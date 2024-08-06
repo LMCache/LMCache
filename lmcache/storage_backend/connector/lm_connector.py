@@ -66,3 +66,7 @@ class LMCServerConnector(RemoteConnector):
         length = meta.length
         data = self.receive_all(length)
         return list(filter(lambda s: len(s) > 0, data.decode().split("\n")))
+
+    def close(self):
+        self.client_socket.close()
+        logger.info("Closed the lmserver connection")

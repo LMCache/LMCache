@@ -59,6 +59,16 @@ class RemoteConnector(metaclass=abc.ABCMeta):
         """
         raise NotImplementedError
 
+    @abc.abstractmethod
+    def close(self) -> None:
+        """
+        List all keys in the remote server
+
+        Returns:
+            A list of keys in the remote server
+        """
+        raise NotImplementedError
+
 class RemoteConnectorDebugWrapper(RemoteConnector):
     def __init__(self, connector: RemoteConnector):
         self.connector = connector
@@ -93,3 +103,6 @@ class RemoteConnectorDebugWrapper(RemoteConnector):
 
     def list(self) -> List[str]:
         return self.connector.list()
+
+    def close(self) -> None:
+        return self.connector.close()

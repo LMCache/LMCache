@@ -65,7 +65,7 @@ class LMCLocalBackend(LMCBackendInterface):
             The KV cache should NOT have the "batch" dimension.
         """
         if not blocking:
-            logger.warn("Non-blocking is not implemented for local backend")
+            logger.warning("Non-blocking is not implemented for local backend")
         self.dict[key] = kv_chunk
 
 

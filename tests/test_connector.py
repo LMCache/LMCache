@@ -17,9 +17,9 @@ def random_string(N):
                              "redis://localhost:6379",
                              "lm://localhost:65000",
                          ])
-def test_lm_connector(url):
+def test_lm_connector(url, autorelease):
     url = "lm://localhost:65000"
-    connector = CreateConnector(url)
+    connector = autorelease(CreateConnector(url))
     
     assert not connector.exists("some-special-key-12345")
 

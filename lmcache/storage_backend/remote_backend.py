@@ -18,14 +18,14 @@ logger = init_logger(__name__)
 # FIXME(Jiayi): Needs to consider concurrent setting (private queue?)
 
 
+class RemoteBackendEndSignal:
+    pass
         
 class LMCRemoteBackend(LMCBackendInterface):
     """
     Cache engine for storing the KV cache of the tokens in the remote server.
     """
 
-    class _EndSignal:
-        pass
 
     def __init__(
             self, 
@@ -38,11 +38,12 @@ class LMCRemoteBackend(LMCBackendInterface):
         """
         super().__init__()
         self.existing_keys = set()
+        self.put_thread = None
+        self.connection = None
         self.connection = CreateConnector(config.remote_url)
         s, d = CreateSerde(config.remote_serde, config, metadata)
         self.serializer = s
         self.deserializer = d
-        self.put_thread = None
 
         # For async put
         self.put_queue = queue.Queue()
@@ -57,7 +58,7 @@ class LMCRemoteBackend(LMCBackendInterface):
     ):
         while True:
             item = self.put_queue.get()
-            if isinstance(item, LMCRemoteBackend._EndSignal):
+            if isinstance(item, RemoteBackendEndSignal):
                 break
             key, value = item
             put_stream = torch.cuda.Stream()
@@ -167,9 +168,12 @@ class LMCRemoteBackend(LMCBackendInterface):
 
     def close(self):
         if self.put_thread is not None and self.put_thread.is_alive():
-            self.put_queue.put(self._EndSignal())
+            self.put_queue.put(RemoteBackendEndSignal())
             self.put_thread.join()
-            logger.debug("Closed the put worker")
+            logger.info("Closed the put worker")
+
+        if self.connection is not None:
+            self.connection.close()
 
     def __del__(self):
         self.close()
@@ -178,9 +182,6 @@ class LMCPipelinedRemoteBackend(LMCRemoteBackend):
     """
     Implements the pipelined get functionality for the remote backend.
     """
-
-    class _EndSignal:
-        pass
 
     def __init__(
             self, 
@@ -194,10 +195,6 @@ class LMCPipelinedRemoteBackend(LMCRemoteBackend):
         super().__init__(config, metadata)
 
         self.existing_keys = set()
-        self.connection = CreateConnector(config.remote_url)
-        s, d = CreateSerde(config.remote_serde, config, metadata)
-        self.serializer = s
-        self.deserializer = d
         self.network_thread = None
         self.deserialize_thread = None
 
@@ -225,7 +222,7 @@ class LMCPipelinedRemoteBackend(LMCRemoteBackend):
         ):
         while True:
             item = self.network_queue.get()
-            if isinstance(item, LMCPipelinedRemoteBackend._EndSignal):
+            if isinstance(item, RemoteBackendEndSignal):
                 break
 
             idx, key = item
@@ -241,7 +238,7 @@ class LMCPipelinedRemoteBackend(LMCRemoteBackend):
         ):
         while True:
             item = self.deserialize_queue.get()
-            if isinstance(item, LMCPipelinedRemoteBackend._EndSignal):
+            if isinstance(item, RemoteBackendEndSignal):
                 break
 
             idx, data = item
@@ -268,14 +265,14 @@ class LMCPipelinedRemoteBackend(LMCRemoteBackend):
         super().close()
 
         if self.network_thread is not None and self.network_thread.is_alive():
-            self.network_queue.put(self._EndSignal())
+            self.network_queue.put(RemoteBackendEndSignal())
             self.network_thread.join()
-            logger.debug("Closed the network worker")
+            logger.info("Closed the network worker")
 
         if self.deserialize_thread is not None and self.deserialize_thread.is_alive():
-            self.deserialize_queue.put(self._EndSignal())
+            self.deserialize_queue.put(RemoteBackendEndSignal())
             self.deserialize_thread.join()
-            logger.debug("Closed the deserialize worker")
+            logger.info("Closed the deserialize worker")
         
 
     def __del__(self):

@@ -27,3 +27,5 @@ class RedisConnector(RemoteConnector):
     
         return [key.decode('utf-8') for key in all_keys]
 
+    def close(self):
+        self.connection.close()
