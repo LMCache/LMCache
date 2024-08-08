@@ -1,0 +1,3 @@
+[pytest]
+log_cli = true
+log_cli_level = INFO

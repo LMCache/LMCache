@@ -11,26 +11,11 @@ logger = init_logger(__name__)
 class TorchSerializer(Serializer):
     def __init__(self):
         super().__init__()
-        self.debug = GlobalConfig.is_debug()
-
-    def to_bytes_debug(self, t: torch.Tensor) -> bytes:
-        start = time.perf_counter()
-        with io.BytesIO() as f:
-            torch.save(t, f)
-            end = time.perf_counter()
-            logger.debug("Serialization took: %.2f", (end - start) * 1000)
-            return f.getvalue()
-
-    def to_bytes_normal(self, t: torch.Tensor) -> bytes:
-        with io.BytesIO() as f:
-            torch.save(t, f)
-            return f.getvalue()
 
     def to_bytes(self, t: torch.Tensor) -> bytes:
-        if self.debug:
-            return self.to_bytes_debug(t)
-        else:
-            return self.to_bytes_normal(t)
+        with io.BytesIO() as f:
+            torch.save(t.clone().detach(), f)
+            return f.getvalue()
 
 class TorchDeserializer(Deserializer):
     def __init__(self):
