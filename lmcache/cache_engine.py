@@ -37,6 +37,8 @@ class LMCacheEngine:
         match self.config.local_device:
             case "cpu":
                 self.device = "cpu"
+            #TODO(Jiayi): Disk "uses" cuda device for now
+            #Need Heirachical support for gpu -> cpu -> disk
             case _:
                 self.device = "cuda"
         logger.info("Using device: %s", self.device)
@@ -88,6 +90,7 @@ class LMCacheEngine:
         Output:
             a generator of chunks of tokens, each with shape [chunk_size]
         """
+        # TODO(Jiayi): the following step can be parallelized
         for i in range(0, len(tokens), self.chunk_size):
             yield tokens[i:i+self.chunk_size].to(device)
 
@@ -123,6 +126,7 @@ class LMCacheEngine:
         kv_tensors = kv_tensors.permute([1, 0, 2, 3, 4])
         
         return kv_tensors
+    
     def _blob_to_tuple_kv(
             self,
             blob: torch.Tensor,
@@ -351,7 +355,7 @@ class LMCacheEngine:
         for chunk in retrival_iterator:
             if chunk is None:
                 break
-            retrived_kv_chunks.append(chunk)
+            retrived_kv_chunks.append(chunk.to(device))
         #retrived_kv_chunks: List[KVCache] = []
 
         #''' retrive the kv cache '''
@@ -381,7 +385,7 @@ class LMCacheEngine:
             return (), 0
 
         st2 = time.perf_counter()
-        ret = self._blob_to_tuple_kv(torch.cat(retrived_kv_chunks, dim=dim + 2).to(device))
+        ret = self._blob_to_tuple_kv(torch.cat(retrived_kv_chunks, dim=dim + 2))#.to(device))
         ed2 = time.perf_counter()
         logger.info(f"Concatenated {len(retrived_kv_chunks)} chunks -- elapsed time {ed2 - st2}")
         retrived_token_count = 0 if len(ret) == 0 else ret[0][0].shape[dim]

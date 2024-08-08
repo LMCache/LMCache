@@ -1,5 +1,5 @@
 from lmcache.storage_backend.abstract_backend import LMCBackendInterface
-from lmcache.storage_backend.local_backend import LMCLocalBackend
+from lmcache.storage_backend.local_backend import LMCLocalBackend, LMCLocalDiskBackend
 from lmcache.storage_backend.remote_backend import LMCRemoteBackend
 from lmcache.storage_backend.hybrid_backend import LMCHybridBackend#, LMCPipelinedHybridBackend
 from lmcache.config import LMCacheEngineConfig, LMCacheEngineMetadata
@@ -20,8 +20,14 @@ def CreateStorageBackend(
 
         case LMCacheEngineConfig(_, local_device=str(p), remote_url=None) if p is not None:
             # local only
-            logger.info("Initializing local-only backend")
-            return LMCLocalBackend(config)
+            match config.local_device:
+                case "cpu" | "cuda":
+                    logger.info(f"Initializing local-only ({config.local_device}) backend")
+                    return LMCLocalBackend(config)
+                case _:
+                    logger.info(f"Initializing local-only (disk) backend at {config.local_device}")
+                    return LMCLocalDiskBackend(config)
+                    
 
         case LMCacheEngineConfig(_, local_device=str(p), remote_url=str(q)) if p is not None and q is not None:
             logger.info("Initializing hybrid backend")
