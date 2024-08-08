@@ -104,13 +104,25 @@ class LMCacheEngine:
 
     def _tuple_kv_to_blob(
             self,
-            kv_tensor: KVCache,
+            kv_tensors: KVCache,
         ) -> torch.Tensor:
         """
         Convert the nested tuple of kv tensors to a single big tensor with 2 extra dimensions
         """
-        return torch.stack([torch.stack(inner_tuple, dim=0) for inner_tuple in kv_tensor], dim=0)
-
+        #return torch.stack([torch.stack(inner_tuple, dim=0) for inner_tuple in kv_tensor], dim=0)
+        k_temp = []
+        v_temp = []
+        for kv_layer in kv_tensors:
+            k_temp.append(kv_layer[0])
+            v_temp.append(kv_layer[1])
+        k_tensor_blob = torch.stack(k_temp)
+        v_tensor_blob = torch.stack(v_temp)
+        
+        # kv_tensors: [num_layer, 2, num_tok, num_kv_head, head_size]
+        kv_tensors = torch.stack((k_tensor_blob, v_tensor_blob))
+        kv_tensors = kv_tensors.permute([1, 0, 2, 3, 4])
+        
+        return kv_tensors
     def _blob_to_tuple_kv(
             self,
             blob: torch.Tensor,
@@ -181,10 +193,10 @@ class LMCacheEngine:
         Output:
             a generator of tuples, each tuple is a chunk of tokens and the corresponding kv cache.
         """
-        num_tokens = self._num_tokens_in_kv(kv_tensors, fmt)
+        #num_tokens = self._num_tokens_in_kv(kv_tensors, fmt)
 
-        for i in range(0, num_tokens, self.chunk_size):
-            yield self._slice_kv_at(i, i+self.chunk_size, kv_tensors, fmt, device)
+        #for i in range(0, num_tokens, self.chunk_size):
+        return self._slice_kv_at(0, kv_tensors, fmt, device)
 
     def _make_chunks_skip_exsiting(
             self, 
