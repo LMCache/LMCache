@@ -13,10 +13,6 @@ from lmcache.utils import KVCache, CacheEngineKey
 from lmcache.logging import init_logger
 from lmcache.utils import _lmcache_nvtx_annotate
 
-# TODO: (functionality) configuration class for backend implementations
-# TODO: (functionality) the model name and the distributed rank should also be the key
-# TODO: (functionality) the chunk size should also be related to the key
-
 logger = init_logger(__name__)
 
 class LMCacheEngine:
@@ -133,30 +129,6 @@ class LMCacheEngine:
         outer_unbound = torch.unbind(blob, dim=0)
         return tuple((inner_tensor[0], inner_tensor[1]) for inner_tensor in outer_unbound)
 
-    '''
-    def _slice_kv_at(
-            self,
-            start_idx: int,
-            end_idx: int,
-            kv_tensors: KVCache,
-            fmt: str,
-            device
-        ) -> KVCache:
-        """
-        Slice the kv cache of tokens between [start_idx:end_idx]
-        """
-        match fmt:
-            case "huggingface":
-                return tuple((kv[0][:, start_idx:end_idx, :].to(device), 
-                              kv[1][:, start_idx:end_idx, :].to(device)) 
-                             for kv in kv_tensors)
-            case "vllm":
-                return tuple((kv[0][start_idx:end_idx, :, :].to(device),
-                              kv[1][start_idx:end_idx, :, :].to(device))
-                             for kv in kv_tensors)
-            case _:
-                raise ValueError(f"Invalid format: {fmt}")
-    '''
     def _slice_kv_at(
         self,
         start_idx: int,
@@ -168,6 +140,7 @@ class LMCacheEngine:
         vllm format: [num_layer, 2, num_tokens, num_kv_head, head_size]
         huggingface format: [num_layer, 2, num_kv_head, num_tokens, head_size]
         """
+        # TODO: unused variable `device`
         match fmt:
             case "vllm":
                 return list(torch.split(kv_tensors[:, :, start_idx:, ...], self.chunk_size, dim=2))
@@ -273,23 +246,7 @@ class LMCacheEngine:
         assert len(kv_tensors) > 0, "Empty kv_tensors"
         assert len(tokens) == self._num_tokens_in_kv(kv_tensors, fmt), "Number of tokens in the kv cache does not match the input tokens"
 
-        # TODO: check shapes
-        
-        # HACK(Jiayi): reshape and concatenate `kv_tensors` into a big tensor
-        # Might be better to have a separate function for this
-        # @Jiayi: the next line should work:
         kv_tensors = self._tuple_kv_to_blob(kv_tensors)
-        #k_temp = []
-        #v_temp = []
-        #for kv_layer in kv_tensors:
-        #    k_temp.append(kv_layer[0])
-        #    v_temp.append(kv_layer[1])
-        #k_tensor_blob = torch.stack(k_temp)
-        #v_tensor_blob = torch.stack(v_temp)
-        #
-        ## kv_tensors: [num_layer, 2, num_tok, num_kv_head, head_size]
-        #kv_tensors = torch.stack((k_tensor_blob, v_tensor_blob))
-        #kv_tensors = kv_tensors.permute([1, 0, 2, 3, 4])
 
         ''' chunk the tokens and the kv caches '''
         chunk_hashes_and_kvs = self._make_chunks(tokens, kv_tensors, fmt, device=self.device, skip_existing=skip_existing)
@@ -300,13 +257,6 @@ class LMCacheEngine:
         end_make_chunks = time.perf_counter()
 
         ''' store them into the dictionary '''
-        #n_chunks = self.engine_.batched_put(
-        #        ((
-        #            self._make_key(chunk_hash, fmt), 
-        #            self._tuple_kv_to_blob(kv_chunk)
-        #        ) for chunk_hash, kv_chunk in chunk_hashes_and_kvs), 
-        #        blocking=blocking
-        #    )
         n_chunks = self.engine_.batched_put(
                 ((
                     self._make_key(chunk_hash, fmt), 

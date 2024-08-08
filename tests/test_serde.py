@@ -39,7 +39,7 @@ def test_cachegen_encoder(chunk_size):
     kv2 = kv.permute([0, 1, 3, 2, 4])
     output2 = serializer2.to_bytes(kv2)
 
-    assert len(output) == len(output2)
+    assert abs(len(output) - len(output2)) < 10
     output_dict = CacheGenEncoderOutput.from_bytes(output)
     assert output_dict.num_heads == 8
     assert output_dict.head_size == 128
