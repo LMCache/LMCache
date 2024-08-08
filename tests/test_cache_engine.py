@@ -100,22 +100,31 @@ def test_retrive_prefix(fmt, chunk_size, backend, autorelease):
     device = "cpu" if backend == "cpu" else "cuda"
     num_tokens = 2000
     new_num_tokens = 1000
-
+    print(fmt, chunk_size, backend)
+    t1 = time.perf_counter()
     tokens = generate_tokens(num_tokens, device)
     kv_cache = generate_kv_cache(num_tokens, fmt, device)
     new_tokens = generate_tokens(new_num_tokens, device)
     new_kv_cache = generate_kv_cache(new_num_tokens, fmt, device)
+    t2 = time.perf_counter()
+    print(f"init tensor takes {t2-t1}")
     
     ''' initialize the engine '''
     cfg = LMCacheEngineConfig.from_legacy(chunk_size = chunk_size, backend=backend)
     engine = autorelease(LMCacheEngine(cfg, dumb_metadata(fmt)))
-
+    t3 = time.perf_counter()
+    print(f"init engine takes {t3-t2}")
+    
     ''' test store '''
     engine.store(tokens, kv_cache)
-
+    t4 = time.perf_counter()
+    print(f"store takes {t4-t3}")
+    
     ''' test retrive '''
     retrived_cache, length = engine.retrive(torch.cat([tokens, new_tokens]), device)
-
+    t5 = time.perf_counter()
+    print(f"retrieve takes {t5-t4}")
+    
     expected_chunk_cnt = num_tokens // chunk_size
     expected_length = expected_chunk_cnt * chunk_size
     assert length == expected_length
@@ -130,7 +139,7 @@ def test_mixed_retrive(fmt, chunk_size, backend, autorelease):
     device = "cuda"
     num_tokens = 2000
     new_num_tokens = 1000
-
+    print(fmt, chunk_size, backend)
     tokens = generate_tokens(num_tokens, device)
     kv_cache = generate_kv_cache(num_tokens, fmt, device)
     new_tokens = generate_tokens(new_num_tokens, device)

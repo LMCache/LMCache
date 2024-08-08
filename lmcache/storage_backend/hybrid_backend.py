@@ -75,6 +75,9 @@ class LMCHybridBackend(LMCBackendInterface):
             value: torch.Tensor,
             blocking: bool = True,
         ):
+        # HACK(Jiayi): skip local cpu cache for now,
+        # local cpu cache can be activated with prefetching
+        # TODO(Jiayi): write-back/write through should determined by config
         self.local_store.put(key, value, blocking = True)
         self.remote_store.put(key, value, blocking)
     
