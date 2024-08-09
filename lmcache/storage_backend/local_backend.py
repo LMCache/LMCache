@@ -1,4 +1,6 @@
 from typing import Tuple, Optional, Iterator
+from safetensors import safe_open
+from safetensors.torch import save_file
 import re
 import io
 import torch
@@ -87,8 +89,11 @@ class LMCLocalBackend(LMCBackendInterface):
         return self.dict.get(key, None)
 
 
-# TODO(Jiayi): need to optimize disk loading
-# current impl. with "torch.load/save" might not be efficient
+# TODO(Jiayi): need to optimize disk saving/loading
+# current impl. with "safetensors" might not be efficient
+# but it is better than "torch.save/load"
+
+#TODO(Jiayi): need to support prefetch for disk
 class LMCLocalDiskBackend(LMCBackendInterface):
     """
     Cache engine for storing the KV cache of the tokens in the local disk.
@@ -108,7 +113,7 @@ class LMCLocalDiskBackend(LMCBackendInterface):
         self.path = config.local_device
         if not os.path.exists(self.path):
             os.makedirs(self.path)
-        self.filenames = set()
+        self.cache_metadata = {}
 
     def contains(
             self, 
@@ -123,7 +128,7 @@ class LMCLocalDiskBackend(LMCBackendInterface):
         Returns:
             True if the cache engine contains the key, False otherwise
         """
-        return key in self.filenames
+        return key in self.cache_metadata.keys()
 
     def _key_to_path(
         self,
@@ -162,9 +167,10 @@ class LMCLocalDiskBackend(LMCBackendInterface):
         """
         if not blocking:
             logger.warn("Non-blocking is not implemented for local backend")
-        self.filenames.add(key)
+        self.cache_metadata[key] = {'device': str(kv_chunk.device)}
         logger.info(f"Saving cache to {self._key_to_path(key)}")
-        torch.save(kv_chunk, self._key_to_path(key))
+        #torch.save(kv_chunk, self._key_to_path(key))
+        save_file({'kv_chunk': kv_chunk.contiguous()}, self._key_to_path(key))
 
 
     @_lmcache_nvtx_annotate
@@ -181,7 +187,12 @@ class LMCLocalDiskBackend(LMCBackendInterface):
             the kv cache of the token chunk, in the format of nested tuples
             None if the key is not found
         """
-        if key not in self.filenames:
+        if key not in self.cache_metadata.keys():
             return None
         
-        return torch.load(self._key_to_path(key))
+        with safe_open(
+            self._key_to_path(key), 
+            framework="pt", 
+            device=self.cache_metadata[key]['device']) as f:
+            return f.get_tensor('kv_chunk')    
+        #return torch.load(self._key_to_path(key))
