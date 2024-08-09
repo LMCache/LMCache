@@ -33,6 +33,8 @@ class LMCacheEngine:
         match self.config.local_device:
             case "cpu":
                 self.device = "cpu"
+            #TODO(Jiayi): Disk "uses" cuda device for now
+            #Need Heirachical support for gpu -> cpu -> disk
             case _:
                 self.device = "cuda"
         logger.info("Using device: %s", self.device)
@@ -84,6 +86,7 @@ class LMCacheEngine:
         Output:
             a generator of chunks of tokens, each with shape [chunk_size]
         """
+        # TODO(Jiayi): the following step can be parallelized
         for i in range(0, len(tokens), self.chunk_size):
             yield tokens[i:i+self.chunk_size].to(device)
 
@@ -119,6 +122,7 @@ class LMCacheEngine:
         kv_tensors = kv_tensors.permute([1, 0, 2, 3, 4])
         
         return kv_tensors
+
     def _blob_to_tuple_kv(
             self,
             blob: torch.Tensor,
@@ -128,6 +132,7 @@ class LMCacheEngine:
         """
         outer_unbound = torch.unbind(blob, dim=0)
         return tuple((inner_tensor[0], inner_tensor[1]) for inner_tensor in outer_unbound)
+
 
     def _slice_kv_at(
         self,
@@ -148,6 +153,7 @@ class LMCacheEngine:
                 return list(torch.split(kv_tensors[:, :, :, start_idx:, ...], self.chunk_size, dim=3))
             case _:
                 raise ValueError(f"Invalid format: {fmt}")
+
         
     def _chunk_kv(
             self, 
@@ -246,7 +252,9 @@ class LMCacheEngine:
         assert len(kv_tensors) > 0, "Empty kv_tensors"
         assert len(tokens) == self._num_tokens_in_kv(kv_tensors, fmt), "Number of tokens in the kv cache does not match the input tokens"
 
+
         kv_tensors = self._tuple_kv_to_blob(kv_tensors)
+
 
         ''' chunk the tokens and the kv caches '''
         chunk_hashes_and_kvs = self._make_chunks(tokens, kv_tensors, fmt, device=self.device, skip_existing=skip_existing)
@@ -257,6 +265,13 @@ class LMCacheEngine:
         end_make_chunks = time.perf_counter()
 
         ''' store them into the dictionary '''
+        #n_chunks = self.engine_.batched_put(
+        #        ((
+        #            self._make_key(chunk_hash, fmt), 
+        #            self._tuple_kv_to_blob(kv_chunk)
+        #        ) for chunk_hash, kv_chunk in chunk_hashes_and_kvs), 
+        #        blocking=blocking
+        #    )
         n_chunks = self.engine_.batched_put(
                 ((
                     self._make_key(chunk_hash, fmt), 
@@ -301,7 +316,7 @@ class LMCacheEngine:
         for chunk in retrival_iterator:
             if chunk is None:
                 break
-            retrived_kv_chunks.append(chunk)
+            retrived_kv_chunks.append(chunk.to(device))
         #retrived_kv_chunks: List[KVCache] = []
 
         #''' retrive the kv cache '''
@@ -331,7 +346,7 @@ class LMCacheEngine:
             return (), 0
 
         st2 = time.perf_counter()
-        ret = self._blob_to_tuple_kv(torch.cat(retrived_kv_chunks, dim=dim + 2).to(device))
+        ret = self._blob_to_tuple_kv(torch.cat(retrived_kv_chunks, dim=dim + 2))#.to(device))
         ed2 = time.perf_counter()
         logger.info(f"Concatenated {len(retrived_kv_chunks)} chunks -- elapsed time {ed2 - st2}")
         retrived_token_count = 0 if len(ret) == 0 else ret[0][0].shape[dim]
