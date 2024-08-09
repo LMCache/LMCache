@@ -1,5 +1,6 @@
 from lmcache.storage_backend.serde.serde import Serializer, Deserializer, SerializerDebugWrapper, DeserializerDebugWrapper
 from lmcache.storage_backend.serde.torch_serde import TorchSerializer, TorchDeserializer
+from lmcache.storage_backend.serde.safe_serde import SafeSerializer, SafeDeserializer
 from lmcache.storage_backend.serde.cachegen_decoder import CacheGenDeserializer
 from lmcache.storage_backend.serde.cachegen_encoder import CacheGenSerializer
 from lmcache.config import LMCacheEngineConfig, LMCacheEngineMetadata, GlobalConfig
@@ -7,6 +8,8 @@ from lmcache.config import LMCacheEngineConfig, LMCacheEngineMetadata, GlobalCon
 def CreateSerde(serde_type: str, config: LMCacheEngineConfig, metadata: LMCacheEngineMetadata):
     if serde_type == "torch":
         s, d = TorchSerializer(), TorchDeserializer()
+    elif serde_type == "safetensor":
+        s, d = SafeSerializer(), SafeDeserializer()
     elif serde_type == "cachegen":
         s, d = CacheGenSerializer(config, metadata), CacheGenDeserializer(config, metadata)
     else:
