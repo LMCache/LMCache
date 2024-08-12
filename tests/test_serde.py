@@ -6,6 +6,8 @@ from lmcache.storage_backend.serde.cachegen_encoder import CacheGenSerializer
 from lmcache.storage_backend.serde.cachegen_basics import CacheGenEncoderOutput
 from lmcache.storage_backend.serde.cachegen_decoder import CacheGenDeserializer
 
+#from lmcache.storage_backend.serde.safe_serde import SafeSerializer, SafeDeserializer
+
 def generate_kv_cache(num_tokens, fmt, device):
     ret = []
     num_layers = 32

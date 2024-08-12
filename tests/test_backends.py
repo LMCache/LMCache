@@ -46,8 +46,8 @@ def get_metadata():
     return LMCacheEngineMetadata("lmsys/longchat-7b-16k", 1, -1, "vllm")
             
 
-@pytest.mark.usefixtures("lmserver_process")
-def test_creation(autorelease):
+@pytest.mark.parametrize("lmserver_process", ["cpu", "remote_disk/"], indirect=True)
+def test_creation(autorelease, lmserver_process):
     config_local = LMCacheEngineConfig.from_defaults(local_device = "cuda", remote_url = None)
     config_remote = LMCacheEngineConfig.from_defaults(local_device = None, remote_url="lm://localhost:65000")
     config_hybrid = LMCacheEngineConfig.from_defaults(local_device = "cuda", remote_url="lm://localhost:65000")
@@ -66,8 +66,8 @@ def test_creation(autorelease):
         backend_fail = CreateStorageBackend(config_fail, get_metadata())
 
 @pytest.mark.parametrize("backend_type", ["local", "remote", "hybrid", "hybrid_pipelined"])
-@pytest.mark.usefixtures("lmserver_process")
-def test_backends(backend_type, autorelease):
+@pytest.mark.parametrize("lmserver_process", ["cpu", "remote_disk/"], indirect=True)
+def test_backends(backend_type, autorelease, lmserver_process):
     config = get_config(backend_type) 
     metadata = get_metadata()
     backend = autorelease(CreateStorageBackend(config, metadata))
@@ -86,8 +86,8 @@ def test_backends(backend_type, autorelease):
             assert torch.equal(value, retrived.to(value.device))
 
 @pytest.mark.parametrize("backend_type", ["local", "remote", "hybrid"])
-@pytest.mark.usefixtures("lmserver_process")
-def test_nonblocking_put(backend_type, autorelease):
+@pytest.mark.parametrize("lmserver_process", ["cpu", "remote_disk/"], indirect=True)
+def test_nonblocking_put(backend_type, autorelease, lmserver_process):
     config = get_config(backend_type) 
     metadata = get_metadata()
     backend = autorelease(CreateStorageBackend(config, metadata))
@@ -113,8 +113,8 @@ def test_nonblocking_put(backend_type, autorelease):
         if config.remote_serde == "torch":
             assert torch.equal(value, retrived.to(value.device))
 
-@pytest.mark.usefixtures("lmserver_process")
-def test_restart(autorelease):
+@pytest.mark.parametrize("lmserver_process", ["cpu", "remote_disk/"], indirect=True)
+def test_restart(autorelease, lmserver_process):
     config = get_config("hybrid") #LMCacheEngineConfig.from_defaults(local_device = "cuda", remote_url = None)
     metadata = get_metadata()
     backend = autorelease(CreateStorageBackend(config, metadata))

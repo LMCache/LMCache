@@ -68,6 +68,8 @@ perf-test.py
 # disk cache
 /remote_disk
 /local_disk
+/tests/local_disk
+/tests/remote_disk
 *.pt
 
 # random scripts

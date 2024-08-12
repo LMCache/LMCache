@@ -2,6 +2,9 @@ import pytest
 import time
 import os
 import torch
+import subprocess
+import shlex
+
 from lmcache.config import LMCacheEngineConfig, LMCacheEngineMetadata
 from lmcache.cache_engine import LMCacheEngine, LMCacheEngineBuilder
 
@@ -64,9 +67,11 @@ def check_kv_cache_equal(left, right, num_tokens, fmt):
                 assert (left_v[:num_tokens, :, :] == right_v[:num_tokens, :, :]).all()
 
 @pytest.mark.parametrize("fmt", ["vllm", "huggingface"])
-@pytest.mark.parametrize("backend", ["cuda", "cpu", "redis://localhost:6379", "lm://localhost:65000"])
-@pytest.mark.usefixtures("lmserver_process")
-def test_same_retrive_store(fmt, backend, autorelease):
+@pytest.mark.parametrize("backend", ["cuda", "cpu", "file://local_disk/", "redis://localhost:6379", "lm://localhost:65000"])
+@pytest.mark.parametrize("remote_serde", ["torch", "safetensor"]) # lossless serde
+#@pytest.mark.usefixtures("lmserver_process")
+@pytest.mark.parametrize("lmserver_process", ["cpu", "remote_disk/"], indirect=True)
+def test_same_retrive_store(fmt, backend, remote_serde, autorelease, lmserver_process):
     device = "cpu" if backend == "cpu" else "cuda"
     num_tokens = 2000
 
@@ -74,7 +79,7 @@ def test_same_retrive_store(fmt, backend, autorelease):
     kv_cache = generate_kv_cache(num_tokens, fmt, device)
     
     ''' initialize the engine '''
-    cfg = LMCacheEngineConfig.from_legacy(chunk_size = 256, backend = backend)
+    cfg = LMCacheEngineConfig.from_legacy(chunk_size = 256, backend = backend, remote_serde = remote_serde)
     engine = autorelease(LMCacheEngine(cfg, dumb_metadata(fmt)))
 
     ''' test retrive empty '''
@@ -90,13 +95,17 @@ def test_same_retrive_store(fmt, backend, autorelease):
 
     assert length == num_tokens
     check_kv_cache_equal(retrived_cache, kv_cache, num_tokens, fmt)
+    
+    '''erase local cache'''
+    if backend in ["local_disk/"]:
+        subprocess.run(shlex.split(f"rm -rf {device}"))
 
 
 @pytest.mark.parametrize("fmt", ["vllm", "huggingface"])
 @pytest.mark.parametrize("chunk_size", [128, 256])
-@pytest.mark.parametrize("backend", ["cuda", "redis://localhost:6379", "lm://localhost:65000"])
-@pytest.mark.usefixtures("lmserver_process")
-def test_retrive_prefix(fmt, chunk_size, backend, autorelease):
+@pytest.mark.parametrize("backend", ["cuda", "cpu", "file://local_disk/", "redis://localhost:6379", "lm://localhost:65000"])
+@pytest.mark.parametrize("lmserver_process", ["cpu"], indirect=True)
+def test_retrive_prefix(fmt, chunk_size, backend, autorelease, lmserver_process):
     device = "cpu" if backend == "cpu" else "cuda"
     num_tokens = 2000
     new_num_tokens = 1000
@@ -129,13 +138,16 @@ def test_retrive_prefix(fmt, chunk_size, backend, autorelease):
     expected_length = expected_chunk_cnt * chunk_size
     assert length == expected_length
     check_kv_cache_equal(retrived_cache, kv_cache, expected_length, fmt)
+    
+    if backend in ["local_disk/"]:
+        subprocess.run(shlex.split(f"rm -rf {device}"))
 
 
 @pytest.mark.parametrize("fmt", ["vllm", "huggingface"])
 @pytest.mark.parametrize("chunk_size", [128, 256])
 @pytest.mark.parametrize("backend", ["cuda", "redis://localhost:6379", "lm://localhost:65000"])
-@pytest.mark.usefixtures("lmserver_process")
-def test_mixed_retrive(fmt, chunk_size, backend, autorelease):
+@pytest.mark.parametrize("lmserver_process", ["cpu"], indirect=True)
+def test_mixed_retrive(fmt, chunk_size, backend, autorelease, lmserver_process):
     device = "cuda"
     num_tokens = 2000
     new_num_tokens = 1000
@@ -176,6 +188,10 @@ def test_mixed_retrive(fmt, chunk_size, backend, autorelease):
     retrived_cache, length = engine.retrive(final_tokens, device)
     assert length == num_tokens + new_num_tokens
     check_kv_cache_equal(retrived_cache, final_kv_cache, length, fmt)
+    
+    '''destroy local disk path'''
+    if backend in ["local_disk/"]:
+        subprocess.run(shlex.split(f"rm -rf {device}"))
 
 @pytest.mark.parametrize("fmt", ["vllm", "huggingface"])
 def test_skipping(fmt, autorelease):

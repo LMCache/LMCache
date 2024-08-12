@@ -48,9 +48,12 @@ class LMCacheEngineConfig:
             case "cpu" | "cuda":
                 local_device = backend
                 remote_url = None
+            case path if re.match(r"file://(.*)/", path): #local disk directory
+                local_device = path
+                remote_url = None
             case url if re.match(r"(.*)://(.*):(\d+)", url):
                 local_device = None
-                remote_url = url 
+                remote_url = url
         return LMCacheEngineConfig(
                 chunk_size, local_device, remote_url, remote_serde,
                 pipelined_backend)

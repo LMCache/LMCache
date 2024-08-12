@@ -11,13 +11,13 @@ def random_string(N):
     return ''.join(random.choices(string.ascii_uppercase + string.digits, k=N))
 
 
-@pytest.mark.usefixtures("lmserver_process")
+@pytest.mark.parametrize("lmserver_process", ["cpu"], indirect=True)
 @pytest.mark.parametrize("url",
                          [
                              "redis://localhost:6379",
                              "lm://localhost:65000",
                          ])
-def test_lm_connector(url, autorelease):
+def test_lm_connector(url, autorelease, lmserver_process):
     url = "lm://localhost:65000"
     connector = autorelease(CreateConnector(url))
     
