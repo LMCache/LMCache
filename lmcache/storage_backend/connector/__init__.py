@@ -11,7 +11,7 @@ def CreateConnector(url: str) -> RemoteConnector:
     """
     m = re.match(r"(.*)://(.*):(\d+)", url)
     if m is None:
-        raise ValueError(f"Invalid remote url {config.remote_url}")
+        raise ValueError(f"Invalid remote url {url}")
     connector_type, host, port = m.group(1), m.group(2), int(m.group(3))
     connector = None
 
@@ -21,6 +21,6 @@ def CreateConnector(url: str) -> RemoteConnector:
         case "lm":
             connector = LMCServerConnector(host, port)
         case _:
-            raise ValueError(f"Invalid remote url {config.remote_url} -- Unknown connector type {connector_type}")
+            raise ValueError(f"Unknown connector type {connector_type} (url is: {url})")
 
     return connector if not GlobalConfig.is_debug() else RemoteConnectorDebugWrapper(connector)
