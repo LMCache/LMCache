@@ -97,8 +97,8 @@ def test_same_retrive_store(fmt, backend, remote_serde, autorelease, lmserver_pr
     check_kv_cache_equal(retrived_cache, kv_cache, num_tokens, fmt)
     
     '''erase local cache'''
-    if backend in ["local_disk/"]:
-        subprocess.run(shlex.split(f"rm -rf {device}"))
+    if backend in ["file://local_disk/"]:
+        subprocess.run(shlex.split(f"rm -rf local_disk/"))
 
 
 @pytest.mark.parametrize("fmt", ["vllm", "huggingface"])
@@ -139,8 +139,8 @@ def test_retrive_prefix(fmt, chunk_size, backend, autorelease, lmserver_process)
     assert length == expected_length
     check_kv_cache_equal(retrived_cache, kv_cache, expected_length, fmt)
     
-    if backend in ["local_disk/"]:
-        subprocess.run(shlex.split(f"rm -rf {device}"))
+    if backend in ["file://local_disk/"]:
+        subprocess.run(shlex.split(f"rm -rf local_disk/"))
 
 
 @pytest.mark.parametrize("fmt", ["vllm", "huggingface"])
@@ -190,8 +190,8 @@ def test_mixed_retrive(fmt, chunk_size, backend, autorelease, lmserver_process):
     check_kv_cache_equal(retrived_cache, final_kv_cache, length, fmt)
     
     '''destroy local disk path'''
-    if backend in ["local_disk/"]:
-        subprocess.run(shlex.split(f"rm -rf {device}"))
+    if backend in ["file://local_disk/"]:
+        subprocess.run(shlex.split(f"rm -rf local_disk/"))
 
 @pytest.mark.parametrize("fmt", ["vllm", "huggingface"])
 def test_skipping(fmt, autorelease):
