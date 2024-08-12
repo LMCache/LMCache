@@ -16,6 +16,6 @@ set -xe
 pip install -e third_party/torchac_cuda
 pip install -e .
 
-git clone https://github.com/LMCache/lmcache-server
+git clone --branch test https://github.com/LMCache/lmcache-server
 pip install -e lmcache-server/
 
