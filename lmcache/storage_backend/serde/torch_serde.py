@@ -26,4 +26,4 @@ class TorchDeserializer(Deserializer):
             return torch.load(f)
 
     def from_bytes(self, b: bytes) -> torch.Tensor:
-        return self.from_bytes_debug(b)
+        return self.from_bytes_normal(b)

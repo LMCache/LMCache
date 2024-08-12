@@ -21,9 +21,10 @@ class SafeSerializer(Serializer):
 class SafeDeserializer(Deserializer):
     def __init__(self):
         super().__init__()
+        self.debug = GlobalConfig.is_debug()
 
     def from_bytes_normal(self, b: Union[bytearray, bytes]) -> torch.Tensor:
-        return load(b)["tensor_bytes"]
+        return load(bytes(b))["tensor_bytes"]
 
     # TODO(Jiayi): please verify the input type
     # bytearray from `receive_all()` in connector?
