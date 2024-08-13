@@ -74,17 +74,14 @@ class LMCacheEngineConfig:
         
         match local_device:
             case "cpu" | "cuda":
-                local_device = backend
-                remote_url = None
+                pass
             case path if re.match(r"file://(.*)/", path): #local disk directory
                 local_device = path[7:]
-                remote_url = None
             case _:
                 raise ValueError(f"Invalid local storage device: {local_deivce}")
         match remote_url:
             case url if re.match(r"(.*)://(.*):(\d+)", url):
-                local_device = None
-                remote_url = url
+                pass
             case _:
                 raise ValueError(f"Invalid remote storage url: {remote_url}")
                 
