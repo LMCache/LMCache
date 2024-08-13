@@ -65,6 +65,16 @@ perf-test.py
 /examples/example_local.yaml
 /examples/openai_chat_completion_client_local.py
 
+# disk cache
+/remote_disk
+/local_disk
+/tests/local_disk
+/tests/remote_disk
+*.pt
+
+# random scripts
+/misc_scripts
+
 # nvtx profile report
 *.nsys-rep
 *.sqlite

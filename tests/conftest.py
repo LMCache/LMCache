@@ -31,9 +31,12 @@ def mock_redis():
         yield mock
 
 @pytest.fixture(scope='module')  
-def lmserver_process():
+def lmserver_process(request):
+    # Specify remote device
+    device = request.param
+    
     # Start the process
-    proc = subprocess.Popen(shlex.split("python3 -m lmcache_server.server localhost 65000"))
+    proc = subprocess.Popen(shlex.split(f"python3 -m lmcache_server.server localhost 65000 {device}"))
 
     # Wait for lmcache process to start
     time.sleep(5) 
@@ -44,6 +47,10 @@ def lmserver_process():
     # Terminate the process
     proc.terminate()
     proc.wait()
+    
+    # Destroy remote disk path
+    if device not in ["cpu"]:
+        subprocess.run(shlex.split(f"rm -rf {device}"))
 
 @pytest.fixture(scope="function")
 def autorelease(request):

@@ -48,9 +48,12 @@ class LMCacheEngineConfig:
             case "cpu" | "cuda":
                 local_device = backend
                 remote_url = None
+            case path if re.match(r"file://(.*)/", path): #local disk directory
+                local_device = path[7:]
+                remote_url = None
             case url if re.match(r"(.*)://(.*):(\d+)", url):
                 local_device = None
-                remote_url = url 
+                remote_url = url
         return LMCacheEngineConfig(
                 chunk_size, local_device, remote_url, remote_serde,
                 pipelined_backend)
@@ -68,6 +71,20 @@ class LMCacheEngineConfig:
         remote_url = config.get("remote_url", None)
         remote_serde = config.get("remote_serde", "torch")
         pipelined_backend = config.get("pipelined_backend", False)
+        
+        match local_device:
+            case "cpu" | "cuda":
+                pass
+            case path if re.match(r"file://(.*)/", path): #local disk directory
+                local_device = path[7:]
+            case _:
+                raise ValueError(f"Invalid local storage device: {local_deivce}")
+        match remote_url:
+            case url if re.match(r"(.*)://(.*):(\d+)", url):
+                pass
+            case _:
+                raise ValueError(f"Invalid remote storage url: {remote_url}")
+                
         return LMCacheEngineConfig(
                 chunk_size, local_device, remote_url, remote_serde,
                 pipelined_backend)
