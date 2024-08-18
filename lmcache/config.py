@@ -73,13 +73,16 @@ class LMCacheEngineConfig:
         pipelined_backend = config.get("pipelined_backend", False)
         
         match local_device:
-            case "cpu" | "cuda":
+            case "cpu" | "cuda" | None:
                 pass
             case path if re.match(r"file://(.*)/", path): #local disk directory
                 local_device = path[7:]
             case _:
                 raise ValueError(f"Invalid local storage device: {local_deivce}")
+
         match remote_url:
+            case None:
+                pass
             case url if re.match(r"(.*)://(.*):(\d+)", url):
                 pass
             case _:

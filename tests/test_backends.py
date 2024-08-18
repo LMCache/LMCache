@@ -1,11 +1,12 @@
 import pytest
+from pathlib import Path
 import time
 import torch
 import random
 import string
 
 from lmcache.storage_backend import CreateStorageBackend
-from lmcache.storage_backend.local_backend import LMCLocalBackend
+from lmcache.storage_backend.local_backend import LMCLocalBackend, LMCLocalDiskBackend
 from lmcache.storage_backend.remote_backend import LMCRemoteBackend
 from lmcache.storage_backend.hybrid_backend import LMCHybridBackend
 from lmcache.config import LMCacheEngineConfig, LMCacheEngineMetadata
@@ -44,7 +45,6 @@ def get_config(t):
 
 def get_metadata():
     return LMCacheEngineMetadata("lmsys/longchat-7b-16k", 1, -1, "vllm")
-            
 
 @pytest.mark.parametrize("lmserver_process", ["cpu", "remote_disk/"], indirect=True)
 def test_creation(autorelease, lmserver_process):
@@ -62,6 +62,30 @@ def test_creation(autorelease, lmserver_process):
     assert isinstance(backend_hybrid, LMCHybridBackend)
 
     config_fail = LMCacheEngineConfig.from_defaults(local_device = None, remote_url = None)
+    with pytest.raises(ValueError):
+        backend_fail = CreateStorageBackend(config_fail, get_metadata())
+
+@pytest.mark.parametrize("lmserver_process", ["cpu"], indirect=True)
+def test_creation_from_file(autorelease, lmserver_process):
+    BASE_DIR = Path(__file__).parent
+
+    config_local = LMCacheEngineConfig.from_file(BASE_DIR / "data/test_creation_from_file/local.yaml")
+    config_disk = LMCacheEngineConfig.from_file(BASE_DIR / "data/test_creation_from_file/disk.yaml")
+    config_remote = LMCacheEngineConfig.from_file(BASE_DIR / "data/test_creation_from_file/remote.yaml")
+    config_hybrid = LMCacheEngineConfig.from_file(BASE_DIR / "data/test_creation_from_file/hybrid.yaml")
+    metadata = get_metadata()
+    
+    backend_local = autorelease(CreateStorageBackend(config_local, get_metadata()))
+    backend_disk = autorelease(CreateStorageBackend(config_disk, get_metadata()))
+    backend_remote = autorelease(CreateStorageBackend(config_remote, get_metadata()))
+    backend_hybrid = autorelease(CreateStorageBackend(config_hybrid, get_metadata()))
+
+    assert isinstance(backend_local, LMCLocalBackend)
+    assert isinstance(backend_disk, LMCLocalDiskBackend)
+    assert isinstance(backend_remote, LMCRemoteBackend)
+    assert isinstance(backend_hybrid, LMCHybridBackend)
+
+    config_fail = LMCacheEngineConfig.from_file(BASE_DIR / "data/test_creation_from_file/fail.yaml")
     with pytest.raises(ValueError):
         backend_fail = CreateStorageBackend(config_fail, get_metadata())
 
