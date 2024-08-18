@@ -1,0 +1,4 @@
+chunk_size: 256
+
+# Whether retrieve() is pipelined or not
+pipelined_backend: False
