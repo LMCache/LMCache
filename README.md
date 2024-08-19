@@ -34,7 +34,7 @@ Please fill `Huggingface cache dir on your local machine` and `Your huggingface 
 
 You can also change the `model` variable to use different models.
 
-The vLLM engines are ready after you see the logs like this:
+The vLLM engine is ready after you see the logs like this:
 ```
 INFO:     Started server process [865615]
 INFO:     Waiting for application startup.
@@ -43,6 +43,7 @@ INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
 ```
 
 **Step 3:** Run demo application
+
 You can now run the demo application in the LMCache repo. Please execute the following commands on the server
 ```bash
 git clone https://github.com/LMCache/LMCache
