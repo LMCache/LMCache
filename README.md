@@ -77,7 +77,7 @@ docker pull apostacyh/vllm:lmcache-0.1.0
 
 **Step 2:** Start LMCache backend server 
 ```bash
-docker run --name apostacyh/lmcache-server:0.1.0 --network host -d lmcache-server:latest 0.0.0.0 65432
+docker run --name lmcache-server --network host -d apostacyh/lmcache-server:0.1.0 0.0.0.0 65432
 ```
 
 **Step 3:** start 2 vLLM instances
