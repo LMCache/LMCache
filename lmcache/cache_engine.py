@@ -150,7 +150,7 @@ class LMCacheEngine:
             case "vllm":
                 return [x.contiguous() for x in list(torch.split(kv_tensors[:, :, start_idx:, ...], self.chunk_size, dim=2))]
             case "huggingface":
-                return [x.contiguous() for x in list(torch.split(kv_tensors[:, :, start_idx:, ...], self.chunk_size, dim=3))]
+                return [x.contiguous() for x in list(torch.split(kv_tensors[:, :, :, start_idx:, ...], self.chunk_size, dim=3))]
             case _:
                 raise ValueError(f"Invalid format: {fmt}")
 
