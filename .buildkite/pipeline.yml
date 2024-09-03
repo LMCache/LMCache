@@ -11,10 +11,10 @@ steps:
       conda activate buildkite
       bash .buildkite/install-lmcache.sh
       coverage run --source=lmcache/ -m pytest -v --junitxml=junit/test-results.xml 
-      coverage report -m > coverage.report
+      coverage report -m > coverage.txt
     artifact_paths:
       - junit/test-results.xml
-      - coverage.report
+      - coverage.txt
 
   - label: ":junit: Annotate"
     depends_on: ["pytest"]
