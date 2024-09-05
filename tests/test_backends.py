@@ -157,4 +157,4 @@ def test_restart(autorelease, lmserver_process):
         retrived = backend.get(key)
         assert value.shape == retrived.shape
         if config.remote_serde == "torch":
-            assert (value == retrived).all()
+            assert torch.equal(value, retrived.to(value.device))

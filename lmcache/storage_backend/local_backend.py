@@ -80,9 +80,9 @@ class LMCLocalBackend(LMCBackendInterface):
         key,
         kv_chunk
     ):
-        kv_chunk_cpu = kv_chunk.to(self.device)
+        kv_chunk_local = kv_chunk.to(self.device)
         self.update_lock.acquire()
-        self.dict[key] = kv_chunk_cpu
+        self.dict[key] = kv_chunk_local
         self.update_lock.release()
     
     def put(
