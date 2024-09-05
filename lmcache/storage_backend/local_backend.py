@@ -8,6 +8,7 @@ import redis
 import os
 import threading
 import queue
+import time
 
 from lmcache.utils import CacheEngineKey, KVCache
 from lmcache.config import LMCacheEngineConfig
@@ -45,6 +46,8 @@ class LMCLocalBackend(LMCBackendInterface):
             ) 
         self.put_thread.start()
         self.update_lock = threading.Lock()
+        #self.async_put_flag = False
+        #self.put_events = {}
         
 
     def contains(
@@ -66,24 +69,34 @@ class LMCLocalBackend(LMCBackendInterface):
     def put_worker(
             self,
     ):
-        put_stream = torch.cuda.Stream()
         while True:
             item = self.put_queue.get()
             if isinstance(item, LocalBackendEndSignal):
                 break
             key, value = item
-            with torch.cuda.stream(put_stream):
-                self.put_blocking(key, value)
+            #with torch.cuda.stream(self.put_stream):
+            self.put_nonblocking(key, value)
 
+    def put_nonblocking(
+        self,
+        key,
+        kv_chunk
+    ):
+        # TODO(Jiayi): torch.cuda.synchronize() needs to be removed
+        # to enable actual async put
+        kv_chunk_local = kv_chunk.to(self.device, non_blocking=True)
+        torch.cuda.synchronize()
+        self.update_lock.acquire()
+        self.dict[key] = kv_chunk_local
+        self.update_lock.release()
+    
     def put_blocking(
         self,
         key,
         kv_chunk
     ):
-        kv_chunk_local = kv_chunk.to(self.device)
-        self.update_lock.acquire()
-        self.dict[key] = kv_chunk_local
-        self.update_lock.release()
+        self.dict[key] = kv_chunk.to(self.device, non_blocking=True)
+        torch.cuda.synchronize()
     
     def put(
             self, 
@@ -104,7 +117,6 @@ class LMCLocalBackend(LMCBackendInterface):
         Note:
             The KV cache should NOT have the "batch" dimension.
         """
-        self.put_blocking(key, kv_chunk)
         if blocking:
             self.put_blocking(key, kv_chunk)
         else:
@@ -126,6 +138,9 @@ class LMCLocalBackend(LMCBackendInterface):
             the kv cache of the token chunk, in the format of nested tuples
             None if the key is not found
         """
+        #if self.async_put_flag:
+        #    while (not self.put_events[key].is_set()):
+        #        time.sleep(0.001)
         return self.dict.get(key, None)
 
     def close(self):
