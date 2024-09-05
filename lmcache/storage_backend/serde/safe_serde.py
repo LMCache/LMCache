@@ -15,7 +15,7 @@ class SafeSerializer(Serializer):
         super().__init__()
 
     def to_bytes(self, t: torch.Tensor) -> bytes:
-        return save({"tensor_bytes": t.contiguous()})
+        return save({"tensor_bytes": t.cpu().contiguous()})
 
 
 class SafeDeserializer(Deserializer):

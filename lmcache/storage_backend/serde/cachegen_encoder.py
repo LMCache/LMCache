@@ -337,16 +337,6 @@ class CacheGenSerializer(Serializer):
         Returns:
             bytes: the serialized bytes
         """
-        # Temporary fix for issue #83: encoder will have the default device 0 
-        # on all the ray workers. Need to set it to the correct device. 
-        # Also need to figure out why this happens.
-        if torch.cuda.current_device != tensor.device:
-            torch.cuda.set_device(tensor.device)
-        if tensor.device != self.key_bins.device:
-            self.key_bins = self.key_bins.to(tensor.device)
-        if tensor.device != self.value_bins.device:
-            self.value_bins = self.value_bins.to(tensor.device)
-
         # TODO: permute is expensive here, need a better way to do it at lower level
         if self.fmt == "huggingface":
             tensor = tensor.permute(0, 1, 3, 2, 4)

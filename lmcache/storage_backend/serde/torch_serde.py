@@ -14,7 +14,7 @@ class TorchSerializer(Serializer):
 
     def to_bytes(self, t: torch.Tensor) -> bytes:
         with io.BytesIO() as f:
-            torch.save(t.clone().detach(), f)
+            torch.save(t.cpu().clone().detach(), f)
             return f.getvalue()
 
 class TorchDeserializer(Deserializer):

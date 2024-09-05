@@ -34,6 +34,12 @@ def do_dequantize(t: torch.Tensor, bins: torch.Tensor, maxtensors: torch.Tensor)
     return t
 
 @_lmcache_nvtx_annotate
+def bytes_to_tensor(bs: bytes, device="cuda") -> torch.Tensor:
+    np_array = np.frombuffer(bs, dtype=np.uint8)
+    concated_string = torch.from_numpy(np_array).to(device)
+    return concated_string
+
+@_lmcache_nvtx_annotate
 def recombine_bytes(bytes_tensor, output_lengths) -> torch.Tensor:
     output_buffer_size = CGBasics.CACHEGEN_GPU_MAX_TOKENS_PER_CHUNK
     offsets = output_lengths.flatten().cumsum(0).roll(1).reshape(output_lengths.shape)
@@ -53,6 +59,13 @@ def decode_chunk(
     Write the decode output in target_buffer
     Expected shape: [nlayers (kv in total), ntokens, nchannels]
     """
+    #recombined_output = recombine_bytes(bytes_to_tensor(data_chunk.bytestream), data_chunk.bytestream_lengths)
+    #torchac_cuda.decode_fast_new(
+    #        cdf,
+    #        recombined_output,
+    #        data_chunk.bytestream_lengths,
+    #        target_buffer)
+    #bytes_tensor = bytes_to_tensor(data_chunk.bytestream)
     bytes_tensor = data_chunk.bytestream
     length_prefsum = data_chunk.bytestream_lengths.flatten().cumsum(0).reshape(data_chunk.bytestream_lengths.shape)
     torchac_cuda.decode_fast_prefsum(
@@ -142,16 +155,6 @@ class CacheGenDeserializer(Deserializer):
                 ntokens,
                 self.get_output_buffer(encoder_output.cdf.shape[0] // 2, encoder_output.cdf.shape[1], ntokens)
             )
-
-        # Temporary fix for #83: change the device of key_bins and value_bins to the device of key and value
-        # This reqiures a long-term fix in the future. Currently, CacheGenGPUEncoderOutput has implicit device in itself.
-        # More specifically, if the encoder encodes the tensor on GPU0, the from_bytes will also return a tensor on GPU0
-        # We may want to dyanmically configure the device based on config and metadata in the future
-        if self.key_bins.device != key.device:
-            self.key_bins = self.key_bins.to(key.device)
-
-        if self.value_bins.device != value.device:
-            self.value_bins = self.value_bins.cuda()
 
         key = do_dequantize(key, self.key_bins, encoder_output.max_tensors_key)
         value = do_dequantize(value, self.value_bins, encoder_output.max_tensors_value)

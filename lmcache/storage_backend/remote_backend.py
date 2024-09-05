@@ -146,7 +146,7 @@ class LMCRemoteBackend(LMCBackendInterface):
         if blocking:
             self.put_blocking(key, kv_chunk)
         else:
-            self.put_queue.put((key, kv_chunk.clone()))
+            self.put_queue.put((key, kv_chunk))
 
 
     @_lmcache_nvtx_annotate

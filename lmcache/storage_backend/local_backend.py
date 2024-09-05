@@ -6,6 +6,8 @@ import io
 import torch
 import redis
 import os
+import threading
+import queue
 
 from lmcache.utils import CacheEngineKey, KVCache
 from lmcache.config import LMCacheEngineConfig
@@ -14,6 +16,9 @@ from lmcache.logging import init_logger
 from lmcache.utils import _lmcache_nvtx_annotate
 
 logger = init_logger(__name__)
+
+class LocalBackendEndSignal:
+    pass
 
 class LMCLocalBackend(LMCBackendInterface):
     """
@@ -32,6 +37,15 @@ class LMCLocalBackend(LMCBackendInterface):
         self.chunk_size = config.chunk_size 
         self.config = config
         self.dict = {}
+        self.device = config.local_device
+        
+        self.put_queue = queue.Queue()
+        self.put_thread = threading.Thread(
+                target=self.put_worker, args=()
+            ) 
+        self.put_thread.start()
+        self.update_lock = threading.Lock()
+        
 
     def contains(
             self, 
@@ -47,7 +61,30 @@ class LMCLocalBackend(LMCBackendInterface):
             True if the cache engine contains the key, False otherwise
         """
         return key in self.dict
+    
+    @_lmcache_nvtx_annotate
+    def put_worker(
+            self,
+    ):
+        put_stream = torch.cuda.Stream()
+        while True:
+            item = self.put_queue.get()
+            if isinstance(item, LocalBackendEndSignal):
+                break
+            key, value = item
+            with torch.cuda.stream(put_stream):
+                self.put_blocking(key, value)
 
+    def put_blocking(
+        self,
+        key,
+        kv_chunk
+    ):
+        kv_chunk_cpu = kv_chunk.to(self.device)
+        self.update_lock.acquire()
+        self.dict[key] = kv_chunk_cpu
+        self.update_lock.release()
+    
     def put(
             self, 
             key: CacheEngineKey,
@@ -67,9 +104,12 @@ class LMCLocalBackend(LMCBackendInterface):
         Note:
             The KV cache should NOT have the "batch" dimension.
         """
-        if not blocking:
-            logger.warning("Non-blocking is not implemented for local backend")
-        self.dict[key] = kv_chunk
+        self.put_blocking(key, kv_chunk)
+        if blocking:
+            self.put_blocking(key, kv_chunk)
+        else:
+            #self.put_blocking(key, kv_chunk)
+            self.put_queue.put((key, kv_chunk))
 
 
     @_lmcache_nvtx_annotate
@@ -88,6 +128,14 @@ class LMCLocalBackend(LMCBackendInterface):
         """
         return self.dict.get(key, None)
 
+    def close(self):
+        if self.put_thread is not None and self.put_thread.is_alive():
+            self.put_queue.put(LocalBackendEndSignal())
+            self.put_thread.join()
+            logger.info("Closed the put worker in local disk backend")
+    
+    def __del__(self):
+        self.close()
 
 # TODO(Jiayi): need to optimize disk saving/loading
 # current impl. with "safetensors" might not be efficient
@@ -115,6 +163,18 @@ class LMCLocalDiskBackend(LMCBackendInterface):
         if not os.path.exists(self.path):
             os.makedirs(self.path)
         self.cache_metadata = {}
+        
+        # TODO(Jiayi): the following async put code is repeated in all backends
+        # Please consider use a parent class that can be inherited by all (local) backends
+        # This should be also be helpful for more flexible heirarchical backends
+        # For async put
+        self.put_queue = queue.Queue()
+        self.put_thread = threading.Thread(
+                target=self.put_worker, args=()
+            ) 
+        self.put_thread.start()
+        self.update_lock = threading.Lock()
+
 
     def contains(
             self, 
@@ -145,6 +205,31 @@ class LMCLocalDiskBackend(LMCBackendInterface):
             returns the path name
         """
         return self.path + key.to_string().replace("/","-") + ".pt"
+    
+    @_lmcache_nvtx_annotate
+    def put_worker(
+            self,
+    ):
+        put_stream = torch.cuda.Stream()
+        while True:
+            item = self.put_queue.get()
+            if isinstance(item, LocalBackendEndSignal):
+                break
+            key, value = item
+            with torch.cuda.stream(put_stream):
+                self.put_blocking(key, value)
+    
+    def put_blocking(
+        self,
+        key: CacheEngineKey,
+        kv_chunk: KVCache,
+    ) -> None:
+        logger.info(f"Saving cache to {self._key_to_path(key)}")
+        # The following order matters of `save_file` and `update dictionary` matters
+        save_file({'kv_chunk': kv_chunk}, self._key_to_path(key))
+        self.update_lock.acquire()
+        self.cache_metadata[key] = {'device': str(kv_chunk.device)}
+        self.update_lock.release()
         
     
     def put(
@@ -166,13 +251,11 @@ class LMCLocalDiskBackend(LMCBackendInterface):
         Note:
             The KV cache should NOT have the "batch" dimension.
         """
-        if not blocking:
-            logger.warn("Non-blocking is not implemented for local backend")
-        self.cache_metadata[key] = {'device': str(kv_chunk.device)}
-        logger.info(f"Saving cache to {self._key_to_path(key)}")
-        #torch.save(kv_chunk, self._key_to_path(key))
-        save_file({'kv_chunk': kv_chunk.contiguous()}, self._key_to_path(key))
-
+        if blocking:
+            self.put_blocking(key, kv_chunk)
+        else:
+            self.put_queue.put((key, kv_chunk))
+        
 
     @_lmcache_nvtx_annotate
     def get(
@@ -197,3 +280,12 @@ class LMCLocalDiskBackend(LMCBackendInterface):
             device=self.cache_metadata[key]['device']) as f:
             return f.get_tensor('kv_chunk')    
         #return torch.load(self._key_to_path(key))
+    
+    def close(self):
+        if self.put_thread is not None and self.put_thread.is_alive():
+            self.put_queue.put(LocalBackendEndSignal())
+            self.put_thread.join()
+            logger.info("Closed the put worker in local disk backend")
+    
+    def __del__(self):
+        self.close()
