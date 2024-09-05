@@ -46,6 +46,8 @@ class LMCLocalBackend(LMCBackendInterface):
             ) 
         self.put_thread.start()
         self.update_lock = threading.Lock()
+        self.use_pin_memory = True
+        logger.info(f"Using pinned cpu memory: {self.use_pin_memory}")
         #self.async_put_flag = False
         #self.put_events = {}
         
@@ -84,8 +86,12 @@ class LMCLocalBackend(LMCBackendInterface):
     ):
         # TODO(Jiayi): torch.cuda.synchronize() needs to be removed
         # to enable actual async put
-        kv_chunk_local = kv_chunk.to(self.device, non_blocking=True)
-        torch.cuda.synchronize()
+        # torch.cuda.synchronize() may disturb inference engine in inference engine
+        if self.use_pin_memory:
+            kv_chunk_local = kv_chunk.to(self.device, non_blocking=True)
+            torch.cuda.synchronize()
+        else:
+            kv_chunk_local = kv_chunk.to(self.device)
         self.update_lock.acquire()
         self.dict[key] = kv_chunk_local
         self.update_lock.release()
@@ -95,8 +101,11 @@ class LMCLocalBackend(LMCBackendInterface):
         key,
         kv_chunk
     ):
-        self.dict[key] = kv_chunk.to(self.device, non_blocking=True)
-        torch.cuda.synchronize()
+        if self.use_pin_memory:
+            self.dict[key] = kv_chunk.to(self.device, non_blocking=True)
+            torch.cuda.synchronize()
+        else:
+            self.dict[key] = kv_chunk.to(self.device)
     
     def put(
             self, 
