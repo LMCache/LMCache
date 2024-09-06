@@ -35,7 +35,8 @@ class LMCHybridBackend(LMCBackendInterface):
             self.remote_store = LMCPipelinedRemoteBackend(config, metadata)
         else:
             self.remote_store = LMCRemoteBackend(config, metadata)
-        
+        # NOTE: no need to add `dst_device` in hybrid bckend
+        # as the logic is handeled in local/remote backend
         # TODO add a configuration item to do this
         self._prefetch(metadata)
            

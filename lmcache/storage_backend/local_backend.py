@@ -46,8 +46,12 @@ class LMCLocalBackend(LMCBackendInterface):
             ) 
         self.put_thread.start()
         self.update_lock = threading.Lock()
+        
+        # FIXME(Jiayi): `use_pin_memory` and `dst_device` should be configged dynamically
         self.use_pin_memory = True
         logger.info(f"Using pinned cpu memory: {self.use_pin_memory}")
+        
+        self.dst_device = "cuda"
         #self.async_put_flag = False
         #self.put_events = {}
         
@@ -86,7 +90,7 @@ class LMCLocalBackend(LMCBackendInterface):
     ):
         # TODO(Jiayi): torch.cuda.synchronize() needs to be removed
         # to enable actual async put
-        # torch.cuda.synchronize() may disturb inference engine in inference engine
+        # torch.cuda.synchronize() may disturb inference engine
         if self.use_pin_memory:
             kv_chunk_local = kv_chunk.to(self.device, non_blocking=True)
             torch.cuda.synchronize()
@@ -150,7 +154,10 @@ class LMCLocalBackend(LMCBackendInterface):
         #if self.async_put_flag:
         #    while (not self.put_events[key].is_set()):
         #        time.sleep(0.001)
-        return self.dict.get(key, None)
+        kv_chunk = self.dict.get(key, None)
+        if kv_chunk is not None:
+            kv_chunk = kv_chunk.to(self.dst_device)
+        return kv_chunk
 
     def close(self):
         if self.put_thread is not None and self.put_thread.is_alive():
@@ -186,7 +193,7 @@ class LMCLocalDiskBackend(LMCBackendInterface):
         self.path = config.local_device
         if not os.path.exists(self.path):
             os.makedirs(self.path)
-        self.cache_metadata = {}
+        self.existing_keys = set()
         
         # TODO(Jiayi): the following async put code is repeated in all backends
         # Please consider use a parent class that can be inherited by all (local) backends
@@ -199,6 +206,8 @@ class LMCLocalDiskBackend(LMCBackendInterface):
         self.put_thread.start()
         self.update_lock = threading.Lock()
 
+        # TODO (Jiayi): please remove this hard code
+        self.dst_device = 'cuda'
 
     def contains(
             self, 
@@ -213,7 +222,7 @@ class LMCLocalDiskBackend(LMCBackendInterface):
         Returns:
             True if the cache engine contains the key, False otherwise
         """
-        return key in self.cache_metadata.keys()
+        return key in self.existing_keys
 
     def _key_to_path(
         self,
@@ -252,7 +261,7 @@ class LMCLocalDiskBackend(LMCBackendInterface):
         # The following order matters of `save_file` and `update dictionary` matters
         save_file({'kv_chunk': kv_chunk}, self._key_to_path(key))
         self.update_lock.acquire()
-        self.cache_metadata[key] = {'device': str(kv_chunk.device)}
+        self.existing_keys.add(key)
         self.update_lock.release()
         
     
@@ -295,14 +304,14 @@ class LMCLocalDiskBackend(LMCBackendInterface):
             the kv cache of the token chunk, in the format of nested tuples
             None if the key is not found
         """
-        if key not in self.cache_metadata.keys():
+        if key not in self.existing_keys:
             return None
         
         with safe_open(
             self._key_to_path(key), 
             framework="pt", 
-            device=self.cache_metadata[key]['device']) as f:
-            return f.get_tensor('kv_chunk')    
+            device=self.dst_device) as f:
+            return f.get_tensor('kv_chunk')
         #return torch.load(self._key_to_path(key))
     
     def close(self):

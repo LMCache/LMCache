@@ -260,7 +260,7 @@ class LMCacheEngine:
     @torch.no_grad()
     def retrive(self,
                 tokens: torch.Tensor,
-                device: str = 'cuda'
+                #device: str = 'cuda'
         ) -> Tuple[KVCache, int]:
         """
         Retrive the KV cache of the tokens from the cache engine. The retrived KV cache 
@@ -289,7 +289,7 @@ class LMCacheEngine:
         for chunk in retrival_iterator:
             if chunk is None:
                 break
-            retrived_kv_chunks.append(chunk.to(device))
+            retrived_kv_chunks.append(chunk)#.to(device))
 
         ''' concatenate the kv cache '''
         dim = None
@@ -306,7 +306,7 @@ class LMCacheEngine:
             return (), 0
 
         st2 = time.perf_counter()
-        ret = self._blob_to_tuple_kv(torch.cat(retrived_kv_chunks, dim=dim + 2))#.to(device))
+        ret = self._blob_to_tuple_kv(torch.cat(retrived_kv_chunks, dim=dim + 2))
         ed2 = time.perf_counter()
         logger.info(f"Concatenated {len(retrived_kv_chunks)} chunks -- elapsed time {ed2 - st2}")
         retrived_token_count = 0 if len(ret) == 0 else ret[0][0].shape[dim]
