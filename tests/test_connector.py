@@ -19,7 +19,6 @@ def random_string(N):
                              "lm://localhost:65000",
                          ])
 def test_lm_connector(url, autorelease, lmserver_process):
-    #url = "lm://localhost:65000"
     connector = autorelease(CreateConnector(url))
     
     assert not connector.exists("some-special-key-12345")
