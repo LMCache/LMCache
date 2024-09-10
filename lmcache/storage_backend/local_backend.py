@@ -133,7 +133,6 @@ class LMCLocalBackend(LMCBackendInterface):
         if blocking:
             self.put_blocking(key, kv_chunk)
         else:
-            #self.put_blocking(key, kv_chunk)
             self.put_queue.put((key, kv_chunk))
 
 
@@ -151,9 +150,6 @@ class LMCLocalBackend(LMCBackendInterface):
             the kv cache of the token chunk, in the format of nested tuples
             None if the key is not found
         """
-        #if self.async_put_flag:
-        #    while (not self.put_events[key].is_set()):
-        #        time.sleep(0.001)
         kv_chunk = self.dict.get(key, None)
         if kv_chunk is not None:
             kv_chunk = kv_chunk.to(self.dst_device)
@@ -312,7 +308,6 @@ class LMCLocalDiskBackend(LMCBackendInterface):
             framework="pt", 
             device=self.dst_device) as f:
             return f.get_tensor('kv_chunk')
-        #return torch.load(self._key_to_path(key))
     
     def close(self):
         if self.put_thread is not None and self.put_thread.is_alive():

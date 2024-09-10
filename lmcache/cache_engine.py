@@ -66,7 +66,6 @@ class LMCacheEngine:
     def _chunk_tokens(
             self, 
             tokens: torch.Tensor, 
-            #device
         ) -> Iterator[torch.Tensor]:
         """
         Chunk the tokens into chunks of size self.chunk_size.
@@ -260,7 +259,6 @@ class LMCacheEngine:
     @torch.no_grad()
     def retrive(self,
                 tokens: torch.Tensor,
-                #device: str = 'cuda'
         ) -> Tuple[KVCache, int]:
         """
         Retrive the KV cache of the tokens from the cache engine. The retrived KV cache 
