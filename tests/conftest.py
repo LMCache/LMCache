@@ -25,9 +25,24 @@ class MockRedis:
     def close(self):
         pass
 
+class MockRedisSentinel:
+    def __init__(self, hosts_and_ports, socket_timeout):
+        self.redis = MockRedis("", "")
+
+    def master_for(self, service_name, socket_timeout):
+        return self.redis
+
+    def slave_for(self, service_name, socket_timeout):
+        return self.redis
+
 @pytest.fixture(scope="function", autouse=True)
 def mock_redis():
     with patch('redis.Redis', new_callable=lambda: MockRedis) as mock:
+        yield mock
+
+@pytest.fixture(scope="function", autouse=True)
+def mock_redis_sentinel():
+    with patch('redis.Sentinel', new_callable=lambda: MockRedisSentinel) as mock:
         yield mock
 
 @pytest.fixture(scope='module')  
