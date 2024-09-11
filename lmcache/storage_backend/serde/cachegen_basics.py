@@ -123,4 +123,3 @@ class CacheGenGPUEncoderOutput:
         logger.debug(f"cdf device: {self.cdf.device}")
         logger.debug(f"max_tensors_key device: {self.max_tensors_key.device}")
         logger.debug(f"max_tensors_value device: {self.max_tensors_value.device}")
-

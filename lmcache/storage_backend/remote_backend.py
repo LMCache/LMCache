@@ -51,6 +51,9 @@ class LMCRemoteBackend(LMCBackendInterface):
                 target=self.put_worker, args=()
             ) 
         self.put_thread.start()
+        
+        # FIXME(Jiayi): please remove this hard code
+        self.dst_device = "cuda"
 
     @_lmcache_nvtx_annotate
     def put_worker(
@@ -146,7 +149,7 @@ class LMCRemoteBackend(LMCBackendInterface):
         if blocking:
             self.put_blocking(key, kv_chunk)
         else:
-            self.put_queue.put((key, kv_chunk.clone()))
+            self.put_queue.put((key, kv_chunk))
 
 
     @_lmcache_nvtx_annotate
@@ -164,7 +167,7 @@ class LMCRemoteBackend(LMCBackendInterface):
         if bs is None or len(bs) == 0:
             return None
 
-        return self.deserializer.from_bytes(bs)
+        return self.deserializer.from_bytes(bs).to(self.dst_device)
 
     def close(self):
         if self.put_thread is not None and self.put_thread.is_alive():
@@ -243,7 +246,7 @@ class LMCPipelinedRemoteBackend(LMCRemoteBackend):
 
             idx, data = item
             if data is not None:
-               result = self.deserializer.from_bytes(data)
+               result = self.deserializer.from_bytes(data).to(self.dst_device)
             else:
                result = None
             self.result_list.append(result)

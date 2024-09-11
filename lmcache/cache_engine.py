@@ -30,17 +30,9 @@ class LMCacheEngine:
         self.metadata = metadata
         self.chunk_size = config.chunk_size 
 
-        match self.config.local_device:
-            case "cpu":
-                self.device = "cpu"
-            #TODO(Jiayi): Disk "uses" cuda device for now
-            #Need Heirachical support for gpu -> cpu -> disk
-            case _:
-                self.device = "cuda"
-        logger.info("Using device: %s", self.device)
         self.engine_ = CreateStorageBackend(config, metadata)
         logger.debug(f"Current storage backend type {type(self.engine_)}")
-
+        
     def _make_key(
             self,
             chunk_hash: str,
@@ -74,7 +66,6 @@ class LMCacheEngine:
     def _chunk_tokens(
             self, 
             tokens: torch.Tensor, 
-            device
         ) -> Iterator[torch.Tensor]:
         """
         Chunk the tokens into chunks of size self.chunk_size.
@@ -88,7 +79,7 @@ class LMCacheEngine:
         """
         # TODO(Jiayi): the following step can be parallelized
         for i in range(0, len(tokens), self.chunk_size):
-            yield tokens[i:i+self.chunk_size].to(device)
+            yield tokens[i:i+self.chunk_size]#.to(device)
 
     def _prefix_hash(
             self, 
@@ -108,7 +99,6 @@ class LMCacheEngine:
         """
         Convert the nested tuple of kv tensors to a single big tensor with 2 extra dimensions
         """
-        #return torch.stack([torch.stack(inner_tuple, dim=0) for inner_tuple in kv_tensor], dim=0)
         k_temp = []
         v_temp = []
         for kv_layer in kv_tensors:
@@ -139,13 +129,11 @@ class LMCacheEngine:
         start_idx: int,
         kv_tensors: torch.Tensor,
         fmt: str,
-        device
     ) -> List[torch.Tensor]: 
         """
         vllm format: [num_layer, 2, num_tokens, num_kv_head, head_size]
         huggingface format: [num_layer, 2, num_kv_head, num_tokens, head_size]
         """
-        # TODO: unused variable `device`
         match fmt:
             case "vllm":
                 return [x.contiguous() for x in list(torch.split(kv_tensors[:, :, start_idx:, ...], self.chunk_size, dim=2))]
@@ -159,7 +147,6 @@ class LMCacheEngine:
             self, 
             kv_tensors: KVCache,
             fmt: str,
-            device
         ) -> Iterator[KVCache]:
         """
         Chunk the kv cache into chunks of size self.chunk_size.
@@ -172,37 +159,31 @@ class LMCacheEngine:
         Output:
             a generator of tuples, each tuple is a chunk of tokens and the corresponding kv cache.
         """
-        #num_tokens = self._num_tokens_in_kv(kv_tensors, fmt)
-
-        #for i in range(0, num_tokens, self.chunk_size):
-        return self._slice_kv_at(0, kv_tensors, fmt, device)
+        return self._slice_kv_at(0, kv_tensors, fmt)
 
     def _make_chunks_skip_exsiting(
             self, 
             tokens: torch.Tensor,
             kv_tensors: torch.Tensor,
             fmt: str,
-            device
         ) -> Iterator[Tuple[torch.Tensor, torch.Tensor]]:
         """
         Skip the existing chunks and return the rest of the chunks
         """
-        chunk_hashes = self._prefix_hash(self._chunk_tokens(tokens, device))
+        chunk_hashes = self._prefix_hash(self._chunk_tokens(tokens))#, device))
         num_tokens = self._num_tokens_in_kv(kv_tensors, fmt)
 
         start_token_idx = None
         start_chunk_idx = 0
         for chunk_hash, idx in zip(chunk_hashes, range(0, num_tokens, self.chunk_size)):
             if not self.engine_.contains(self._make_key(chunk_hash, fmt)):
-                #yield chunk_hash, self._slice_kv_at(idx, idx+self.chunk_size, kv_tensors, fmt, device)
                 start_token_idx = idx
                 break
             start_chunk_idx += 1
-            #if (chunk_hash, fmt) not in self.dict:
-            #    yield chunk_hash, self._slice_kv_at(idx, idx+self.chunk_size, kv_tensors, fmt, device)
+
         if start_token_idx is None:
             return zip([], [])
-        chunk_kvs = self._slice_kv_at(start_token_idx, kv_tensors, fmt, device)
+        chunk_kvs = self._slice_kv_at(start_token_idx, kv_tensors, fmt)#, device)
         chunk_hashes = chunk_hashes[start_chunk_idx:]
         return zip(chunk_hashes, chunk_kvs)
 
@@ -211,17 +192,17 @@ class LMCacheEngine:
             tokens: torch.Tensor,
             kv_tensors: torch.Tensor,
             fmt: str,
-            device,
             skip_existing = True,
         ) -> Iterator[Tuple[torch.Tensor, torch.Tensor]]:
         """
         Returns a generator of zipped (chunk_hash, chunk_kv) tuples
         """
         if skip_existing:
-            return self._make_chunks_skip_exsiting(tokens, kv_tensors, fmt, device)
+            return self._make_chunks_skip_exsiting(tokens, kv_tensors, fmt)
         else:
-            return zip(self._prefix_hash(self._chunk_tokens(tokens, device)), self._chunk_kv(kv_tensors, fmt, device))
-
+            return zip(self._prefix_hash(self._chunk_tokens(tokens)), self._chunk_kv(kv_tensors, fmt))
+    
+    @torch.no_grad()
     def store(
             self, 
             tokens: torch.Tensor,
@@ -257,21 +238,12 @@ class LMCacheEngine:
 
 
         ''' chunk the tokens and the kv caches '''
-        chunk_hashes_and_kvs = self._make_chunks(tokens, kv_tensors, fmt, device=self.device, skip_existing=skip_existing)
-        
-        #''' Issue all the exists() query first if we are doing non-blocking '''
+        chunk_hashes_and_kvs = self._make_chunks(tokens, kv_tensors, fmt, skip_existing=skip_existing)
         if not blocking:
             chunk_hashes_and_kvs = list(chunk_hashes_and_kvs)
         end_make_chunks = time.perf_counter()
 
         ''' store them into the dictionary '''
-        #n_chunks = self.engine_.batched_put(
-        #        ((
-        #            self._make_key(chunk_hash, fmt), 
-        #            self._tuple_kv_to_blob(kv_chunk)
-        #        ) for chunk_hash, kv_chunk in chunk_hashes_and_kvs), 
-        #        blocking=blocking
-        #    )
         n_chunks = self.engine_.batched_put(
                 ((
                     self._make_key(chunk_hash, fmt), 
@@ -284,9 +256,9 @@ class LMCacheEngine:
         logger.info(f"Stored/updated {n_chunks} chunks, total time {end_time - start_time:.2f}s, make chunks time {end_make_chunks - start_time:.2f}s")
 
     @_lmcache_nvtx_annotate
+    @torch.no_grad()
     def retrive(self,
                 tokens: torch.Tensor,
-                device: str = 'cuda'
         ) -> Tuple[KVCache, int]:
         """
         Retrive the KV cache of the tokens from the cache engine. The retrived KV cache 
@@ -305,8 +277,7 @@ class LMCacheEngine:
         """
         st = time.perf_counter()
         fmt = self.metadata.fmt
-        chunk_hashes = self._prefix_hash(self._chunk_tokens(tokens, device=self.device))
-        
+        chunk_hashes = self._prefix_hash(self._chunk_tokens(tokens))
 
         retrival_iterator = self.engine_.batched_get(
                 (self._make_key(chunk_hash, fmt) for chunk_hash in chunk_hashes),
@@ -316,20 +287,7 @@ class LMCacheEngine:
         for chunk in retrival_iterator:
             if chunk is None:
                 break
-            retrived_kv_chunks.append(chunk.to(device))
-        #retrived_kv_chunks: List[KVCache] = []
-
-        #''' retrive the kv cache '''
-        #for chunk_hash in chunk_hashes:
-        #    if self.engine_.contains(self._make_key(chunk_hash, fmt)):
-        #        blob_kv = self.engine_.get(self._make_key(chunk_hash, fmt))
-        #        retrived_kv_chunks.append(blob_kv)
-        #    else:
-        #        break
-        #    #if (chunk_hash, fmt) in self.dict:
-        #    #    retrived_kv_chunks.append(self.dict[(chunk_hash, fmt)])
-        #    #else:
-        #    #    break
+            retrived_kv_chunks.append(chunk)#.to(device))
 
         ''' concatenate the kv cache '''
         dim = None
@@ -346,7 +304,7 @@ class LMCacheEngine:
             return (), 0
 
         st2 = time.perf_counter()
-        ret = self._blob_to_tuple_kv(torch.cat(retrived_kv_chunks, dim=dim + 2))#.to(device))
+        ret = self._blob_to_tuple_kv(torch.cat(retrived_kv_chunks, dim=dim + 2))
         ed2 = time.perf_counter()
         logger.info(f"Concatenated {len(retrived_kv_chunks)} chunks -- elapsed time {ed2 - st2}")
         retrived_token_count = 0 if len(ret) == 0 else ret[0][0].shape[dim]

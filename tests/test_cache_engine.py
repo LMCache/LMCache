@@ -47,6 +47,8 @@ def check_kv_cache_equal(left, right, num_tokens, fmt):
     for left_kv, right_kv in zip(left, right):
         left_k, left_v = left_kv
         right_k, right_v = right_kv
+        right_k = left_k.to(left_k.device)
+        right_v = left_v.to(left_v.device)
 
         assert len(left_k.shape) == 3
         assert len(left_v.shape) == 3
@@ -66,6 +68,33 @@ def check_kv_cache_equal(left, right, num_tokens, fmt):
                 assert (left_k[:num_tokens, :, :] == right_k[:num_tokens, :, :]).all()
                 assert (left_v[:num_tokens, :, :] == right_v[:num_tokens, :, :]).all()
 
+def check_kv_cache_device(kvs, device):
+    for kv in kvs:
+        k, v = kv
+        assert k.device == torch.device(device)
+        assert v.device == torch.device(device)
+        
+
+# TODO(Jiayi): this test needs to be improved onece more dst_device is supported
+@pytest.mark.parametrize("src_device", ["cuda:0", "cuda", "cpu"])
+@pytest.mark.parametrize("dst_device", ["cuda:0"])
+@pytest.mark.parametrize("backend", ["cuda", "cpu", "file://local_disk/"])
+def test_retrive_device(backend, src_device, dst_device, autorelease):
+    
+    fmt = 'vllm'
+    num_tokens = 500
+
+    ''' initialize the engine '''
+    tokens = generate_tokens(num_tokens, src_device)
+    kv_cache = generate_kv_cache(num_tokens, fmt, src_device)
+    cfg = LMCacheEngineConfig.from_legacy(chunk_size = 256, backend = backend)
+    engine = autorelease(LMCacheEngine(cfg, dumb_metadata(fmt)))
+    
+    engine.store(tokens, kv_cache)
+    retrived_cache, length = engine.retrive(tokens)
+    check_kv_cache_device(retrived_cache, dst_device)
+    
+
 @pytest.mark.parametrize("fmt", ["vllm", "huggingface"])
 @pytest.mark.parametrize("backend", ["cuda", "cpu", "file://local_disk/", "redis://localhost:6379", "lm://localhost:65000"])
 @pytest.mark.parametrize("remote_serde", ["torch", "safetensor"]) # lossless serde
@@ -83,7 +112,7 @@ def test_same_retrive_store(fmt, backend, remote_serde, autorelease, lmserver_pr
     engine = autorelease(LMCacheEngine(cfg, dumb_metadata(fmt)))
 
     ''' test retrive empty '''
-    retrived_cache, length = engine.retrive(tokens, device)
+    retrived_cache, length = engine.retrive(tokens)
     assert len(retrived_cache) == 0
     assert length == 0
 
@@ -91,7 +120,7 @@ def test_same_retrive_store(fmt, backend, remote_serde, autorelease, lmserver_pr
     engine.store(tokens, kv_cache)
 
     ''' test retrive '''
-    retrived_cache, length = engine.retrive(tokens, device)
+    retrived_cache, length = engine.retrive(tokens)
 
     assert length == num_tokens
     check_kv_cache_equal(retrived_cache, kv_cache, num_tokens, fmt)
@@ -130,7 +159,7 @@ def test_retrive_prefix(fmt, chunk_size, backend, autorelease, lmserver_process)
     print(f"store takes {t4-t3}")
     
     ''' test retrive '''
-    retrived_cache, length = engine.retrive(torch.cat([tokens, new_tokens]), device)
+    retrived_cache, length = engine.retrive(torch.cat([tokens, new_tokens]))
     t5 = time.perf_counter()
     print(f"retrieve takes {t5-t4}")
     
@@ -166,7 +195,7 @@ def test_mixed_retrive(fmt, chunk_size, backend, autorelease, lmserver_process):
     engine.store(new_tokens, new_kv_cache)
 
     ''' test retrive '''
-    retrived_cache, length = engine.retrive(torch.cat([tokens, new_tokens]), device)
+    retrived_cache, length = engine.retrive(torch.cat([tokens, new_tokens]))
 
     expected_chunk_cnt = num_tokens // chunk_size
     expected_length = expected_chunk_cnt * chunk_size
@@ -174,7 +203,7 @@ def test_mixed_retrive(fmt, chunk_size, backend, autorelease, lmserver_process):
     check_kv_cache_equal(retrived_cache, kv_cache, expected_length, fmt)
     
     ''' test another retrive '''
-    retrived_cache, length = engine.retrive(new_tokens, device)
+    retrived_cache, length = engine.retrive(new_tokens)
 
     assert length == new_num_tokens
     check_kv_cache_equal(retrived_cache, new_kv_cache, length, fmt)
@@ -185,7 +214,7 @@ def test_mixed_retrive(fmt, chunk_size, backend, autorelease, lmserver_process):
     engine.store(final_tokens, final_kv_cache)
 
     ''' should retrive the mixed version '''
-    retrived_cache, length = engine.retrive(final_tokens, device)
+    retrived_cache, length = engine.retrive(final_tokens)
     assert length == num_tokens + new_num_tokens
     check_kv_cache_equal(retrived_cache, final_kv_cache, length, fmt)
     
