@@ -25,7 +25,7 @@ First, clone and cd into the LMCache repo with
 git clone https://github.com/LMCache/LMCache && cd LMCache
 ```
 
-To run the quickstart demo, your server should have 1 GPU and the docker environment with the nvidia-runtime installed. 
+To run the quickstart demo, your server should have 1 GPU and the [docker environment](https://docs.docker.com/engine/install/) with the [nvidia-runtime](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) installed. 
 
 You may need sudo access to run the docker depending on the server configuration.
 
