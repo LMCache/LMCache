@@ -1,150 +1,75 @@
-# LMCache core library
+<div align="center">
+<img src="https://github.com/user-attachments/assets/a0809748-3cb1-4732-9c5a-acfa90cc72d1" width="720" alt="lmcache logo">
+</a>
+</div>
 
-## Installation
 
-**Prerequisite:** Python >= 3.10
+# 💡 What is LMCache?
+LMCache lets LLMs prefill each text only once. By storing the KV caches of all reusable texts, LMCache can reuse the KV caches of **_any_** reused text (not necessarily prefix) in **_any_** serving engine instance. It thus reduces prefill delay, i.e., time to first token (TTFT), as well as saves the precious GPU cycles. 
+
+By combining LMCache with vLLM, LMCaches achieves 3-10x delay savings and GPU cycle reduction in many LLM use cases, including multi-round QA and RAG.
+
+Try LMCache with pre-built vllm docker images [here](https://github.com/LMCache/demo).
+
+# 🚀 Performance snapshot
+![image](https://github.com/user-attachments/assets/37570b5e-558d-49e0-a3a6-4e940ddec75c)
+
+
+# 💻 Quickstart
+We provide a docker-based quickstart demo in the folder [`examples/`](https://github.com/LMCache/LMCache/tree/dev/examples). This quickstart lets you start a serving engine (vLLM) with LMCache and then query the serving engine with a long context.
+
+## - Prerequisites
+
+First, clone and cd into the LMCache repo with 
+```bash
+git clone https://github.com/LMCache/LMCache && cd LMCache
+```
+
+To run the quickstart demo, your server should have 1 GPU and the docker environment with the nvidia-runtime installed. 
+
+You may need sudo access to run the docker depending on the server configuration.
+
+This demo will use the port 8000 (for vLLM) and 8501 (for the frontend).
+
+## - Start the serving engine with LMCache
+
+Start the docker-based serving engine by:
+```bash
+bash examples/quickstart.sh
+```
+
+The vLLM serving engine is ready after you see the following lines in the log:
+<img width="630" alt="image" src="https://github.com/user-attachments/assets/b0f3cef5-4926-4d5b-9fe2-99d6981decd2">
+
+## - Start the frontend
+
+The quickstart comes with a frontend. To run the frontend, use:
 
 ```bash
-pip install -e .
+pip install openai streamlit
+streamlit run examples/quickstart-frontend.py
 ```
 
-## Demos
-Feel free to try our docker-based demos yourself! All the demos are available [in this repo](https://github.com/LMCache/demo).
+You should be able to access the frontend from your browser at `http://<your server's IP>:8501`
 
-## Quickstart: 
+The first query has a long TTFT because the server needs to prefill the long context. But once the first quey finishes, the TTFT of all future queries will be much lower as LMCache shares the KV cache to vLLM which can then skip the prefill of the long context.
 
-**Prerequisites**: To run the quickstart demo, your server should have 1 GPU and the [docker environment](https://docs.docker.com/engine/install/) installed.
+## - What's next
+We provide multiple demos at [🔗LMCache-demos repo](https://github.com/LMCache/demo). The demos cover the following use cases:
+- Share KV caches across multiple serving engines [(🔗link)](https://github.com/LMCache/demo/tree/master/demo2-multi-node-sharing)
+- Loading non-prefix KV caches for RAG [(🔗link)](https://github.com/LMCache/demo/tree/master/demo3-KV-blending)
 
-**Step 1:** Pull docker images
-```bash
-docker pull apostacyh/vllm:lmcache-0.1.0
-```
+# 🛣️ Project Milestones
 
-**Step 2:** Start vLLM + LMCache 
-```bash
-model=mistralai/Mistral-7B-Instruct-v0.2    # Replace with your model name
-sudo docker run --runtime nvidia --gpus '"device=0"' \
-    -v <Huggingface cache dir on your local machine>:/root/.cache/huggingface \
-    -p 8000:8000 \
-    --env "HF_TOKEN=<Your huggingface access token>" \
-    --ipc=host \
-    --network=host \
-    apostacyh/vllm:lmcache-0.1.0 \
-    --model $model --gpu-memory-utilization 0.6 --port 8000 \
-    --lmcache-config-file /lmcache/LMCache/examples/example-local.yaml
-```
-Please fill `Huggingface cache dir on your local machine` and `Your huggingface access token` in the above command. 
+- [x] First release of LMCache 
+- [ ] Support installation through pip install
+- [ ] Integration with latest vLLM
 
-You can also change the `model` variable to use different models.
+# 📖 Blogs and papers
+LMCache is built on two key techniques:
+1. CacheGen [SIGCOMM'24]: A KV-cache compression system that encodes KV caches into compact bitstreams.
+2. CacheBlend [EuroSys'25]: A KV-cache blending system that dynamically composes new KV caches from smaller ones.
 
-The vLLM engine is ready after you see the logs like this:
-```
-INFO:     Started server process [865615]
-INFO:     Waiting for application startup.
-INFO:     Application startup complete.
-INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
-```
+Please read our [blog posts](https://lmcache.github.io) for more details.
 
-**Step 3:** Run demo application
-
-You can now run the demo application in the LMCache repo. Please execute the following commands on the server
-```bash
-git clone https://github.com/LMCache/LMCache
-cd LMCache/examples/
-
-# Install openai client library
-pip install openai
-
-# Start the demo chat application
-python openai_chat_completion_client.py 8000
-```
-
-This demo is a QA application based on a long context (`examples/f.txt`). The TTFT should be drastically reduced since the second round of QA.
-
-
-
-## Use case 1: share prefix KV between different vLLM instance through LMCache
-The following instructions help deploy LMCache backend + multile vLLM instance by docker containers. The architecture of the demo application looks like this:
-
-<img width="817" alt="image" src="https://github.com/LMCache/LMCache/assets/25103655/ab64f84d-26e1-46ce-a503-e7e917b618bc">
-
-
-**Prerequisites**: To run the quickstart demo, your server must have 2 GPUs and the [docker environment](https://docs.docker.com/engine/install/) installed.
-
-
-**Step 1:** Pull docker images
-```bash
-docker pull apostacyh/lmcache-server:0.1.0
-docker pull apostacyh/vllm:lmcache-0.1.0
-```
-
-**Step 2:** Start LMCache backend server 
-```bash
-docker run --name lmcache-server --network host -d apostacyh/lmcache-server:0.1.0 0.0.0.0 65432
-```
-
-**Step 3:** start 2 vLLM instances
-```bash
-# The first vLLM instance listens at port 8000
-model=mistralai/Mistral-7B-Instruct-v0.2    # Replace with your model name
-sudo docker run --runtime nvidia --gpus '"device=0"' \
-    -v <Huggingface cache dir on your local machine>:/root/.cache/huggingface \
-    -p 8000:8000 \
-    --env "HF_TOKEN=<Your huggingface token>" \
-    --ipc=host \
-    --network=host \
-    apostacyh/vllm:lmcache-0.1.0 \
-    --model $model --gpu-memory-utilization 0.7 --port 8000 \
-    --lmcache-config-file /lmcache/LMCache/examples/example.yaml
-```
-
-Now, open another terminal and start another vLLM instance
-```bash
-# The second vLLM instance listens at port 8001
-model=mistralai/Mistral-7B-Instruct-v0.2    # Replace with your model name
-sudo docker run --runtime nvidia --gpus '"device=1"' \
-    -v <Huggingface cache dir on your local machine>:/root/.cache/huggingface \
-    -p 8001:8001 \
-    --env "HF_TOKEN=<Your huggingface token>" \
-    --ipc=host \
-    --network=host \
-    apostacyh/vllm:lmcache-0.1.0 \
-    --model $model --gpu-memory-utilization 0.7 --port 8001 \
-    --lmcache-config-file /lmcache/LMCache/examples/example.yaml
-```
-
-Remember to replace the `Huggingface cache dir on your local machine` and `Your huggingface token` in the commandline.
-
-The vLLM engines are ready after you see the logs like this:
-```
-INFO:     Started server process [865615]
-INFO:     Waiting for application startup.
-INFO:     Application startup complete.
-INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
-```
-
-**Step 4:** Run demo application
-You can run the demo application in the LMCache repo. Please execute the following commands on the server
-```bash
-git clone https://github.com/LMCache/LMCache
-cd LMCache/examples/
-
-# Install openai client library
-pip install openai
-```
-
-In one terminal:
-```
-# Connect to the first vLLM engine
-python openai_chat_completion_client.py 8000
-```
-
-In another terminal
-```
-# Connect to the second vLLM engine
-python openai_chat_completion_client.py 8001
-```
-
-You should be able to see the second vLLM engine has much lower response delay.
-This is because the KV cache of the long context can be shared across both vLLM engines by using LMCache.
 
