@@ -67,8 +67,8 @@ We provide multiple demos at [🔗LMCache-demos repo](https://github.com/LMCache
 
 # 📖 Blogs and papers
 LMCache is built on two key techniques:
-1. CacheGen [SIGCOMM'24]: A KV-cache compression system that encodes KV caches into compact bitstreams.
-2. CacheBlend [EuroSys'25]: A KV-cache blending system that dynamically composes new KV caches from smaller ones.
+1. [**CacheGen [SIGCOMM'24]**](https://arxiv.org/abs/2310.07240): A KV-cache compression system that encodes KV caches into compact bitstreams.
+2. [**CacheBlend [EuroSys'25]**](https://arxiv.org/abs/2405.16444): A KV-cache blending system that dynamically composes new KV caches from smaller ones.
 
 Please read our [blog posts](https://lmcache.github.io) for more details.
 
