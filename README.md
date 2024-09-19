@@ -12,7 +12,8 @@ By combining LMCache with vLLM, LMCaches achieves 3-10x delay savings and GPU cy
 Try LMCache with pre-built vllm docker images [here](https://github.com/LMCache/demo).
 
 # 🚀 Performance snapshot
-![image](https://github.com/user-attachments/assets/37570b5e-558d-49e0-a3a6-4e940ddec75c)
+![image](https://github.com/user-attachments/assets/7db9510f-0104-4fb3-9976-8ad5d7fafe26)
+
 
 
 # 💻 Quickstart
