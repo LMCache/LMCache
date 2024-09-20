@@ -15,7 +15,7 @@ class FastSerializer(Serializer):
     def to_bytes(self, t: torch.Tensor) -> bytes:
         # FIXME: only support fp16 for now
         assert t.dtype == torch.float16
-        return t.contiguous().numpy().tobytes()
+        return t.contiguous().cpu().numpy().tobytes()
 
 class FastDeserializer(Deserializer):
     def __init__(self):
