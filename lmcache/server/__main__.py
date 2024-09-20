@@ -83,7 +83,7 @@ class LMCacheServer:
         finally:
             self.server_socket.close()
 
-if __name__ == "__main__":
+def main():
     import os, sys
     if len(sys.argv) not in [3,4]:
         print(f"Usage: {sys.argv[0]} <host> <port> <storage>(default:cpu)")
@@ -99,3 +99,7 @@ if __name__ == "__main__":
     server = LMCacheServer(host, port, device)
     server.run()
 
+
+
+if __name__ == "__main__":
+    main()
