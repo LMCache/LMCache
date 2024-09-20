@@ -51,7 +51,7 @@ def lmserver_process(request):
     device = request.param
     
     # Start the process
-    proc = subprocess.Popen(shlex.split(f"python3 -m lmcache_server.server localhost 65000 {device}"))
+    proc = subprocess.Popen(shlex.split(f"python3 -m lmcache.server localhost 65000 {device}"))
 
     # Wait for lmcache process to start
     time.sleep(5) 

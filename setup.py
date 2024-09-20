@@ -5,10 +5,10 @@ setup(
     version="0.1",
     packages=find_packages(),
     install_requires=[
-        "torch",
+        "torch >= 2.1.0",
         "redis",
-        "torchac",
         "pyyaml",
+        "nvtx",
         # List any dependencies here
         # e.g., "numpy", "requests"
     ],
