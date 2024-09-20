@@ -2,6 +2,6 @@ torch>=2.2.0
 numpy==1.26.4
 pyyaml
 redis
-torchac
 nvtx
 safetensors
+torchac_cuda==0.2.5
