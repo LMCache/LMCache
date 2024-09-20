@@ -8,7 +8,7 @@ from lmcache.config import LMCacheEngineConfig, LMCacheEngineMetadata
 from lmcache.storage_backend.abstract_backend import LMCBackendInterface
 from lmcache.logging import init_logger
 from lmcache.storage_backend.connector import CreateConnector
-from lmcache.storage_backend.serde import TorchSerializer, TorchDeserializer, CacheGenSerializer, CacheGenDeserializer, CreateSerde
+from lmcache.storage_backend.serde import CreateSerde
 from lmcache.utils import CacheEngineKey
 from lmcache.utils import _lmcache_nvtx_annotate
 

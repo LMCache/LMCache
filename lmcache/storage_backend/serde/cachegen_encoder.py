@@ -1,6 +1,5 @@
 import io
 import pickle
-import torchac
 import torchac_cuda
 import numpy as np
 import torch
