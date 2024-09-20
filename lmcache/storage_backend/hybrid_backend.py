@@ -8,7 +8,6 @@ import time
 import pickle
 import queue
 import threading
-from multiprocessing import Process, Queue
 
 from lmcache.config import LMCacheEngineConfig, LMCacheEngineMetadata
 from lmcache.storage_backend.abstract_backend import LMCBackendInterface

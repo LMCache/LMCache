@@ -17,54 +17,58 @@ Try LMCache with pre-built vllm docker images [here](https://github.com/LMCache/
 
 
 # 💻 Quickstart
-We provide a docker-based quickstart demo in the folder [`examples/`](https://github.com/LMCache/LMCache/tree/dev/examples). This quickstart lets you start a serving engine (vLLM) with LMCache and then query the serving engine with a long context.
 
-## - Prerequisites
-
-First, clone and cd into the LMCache repo with 
+LMCache provides the integration to the latest vLLM (0.6.1.post2). To install LMCache, use the following command:
 ```bash
-git clone https://github.com/LMCache/LMCache && cd LMCache
+pip install lmcache lmcache_vllm
 ```
 
-To run the quickstart demo, your server should have 1 GPU and the [docker environment](https://docs.docker.com/engine/install/) with the [nvidia-runtime](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) installed. 
-
-You may need sudo access to run the docker depending on the server configuration.
-
-This demo will use the port 8000 (for vLLM) and 8501 (for the frontend).
-
-## - Start the serving engine with LMCache
-
-Start the docker-based serving engine by:
+LMCache has the same interface as vLLM (both online serving and offline inference).
+To use the online serving, you can start an OpenAI API-compatible vLLM server with LMCache via:
 ```bash
-bash examples/quickstart.sh
+lmcache_vllm serve lmsys/longchat-7b-16k --gpu-memory-utilization 0.8
 ```
 
-The vLLM serving engine is ready after you see the following lines in the log:
-<img width="630" alt="image" src="https://github.com/user-attachments/assets/b0f3cef5-4926-4d5b-9fe2-99d6981decd2">
-
-## - Start the frontend
-
-The quickstart comes with a frontend. To run the frontend, use:
-
-```bash
-pip install openai streamlit
-streamlit run examples/quickstart-frontend.py
+To use vLLM's offline inference with LMCache, just simply add `lmcache_vllm` before the import to vLLM components. For example
+```python
+import lmcache_vllm.vllm as vllm
+from lmcache_vllm.vllm import LLM 
 ```
 
-You should be able to access the frontend from your browser at `http://<your server's IP>:8501`
+More detailed documentation will be available soon.
 
-The first query has a long TTFT because the server needs to prefill the long context. But once the first quey finishes, the TTFT of all future queries will be much lower as LMCache shares the KV cache to vLLM which can then skip the prefill of the long context.
+## - Sharing KV cache across multiple vLLM instances
+
+LMCache supports sharing KV across different vLLM instances by the `lmcache.server` module. Here is a quick guide:
+
+```bash
+# Start lmcache server
+lmcache.server localhost 65432
+```
+
+Then, start two vLLM instances with the LMCache config file
+```bash
+wget https://raw.githubusercontent.com/LMCache/LMCache/refs/heads/dev/examples/example.yaml
+
+# start the first vLLM instance
+LMCACHE_CONFIG_FILE=example.yaml CUDA_VISIBLE_DEVICES=0 lmcache_vllm serve lmsys/longchat-7b-16k --gpu-memory-utilization 0.8 --port 8000
+
+# start the second vLLM instance
+LMCACHE_CONFIG_FILE=example.yaml CUDA_VISIBLE_DEVICES=1 lmcache_vllm serve lmsys/longchat-7b-16k --gpu-memory-utilization 0.8 --port 8001
+```
+
 
 ## - What's next
-We provide multiple demos at [🔗LMCache-demos repo](https://github.com/LMCache/demo). The demos cover the following use cases:
+We also provide multiple docker-based demos at [🔗LMCache-demos repo](https://github.com/LMCache/demo). The demos cover the following use cases:
 - Share KV caches across multiple serving engines [(🔗link)](https://github.com/LMCache/demo/tree/master/demo2-multi-node-sharing)
 - Loading non-prefix KV caches for RAG [(🔗link)](https://github.com/LMCache/demo/tree/master/demo3-KV-blending)
 
-# 🛣️ Project Milestones
+# 🛣️ Incoming Milestones
 
 - [x] First release of LMCache 
-- [ ] Support installation through pip install
-- [ ] Integration with latest vLLM
+- [x] Support installation through pip install and integrate with latest vLLM
+- [ ] Stable support for non-prefix KV caches
+- [ ] User and developer documentation
 
 # 📖 Blogs and papers
 LMCache is built on two key techniques:

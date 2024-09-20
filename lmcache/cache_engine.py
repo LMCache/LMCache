@@ -356,3 +356,18 @@ class LMCacheEngineBuilder:
         ) -> Optional[LMCacheEngine]:
         """Returns the LMCacheEngine instance associated with the instance ID, or None if not found."""
         return cls._instances.get(instance_id)
+
+    @classmethod
+    def destroy(
+            cls,
+            instance_id: str
+        ) -> None:
+        """Close and delete the LMCacheEngine instance by the instance ID"""
+        # TODO: unit test for this
+        if instance_id in cls._instances:
+            engine = cls._instances[instance_id]
+            engine.close()
+            cls._instances.pop(instance_id, None)
+            cls._cfgs.pop(instance_id, None)
+            cls._metadatas.pop(instance_id, None)
+
