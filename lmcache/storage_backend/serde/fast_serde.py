@@ -35,7 +35,7 @@ class FastDeserializer(Deserializer):
 
     def from_bytes_normal(self, b: bytes) -> torch.Tensor:
         tag = int.from_bytes(b[:1], byteorder='big')
-        buffer = b[:-1] # make it l-val
+        buffer = b[1:] # make it l-val
         return torch.frombuffer(buffer, dtype=TAG_TO_DTYPE[tag])
 
     def from_bytes(self, b: bytes) -> torch.Tensor:
