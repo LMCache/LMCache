@@ -48,7 +48,7 @@ class LMCLocalBackend(LMCBackendInterface):
         self.update_lock = threading.Lock()
         
         # FIXME(Jiayi): `use_pin_memory` and `dst_device` should be configged dynamically
-        self.use_pin_memory = True
+        self.use_pin_memory = False
         logger.info(f"Using pinned cpu memory: {self.use_pin_memory}")
         
         self.dst_device = "cuda"
@@ -159,7 +159,7 @@ class LMCLocalBackend(LMCBackendInterface):
         if self.put_thread is not None and self.put_thread.is_alive():
             self.put_queue.put(LocalBackendEndSignal())
             self.put_thread.join()
-            logger.info("Closed the put worker in local disk backend")
+            logger.info("Closed the put worker in local backend")
     
     def __del__(self):
         self.close()

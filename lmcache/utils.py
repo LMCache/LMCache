@@ -40,7 +40,7 @@ def _get_color_for_nvtx(name):
     return _NVTX_COLORS[idx]
 
 def _lmcache_nvtx_annotate(func, domain="lmcache"):
-    """Decorator for applying nvtx annotations to methods in cudf."""
+    """Decorator for applying nvtx annotations to methods in lmcache."""
     return annotate(
         message=func.__qualname__,
         color=_get_color_for_nvtx(func.__qualname__),
