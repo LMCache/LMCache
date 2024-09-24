@@ -44,7 +44,7 @@ LMCache supports sharing KV across different vLLM instances by the `lmcache.serv
 
 ```bash
 # Start lmcache server
-lmcache.server localhost 65432
+lmcache_server localhost 65432
 ```
 
 Then, start two vLLM instances with the LMCache config file
