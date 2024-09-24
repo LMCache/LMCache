@@ -9,7 +9,7 @@ from lmcache.config import LMCacheEngineConfig, LMCacheEngineMetadata
 from lmcache.cache_engine import LMCacheEngine, LMCacheEngineBuilder
 
 def dumb_metadata(fmt="vllm"):
-    return LMCacheEngineMetadata("test_model", 3, 123, fmt)
+    return LMCacheEngineMetadata("test_model", 3, 123, fmt, "auto")
 
 def generate_kv_cache(num_tokens, fmt, device):
     ret = []

@@ -41,7 +41,7 @@ def to_blob(kv_tuples):
 @pytest.mark.parametrize("chunk_size", [64, 256, 768])
 def test_cachegen_decoder_bench(benchmark, fmt, chunk_size):
     config = LMCacheEngineConfig.from_defaults(chunk_size = chunk_size)
-    metadata = LMCacheEngineMetadata(model_name = "mistralai/Mistral-7B-Instruct-v0.2", world_size = 1, worker_id = 0, fmt = fmt)
+    metadata = LMCacheEngineMetadata(model_name = "mistralai/Mistral-7B-Instruct-v0.2", world_size = 1, worker_id = 0, fmt = fmt, dtype = "auto")
     serializer = CacheGenSerializer(config, metadata)
     deserializer = CacheGenDeserializer(config, metadata)
 

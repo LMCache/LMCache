@@ -44,7 +44,7 @@ def get_config(t):
             raise ValueError(f"Testbed internal error: Unknown config type: {t}")
 
 def get_metadata():
-    return LMCacheEngineMetadata("lmsys/longchat-7b-16k", 1, -1, "vllm")
+    return LMCacheEngineMetadata("lmsys/longchat-7b-16k", 1, -1, "vllm", "auto")
 
 @pytest.mark.parametrize("lmserver_process", ["cpu", "remote_disk/"], indirect=True)
 def test_creation(autorelease, lmserver_process):

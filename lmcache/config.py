@@ -17,6 +17,9 @@ class LMCacheEngineMetadata:
     ''' the format of kv tensors '''
     fmt: str
 
+    ''' the data type of kv tensors '''
+    dtype: str
+
 @dataclass
 class LMCacheEngineConfig:
     chunk_size: int
