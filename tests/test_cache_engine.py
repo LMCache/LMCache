@@ -47,8 +47,8 @@ def check_kv_cache_equal(left, right, num_tokens, fmt):
     for left_kv, right_kv in zip(left, right):
         left_k, left_v = left_kv
         right_k, right_v = right_kv
-        right_k = left_k.to(left_k.device)
-        right_v = left_v.to(left_v.device)
+        right_k = right_k.to(left_k.device)
+        right_v = right_v.to(left_v.device)
 
         assert len(left_k.shape) == 3
         assert len(left_v.shape) == 3
