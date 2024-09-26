@@ -79,7 +79,7 @@ class LMCacheEngine:
         """
         # TODO(Jiayi): the following step can be parallelized
         for i in range(0, len(tokens), self.chunk_size):
-            yield tokens[i:i+self.chunk_size]#.to(device)
+            yield tokens[i:i+self.chunk_size]
 
     def _prefix_hash(
             self, 
@@ -170,7 +170,7 @@ class LMCacheEngine:
         """
         Skip the existing chunks and return the rest of the chunks
         """
-        chunk_hashes = self._prefix_hash(self._chunk_tokens(tokens))#, device))
+        chunk_hashes = self._prefix_hash(self._chunk_tokens(tokens))
         num_tokens = self._num_tokens_in_kv(kv_tensors, fmt)
 
         start_token_idx = None
@@ -183,7 +183,7 @@ class LMCacheEngine:
 
         if start_token_idx is None:
             return zip([], [])
-        chunk_kvs = self._slice_kv_at(start_token_idx, kv_tensors, fmt)#, device)
+        chunk_kvs = self._slice_kv_at(start_token_idx, kv_tensors, fmt)
         chunk_hashes = chunk_hashes[start_chunk_idx:]
         return zip(chunk_hashes, chunk_kvs)
 
@@ -202,6 +202,7 @@ class LMCacheEngine:
         else:
             return zip(self._prefix_hash(self._chunk_tokens(tokens)), self._chunk_kv(kv_tensors, fmt))
     
+    @_lmcache_nvtx_annotate
     @torch.no_grad()
     def store(
             self, 
