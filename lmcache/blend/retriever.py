@@ -268,22 +268,3 @@ class SPTBlendRetriever(BlendRetriever):
                 fmt = self.metadata.fmt
             )
 
-#if __name__ == "__main__":
-    #tokens = torch.tensor([1, 2, 3, 4, 5, 2, 6, 7, 8, 2, 3, 9, 10])
-    #r1 = SPTBlendRetriever(torch.tensor([2]), None)
-    #r2 = SPTBlendRetriever(torch.tensor([2, 3]), None)
-
-    #print(r1._split_input_tokens(tokens))
-    #print(r2._split_input_tokens(tokens))
-
-    #vllm_kv = torch.zeros([32, 2, 2000, 128])
-    #hf_kv = torch.zeros([32, 2, 128, 2000])
-
-    #k, v = SPTBlendRetrieverTask._PrepareOutputTensor("vllm", vllm_kv, 2000, 3000)
-    #print(k.shape)
-    #print(v.shape)
-
-    #k, v = SPTBlendRetrieverTask._PrepareOutputTensor("huggingface", hf_kv, 2000, 3000)
-    #print(k.shape)
-    #print(v.shape)
-    pass

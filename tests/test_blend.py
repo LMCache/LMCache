@@ -8,6 +8,7 @@ import shlex
 from lmcache.config import LMCacheEngineConfig, LMCacheEngineMetadata
 from lmcache.cache_engine import LMCacheEngine, LMCacheEngineBuilder
 from lmcache.blend.retriever import SPTBlendRetriever
+from lmcache.blend.executor import CacheBlendImpl
 
 def dumb_metadata(fmt="vllm"):
     return LMCacheEngineMetadata("test_model", 3, 123, fmt)
@@ -331,3 +332,73 @@ def test_spt_multi_query(fmt, spt_length, autorelease):
     check_groups(0, 2)
     check_groups(0, 1, 2, 3)
     check_groups(1, 1, 2, 2)
+
+
+def test_cacheblend_executor_single_query():
+    # Case 1: all valid
+    dtype = torch.bfloat16
+    device = "cuda"
+    prefix_len = 10
+    query_len = 10
+    q_shape = (query_len, 4096)
+    kv_shape = (query_len, 1024)
+
+    changed_positions = [2, 6]
+    expected_positions = [p + prefix_len for p in changed_positions]
+
+    blender = CacheBlendImpl(0.2)
+
+    fq_1 = torch.zeros(q_shape, dtype = dtype, device = device)
+    for i in range(query_len):
+        fq_1[i] = i
+
+    # Newly generated KV is 0 on the "changed_positions"
+    fk_1 = torch.full(kv_shape, 1, dtype = dtype, device = device)
+    fk_1[changed_positions, ...] = 0
+    fv_1 = torch.full(kv_shape, 1, dtype = dtype, device = device)
+    fv_1[changed_positions, ...] = 0
+
+    # Retrieved KV are all 1 
+    rk_1 = torch.full(kv_shape, 1, dtype = dtype, device = device)
+    rv_1 = torch.full(kv_shape, 1, dtype = dtype, device = device)
+    valid = torch.full((query_len, ), 1, dtype = torch.long, device = "cpu")
+    positions = torch.arange(prefix_len, prefix_len + query_len, 
+                             dtype = torch.int32, device = "cuda")
+    query_start_loc = torch.tensor([0, query_len], 
+                                   dtype = torch.int32, device = "cuda")
+
+    # First layer should do nothing!
+    ret = blender.blend(0, rk_1, rv_1, valid, fq_1, fk_1, fv_1, positions, query_start_loc, 0)
+    assert torch.equal(ret.q, fq_1)
+    assert torch.equal(ret.k, fk_1)
+    assert torch.equal(ret.v, fv_1)
+    assert torch.equal(ret.positions, positions)
+
+    # Second layer should do token selection
+    ret = blender.blend(1, rk_1, rv_1, valid, fq_1, fk_1, fv_1, positions, query_start_loc, 0)
+    assert len(ret.positions) == len(expected_positions) # recompute 2 tokens
+    assert ret.k.shape[0] == query_len                   # long K
+    assert ret.v.shape[0] == query_len                   # long V
+    for i in range(len(expected_positions)):
+        assert ret.positions[i].item() == expected_positions[i]
+        assert ret.q[i][0].item() == changed_positions[i]
+        assert (ret.k[changed_positions[i]] == 0).all()
+        assert (ret.v[changed_positions[i]] == 0).all()
+
+    # Thrid layer should do kv update
+    fq_2 = ret.q
+    fk_2 = fk_1[changed_positions]
+    fv_2 = fv_1[changed_positions]
+    rk_2 = rk_1
+    rv_2 = rv_1
+    pos_2 = ret.positions
+    ret = blender.blend(2, rk_2, rv_2, valid, ret.q, fk_2, fv_2, pos_2, query_start_loc, 0)
+
+    # Should update the KV without changing q or positions
+    assert torch.equal(ret.q, fq_2)
+    assert torch.equal(ret.positions, pos_2)
+    assert (ret.k[changed_positions] == 0).all()
+    assert (ret.v[changed_positions] == 0).all()
+    unchanged_positions = list(filter(lambda x: x not in changed_positions, range(query_len)))
+    assert (ret.k[unchanged_positions] == 1).all()
+    assert (ret.v[unchanged_positions] == 1).all()

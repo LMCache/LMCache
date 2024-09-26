@@ -88,11 +88,13 @@ class BlendExecutor(metaclass=abc.ABCMeta):
         layer_id: int,
         retrieved_k: torch.Tensor,
         retrieved_v: torch.Tensor,
+        valid_mask: torch.Tensor,
         fresh_q: torch.Tensor,
         fresh_k: torch.Tensor,
         fresh_v: torch.Tensor,
         positions: torch.Tensor,
         query_start_loc: torch.Tensor,
+        token_dim: int
     ) -> BlenderOutput:
         """This function blends the retrieved KV with fresh KVs, and
         returns the short Q + long KV (blended) + positions of the tokens in Q
@@ -100,6 +102,8 @@ class BlendExecutor(metaclass=abc.ABCMeta):
         :param int layer_id: The layer id
         :param torch.Tensor retrieved_k: The retrieved K tensor
         :param torch.Tensor retrieved_v: The retrieved V tensor
+        :param torch.Tensor valid_mask: A CPU tensor returned from the retriever indicating
+            whether the KV is valid. 
         :param torch.Tensor fresh_q: The fresh Q tensor from QKV split
         :param torch.Tensor fresh_k: The fresh K tensor from QKV split
         :param torch.Tensor fresh_v: The fresh V tensor from QKV split
@@ -108,6 +112,7 @@ class BlendExecutor(metaclass=abc.ABCMeta):
         :param torch.Tensor query_start_loc: The start location of the query if
             input_tokens has multiple requests in a batch. The length should be
             the number of requests in the batch + 1
+        :param int token_dim: The token dimension  
 
         :return: The blended Q, K, V, and positions
         """
