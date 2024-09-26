@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 import torch
-from typing import Tuple 
+from typing import Tuple, Optional
 import abc
 
 @dataclass
@@ -23,12 +23,14 @@ class BlenderOutput:
 class BlenderRetrieverResult:
     """The result of the cacheblend retriever
 
-    :ivar torch.Tensor k: The K tensor of a single layer
-    :ivar torch.Tensor v: The V tensor of a single layer
-    :ivar torch.Tensor valid_mask: The valid mask
+    :ivar torch.Tensor k: The K tensor of a single layer, will be None if 
+        nothing is retrieved
+    :ivar torch.Tensor v: The V tensor of a single layer, will be None if 
+        nothing is retrieved
+    :ivar torch.Tensor valid_mask: The valid mask on CPU
     """
-    k: torch.Tensor
-    v: torch.Tensor
+    k: Optional[torch.Tensor]
+    v: Optional[torch.Tensor]
     valid_mask: torch.Tensor
 
 class BlendRetrieverTask(metaclass=abc.ABCMeta):
@@ -68,7 +70,7 @@ class BlendRetriever(metaclass=abc.ABCMeta):
             multiple requests in a batch
         :param torch.Tensor query_start_loc: The start location of the query if
             input_tokens has multiple requests in a batch. The length should be
-            the number of requests in the batch.
+            the number of requests in the batch + 1
 
         :return: The retriever task to retrieve the KV caches
         :rtype: BlendRetrieverTask
@@ -105,7 +107,7 @@ class BlendExecutor(metaclass=abc.ABCMeta):
             tokens in the fresh_q
         :param torch.Tensor query_start_loc: The start location of the query if
             input_tokens has multiple requests in a batch. The length should be
-            the number of requests in the batch.
+            the number of requests in the batch + 1
 
         :return: The blended Q, K, V, and positions
         """

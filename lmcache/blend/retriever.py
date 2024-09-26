@@ -20,7 +20,7 @@ class SPTBlendRetrieverTask(BlendRetrieverTask):
         segments.
 
         The result of tasks should be the Tuple[torch.Tensor, int] and the shape of
-        the tensor L2HT or L2TH
+        the tensor L2HTD or L2THD
         """
         assert len(token_segments) == len(tasks), \
                 "The number of token segments and tasks should match."
@@ -40,16 +40,21 @@ class SPTBlendRetrieverTask(BlendRetrieverTask):
             expected_length: int,
         ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Input tensor is L2TH or L2HT depending on fmt
+        Input tensor is L2THD or L2HTD depending on fmt
         Output tensor is K and V with shape LTH or LHT depending on fmt
+        Could also be None, None if nothing is retrieved
         """
         if real_length == expected_length:
             return input_tensor[:, 0, ...], input_tensor[:, 1, ...]
 
-        ret_shape = input_tensor.shape
+        if real_length == 0:
+            return None, None
+
+        ret_shape = list(input_tensor.shape)
         match fmt:
             case "vllm": 
                 ret_shape[2] = expected_length
+            case "huggingface": 
                 ret_shape[3] = expected_length
             case _:
                 raise ValueError(f"Unknown KV format {fmt}")
@@ -74,8 +79,25 @@ class SPTBlendRetrieverTask(BlendRetrieverTask):
         keys = []
         values = []
         valid_masks = []
+
+        num_layers = None
+        num_heads = None
+        head_size = None
+        dtype = None
+        device = None
+        def update_shape(kv, fmt):
+            nonlocal num_layers, num_heads, head_size, dtype, device
+            num_layers = kv.shape[0]
+            head_size = kv.shape[-1]
+            num_heads = kv.shape[3] if fmt == "vllm" else kv.shape[2]
+            dtype = kv.dtype
+            device = kv.device
+
         for token_segment, task in zip(self.token_segments, self.tasks):
             kv, length = task.result()
+            if length > 0:
+                update_shape(kv, self.fmt)
+
             k, v = self._PrepareOutputTensor(
                     self.fmt,
                     kv,
@@ -84,20 +106,36 @@ class SPTBlendRetrieverTask(BlendRetrieverTask):
 
             valid_mask = torch.zeros(len(token_segment), 
                                      dtype = torch.int, 
-                                     device = kv.device)
+                                     device = "cpu")
             valid_mask[:length] = 1
                     
             keys.append(k)
             values.append(v)
             valid_masks.append(valid_mask)
 
+        # return if nothing is retrieved
+        if num_layers is None:
+            return
+
         match self.fmt:
             case "vllm": 
                 token_dim = 1
+                shape_placeholder = [num_layers, 0, num_heads, head_size]
             case "huggingface":
                 token_dim = 2
+                shape_placeholder = [num_layers, num_heads, 0, head_size]
             case _:
                 raise ValueError(f"Unknown KV format {self.fmt}")
+
+        # Update the shape of the None tensors
+        for i, (k, v) in enumerate(zip(keys, values)):
+            shape_placeholder[token_dim] = len(self.token_segments[i])
+            if k is None:
+                keys[i] = torch.empty(shape_placeholder,
+                                      dtype = dtype, device = device) 
+            if v is None:
+                values[i] = torch.empty(shape_placeholder,
+                                        dtype = dtype, device = device)
 
         self.rebuilt_key = torch.cat(keys, dim = token_dim)
         self.rebuilt_value = torch.cat(values, dim = token_dim)
@@ -112,16 +150,16 @@ class SPTBlendRetrieverTask(BlendRetrieverTask):
         :return: Tuple of K and V tensor
         :rtype: Tuple[torch.Tensor, torch.Tensor]
         """
-        if self.rebuilt_key is None:
+        if self.valid_mask is None:
             self._wait_for_result()
 
-        assert self.rebuilt_key is not None
-        assert self.rebuilt_value is not None
         assert self.valid_mask is not None
 
         ret = BlenderRetrieverResult(
-                k = self.rebuilt_key[layer_id],
-                v = self.rebuilt_value[layer_id],
+                k = self.rebuilt_key[layer_id] \
+                        if self.rebuilt_key is not None else None,
+                v = self.rebuilt_value[layer_id] \
+                        if self.rebuilt_value is not None else None,
                 valid_mask = self.valid_mask)
         return ret
 
@@ -171,8 +209,17 @@ class SPTBlendRetriever(BlendRetriever):
             windows = input_tokens_single_query.unfold(0, spt_len, 1)
             indices = (windows == self.spt).all(dim=1).nonzero().squeeze()
 
+        if indices.dim() == 0:
+            indices = indices.unsqueeze(0)
+
         start = 0
         splitted_tokens = []
+
+        print("HERE indices is", indices, indices.shape)
+        if len(indices.shape) == 0:
+            breakpoint()
+        #if indices[0] == 999 and len(indices == 1):
+        #    breakpoint()
 
         for i in indices:
             splitted_tokens.append(input_tokens_single_query[start:i+spt_len])
@@ -194,15 +241,22 @@ class SPTBlendRetriever(BlendRetriever):
             multiple requests in a batch
         :param torch.Tensor query_start_loc: The start location of the query if
             input_tokens has multiple requests in a batch. The length should be 
-            the number of requests in the batch.
+            the number of requests in the batch + 1.
 
         :return: The retriever task to retrieve the KV caches
         :rtype: BlendRetrieverTask
         """
         with ThreadPoolExecutor(max_workers = 1) as executor:
-            splitted_tokens = self._split_input_tokens(input_tokens)
+            splitted_tokens = []
+            start_loc = query_start_loc[0]
+            for loc in query_start_loc[1:]:
+                print("HERE", start_loc, loc)
+                print("SHAPE:", input_tokens.shape, input_tokens[start_loc:loc].shape)
+                splitted_tokens.extend(
+                        self._split_input_tokens(input_tokens[start_loc:loc]))
+                start_loc = loc
+                
             logger.debug("Split input tokens into %d requests", len(splitted_tokens))
-            print(splitted_tokens)
             tasks = [executor.submit(
                         self.cache_engine.retrive,
                         tokens, False
