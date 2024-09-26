@@ -259,6 +259,7 @@ class LMCacheEngine:
     @torch.no_grad()
     def retrive(self,
                 tokens: torch.Tensor,
+                return_tuple: bool = True,
         ) -> Tuple[KVCache, int]:
         """
         Retrive the KV cache of the tokens from the cache engine. The retrived KV cache 
@@ -266,12 +267,12 @@ class LMCacheEngine:
 
         Input:
             tokens: the input tokens, with shape [seq_len]
-            format: either 'huggingface' or 'vllm'
-                    For huggingface, it should have the shape of [num_heads, num_tokens, head_size]
-                    For vllm, it should have the shape of [num_tokens, num_heads, head_size]
+            return_tuple: whether to return the kv cache as a tuple or a single tensor
 
         Output: 
-            kv_tensors: the kv cache of the tokens, in the format of nested tuples.
+            kv_tensors: the kv cache of the tokens, in the format of nested tuples or
+                        a single tensor with shape [num_layers, 2, hidden_dim, num_tokens]
+                        (huggingface) or [num_layers, 2, num_tokens, hidden_dim] (vllm).
                         Will be an empty tuple if no kv cache is retrived.
             num_tokens: the number of tokens in the kv cache
         """
@@ -303,11 +304,16 @@ class LMCacheEngine:
             logging.info("Retrived 0 chunks")
             return (), 0
 
-        st2 = time.perf_counter()
-        ret = self._blob_to_tuple_kv(torch.cat(retrived_kv_chunks, dim=dim + 2))
-        ed2 = time.perf_counter()
-        logger.info(f"Concatenated {len(retrived_kv_chunks)} chunks -- elapsed time {ed2 - st2}")
-        retrived_token_count = 0 if len(ret) == 0 else ret[0][0].shape[dim]
+        if return_tuple:
+            st2 = time.perf_counter()
+            ret = self._blob_to_tuple_kv(torch.cat(retrived_kv_chunks, dim=dim + 2))
+            ed2 = time.perf_counter()
+            logger.info(f"Concatenated {len(retrived_kv_chunks)} chunks -- elapsed time {ed2 - st2}")
+            retrived_token_count = 0 if len(ret) == 0 else ret[0][0].shape[dim]
+        else:
+            ret = torch.cat(retrived_kv_chunks, dim=dim + 2)
+            retrived_token_count = 0 if ret.numel() == 0 else ret.shape[dim + 2]
+
         ed = time.perf_counter()
         logger.info(f"Retrived {len(retrived_kv_chunks)} chunks ({retrived_token_count} tokens in total) -- elapsed time {ed - st}")
         return ret, retrived_token_count
