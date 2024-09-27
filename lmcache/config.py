@@ -20,12 +20,13 @@ class LMCacheEngineMetadata:
 @dataclass
 class LMCacheEngineConfig:
     chunk_size: int
-    local_device: str
-    remote_url: str
-    remote_serde: str # Can be "torch" or "cachegen"
+    local_device: Optional[str]
+    remote_url: Optional[str]
+    remote_serde: Optional[str] # Can be "torch" or "cachegen"
 
     pipelined_backend: bool
 
+    @staticmethod
     def from_defaults(
             chunk_size: int = 256,
             local_device: str = "cuda",
@@ -37,13 +38,18 @@ class LMCacheEngineConfig:
                 chunk_size, local_device, remote_url, remote_serde,
                 pipelined_backend)
 
+    @staticmethod
     def from_legacy(
             chunk_size: int = 256,
             backend: str = "cuda",
-            persist_path: str = None,
-            remote_serde: str = "torch",
+            persist_path: Optional[str] = None,
+            remote_serde: Optional[str] = "torch",
             pipelined_backend: bool = False,
         ) -> 'LMCacheEngineConfig':
+
+        local_device: Optional[str] = None
+        remote_url: Optional[str] = None
+        
         match backend:
             case "cpu" | "cuda":
                 local_device = backend
@@ -78,7 +84,7 @@ class LMCacheEngineConfig:
             case path if re.match(r"file://(.*)/", path): #local disk directory
                 local_device = path[7:]
             case _:
-                raise ValueError(f"Invalid local storage device: {local_deivce}")
+                raise ValueError(f"Invalid local storage device: {local_device}")
 
         match remote_url:
             case None:
