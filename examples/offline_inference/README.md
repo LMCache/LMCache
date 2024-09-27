@@ -1,0 +1,5 @@
+# Feed offline prompts to the model
+1.  ```lmcache_server localhost 65432```  
+And wait until it's ready.  
+2. ```python3 offline_inference.py```  
+You can also modify the model and prompts inside this file.  
