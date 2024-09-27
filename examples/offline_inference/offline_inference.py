@@ -1,6 +1,5 @@
-import lmcache_vllm
-# Note that muct import lmcache_vllm first to enable LMCache.
-from vllm import LLM, SamplingParams
+import lmcache_vllm.vllm as vllm
+from lmcache_vllm.vllm import LLM, SamplingParams
 import time
 
 # Sample prompts.
