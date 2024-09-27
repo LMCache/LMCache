@@ -1,4 +1,5 @@
-from lmcache.protocol import ClientMetaMessage, ServerMetaMessage, Constants
+from lmcache.protocol import ClientMetaMessage, Constants, ServerMetaMessage
+
 
 def test_client_meta_message():
     msg = ClientMetaMessage(Constants.CLIENT_PUT, "some-random-key", 50)
@@ -6,6 +7,7 @@ def test_client_meta_message():
     assert len(s) == ClientMetaMessage.packlength()
     msg2 = ClientMetaMessage.deserialize(s)
     assert msg2 == msg
+
 
 def test_server_meta_message():
     msg = ServerMetaMessage(Constants.SERVER_FAIL, 0)
