@@ -322,12 +322,6 @@ class LMCacheEngine:
         )
         return ret, retrieved_token_count
 
-    def persist(self):
-        """
-        Temporary function of persisting
-        """
-        self.engine_.persist()
-
     def close(self):
         self.engine_.close()
 

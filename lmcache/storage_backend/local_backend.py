@@ -1,7 +1,7 @@
 import os
 import queue
 import threading
-from typing import Dict, Optional, Set, Tuple
+from typing import Dict, Optional, Set, Tuple, Union
 
 import torch
 from safetensors import safe_open
@@ -36,8 +36,9 @@ class LMCLocalBackend(LMCBackendInterface):
         self.dict: Dict[CacheEngineKey, torch.Tensor] = {}
         self.device = config.local_device
 
-        self.put_queue: queue.Queue[Tuple[CacheEngineKey,
-                                          torch.Tensor]] = queue.Queue()
+        self.put_queue: queue.Queue[
+            Union[Tuple[CacheEngineKey, torch.Tensor],
+                  LocalBackendEndSignal]] = queue.Queue()
         self.put_thread = threading.Thread(target=self.put_worker, args=())
         self.put_thread.start()
         self.update_lock = threading.Lock()
@@ -182,8 +183,9 @@ class LMCLocalDiskBackend(LMCBackendInterface):
         # Please consider use a parent class that can be inherited by all (local) backends
         # This should be also be helpful for more flexible hierarchical backends
         # For async put
-        self.put_queue: queue.Queue[Tuple[CacheEngineKey,
-                                          torch.Tensor]] = queue.Queue()
+        self.put_queue: queue.Queue[
+            Union[Tuple[CacheEngineKey, torch.Tensor],
+                  LocalBackendEndSignal]] = queue.Queue()
         self.put_thread = threading.Thread(target=self.put_worker, args=())
         self.put_thread.start()
         self.update_lock = threading.Lock()

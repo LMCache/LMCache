@@ -34,10 +34,13 @@ class RedisConnector(RemoteConnector):
 
     def list(self):
         cursor = 0
-        all_keys = []
+        all_keys: List[bytes] = []
 
         while True:
-            cursor, keys = self.connection.scan(cursor=cursor, match='*')
+            ret: Tuple[int, List[bytes]] = self.connection.scan(
+                cursor=cursor,
+                match='*') # type: ignore
+            cursor, keys = ret
             all_keys.extend(keys)
             if cursor == 0:
                 break

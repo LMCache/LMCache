@@ -1,6 +1,6 @@
 import queue
 import threading
-from typing import Iterable, Iterator, List, Optional, Set, Tuple
+from typing import Iterable, Iterator, List, Optional, Set, Tuple, Union
 
 import torch
 
@@ -45,8 +45,9 @@ class LMCRemoteBackend(LMCBackendInterface):
         self.deserializer = d
 
         # For async put
-        self.put_queue: queue.Queue[Tuple[CacheEngineKey,
-                                          torch.Tensor]] = queue.Queue()
+        self.put_queue: queue.Queue[
+            Union[Tuple[CacheEngineKey, torch.Tensor],
+                  RemoteBackendEndSignal]] = queue.Queue()
         self.put_thread = threading.Thread(target=self.put_worker, args=())
         self.put_thread.start()
 
@@ -195,21 +196,21 @@ class LMCPipelinedRemoteBackend(LMCRemoteBackend):
 
         #Initialize network get thread queue
         logger.debug("Initializing network thread queue")
-        self.network_queue: queue.Queue[Tuple[int,
-                                              CacheEngineKey]] = queue.Queue()
+        self.network_queue: queue.Queue[Union[Tuple[
+            int, CacheEngineKey], RemoteBackendEndSignal]] = queue.Queue()
         self.network_thread = threading.Thread(target=self.network_worker,
                                                args=())
         self.network_thread.start()
 
         #Initialize network get thread queue
         logger.debug("Initializing deserial thread queue")
-        self.deserialize_queue: queue.Queue[Tuple[
-            int, Optional[bytes]]] = queue.Queue()
+        self.deserialize_queue: queue.Queue[Union[Tuple[
+            int, Optional[bytes]], RemoteBackendEndSignal]] = queue.Queue()
         self.deserialize_thread = threading.Thread(
             target=self.deserialize_worker, args=())
         self.deserialize_thread.start()
 
-        self.result_list: List[torch.Tensor] = []
+        self.result_list: List[Optional[torch.Tensor]] = []
 
     @_lmcache_nvtx_annotate
     def network_worker(self, ):
