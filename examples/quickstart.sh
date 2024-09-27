@@ -2,7 +2,7 @@
 
 ### CHANGE THE FOLLOWING VARIABLES BASED ON YOUR SETTING
 MODEL=lmsys/longchat-7b-16k                 # LLM model name
-LOCAL_HF_HOME=${HOME}/.cache/huggingface/   # the HF_HOME on local machine. vLLM will try finding/dowloading the models here
+LOCAL_HF_HOME=${HOME}/.cache/huggingface/   # the HF_HOME on local machine. vLLM will try finding/downloading the models here
 HF_TOKEN=                                   # (optional) the huggingface token to access some special models
 PORT=8000                                   # Port for the server
 

@@ -1,23 +1,33 @@
-import redis
+import inspect
 import os
-from typing import Optional, List, Tuple, Union
-from lmcache.storage_backend.connector.base_connector import RemoteConnector
+from typing import List, Optional, Tuple, Union
+
+import redis
 
 from lmcache.logging import init_logger
+from lmcache.storage_backend.connector.base_connector import RemoteConnector
+
 logger = init_logger(__name__)
+
 
 class RedisConnector(RemoteConnector):
     """
     The remote url should start with "redis://" and only have one host-port pair
     """
+
     def __init__(self, host: str, port: int):
         self.connection = redis.Redis(host=host, port=port)
 
     def exists(self, key: str) -> bool:
-        return self.connection.exists(key)
+        return bool(self.connection.exists(key))
 
     def get(self, key: str) -> Optional[bytes]:
-        return self.connection.get(key)
+        result = self.connection.get(key)
+
+        # assert that result is not a co-routine
+        assert not inspect.isawaitable(result)
+
+        return result if result is None else bytes(result)
 
     def set(self, key: str, obj: bytes) -> None:
         self.connection.set(key, obj)
@@ -25,17 +35,18 @@ class RedisConnector(RemoteConnector):
     def list(self):
         cursor = 0
         all_keys = []
-    
+
         while True:
             cursor, keys = self.connection.scan(cursor=cursor, match='*')
             all_keys.extend(keys)
             if cursor == 0:
                 break
-    
+
         return [key.decode('utf-8') for key in all_keys]
 
     def close(self):
         self.connection.close()
+
 
 class RedisSentinelConnector(RemoteConnector):
     """
@@ -52,18 +63,19 @@ class RedisSentinelConnector(RemoteConnector):
     ENV_REDIS_TIMEOUT = 'REDIS_TIMEOUT'
     ENV_REDIS_SERVICE_NAME = 'REDIS_SERVICE_NAME'
 
-    def __init__(
-            self, 
-            hosts_and_ports: List[Tuple[str, Union[str, int]]]
-        ):
+    def __init__(self, hosts_and_ports: List[Tuple[str, Union[str, int]]]):
 
         # Get service name
         match os.environ.get(self.ENV_REDIS_SERVICE_NAME):
             case None:
-                logger.warning(f"Environment variable {self.ENV_REDIS_SERVICE_NAME} is not found, using default value 'mymaster'")
+                logger.warning(
+                    f"Environment variable {self.ENV_REDIS_SERVICE_NAME} is not found, using default value 'mymaster'"
+                )
                 service_name = "mymaster"
             case value:
                 service_name = value
+
+        timeout: float = -1000.0
 
         # Get timeout
         match os.environ.get(self.ENV_REDIS_TIMEOUT):
@@ -72,10 +84,11 @@ class RedisSentinelConnector(RemoteConnector):
             case value:
                 timeout = float(value)
 
-        
         self.sentinel = redis.Sentinel(hosts_and_ports, timeout)
-        self.master = self.sentinel.master_for(service_name, socket_timeout = timeout)
-        self.slave = self.sentinel.slave_for(service_name, socket_timeout = timeout)
+        self.master = self.sentinel.master_for(service_name,
+                                               socket_timeout=timeout)
+        self.slave = self.sentinel.slave_for(service_name,
+                                             socket_timeout=timeout)
 
     def exists(self, key: str) -> bool:
         return self.slave.exists(key)
@@ -89,13 +102,13 @@ class RedisSentinelConnector(RemoteConnector):
     def list(self):
         cursor = 0
         all_keys = []
-    
+
         while True:
             cursor, keys = self.slave.scan(cursor=cursor, match='*')
             all_keys.extend(keys)
             if cursor == 0:
                 break
-    
+
         return [key.decode('utf-8') for key in all_keys]
 
     def close(self):

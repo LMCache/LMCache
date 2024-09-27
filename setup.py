@@ -1,11 +1,11 @@
-from setuptools import setup, find_packages
+from setuptools import find_packages, setup
 
 setup(
     name="lmcache",
     version="0.1.2",
-    description = "LMCache: prefill your long contexts only once",
-    author = "LMCache team",
-    author_email = "lmcacheteam@gmail.com",
+    description="LMCache: prefill your long contexts only once",
+    author="LMCache team",
+    author_email="lmcacheteam@gmail.com",
     long_description=open('README.md').read(),
     long_description_content_type='text/markdown',
     packages=find_packages(),
@@ -35,4 +35,3 @@ setup(
         ],
     },
 )
-
