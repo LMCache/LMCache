@@ -2,7 +2,7 @@ from typing import List, Tuple
 import torch
 from concurrent.futures import ThreadPoolExecutor, Future
 
-from lmcache.blend.interfaces import BlendRetriever, BlendRetrieverTask, BlenderRetrieverResult
+from lmcache.blend.interfaces import BlendRetriever, BlendRetrieverTask, BlendRetrieverResult
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.cache_engine import LMCacheEngine
 from lmcache.logging import init_logger
@@ -141,10 +141,10 @@ class SPTBlendRetrieverTask(BlendRetrieverTask):
         self.rebuilt_value = torch.cat(values, dim = token_dim)
         self.valid_mask = torch.cat(valid_masks, dim = 0)
 
-    def result(self, layer_id: int) -> BlenderRetrieverResult:
+    def result(self, layer_id: int) -> BlendRetrieverResult:
         """Blocking function to get a single layer of K and V tensor.
         The returned the K and V tensor should match the length of the input tokens
-        passed to the `BlenderRetriever.new_request` function.
+        passed to the `BlendRetriever.new_request` function.
 
         :param int layer_id: the layer id 
         :return: Tuple of K and V tensor
@@ -155,7 +155,7 @@ class SPTBlendRetrieverTask(BlendRetrieverTask):
 
         assert self.valid_mask is not None
 
-        ret = BlenderRetrieverResult(
+        ret = BlendRetrieverResult(
                 k = self.rebuilt_key[layer_id] \
                         if self.rebuilt_key is not None else None,
                 v = self.rebuilt_value[layer_id] \

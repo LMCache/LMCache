@@ -1,7 +1,7 @@
 from typing import List, Tuple
 import torch
 
-from lmcache.blend.interfaces import BlendExecutor, BlenderOutput
+from lmcache.blend.interfaces import BlendExecutor, BlendOutput
 from lmcache.logging import init_logger
 
 logger = init_logger(__name__)
@@ -83,7 +83,7 @@ class CacheBlendImpl(BlendExecutor):
         positions: torch.Tensor,
         query_start_loc: torch.Tensor,
         token_dim: int,
-    ) -> BlenderOutput:
+    ) -> BlendOutput:
         """This function blends the retrieved KV with fresh KVs, and
         returns the short Q + long KV (blended) + positions of the tokens in Q
 
@@ -111,11 +111,14 @@ class CacheBlendImpl(BlendExecutor):
             self.indexes_in_kv = torch.tensor([], 
                                               dtype = torch.long, 
                                               device = "cpu")
-            return BlenderOutput(fresh_q, fresh_k, fresh_v, positions)
+            return BlendOutput(fresh_q, fresh_k, fresh_v, positions, 
+                               torch.arange(fresh_q.shape[token_dim], 
+                                            device="cpu", dtype = torch.long),
+                               query_start_loc)
 
         if layer_id == 1:
             logger.info("Before layer 1's attention, comparing the KVs")
-            all_indices = []
+            new_query_start_locs = [0]
             for qstart, qend in zip(query_start_loc[:-1], query_start_loc[1:]):
                 # Select the tokens for each query
                 local_indices = self._select_tokens_single_query(
@@ -128,13 +131,20 @@ class CacheBlendImpl(BlendExecutor):
                     token_dim
                 )
 
+                new_query_start_locs.append(
+                        new_query_start_locs[-1] + len(local_indices))
+
                 self.indexes_in_kv = torch.cat(
                     (self.indexes_in_kv, local_indices + qstart.item())
                 )
 
             new_q = fresh_q[self.indexes_in_kv]
             new_positions = positions[self.indexes_in_kv]
-            return BlenderOutput(new_q, fresh_k, fresh_v, new_positions)
+            new_query_start_locs = torch.tensor(new_query_start_locs,
+                                                device = query_start_loc.device,
+                                                dtype = query_start_loc.dtype)
+            return BlendOutput(new_q, fresh_k, fresh_v, new_positions, 
+                               self.indexes_in_kv, new_query_start_locs)
 
             
         if layer_id > 1:
@@ -144,4 +154,5 @@ class CacheBlendImpl(BlendExecutor):
             retrieved_k[index_obj] = fresh_k
             retrieved_v[index_obj] = fresh_v
 
-            return BlenderOutput(fresh_q, retrieved_k, retrieved_v, positions)
+            return BlendOutput(fresh_q, retrieved_k, retrieved_v, positions, 
+                               self.indexes_in_kv, query_start_loc)

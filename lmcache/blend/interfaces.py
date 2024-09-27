@@ -4,7 +4,7 @@ from typing import Tuple, Optional
 import abc
 
 @dataclass
-class BlenderOutput:
+class BlendOutput:
     """The output of the cacheblend module
 
     :ivar torch.Tensor q: The short Q tensor with selected tokens
@@ -12,15 +12,20 @@ class BlenderOutput:
     :ivar torch.Tensor v: The long V tensor with the updated values
     :ivar torch.Tensor positions: The positions of the selected Q tokens in 
         the input sequence
+    :ivar torch.Tensor local_indices: The positions of the selected Q tokens in 
+        fresh q 
+    :ivar torch.Tensor query_start_loc: The modified query_start_loc
     """
     q: torch.Tensor
     k: torch.Tensor
     v: torch.Tensor
     positions: torch.Tensor
+    local_indices: torch.Tensor
+    query_start_loc: torch.Tensor
 
 
 @dataclass
-class BlenderRetrieverResult:
+class BlendRetrieverResult:
     """The result of the cacheblend retriever
 
     :ivar torch.Tensor k: The K tensor of a single layer, will be None if 
@@ -37,16 +42,16 @@ class BlendRetrieverTask(metaclass=abc.ABCMeta):
     """The KV retrieval task created by the BlendRetriever"""
 
     @abc.abstractmethod
-    def result(self, layer_id: int) -> BlenderRetrieverResult:
+    def result(self, layer_id: int) -> BlendRetrieverResult:
         """Blocking function to get a single layer of K and V tensor.
         The returned the K and V tensor should match the length of the input tokens
-        passed to the `BlenderRetriever.new_request` function.
+        passed to the `BlendRetriever.new_request` function.
         If the KV of a token is not available, the `vaild_mask` will be 0, and the
         correponding values in the KV tensor will be undefined.
 
         :param int layer_id: the layer id 
-        :return: The BlenderRetrieverResult object
-        :rtype: BlenderRetrieverResult
+        :return: The BlendRetrieverResult object
+        :rtype: BlendRetrieverResult
         """
         pass
 
@@ -95,7 +100,7 @@ class BlendExecutor(metaclass=abc.ABCMeta):
         positions: torch.Tensor,
         query_start_loc: torch.Tensor,
         token_dim: int
-    ) -> BlenderOutput:
+    ) -> BlendOutput:
         """This function blends the retrieved KV with fresh KVs, and
         returns the short Q + long KV (blended) + positions of the tokens in Q
 

@@ -373,12 +373,18 @@ def test_cacheblend_executor_single_query():
     assert torch.equal(ret.k, fk_1)
     assert torch.equal(ret.v, fv_1)
     assert torch.equal(ret.positions, positions)
+    assert torch.equal(ret.local_indices, torch.arange(prefix_len, dtype = torch.int, device = "cpu"))
+    assert ret.query_start_loc[0].item() == 0
+    assert ret.query_start_loc[1].item() == prefix_len
 
     # Second layer should do token selection
-    ret = blender.blend(1, rk_1, rv_1, valid, fq_1, fk_1, fv_1, positions, query_start_loc, 0)
+    ret = blender.blend(1, rk_1, rv_1, valid, fq_1, fk_1, fv_1, positions, ret.query_start_loc, 0)
     assert len(ret.positions) == len(expected_positions) # recompute 2 tokens
     assert ret.k.shape[0] == query_len                   # long K
     assert ret.v.shape[0] == query_len                   # long V
+    assert torch.equal(ret.local_indices, torch.tensor(changed_positions, dtype = torch.int, device = "cpu"))
+    assert ret.query_start_loc[0].item() == 0
+    assert ret.query_start_loc[1].item() == 2
     for i in range(len(expected_positions)):
         assert ret.positions[i].item() == expected_positions[i]
         assert ret.q[i][0].item() == changed_positions[i]
@@ -392,13 +398,23 @@ def test_cacheblend_executor_single_query():
     rk_2 = rk_1
     rv_2 = rv_1
     pos_2 = ret.positions
-    ret = blender.blend(2, rk_2, rv_2, valid, ret.q, fk_2, fv_2, pos_2, query_start_loc, 0)
+    ret = blender.blend(2, rk_2, rv_2, valid, ret.q, fk_2, fv_2, pos_2, ret.query_start_loc, 0)
 
     # Should update the KV without changing q or positions
     assert torch.equal(ret.q, fq_2)
     assert torch.equal(ret.positions, pos_2)
+    assert ret.k.shape[0] == prefix_len
+    assert ret.v.shape[0] == prefix_len
     assert (ret.k[changed_positions] == 0).all()
     assert (ret.v[changed_positions] == 0).all()
     unchanged_positions = list(filter(lambda x: x not in changed_positions, range(query_len)))
     assert (ret.k[unchanged_positions] == 1).all()
     assert (ret.v[unchanged_positions] == 1).all()
+    assert torch.equal(ret.local_indices, torch.tensor(changed_positions, dtype = torch.int, device = "cpu"))
+    assert ret.query_start_loc[0].item() == 0
+    assert ret.query_start_loc[1].item() == 2
+
+    # TODO: un-tested cases:
+    # - some positions are invalid
+    # - multiple queries (batch size > 1)
+
