@@ -98,7 +98,6 @@ def test_retrive_device(backend, src_device, dst_device, autorelease):
 @pytest.mark.parametrize("fmt", ["vllm", "huggingface"])
 @pytest.mark.parametrize("backend", ["cuda", "cpu", "file://local_disk/", "redis://localhost:6379", "lm://localhost:65000"])
 @pytest.mark.parametrize("remote_serde", ["torch", "safetensor"]) # lossless serde
-#@pytest.mark.usefixtures("lmserver_process")
 @pytest.mark.parametrize("lmserver_process", ["cpu", "remote_disk/"], indirect=True)
 def test_same_retrive_store(fmt, backend, remote_serde, autorelease, lmserver_process):
     device = "cpu" if backend == "cpu" else "cuda"
@@ -129,7 +128,37 @@ def test_same_retrive_store(fmt, backend, remote_serde, autorelease, lmserver_pr
     if backend in ["file://local_disk/"]:
         subprocess.run(shlex.split(f"rm -rf local_disk/"))
 
+@pytest.mark.parametrize("fmt", ["vllm", "huggingface"])
+@pytest.mark.parametrize("backend", ["cuda", "cpu"])
+def test_retrieve_big_tensor(fmt, backend, autorelease):
+    device = "cpu" if backend == "cpu" else "cuda"
+    num_tokens = 2000
 
+    tokens = generate_tokens(num_tokens, device)
+    kv_cache = generate_kv_cache(num_tokens, fmt, device)
+    
+    ''' initialize the engine '''
+    cfg = LMCacheEngineConfig.from_legacy(chunk_size = 256, backend = backend)
+    engine = autorelease(LMCacheEngine(cfg, dumb_metadata(fmt)))
+
+    ''' test retrive empty '''
+    retrived_cache, length = engine.retrive(tokens, return_tuple = False)
+    assert len(retrived_cache) == 0
+    assert length == 0
+
+    ''' test store '''
+    engine.store(tokens, kv_cache)
+
+    ''' test retrive '''
+    retrived_cache, length = engine.retrive(tokens, return_tuple = False)
+
+    assert length == num_tokens
+    assert retrived_cache.shape[0] == 32 # 32 is num_layers used in generate_kv_cache
+    assert retrived_cache.shape[1] == 2
+    token_dim = 2 if fmt == "vllm" else 3
+    assert retrived_cache.shape[token_dim] == num_tokens
+
+    
 @pytest.mark.parametrize("fmt", ["vllm", "huggingface"])
 @pytest.mark.parametrize("chunk_size", [128, 256])
 @pytest.mark.parametrize("backend", ["cuda", "cpu", "file://local_disk/", "redis://localhost:6379", "lm://localhost:65000"])
