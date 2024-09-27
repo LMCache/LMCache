@@ -1,13 +1,17 @@
-import torch
 import io
 import pickle
 from dataclasses import dataclass
 from typing import List
-from lmcache.utils import _lmcache_nvtx_annotate
+
+import torch
+
 from lmcache.logging import init_logger
+from lmcache.utils import _lmcache_nvtx_annotate
+
 logger = init_logger(__name__)
 
 CACHEGEN_GPU_MAX_TOKENS_PER_CHUNK = 256
+
 
 @dataclass
 class CacheGenConfig:
@@ -27,35 +31,35 @@ class CacheGenConfig:
 
     @staticmethod
     def from_model_name(model_name: str) -> "CacheGenConfig":
-        family_7b = ["mistralai/Mistral-7B-Instruct-v0.2", "lmsys/longchat-7b-16k"]
+        family_7b = [
+            "mistralai/Mistral-7B-Instruct-v0.2", "lmsys/longchat-7b-16k"
+        ]
         family_9b = ["THUDM/glm-4-9b-chat"]
         if model_name in family_7b:
             return CacheGenConfig(
-                key_first_layers=10, 
-                key_second_layers=20,
-                key_third_layers=32, # total layers
-                key_first_bins=32,
-                key_second_bins=16,
-                key_third_bins=16,
-                value_first_layers=2,
-                value_first_bins=32,
-                value_second_bins=16
-            )
-        # TODO(Jiayi): needs tuning for better quality
-        elif model_name in family_9b:
-            return CacheGenConfig(
                 key_first_layers=10,
                 key_second_layers=20,
-                key_third_layers=40,
+                key_third_layers=32,  # total layers
                 key_first_bins=32,
                 key_second_bins=16,
                 key_third_bins=16,
                 value_first_layers=2,
                 value_first_bins=32,
-                value_second_bins=16
-            )
+                value_second_bins=16)
+        # TODO(Jiayi): needs tuning for better quality
+        elif model_name in family_9b:
+            return CacheGenConfig(key_first_layers=10,
+                                  key_second_layers=20,
+                                  key_third_layers=40,
+                                  key_first_bins=32,
+                                  key_second_bins=16,
+                                  key_third_bins=16,
+                                  value_first_layers=2,
+                                  value_first_bins=32,
+                                  value_second_bins=16)
         else:
             raise ValueError(f"Model {model_name} is not supported")
+
 
 @dataclass
 class CacheGenEncoderOutput:
@@ -83,6 +87,7 @@ class CacheGenEncoderOutput:
         with io.BytesIO(bs) as f:
             return pickle.load(f)
 
+
 @dataclass
 class CacheGenGPUBytestream:
     bytestream: torch.Tensor
@@ -92,7 +97,8 @@ class CacheGenGPUBytestream:
     def __getitem__(self, key: str) -> int:
         return getattr(self, key)
 
-@dataclass 
+
+@dataclass
 class CacheGenGPUEncoderOutput:
     data_chunks: List[CacheGenGPUBytestream]
     cdf: torch.Tensor
@@ -118,8 +124,12 @@ class CacheGenGPUEncoderOutput:
             return pickle.load(f)
 
     def debug_print_device(self):
-        logger.debug(f"bytestream device: {self.data_chunks[0].bytestream.device}")
-        logger.debug(f"bytestream_lengths device: {self.data_chunks[0].bytestream_lengths.device}")
+        logger.debug(
+            f"bytestream device: {self.data_chunks[0].bytestream.device}")
+        logger.debug(
+            f"bytestream_lengths device: {self.data_chunks[0].bytestream_lengths.device}"
+        )
         logger.debug(f"cdf device: {self.cdf.device}")
         logger.debug(f"max_tensors_key device: {self.max_tensors_key.device}")
-        logger.debug(f"max_tensors_value device: {self.max_tensors_value.device}")
+        logger.debug(
+            f"max_tensors_value device: {self.max_tensors_value.device}")

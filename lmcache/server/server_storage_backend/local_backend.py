@@ -1,26 +1,20 @@
-from typing import Tuple, Optional, Iterator, List
-from safetensors import safe_open
-from safetensors.torch import save_file
-import re
-import io
-import torch
-import redis
 import os
-import pickle
+from typing import List, Optional, Set
 
-from lmcache.server.server_storage_backend.abstract_backend import LMSBackendInterface
 from lmcache.logging import init_logger
+from lmcache.server.server_storage_backend.abstract_backend import \
+    LMSBackendInterface
 from lmcache.utils import _lmcache_nvtx_annotate
 
 logger = init_logger(__name__)
+
 
 class LMSLocalBackend(LMSBackendInterface):
     """
     Cache engine for storing the KV cache of the tokens in the local cpu/gpu memory.
     """
-    def __init__(
-            self, 
-        ):
+
+    def __init__(self, ):
         """
         Throws:
             RuntimeError if the loaded configuration does not match the current configuration
@@ -28,17 +22,15 @@ class LMSLocalBackend(LMSBackendInterface):
         super().__init__()
 
         self.dict = {}
-    
-    def list_keys(
-            self
-        ) -> List[str]:
-        
+
+    def list_keys(self) -> List[str]:
+
         return list(self.dict.keys())
-    
+
     def contains(
-            self, 
-            key: str,
-        ) -> bool:
+        self,
+        key: str,
+    ) -> bool:
         """
         Check if the cache engine contains the key.
 
@@ -51,11 +43,11 @@ class LMSLocalBackend(LMSBackendInterface):
         return key in self.dict
 
     def put(
-            self, 
-            key: str,
-            kv_chunk_bytes: bytes,
-            blocking: bool = True,
-        ) -> None:
+        self,
+        key: str,
+        kv_chunk_bytes: bytes,
+        blocking: bool = True,
+    ) -> None:
         """
         Store the KV cache of the tokens into the cache engine.
 
@@ -73,14 +65,13 @@ class LMSLocalBackend(LMSBackendInterface):
             logger.warn("Non-blocking is not implemented for local backend")
         self.dict[key] = kv_chunk_bytes
 
-
     @_lmcache_nvtx_annotate
     def get(
-            self,
-            key: str,
-        ) -> Optional[bytes]:
+        self,
+        key: str,
+    ) -> Optional[bytes]:
         """
-        Retrive the KV cache chunk by the given key 
+        Retrieve the KV cache chunk by the given key 
 
         Input:
             key: the key of the token chunk, including prefix hash and format
@@ -97,10 +88,11 @@ class LMSLocalDiskBackend(LMSBackendInterface):
     """
     Cache engine for storing the KV cache of the tokens in the local disk.
     """
+
     def __init__(
-            self, 
-            path: str,
-        ):
+        self,
+        path: str,
+    ):
         """
         Throws:
             RuntimeError if the loaded configuration does not match the current configuration
@@ -110,18 +102,16 @@ class LMSLocalDiskBackend(LMSBackendInterface):
         self.path = path
         if not os.path.exists(self.path):
             os.makedirs(self.path)
-        self.filenames = set()
+        self.filenames: Set[str] = set()
 
-    def list_keys(
-            self
-        ) -> List[str]:
-        
+    def list_keys(self) -> List[str]:
+
         return list(self.filenames)
-    
+
     def contains(
-            self, 
-            key: str,
-        ) -> bool:
+        self,
+        key: str,
+    ) -> bool:
         """
         Check if the cache engine contains the key.
 
@@ -138,7 +128,7 @@ class LMSLocalDiskBackend(LMSBackendInterface):
         key: str,
     ) -> str:
         """
-        Covert key to path_name
+        Convert key to path_name
 
         Input:
             key: the key of the token chunk, including prefix hash and format
@@ -146,15 +136,14 @@ class LMSLocalDiskBackend(LMSBackendInterface):
         Returns:
             returns the path name
         """
-        return self.path + key.replace("/","-") + ".bin"
-        
-    
+        return self.path + key.replace("/", "-") + ".bin"
+
     def put(
-            self, 
-            key: str,
-            kv_chunk_bytes: bytes,
-            blocking: bool = True,
-        ) -> None:
+        self,
+        key: str,
+        kv_chunk_bytes: bytes,
+        blocking: bool = True,
+    ) -> None:
         """
         Store the KV cache of the tokens into the cache engine.
 
@@ -176,14 +165,13 @@ class LMSLocalDiskBackend(LMSBackendInterface):
         with open(self._key_to_path(key), "wb") as binary_file:
             binary_file.write(kv_chunk_bytes)
 
-
     @_lmcache_nvtx_annotate
     def get(
-            self,
-            key: str,
-        ) -> Optional[bytes]:
+        self,
+        key: str,
+    ) -> Optional[bytes]:
         """
-        Retrive the KV cache chunk by the given key 
+        Retrieve the KV cache chunk by the given key 
 
         Input:
             key: the key of the token chunk, including prefix hash and format
@@ -193,8 +181,8 @@ class LMSLocalDiskBackend(LMSBackendInterface):
         """
         if key not in self.filenames:
             return None
-        
+
         with open(self._key_to_path(key), "rb") as binary_file:
             return binary_file.read()
-        
+
         #return torch.load(self._key_to_path(key))
