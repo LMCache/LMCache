@@ -78,7 +78,7 @@ class LMCacheEngineConfig:
             case path if re.match(r"file://(.*)/", path): #local disk directory
                 local_device = path[7:]
             case _:
-                raise ValueError(f"Invalid local storage device: {local_deivce}")
+                raise ValueError(f"Invalid local storage device: {local_device}")
 
         match remote_url:
             case None:
