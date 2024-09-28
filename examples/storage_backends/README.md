@@ -22,7 +22,7 @@ The table shows which storage backend is used when some fields are present or no
 ---------------------------------------------------
 |  remote backend |   not present  |    present   |
 ---------------------------------------------------
-|  hybrid backend |    present     |  not present |
+|  hybrid backend |    present     |    present   |
 ---------------------------------------------------
 ```
 ### local backend
@@ -67,3 +67,4 @@ Use pipelined remote backend or not.
 ```
 pipelined_backend: True/False
 ```
+
