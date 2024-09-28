@@ -30,8 +30,9 @@ jobs:
         pip install types-PyYAML
         pip install types-requests
         pip install types-setuptools
+        pip install redis
     - name: Mypy
       run: |
-        mypy --install-types --non-interactive
+        mypy
         mypy tests --follow-imports skip
         mypy lmcache --follow-imports skip
