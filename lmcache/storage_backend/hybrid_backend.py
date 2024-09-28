@@ -16,7 +16,8 @@ logger = init_logger(__name__)
 
 class LMCHybridBackend(LMCBackendInterface):
     """
-    A hybrid backend that uses both local and remote backend to store and retrieve data.
+    A hybrid backend that uses both local and remote backend to store and 
+    retrieve data.
     It implements write-through and read-through caching.
     """
 
@@ -42,9 +43,9 @@ class LMCHybridBackend(LMCBackendInterface):
         logger.debug(f"Metadata is {metadata}")
         start = time.perf_counter()
         for key in keys:
-            if key.model_name != metadata.model_name or \
-                    key.worker_id != metadata.worker_id or \
-                    key.world_size != metadata.world_size:
+            if (key.model_name != metadata.model_name
+                    or key.worker_id != metadata.worker_id
+                    or key.world_size != metadata.world_size):
                 continue
 
             retrived_data = self.remote_store.get(key)
@@ -54,8 +55,11 @@ class LMCHybridBackend(LMCBackendInterface):
 
         end = time.perf_counter()
 
-        logger.info("Pre-fetched %d keys from remote backend, used %.2f sec",
-                    nfetched, end - start)
+        logger.info(
+            "Pre-fetched %d keys from remote backend, used %.2f sec",
+            nfetched,
+            end - start,
+        )
 
     def contains(
         self,

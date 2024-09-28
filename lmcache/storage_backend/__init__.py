@@ -26,13 +26,12 @@ def CreateStorageBackend(
             match config.local_device:
                 case "cpu" | "cuda":
                     logger.info(
-                        f"Initializing local-only ({config.local_device}) backend"
-                    )
+                        f"Initializing local-only ({config.local_device})"
+                        f" backend")
                     return LMCLocalBackend(config)
                 case _:
-                    logger.info(
-                        f"Initializing local-only (disk) backend at {config.local_device}"
-                    )
+                    logger.info(f"Initializing local-only (disk) backend at"
+                                f" {config.local_device}")
                     return LMCLocalDiskBackend(config)
 
         case LMCacheEngineConfig(
@@ -45,8 +44,8 @@ def CreateStorageBackend(
             raise ValueError(f"Invalid configuration: {config}")
 
 
-#__all__ = [
+# __all__ = [
 #    "LMCBackendInterface",
 #    "LMCLocalBackend",
 #    "LMCRemoteBackend",
-#]
+# ]

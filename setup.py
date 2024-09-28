@@ -6,8 +6,8 @@ setup(
     description="LMCache: prefill your long contexts only once",
     author="LMCache team",
     author_email="lmcacheteam@gmail.com",
-    long_description=open('README.md').read(),
-    long_description_content_type='text/markdown',
+    long_description=open("README.md").read(),
+    long_description_content_type="text/markdown",
     packages=find_packages(),
     install_requires=[
         "torch >= 2.2.0",
@@ -21,14 +21,14 @@ setup(
     classifiers=[
         # Trove classifiers
         # Full list at https://pypi.org/classifiers/
-        'Development Status :: 3 - Alpha',
-        'Environment :: GPU',
-        'Programming Language :: Python :: 3',
-        'License :: OSI Approved :: Apache Software License',
+        "Development Status :: 3 - Alpha",
+        "Environment :: GPU",
+        "Programming Language :: Python :: 3",
+        "License :: OSI Approved :: Apache Software License",
     ],
-    python_requires='>=3.10',
+    python_requires=">=3.10",
     entry_points={
-        'console_scripts': [
+        "console_scripts": [
             # Add command-line scripts here
             # e.g., "my_command=my_package.module:function"
             "lmcache_server=lmcache.server.__main__:main",

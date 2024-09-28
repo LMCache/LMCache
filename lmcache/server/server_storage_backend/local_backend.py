@@ -11,13 +11,15 @@ logger = init_logger(__name__)
 
 class LMSLocalBackend(LMSBackendInterface):
     """
-    Cache engine for storing the KV cache of the tokens in the local cpu/gpu memory.
+    Cache engine for storing the KV cache of the tokens in the local cpu/gpu 
+    memory.
     """
 
     def __init__(self, ):
         """
         Throws:
-            RuntimeError if the loaded configuration does not match the current configuration
+            RuntimeError if the loaded configuration does not match the current 
+            configuration
         """
         super().__init__()
 
@@ -53,7 +55,8 @@ class LMSLocalBackend(LMSBackendInterface):
 
         Input:
             key: the key of the token chunk, including prefix hash and format
-            kv_chunk: the kv cache of the token chunk, in the format of nested tuples
+            kv_chunk: the kv cache of the token chunk, in the format of nested 
+                tuples
 
         Returns:
             None
@@ -71,19 +74,23 @@ class LMSLocalBackend(LMSBackendInterface):
         key: str,
     ) -> Optional[bytes]:
         """
-        Retrieve the KV cache chunk by the given key 
+        Retrieve the KV cache chunk by the given key
 
         Input:
             key: the key of the token chunk, including prefix hash and format
-        Output: 
+        Output:
             the kv cache of the token chunk, in the format of nested tuples
             None if the key is not found
         """
         return self.dict.get(key, None)
 
+    def close(self):
+        pass
+
 
 # TODO(Jiayi): need to optimize disk loading
-# current impl. with "naive open read/write" might not be efficient (better than torch.load)
+# current impl. with "naive open read/write" might not be efficient
+# (better than torch.load)
 class LMSLocalDiskBackend(LMSBackendInterface):
     """
     Cache engine for storing the KV cache of the tokens in the local disk.
@@ -95,7 +102,8 @@ class LMSLocalDiskBackend(LMSBackendInterface):
     ):
         """
         Throws:
-            RuntimeError if the loaded configuration does not match the current configuration
+            RuntimeError if the loaded configuration does not match the current
+            configuration
         """
         super().__init__()
 
@@ -149,7 +157,8 @@ class LMSLocalDiskBackend(LMSBackendInterface):
 
         Input:
             key: the key of the token chunk, including prefix hash and format
-            kv_chunk: the kv cache of the token chunk, in the format of nested tuples
+            kv_chunk: the kv cache of the token chunk, in the format of nested 
+                tuples
 
         Returns:
             None
@@ -161,7 +170,7 @@ class LMSLocalDiskBackend(LMSBackendInterface):
             logger.warn("Non-blocking is not implemented for local backend")
         self.filenames.add(key)
         logger.info(f"Saving cache to {self._key_to_path(key)}")
-        #torch.save(kv_chunk_bytes, self._key_to_path(key))
+        # torch.save(kv_chunk_bytes, self._key_to_path(key))
         with open(self._key_to_path(key), "wb") as binary_file:
             binary_file.write(kv_chunk_bytes)
 
@@ -171,11 +180,11 @@ class LMSLocalDiskBackend(LMSBackendInterface):
         key: str,
     ) -> Optional[bytes]:
         """
-        Retrieve the KV cache chunk by the given key 
+        Retrieve the KV cache chunk by the given key
 
         Input:
             key: the key of the token chunk, including prefix hash and format
-        Output: 
+        Output:
             the kv cache of the token chunk, in the format of nested tuples
             None if the key is not found
         """
@@ -185,4 +194,7 @@ class LMSLocalDiskBackend(LMSBackendInterface):
         with open(self._key_to_path(key), "rb") as binary_file:
             return binary_file.read()
 
-        #return torch.load(self._key_to_path(key))
+        # return torch.load(self._key_to_path(key))
+
+    def close(self):
+        pass

@@ -93,7 +93,9 @@ class RemoteConnectorDebugWrapper(RemoteConnector):
 
         logger.debug(
             "Get %.2f MBytes data from the remote backend takes %.2f ms",
-            len(ret) / 1e6, (end - start) * 1e3)
+            len(ret) / 1e6,
+            (end - start) * 1e3,
+        )
         return ret
 
     def set(self, key: str, obj: bytes) -> None:
@@ -102,7 +104,9 @@ class RemoteConnectorDebugWrapper(RemoteConnector):
         end = time.perf_counter()
         logger.debug(
             "Put %.2f MBytes data to the remote backend takes %.2f ms",
-            len(obj) / 1e6, (end - start) * 1e3)
+            len(obj) / 1e6,
+            (end - start) * 1e3,
+        )
 
     def list(self) -> List[str]:
         return self.connector.list()

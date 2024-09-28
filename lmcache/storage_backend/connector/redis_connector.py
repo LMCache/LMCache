@@ -34,15 +34,17 @@ class RedisConnector(RemoteConnector):
 
     def list(self):
         cursor = 0
-        all_keys = []
+        all_keys: List[bytes] = []
 
         while True:
-            cursor, keys = self.connection.scan(cursor=cursor, match='*')
+            ret: Tuple[int, List[bytes]] = self.connection.scan(
+                cursor=cursor, match="*")  # type: ignore
+            cursor, keys = ret
             all_keys.extend(keys)
             if cursor == 0:
                 break
 
-        return [key.decode('utf-8') for key in all_keys]
+        return [key.decode("utf-8") for key in all_keys]
 
     def close(self):
         self.connection.close()
@@ -51,17 +53,19 @@ class RedisConnector(RemoteConnector):
 class RedisSentinelConnector(RemoteConnector):
     """
     Uses redis.Sentinel to connect to a Redis cluster.
-    The hosts are specified in the config file, started with "redis-sentinel://" and separated by commas.
+    The hosts are specified in the config file, started with "redis-sentinel://"
+    and separated by commas.
     Example:
-        remote_url: "redis-sentinel://localhost:26379,localhost:26380,localhost:26381"
+        remote_url: 
+            "redis-sentinel://localhost:26379,localhost:26380,localhost:26381"
 
     Extra environment variables:
     - REDIS_SERVICE_NAME (required) -- service name for redis.
     - REDIS_TIMEOUT (optional) -- Timeout in seconds, default is 1 if not set
     """
 
-    ENV_REDIS_TIMEOUT = 'REDIS_TIMEOUT'
-    ENV_REDIS_SERVICE_NAME = 'REDIS_SERVICE_NAME'
+    ENV_REDIS_TIMEOUT = "REDIS_TIMEOUT"
+    ENV_REDIS_SERVICE_NAME = "REDIS_SERVICE_NAME"
 
     def __init__(self, hosts_and_ports: List[Tuple[str, Union[str, int]]]):
 
@@ -69,8 +73,8 @@ class RedisSentinelConnector(RemoteConnector):
         match os.environ.get(self.ENV_REDIS_SERVICE_NAME):
             case None:
                 logger.warning(
-                    f"Environment variable {self.ENV_REDIS_SERVICE_NAME} is not found, using default value 'mymaster'"
-                )
+                    f"Environment variable {self.ENV_REDIS_SERVICE_NAME} is not"
+                    f"found, using default value 'mymaster'")
                 service_name = "mymaster"
             case value:
                 service_name = value
@@ -104,12 +108,12 @@ class RedisSentinelConnector(RemoteConnector):
         all_keys = []
 
         while True:
-            cursor, keys = self.slave.scan(cursor=cursor, match='*')
+            cursor, keys = self.slave.scan(cursor=cursor, match="*")
             all_keys.extend(keys)
             if cursor == 0:
                 break
 
-        return [key.decode('utf-8') for key in all_keys]
+        return [key.decode("utf-8") for key in all_keys]
 
     def close(self):
         self.master.close()

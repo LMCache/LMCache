@@ -19,6 +19,7 @@ class ParsedRemoteURL:
     The parsed URL of the format:
     <connector_type>://<host>:<port>,<host2>:<port2>,...
     """
+
     connector_type: str
     hosts: List[str]
     ports: List[int]
@@ -45,8 +46,8 @@ def parse_remote_url(url: str) -> ParsedRemoteURL:
         m = re.match(r"(.+):(\d+)", body)
         if m is None:
             logger.error(
-                f"Cannot parse url body {body} from remote_url {url} in the config"
-            )
+                f"Cannot parse url body {body} from remote_url {url} in the "
+                f"config")
             raise ValueError(f"Invalid remote url {url}")
 
         host, port = m.group(1), int(m.group(2))
@@ -76,8 +77,8 @@ def CreateConnector(url: str) -> RemoteConnector:
                 connector = RedisConnector(host, port)
             else:
                 raise ValueError(
-                    f"Redis connector only supports a single host, but got url: {url}"
-                )
+                    f"Redis connector only supports a single host, but got url:"
+                    f" {url}")
 
         case "redis-sentinel":
             connector = RedisSentinelConnector(
@@ -89,13 +90,13 @@ def CreateConnector(url: str) -> RemoteConnector:
                 connector = LMCServerConnector(host, port)
             else:
                 raise ValueError(
-                    f"LM connector only supports a single host, but got url: {url}"
-                )
+                    f"LM connector only supports a single host, but got url:"
+                    f" {url}")
 
         case _:
             raise ValueError(
-                f"Unknown connector type {parsed_url.connector_type} (url is: {url})"
-            )
+                f"Unknown connector type {parsed_url.connector_type} "
+                f"(url is: {url})")
 
-    return connector if not GlobalConfig.is_debug(
-    ) else RemoteConnectorDebugWrapper(connector)
+    return (connector if not GlobalConfig.is_debug() else
+            RemoteConnectorDebugWrapper(connector))

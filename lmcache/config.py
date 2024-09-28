@@ -7,13 +7,14 @@ import yaml
 
 @dataclass
 class LMCacheEngineMetadata:
-    ''' name of the LLM model '''
+    """name of the LLM model"""
+
     model_name: str
-    ''' world size when running under a distributed setting '''
+    """ world size when running under a distributed setting """
     world_size: int
-    ''' worker id when running under a distributed setting '''
+    """ worker id when running under a distributed setting """
     worker_id: int
-    ''' the format of kv tensors '''
+    """ the format of kv tensors """
     fmt: str
 
 
@@ -33,9 +34,14 @@ class LMCacheEngineConfig:
         remote_url: str = "redis://localhost:6379",
         remote_serde: str = "torch",
         pipelined_backend: bool = False,
-    ) -> 'LMCacheEngineConfig':
-        return LMCacheEngineConfig(chunk_size, local_device, remote_url,
-                                   remote_serde, pipelined_backend)
+    ) -> "LMCacheEngineConfig":
+        return LMCacheEngineConfig(
+            chunk_size,
+            local_device,
+            remote_url,
+            remote_serde,
+            pipelined_backend,
+        )
 
     @staticmethod
     def from_legacy(
@@ -44,7 +50,7 @@ class LMCacheEngineConfig:
         persist_path: Optional[str] = None,
         remote_serde: Optional[str] = "torch",
         pipelined_backend: bool = False,
-    ) -> 'LMCacheEngineConfig':
+    ) -> "LMCacheEngineConfig":
 
         local_device: Optional[str] = None
         remote_url: Optional[str] = None
@@ -54,21 +60,26 @@ class LMCacheEngineConfig:
                 local_device = backend
                 remote_url = None
             case path if re.match(r"file://(.*)/",
-                                  path):  #local disk directory
+                                  path):  # local disk directory
                 local_device = path[7:]
                 remote_url = None
             case url if re.match(r"(.*)://(.*):(\d+)", url):
                 local_device = None
                 remote_url = url
-        return LMCacheEngineConfig(chunk_size, local_device, remote_url,
-                                   remote_serde, pipelined_backend)
+        return LMCacheEngineConfig(
+            chunk_size,
+            local_device,
+            remote_url,
+            remote_serde,
+            pipelined_backend,
+        )
 
     @staticmethod
-    def from_file(file_path: str) -> 'LMCacheEngineConfig':
+    def from_file(file_path: str) -> "LMCacheEngineConfig":
         """
         Load the config from a yaml file
         """
-        with open(file_path, 'r') as fin:
+        with open(file_path, "r") as fin:
             config = yaml.safe_load(fin)
 
         chunk_size = config.get("chunk_size", 256)
@@ -81,7 +92,7 @@ class LMCacheEngineConfig:
             case "cpu" | "cuda" | None:
                 pass
             case path if re.match(r"file://(.*)/",
-                                  path):  #local disk directory
+                                  path):  # local disk directory
                 local_device = path[7:]
             case _:
                 raise ValueError(
@@ -95,12 +106,18 @@ class LMCacheEngineConfig:
             case _:
                 raise ValueError(f"Invalid remote storage url: {remote_url}")
 
-        return LMCacheEngineConfig(chunk_size, local_device, remote_url,
-                                   remote_serde, pipelined_backend)
+        return LMCacheEngineConfig(
+            chunk_size,
+            local_device,
+            remote_url,
+            remote_serde,
+            pipelined_backend,
+        )
 
 
 ### SOME GLOBAL CONFIGS
-# TODO: it needs to be manually updated in the code here, but cannot be really configured
+# TODO: it needs to be manually updated in the code here, but cannot be really
+# configured
 class GlobalConfig:
     enable_debug: bool = True
 

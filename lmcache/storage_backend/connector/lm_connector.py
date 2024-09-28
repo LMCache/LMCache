@@ -10,7 +10,8 @@ from lmcache.utils import _lmcache_nvtx_annotate
 logger = init_logger(__name__)
 
 
-# TODO: performance optimization for this class, consider using C/C++/Rust for communication + deserialization
+# TODO: performance optimization for this class, consider using C/C++/Rust
+# for communication + deserialization
 class LMCServerConnector(RemoteConnector):
 
     def __init__(self, host, port):
@@ -39,17 +40,19 @@ class LMCServerConnector(RemoteConnector):
         self.send_all(
             ClientMetaMessage(Constants.CLIENT_EXIST, key, 0).serialize())
         response = self.client_socket.recv(ServerMetaMessage.packlength())
-        return ServerMetaMessage.deserialize(
-            response).code == Constants.SERVER_SUCCESS
+        return (ServerMetaMessage.deserialize(response).code ==
+                Constants.SERVER_SUCCESS)
 
     def set(self, key: str, obj: bytes):
         logger.debug("Call to set()!")
         self.send_all(
             ClientMetaMessage(Constants.CLIENT_PUT, key, len(obj)).serialize())
         self.send_all(obj)
-        #response = self.client_socket.recv(ServerMetaMessage.packlength())
-        #if ServerMetaMessage.deserialize(response).code != Constants.SERVER_SUCCESS:
-        #    raise RuntimeError(f"Failed to set key: {ServerMetaMessage.deserialize(response).code}")
+        # response = self.client_socket.recv(ServerMetaMessage.packlength())
+        # if ServerMetaMessage.deserialize(response).code
+        #   != Constants.SERVER_SUCCESS:
+        #    raise RuntimeError(f"Failed to set key:
+        # {ServerMetaMessage.deserialize(response).code}")
 
     @_lmcache_nvtx_annotate
     def get(self, key: str) -> Optional[bytes]:

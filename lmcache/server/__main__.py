@@ -11,7 +11,7 @@ class LMCacheServer:
     def __init__(self, host, port, device):
         self.host = host
         self.port = port
-        #self.data_store = {}
+        # self.data_store = {}
         self.data_store = CreateStorageBackend(device)
         self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.server_socket.bind((host, port))
@@ -40,18 +40,19 @@ class LMCacheServer:
                         t0 = time.perf_counter()
                         s = self.receive_all(client_socket, meta.length)
                         t1 = time.perf_counter()
-                        #self.data_store[meta.key] = s
+                        # self.data_store[meta.key] = s
                         self.data_store.put(meta.key, s)
                         t2 = time.perf_counter()
-                        #client_socket.sendall(ServerMetaMessage(Constants.SERVER_SUCCESS, 0).serialize())
-                        #t3 = time.perf_counter()
+                        # client_socket.sendall(ServerMetaMessage(
+                        # Constants.SERVER_SUCCESS, 0).serialize())
+                        # t3 = time.perf_counter()
                         print(
-                            f"Time to receive data: {t1 - t0}, time to store data: {t2 - t1}"
-                        )
+                            f"Time to receive data: {t1 - t0}, time to store "
+                            f"data: {t2 - t1}")
 
                     case Constants.CLIENT_GET:
                         t0 = time.perf_counter()
-                        #data_string = self.data_store.get(meta.key, None)
+                        # data_string = self.data_store.get(meta.key, None)
                         data_string = self.data_store.get(meta.key)
                         t1 = time.perf_counter()
                         if data_string is not None:
@@ -63,7 +64,8 @@ class LMCacheServer:
                             client_socket.sendall(data_string)
                             t3 = time.perf_counter()
                             print(
-                                f"Time to get data: {t1 - t0}, time to send meta: {t2 - t1}, time to send data: {t3 - t2}"
+                                f"Time to get data: {t1 - t0}, time to send "
+                                f"meta: {t2 - t1}, time to send data: {t3 - t2}"
                             )
                         else:
                             client_socket.sendall(
@@ -71,9 +73,11 @@ class LMCacheServer:
                                                   0).serialize())
 
                     case Constants.CLIENT_EXIST:
-                        #code = Constants.SERVER_SUCCESS if meta.key in self.data_store else Constants.SERVER_FAIL
-                        code = Constants.SERVER_SUCCESS if meta.key in self.data_store.list_keys(
-                        ) else Constants.SERVER_FAIL
+                        # code = Constants.SERVER_SUCCESS if meta.key in
+                        # self.data_store else Constants.SERVER_FAIL
+                        code = (Constants.SERVER_SUCCESS
+                                if meta.key in self.data_store.list_keys() else
+                                Constants.SERVER_FAIL)
                         client_socket.sendall(
                             ServerMetaMessage(code, 0).serialize())
 
@@ -102,6 +106,7 @@ class LMCacheServer:
 
 def main():
     import sys
+
     if len(sys.argv) not in [3, 4]:
         print(f"Usage: {sys.argv[0]} <host> <port> <storage>(default:cpu)")
         exit(1)

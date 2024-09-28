@@ -22,8 +22,10 @@ class LMSBackendInterface(metaclass=abc.ABCMeta):
 
         Input:
             key: the key of the token chunk, in the format of str
-            kv_chunk: the kv cache (bytes) of the token chunk, in the format of a big tensor
-            blocking: whether to block the call before the operation is completed
+            kv_chunk: the kv cache (bytes) of the token chunk, in the format of 
+                a big tensor
+            blocking: whether to block the call before the operation is 
+                completed
 
         Returns:
             None
@@ -49,12 +51,12 @@ class LMSBackendInterface(metaclass=abc.ABCMeta):
         key: str,
     ) -> Optional[torch.Tensor]:
         """
-        Retrieve the KV cache chunk by the given key 
+        Retrieve the KV cache chunk by the given key
 
         Input:
             key: the key of the token chunk, including prefix hash and format
 
-        Output: 
+        Output:
             the kv cache of the token chunk, in the format of a big tensor
             None if the key is not found
         """
@@ -63,17 +65,18 @@ class LMSBackendInterface(metaclass=abc.ABCMeta):
     @abc.abstractmethod
     def list_keys(self, ) -> List[str]:
         """
-        Retrieve the KV cache chunk by the given key 
+        Retrieve the KV cache chunk by the given key
 
         Input:
             key: the key of the token chunk, including prefix hash and format
 
-        Output: 
+        Output:
             the kv cache of the token chunk, in the format of a big tensor
             None if the key is not found
         """
         raise NotImplementedError
 
+    @abc.abstractmethod
     def close(self):
         """
         Do the cleanup things
