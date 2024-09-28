@@ -1,4 +1,7 @@
 # Configure storage backend
+This folder is about how to write configuration yamls(for storage backends).  
+Just replace example.yaml in other folders with yamls you want in this folder, and run with steps mentioned in those folders.  
+
 Local: CUDA, CPU, Disk.  
 Remote: lmcache, redis, redis-sentinel.  
 ```

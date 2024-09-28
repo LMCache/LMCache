@@ -1,4 +1,11 @@
-# Start an online chat with LLM
+# Online chat with LLM
+This will help with online chat on vLLM + LMCache.  
+No context is given to LLM here.  
+## Prerequisites
+Your server should have at least 1 GPU.  
+
+This will use the port 8000 (for vLLM) and port 65432(for LMCache).  
+## Steps
 1.  ```lmcache_server localhost 65432```  
 And wait until it's ready.  
 2. In one terminal,  
@@ -6,4 +13,5 @@ And wait until it's ready.
 Wait until it's ready.  
 3.  ```python3 openai_chat_completion_client.py 8000```  
 Then you can start to chat with the model.  
-
+## What to expect
+A multi-turn conversation between you and the model.  

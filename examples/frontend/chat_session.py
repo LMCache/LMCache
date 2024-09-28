@@ -54,12 +54,10 @@ class ChatSession:
         chat_completion = self.client.chat.completions.create(
             messages=self.messages,
             model=self.model,
-            temperature=0.5,
-            stream=True,
-            stop = "\n",
+            temperature=0,
+            stream=True
         )
 
-        output_buffer = StringIO()
         server_message = []
         for chunk in chat_completion:
             chunk_message = chunk.choices[0].delta.content
