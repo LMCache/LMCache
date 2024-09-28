@@ -32,6 +32,6 @@ jobs:
         pip install types-setuptools
     - name: Mypy
       run: |
-        mypy --install-types
+        mypy --install-types --non-interactive
         mypy tests --follow-imports skip
         mypy lmcache --follow-imports skip
