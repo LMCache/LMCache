@@ -17,8 +17,10 @@ from lmcache.storage_backend.serde.torch_serde import (TorchDeserializer,
 
 
 def CreateSerde(
-        serde_type: str, config: LMCacheEngineConfig,
-        metadata: LMCacheEngineMetadata) -> Tuple[Serializer, Deserializer]:
+    serde_type: str,
+    config: LMCacheEngineConfig,
+    metadata: LMCacheEngineMetadata,
+) -> Tuple[Serializer, Deserializer]:
     s: Optional[Serializer] = None
     d: Optional[Deserializer] = None
     if serde_type == "torch":

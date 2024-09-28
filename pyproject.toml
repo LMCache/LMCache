@@ -5,3 +5,46 @@ requires = [
     "wheel",
 ]
 build-backend = "setuptools.build_meta"
+
+[tool.ruff]
+# Allow lines to be as long as 80.
+line-length = 80
+
+
+[tool.ruff.lint]
+select = [
+    # pycodestyle
+    "E",
+    # Pyflakes
+    "F",
+    # pyupgrade
+    # "UP",
+    # flake8-bugbear
+    "B",
+    # isort
+    # "I",
+]
+ignore = [
+    # star imports
+    "F405", "F403",
+    # lambda expression assignment
+    "E731",
+    # Loop control variable not used within loop body
+    "B007",
+    # f-string format
+    "UP032",
+]
+
+
+[tool.mypy]
+python_version = "3.10"
+
+ignore_missing_imports = true
+check_untyped_defs = true
+follow_imports = "silent"
+
+# After fixing type errors resulting from follow_imports: "skip" -> "silent",
+# move the directory here and remove it from format.sh and mypy.yaml
+files = [
+    "lmcache"
+]

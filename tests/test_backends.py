@@ -22,7 +22,7 @@ REDIS_URL = "redis://localhost:6379"
 
 
 def random_string(N):
-    return ''.join(random.choices(string.ascii_uppercase + string.digits, k=N))
+    return "".join(random.choices(string.ascii_uppercase + string.digits, k=N))
 
 
 def generate_random_key() -> CacheEngineKey:
@@ -49,7 +49,8 @@ def get_config(t):
             return LMCacheEngineConfig.from_defaults(
                 local_device="cuda",
                 remote_url="lm://localhost:65000",
-                pipelined_backend=True)
+                pipelined_backend=True,
+            )
         case _:
             raise ValueError(
                 f"Testbed internal error: Unknown config type: {t}")
@@ -161,9 +162,11 @@ def test_nonblocking_put(backend_type, autorelease, lmserver_process):
         backend.put(key, value, blocking=False)
         end = time.perf_counter()
         _elapsed = end - start
-        # TODO: `end = time.perf_counter()` may not be instantly scheduled after backed.put()
-        #       So we cannot assert on the elapsed time. This should be fixed in the future
-        #assert _elapsed < 0.005
+        # TODO: `end = time.perf_counter()` may not be instantly scheduled after
+        # backed.put()
+        #       So we cannot assert on the elapsed time. This should be fixed
+        # in the future
+        # assert _elapsed < 0.005
 
     time.sleep(5)
     for key, value in zip(keys, random_tensors):
@@ -177,9 +180,9 @@ def test_nonblocking_put(backend_type, autorelease, lmserver_process):
 @pytest.mark.parametrize("lmserver_process", ["cpu", "remote_disk/"],
                          indirect=True)
 def test_restart(autorelease, lmserver_process):
-    config = get_config(
-        "hybrid"
-    )  #LMCacheEngineConfig.from_defaults(local_device = "cuda", remote_url = None)
+    config = get_config("hybrid")
+    # LMCacheEngineConfig.from_defaults(local_device = "cuda",
+    # remote_url = None)
     metadata = get_metadata()
     backend = autorelease(CreateStorageBackend(config, metadata))
 

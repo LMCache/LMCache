@@ -30,7 +30,7 @@ class Printer:
         while not self._stop_event.is_set():
             arrows = ">" * (idx % 6)
             string = "{:6s}".format(arrows)
-            print("\033[31m\r" + string + "\033[0m", end='', flush=True)
+            print("\033[31m\r" + string + "\033[0m", end="", flush=True)
             idx += 1
             time.sleep(0.2)
 
@@ -45,7 +45,7 @@ class Printer:
             self._stop_event.set()
             self._thread.join()
             self._thread = None
-            print("\033[31m\r>>>>> \033[0m", end='', flush=True)
+            print("\033[31m\r>>>>> \033[0m", end="", flush=True)
 
 
 class ChatSession:
@@ -69,7 +69,8 @@ class ChatSession:
                 "role":
                 "user",
                 "content":
-                f"I've got a document, here's the content:```\n{self.context}\n```."
+                f"I've got a document, here's the content:```\n{self.context}\n"
+                f"```.",
             },
             {
                 "role": "assistant",

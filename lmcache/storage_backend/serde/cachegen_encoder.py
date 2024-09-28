@@ -78,10 +78,12 @@ def _split_kv(tensor: torch.Tensor) -> Tuple[torch.Tensor, ...]:
     Split a blob KV tensor to K and V tensors with the merged heads
 
     Input:
-        tensor: the KV tensor with shape [num_layers, 2, num_tokens, num_heads, head_size]
+        tensor: the KV tensor with shape 
+            [num_layers, 2, num_tokens, num_heads, head_size]
 
     Returns:
-        K and V tensors with shape [num_layers, num_tokens, num_channels]
+        K and V tensors with shape 
+            [num_layers, num_tokens, num_channels]
     """
     num_layers, _, num_tokens, num_heads, head_size = tensor.shape
     return torch.unbind(tensor.reshape(num_layers, 2, num_tokens,
@@ -93,7 +95,7 @@ def _split_kv(tensor: torch.Tensor) -> Tuple[torch.Tensor, ...]:
 def _convert_to_int_and_normalize(cdf_float, needs_normalization):
     """
     Convert floatingpoint CDF to integers. See README for more info.
-  
+
     The idea is the following:
     When we get the cdf here, it is (assumed to be) between 0 and 1, i.e,
       cdf in [0, 1)
@@ -127,10 +129,12 @@ def _convert_to_int_and_normalize(cdf_float, needs_normalization):
 class CacheGenEncoderImpl:
 
     def __init__(self, **kwargs) -> None:
-        """ 
-        Fields: 
-        - fp_kv: should be a tensor of shape (num_layers, num_tokens, num_channels)
-        - fp_v: should be a tensor of shape (num_layers, num_tokens, num_channels)
+        """
+        Fields:
+        - fp_kv: 
+            should be a tensor of shape (num_layers, num_tokens, num_channels)
+        - fp_v: 
+            should be a tensor of shape (num_layers, num_tokens, num_channels)
         """
         self.fp_k = kwargs["fp_k"]
         self.fp_v = kwargs["fp_v"]
@@ -143,8 +147,8 @@ class CacheGenEncoderImpl:
 
     @_lmcache_nvtx_annotate
     def quantize(self):
-        """ Quantize the key and value tensors 
-        (self.fp_k and self.fp_v) 
+        """Quantize the key and value tensors
+        (self.fp_k and self.fp_v)
         """
         for layer in range(len(self.fp_k)):
             if layer < self.config["key_first_layers"]:
@@ -171,7 +175,7 @@ class CacheGenEncoderImpl:
     def compute_cdf(self, is_key):
         """
         Compute the CDF based on the quantized tensors
-        Field: 
+        Field:
         - start_layer: the start layer to compute the CDF
         - end_layer: the end layer to compute the CDF
         """
@@ -198,7 +202,7 @@ class CacheGenEncoderImpl:
             """
             results = []
             for x in X:
-                ''' do permute here '''
+                """do permute here"""
                 batch_counts = process_batch(x.cuda().permute(1, 0), max_val)
                 results.append(batch_counts)
 
@@ -240,8 +244,10 @@ def encode_ntokens(cdf_int, encode_input, output_buffer,
     """
     Input:
         cdf_int: int16 tensor on GPU with shape [nlayers, nchannels, Lp]
-        encode_input: int8 tensor on GPU with shape [nlayers, ntokens, nchannels]
-        output_buffer: uint8 tensor on GPU with shape [nlayers, nchannels, BUFFER_SIZE]
+        encode_input: int8 tensor on GPU with shape 
+        [nlayers, ntokens, nchannels]
+        output_buffer: uint8 tensor on GPU with shape 
+        [nlayers, nchannels, BUFFER_SIZE]
         output_lengths: int32 tensor on GPU with shape [nlayers, nchannels]
     Returns:
         byte_tensor: the byte tensor
@@ -254,13 +260,17 @@ def encode_ntokens(cdf_int, encode_input, output_buffer,
     )
     byte_tensor = collect_bytes(output_buffer, output_lengths)
     return byte_tensor
-    #return byte_tensor.cpu().numpy().tobytes()
+    # return byte_tensor.cpu().numpy().tobytes()
 
 
 @_lmcache_nvtx_annotate
-def encode_function(kv: torch.Tensor, config: CacheGenConfig,
-                    key_bins: torch.Tensor, value_bins: torch.Tensor,
-                    chunk_size: int) -> CacheGenGPUEncoderOutput:
+def encode_function(
+    kv: torch.Tensor,
+    config: CacheGenConfig,
+    key_bins: torch.Tensor,
+    value_bins: torch.Tensor,
+    chunk_size: int,
+) -> CacheGenGPUEncoderOutput:
     """
     Given the path to the original key value cache, encode the KV cache
     """
@@ -282,7 +292,8 @@ def encode_function(kv: torch.Tensor, config: CacheGenConfig,
     output_buffer = torch.zeros(
         (nlayers, nchannels, CGBasics.CACHEGEN_GPU_MAX_TOKENS_PER_CHUNK),
         dtype=torch.uint8,
-        device=encode_input.device)
+        device=encode_input.device,
+    )
     output_lengths = torch.zeros((nlayers, nchannels),
                                  dtype=torch.int32,
                                  device=encode_input.device)
@@ -291,8 +302,12 @@ def encode_function(kv: torch.Tensor, config: CacheGenConfig,
     for i in range(0, chunk_size, CGBasics.CACHEGEN_GPU_MAX_TOKENS_PER_CHUNK):
         start = i
         end = min(i + CGBasics.CACHEGEN_GPU_MAX_TOKENS_PER_CHUNK, chunk_size)
-        bytestream = encode_ntokens(cdf_int, encode_input[:, start:end, :],
-                                    output_buffer, output_lengths)
+        bytestream = encode_ntokens(
+            cdf_int,
+            encode_input[:, start:end, :],
+            output_buffer,
+            output_lengths,
+        )
         data_chunks.append(
             CacheGenGPUBytestream(
                 bytestream=bytestream,
@@ -343,7 +358,7 @@ class CacheGenSerializer(Serializer):
         Input:
             t: the input pytorch tensor, can be on any device, in any shape,
                with any dtype
-        
+
         Returns:
             bytes: the serialized bytes
         """
@@ -357,11 +372,18 @@ class CacheGenSerializer(Serializer):
         if tensor.device != self.value_bins.device:
             self.value_bins = self.value_bins.to(tensor.device)
 
-        # TODO: permute is expensive here, need a better way to do it at lower level
+        # TODO: permute is expensive here, need a better way to do it at lower
+        # level
         if self.fmt == "huggingface":
             tensor = tensor.permute(0, 1, 3, 2, 4)
-        ''' expecting a tensor of shape [num_layers, 2, num_tokens, num_heads, head_size] '''
+        """ expecting a tensor of shape 
+        [num_layers, 2, num_tokens, num_heads, head_size] """
         ntokens = tensor.shape[2]
-        output_dict = encode_function(tensor.cuda(), self.cachegen_config,
-                                      self.key_bins, self.value_bins, ntokens)
+        output_dict = encode_function(
+            tensor.cuda(),
+            self.cachegen_config,
+            self.key_bins,
+            self.value_bins,
+            ntokens,
+        )
         return output_dict.to_bytes()

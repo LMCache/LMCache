@@ -23,8 +23,10 @@ class LMCBackendInterface(metaclass=abc.ABCMeta):
 
         Input:
             key: the key of the token chunk, in the format of CacheEngineKey
-            kv_chunk: the kv cache of the token chunk, in the format of a big tensor
-            blocking: whether to block the call before the operation is completed
+            kv_chunk: the kv cache of the token chunk, in the format of a 
+                big tensor
+            blocking: whether to block the call before the operation is 
+                completed
 
         Returns:
             None
@@ -50,12 +52,12 @@ class LMCBackendInterface(metaclass=abc.ABCMeta):
         key: CacheEngineKey,
     ) -> Optional[torch.Tensor]:
         """
-        Retrieve the KV cache chunk by the given key 
+        Retrieve the KV cache chunk by the given key
 
         Input:
             key: the key of the token chunk, including prefix hash and format
 
-        Output: 
+        Output:
             the kv cache of the token chunk, in the format of a big tensor
             None if the key is not found
         """
@@ -67,12 +69,16 @@ class LMCBackendInterface(metaclass=abc.ABCMeta):
         blocking=True,
     ) -> int:
         """
-        Store the multiple keys and KV cache chunks into the cache engine in a batched manner.
+        Store the multiple keys and KV cache chunks into the cache engine in a
+        batched manner.
 
         Input:
-            keys: the iterable of keys of the token chunks, in the format of CacheEngineKey
-            kv_chunks: the iterable of kv cache of the token chunks, in the format of a big tensor
-            blocking: whether to block the call before the operation is completed
+            keys: the iterable of keys of the token chunks, in the format of 
+                CacheEngineKey
+            kv_chunks: the iterable of kv cache of the token chunks, in the 
+                format of a big tensor
+            blocking: whether to block the call before the operation is 
+                completed
 
         Returns:
             the number of chunks are stored
@@ -92,10 +98,12 @@ class LMCBackendInterface(metaclass=abc.ABCMeta):
         Retrieve the kv cache chunks by the given keys in a batched manner
 
         Input:
-            keys: the iterator of keys of the token chunks, including prefix hash and format
+            keys: the iterator of keys of the token chunks, including prefix 
+                hash and format
 
         Output:
-            the iterator of kv cache of the token chunks, in the format of a big tensor
+            the iterator of kv cache of the token chunks, in the format of a 
+            big tensor
             None if the key is not found
         """
         logger.info("Using default batched implementation of the get() method")
@@ -105,6 +113,7 @@ class LMCBackendInterface(metaclass=abc.ABCMeta):
             else:
                 yield None
 
+    @abc.abstractmethod
     def close(self):
         """
         Do the cleanup things

@@ -43,18 +43,18 @@ class MockRedisSentinel:
 
 @pytest.fixture(scope="function", autouse=True)
 def mock_redis():
-    with patch('redis.Redis', new_callable=lambda: MockRedis) as mock:
+    with patch("redis.Redis", new_callable=lambda: MockRedis) as mock:
         yield mock
 
 
 @pytest.fixture(scope="function", autouse=True)
 def mock_redis_sentinel():
-    with patch('redis.Sentinel',
+    with patch("redis.Sentinel",
                new_callable=lambda: MockRedisSentinel) as mock:
         yield mock
 
 
-@pytest.fixture(scope='module')
+@pytest.fixture(scope="module")
 def lmserver_process(request):
     # Specify remote device
     device = request.param

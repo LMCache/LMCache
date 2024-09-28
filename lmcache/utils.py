@@ -18,11 +18,17 @@ class CacheEngineKey:
     chunk_hash: str
 
     def __hash__(self):
-        return hash((self.fmt, self.model_name, self.world_size,
-                     self.worker_id, self.chunk_hash))
+        return hash((
+            self.fmt,
+            self.model_name,
+            self.world_size,
+            self.worker_id,
+            self.chunk_hash,
+        ))
 
     def to_string(self):
-        return f"{self.fmt}@{self.model_name}@{self.world_size}@{self.worker_id}@{self.chunk_hash}"
+        return f"{self.fmt}@{self.model_name}@{self.world_size}"\
+            f"@{self.worker_id}@{self.chunk_hash}"
 
     @staticmethod
     def from_string(s):

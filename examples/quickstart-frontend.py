@@ -34,7 +34,7 @@ with st.sidebar:
     system_prompt = st.text_area(
         "System prompt:",
         "You are a helpful assistant. I will now give you a document and "
-        "please answer my question afterwards based on the content in document"
+        "please answer my question afterwards based on the content in document",
     )
 
     session.set_context([system_prompt] + [context])

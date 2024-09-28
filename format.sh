@@ -96,7 +96,7 @@ echo 'lmcache yapf: Done'
 
 # Run mypy
 echo 'lmcache mypy:'
-mypy tests --follow-imports skip
+mypy
 mypy lmcache --follow-imports skip
 echo 'lmcache mypy: Done'
 

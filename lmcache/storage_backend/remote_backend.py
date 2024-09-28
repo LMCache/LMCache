@@ -30,16 +30,19 @@ class LMCRemoteBackend(LMCBackendInterface):
                  metadata: LMCacheEngineMetadata):
         """
         Throws:
-            RuntimeError if the loaded configuration does not match the current configuration
+            RuntimeError if the loaded configuration does not match the current
+                configuration
         """
         super().__init__()
         self.existing_keys: Set[CacheEngineKey] = set()
         self.put_thread = None
-        assert config.remote_url is not None, "Need to provide remote_url when"\
-            " using LMCRemoteBackend"
+        assert config.remote_url is not None, (
+            "Need to provide remote_url when"
+            " using LMCRemoteBackend")
         self.connection = CreateConnector(config.remote_url)
-        assert config.remote_serde is not None, "Need to provide remote_serde "\
-            "when using LMCRemoteBackend"
+        assert config.remote_serde is not None, (
+            "Need to provide remote_serde "
+            "when using LMCRemoteBackend")
         s, d = CreateSerde(config.remote_serde, config, metadata)
         self.serializer = s
         self.deserializer = d
@@ -56,13 +59,13 @@ class LMCRemoteBackend(LMCBackendInterface):
 
     @_lmcache_nvtx_annotate
     def put_worker(self, ):
-        #put_stream = torch.cuda.Stream()
+        # put_stream = torch.cuda.Stream()
         while True:
             item = self.put_queue.get()
             if isinstance(item, RemoteBackendEndSignal):
                 break
             key, value = item
-            #with torch.cuda.stream(put_stream):
+            # with torch.cuda.stream(put_stream):
             self.put_blocking(key, value)
 
     def _combine_key(
@@ -186,7 +189,8 @@ class LMCPipelinedRemoteBackend(LMCRemoteBackend):
                  metadata: LMCacheEngineMetadata):
         """
         Throws:
-            RuntimeError if the loaded configuration does not match the current configuration
+            RuntimeError if the loaded configuration does not match the current
+                configuration
         """
         super().__init__(config, metadata)
 
@@ -194,7 +198,7 @@ class LMCPipelinedRemoteBackend(LMCRemoteBackend):
         self.network_thread = None
         self.deserialize_thread = None
 
-        #Initialize network get thread queue
+        # Initialize network get thread queue
         logger.debug("Initializing network thread queue")
         self.network_queue: queue.Queue[Union[Tuple[
             int, CacheEngineKey], RemoteBackendEndSignal]] = queue.Queue()
@@ -202,7 +206,7 @@ class LMCPipelinedRemoteBackend(LMCRemoteBackend):
                                                args=())
         self.network_thread.start()
 
-        #Initialize network get thread queue
+        # Initialize network get thread queue
         logger.debug("Initializing deserial thread queue")
         self.deserialize_queue: queue.Queue[Union[Tuple[
             int, Optional[bytes]], RemoteBackendEndSignal]] = queue.Queue()
@@ -261,8 +265,8 @@ class LMCPipelinedRemoteBackend(LMCRemoteBackend):
             self.network_thread.join()
             logger.info("Closed the network worker")
 
-        if self.deserialize_thread is not None and self.deserialize_thread.is_alive(
-        ):
+        if (self.deserialize_thread is not None
+                and self.deserialize_thread.is_alive()):
             self.deserialize_queue.put(RemoteBackendEndSignal())
             self.deserialize_thread.join()
             logger.info("Closed the deserialize worker")

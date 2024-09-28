@@ -20,7 +20,7 @@ class Serializer(metaclass=abc.ABCMeta):
         Input:
             t: the input pytorch tensor, can be on any device, in any shape,
                with any dtype
-        
+
         Returns:
             bytes: the serialized bytes
         """
@@ -46,7 +46,7 @@ class Deserializer(metaclass=abc.ABCMeta):
     @abc.abstractmethod
     def from_bytes(self, bs: bytes) -> torch.Tensor:
         """
-        Deserialize a pytorch tensor from bytes. 
+        Deserialize a pytorch tensor from bytes.
 
         Input:
             bytes: a stream of bytes

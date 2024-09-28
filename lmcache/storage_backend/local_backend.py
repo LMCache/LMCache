@@ -21,13 +21,15 @@ class LocalBackendEndSignal:
 
 class LMCLocalBackend(LMCBackendInterface):
     """
-    Cache engine for storing the KV cache of the tokens in the local cpu/gpu memory.
+    Cache engine for storing the KV cache of the tokens in the local cpu/gpu
+    memory.
     """
 
     def __init__(self, config: LMCacheEngineConfig):
         """
         Throws:
-            RuntimeError if the loaded configuration does not match the current configuration
+            RuntimeError if the loaded configuration does not match the current
+                configuration
         """
         super().__init__()
 
@@ -43,13 +45,14 @@ class LMCLocalBackend(LMCBackendInterface):
         self.put_thread.start()
         self.update_lock = threading.Lock()
 
-        # FIXME(Jiayi): `use_pin_memory` and `dst_device` should be configged dynamically
+        # FIXME(Jiayi): `use_pin_memory` and `dst_device` should be configged
+        # dynamically
         self.use_pin_memory = False
         logger.info(f"Using pinned cpu memory: {self.use_pin_memory}")
 
         self.dst_device = "cuda"
-        #self.async_put_flag = False
-        #self.put_events = {}
+        # self.async_put_flag = False
+        # self.put_events = {}
 
     def contains(
         self,
@@ -73,7 +76,7 @@ class LMCLocalBackend(LMCBackendInterface):
             if isinstance(item, LocalBackendEndSignal):
                 break
             key, value = item
-            #with torch.cuda.stream(self.put_stream):
+            # with torch.cuda.stream(self.put_stream):
             self.put_nonblocking(key, value)
 
     def put_nonblocking(self, key, kv_chunk):
@@ -107,7 +110,8 @@ class LMCLocalBackend(LMCBackendInterface):
 
         Input:
             key: the key of the token chunk, including prefix hash and format
-            kv_chunk: the kv cache of the token chunk, in the format of nested tuples
+            kv_chunk: the kv cache of the token chunk, in the format of nested 
+                tuples
 
         Returns:
             None
@@ -126,11 +130,11 @@ class LMCLocalBackend(LMCBackendInterface):
         key: CacheEngineKey,
     ) -> Optional[torch.Tensor]:
         """
-        Retrieve the KV cache chunk by the given key 
+        Retrieve the KV cache chunk by the given key
 
         Input:
             key: the key of the token chunk, including prefix hash and format
-        Output: 
+        Output:
             the kv cache of the token chunk, in the format of nested tuples
             None if the key is not found
         """
@@ -153,7 +157,7 @@ class LMCLocalBackend(LMCBackendInterface):
 # current impl. with "safetensors" might not be efficient
 # but it is better than "torch.save/load"
 
-#TODO(Jiayi): need to support prefetch for disk
+# TODO(Jiayi): need to support prefetch for disk
 
 
 class LMCLocalDiskBackend(LMCBackendInterface):
@@ -164,7 +168,8 @@ class LMCLocalDiskBackend(LMCBackendInterface):
     def __init__(self, config: LMCacheEngineConfig):
         """
         Throws:
-            RuntimeError if the loaded configuration does not match the current configuration
+            RuntimeError if the loaded configuration does not match the current
+                configuration
         """
         super().__init__()
 
@@ -172,15 +177,16 @@ class LMCLocalDiskBackend(LMCBackendInterface):
         self.config = config
         self.path = config.local_device
 
-        assert self.path is not None, "Need to specify local path if when "\
-            "using LMCLocalDiskBackend"
+        assert self.path is not None, ("Need to specify local path if when "
+                                       "using LMCLocalDiskBackend")
 
         if not os.path.exists(self.path):
             os.makedirs(self.path)
         self.existing_keys: Set[CacheEngineKey] = set()
 
         # TODO(Jiayi): the following async put code is repeated in all backends
-        # Please consider use a parent class that can be inherited by all (local) backends
+        # Please consider use a parent class that can be inherited by all
+        # (local) backends
         # This should be also be helpful for more flexible hierarchical backends
         # For async put
         self.put_queue: queue.Queue[
@@ -191,7 +197,7 @@ class LMCLocalDiskBackend(LMCBackendInterface):
         self.update_lock = threading.Lock()
 
         # TODO (Jiayi): please remove this hard code
-        self.dst_device = 'cuda'
+        self.dst_device = "cuda"
 
     def contains(
         self,
@@ -240,8 +246,9 @@ class LMCLocalDiskBackend(LMCBackendInterface):
         kv_chunk: torch.Tensor,
     ) -> None:
         logger.info(f"Saving cache to {self._key_to_path(key)}")
-        # The following order matters of `save_file` and `update dictionary` matters
-        save_file({'kv_chunk': kv_chunk}, self._key_to_path(key))
+        # The following order matters of `save_file` and `update dictionary`
+        # matters
+        save_file({"kv_chunk": kv_chunk}, self._key_to_path(key))
         self.update_lock.acquire()
         self.existing_keys.add(key)
         self.update_lock.release()
@@ -257,7 +264,8 @@ class LMCLocalDiskBackend(LMCBackendInterface):
 
         Input:
             key: the key of the token chunk, including prefix hash and format
-            kv_chunk: the kv cache of the token chunk, in the format of nested tuples
+            kv_chunk: the kv cache of the token chunk, in the format of nested 
+                tuples
 
         Returns:
             None
@@ -276,11 +284,11 @@ class LMCLocalDiskBackend(LMCBackendInterface):
         key: CacheEngineKey,
     ) -> Optional[KVCache]:
         """
-        Retrieve the KV cache chunk by the given key 
+        Retrieve the KV cache chunk by the given key
 
         Input:
             key: the key of the token chunk, including prefix hash and format
-        Output: 
+        Output:
             the kv cache of the token chunk, in the format of nested tuples
             None if the key is not found
         """
@@ -290,7 +298,7 @@ class LMCLocalDiskBackend(LMCBackendInterface):
         with safe_open(self._key_to_path(key),
                        framework="pt",
                        device=self.dst_device) as f:  # type: ignore
-            return f.get_tensor('kv_chunk')
+            return f.get_tensor("kv_chunk")
 
     def close(self):
         if self.put_thread is not None and self.put_thread.is_alive():

@@ -6,16 +6,14 @@ from lmcache.storage_backend.serde.cachegen_basics import CacheGenEncoderOutput
 from lmcache.storage_backend.serde.cachegen_decoder import CacheGenDeserializer
 from lmcache.storage_backend.serde.cachegen_encoder import CacheGenSerializer
 
-#from lmcache.storage_backend.serde.safe_serde import SafeSerializer, SafeDeserializer
-
 
 def generate_kv_cache(num_tokens, fmt, device):
     ret = []
     num_layers = 32
     num_heads = 8
     head_size = 128
-    shape = [num_tokens, num_heads, head_size
-             ] if fmt == "vllm" else [num_heads, num_tokens, head_size]
+    shape = ([num_tokens, num_heads, head_size]
+             if fmt == "vllm" else [num_heads, num_tokens, head_size])
     dtype = torch.bfloat16 if fmt == "vllm" else torch.float16
 
     for i in range(num_layers):
@@ -40,12 +38,14 @@ def test_cachegen_encoder(chunk_size):
         model_name="mistralai/Mistral-7B-Instruct-v0.2",
         world_size=1,
         worker_id=0,
-        fmt=fmt)
+        fmt=fmt,
+    )
     metadata2 = LMCacheEngineMetadata(
         model_name="mistralai/Mistral-7B-Instruct-v0.2",
         world_size=1,
         worker_id=0,
-        fmt=fmt2)
+        fmt=fmt2,
+    )
     serializer = CacheGenSerializer(config, metadata)
     serializer2 = CacheGenSerializer(config, metadata2)
 
@@ -68,7 +68,8 @@ def test_cachegen_decoder(fmt, chunk_size):
         model_name="mistralai/Mistral-7B-Instruct-v0.2",
         world_size=1,
         worker_id=0,
-        fmt=fmt)
+        fmt=fmt,
+    )
     serializer = CacheGenSerializer(config, metadata)
     deserializer = CacheGenDeserializer(config, metadata)
 
@@ -89,7 +90,8 @@ def test_cachegen_unmatched_size(fmt):
         model_name="mistralai/Mistral-7B-Instruct-v0.2",
         world_size=1,
         worker_id=0,
-        fmt=fmt)
+        fmt=fmt,
+    )
     serializer = CacheGenSerializer(config, metadata)
     deserializer = CacheGenDeserializer(config, metadata)
 
