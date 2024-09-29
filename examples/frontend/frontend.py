@@ -3,7 +3,8 @@ import streamlit as st
 from transformers import AutoTokenizer
 
 # Change the following variables as needed
-MODEL_NAME = "lmsys/longchat-7b-16k"
+
+MODEL_NAME = "mistralai/Mistral-7B-Instruct-v0.2"
 PORT = 8000
 
 
