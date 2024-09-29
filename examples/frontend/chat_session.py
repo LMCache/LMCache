@@ -1,6 +1,6 @@
-from openai import OpenAI
 import time
 
+from openai import OpenAI
 
 
 class ChatSession:
@@ -28,7 +28,7 @@ class ChatSession:
         for context in context_strings:
             contexts.append(context)
 
-        self.final_context = self.context_separator.join(contexts) 
+        self.final_context = self.context_separator.join(contexts)
         self.on_user_message(self.final_context, display=False)
         self.on_server_message("Got it!", display=False)
 

@@ -101,7 +101,6 @@ class ChatSession:
         print("Total time:", time.perf_counter() - start)
 
 
-
 chat_session = ChatSession()
 
 while True:

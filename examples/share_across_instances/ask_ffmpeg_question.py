@@ -1,8 +1,9 @@
-from openai import OpenAI
-import threading
 import sys
-from io import StringIO
+import threading
 import time
+from io import StringIO
+
+from openai import OpenAI
 
 if len(sys.argv) != 2:
     print(f"Usage: {sys.argv[0]} <port>")
@@ -46,7 +47,6 @@ class Printer:
             print("\033[31m\r>>>>> \033[0m", end='', flush=True)
 
 
-
 class ChatSession:
 
     def __init__(self, context_file):
@@ -65,11 +65,12 @@ class ChatSession:
 
         self.messages = [
             {
-                "role": "user",
-                "content": 
+                "role":
+                "user",
+                "content":
                 "I've got a document, "
                 f"here's the content:```\n{self.context}\n```."
-            }, 
+            },
             {
                 "role": "assistant",
                 "content": "I've got your document"

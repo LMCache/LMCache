@@ -1,5 +1,6 @@
-from lmcache_vllm.vllm import LLM, SamplingParams
 import time
+
+from lmcache_vllm.vllm import LLM, SamplingParams
 
 # Sample prompts.
 prompts = [
@@ -12,8 +13,8 @@ prompts = [
 sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 
 # Create an LLM.
-llm = LLM(model="mistralai/Mistral-7B-Instruct-v0.2", 
-          gpu_memory_utilization= 0.8)
+llm = LLM(model="mistralai/Mistral-7B-Instruct-v0.2",
+          gpu_memory_utilization=0.8)
 # Generate texts from the prompts. The output is a list of RequestOutput objects
 # that contain the prompt, generated text, and other information.
 t1 = time.perf_counter()
