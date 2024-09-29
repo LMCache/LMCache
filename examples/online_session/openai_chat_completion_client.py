@@ -46,6 +46,7 @@ class Printer:
 
 
 class ChatSession:
+
     def __init__(self):
         self.client = client = OpenAI(
             # defaults to os.environ.get("OPENAI_API_KEY")
@@ -60,7 +61,7 @@ class ChatSession:
             {
                 "role": "system",
                 "content": "You are a helpful assistant."
-            }, 
+            },
         ]
 
         self.printer = Printer()

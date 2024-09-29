@@ -1,11 +1,11 @@
 from openai import OpenAI
-from io import StringIO
 import time
 
 
 
 class ChatSession:
-    def __init__(self, port, context_separator = "###"):
+
+    def __init__(self, port, context_separator="###"):
         openai_api_key = "EMPTY"
         openai_api_base = f"http://localhost:{port}/v1"
 
@@ -23,13 +23,12 @@ class ChatSession:
         self.final_context = ""
         self.context_separator = context_separator
 
-
     def set_context(self, context_strings):
         contexts = []
         for context in context_strings:
             contexts.append(context)
 
-        self.final_context =  self.context_separator.join(contexts) 
+        self.final_context = self.context_separator.join(contexts) 
         self.on_user_message(self.final_context, display=False)
         self.on_server_message("Got it!", display=False)
 
@@ -55,8 +54,7 @@ class ChatSession:
             messages=self.messages,
             model=self.model,
             temperature=0,
-            stream=True
-        )
+            stream=True)
 
         server_message = []
         for chunk in chat_completion:

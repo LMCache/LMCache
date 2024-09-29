@@ -16,7 +16,9 @@ context_file = "ffmpeg.txt"
 openai_api_key = "EMPTY"
 openai_api_base = f"http://localhost:{port}/v1"
 
+
 class Printer:
+
     def __init__(self):
         self._thread = None
         self._stop_event = threading.Event()
@@ -24,7 +26,7 @@ class Printer:
     def _print(self):
         idx = 0
         while not self._stop_event.is_set():
-            arrows = ">"*(idx%6)
+            arrows = ">" * (idx % 6)
             string = "{:6s}".format(arrows)
             print("\033[31m\r" + string + "\033[0m", end='', flush=True)
             idx += 1
@@ -44,7 +46,9 @@ class Printer:
             print("\033[31m\r>>>>> \033[0m", end='', flush=True)
 
 
+
 class ChatSession:
+
     def __init__(self, context_file):
         self.context_file = context_file
         with open(context_file, "r") as fin:
@@ -62,12 +66,14 @@ class ChatSession:
         self.messages = [
             {
                 "role": "user",
-                "content": f"I've got a document, here's the content:```\n{self.context}\n```."
+                "content": 
+                "I've got a document, "
+                f"here's the content:```\n{self.context}\n```."
             }, 
             {
                 "role": "assistant",
                 "content": "I've got your document"
-            }, 
+            },
         ]
 
         print(f"\033[33mLoaded context file: {self.context_file}\033[0m")
@@ -93,8 +99,7 @@ class ChatSession:
             messages=self.messages,
             model=self.model,
             temperature=0,
-            stream=True
-        )
+            stream=True)
 
         output_buffer = StringIO()
         for chunk in chat_completion:
@@ -111,9 +116,7 @@ class ChatSession:
         print("Total time:", time.perf_counter() - start)
 
 
-
 chat_session = ChatSession(context_file)
 
 chat_session.chat()
 print("")
-

@@ -4,7 +4,6 @@ from transformers import AutoTokenizer
 
 # Change the following variables as needed
 
-
 MODEL_NAME = "mistralai/Mistral-7B-Instruct-v0.2"
 PORT = 8000
 
