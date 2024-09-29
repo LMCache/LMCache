@@ -1,5 +1,5 @@
-import streamlit as st
 import chat_session
+import streamlit as st
 from transformers import AutoTokenizer
 
 # Change the following variables as needed
@@ -7,6 +7,7 @@ from transformers import AutoTokenizer
 
 MODEL_NAME = "mistralai/Mistral-7B-Instruct-v0.2"
 PORT = 8000
+
 
 @st.cache_resource
 def get_tokenizer():
@@ -24,6 +25,7 @@ def read_context() -> str:
         context = fin.read()
     return context
 
+
 context = read_context()
 
 container = st.container(border=True)
@@ -32,14 +34,15 @@ with st.sidebar:
     session = chat_session.ChatSession(PORT)
 
     system_prompt = st.text_area(
-            "System prompt:",
-            "You are a helpful assistant. I will now give you a document and "
-            "please answer my question afterwards based on the content in document"
-        )
+        "System prompt:",
+        "You are a helpful assistant. I will now give you a document and "
+        "please answer my question afterwards based on the content in document",
+    )
 
     session.set_context([system_prompt] + [context])
     num_tokens = tokenizer.encode(session.get_context())
-    container.header(f"The context given to LLM: ({len(num_tokens)} tokens)", divider = "grey")
+    container.header(f"The context given to LLM: ({len(num_tokens)} tokens)",
+                     divider="grey")
     container.text(session.get_context())
 
     messages = st.container(height=400)

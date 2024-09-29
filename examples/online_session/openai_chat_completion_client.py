@@ -1,8 +1,9 @@
-from openai import OpenAI
-import threading
 import sys
-from io import StringIO
+import threading
 import time
+from io import StringIO
+
+from openai import OpenAI
 
 if len(sys.argv) != 2:
     print(f"Usage: {sys.argv[0]} <port>")
@@ -14,7 +15,9 @@ port = sys.argv[1]
 openai_api_key = "EMPTY"
 openai_api_base = f"http://localhost:{port}/v1"
 
+
 class Printer:
+
     def __init__(self):
         self._thread = None
         self._stop_event = threading.Event()
@@ -22,9 +25,9 @@ class Printer:
     def _print(self):
         idx = 0
         while not self._stop_event.is_set():
-            arrows = ">"*(idx%6)
+            arrows = ">" * (idx % 6)
             string = "{:6s}".format(arrows)
-            print("\033[31m\r" + string + "\033[0m", end='', flush=True)
+            print("\033[31m\r" + string + "\033[0m", end="", flush=True)
             idx += 1
             time.sleep(0.2)
 
@@ -39,7 +42,7 @@ class Printer:
             self._stop_event.set()
             self._thread.join()
             self._thread = None
-            print("\033[31m\r>>>>> \033[0m", end='', flush=True)
+            print("\033[31m\r>>>>> \033[0m", end="", flush=True)
 
 
 class ChatSession:
@@ -80,8 +83,7 @@ class ChatSession:
             messages=self.messages,
             model=self.model,
             temperature=0,
-            stream=True
-        )
+            stream=True)
 
         output_buffer = StringIO()
         for chunk in chat_completion:
@@ -104,4 +106,3 @@ chat_session = ChatSession()
 while True:
     chat_session.chat()
     print("")
-

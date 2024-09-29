@@ -1,14 +1,15 @@
-import torch
 import io
-import time
 
-from lmcache.storage_backend.serde.serde import Serializer, Deserializer
+import torch
+
 from lmcache.logging import init_logger
-from lmcache.config import GlobalConfig
+from lmcache.storage_backend.serde.serde import Deserializer, Serializer
 
 logger = init_logger(__name__)
 
+
 class TorchSerializer(Serializer):
+
     def __init__(self):
         super().__init__()
 
@@ -17,7 +18,9 @@ class TorchSerializer(Serializer):
             torch.save(t.cpu().clone().detach(), f)
             return f.getvalue()
 
+
 class TorchDeserializer(Deserializer):
+
     def __init__(self):
         super().__init__()
 
