@@ -10,7 +10,7 @@ To use the online serving, you can start an OpenAI API-compatible vLLM server wi
 
     $ lmcache_vllm serve lmsys/longchat-7b-16k --gpu-memory-utilization 0.8
 
-To use vLLM's offline inference with LMCache, just simply add lmcache_vllm before the import to vLLM components. For example
+To use vLLM's offline inference with LMCache, just simply add ``lmcache_vllm`` before the import to the vLLM components. For example
 
 .. code-block:: python
 

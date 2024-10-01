@@ -39,7 +39,7 @@ You can install LMCache using pip:
 .. note::
     LMCache requires CUDA 12.1. You can check ``nvcc --version`` to see if you loaded CUDA 12. Following, please add the following to your ``~/.bashrc`` file:
 
-.. code-block:: console
+.. code-block:: bash
     
     cuda_version=12.1
     export CUDA_HOME=/usr/local/cuda-${cuda_version}

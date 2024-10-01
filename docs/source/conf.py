@@ -31,3 +31,4 @@ exclude_patterns = []
 html_theme = "sphinxawesome_theme"
 html_static_path = ["_static"]
 html_permalinks_icon = "<span>#</span>"
+pygments_style = "sphinx"
