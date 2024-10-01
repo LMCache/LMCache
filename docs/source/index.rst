@@ -3,7 +3,16 @@
    You can adapt this file completely to your liking, but it should at least
    contain the root `toctree` directive.
 
-LMCache
+.. role:: raw-html(raw)
+    :format: html
+
+.. figure:: https://github.com/user-attachments/assets/a0809748-3cb1-4732-9c5a-acfa90cc72d1
+  :width: 60%
+  :align: center
+  :alt: LMCache
+  :class: no-scaled-link
+
+Welcome to LMCache!
 =====================
 
 LMCache lets LLMs prefill each text only once. By storing the KV caches of all reusable texts, LMCache can reuse the KV caches of any reused text (not necessarily prefix) in any serving engine instance. 
@@ -11,13 +20,35 @@ It thus reduces prefill delay, i.e., time to first token (TTFT), as well as save
 
 By combining LMCache with vLLM, LMCaches achieves 3-10x delay savings and GPU cycle reduction in many LLM use cases, including multi-round QA and RAG.
 
+:raw-html:`<br />`
+
+Documentation
+=====================
+
 
 .. toctree::
    :maxdepth: 1
-   :caption: Documentation
+   :caption: Getting Started
 
    getting_started/installation
    getting_started/quickstart
    getting_started/sharing_kv_cache
+
+.. toctree::
+   :maxdepth: 1
+   :caption: Examples
+
+   examples/launching
+   examples/backend
+
+.. toctree::
+   :maxdepth: 1
+   :caption: Configuration
+
+   configuration/config
+
+.. toctree::
+   :maxdepth: 1
+   :caption: Developer Guide
+
    developer/lmcache
-   
