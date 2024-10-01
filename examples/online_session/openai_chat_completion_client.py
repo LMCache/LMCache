@@ -11,9 +11,6 @@ if len(sys.argv) != 2:
 
 port = sys.argv[1]
 
-# Get the looooong context
-context_file = "f.txt"
-
 # Modify OpenAI's API key and API base to use vLLM's API server.
 openai_api_key = "EMPTY"
 openai_api_base = f"http://localhost:{port}/v1"
@@ -50,11 +47,7 @@ class Printer:
 
 class ChatSession:
 
-    def __init__(self, context_file):
-        self.context_file = context_file
-        with open(context_file, "r") as fin:
-            self.context = fin.read()
-
+    def __init__(self):
         self.client = client = OpenAI(
             # defaults to os.environ.get("OPENAI_API_KEY")
             api_key=openai_api_key,
@@ -66,19 +59,10 @@ class ChatSession:
 
         self.messages = [
             {
-                "role":
-                "user",
-                "content":
-                f"I've got a document, here's the content:```\n{self.context}\n"
-                f"```.",
-            },
-            {
-                "role": "assistant",
-                "content": "I've got your document"
+                "role": "system",
+                "content": "You are a helpful assistant."
             },
         ]
-
-        print(f"\033[33mLoaded context file: {self.context_file}\033[0m")
 
         self.printer = Printer()
 
@@ -89,8 +73,8 @@ class ChatSession:
         self.messages.append({"role": "assistant", "content": message})
 
     def chat(self):
-        question = input("Input your question: ")
-        self.on_user_message(question)
+        user_prompt = input("User: ")
+        self.on_user_message(user_prompt)
 
         self.printer.start()
         start = time.perf_counter()
@@ -108,6 +92,7 @@ class ChatSession:
             if chunk_message is not None:
                 self.printer.stop()
                 print(chunk_message, end="", flush=True)
+                output_buffer.write(chunk_message)
                 if end is None:
                     end = time.perf_counter()
         self.on_server_message(output_buffer.getvalue())
@@ -116,7 +101,7 @@ class ChatSession:
         print("Total time:", time.perf_counter() - start)
 
 
-chat_session = ChatSession(context_file)
+chat_session = ChatSession()
 
 while True:
     chat_session.chat()

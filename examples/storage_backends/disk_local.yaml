@@ -1,0 +1,3 @@
+chunk_size: 256
+local_device: "file://local_disk/"
+
