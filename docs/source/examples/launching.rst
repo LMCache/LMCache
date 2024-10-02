@@ -40,6 +40,31 @@ How to:
       print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
    print(f"Total Time: {t2 - t1} seconds")
 
+Save the code above to a file, e.g., ``offline_inference.py``.
+
+.. code-block:: yaml
+
+   chunk_size: 256
+   local_device: "cpu"
+   remote_url: "lm://localhost:65432"
+   remote_serde: "cachegen"
+
+   # Whether retrieve() is pipelined or not
+   pipelined_backend: False
+
+Save the code above to a file, e.g., ``offline.yaml``.
+
+Now you can run the following command to launch a vLLM instance with LMCache:
+
+.. code-block:: console
+
+   $ lmcache_server localhost 65432
+   $ LMCACHE_CONFIG_FILE=offline.yaml CUDA_VISIBLE_DEVICES=0 python offline_inference.py
+
+.. note:: 
+
+   The above will need one GPU and will use port 65432 for the LMCache server. You can change the port number if needed.
+
 * Launch multiple vLLM instances with LMCache?
 
 .. code-block:: console

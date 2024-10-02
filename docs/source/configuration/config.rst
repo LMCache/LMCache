@@ -3,12 +3,11 @@
 Configuring LMCache
 ===============================================
 
-lmcache.config module
----------------------
+.. toctree::
+   :maxdepth: 1
 
 .. automodule:: lmcache.config
    :members:
    :undoc-members:
    :show-inheritance:
-   :no-index:
 

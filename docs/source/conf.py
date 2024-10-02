@@ -20,7 +20,14 @@ author = "The LMCache Team"
 
 extensions = [
     "sphinx.ext.autodoc",
+    "sphinx.ext.intersphinx",
 ]
+
+# autodoc_default_options = {
+#     "members": True,
+#     "undoc-members": True,
+#     "private-members": True
+# }
 
 templates_path = ["_templates"]
 exclude_patterns = []
