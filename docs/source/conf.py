@@ -21,6 +21,7 @@ author = "The LMCache Team"
 extensions = [
     "sphinx.ext.autodoc",
     "sphinx.ext.intersphinx",
+    "sphinx.ext.githubpages",
 ]
 
 # autodoc_default_options = {
