@@ -82,14 +82,14 @@ def decode_function_gpu(
         cdf: the cdf tensor, in shape [2 * nlayers, nchannels, bins + 1]
         data_chunks: the data_chunks in the encoder's output
         layers_in_key: number of layers in K (or V) 
-            (K/V should have the same number of layers)
+        (K/V should have the same number of layers)
         chunk_size: the chunk_size
         output: output buffer, in shape [ntokens, 2 * nlayers * nchannels]
 
     Outputs:
         key: the decoded key tensor in the shape of (layers, tokens, nchannels)
         value: the decoded value tensor in the shape of 
-            (layers, tokens, nchannels)
+        (layers, tokens, nchannels)
     """
     nlayers, nchannels, _ = cdf.shape
     output = output.reshape((nlayers, chunk_size, nchannels))

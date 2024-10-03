@@ -236,9 +236,11 @@ class LMCacheEngine:
             tokens: the input tokens, with shape [seq_len]
             kv_tensors: the kv cache of the tokens, in the format of nested 
             tuples
+            
             format: either 'huggingface' or 'vllm'
                 For huggingface, it should have the shape of 
                 [num_heads, num_tokens, head_size]
+
                 For vllm, it should have the shape of 
                 [num_tokens, num_heads, head_size]
 
@@ -287,21 +289,23 @@ class LMCacheEngine:
     ) -> Tuple[KVCache, int]:
         """
         Retrieve the KV cache of the tokens from the cache engine. The 
-        retrieved KV cache
-        should be a prefix of the input tokens.
+        retrieved KV cache should be a prefix of the input tokens.
 
         Input:
             tokens: the input tokens, with shape [seq_len]
+
             format: either 'huggingface' or 'vllm'
-                    For huggingface, it should have the shape of 
-                    [num_heads, num_tokens, head_size]
-                    For vllm, it should have the shape of 
-                    [num_tokens, num_heads, head_size]
+                For huggingface, it should have the shape of 
+                [num_heads, num_tokens, head_size]
+                
+                For vllm, it should have the shape of 
+                [num_tokens, num_heads, head_size]
 
         Output:
             kv_tensors: the kv cache of the tokens, in the format of nested 
                         tuples. Will be an empty tuple if no kv cache is 
                         retrieved.
+
             num_tokens: the number of tokens in the kv cache
         """
         st = time.perf_counter()
