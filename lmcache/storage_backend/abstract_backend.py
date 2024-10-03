@@ -21,12 +21,11 @@ class LMCBackendInterface(metaclass=abc.ABCMeta):
         """
         Store the KV cache of the tokens into the cache engine.
 
-        Input:
+        Args:
             key: the key of the token chunk, in the format of CacheEngineKey
-            kv_chunk: the kv cache of the token chunk, in the format of a 
-                big tensor
-            blocking: whether to block the call before the operation is 
-                completed
+            kv_chunk: the kv cache of the token chunk, as a big tensor.
+            blocking: to block the call before the operation is
+            completed.
 
         Returns:
             None

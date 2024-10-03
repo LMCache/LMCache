@@ -20,12 +20,12 @@ class LMSBackendInterface(metaclass=abc.ABCMeta):
         """
         Store the KV cache of the tokens into the cache server.
 
-        Input:
+        Args:
             key: the key of the token chunk, in the format of str
             kv_chunk: the kv cache (bytes) of the token chunk, in the format of 
-                a big tensor
+            a big tensor
             blocking: whether to block the call before the operation is 
-                completed
+            completed
 
         Returns:
             None
