@@ -61,7 +61,7 @@ def append_outputs(output_file_name, outputs, context_length, time_taken):
         generated_text = output.outputs[0].text
         generated_texts.append(f"{generated_text!r}")
     json_dict = {
-        "user_input": user_inputs,
+        "user_inputs": user_inputs,
         "generated_texts": generated_texts,
         "time in seconds": time_taken
     }

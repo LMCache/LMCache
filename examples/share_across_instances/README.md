@@ -8,9 +8,9 @@ This will use the port 8000 and 8001(for vLLM) and port 65432(for LMCache).
 1.  ```lmcache_server localhost 65432```  
 And wait until it's ready.  
 2. In one terminal,  
-```LMCACHE_CONFIG_FILE=example.yaml CUDA_VISIBLE_DEVICES=0 lmcache_vllm serve mistralai/Mistral-7B-Instruct-v0.2 --gpu-memory-utilization 0.8 --port 8000```  
+```LMCACHE_CONFIG_FILE=example.yaml CUDA_VISIBLE_DEVICES=0 python3 -m lmcache_vllm.vllm.entrypoints.openai.api_server --model mistralai/Mistral-7B-Instruct-v0.2 --gpu-memory-utilization 0.8 --port 8000```  
 In ANOTHER terminal,   
-```LMCACHE_CONFIG_FILE=example.yaml CUDA_VISIBLE_DEVICES=1 lmcache_vllm serve mistralai/Mistral-7B-Instruct-v0.2 --gpu-memory-utilization 0.8 --port 8001```  
+```LMCACHE_CONFIG_FILE=example.yaml CUDA_VISIBLE_DEVICES=1 python3 -m lmcache_vllm.vllm.entrypoints.openai.api_server --model mistralai/Mistral-7B-Instruct-v0.2 --gpu-memory-utilization 0.8 --port 8001```  
 And wait until both of them are ready.  
 3.  ```python3 ask_ffmpeg_question.py 8000```  
 Wait until generation completes, then  
