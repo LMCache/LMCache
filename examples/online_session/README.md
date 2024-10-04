@@ -1,6 +1,6 @@
 # Online chat with LLM
 This will help with online chat on vLLM + LMCache.  
-No context is given to LLM here.  
+The default context is a ffmpeg man page.  
 ## Prerequisites
 Your server should have at least 1 GPU.  
 
@@ -14,4 +14,4 @@ Wait until it's ready.
 3.  ```python3 openai_chat_completion_client.py 8000```  
 Then you can start to chat with the model.  
 ## What to expect
-A multi-turn conversation between you and the model.  
+LMCache should be able to reduce the response delay since the second question.  

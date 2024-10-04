@@ -1,3 +1,4 @@
+import os
 import sys
 import threading
 import time
@@ -15,6 +16,7 @@ port = sys.argv[1]
 openai_api_key = "EMPTY"
 openai_api_base = f"http://localhost:{port}/v1"
 
+context_file_name = os.path.join(os.pardir, "ffmpeg.txt")
 
 class Printer:
 
@@ -57,10 +59,22 @@ class ChatSession:
         models = client.models.list()
         self.model = models.data[0].id
 
+        context_text = None
+        with open(context_file_name, "r") as f:
+            context_text = f.read()
+        assert context_text is not None
+        print(f"The chat session is based on the context of file: {context_file_name}")
         self.messages = [
+                {
+                "role":
+                "user",
+                "content":
+                "I've got a document, "
+                f"here's the content:```\n{context_text}\n```."
+            },
             {
-                "role": "system",
-                "content": "You are a helpful assistant."
+                "role": "assistant",
+                "content": "I've got your document"
             },
         ]
 
