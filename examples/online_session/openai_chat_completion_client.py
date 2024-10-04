@@ -18,6 +18,7 @@ openai_api_base = f"http://localhost:{port}/v1"
 
 context_file_name = os.path.join(os.pardir, "ffmpeg.txt")
 
+
 class Printer:
 
     def __init__(self):
@@ -63,9 +64,9 @@ class ChatSession:
         with open(context_file_name, "r") as f:
             context_text = f.read()
         assert context_text is not None
-        print(f"The chat session is based on the context of file: {context_file_name}")
+        print(f"Chat session is based on context of file: {context_file_name}")
         self.messages = [
-                {
+            {
                 "role":
                 "user",
                 "content":
