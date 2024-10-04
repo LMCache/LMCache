@@ -6,7 +6,8 @@ import time
 from lmcache_vllm.vllm import LLM, SamplingParams
 from transformers import AutoTokenizer
 
-model_name = "mistralai/Mistral-7B-Instruct-v0.2"
+#model_name = "mistralai/Mistral-7B-Instruct-v0.2"
+model_name = "meta-llama/Llama-3.1-8B-Instruct"
 context_file = os.path.join(os.pardir, 'ffmpeg.txt')
 output_file = "offline_inference_outputs.jsonl"
 
@@ -74,7 +75,9 @@ context_length = get_context_length(tokenizer, context_messages)
 sampling_params = SamplingParams(temperature=0.8, top_p=0.95, max_tokens=1024)
 prompts = gen_prompts(tokenizer, context_messages, user_inputs_batch)
 # Create an LLM.
-llm = LLM(model=model_name, gpu_memory_utilization=0.8)
+llm = LLM(model=model_name, gpu_memory_utilization=0.8, 
+          enable_chunked_prefill=False,
+          max_model_len=32768)
 
 # Clear output file.
 with open(output_file, "w") as f:

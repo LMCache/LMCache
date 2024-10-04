@@ -34,9 +34,23 @@ class CacheGenConfig:
         family_7b = [
             "mistralai/Mistral-7B-Instruct-v0.2",
             "lmsys/longchat-7b-16k",
+            "Qwen/Qwen-7B"
         ]
+        family_8b = ["meta-llama/Llama-3.1-8B-Instruct"]
         family_9b = ["THUDM/glm-4-9b-chat"]
         if model_name in family_7b:
+            return CacheGenConfig(
+                key_first_layers=10,
+                key_second_layers=20,
+                key_third_layers=32,  # total layers
+                key_first_bins=32,
+                key_second_bins=16,
+                key_third_bins=16,
+                value_first_layers=2,
+                value_first_bins=32,
+                value_second_bins=16,
+            )
+        elif model_name in family_8b:
             return CacheGenConfig(
                 key_first_layers=10,
                 key_second_layers=20,
