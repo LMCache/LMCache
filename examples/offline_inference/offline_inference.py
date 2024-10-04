@@ -33,7 +33,6 @@ context_messages = [
 user_inputs_batch = [
     "Give me a concise description for the format"
     " of ffmpeg command in one line.",
-    "Give me a short example of ffmpeg in one line and do not explain it."
 ]
 
 
