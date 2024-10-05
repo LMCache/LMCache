@@ -7,8 +7,6 @@ from lmcache_vllm.vllm import LLM, SamplingParams
 from transformers import AutoTokenizer
 
 model_name = "mistralai/Mistral-7B-Instruct-v0.2"
-#model_name = "Qwen/Qwen-7B"
-#model_name = "meta-llama/Llama-3.1-8B-Instruct"
 context_file = os.path.join(os.pardir, 'ffmpeg.txt')
 output_file = "offline_inference_outputs.jsonl"
 

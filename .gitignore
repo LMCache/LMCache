@@ -67,6 +67,8 @@ perf-test.py
 
 # example output
 /examples/offline_inference/offline_inference_outputs.jsonl
+/examples/offline_inference/buggy_example.py
+/examples/test_example
 
 # disk cache
 /remote_disk
