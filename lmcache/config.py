@@ -26,8 +26,8 @@ class LMCacheEngineConfig:
     remote_serde: Optional[str]  # Can be "torch" or "cachegen"
 
     pipelined_backend: bool
-    
-    save_decode_cache: bool # whether to store decode kv cache
+
+    save_decode_cache: bool  # whether to store decode kv cache
 
     @staticmethod
     def from_defaults(
@@ -94,7 +94,7 @@ class LMCacheEngineConfig:
         remote_serde = config.get("remote_serde", "torch")
         pipelined_backend = config.get("pipelined_backend", False)
         save_decode_cache = config.get("save_decode_cache", False)
-        
+
         match local_device:
             case "cpu" | "cuda" | None:
                 pass

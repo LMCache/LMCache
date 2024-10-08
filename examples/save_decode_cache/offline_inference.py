@@ -20,10 +20,8 @@ tokenizer = AutoTokenizer.from_pretrained(model_name)
 
 context_messages = [
     {
-        "role":
-        "user",
-        "content":
-        "You are a helpgul assistant."
+        "role": "user",
+        "content": "You are a helpgul assistant."
     },
     {
         "role": "assistant",
@@ -80,7 +78,6 @@ llm = LLM(model=model_name,
           enable_chunked_prefill=False,
           max_model_len=32768)
 
-
 # Clear output file.
 with open(output_file, "w") as f:
     pass
@@ -93,20 +90,16 @@ t2 = time.perf_counter()
 print(f"\n\nFirst request Time: {t2 - t1} seconds\n\n")
 append_outputs(output_file, first_outputs, context_length, t2 - t1)
 
-context_messages.extend(
-    [
-        {
-            "role": "user",
-            "content":
-            user_inputs_batch[0]
-        },
-        {
-            "role": "assistant",
-            "content": 
-            first_outputs[0].outputs[0].text
-        },
-    ]
-)
+context_messages.extend([
+    {
+        "role": "user",
+        "content": user_inputs_batch[0]
+    },
+    {
+        "role": "assistant",
+        "content": first_outputs[0].outputs[0].text
+    },
+])
 user_inputs_batch = [
     "Score your answer from 1-10",
 ]
