@@ -7,8 +7,6 @@ from lmcache_vllm.vllm import LLM, SamplingParams
 from transformers import AutoTokenizer
 
 model_name = "mistralai/Mistral-7B-Instruct-v0.2"
-#model_name = "Qwen/Qwen-7B"
-#model_name = "meta-llama/Llama-3.1-8B-Instruct"
 context_file = os.path.join(os.pardir, 'ffmpeg.txt')
 output_file = "offline_inference_outputs.jsonl"
 
@@ -21,7 +19,7 @@ tokenizer = AutoTokenizer.from_pretrained(model_name)
 context_messages = [
     {
         "role": "user",
-        "content": "You are a helpgul assistant."
+        "content": "You are a helpful assistant."
     },
     {
         "role": "assistant",
