@@ -1,11 +1,13 @@
-import torch
 import hashlib
-from nvtx import annotate
-from typing import Tuple
 from dataclasses import dataclass
+from typing import Tuple
+
+import torch
+from nvtx import annotate  # type: ignore
 
 # Type definition
 KVCache = Tuple[Tuple[torch.Tensor, torch.Tensor], ...]
+
 
 @dataclass
 class CacheEngineKey:
@@ -16,21 +18,30 @@ class CacheEngineKey:
     chunk_hash: str
 
     def __hash__(self):
-        return hash((self.fmt, self.model_name, self.world_size, self.worker_id, self.chunk_hash))
+        return hash((
+            self.fmt,
+            self.model_name,
+            self.world_size,
+            self.worker_id,
+            self.chunk_hash,
+        ))
 
     def to_string(self):
-        return f"{self.fmt}@{self.model_name}@{self.world_size}@{self.worker_id}@{self.chunk_hash}"
+        return f"{self.fmt}@{self.model_name}@{self.world_size}"\
+            f"@{self.worker_id}@{self.chunk_hash}"
 
     @staticmethod
     def from_string(s):
         parts = s.split("@")
         if len(parts) != 5:
             raise ValueError(f"Invalid key string: {s}")
-        return CacheEngineKey(parts[0], parts[1], int(parts[2]), int(parts[3]), parts[4])
+        return CacheEngineKey(parts[0], parts[1], int(parts[2]), int(parts[3]),
+                              parts[4])
 
 
 ##### NVTX annotation #####
 _NVTX_COLORS = ["green", "blue", "purple", "rapids"]
+
 
 def _get_color_for_nvtx(name):
     m = hashlib.sha256()
@@ -39,8 +50,9 @@ def _get_color_for_nvtx(name):
     idx = hash_value % len(_NVTX_COLORS)
     return _NVTX_COLORS[idx]
 
+
 def _lmcache_nvtx_annotate(func, domain="lmcache"):
-    """Decorator for applying nvtx annotations to methods in cudf."""
+    """Decorator for applying nvtx annotations to methods in lmcache."""
     return annotate(
         message=func.__qualname__,
         color=_get_color_for_nvtx(func.__qualname__),

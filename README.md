@@ -20,6 +20,7 @@ Try LMCache with pre-built vllm docker images [here](https://github.com/LMCache/
 
 LMCache provides the integration to the latest vLLM (0.6.1.post2). To install LMCache, use the following command:
 ```bash
+# requires python >= 3.10 and nvcc >= 12.1
 pip install lmcache lmcache_vllm
 ```
 
@@ -43,7 +44,7 @@ LMCache supports sharing KV across different vLLM instances by the `lmcache.serv
 
 ```bash
 # Start lmcache server
-lmcache.server localhost 65432
+lmcache_server localhost 65432
 ```
 
 Then, start two vLLM instances with the LMCache config file
