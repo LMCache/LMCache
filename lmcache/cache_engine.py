@@ -294,7 +294,7 @@ class LMCacheEngine:
         Input:
             tokens: the input tokens, with shape [seq_len]
 
-            format: either 'huggingface' or 'vllm'
+            format is either 'huggingface' or 'vllm'
                 For huggingface, it should have the shape of 
                 [num_heads, num_tokens, head_size]
                 
@@ -348,6 +348,65 @@ class LMCacheEngine:
                     f"elapsed time {ed - st}")
         return ret, retrieved_token_count
 
+    @_lmcache_nvtx_annotate
+    @torch.no_grad()
+    def exists(
+        self,
+        tokens: torch.Tensor,
+    ) -> Tuple[int, List[List[str]]]:
+        """
+        Checks the locations of KV cache of the tokens from the cache engine.
+        The return should be a list of the locations for each block.
+
+        Input:
+            tokens: the input tokens, with shape [seq_len]
+
+            format is either 'huggingface' or 'vllm'
+                For huggingface, it should have the shape of 
+                [num_heads, num_tokens, head_size]
+                
+                For vllm, it should have the shape of 
+                [num_tokens, num_heads, head_size]
+
+        Output:
+            [block size, List[List[locations]]]:
+            block size is the number of tokens per block.
+            List of the locations (ex. ['local DRAM']) of stroage of each block. 
+            The entry will be None if the block is not found 
+            or the last block is not full (ex. 13 token / (16 token per block)) 
+        """
+        return [0, ['this is placeholder']]
+
+    @_lmcache_nvtx_annotate
+    @torch.no_grad()
+    def remove(
+        self,
+        token_block: torch.Tensor,
+        locations: List[str],
+    ) -> Tuple[bool, List[bool]]:
+        """
+        Remove the KV cache entry from the locations specified. 
+        Tokens has to be one block. 
+        Returns validity of token_block and success of deletions
+
+        Input:
+            token_block: the input tokens block, with shape [block_size]
+
+            format is either 'huggingface' or 'vllm'
+                For huggingface, it should have the shape of 
+                [num_heads, num_tokens, head_size]
+                
+                For vllm, it should have the shape of 
+                [num_tokens, num_heads, head_size]
+            
+            locations: locations to remove KV cache of token_block from
+
+        Output:
+            [token_block validity, List[deletion successful or not]]
+            The list is the same length as locations
+        """
+        return [0,[0]]
+        
     def close(self):
         self.engine_.close()
 
