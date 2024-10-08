@@ -80,8 +80,6 @@ llm = LLM(model=model_name,
           enable_chunked_prefill=False,
           max_model_len=32768)
 
-import pdb
-pdb.set_trace()
 
 # Clear output file.
 with open(output_file, "w") as f:
