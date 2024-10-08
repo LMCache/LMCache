@@ -5,7 +5,7 @@ Subpackages
 -----------
 
 .. toctree::
-   :maxdepth: 4
+   :maxdepth: 2
 
    lmcache.server
    lmcache.storage_backend
@@ -28,6 +28,7 @@ lmcache.config module
    :members:
    :undoc-members:
    :show-inheritance:
+   :noindex:
 
 lmcache.logging module
 ----------------------

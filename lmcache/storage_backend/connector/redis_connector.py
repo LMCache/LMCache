@@ -53,11 +53,11 @@ class RedisConnector(RemoteConnector):
 class RedisSentinelConnector(RemoteConnector):
     """
     Uses redis.Sentinel to connect to a Redis cluster.
-    The hosts are specified in the config file, started with "redis-sentinel://"
+    The hosts are specified in the config file, started with "redis-sentinel://" 
     and separated by commas.
+    
     Example:
-        remote_url: 
-            "redis-sentinel://localhost:26379,localhost:26380,localhost:26381"
+        remote_url: "redis-sentinel://localhost:26379,localhost:26380,localhost:26381"
 
     Extra environment variables:
     - REDIS_SERVICE_NAME (required) -- service name for redis.

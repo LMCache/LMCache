@@ -5,11 +5,11 @@ Just replace example.yaml in other folders with yamls you want in this folder, a
 Local: CUDA, CPU, Disk.  
 Remote: lmcache, redis, redis-sentinel.  
 ```
-chunk_size: an integer (e.g., 256)
-local_device: "cuda", "cpu" or "an arbitrary path (e.g., file://local_disk/)"
-remote_url: "remote shared cache server url" (e.g., "lm://localhost:65432")
-remote_serde: "torch", "safetensor", "cachegen" or "fast"
-piplined_backend: True/False
+chunk_size: an integer (e.g., 256), how many tokens are there in a KV chunk.  
+local_device: "cuda", "cpu" or "an arbitrary path (e.g., file://local_disk/)", where to store KV cache locally.  
+remote_url: "remote shared cache server url" (e.g., "lm://localhost:65432"), protocol and address for remote.  
+remote_serde: "torch", "safetensor", "cachegen" or "fast", how to serialize and deserialize KV cache on remote transmission.  
+piplined_backend: True/False, whether to pipeline backend.  
 ```
 ## storage backend types
 Configuration yaml decides storage backend.  

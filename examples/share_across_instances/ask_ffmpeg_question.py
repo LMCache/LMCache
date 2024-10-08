@@ -1,3 +1,4 @@
+import os
 import sys
 import threading
 import time
@@ -11,7 +12,7 @@ if len(sys.argv) != 2:
 
 port = sys.argv[1]
 
-context_file = "ffmpeg.txt"
+context_file = os.path.join(os.pardir, "ffmpeg.txt")
 
 # Modify OpenAI's API key and API base to use vLLM's API server.
 openai_api_key = "EMPTY"
