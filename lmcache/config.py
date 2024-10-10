@@ -27,6 +27,8 @@ class LMCacheEngineConfig:
 
     pipelined_backend: bool
 
+    save_decode_cache: bool  # whether to store decode kv cache
+
     @staticmethod
     def from_defaults(
         chunk_size: int = 256,
@@ -34,6 +36,7 @@ class LMCacheEngineConfig:
         remote_url: str = "redis://localhost:6379",
         remote_serde: str = "torch",
         pipelined_backend: bool = False,
+        save_decode_cache: bool = False,
     ) -> "LMCacheEngineConfig":
         return LMCacheEngineConfig(
             chunk_size,
@@ -41,6 +44,7 @@ class LMCacheEngineConfig:
             remote_url,
             remote_serde,
             pipelined_backend,
+            save_decode_cache,
         )
 
     @staticmethod
@@ -50,6 +54,7 @@ class LMCacheEngineConfig:
         persist_path: Optional[str] = None,
         remote_serde: Optional[str] = "torch",
         pipelined_backend: bool = False,
+        save_decode_cache: bool = False,
     ) -> "LMCacheEngineConfig":
 
         local_device: Optional[str] = None
@@ -72,6 +77,7 @@ class LMCacheEngineConfig:
             remote_url,
             remote_serde,
             pipelined_backend,
+            save_decode_cache,
         )
 
     @staticmethod
@@ -87,6 +93,7 @@ class LMCacheEngineConfig:
         remote_url = config.get("remote_url", None)
         remote_serde = config.get("remote_serde", "torch")
         pipelined_backend = config.get("pipelined_backend", False)
+        save_decode_cache = config.get("save_decode_cache", False)
 
         match local_device:
             case "cpu" | "cuda" | None:
@@ -112,6 +119,7 @@ class LMCacheEngineConfig:
             remote_url,
             remote_serde,
             pipelined_backend,
+            save_decode_cache,
         )
 
 
