@@ -113,6 +113,9 @@ class SPTBlendRetrieverTask(BlendRetrieverTask):
             values.append(v)
             valid_masks.append(valid_mask)
 
+        # Create valid mask before returning
+        self.valid_mask = torch.cat(valid_masks, dim = 0)
+
         # return if nothing is retrieved
         if num_layers is None:
             return
@@ -139,7 +142,6 @@ class SPTBlendRetrieverTask(BlendRetrieverTask):
 
         self.rebuilt_key = torch.cat(keys, dim = token_dim)
         self.rebuilt_value = torch.cat(values, dim = token_dim)
-        self.valid_mask = torch.cat(valid_masks, dim = 0)
 
     def result(self, layer_id: int) -> BlendRetrieverResult:
         """Blocking function to get a single layer of K and V tensor.
@@ -215,12 +217,6 @@ class SPTBlendRetriever(BlendRetriever):
         start = 0
         splitted_tokens = []
 
-        print("HERE indices is", indices, indices.shape)
-        if len(indices.shape) == 0:
-            breakpoint()
-        #if indices[0] == 999 and len(indices == 1):
-        #    breakpoint()
-
         for i in indices:
             splitted_tokens.append(input_tokens_single_query[start:i+spt_len])
             start = i + spt_len
@@ -250,8 +246,8 @@ class SPTBlendRetriever(BlendRetriever):
             splitted_tokens = []
             start_loc = query_start_loc[0]
             for loc in query_start_loc[1:]:
-                print("HERE", start_loc, loc)
-                print("SHAPE:", input_tokens.shape, input_tokens[start_loc:loc].shape)
+                logger.debug(f"HERE start_loc = {start_loc}, loc = {loc}")
+                logger.debug(f"SHAPE: {input_tokens.shape} {input_tokens[start_loc:loc].shape}")
                 splitted_tokens.extend(
                         self._split_input_tokens(input_tokens[start_loc:loc]))
                 start_loc = loc
