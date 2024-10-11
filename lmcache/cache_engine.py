@@ -83,11 +83,20 @@ class LMCacheEngine:
         for i in range(0, len(tokens), self.chunk_size):
             yield tokens[i:i + self.chunk_size]
 
-    def _prefix_hash(self, token_chunks: Iterable[torch.Tensor]) -> List[str]:
+    def _prefix_hash(
+        self,
+        token_chunks: Iterable[torch.Tensor],
+        mask: Optional[torch.Tensor] = None,
+    ) -> List[str]:
         prefix_hash = self._get_init_hash()
         prefix_hashes = []
+        tok_idx = -1
         for token_chunk in token_chunks:
             prefix_hash = self._hash(token_chunk, prefix_hash)
+            if mask is not None:
+                tok_idx += len(token_chunk)
+                if not mask[tok_idx]:
+                    continue
             prefix_hashes.append(prefix_hash)
         return prefix_hashes
 
@@ -282,11 +291,14 @@ class LMCacheEngine:
                     f"{end_time - start_time:.2f}s, make chunks time "
                     f"{end_make_chunks - start_time:.2f}s")
 
+    # prefix caching only needs a mask_len
+    # but non-prefix might need an roi
     @_lmcache_nvtx_annotate
     @torch.no_grad()
     def retrieve(
         self,
         tokens: torch.Tensor,
+        mask: Optional[torch.Tensor] = None,
     ) -> Tuple[KVCache, int]:
         """
         Retrieve the KV cache of the tokens from the cache engine. The 
@@ -301,6 +313,9 @@ class LMCacheEngine:
                 
                 For vllm, it should have the shape of 
                 [num_tokens, num_heads, head_size]
+                
+            mask: a boolean mask of tokens indicating which tokens'
+            KV Cache should be retrieved
 
         Output:
             kv_tensors: the kv cache of the tokens, in the format of nested 
@@ -311,7 +326,7 @@ class LMCacheEngine:
         """
         st = time.perf_counter()
         fmt = self.metadata.fmt
-        chunk_hashes = self._prefix_hash(self._chunk_tokens(tokens))
+        chunk_hashes = self._prefix_hash(self._chunk_tokens(tokens), mask)
 
         retrival_iterator = self.engine_.batched_get(
             (self._make_key(chunk_hash, fmt) for chunk_hash in chunk_hashes), )
@@ -320,7 +335,7 @@ class LMCacheEngine:
         for chunk in retrival_iterator:
             if chunk is None:
                 break
-            retrieved_kv_chunks.append(chunk)  # .to(device))
+            retrieved_kv_chunks.append(chunk)
         """ concatenate the kv cache """
         dim = None
         match fmt:
