@@ -62,12 +62,14 @@ class CacheBlendImpl(BlendExecutor):
         num_selected_tokens = int(num_valid_tokens * self.recompute_ratio)
         top_indices = torch.topk(diff_per_token, 
                                 num_selected_tokens).indices
+        logger.debug(f"Indices of the top differences: {top_indices}")
 
         # Merge the positions with the invalid tokens
         top_mask = indices_to_mask(top_indices, valid.shape[0])
         total_selected_mask = (1 - valid) + top_mask
 
         local_indices = mask_to_indices(total_selected_mask)
+        logger.debug(f"Local indices of the selected tokens: {local_indices}")
         return local_indices
 
 
@@ -88,13 +90,18 @@ class CacheBlendImpl(BlendExecutor):
         returns the short Q + long KV (blended) + positions of the tokens in Q
 
         :param int layer_id: The layer id
-        :param torch.Tensor retrieved_k: The retrieved K tensor
-        :param torch.Tensor retrieved_v: The retrieved V tensor
+        :param torch.Tensor retrieved_k: The retrieved K layer, in shape
+            [num_tokens, hidden_dims]
+        :param torch.Tensor retrieved_v: The retrieved V layer, in shape
+            [num_tokens, hidden_dims]
         :param torch.Tensor valid_mask: A CPU tensor returned from the 
             retriever indicating whether the KV is valid. 
-        :param torch.Tensor fresh_q: The fresh Q tensor from QKV split
-        :param torch.Tensor fresh_k: The fresh K tensor from QKV split
-        :param torch.Tensor fresh_v: The fresh V tensor from QKV split
+        :param torch.Tensor fresh_q: The fresh Q tensor from QKV split,
+            in shape [num_tokens, hidden_dims]
+        :param torch.Tensor fresh_k: The fresh K tensor from QKV split,
+            in shape [num_tokens, hidden_dims]
+        :param torch.Tensor fresh_v: The fresh V tensor from QKV split,
+            in shape [num_tokens, hidden_dims]
         :param torch.Tensor positions: The positions in the input of the
             tokens in the fresh_q
         :param torch.Tensor query_start_loc: The start location of the query if
@@ -104,10 +111,10 @@ class CacheBlendImpl(BlendExecutor):
 
         :return: The blended Q, K, V, and positions
         """
+        # We should convert the shape of KV to [num_elems, hidden_dimensions]
         assert valid_mask.is_cpu, "valid_mask should be on CPU"
 
         if layer_id == 0:
-            logger.info("Before layer 0's attention, skipping cache blend")
             self.indexes_in_kv = torch.tensor([], 
                                               dtype = torch.long, 
                                               device = "cpu")
@@ -117,7 +124,6 @@ class CacheBlendImpl(BlendExecutor):
                                query_start_loc)
 
         if layer_id == 1:
-            logger.info("Before layer 1's attention, comparing the KVs")
             new_query_start_locs = [0]
             for qstart, qend in zip(query_start_loc[:-1], query_start_loc[1:]):
                 # Select the tokens for each query
@@ -143,12 +149,12 @@ class CacheBlendImpl(BlendExecutor):
             new_query_start_locs = torch.tensor(new_query_start_locs,
                                                 device = query_start_loc.device,
                                                 dtype = query_start_loc.dtype)
+            breakpoint()
             return BlendOutput(new_q, fresh_k, fresh_v, new_positions, 
                                self.indexes_in_kv, new_query_start_locs)
 
             
         if layer_id > 1:
-            logger.info(f"Before layer {layer_id}'s attention, blending the KVs")
             assert len(self.indexes_in_kv) == fresh_k.shape[token_dim]
             index_obj = create_index(fresh_k.dim(), token_dim, self.indexes_in_kv)
             retrieved_k[index_obj] = fresh_k
