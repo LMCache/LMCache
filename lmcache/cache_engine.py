@@ -29,6 +29,7 @@ class LMCacheEngine:
         self.config = config
         self.metadata = metadata
         self.chunk_size = config.chunk_size
+        self.save_decode_cache = config.save_decode_cache
 
         self.engine_ = CreateStorageBackend(config, metadata)
         logger.debug(f"Current storage backend type {type(self.engine_)}")
@@ -175,7 +176,7 @@ class LMCacheEngine:
         """
         return self._slice_kv_at(0, kv_tensors, fmt)
 
-    def _make_chunks_skip_exsiting(
+    def _make_chunks_skip_existing(
         self,
         tokens: torch.Tensor,
         kv_tensors: torch.Tensor,
@@ -213,7 +214,7 @@ class LMCacheEngine:
         Returns a generator of zipped (chunk_hash, chunk_kv) tuples
         """
         if skip_existing:
-            return self._make_chunks_skip_exsiting(tokens, kv_tensors, fmt)
+            return self._make_chunks_skip_existing(tokens, kv_tensors, fmt)
         else:
             return zip(
                 self._prefix_hash(self._chunk_tokens(tokens)),
@@ -234,7 +235,7 @@ class LMCacheEngine:
 
         Input:
             tokens: the input tokens, with shape [seq_len]
-            kv_tensors: the kv cache of the tokens, in the format of nested 
+            kv_tensors_raw: the kv cache of the tokens, in the format of nested 
             tuples
             
             format: either 'huggingface' or 'vllm'

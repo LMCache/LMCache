@@ -18,20 +18,18 @@ tokenizer = AutoTokenizer.from_pretrained(model_name)
 
 context_messages = [
     {
-        "role":
-        "user",
-        "content":
-        "I've got a document, "
-        f"here's the content:```\n{context_text}\n```."
+        "role": "user",
+        "content": "You are a helpful assistant."
     },
     {
         "role": "assistant",
-        "content": "I've got your document"
+        "content": "Got it."
     },
 ]
 user_inputs_batch = [
-    "Give me a concise description for the format"
-    " of ffmpeg command in one line.",
+    "What is FFmpeg?"
+    "Please include some details."
+    "Your answer should be around 5k words",
 ]
 
 
@@ -70,7 +68,7 @@ def append_outputs(output_file_name, outputs, context_length, time_taken):
 
 context_length = get_context_length(tokenizer, context_messages)
 # Create a sampling params object.
-sampling_params = SamplingParams(temperature=0.8, top_p=0.95, max_tokens=1024)
+sampling_params = SamplingParams(temperature=1.0, top_p=0.95, max_tokens=1024)
 prompts = gen_prompts(tokenizer, context_messages, user_inputs_batch)
 # Create an LLM.
 llm = LLM(model=model_name,
@@ -89,6 +87,23 @@ first_outputs = llm.generate(prompts, sampling_params)
 t2 = time.perf_counter()
 print(f"\n\nFirst request Time: {t2 - t1} seconds\n\n")
 append_outputs(output_file, first_outputs, context_length, t2 - t1)
+
+context_messages.extend([
+    {
+        "role": "user",
+        "content": user_inputs_batch[0]
+    },
+    {
+        "role": "assistant",
+        "content": first_outputs[0].outputs[0].text
+    },
+])
+user_inputs_batch = [
+    "Score your answer from 1-10",
+]
+context_length = get_context_length(tokenizer, context_messages)
+sampling_params = SamplingParams(temperature=1.0, top_p=0.95, max_tokens=10)
+prompts = gen_prompts(tokenizer, context_messages, user_inputs_batch)
 t3 = time.perf_counter()
 second_outputs = llm.generate(prompts, sampling_params)
 t4 = time.perf_counter()
