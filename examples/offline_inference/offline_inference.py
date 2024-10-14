@@ -3,6 +3,8 @@ import json
 import os
 import time
 
+import numpy as np
+
 from lmcache_vllm.vllm import LLM, SamplingParams
 from transformers import AutoTokenizer
 
@@ -30,8 +32,8 @@ context_messages = [
     },
 ]
 user_inputs_batch = [
-    "Give me a concise description for the format"
-    " of ffmpeg command in one line.",
+    "What's the name of the tool. "
+    "Answer with no more than 10 tokens.",
 ]
 
 
@@ -70,7 +72,7 @@ def append_outputs(output_file_name, outputs, context_length, time_taken):
 
 context_length = get_context_length(tokenizer, context_messages)
 # Create a sampling params object.
-sampling_params = SamplingParams(temperature=0.8, top_p=0.95, max_tokens=1024)
+sampling_params = SamplingParams(temperature=0.8, top_p=0.95, max_tokens=10)
 prompts = gen_prompts(tokenizer, context_messages, user_inputs_batch)
 # Create an LLM.
 llm = LLM(model=model_name,
@@ -78,6 +80,15 @@ llm = LLM(model=model_name,
           enable_chunked_prefill=False,
           max_model_len=32768)
 
+dummy_prompt_token_ids = np.random.randint(10000,
+                                               size=(8,
+                                                     32))
+dummy_prompts = [{
+        "prompt_token_ids": batch
+} for batch in dummy_prompt_token_ids.tolist()]
+print("Warming up.")
+llm.generate(dummy_prompts, sampling_params)
+print("Wram up done.")
 # Clear output file.
 with open(output_file, "w") as f:
     pass
@@ -94,3 +105,4 @@ second_outputs = llm.generate(prompts, sampling_params)
 t4 = time.perf_counter()
 print(f"\n\nSecond request Time: {t4 - t3} seconds\n\n")
 append_outputs(output_file, second_outputs, context_length, t4 - t3)
+os._exit(0)
