@@ -68,7 +68,7 @@ def append_outputs(output_file_name, outputs, context_length, time_taken):
 
 context_length = get_context_length(tokenizer, context_messages)
 # Create a sampling params object.
-sampling_params = SamplingParams(temperature=1.0, top_p=0.95, max_tokens=1024)
+sampling_params = SamplingParams(temperature=0.8, top_p=0.95, max_tokens=1024)
 prompts = gen_prompts(tokenizer, context_messages, user_inputs_batch)
 # Create an LLM.
 llm = LLM(model=model_name,

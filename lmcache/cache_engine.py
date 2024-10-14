@@ -86,16 +86,16 @@ class LMCacheEngine:
     def _prefix_hash(
         self,
         token_chunks: Iterable[torch.Tensor],
-        mask: Optional[torch.Tensor] = None,
+        skipping_len: Optional[int] = None,
     ) -> List[str]:
         prefix_hash = self._get_init_hash()
         prefix_hashes = []
-        tok_idx = -1
+        tok_idx = 0
         for token_chunk in token_chunks:
             prefix_hash = self._hash(token_chunk, prefix_hash)
-            if mask is not None:
+            if skipping_len is not None:
                 tok_idx += len(token_chunk)
-                if not mask[tok_idx]:
+                if tok_idx <= skipping_len:
                     continue
             prefix_hashes.append(prefix_hash)
         return prefix_hashes
@@ -299,7 +299,7 @@ class LMCacheEngine:
         self,
         tokens: torch.Tensor,
         mask: Optional[torch.Tensor] = None,
-    ) -> Tuple[KVCache, int]:
+    ) -> Tuple[KVCache, torch.Tensor]:
         """
         Retrieve the KV cache of the tokens from the cache engine. The 
         retrieved KV cache should be a prefix of the input tokens.
@@ -322,11 +322,19 @@ class LMCacheEngine:
                         tuples. Will be an empty tuple if no kv cache is 
                         retrieved.
 
-            num_tokens: the number of tokens in the kv cache
+            ret_mask: indicate which tokens are retrieved
         """
+        skipping_len = 0
+        ret_mask = torch.ones_like(tokens, dtype=torch.bool)
+        if mask is not None:
+            skipping_len = ((len(mask)-torch.sum(mask)) // self.chunk_size) * \
+                self.chunk_size
+        ret_mask[:skipping_len] = False
+            
+
         st = time.perf_counter()
         fmt = self.metadata.fmt
-        chunk_hashes = self._prefix_hash(self._chunk_tokens(tokens), mask)
+        chunk_hashes = self._prefix_hash(self._chunk_tokens(tokens), skipping_len)
 
         retrival_iterator = self.engine_.batched_get(
             (self._make_key(chunk_hash, fmt) for chunk_hash in chunk_hashes), )
@@ -362,7 +370,10 @@ class LMCacheEngine:
         logger.info(f"Retrieved {len(retrieved_kv_chunks)} chunks "
                     f"({retrieved_token_count} tokens in total) --"
                     f"elapsed time {ed - st}")
-        return ret, retrieved_token_count
+        
+        ret_mask[skipping_len+retrieved_token_count:] = False
+        
+        return ret, ret_mask
 
     def close(self):
         self.engine_.close()
