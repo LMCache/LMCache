@@ -9,18 +9,15 @@ import yaml
 class LMCacheEngineMetadata:
     """ name of the LLM model """
     model_name: str
-    
     """ world size when running under a distributed setting """
     world_size: int
-    
     """ worker id when running under a distributed setting """
     worker_id: int
-    
     """ the format of kv tensors """
     fmt: str
-
     """ the data type of kv tensors """
     dtype: str
+
 
 @dataclass
 class LMCacheEngineConfig:
