@@ -330,11 +330,11 @@ class LMCacheEngine:
             skipping_len = ((len(mask)-torch.sum(mask)) // self.chunk_size) * \
                 self.chunk_size
         ret_mask[:skipping_len] = False
-            
 
         st = time.perf_counter()
         fmt = self.metadata.fmt
-        chunk_hashes = self._prefix_hash(self._chunk_tokens(tokens), skipping_len)
+        chunk_hashes = self._prefix_hash(self._chunk_tokens(tokens),
+                                         skipping_len)
 
         retrival_iterator = self.engine_.batched_get(
             (self._make_key(chunk_hash, fmt) for chunk_hash in chunk_hashes), )
@@ -356,7 +356,8 @@ class LMCacheEngine:
 
         if len(retrieved_kv_chunks) == 0:
             logging.info("Retrieved 0 chunks")
-            return (), 0
+            ret_mask[:] = False
+            return (), ret_mask
 
         st2 = time.perf_counter()
         ret = self._blob_to_tuple_kv(
@@ -370,9 +371,9 @@ class LMCacheEngine:
         logger.info(f"Retrieved {len(retrieved_kv_chunks)} chunks "
                     f"({retrieved_token_count} tokens in total) --"
                     f"elapsed time {ed - st}")
-        
-        ret_mask[skipping_len+retrieved_token_count:] = False
-        
+
+        ret_mask[skipping_len + retrieved_token_count:] = False
+
         return ret, ret_mask
 
     def close(self):
