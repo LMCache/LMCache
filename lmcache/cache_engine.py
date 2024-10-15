@@ -86,16 +86,16 @@ class LMCacheEngine:
     def _prefix_hash(
         self,
         token_chunks: Iterable[torch.Tensor],
-        skipping_len: Optional[int] = None,
+        chunked_skip_len: Optional[int] = None,
     ) -> List[str]:
         prefix_hash = self._get_init_hash()
         prefix_hashes = []
         tok_idx = 0
         for token_chunk in token_chunks:
             prefix_hash = self._hash(token_chunk, prefix_hash)
-            if skipping_len is not None:
+            if chunked_skip_len is not None:
                 tok_idx += len(token_chunk)
-                if tok_idx <= skipping_len:
+                if tok_idx <= chunked_skip_len:
                     continue
             prefix_hashes.append(prefix_hash)
         return prefix_hashes
@@ -324,17 +324,19 @@ class LMCacheEngine:
 
             ret_mask: indicate which tokens are retrieved
         """
-        skipping_len = 0
+        chunked_skip_len = 0
+        skip_len = 0
         ret_mask = torch.ones_like(tokens, dtype=torch.bool)
         if mask is not None:
-            skipping_len = ((len(mask)-torch.sum(mask)) // self.chunk_size) * \
+            skip_len = (len(mask) - torch.sum(mask))
+            chunked_skip_len = (skip_len // self.chunk_size) * \
                 self.chunk_size
-        ret_mask[:skipping_len] = False
+        ret_mask[:skip_len] = False
 
         st = time.perf_counter()
         fmt = self.metadata.fmt
         chunk_hashes = self._prefix_hash(self._chunk_tokens(tokens),
-                                         skipping_len)
+                                         chunked_skip_len)
 
         retrival_iterator = self.engine_.batched_get(
             (self._make_key(chunk_hash, fmt) for chunk_hash in chunk_hashes), )
@@ -360,6 +362,15 @@ class LMCacheEngine:
             return (), ret_mask
 
         st2 = time.perf_counter()
+
+        # drop extra tokens in the first chunk
+        extra_token_len = skip_len - chunked_skip_len
+        if dim == 0:
+            retrieved_kv_chunks[0] = retrieved_kv_chunks[0][extra_token_len:]
+        elif dim == 1:
+            retrieved_kv_chunks[0] = retrieved_kv_chunks[0][:,
+                                                            extra_token_len:]
+
         ret = self._blob_to_tuple_kv(
             torch.cat(retrieved_kv_chunks, dim=dim + 2))
         ed2 = time.perf_counter()
@@ -372,7 +383,7 @@ class LMCacheEngine:
                     f"({retrieved_token_count} tokens in total) --"
                     f"elapsed time {ed - st}")
 
-        ret_mask[skipping_len + retrieved_token_count:] = False
+        ret_mask[skip_len + retrieved_token_count:] = False
 
         return ret, ret_mask
 
