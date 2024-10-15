@@ -1,5 +1,5 @@
 import abc
-from typing import Iterable, Optional, Tuple
+from typing import Iterable, Optional, Tuple, List
 
 import torch
 
@@ -42,6 +42,17 @@ class LMCBackendInterface(metaclass=abc.ABCMeta):
     ) -> bool:
         """
         Query if a key is in the cache or not
+        """
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    def where_is(
+        self,
+        key: CacheEngineKey,
+    ) -> List[str]:
+        """
+        Query the location that the KV cache resides with key
+        returns "NOT IN CACHE" if not found
         """
         raise NotImplementedError
 
@@ -111,15 +122,7 @@ class LMCBackendInterface(metaclass=abc.ABCMeta):
                 yield self.get(key)
             else:
                 yield None
-    
-    @abc.abstractmethod
-    def retrieve(self):
-        """
-        Do the cleanup things
-        Children classes should override this method if necessary
-        """
-        pass
-    
+
     @abc.abstractmethod
     def close(self):
         """

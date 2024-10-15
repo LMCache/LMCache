@@ -87,7 +87,7 @@ def check_kv_cache_device(kvs, device):
 
 
 @pytest.mark.parametrize("fmt", ["vllm", "huggingface"])
-def test_func_exists(fmt, autorelease):
+def test_func_get_locations(fmt, autorelease):
     device = "cuda"
     num_tokens = 12000
     new_num_tokens = 200
@@ -108,15 +108,15 @@ def test_func_exists(fmt, autorelease):
     """ store and persist """
     engine1.store(tokens, kv_cache)
     engine2.store(tokens, kv_cache)
-    """ store final """
-    t1 = time.perf_counter()
-    engine1.store(final_tokens, final_kv_cache, skip_existing=True)
-    t2 = time.perf_counter()
-    engine2.store(final_tokens, final_kv_cache, skip_existing=False)
-    t3 = time.perf_counter()
+
+    """ check locations """
+    location_list = engine1.get_locations(tokens)
+    assert(len(location_list) == (num_tokens - 1) // chunk_size  + 1)
+    for location in location_list:
+        assert (location == ['local cuda'])
 
 @pytest.mark.parametrize("fmt", ["vllm", "huggingface"])
-def test_func_retrieve(fmt, autorelease):
+def test_func_get_locations_cpu(fmt, autorelease):
     device = "cuda"
     num_tokens = 12000
     new_num_tokens = 200
@@ -131,74 +131,104 @@ def test_func_retrieve(fmt, autorelease):
     final_kv_cache = concatenate_kv_caches([kv_cache, new_kv_cache], fmt)
     """ initialize the engine """
     cfg = LMCacheEngineConfig.from_legacy(chunk_size=chunk_size,
-                                          persist_path=persist_path)
+                                          persist_path=persist_path,
+                                          backend='cpu')
     engine1 = autorelease(LMCacheEngine(cfg, dumb_metadata(fmt)))
     engine2 = autorelease(LMCacheEngine(cfg, dumb_metadata(fmt)))
     """ store and persist """
     engine1.store(tokens, kv_cache)
     engine2.store(tokens, kv_cache)
-    """ store final """
-    t1 = time.perf_counter()
-    engine1.store(final_tokens, final_kv_cache, skip_existing=True)
-    t2 = time.perf_counter()
-    engine2.store(final_tokens, final_kv_cache, skip_existing=False)
-    t3 = time.perf_counter()
+
+    """ check locations """
+    location_list = engine1.get_locations(tokens)
+    assert(len(location_list) == (num_tokens - 1) // chunk_size  + 1)
+    for location in location_list:
+        assert (location == ['local cpu'])
+
+# @pytest.mark.parametrize("fmt", ["vllm", "huggingface"])
+# def test_func_remove(fmt, autorelease):
+#     device = "cuda"
+#     num_tokens = 12000
+#     new_num_tokens = 200
+#     chunk_size = 256
+#     persist_path = "/tmp/test-engine.pth"
+
+#     tokens = generate_tokens(num_tokens, device)
+#     kv_cache = generate_kv_cache(num_tokens, fmt, device)
+#     new_tokens = generate_tokens(new_num_tokens, device)
+#     new_kv_cache = generate_kv_cache(new_num_tokens, fmt, device)
+#     final_tokens = torch.cat([tokens, new_tokens])
+#     final_kv_cache = concatenate_kv_caches([kv_cache, new_kv_cache], fmt)
+#     """ initialize the engine """
+#     cfg = LMCacheEngineConfig.from_legacy(chunk_size=chunk_size,
+#                                           persist_path=persist_path)
+#     engine1 = autorelease(LMCacheEngine(cfg, dumb_metadata(fmt)))
+#     engine2 = autorelease(LMCacheEngine(cfg, dumb_metadata(fmt)))
+#     """ store and persist """
+#     engine1.store(tokens, kv_cache)
+#     engine2.store(tokens, kv_cache)
+#     """ store final """
+#     t1 = time.perf_counter()
+#     engine1.store(final_tokens, final_kv_cache, skip_existing=True)
+#     t2 = time.perf_counter()
+#     engine2.store(final_tokens, final_kv_cache, skip_existing=False)
+#     t3 = time.perf_counter()
 
 
-@pytest.mark.parametrize("fmt", ["vllm", "huggingface"])
-def test_func_retrieve_not_here(fmt, autorelease):
-    device = "cuda"
-    num_tokens = 12000
-    new_num_tokens = 200
-    chunk_size = 256
-    persist_path = "/tmp/test-engine.pth"
+# @pytest.mark.parametrize("fmt", ["vllm", "huggingface"])
+# def test_func_retrieve_not_here(fmt, autorelease):
+#     device = "cuda"
+#     num_tokens = 12000
+#     new_num_tokens = 200
+#     chunk_size = 256
+#     persist_path = "/tmp/test-engine.pth"
 
-    tokens = generate_tokens(num_tokens, device)
-    kv_cache = generate_kv_cache(num_tokens, fmt, device)
-    new_tokens = generate_tokens(new_num_tokens, device)
-    new_kv_cache = generate_kv_cache(new_num_tokens, fmt, device)
-    final_tokens = torch.cat([tokens, new_tokens])
-    final_kv_cache = concatenate_kv_caches([kv_cache, new_kv_cache], fmt)
-    """ initialize the engine """
-    cfg = LMCacheEngineConfig.from_legacy(chunk_size=chunk_size,
-                                          persist_path=persist_path)
-    engine1 = autorelease(LMCacheEngine(cfg, dumb_metadata(fmt)))
-    engine2 = autorelease(LMCacheEngine(cfg, dumb_metadata(fmt)))
-    """ store and persist """
-    engine1.store(tokens, kv_cache)
-    engine2.store(tokens, kv_cache)
-    """ store final """
-    t1 = time.perf_counter()
-    engine1.store(final_tokens, final_kv_cache, skip_existing=True)
-    t2 = time.perf_counter()
-    engine2.store(final_tokens, final_kv_cache, skip_existing=False)
-    t3 = time.perf_counter()
+#     tokens = generate_tokens(num_tokens, device)
+#     kv_cache = generate_kv_cache(num_tokens, fmt, device)
+#     new_tokens = generate_tokens(new_num_tokens, device)
+#     new_kv_cache = generate_kv_cache(new_num_tokens, fmt, device)
+#     final_tokens = torch.cat([tokens, new_tokens])
+#     final_kv_cache = concatenate_kv_caches([kv_cache, new_kv_cache], fmt)
+#     """ initialize the engine """
+#     cfg = LMCacheEngineConfig.from_legacy(chunk_size=chunk_size,
+#                                           persist_path=persist_path)
+#     engine1 = autorelease(LMCacheEngine(cfg, dumb_metadata(fmt)))
+#     engine2 = autorelease(LMCacheEngine(cfg, dumb_metadata(fmt)))
+#     """ store and persist """
+#     engine1.store(tokens, kv_cache)
+#     engine2.store(tokens, kv_cache)
+#     """ store final """
+#     t1 = time.perf_counter()
+#     engine1.store(final_tokens, final_kv_cache, skip_existing=True)
+#     t2 = time.perf_counter()
+#     engine2.store(final_tokens, final_kv_cache, skip_existing=False)
+#     t3 = time.perf_counter()
 
-@pytest.mark.parametrize("fmt", ["vllm", "huggingface"])
-def test_func_retrieve_wrong_block_fmt(fmt, autorelease):
-    device = "cuda"
-    num_tokens = 12000
-    new_num_tokens = 200
-    chunk_size = 256
-    persist_path = "/tmp/test-engine.pth"
+# @pytest.mark.parametrize("fmt", ["vllm", "huggingface"])
+# def test_func_retrieve_wrong_block_fmt(fmt, autorelease):
+#     device = "cuda"
+#     num_tokens = 12000
+#     new_num_tokens = 200
+#     chunk_size = 256
+#     persist_path = "/tmp/test-engine.pth"
 
-    tokens = generate_tokens(num_tokens, device)
-    kv_cache = generate_kv_cache(num_tokens, fmt, device)
-    new_tokens = generate_tokens(new_num_tokens, device)
-    new_kv_cache = generate_kv_cache(new_num_tokens, fmt, device)
-    final_tokens = torch.cat([tokens, new_tokens])
-    final_kv_cache = concatenate_kv_caches([kv_cache, new_kv_cache], fmt)
-    """ initialize the engine """
-    cfg = LMCacheEngineConfig.from_legacy(chunk_size=chunk_size,
-                                          persist_path=persist_path)
-    engine1 = autorelease(LMCacheEngine(cfg, dumb_metadata(fmt)))
-    engine2 = autorelease(LMCacheEngine(cfg, dumb_metadata(fmt)))
-    """ store and persist """
-    engine1.store(tokens, kv_cache)
-    engine2.store(tokens, kv_cache)
-    """ store final """
-    t1 = time.perf_counter()
-    engine1.store(final_tokens, final_kv_cache, skip_existing=True)
-    t2 = time.perf_counter()
-    engine2.store(final_tokens, final_kv_cache, skip_existing=False)
-    t3 = time.perf_counter()
+#     tokens = generate_tokens(num_tokens, device)
+#     kv_cache = generate_kv_cache(num_tokens, fmt, device)
+#     new_tokens = generate_tokens(new_num_tokens, device)
+#     new_kv_cache = generate_kv_cache(new_num_tokens, fmt, device)
+#     final_tokens = torch.cat([tokens, new_tokens])
+#     final_kv_cache = concatenate_kv_caches([kv_cache, new_kv_cache], fmt)
+#     """ initialize the engine """
+#     cfg = LMCacheEngineConfig.from_legacy(chunk_size=chunk_size,
+#                                           persist_path=persist_path)
+#     engine1 = autorelease(LMCacheEngine(cfg, dumb_metadata(fmt)))
+#     engine2 = autorelease(LMCacheEngine(cfg, dumb_metadata(fmt)))
+#     """ store and persist """
+#     engine1.store(tokens, kv_cache)
+#     engine2.store(tokens, kv_cache)
+#     """ store final """
+#     t1 = time.perf_counter()
+#     engine1.store(final_tokens, final_kv_cache, skip_existing=True)
+#     t2 = time.perf_counter()
+#     engine2.store(final_tokens, final_kv_cache, skip_existing=False)
+#     t3 = time.perf_counter()

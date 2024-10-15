@@ -350,7 +350,7 @@ class LMCacheEngine:
 
     @_lmcache_nvtx_annotate
     @torch.no_grad()
-    def exists(
+    def get_locations(
         self,
         tokens: torch.Tensor,
     ) -> List[List[str]]:
@@ -375,8 +375,17 @@ class LMCacheEngine:
             or the last block is not full (ex. 13 token / (16 token per block)) 
         """
 
+        chunk_hashes = self._prefix_hash(self._chunk_tokens(tokens))
 
-        return self.engine_.exists()
+        ret_locations_list = []
+        for chunk_hash in chunk_hashes:
+            list_locations = self.engine_.where_is(self._make_key(chunk_hash, self.metadata.fmt))
+            if list_locations[0] == 'NOT IN CACHE':
+                ret_locations_list.append(None)
+            else:
+                ret_locations_list.append(list_locations)
+
+        return ret_locations_list
 
     @_lmcache_nvtx_annotate
     @torch.no_grad()
@@ -407,12 +416,9 @@ class LMCacheEngine:
             The list is the same length as locations
         """
 
-        num_tokens: int = self._num_tokens_in_kv(kv_tensors, self.metadata.fmt)
-        if num_tokens != self.chunk_size:
-            return [False, []]
-
         chunk_hashes = self._prefix_hash(self._chunk_tokens(tokens))
-        assert(len(chunk_hashes) == 1)
+        if (len(chunk_hashes) != 1):
+            return [False, []]
 
         stored_locations = self.exists(tokens)[0]
         ret = []

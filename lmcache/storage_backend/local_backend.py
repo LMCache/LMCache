@@ -11,6 +11,7 @@ from lmcache.config import LMCacheEngineConfig
 from lmcache.logging import init_logger
 from lmcache.storage_backend.abstract_backend import LMCBackendInterface
 from lmcache.utils import CacheEngineKey, KVCache, _lmcache_nvtx_annotate
+from typing import Dict, Iterable, List, Optional, Tuple, Union
 
 logger = init_logger(__name__)
 
@@ -68,6 +69,14 @@ class LMCLocalBackend(LMCBackendInterface):
             True if the cache engine contains the key, False otherwise
         """
         return key in self.dict
+
+    def where_is(
+        self,
+        key: CacheEngineKey,
+    ) -> List[str]:
+        if self.contains(key):
+            return [f"local {self.device}"]
+        return ["NOT IN CACHE"]
 
     @_lmcache_nvtx_annotate
     def put_worker(self, ):
@@ -213,6 +222,14 @@ class LMCLocalDiskBackend(LMCBackendInterface):
             True if the cache engine contains the key, False otherwise
         """
         return key in self.existing_keys
+
+    def where_is(
+        self,
+        key: CacheEngineKey,
+    ) -> List[str]:
+        if self.contains(key):
+            return ["local_disk"]
+        return ["NOT IN CACHE"]
 
     def _key_to_path(
         self,
