@@ -39,7 +39,6 @@ def gen_input(tokenizer, context, user_prompt):
     user_inputs_batch = [
         user_prompt,
     ]
-    print(f"Context length: {get_context_length(tokenizer, context_messages)}")
     return gen_prompts(tokenizer, context_messages, user_inputs_batch)
 
 def save_outputs(outputs, filename):
