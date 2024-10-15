@@ -101,7 +101,7 @@ def test_retrieve_device(backend, src_device, dst_device, autorelease):
     engine = autorelease(LMCacheEngine(cfg, dumb_metadata(fmt)))
 
     engine.store(tokens, kv_cache)
-    retrieved_cache, length = engine.retrieve(tokens)
+    retrieved_cache, ret_mask = engine.retrieve(tokens)
     check_kv_cache_device(retrieved_cache, dst_device)
 
 
@@ -134,14 +134,16 @@ def test_same_retrieve_store(fmt, backend, remote_serde, autorelease,
                                           remote_serde=remote_serde)
     engine = autorelease(LMCacheEngine(cfg, dumb_metadata(fmt)))
     """ test retrieve empty """
-    retrieved_cache, length = engine.retrieve(tokens)
+    retrieved_cache, ret_mask = engine.retrieve(tokens)
+    length = torch.sum(ret_mask)
     assert len(retrieved_cache) == 0
     assert length == 0
     """ test store """
     engine.store(tokens, kv_cache)
     """ test retrieve """
-    retrieved_cache, length = engine.retrieve(tokens)
-
+    retrieved_cache, ret_mask = engine.retrieve(tokens)
+    length = torch.sum(ret_mask)
+    
     assert length == num_tokens
     check_kv_cache_equal(retrieved_cache, kv_cache, num_tokens, fmt)
     """erase local cache"""
@@ -186,7 +188,8 @@ def test_retrieve_prefix(fmt, chunk_size, backend, autorelease,
     t4 = time.perf_counter()
     print(f"store takes {t4-t3}")
     """ test retrieve """
-    retrieved_cache, length = engine.retrieve(torch.cat([tokens, new_tokens]))
+    retrieved_cache, ret_mask = engine.retrieve(torch.cat([tokens, new_tokens]))
+    length = torch.sum(ret_mask)
     t5 = time.perf_counter()
     print(f"retrieve takes {t5-t4}")
 
@@ -222,15 +225,16 @@ def test_mixed_retrieve(fmt, chunk_size, backend, autorelease,
     engine.store(tokens, kv_cache)
     engine.store(new_tokens, new_kv_cache)
     """ test retrieve """
-    retrieved_cache, length = engine.retrieve(torch.cat([tokens, new_tokens]))
-
+    retrieved_cache, ret_mask = engine.retrieve(torch.cat([tokens, new_tokens]))
+    length = torch.sum(ret_mask)
+    
     expected_chunk_cnt = num_tokens // chunk_size
     expected_length = expected_chunk_cnt * chunk_size
     assert length == expected_length
     check_kv_cache_equal(retrieved_cache, kv_cache, expected_length, fmt)
     """ test another retrieve """
-    retrieved_cache, length = engine.retrieve(new_tokens)
-
+    retrieved_cache, ret_mask = engine.retrieve(new_tokens)
+    length = torch.sum(ret_mask)
     assert length == new_num_tokens
     check_kv_cache_equal(retrieved_cache, new_kv_cache, length, fmt)
     """ insert the mixed kv cache """
@@ -239,7 +243,8 @@ def test_mixed_retrieve(fmt, chunk_size, backend, autorelease,
         [kv_cache, generate_kv_cache(new_num_tokens, fmt, device)], fmt)
     engine.store(final_tokens, final_kv_cache)
     """ should retrieve the mixed version """
-    retrieved_cache, length = engine.retrieve(final_tokens)
+    retrieved_cache, ret_mask = engine.retrieve(final_tokens)
+    length = torch.sum(ret_mask)
     assert length == num_tokens + new_num_tokens
     check_kv_cache_equal(retrieved_cache, final_kv_cache, length, fmt)
     """destroy local disk path"""
