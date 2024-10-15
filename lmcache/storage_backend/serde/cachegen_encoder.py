@@ -337,16 +337,15 @@ class CacheGenSerializer(Serializer):
         self.value_bins = self.make_value_bins(self.cachegen_config)
 
     def make_key_bins(self, config: CacheGenConfig) -> torch.Tensor:
-        ret = torch.zeros(config.key_third_layers)
-        ret.fill_(config.key_third_bins)
-        ret[:config.key_second_layers] = config.key_second_bins
-        ret[:config.key_first_layers] = config.key_first_bins
+        ret = torch.zeros(config.nlayers)
+        for spec in config.kspecs:
+            ret[spec.start_layer:spec.end_layer] = spec.bins
         return ret.cuda()
 
     def make_value_bins(self, config: CacheGenConfig) -> torch.Tensor:
-        ret = torch.zeros(config.key_third_layers)
-        ret.fill_(config.value_second_bins)
-        ret[:config.value_first_layers] = config.value_first_bins
+        ret = torch.zeros(config.nlayers)
+        for spec in config.vspecs:
+            ret[spec.start_layer:spec.end_layer] = spec.bins
         return ret.cuda()
 
     @_lmcache_nvtx_annotate

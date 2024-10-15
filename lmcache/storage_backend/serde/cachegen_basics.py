@@ -12,19 +12,22 @@ logger = init_logger(__name__)
 
 CACHEGEN_GPU_MAX_TOKENS_PER_CHUNK = 256
 
+@dataclass
+class QuantizationSpec:
+    start_layer: int
+    end_layer: int    
+    bins: int
+    
+    def __getitem__(self, key: str) -> int:
+        return getattr(self, key)
+    
 
 @dataclass
 class CacheGenConfig:
     # TODO: move this class to another file like "cachegen_basics.py"
-    key_first_layers: int
-    key_second_layers: int
-    key_third_layers: int
-    key_first_bins: int
-    key_second_bins: int
-    key_third_bins: int
-    value_first_layers: int
-    value_first_bins: int
-    value_second_bins: int
+    nlayers: int
+    kspecs: List[QuantizationSpec]
+    vspecs: List[QuantizationSpec]
 
     def __getitem__(self, key: str) -> int:
         return getattr(self, key)
@@ -39,40 +42,43 @@ class CacheGenConfig:
         family_9b = ["THUDM/glm-4-9b-chat"]
         if model_name in family_7b:
             return CacheGenConfig(
-                key_first_layers=10,
-                key_second_layers=20,
-                key_third_layers=32,  # total layers
-                key_first_bins=32,
-                key_second_bins=16,
-                key_third_bins=16,
-                value_first_layers=2,
-                value_first_bins=32,
-                value_second_bins=16,
+                nlayers=32,
+                kspecs=[
+                    QuantizationSpec(start_layer=0, end_layer=10, bins=32),
+                    QuantizationSpec(start_layer=10, end_layer=20, bins=16),
+                    QuantizationSpec(start_layer=20, end_layer=32, bins=16),
+                ],
+                vspecs=[
+                    QuantizationSpec(start_layer=0, end_layer=2, bins=32),
+                    QuantizationSpec(start_layer=2, end_layer=32, bins=16),
+                ],
             )
         elif model_name in family_8b:
             return CacheGenConfig(
-                key_first_layers=10,
-                key_second_layers=20,
-                key_third_layers=32,  # total layers
-                key_first_bins=32,
-                key_second_bins=16,
-                key_third_bins=16,
-                value_first_layers=2,
-                value_first_bins=32,
-                value_second_bins=16,
+                nlayers=32,
+                kspecs=[
+                    QuantizationSpec(start_layer=0, end_layer=10, bins=32),
+                    QuantizationSpec(start_layer=10, end_layer=20, bins=16),
+                    QuantizationSpec(start_layer=20, end_layer=32, bins=16),
+                ],
+                vspecs=[
+                    QuantizationSpec(start_layer=0, end_layer=2, bins=32),
+                    QuantizationSpec(start_layer=2, end_layer=32, bins=16),
+                ],
             )
         # TODO(Jiayi): needs tuning for better quality
         elif model_name in family_9b:
             return CacheGenConfig(
-                key_first_layers=10,
-                key_second_layers=20,
-                key_third_layers=40,
-                key_first_bins=32,
-                key_second_bins=16,
-                key_third_bins=16,
-                value_first_layers=2,
-                value_first_bins=32,
-                value_second_bins=16,
+                nlayers=40,
+                kspecs=[
+                    QuantizationSpec(start_layer=0, end_layer=10, bins=32),
+                    QuantizationSpec(start_layer=10, end_layer=20, bins=16),
+                    QuantizationSpec(start_layer=20, end_layer=40, bins=16),
+                ],
+                vspecs=[
+                    QuantizationSpec(start_layer=0, end_layer=2, bins=32),
+                    QuantizationSpec(start_layer=2, end_layer=40, bins=16),
+                ],
             )
         else:
             raise ValueError(f"Model {model_name} is not supported")
