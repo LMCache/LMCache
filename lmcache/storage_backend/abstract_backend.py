@@ -111,7 +111,15 @@ class LMCBackendInterface(metaclass=abc.ABCMeta):
                 yield self.get(key)
             else:
                 yield None
-
+    
+    @abc.abstractmethod
+    def retrieve(self):
+        """
+        Do the cleanup things
+        Children classes should override this method if necessary
+        """
+        pass
+    
     @abc.abstractmethod
     def close(self):
         """

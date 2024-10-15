@@ -353,7 +353,7 @@ class LMCacheEngine:
     def exists(
         self,
         tokens: torch.Tensor,
-    ) -> Tuple[int, List[List[str]]]:
+    ) -> List[List[str]]:
         """
         Checks the locations of KV cache of the tokens from the cache engine.
         The return should be a list of the locations for each block.
@@ -369,13 +369,14 @@ class LMCacheEngine:
                 [num_tokens, num_heads, head_size]
 
         Output:
-            [block size, List[List[locations]]]:
-            block size is the number of tokens per block.
+            List[List[locations]]:
             List of the locations (ex. ['local DRAM']) of stroage of each block. 
             The entry will be None if the block is not found 
             or the last block is not full (ex. 13 token / (16 token per block)) 
         """
-        return [0, ['this is placeholder']]
+
+
+        return self.engine_.exists()
 
     @_lmcache_nvtx_annotate
     @torch.no_grad()
@@ -390,7 +391,7 @@ class LMCacheEngine:
         Returns validity of token_block and success of deletions
 
         Input:
-            token_block: the input tokens block, with shape [block_size]
+            token_block: the input tokens block, with shape [chunk_size]
 
             format is either 'huggingface' or 'vllm'
                 For huggingface, it should have the shape of 
@@ -405,7 +406,23 @@ class LMCacheEngine:
             [token_block validity, List[deletion successful or not]]
             The list is the same length as locations
         """
-        return [0,[0]]
+
+        num_tokens: int = self._num_tokens_in_kv(kv_tensors, self.metadata.fmt)
+        if num_tokens != self.chunk_size:
+            return [False, []]
+
+        chunk_hashes = self._prefix_hash(self._chunk_tokens(tokens))
+        assert(len(chunk_hashes) == 1)
+
+        stored_locations = self.exists(tokens)[0]
+        ret = []
+        for location in locations:
+            if location not in stored_locations:
+                ret.append(False)
+            else:
+                ret.append(self.engine_.remove(_make_key[chunk_hashes[0]], location))
+            
+        return [True, ret]
         
     def close(self):
         self.engine_.close()
