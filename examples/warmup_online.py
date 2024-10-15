@@ -1,12 +1,14 @@
 import sys
 
 import numpy as np
-
 from openai import OpenAI
 
-assert len(sys.argv) >= 2, f"Usage: python3 {sys.argv[0]} <port1> <port2> ... <portN>"
+assert len(
+    sys.argv) >= 2, f"Usage: python3 {sys.argv[0]} <port1> <port2> ... <portN>"
 
 port_list = sys.argv[1:]
+
+
 class ChatSession:
 
     def __init__(self, port, context_separator="###"):
@@ -66,6 +68,7 @@ class ChatSession:
 
         self.on_server_message("".join(server_message), False)
 
+
 def warm_up_online(ports_to_warm_up):
     # Generate random string of 32 words, 8 groups.
     dummy_prompt_ints = np.random.randint(10000, size=(8, 32))
@@ -77,6 +80,7 @@ def warm_up_online(ports_to_warm_up):
             chat_session.set_context(["Wram up. Print the first number."])
             chat_session.chat(dummy_prompt)
         print(f"Warm up on port {port} done.")
+
 
 if __name__ == "__main__":
     warm_up_online(port_list)

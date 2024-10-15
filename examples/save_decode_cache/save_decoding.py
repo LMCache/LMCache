@@ -3,8 +3,6 @@ import json
 import os
 import time
 
-import numpy as np
-
 from lmcache_vllm.vllm import LLM, SamplingParams
 from transformers import AutoTokenizer
 
@@ -78,12 +76,11 @@ llm = LLM(model=model_name,
           enable_chunked_prefill=False,
           max_model_len=32768)
 
-
 sampling_params = SamplingParams(temperature=0.8, top_p=0.95, max_tokens=1024)
 
 # Clear output file.
 with open(output_file, "w") as f:
-    pass
+    f.write("")
 
 # Generate texts from the prompts. The output is a list of RequestOutput objects
 # that contain the prompt, generated text, and other information.

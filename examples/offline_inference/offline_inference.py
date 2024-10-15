@@ -4,7 +4,6 @@ import os
 import time
 
 import numpy as np
-
 from lmcache_vllm.vllm import LLM, SamplingParams
 from transformers import AutoTokenizer
 
@@ -80,11 +79,9 @@ llm = LLM(model=model_name,
           enable_chunked_prefill=False,
           max_model_len=32768)
 
-dummy_prompt_token_ids = np.random.randint(10000,
-                                               size=(8,
-                                                     32))
+dummy_prompt_token_ids = np.random.randint(10000, size=(8, 32))
 dummy_prompts = [{
-        "prompt_token_ids": batch
+    "prompt_token_ids": batch
 } for batch in dummy_prompt_token_ids.tolist()]
 print("Warming up.")
 llm.generate(dummy_prompts, sampling_params)
