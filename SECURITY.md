@@ -6,4 +6,4 @@ If you believe you have found a security vulnerability in LMCache, please let us
 
 ## Reporting a Vulnerability
 
-For now, please email details of the vulnerability to lmcacheteam@gmail.com. Please try to include some detailed examples, screenshots etc. or anything you feel which may help identidy the problem fast.
+For now, please email details of the vulnerability to lmcacheteam@gmail.com. Please try to include some detailed examples, screenshots etc. or anything you feel which may help identify the problem fast.
