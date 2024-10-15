@@ -8,7 +8,7 @@ from transformers import AutoTokenizer
 
 model_name = "mistralai/Mistral-7B-Instruct-v0.2"
 context_file = os.path.join(os.pardir, 'ffmpeg.txt')
-output_file = "offline_inference_outputs.jsonl"
+output_file = "save_decode_cache_outputs.jsonl"
 
 context_text = None
 with open(context_file, 'r') as f:
