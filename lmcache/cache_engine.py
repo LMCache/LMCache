@@ -365,11 +365,9 @@ class LMCacheEngine:
 
         # drop extra tokens in the first chunk
         extra_token_len = skip_len - chunked_skip_len
-        if dim == 0:
-            retrieved_kv_chunks[0] = retrieved_kv_chunks[0][extra_token_len:]
-        elif dim == 1:
-            retrieved_kv_chunks[0] = retrieved_kv_chunks[0][:,
-                                                            extra_token_len:]
+        retrieved_kv_chunks[0] = self._slice_kv_at(extra_token_len,
+                                                   retrieved_kv_chunks[0],
+                                                   fmt)[0]
 
         ret = self._blob_to_tuple_kv(
             torch.cat(retrieved_kv_chunks, dim=dim + 2))
