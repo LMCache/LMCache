@@ -74,9 +74,29 @@ class LMCLocalBackend(LMCBackendInterface):
         self,
         key: CacheEngineKey,
     ) -> List[str]:
+        self.update_lock.acquire()
         if self.contains(key):
+            self.update_lock.release()
             return [f"local {self.device}"]
+        self.update_lock.release()
+
         return ["NOT IN CACHE"]
+
+    def remove(
+        self,
+        key: CacheEngineKey,
+        location: str
+    ) -> bool:
+        if location != f'local {self.device}':
+            return False
+        else:
+            self.update_lock.acquire()
+            if self.contains(key):
+                del self.dict[key]
+            self.update_lock.release()
+
+        return True
+
 
     @_lmcache_nvtx_annotate
     def put_worker(self, ):
@@ -227,9 +247,26 @@ class LMCLocalDiskBackend(LMCBackendInterface):
         self,
         key: CacheEngineKey,
     ) -> List[str]:
+        self.update_lock.acquire()
         if self.contains(key):
+            self.update_lock.release()
             return ["local_disk"]
+        self.update_lock.release()
         return ["NOT IN CACHE"]
+
+    def remove(
+        self,
+        key: CacheEngineKey,
+        location: str
+    ) -> bool:
+        if location != f'local disk':
+            return False
+        else:
+            self.update_lock.acquire()
+            os.remove(self._key_to_path(key))
+            del self.dict[key]
+            self.update_lock.release()
+            return True
 
     def _key_to_path(
         self,

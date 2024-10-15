@@ -416,17 +416,20 @@ class LMCacheEngine:
             The list is the same length as locations
         """
 
-        chunk_hashes = self._prefix_hash(self._chunk_tokens(tokens))
+        chunk_hashes = self._prefix_hash(self._chunk_tokens(token_block))
         if (len(chunk_hashes) != 1):
             return [False, []]
 
-        stored_locations = self.exists(tokens)[0]
+        stored_locations = self.get_locations(token_block)[0]
+
         ret = []
         for location in locations:
-            if location not in stored_locations:
+            if stored_locations == None or location not in stored_locations:
                 ret.append(False)
             else:
-                ret.append(self.engine_.remove(_make_key[chunk_hashes[0]], location))
+                ret.append(self.engine_.remove(
+                    self._make_key(chunk_hashes[0], self.metadata.fmt),
+                    location))
             
         return [True, ret]
         

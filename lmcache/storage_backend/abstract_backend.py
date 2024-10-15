@@ -57,6 +57,19 @@ class LMCBackendInterface(metaclass=abc.ABCMeta):
         raise NotImplementedError
 
     @abc.abstractmethod
+    def remove(
+        self,
+        key: CacheEngineKey,
+        location: str
+    ) -> bool:
+        """
+        Remove the key from the location
+        If backend is not the location, return False automatically.
+        """
+        #TODO NO Lock right now
+        raise NotImplementedError
+
+    @abc.abstractmethod
     def get(
         self,
         key: CacheEngineKey,

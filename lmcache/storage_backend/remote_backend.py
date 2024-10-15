@@ -129,7 +129,17 @@ class LMCRemoteBackend(LMCBackendInterface):
             return ["remote"]
         else:
             return ["NOT IN CACHE"]
-
+    
+    def remove(
+        self,
+        key: CacheEngineKey,
+        location: str
+    ) -> bool:
+        # if location[0] != f'remote':
+        #     return False
+        # else:
+        #     os.remove(self._key_to_path(key))
+        return True
 
     def put_blocking(
         self,
