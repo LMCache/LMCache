@@ -143,7 +143,7 @@ def test_same_retrieve_store(fmt, backend, remote_serde, autorelease,
     """ test retrieve """
     retrieved_cache, ret_mask = engine.retrieve(tokens)
     length = torch.sum(ret_mask)
-    
+
     assert length == num_tokens
     check_kv_cache_equal(retrieved_cache, kv_cache, num_tokens, fmt)
     """erase local cache"""
@@ -188,7 +188,8 @@ def test_retrieve_prefix(fmt, chunk_size, backend, autorelease,
     t4 = time.perf_counter()
     print(f"store takes {t4-t3}")
     """ test retrieve """
-    retrieved_cache, ret_mask = engine.retrieve(torch.cat([tokens, new_tokens]))
+    retrieved_cache, ret_mask = engine.retrieve(torch.cat([tokens,
+                                                           new_tokens]))
     length = torch.sum(ret_mask)
     t5 = time.perf_counter()
     print(f"retrieve takes {t5-t4}")
@@ -225,9 +226,10 @@ def test_mixed_retrieve(fmt, chunk_size, backend, autorelease,
     engine.store(tokens, kv_cache)
     engine.store(new_tokens, new_kv_cache)
     """ test retrieve """
-    retrieved_cache, ret_mask = engine.retrieve(torch.cat([tokens, new_tokens]))
+    retrieved_cache, ret_mask = engine.retrieve(torch.cat([tokens,
+                                                           new_tokens]))
     length = torch.sum(ret_mask)
-    
+
     expected_chunk_cnt = num_tokens // chunk_size
     expected_length = expected_chunk_cnt * chunk_size
     assert length == expected_length
