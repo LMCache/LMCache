@@ -1,11 +1,10 @@
 import shlex
 import subprocess
-import time
 
 import pytest
 import torch
 
-from lmcache.cache_engine import LMCacheEngine, LMCacheEngineBuilder
+from lmcache.cache_engine import LMCacheEngine
 from lmcache.config import LMCacheEngineConfig, LMCacheEngineMetadata
 
 
@@ -90,16 +89,11 @@ def check_kv_cache_device(kvs, device):
 def test_func_get_locations(fmt, autorelease):
     device = "cuda"
     num_tokens = 12000
-    new_num_tokens = 200
     chunk_size = 256
     persist_path = "/tmp/test-engine.pth"
 
     tokens = generate_tokens(num_tokens, device)
     kv_cache = generate_kv_cache(num_tokens, fmt, device)
-    new_tokens = generate_tokens(new_num_tokens, device)
-    new_kv_cache = generate_kv_cache(new_num_tokens, fmt, device)
-    final_tokens = torch.cat([tokens, new_tokens])
-    final_kv_cache = concatenate_kv_caches([kv_cache, new_kv_cache], fmt)
     """ initialize the engine """
     cfg = LMCacheEngineConfig.from_legacy(chunk_size=chunk_size,
                                           persist_path=persist_path)
@@ -108,27 +102,22 @@ def test_func_get_locations(fmt, autorelease):
     """ store and persist """
     engine1.store(tokens, kv_cache)
     engine2.store(tokens, kv_cache)
-
     """ check locations """
     location_list = engine1.get_locations(tokens)
-    assert(len(location_list) == (num_tokens - 1) // chunk_size  + 1)
+    assert (len(location_list) == (num_tokens - 1) // chunk_size + 1)
     for location in location_list:
         assert (location == ['local cuda'])
 
+
 @pytest.mark.parametrize("fmt", ["vllm", "huggingface"])
 def test_func_get_locations_cpu(fmt, autorelease):
     device = "cuda"
     num_tokens = 12000
-    new_num_tokens = 200
     chunk_size = 256
     persist_path = "/tmp/test-engine.pth"
 
     tokens = generate_tokens(num_tokens, device)
     kv_cache = generate_kv_cache(num_tokens, fmt, device)
-    new_tokens = generate_tokens(new_num_tokens, device)
-    new_kv_cache = generate_kv_cache(new_num_tokens, fmt, device)
-    final_tokens = torch.cat([tokens, new_tokens])
-    final_kv_cache = concatenate_kv_caches([kv_cache, new_kv_cache], fmt)
     """ initialize the engine """
     cfg = LMCacheEngineConfig.from_legacy(chunk_size=chunk_size,
                                           persist_path=persist_path,
@@ -138,57 +127,22 @@ def test_func_get_locations_cpu(fmt, autorelease):
     """ store and persist """
     engine1.store(tokens, kv_cache)
     engine2.store(tokens, kv_cache)
-
     """ check locations """
     location_list = engine1.get_locations(tokens)
-    assert(len(location_list) == (num_tokens - 1) // chunk_size  + 1)
+    assert (len(location_list) == (num_tokens - 1) // chunk_size + 1)
     for location in location_list:
         assert (location == ['local cpu'])
 
-@pytest.mark.parametrize("fmt", ["vllm", "huggingface"])
-def test_func_get_locations_cpu(fmt, autorelease):
-    device = "cuda"
-    num_tokens = 12000
-    new_num_tokens = 200
-    chunk_size = 256
-    persist_path = "/tmp/test-engine.pth"
-
-    tokens = generate_tokens(num_tokens, device)
-    kv_cache = generate_kv_cache(num_tokens, fmt, device)
-    new_tokens = generate_tokens(new_num_tokens, device)
-    new_kv_cache = generate_kv_cache(new_num_tokens, fmt, device)
-    final_tokens = torch.cat([tokens, new_tokens])
-    final_kv_cache = concatenate_kv_caches([kv_cache, new_kv_cache], fmt)
-    """ initialize the engine """
-    cfg = LMCacheEngineConfig.from_legacy(chunk_size=chunk_size,
-                                          persist_path=persist_path,
-                                          backend='cpu')
-    engine1 = autorelease(LMCacheEngine(cfg, dumb_metadata(fmt)))
-    engine2 = autorelease(LMCacheEngine(cfg, dumb_metadata(fmt)))
-    """ store and persist """
-    engine1.store(tokens, kv_cache)
-    engine2.store(tokens, kv_cache)
-
-    """ check locations """
-    location_list = engine1.get_locations(tokens)
-    assert(len(location_list) == (num_tokens - 1) // chunk_size  + 1)
-    for location in location_list:
-        assert (location == ['local cpu'])
 
 @pytest.mark.parametrize("fmt", ["vllm", "huggingface"])
 def test_func_get_locations_remove_cpu(fmt, autorelease):
     device = "cuda"
     num_tokens = 12000
-    new_num_tokens = 200
     chunk_size = 256
     persist_path = "/tmp/test-engine.pth"
 
     tokens = generate_tokens(num_tokens, device)
     kv_cache = generate_kv_cache(num_tokens, fmt, device)
-    new_tokens = generate_tokens(new_num_tokens, device)
-    new_kv_cache = generate_kv_cache(new_num_tokens, fmt, device)
-    final_tokens = torch.cat([tokens, new_tokens])
-    final_kv_cache = concatenate_kv_caches([kv_cache, new_kv_cache], fmt)
     """ initialize the engine """
     cfg = LMCacheEngineConfig.from_legacy(chunk_size=chunk_size,
                                           persist_path=persist_path,
@@ -198,21 +152,20 @@ def test_func_get_locations_remove_cpu(fmt, autorelease):
     """ store and persist """
     engine1.store(tokens, kv_cache)
     engine2.store(tokens, kv_cache)
-
     """ check locations """
     location_list = engine1.get_locations(tokens)
-    assert(len(location_list) == (num_tokens - 1) // chunk_size  + 1)
+    assert (len(location_list) == (num_tokens - 1) // chunk_size + 1)
     for location in location_list:
         assert (location == ['local cpu'])
-    
+
     engine1.remove(tokens[:chunk_size], ['local cpu'])
-    assert (engine1.get_locations(tokens)[0] == None )
+    assert (engine1.get_locations(tokens)[0] is None)
 
     saved = engine1.remove(tokens[:chunk_size], ['local cpu'])
-    assert(saved[1] == [False])
+    assert (saved[1] == [False])
 
-    saved = engine1.remove(tokens[:chunk_size+10], ['local cpu'])
-    assert(saved[0] == False)
+    saved = engine1.remove(tokens[:chunk_size + 10], ['local cpu'])
+    assert (not saved[0])
 
 
 @pytest.mark.parametrize("fmt", ["vllm", "huggingface"])
@@ -228,7 +181,7 @@ def test_func_get_locations_remove_cpu(fmt, autorelease):
 @pytest.mark.parametrize("lmserver_process", ["cpu", "remote_disk/"],
                          indirect=True)
 def test_remove_first(fmt, backend, remote_serde, autorelease,
-                             lmserver_process):
+                      lmserver_process):
     device = "cpu" if backend == "cpu" else "cuda"
     num_tokens = 2000
     chunk_size = 256
@@ -253,17 +206,13 @@ def test_remove_first(fmt, backend, remote_serde, autorelease,
 
     #Test get locations
     location_list = engine.get_locations(tokens)
-    assert(len(location_list) == (num_tokens - 1) // chunk_size  + 1)
+    assert (len(location_list) == (num_tokens - 1) // chunk_size + 1)
     for location in location_list:
         assert (location == ['remote'])
-    
+
     #Test remove first chunk
     engine.remove(tokens[:chunk_size], ['remote'])
-    assert (engine.get_locations(tokens)[0] == None )
-
-
+    assert (engine.get_locations(tokens)[0] is None)
     """erase local cache"""
     if backend in ["file://local_disk/"]:
         subprocess.run(shlex.split("rm -rf local_disk/"))
-
-    

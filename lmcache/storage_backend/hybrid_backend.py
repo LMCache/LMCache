@@ -67,29 +67,25 @@ class LMCHybridBackend(LMCBackendInterface):
     ) -> bool:
         return self.local_store.contains(key) or self.remote_store.contains(
             key)
-    
+
     def where_is(
         self,
         key: CacheEngineKey,
     ) -> List[str]:
         #TODO Need to add more devices here
-        ret_locations = []
+        ret_locations: list[str] = []
         if self.local_store.contains(key):
-            ret_locations.extend(self.local_store.where_is(ret_locations))
-        
+            ret_locations.extend(self.local_store.where_is(key))
+
         if self.remote_store.contains(key):
-            ret_locations.extend(self.remote_store.where_is(ret_locations))
-        
+            ret_locations.extend(self.remote_store.where_is(key))
+
         if len(ret_locations) == 0:
             ret_locations = ['NOT IN CACHE']
 
         return ret_locations
-    
-    def remove(
-        self,
-        key: CacheEngineKey,
-        location: str
-    ) -> bool:
+
+    def remove(self, key: CacheEngineKey, location: str) -> bool:
         if location == 'remote':
             return self.remote_store.remove(key, location)
         else:

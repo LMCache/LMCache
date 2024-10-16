@@ -178,7 +178,6 @@ class LMSLocalDiskBackend(LMSBackendInterface):
         """
         self.filenames.remove(key)
         os.remove(self._key_to_path(key))
-        print("wtf")
         return True
 
     def put(

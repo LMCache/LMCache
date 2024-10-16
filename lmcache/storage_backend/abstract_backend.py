@@ -1,5 +1,5 @@
 import abc
-from typing import Iterable, Optional, Tuple, List
+from typing import Iterable, List, Optional, Tuple
 
 import torch
 
@@ -57,11 +57,7 @@ class LMCBackendInterface(metaclass=abc.ABCMeta):
         raise NotImplementedError
 
     @abc.abstractmethod
-    def remove(
-        self,
-        key: CacheEngineKey,
-        location: str
-    ) -> bool:
+    def remove(self, key: CacheEngineKey, location: str) -> bool:
         """
         Remove the key from the location
         If backend is not the location, return False automatically.

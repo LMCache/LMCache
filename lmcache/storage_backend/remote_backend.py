@@ -129,12 +129,8 @@ class LMCRemoteBackend(LMCBackendInterface):
             return ["remote"]
         else:
             return ["NOT IN CACHE"]
-    
-    def remove(
-        self,
-        key: CacheEngineKey,
-        location: str
-    ) -> bool:
+
+    def remove(self, key: CacheEngineKey, location: str) -> bool:
         #TODO (Hanchen) There might be many remote locations in the future
 
         if location != 'remote':

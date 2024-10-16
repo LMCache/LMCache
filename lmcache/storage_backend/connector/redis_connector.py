@@ -31,7 +31,7 @@ class RedisConnector(RemoteConnector):
 
     def set(self, key: str, obj: bytes) -> None:
         self.connection.set(key, obj)
-    
+
     def remove(self, key: str):
         self.connection.delete(key)
 
@@ -105,6 +105,10 @@ class RedisSentinelConnector(RemoteConnector):
 
     def set(self, key: str, obj: bytes) -> None:
         self.master.set(key, obj)
+
+    def remove(self, key: str) -> bool:
+        self.master.delete(key)
+        return True
 
     def list(self):
         cursor = 0

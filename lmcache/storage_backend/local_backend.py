@@ -1,7 +1,7 @@
 import os
 import queue
 import threading
-from typing import Dict, Optional, Set, Tuple, Union
+from typing import Dict, List, Optional, Set, Tuple, Union
 
 import torch
 from safetensors import safe_open
@@ -11,7 +11,6 @@ from lmcache.config import LMCacheEngineConfig
 from lmcache.logging import init_logger
 from lmcache.storage_backend.abstract_backend import LMCBackendInterface
 from lmcache.utils import CacheEngineKey, KVCache, _lmcache_nvtx_annotate
-from typing import Dict, Iterable, List, Optional, Tuple, Union
 
 logger = init_logger(__name__)
 
@@ -82,11 +81,7 @@ class LMCLocalBackend(LMCBackendInterface):
 
         return ["NOT IN CACHE"]
 
-    def remove(
-        self,
-        key: CacheEngineKey,
-        location: str
-    ) -> bool:
+    def remove(self, key: CacheEngineKey, location: str) -> bool:
         if location != f'local {self.device}':
             return False
         else:
@@ -96,7 +91,6 @@ class LMCLocalBackend(LMCBackendInterface):
             self.update_lock.release()
 
         return True
-
 
     @_lmcache_nvtx_annotate
     def put_worker(self, ):
@@ -254,17 +248,13 @@ class LMCLocalDiskBackend(LMCBackendInterface):
         self.update_lock.release()
         return ["NOT IN CACHE"]
 
-    def remove(
-        self,
-        key: CacheEngineKey,
-        location: str
-    ) -> bool:
-        if location != f'local disk':
+    def remove(self, key: CacheEngineKey, location: str) -> bool:
+        if location != 'local disk':
             return False
         else:
             self.update_lock.acquire()
             os.remove(self._key_to_path(key))
-            del self.dict[key]
+            self.existing_keys.remove(key)
             self.update_lock.release()
             return True
 

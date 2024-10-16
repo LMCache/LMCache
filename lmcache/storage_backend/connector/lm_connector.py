@@ -53,11 +53,10 @@ class LMCServerConnector(RemoteConnector):
         #   != Constants.SERVER_SUCCESS:
         #    raise RuntimeError(f"Failed to set key:
         # {ServerMetaMessage.deserialize(response).code}")
-    
+
     def remove(self, key: str):
         self.send_all(
-            ClientMetaMessage(Constants.CLIENT_REMOVE, key, 0).serialize()
-        )
+            ClientMetaMessage(Constants.CLIENT_REMOVE, key, 0).serialize())
 
     @_lmcache_nvtx_annotate
     def get(self, key: str) -> Optional[bytes]:

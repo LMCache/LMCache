@@ -353,7 +353,7 @@ class LMCacheEngine:
     def get_locations(
         self,
         tokens: torch.Tensor,
-    ) -> List[List[str]]:
+    ) -> List[Optional[List[str]]]:
         """
         Checks the locations of KV cache of the tokens from the cache engine.
         The return should be a list of the locations for each block.
@@ -370,16 +370,17 @@ class LMCacheEngine:
 
         Output:
             List[List[locations]]:
-            List of the locations (ex. ['local DRAM']) of stroage of each block. 
+            List of the locations (ex. ['local DRAM']) of storage of each block 
             The entry will be None if the block is not found 
             or the last block is not full (ex. 13 token / (16 token per block)) 
         """
 
         chunk_hashes = self._prefix_hash(self._chunk_tokens(tokens))
 
-        ret_locations_list = []
+        ret_locations_list: list[Optional[list[str]]] = []
         for chunk_hash in chunk_hashes:
-            list_locations = self.engine_.where_is(self._make_key(chunk_hash, self.metadata.fmt))
+            list_locations = self.engine_.where_is(
+                self._make_key(chunk_hash, self.metadata.fmt))
             if list_locations[0] == 'NOT IN CACHE':
                 ret_locations_list.append(None)
             else:
@@ -418,21 +419,22 @@ class LMCacheEngine:
 
         chunk_hashes = self._prefix_hash(self._chunk_tokens(token_block))
         if (len(chunk_hashes) != 1):
-            return [False, []]
+            return (False, [])
 
         stored_locations = self.get_locations(token_block)[0]
 
         ret = []
         for location in locations:
-            if stored_locations == None or location not in stored_locations:
+            if stored_locations is None or location not in stored_locations:
                 ret.append(False)
             else:
-                ret.append(self.engine_.remove(
-                    self._make_key(chunk_hashes[0], self.metadata.fmt),
-                    location))
-            
-        return [True, ret]
-        
+                ret.append(
+                    self.engine_.remove(
+                        self._make_key(chunk_hashes[0], self.metadata.fmt),
+                        location))
+
+        return (True, ret)
+
     def close(self):
         self.engine_.close()
 
