@@ -361,12 +361,6 @@ class LMCacheEngine:
         Input:
             tokens: the input tokens, with shape [seq_len]
 
-            format is either 'huggingface' or 'vllm'
-                For huggingface, it should have the shape of 
-                [num_heads, num_tokens, head_size]
-                
-                For vllm, it should have the shape of 
-                [num_tokens, num_heads, head_size]
 
         Output:
             List[List[locations]]:
