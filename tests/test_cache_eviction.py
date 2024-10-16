@@ -208,7 +208,7 @@ def test_remove_first(fmt, backend, remote_serde, autorelease,
         assert (location == ['remote'])
 
     #Test remove first chunk
-    engine.remove(tokens, [['remote']]*3, 1, 3)
+    engine.remove(tokens, [['remote']] * 3, 1, 3)
 
     assert (engine.get_locations(tokens)[1] is None)
     assert (engine.get_locations(tokens)[2] is None)

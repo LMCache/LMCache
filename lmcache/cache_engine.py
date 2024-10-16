@@ -428,8 +428,9 @@ class LMCacheEngine:
         chunk_hashes = self._prefix_hash(self._chunk_tokens(token_block))
         ret = []
 
-        for idx in range(from_block_num, min(
-            len(chunk_hashes), from_block_num+ blocks_to_delete)):
+        for idx in range(
+                from_block_num,
+                min(len(chunk_hashes), from_block_num + blocks_to_delete)):
             print(idx)
             chunk_hash = chunk_hashes[idx]
             stored_locations = self.get_locations(token_block)[idx]
@@ -442,7 +443,7 @@ class LMCacheEngine:
                         self.engine_.remove(
                             self._make_key(chunk_hash, self.metadata.fmt),
                             location))
-            
+
             ret.append(ret_this_chunk)
 
         return ret
