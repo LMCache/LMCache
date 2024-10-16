@@ -158,14 +158,11 @@ def test_func_get_locations_remove_cpu(fmt, autorelease):
     for location in location_list:
         assert (location == ['local cpu'])
 
-    engine1.remove(tokens[:chunk_size], ['local cpu'])
+    engine1.remove(tokens, [['local cpu']], 0, 1)
     assert (engine1.get_locations(tokens)[0] is None)
 
-    saved = engine1.remove(tokens[:chunk_size], ['local cpu'])
-    assert (saved[1] == [False])
-
-    saved = engine1.remove(tokens[:chunk_size + 10], ['local cpu'])
-    assert (not saved[0])
+    saved = engine1.remove(tokens, [['local cpu']], 0, 1)
+    assert (saved[0] == [False])
 
 
 @pytest.mark.parametrize("fmt", ["vllm", "huggingface"])
@@ -211,8 +208,11 @@ def test_remove_first(fmt, backend, remote_serde, autorelease,
         assert (location == ['remote'])
 
     #Test remove first chunk
-    engine.remove(tokens[:chunk_size], ['remote'])
-    assert (engine.get_locations(tokens)[0] is None)
+    engine.remove(tokens, [['remote']]*3, 1, 3)
+
+    assert (engine.get_locations(tokens)[1] is None)
+    assert (engine.get_locations(tokens)[2] is None)
+    assert (engine.get_locations(tokens)[3] is None)
     """erase local cache"""
     if backend in ["file://local_disk/"]:
         subprocess.run(shlex.split("rm -rf local_disk/"))

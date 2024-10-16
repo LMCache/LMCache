@@ -393,15 +393,17 @@ class LMCacheEngine:
     def remove(
         self,
         token_block: torch.Tensor,
-        locations: List[str],
-    ) -> Tuple[bool, List[bool]]:
+        locations: List[List[str]],
+        from_block_num: int,
+        blocks_to_delete: int,
+    ) -> List[List[bool]]:
         """
         Remove the KV cache entry from the locations specified. 
         Tokens has to be one block. 
         Returns validity of token_block and success of deletions
 
         Input:
-            token_block: the input tokens block, with shape [chunk_size]
+            token_block: the input tokens block
 
             format is either 'huggingface' or 'vllm'
                 For huggingface, it should have the shape of 
@@ -411,29 +413,39 @@ class LMCacheEngine:
                 [num_tokens, num_heads, head_size]
             
             locations: locations to remove KV cache of token_block from
+                        one list for each block
+            
+            from_block_num: the starting idx of blocks to remove
+
+            blocks_to_delete: the max number of blocks to delete
 
         Output:
-            [token_block validity, List[deletion successful or not]]
-            The list is the same length as locations
+            List[ List[deletion successful or not]]
+            First layer is to the number of blocks, 
+            Second layer list is the same length as locations
         """
 
         chunk_hashes = self._prefix_hash(self._chunk_tokens(token_block))
-        if (len(chunk_hashes) != 1):
-            return (False, [])
-
-        stored_locations = self.get_locations(token_block)[0]
-
         ret = []
-        for location in locations:
-            if stored_locations is None or location not in stored_locations:
-                ret.append(False)
-            else:
-                ret.append(
-                    self.engine_.remove(
-                        self._make_key(chunk_hashes[0], self.metadata.fmt),
-                        location))
 
-        return (True, ret)
+        for idx in range(from_block_num, min(
+            len(chunk_hashes), from_block_num+ blocks_to_delete)):
+            print(idx)
+            chunk_hash = chunk_hashes[idx]
+            stored_locations = self.get_locations(token_block)[idx]
+            ret_this_chunk = []
+            for location in locations[idx - from_block_num]:
+                if not stored_locations or location not in stored_locations:
+                    ret_this_chunk.append(False)
+                else:
+                    ret_this_chunk.append(
+                        self.engine_.remove(
+                            self._make_key(chunk_hash, self.metadata.fmt),
+                            location))
+            
+            ret.append(ret_this_chunk)
+
+        return ret
 
     def close(self):
         self.engine_.close()
