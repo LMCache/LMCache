@@ -31,6 +31,9 @@ class RedisConnector(RemoteConnector):
 
     def set(self, key: str, obj: bytes) -> None:
         self.connection.set(key, obj)
+    
+    def remove(self, key: str):
+        self.connection.delete(key)
 
     def list(self):
         cursor = 0

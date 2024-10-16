@@ -46,6 +46,16 @@ class LMSBackendInterface(metaclass=abc.ABCMeta):
         raise NotImplementedError
 
     @abc.abstractmethod
+    def remove(
+        self,
+        key: str,
+    ) -> bool:
+        """
+        remove the key from the cache
+        """
+        raise NotImplementedError
+
+    @abc.abstractmethod
     def get(
         self,
         key: str,

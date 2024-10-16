@@ -84,6 +84,16 @@ class LMCHybridBackend(LMCBackendInterface):
             ret_locations = ['NOT IN CACHE']
 
         return ret_locations
+    
+    def remove(
+        self,
+        key: CacheEngineKey,
+        location: str
+    ) -> bool:
+        if location == 'remote':
+            return self.remote_store.remove(key, location)
+        else:
+            return self.local_store.remove(key, location)
 
     def put(
         self,

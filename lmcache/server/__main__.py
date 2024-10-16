@@ -88,6 +88,9 @@ class LMCacheServer:
                             ServerMetaMessage(Constants.SERVER_SUCCESS,
                                               len(data)).serialize())
                         client_socket.sendall(data)
+                    
+                    case Constants.CLIENT_REMOVE:
+                        self.data_store.remove(meta.key)
 
         finally:
             client_socket.close()

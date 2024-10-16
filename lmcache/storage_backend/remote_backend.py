@@ -135,10 +135,13 @@ class LMCRemoteBackend(LMCBackendInterface):
         key: CacheEngineKey,
         location: str
     ) -> bool:
-        # if location[0] != f'remote':
-        #     return False
-        # else:
-        #     os.remove(self._key_to_path(key))
+        #TODO (Hanchen) There might be many remote locations in the future
+
+        if location != 'remote':
+            return False
+        else:
+            self.connection.remove(self._combine_key(key))
+            self.existing_keys.remove(key)
         return True
 
     def put_blocking(

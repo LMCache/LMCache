@@ -21,6 +21,10 @@ class MockRedis:
     def exists(self, key):
         return key in self.store
 
+    def delete(self, key):
+        del self.store[key]
+        return True
+
     def scan(self, cursor=0, match=None):
         keys = [s.encode("utf-8") for s in self.store.keys()]
         return (0, keys)

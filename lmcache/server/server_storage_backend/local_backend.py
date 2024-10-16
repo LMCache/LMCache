@@ -44,6 +44,22 @@ class LMSLocalBackend(LMSBackendInterface):
         """
         return key in self.dict
 
+    def remove(
+        self,
+        key: str,
+    ) -> bool:
+        """
+        Remove key from the cache.
+
+        Input:
+            key: the key of the token chunk, including prefix hash and format
+
+        Returns:
+            True if the cache engine contains the key, False otherwise
+        """
+        del self.dict[key]
+        return True
+
     def put(
         self,
         key: str,
@@ -146,6 +162,24 @@ class LMSLocalDiskBackend(LMSBackendInterface):
             returns the path name
         """
         return self.path + key.replace("/", "-") + ".bin"
+
+    def remove(
+        self,
+        key: str,
+    ) -> bool:
+        """
+        Remove key from the cache.
+
+        Input:
+            key: the key of the token chunk, including prefix hash and format
+
+        Returns:
+            True if the cache engine contains the key, False otherwise
+        """
+        self.filenames.remove(key)
+        os.remove(self._key_to_path(key))
+        print("wtf")
+        return True
 
     def put(
         self,
