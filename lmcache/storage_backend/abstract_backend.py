@@ -62,7 +62,6 @@ class LMCBackendInterface(metaclass=abc.ABCMeta):
         Remove the key from the location
         If backend is not the location, return False automatically.
         """
-        #TODO NO Lock right now
         raise NotImplementedError
 
     @abc.abstractmethod
