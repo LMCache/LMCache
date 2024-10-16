@@ -54,7 +54,7 @@ class RemoteConnector(metaclass=abc.ABCMeta):
     @abc.abstractmethod
     def remove(self, key: str) -> bool:
         """
-        Remove the objects (bytes) with the key from remote server
+        Remove the objects (bytes) with the key from the remote server
 
         Input:
             key: the key of the corresponding object
