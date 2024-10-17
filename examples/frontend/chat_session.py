@@ -63,7 +63,6 @@ class ChatSession:
             if chunk_message is not None and chunk_message != "":
                 if end is None:
                     end = time.time()
-                    print(end)
                 yield chunk_message
                 server_message.append(chunk_message)
 
