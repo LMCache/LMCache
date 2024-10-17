@@ -451,6 +451,8 @@ class LMCacheEngine:
 
         Input:
             tokens: the input tokens, with shape [seq_len]
+            align_to_chunk: whether to align the output to the chunk size, 
+            this truncates available tokens to the last full chunk.
 
         Output:
             a boolean tensor indicating the existence of the KV cache of 
