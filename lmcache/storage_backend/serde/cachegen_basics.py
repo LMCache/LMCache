@@ -15,7 +15,6 @@ CACHEGEN_GPU_MAX_TOKENS_PER_CHUNK = 256
 
 @dataclass
 class CacheGenConfig:
-    # TODO: move this class to another file like "cachegen_basics.py"
     key_first_layers: int
     key_second_layers: int
     key_third_layers: int
@@ -70,6 +69,30 @@ class CacheGenConfig:
                 key_first_bins=32,
                 key_second_bins=16,
                 key_third_bins=16,
+                value_first_layers=2,
+                value_first_bins=32,
+                value_second_bins=16,
+            )
+        elif model_name == "meta-llama/Llama-3.1-8B-Instruct":
+            return CacheGenConfig(
+                key_first_layers=10,
+                key_second_layers=20,
+                key_third_layers=32,  # total layers
+                key_first_bins=32,
+                key_second_bins=16,
+                key_third_bins=16,
+                value_first_layers=2,
+                value_first_bins=32,
+                value_second_bins=16,
+            )
+        elif model_name == "Qwen/Qwen-7B":
+            return CacheGenConfig(
+                key_first_layers=10,
+                key_second_layers=20,
+                key_third_layers=32,  # total layers
+                key_first_bins=16,
+                key_second_bins=8,
+                key_third_bins=8,
                 value_first_layers=2,
                 value_first_bins=32,
                 value_second_bins=16,
