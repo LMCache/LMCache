@@ -65,3 +65,4 @@ Documentation
    :caption: Developer Guide
 
    developer/lmcache
+   developer_tutorial/tutorial
