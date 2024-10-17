@@ -11,8 +11,25 @@ If you'd like to support our community further, then answering queries, offering
 
 Finally, you can support us by raising awareness about LMCache. Feel free to share our blog posts, check out our handle on X at [LMCache](https://x.com/lmcache) and see the latest of what we are upto. If using LMCache helped your projects or product in any way, you can simply offer your appreciation by starring our repository!
 
-## Contribution Guidelines
+## Installation
 
+For different types of installation methods, please check our installation docs at [intallation](https://docs.lmcache.ai/getting_started/installation.html)
+
+## Running tests
+
+For running tests (existing + newly added), please use
+
+```bash
+pip install -r requirements-dev.txt
+
+# linting and formatting
+bash format.sh
+
+# Unit tests
+pytest 
+```
+
+## Contribution Guidelines
 
 ### Issues
 
@@ -23,6 +40,10 @@ If you discover a security vulnerability, please follow the instructions [here](
 ### Pull Requests and adding changes
 
 Please check the PR checklist in the [PR template](.github/PULL_REQUEST_TEMPLATE.md) on how to create a new PR for contributing.
+
+### Writing docstrings
+
+For all new code added, please write docstrings in the format as shown here [sphinx-doc](https://sphinx-rtd-tutorial.readthedocs.io/en/latest/docstrings.html).
 
 ### Thank you 
 
