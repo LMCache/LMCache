@@ -86,19 +86,14 @@ class LMCacheEngine:
     def _prefix_hash(
         self,
         token_chunks: Iterable[torch.Tensor],
-        chunked_skip_len: Optional[int] = None,
+        num_skip_chunk: Optional[int] = 0,
     ) -> List[str]:
         prefix_hash = self._get_init_hash()
         prefix_hashes = []
-        tok_idx = 0
         for token_chunk in token_chunks:
             prefix_hash = self._hash(token_chunk, prefix_hash)
-            if chunked_skip_len is not None:
-                tok_idx += len(token_chunk)
-                if tok_idx <= chunked_skip_len:
-                    continue
             prefix_hashes.append(prefix_hash)
-        return prefix_hashes
+        return prefix_hashes[num_skip_chunk:]
 
     def _tuple_kv_to_blob(
         self,
@@ -315,7 +310,8 @@ class LMCacheEngine:
                 [num_tokens, num_heads, head_size]
                 
             mask: a boolean mask of tokens indicating which tokens'
-            KV Cache should be retrieved
+            KV Cache should be retrieved. Currently, only support
+            suffix mask.
 
         Output:
             kv_tensors: the kv cache of the tokens, in the format of nested 
@@ -324,19 +320,18 @@ class LMCacheEngine:
 
             ret_mask: indicate which tokens are retrieved
         """
-        chunked_skip_len = 0
-        skip_len = 0
+        num_skip_chunk = 0
+        num_skip_tok = 0
         ret_mask = torch.ones_like(tokens, dtype=torch.bool)
         if mask is not None:
-            skip_len = (len(mask) - torch.sum(mask))
-            chunked_skip_len = (skip_len // self.chunk_size) * \
-                self.chunk_size
-        ret_mask[:skip_len] = False
+            num_skip_tok = (len(mask) - torch.sum(mask))
+            num_skip_chunk = num_skip_tok // self.chunk_size
+        ret_mask[:num_skip_tok] = False
 
         st = time.perf_counter()
         fmt = self.metadata.fmt
         chunk_hashes = self._prefix_hash(self._chunk_tokens(tokens),
-                                         chunked_skip_len)
+                                         num_skip_chunk)
 
         retrival_iterator = self.engine_.batched_get(
             (self._make_key(chunk_hash, fmt) for chunk_hash in chunk_hashes), )
@@ -364,7 +359,7 @@ class LMCacheEngine:
         st2 = time.perf_counter()
 
         # drop extra tokens in the first chunk
-        extra_token_len = skip_len - chunked_skip_len
+        extra_token_len = num_skip_tok - num_skip_chunk * self.chunk_size
         retrieved_kv_chunks[0] = self._slice_kv_at(extra_token_len,
                                                    retrieved_kv_chunks[0],
                                                    fmt)[0]
@@ -381,9 +376,103 @@ class LMCacheEngine:
                     f"({retrieved_token_count} tokens in total) --"
                     f"elapsed time {ed - st}")
 
-        ret_mask[skip_len + retrieved_token_count:] = False
+        ret_mask[num_skip_tok + retrieved_token_count:] = False
 
         return ret, ret_mask
+
+    @_lmcache_nvtx_annotate
+    @torch.no_grad()
+    def get_locations(
+        self,
+        tokens: torch.Tensor,
+    ) -> List[Optional[List[str]]]:
+        """
+        Checks the locations of KV cache of the tokens from the cache engine.
+        The return should be a list of the locations for each block.
+
+        Input:
+            tokens: the input tokens, with shape [seq_len]
+
+
+        Output:
+            List[List[locations]]:
+            List of the locations (ex. ['local DRAM']) of storage of each block 
+            The entry will be None if the block is not found 
+            or the last block is not full (ex. 13 token / (16 token per block)) 
+        """
+
+        chunk_hashes = self._prefix_hash(self._chunk_tokens(tokens))
+
+        ret_locations_list: list[Optional[list[str]]] = []
+        for chunk_hash in chunk_hashes:
+            list_locations = self.engine_.where_is(
+                self._make_key(chunk_hash, self.metadata.fmt))
+            if list_locations[0] == 'NOT IN CACHE':
+                ret_locations_list.append(None)
+            else:
+                ret_locations_list.append(list_locations)
+
+        return ret_locations_list
+    
+    @_lmcache_nvtx_annotate
+    @torch.no_grad()
+    def remove(
+        self,
+        token_block: torch.Tensor,
+        locations: List[List[str]],
+        from_block_num: int,
+        blocks_to_delete: int,
+    ) -> List[List[bool]]:
+        """
+        Remove the KV cache entry from the locations specified. 
+        Tokens has to be one block. 
+        Returns validity of token_block and success of deletions
+
+        Input:
+            token_block: the input tokens block
+
+            format is either 'huggingface' or 'vllm'
+                For huggingface, it should have the shape of 
+                [num_heads, num_tokens, head_size]
+                
+                For vllm, it should have the shape of 
+                [num_tokens, num_heads, head_size]
+            
+            locations: locations to remove KV cache of token_block from
+                        one list for each block
+            
+            from_block_num: the starting idx of blocks to remove
+
+            blocks_to_delete: the max number of blocks to delete
+
+        Output:
+            List[ List[deletion successful or not]]
+            First layer is to the number of blocks, 
+            Second layer list is the same length as locations
+        """
+
+        chunk_hashes = self._prefix_hash(self._chunk_tokens(token_block))
+        ret = []
+
+        for idx in range(
+                from_block_num,
+                min(len(chunk_hashes), from_block_num + blocks_to_delete)):
+            print(idx)
+            chunk_hash = chunk_hashes[idx]
+            stored_locations = self.get_locations(token_block)[idx]
+            ret_this_chunk = []
+            for location in locations[idx - from_block_num]:
+                if not stored_locations or location not in stored_locations:
+                    ret_this_chunk.append(False)
+                else:
+                    ret_this_chunk.append(
+                        self.engine_.remove(
+                            self._make_key(chunk_hash, self.metadata.fmt),
+                            location))
+
+            ret.append(ret_this_chunk)
+
+        return ret
 
     def close(self):
         self.engine_.close()
