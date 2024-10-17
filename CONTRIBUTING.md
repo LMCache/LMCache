@@ -25,7 +25,7 @@ pip install -r requirements-dev.txt
 # linting and formatting
 bash format.sh
 
-# Unit tests
+# Unit tests (run in root directory)
 pytest 
 ```
 
