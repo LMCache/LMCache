@@ -310,7 +310,8 @@ class LMCacheEngine:
                 [num_tokens, num_heads, head_size]
                 
             mask: a boolean mask of tokens indicating which tokens'
-            KV Cache should be retrieved
+            KV Cache should be retrieved. Currently, only support
+            suffix mask.
 
         Output:
             kv_tensors: the kv cache of the tokens, in the format of nested 
