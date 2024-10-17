@@ -185,11 +185,12 @@ class LMCacheEngine:
         tokens: torch.Tensor,
         kv_tensors: torch.Tensor,
         fmt: str,
+        num_skip_chunk=0,
     ) -> Iterable[Tuple[str, torch.Tensor]]:
         """
         Skip the existing chunks and return the rest of the chunks
         """
-        chunk_hashes = self._prefix_hash(self._chunk_tokens(tokens))
+        chunk_hashes = self._prefix_hash(self._chunk_tokens(tokens), num_skip_chunk)
         num_tokens: int = self._num_tokens_in_kv(kv_tensors, fmt)
 
         start_token_idx = None
@@ -212,14 +213,16 @@ class LMCacheEngine:
         tokens: torch.Tensor,
         kv_tensors: torch.Tensor,
         fmt: str,
+        num_skip_chunk=0,
         skip_existing=True,
     ) -> Iterable[Tuple[str, torch.Tensor]]:
         """
         Returns a generator of zipped (chunk_hash, chunk_kv) tuples
         """
         if skip_existing:
-            return self._make_chunks_skip_existing(tokens, kv_tensors, fmt)
+            return self._make_chunks_skip_existing(tokens, kv_tensors, fmt, num_skip_chunk)
         else:
+            assert num_skip_chunk == 0
             return zip(
                 self._prefix_hash(self._chunk_tokens(tokens)),
                 self._chunk_kv(kv_tensors, fmt),
@@ -231,6 +234,7 @@ class LMCacheEngine:
         self,
         tokens: torch.Tensor,
         kv_tensors_raw: KVCache,
+        kv_tensors_mask: Optional[torch.Tensor] = None,
         skip_existing=True,
         blocking=True,
     ) -> None:
@@ -260,24 +264,38 @@ class LMCacheEngine:
 
         assert (len(
             tokens.shape) == 1), f"Invalid shape of tokens: {tokens.shape}"
+        assert (len(
+            kv_tensors_mask.shape) == 1), \
+        f"Invalid shape of mask: {kv_tensors_mask.shape}"
+        assert len(tokens) == len(kv_tensors_mask), \
+            f"token length does not match mask length"
+        num_skip_chunk = 0
+        num_skip_tok = 0
+        if kv_tensors_mask is not None:
+            # NOTE(Sixian): Now kv_tensors_mask always a suffix mask.
+            num_skip_tok = (len(kv_tensors_mask) - torch.sum(kv_tensors_mask))
+            num_skip_chunk = num_skip_tok // self.chunk_size
+        assert num_skip_tok == num_skip_chunk * self.chunk_size, \
+            f"Only support chunk skip in store."
+        assert num_skip_tok < len(tokens), f"No tokens to store"
         assert len(kv_tensors_raw) > 0, "Empty kv_tensors"
         assert len(tokens) == self._num_tokens_in_kv(
             kv_tensors_raw, fmt
-        ), "Number of tokens in the kv cache does not match the input tokens"
-
+        ) + num_skip_tok, "Number of tokens in the kv cache does not match the input tokens"
         kv_tensors = self._tuple_kv_to_blob(kv_tensors_raw)
         """ chunk the tokens and the kv caches """
         chunk_hashes_and_kvs = self._make_chunks(tokens,
-                                                 kv_tensors,
-                                                 fmt,
-                                                 skip_existing=skip_existing)
+                                                kv_tensors,
+                                                fmt,
+                                                num_skip_chunk,
+                                                skip_existing=skip_existing)
         if not blocking:
             chunk_hashes_and_kvs = list(chunk_hashes_and_kvs)
         end_make_chunks = time.perf_counter()
         """ store them into the dictionary """
         n_chunks = self.engine_.batched_put(
             ((self._make_key(chunk_hash, fmt), kv_chunk)
-             for chunk_hash, kv_chunk in chunk_hashes_and_kvs),
+            for chunk_hash, kv_chunk in chunk_hashes_and_kvs),
             blocking=blocking,
         )
 
@@ -413,6 +431,46 @@ class LMCacheEngine:
                 ret_locations_list.append(list_locations)
 
         return ret_locations_list
+    
+    @_lmcache_nvtx_annotate
+    @torch.no_grad()
+    def lookup(
+        self,
+        tokens: torch.Tensor,
+        align_to_chunk: bool,
+    ) -> torch.Tensor:
+        """
+        Checks the existence of KV cache of the tokens from the cache engine.
+        The return should be a boolean tensor indicating the existence of 
+        the KV cache of each token.
+
+        Input:
+            tokens: the input tokens, with shape [seq_len]
+
+        Output:
+            a boolean tensor indicating the existence of the KV cache of 
+            each token
+        """
+        # NOTE(Sixian): Now this is a prefix lookup.
+        # Can split tokens, get_locations and combine for cacheblend later.
+        chunk_locations_list = self.get_locations(tokens)
+        total_token_cnt = len(tokens)
+        ret = torch.zeros(total_token_cnt, dtype=torch.bool)
+        current_token_idx = 0
+        full_chunk_cnt = total_token_cnt // self.chunk_size
+        next_token_idx = total_token_cnt if full_chunk_cnt == 0 else self.chunk_size
+        for chunk_location in chunk_locations_list:
+            interval_len = next_token_idx - current_token_idx
+            if interval_len < self.chunk_size and align_to_chunk:
+                break
+            if chunk_location is None:
+                break
+            else:
+                ret[current_token_idx:next_token_idx] = True
+            current_token_idx = next_token_idx
+            next_token_idx = min(next_token_idx + self.chunk_size, total_token_cnt)
+        return ret
+                
     
     @_lmcache_nvtx_annotate
     @torch.no_grad()
