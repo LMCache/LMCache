@@ -24,7 +24,7 @@ class LRUEvictor(BaseEvictor):
         Evict cache when a new cache comes and the storage is full
 
         Input:
-            key: a CacheEngineKey
+            key: a CacheEngineKey or a str
             cache_dict: a dict consists of current cache
         """
         cache_dict.move_to_end(key)
