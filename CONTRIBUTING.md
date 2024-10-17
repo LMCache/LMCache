@@ -13,7 +13,7 @@ Finally, you can support us by raising awareness about LMCache. Feel free to sha
 
 ## Installation
 
-For different types of installation methods, please check our installation docs at [intallation](https://docs.lmcache.ai/getting_started/installation.html)
+For different types of installation methods, please check our installation docs at [installation](https://docs.lmcache.ai/getting_started/installation.html)
 
 ## Running tests
 
