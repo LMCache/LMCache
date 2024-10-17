@@ -1,5 +1,6 @@
 import os
-from typing import List, Optional, Set
+from typing import List, Optional, Set, OrderedDict
+from collections import OrderedDict
 
 from lmcache.logging import init_logger
 from lmcache.server.server_storage_backend.abstract_backend import \
@@ -23,7 +24,7 @@ class LMSLocalBackend(LMSBackendInterface):
         """
         super().__init__()
 
-        self.dict = {}
+        self.dict = OrderedDict()
 
     def list_keys(self) -> List[str]:
 

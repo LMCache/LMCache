@@ -1,7 +1,8 @@
 import os
 import queue
 import threading
-from typing import Dict, Optional, Set, Tuple, Union
+from typing import Dict, Optional, Set, Tuple, Union, OrderedDict
+from collections import OrderedDict
 
 import torch
 from safetensors import safe_open
@@ -11,6 +12,7 @@ from lmcache.config import LMCacheEngineConfig
 from lmcache.logging import init_logger
 from lmcache.storage_backend.abstract_backend import LMCBackendInterface
 from lmcache.utils import CacheEngineKey, KVCache, _lmcache_nvtx_annotate
+from lmcache.storage_backend.evictor import LRUEvictor
 
 logger = init_logger(__name__)
 
@@ -35,7 +37,7 @@ class LMCLocalBackend(LMCBackendInterface):
 
         self.chunk_size = config.chunk_size
         self.config = config
-        self.dict: Dict[CacheEngineKey, torch.Tensor] = {}
+        self.dict: OrderedDict[CacheEngineKey, torch.Tensor] = OrderedDict()
         self.device = config.local_device
 
         self.put_queue: queue.Queue[
@@ -53,6 +55,9 @@ class LMCLocalBackend(LMCBackendInterface):
         self.dst_device = "cuda"
         # self.async_put_flag = False
         # self.put_events = {}
+
+        # TODO (Jiayi): The storage size and caching
+        self.evictor = LRUEvictor()
 
     def contains(
         self,
@@ -89,15 +94,25 @@ class LMCLocalBackend(LMCBackendInterface):
         else:
             kv_chunk_local = kv_chunk.to(self.device)
         self.update_lock.acquire()
+        evict_key = self.evictor.get_evict_key(self.dict, kv_chunk_local)
+        if evict_key is not None:
+            # TODO (Jiayi): eait for hanchen
+            self.remove()
         self.dict[key] = kv_chunk_local
         self.update_lock.release()
 
     def put_blocking(self, key, kv_chunk):
         if self.use_pin_memory:
-            self.dict[key] = kv_chunk.to(self.device, non_blocking=True)
+            kv_chunk_local = kv_chunk.to(self.device, non_blocking=True)
             torch.cuda.synchronize()
         else:
-            self.dict[key] = kv_chunk.to(self.device)
+            kv_chunk_local = kv_chunk.to(self.device)
+
+        evict_key = self.evictor.get_evict_key(self.dict, kv_chunk_local)
+        if evict_key is not None:
+            # TODO (Jiayi): eait for hanchen
+            self.remove()
+        self.dict[key] = kv_chunk_local
 
     def put(
         self,
@@ -140,6 +155,7 @@ class LMCLocalBackend(LMCBackendInterface):
         """
         kv_chunk = self.dict.get(key, None)
         if kv_chunk is not None:
+            self.evictor.update(key, self.dict)
             kv_chunk = kv_chunk.to(self.dst_device)
         return kv_chunk
 
