@@ -19,7 +19,7 @@ class LRUEvictor(BaseEvictor):
         self.current_cache_size = 0
             
     
-    def update(self, key: CacheEngineKey, cache_dict: OrderedDict) -> None:
+    def update_on_get(self, key: Union[CacheEngineKey, str], cache_dict: OrderedDict) -> None:
         """
         Evict cache when a new cache comes and the storage is full
 
@@ -29,10 +29,10 @@ class LRUEvictor(BaseEvictor):
         """
         cache_dict.move_to_end(key)
     
-    def get_evict_key(
+    def update_on_put(
         self, 
         cache_dict: OrderedDict, 
-        kv_obj: Union[torch.Tensor, bytes]) -> Optional[str]:
+        kv_obj: Union[torch.Tensor, bytes]) -> List[Union[CacheEngineKey, str]]:
         """
         Evict cache when a new cache comes and the storage is full
 
@@ -41,13 +41,22 @@ class LRUEvictor(BaseEvictor):
             kv_obj: the new kv cache to be injected
         
         Return:
-            evict_key: a key to be evicted
+            evict_keys: a list of keys to be evicted
         """
-        evict_key = None
+        evict_keys = []
         cache_size = self.get_size(kv_obj)
-        if cache_size + self.current_cache_size > \
+        iter_cache_dict = iter(cache_dict)
+        
+        # evict cache until there's enough space
+        while cache_size + self.current_cache_size > \
             self.MAX_CACHE_SIZE:
-            evict_key = next(iter(cache_dict))
+            evict_key = next(iter_cache_dict)
+            evict_cache_size = self.get_size(cache_dict[evict_key])
+            self.current_cache_size -= evict_cache_size
+            evict_keys.append(evict_key)
+        
+        # update cache size
+        self.current_cache_size += cache_size
         return evict_key
         
             

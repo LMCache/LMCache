@@ -13,7 +13,7 @@ class BaseEvictor(metaclass=abc.ABCMeta):
     """
     
     @abc.abstractmethod
-    def update(self, key: CacheEngineKey, cache_dict: OrderedDict) -> None:
+    def update_on_get(self, key: Union[CacheEngineKey, str], cache_dict: OrderedDict) -> None:
         """
         Update cache_dict when a cache is used is used
 
@@ -24,7 +24,10 @@ class BaseEvictor(metaclass=abc.ABCMeta):
         raise NotImplementedError
     
     @abc.abstractmethod
-    def get_evict_key(self, cache_dict: OrderedDict, kv_obj: Union[torch.Tensor, bytes]) -> Optional[str]:
+    def update_on_put(
+        self, 
+        cache_dict: OrderedDict, 
+        kv_obj: Union[torch.Tensor, bytes]) -> List[Union[CacheEngineKey, str]]:
         """
         Evict cache when a new cache comes and the storage is full
 
