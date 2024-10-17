@@ -15,3 +15,5 @@ And wait until it's ready.
 2. ```LMCACHE_CONFIG_FILE=example.yaml CUDA_VISIBLE_DEVICES=0 python3 offline_inference.py```  
 ## What to expect
 LMCache should be able to reduce the generation time of the second generate call.  
+The total time of processing the request(end to end request time) can improve by more than 3x, for example, 7s to 2s.  
+(The exact number depends on hardware).  

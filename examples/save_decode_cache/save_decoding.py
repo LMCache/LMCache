@@ -8,7 +8,7 @@ from transformers import AutoTokenizer
 
 model_name = "mistralai/Mistral-7B-Instruct-v0.2"
 context_file = os.path.join(os.pardir, 'ffmpeg.txt')
-output_file = "offline_inference_outputs.jsonl"
+output_file = "save_decode_cache_outputs.jsonl"
 
 context_text = None
 with open(context_file, 'r') as f:
@@ -68,7 +68,7 @@ def append_outputs(output_file_name, outputs, context_length, time_taken):
 
 context_length = get_context_length(tokenizer, context_messages)
 # Create a sampling params object.
-sampling_params = SamplingParams(temperature=1.0, top_p=0.95, max_tokens=1024)
+
 prompts = gen_prompts(tokenizer, context_messages, user_inputs_batch)
 # Create an LLM.
 llm = LLM(model=model_name,
@@ -76,9 +76,11 @@ llm = LLM(model=model_name,
           enable_chunked_prefill=False,
           max_model_len=32768)
 
+sampling_params = SamplingParams(temperature=0.8, top_p=0.95, max_tokens=1024)
+
 # Clear output file.
 with open(output_file, "w") as f:
-    pass
+    f.write("")
 
 # Generate texts from the prompts. The output is a list of RequestOutput objects
 # that contain the prompt, generated text, and other information.
@@ -109,3 +111,4 @@ second_outputs = llm.generate(prompts, sampling_params)
 t4 = time.perf_counter()
 print(f"\n\nSecond request Time: {t4 - t3} seconds\n\n")
 append_outputs(output_file, second_outputs, context_length, t4 - t3)
+os._exit(0)

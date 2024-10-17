@@ -83,11 +83,20 @@ class LMCacheEngine:
         for i in range(0, len(tokens), self.chunk_size):
             yield tokens[i:i + self.chunk_size]
 
-    def _prefix_hash(self, token_chunks: Iterable[torch.Tensor]) -> List[str]:
+    def _prefix_hash(
+        self,
+        token_chunks: Iterable[torch.Tensor],
+        chunked_skip_len: Optional[int] = None,
+    ) -> List[str]:
         prefix_hash = self._get_init_hash()
         prefix_hashes = []
+        tok_idx = 0
         for token_chunk in token_chunks:
             prefix_hash = self._hash(token_chunk, prefix_hash)
+            if chunked_skip_len is not None:
+                tok_idx += len(token_chunk)
+                if tok_idx <= chunked_skip_len:
+                    continue
             prefix_hashes.append(prefix_hash)
         return prefix_hashes
 
@@ -282,12 +291,15 @@ class LMCacheEngine:
                     f"{end_time - start_time:.2f}s, make chunks time "
                     f"{end_make_chunks - start_time:.2f}s")
 
+    # prefix caching only needs a mask_len
+    # but non-prefix might need an roi
     @_lmcache_nvtx_annotate
     @torch.no_grad()
     def retrieve(
         self,
         tokens: torch.Tensor,
-    ) -> Tuple[KVCache, int]:
+        mask: Optional[torch.Tensor] = None,
+    ) -> Tuple[KVCache, torch.Tensor]:
         """
         Retrieve the KV cache of the tokens from the cache engine. The 
         retrieved KV cache should be a prefix of the input tokens.
@@ -301,17 +313,30 @@ class LMCacheEngine:
                 
                 For vllm, it should have the shape of 
                 [num_tokens, num_heads, head_size]
+                
+            mask: a boolean mask of tokens indicating which tokens'
+            KV Cache should be retrieved
 
         Output:
             kv_tensors: the kv cache of the tokens, in the format of nested 
                         tuples. Will be an empty tuple if no kv cache is 
                         retrieved.
 
-            num_tokens: the number of tokens in the kv cache
+            ret_mask: indicate which tokens are retrieved
         """
+        chunked_skip_len = 0
+        skip_len = 0
+        ret_mask = torch.ones_like(tokens, dtype=torch.bool)
+        if mask is not None:
+            skip_len = (len(mask) - torch.sum(mask))
+            chunked_skip_len = (skip_len // self.chunk_size) * \
+                self.chunk_size
+        ret_mask[:skip_len] = False
+
         st = time.perf_counter()
         fmt = self.metadata.fmt
-        chunk_hashes = self._prefix_hash(self._chunk_tokens(tokens))
+        chunk_hashes = self._prefix_hash(self._chunk_tokens(tokens),
+                                         chunked_skip_len)
 
         retrival_iterator = self.engine_.batched_get(
             (self._make_key(chunk_hash, fmt) for chunk_hash in chunk_hashes), )
@@ -320,7 +345,7 @@ class LMCacheEngine:
         for chunk in retrival_iterator:
             if chunk is None:
                 break
-            retrieved_kv_chunks.append(chunk)  # .to(device))
+            retrieved_kv_chunks.append(chunk)
         """ concatenate the kv cache """
         dim = None
         match fmt:
@@ -333,9 +358,17 @@ class LMCacheEngine:
 
         if len(retrieved_kv_chunks) == 0:
             logging.info("Retrieved 0 chunks")
-            return (), 0
+            ret_mask[:] = False
+            return (), ret_mask
 
         st2 = time.perf_counter()
+
+        # drop extra tokens in the first chunk
+        extra_token_len = skip_len - chunked_skip_len
+        retrieved_kv_chunks[0] = self._slice_kv_at(extra_token_len,
+                                                   retrieved_kv_chunks[0],
+                                                   fmt)[0]
+
         ret = self._blob_to_tuple_kv(
             torch.cat(retrieved_kv_chunks, dim=dim + 2))
         ed2 = time.perf_counter()
@@ -347,7 +380,10 @@ class LMCacheEngine:
         logger.info(f"Retrieved {len(retrieved_kv_chunks)} chunks "
                     f"({retrieved_token_count} tokens in total) --"
                     f"elapsed time {ed - st}")
-        return ret, retrieved_token_count
+
+        ret_mask[skip_len + retrieved_token_count:] = False
+
+        return ret, ret_mask
 
     def close(self):
         self.engine_.close()
