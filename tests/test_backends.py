@@ -58,7 +58,7 @@ def get_config(t):
 
 def get_metadata():
     return LMCacheEngineMetadata("lmsys/longchat-7b-16k", 1, -1, "vllm",
-                                 "auto")
+                                 "half")
 
 
 @pytest.mark.parametrize("lmserver_process", ["cpu", "remote_disk/"],
