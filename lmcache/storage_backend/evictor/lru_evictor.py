@@ -3,7 +3,9 @@ from typing import OrderedDict, Optional, Union
 from collections import OrderedDict
 
 from lmcache.utils import CacheEngineKey
-from lmcache.storage_backend.evictor.base_evictor import BaseEvictor
+from lmcache.storage_backend.evictor.base_evictor import BaseEvictor, PutStatus
+
+logger = init_logger(__name__)
 
 class LRUEvictor(BaseEvictor):
     """
@@ -32,7 +34,7 @@ class LRUEvictor(BaseEvictor):
     def update_on_put(
         self, 
         cache_dict: OrderedDict, 
-        kv_obj: Union[torch.Tensor, bytes]) -> List[Union[CacheEngineKey, str]]:
+        kv_obj: Union[torch.Tensor, bytes]) -> Tuple[List[Union[CacheEngineKey, str]], PutStatus]:
         """
         Evict cache when a new cache comes and the storage is full
 
@@ -47,6 +49,10 @@ class LRUEvictor(BaseEvictor):
         cache_size = self.get_size(kv_obj)
         iter_cache_dict = iter(cache_dict)
         
+        if cache_size > self.MAX_CACHE_SIZE:
+            logger.info("Put failed due to limited cache storage")
+            return [], PutStatus.ILLEGAL
+        
         # evict cache until there's enough space
         while cache_size + self.current_cache_size > \
             self.MAX_CACHE_SIZE:
@@ -57,7 +63,7 @@ class LRUEvictor(BaseEvictor):
         
         # update cache size
         self.current_cache_size += cache_size
-        return evict_key
+        return evict_keys, PutStatus.LEGAL
         
             
         

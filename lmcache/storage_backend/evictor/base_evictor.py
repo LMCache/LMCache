@@ -2,10 +2,16 @@ import abc
 import torch
 from typing import OrderedDict, Optional, Union
 from collections import OrderedDict
+from enum import Enum
 
 from lmcache.utils import CacheEngineKey
 from lmcache.logging import init_logger
+
 logger = init_logger(__name__)
+
+class PutStatus(Enum):
+    LEGAL = 1
+    ILLEGAL = 2
 
 class BaseEvictor(metaclass=abc.ABCMeta):
     """
@@ -27,7 +33,7 @@ class BaseEvictor(metaclass=abc.ABCMeta):
     def update_on_put(
         self, 
         cache_dict: OrderedDict, 
-        kv_obj: Union[torch.Tensor, bytes]) -> List[Union[CacheEngineKey, str]]:
+        kv_obj: Union[torch.Tensor, bytes]) -> Tuple[List[Union[CacheEngineKey, str]], PutStatus]:
         """
         Evict cache when a new cache comes and the storage is full
 

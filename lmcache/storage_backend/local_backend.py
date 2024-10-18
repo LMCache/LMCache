@@ -94,8 +94,8 @@ class LMCLocalBackend(LMCBackendInterface):
         else:
             kv_chunk_local = kv_chunk.to(self.device)
         self.update_lock.acquire()
-        evict_key = self.evictor.update_on_put(self.dict, kv_chunk_local)
-        if evict_key is not None:
+        evict_keys, = self.evictor.update_on_put(self.dict, kv_chunk_local)
+        if evict_keys:
             # TODO (Jiayi): eait for hanchen
             self.remove()
         self.dict[key] = kv_chunk_local
