@@ -242,10 +242,12 @@ echo 'lmcache isort: Done'
 
 
 if ! git diff --quiet &>/dev/null; then
-    echo 'Reformatted files. Please review and stage the changes.'
-    echo 'Changes not staged for commit:'
-    echo
+    echo 
+    echo "❗️❗️Reformatted files / changed files that are not added and committed:❗️❗️"
     git --no-pager diff --name-only
+    echo "❗️❗️Reminder: Please add, commit and push all the files above to make sure you pass the format checker.❗️❗️"
 
     exit 1
+else
+    echo "✨🎉 Format check passed! Congratulations! 🎉✨"
 fi
