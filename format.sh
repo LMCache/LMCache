@@ -21,6 +21,20 @@ builtin cd "$(dirname "${BASH_SOURCE:-$0}")"
 ROOT="$(git rev-parse --show-toplevel)"
 builtin cd "$ROOT" || exit 1
 
+check_command() {
+    if ! command -v "$1" &> /dev/null; then
+        echo "$1 is not installed, please run \`pip install -r requirements-lint.txt\`"
+        exit 1
+    fi
+}
+
+check_command yapf
+check_command ruff
+check_command mypy
+check_command codespell
+check_command isort
+check_command clang-format
+
 YAPF_VERSION=$(yapf --version | awk '{print $2}')
 RUFF_VERSION=$(ruff --version | awk '{print $2}')
 MYPY_VERSION=$(mypy --version | awk '{print $2}')
