@@ -23,7 +23,7 @@ builtin cd "$ROOT" || exit 1
 
 check_command() {
     if ! command -v "$1" &> /dev/null; then
-        echo "$1 is not installed, please run \`pip install -r requirements-lint.txt\`"
+        echo "❓❓$1 is not installed, please run \`pip install -r requirements-lint.txt\`"
         exit 1
     fi
 }
