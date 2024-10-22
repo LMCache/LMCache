@@ -94,7 +94,8 @@ class SPTBlendRetrieverTask(BlendRetrieverTask):
             device = kv.device
 
         for token_segment, task in zip(self.token_segments, self.tasks):
-            kv, length = task.result()
+            kv, ret_mask = task.result()
+            length = torch.sum(ret_mask).item()
             if length > 0:
                 update_shape(kv, self.fmt)
 
@@ -254,8 +255,10 @@ class SPTBlendRetriever(BlendRetriever):
                 
             logger.debug("Split input tokens into %d requests", len(splitted_tokens))
             tasks = [executor.submit(
-                        self.cache_engine.retrive,
-                        tokens, False
+                        self.cache_engine.retrieve,
+                        tokens,  # tokens
+                        None,    # mask
+                        False,   # return_tuple
                     ) for tokens in splitted_tokens]
         
         return SPTBlendRetrieverTask(

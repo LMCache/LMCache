@@ -1,16 +1,17 @@
-import torch
-import io
-import time
-from safetensors.torch import save, load
 from typing import Union
 
-from lmcache.storage_backend.serde.serde import Serializer, Deserializer
-from lmcache.logging import init_logger
+import torch
+from safetensors.torch import load, save
+
 from lmcache.config import GlobalConfig
+from lmcache.logging import init_logger
+from lmcache.storage_backend.serde.serde import Deserializer, Serializer
 
 logger = init_logger(__name__)
 
+
 class SafeSerializer(Serializer):
+
     def __init__(self):
         super().__init__()
 
@@ -19,6 +20,7 @@ class SafeSerializer(Serializer):
 
 
 class SafeDeserializer(Deserializer):
+
     def __init__(self):
         super().__init__()
         self.debug = GlobalConfig.is_debug()

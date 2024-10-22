@@ -1,12 +1,16 @@
 import abc
-import torch
 import time
 
-from lmcache.utils import _lmcache_nvtx_annotate
+import torch
+
 from lmcache.logging import init_logger
+from lmcache.utils import _lmcache_nvtx_annotate
+
 logger = init_logger(__name__)
 
+
 class Serializer(metaclass=abc.ABCMeta):
+
     @abc.abstractmethod
     def to_bytes(self, t: torch.Tensor) -> bytes:
         """
@@ -16,13 +20,15 @@ class Serializer(metaclass=abc.ABCMeta):
         Input:
             t: the input pytorch tensor, can be on any device, in any shape,
                with any dtype
-        
+
         Returns:
             bytes: the serialized bytes
         """
         raise NotImplementedError
 
+
 class SerializerDebugWrapper(Serializer):
+
     def __init__(self, s: Serializer):
         self.s = s
 
@@ -36,10 +42,11 @@ class SerializerDebugWrapper(Serializer):
 
 
 class Deserializer(metaclass=abc.ABCMeta):
+
     @abc.abstractmethod
     def from_bytes(self, bs: bytes) -> torch.Tensor:
         """
-        Deserialize a pytorch tensor from bytes. 
+        Deserialize a pytorch tensor from bytes.
 
         Input:
             bytes: a stream of bytes
@@ -49,12 +56,14 @@ class Deserializer(metaclass=abc.ABCMeta):
         """
         raise NotImplementedError
 
+
 class DeserializerDebugWrapper(Deserializer):
+
     def __init__(self, d: Deserializer):
         self.d = d
 
     @_lmcache_nvtx_annotate
-    def from_bytes(self, t: torch.Tensor) -> bytes:
+    def from_bytes(self, t: bytes) -> torch.Tensor:
         start = time.perf_counter()
         ret = self.d.from_bytes(t)
         end = time.perf_counter()

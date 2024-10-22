@@ -65,6 +65,12 @@ perf-test.py
 /examples/example_local.yaml
 /examples/openai_chat_completion_client_local.py
 
+# example output
+/examples/offline_inference/offline_inference_outputs.jsonl
+/examples/save_decode_cache/offline_inference_outputs.jsonl
+/examples/offline_inference/buggy_example.py
+/examples/test_example
+
 # disk cache
 /remote_disk
 /local_disk
@@ -81,3 +87,4 @@ perf-test.py
 
 # docs/build
 /docs/build/
+/docs/build.sh

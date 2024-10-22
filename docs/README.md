@@ -1,3 +1,7 @@
+## Install Prerequisitesgiot
+```
+pip install -r requirements-docs.txt
+```
 ## To build docs from source
 
 First run 
@@ -6,10 +10,10 @@ First run
 make clean
 ```
 
-To build latest docs from docstrings
+To build latest developer docs from docstrings
 
 ```
-sphinx-apidoc -o ./source/ ../lmcache/
+sphinx-apidoc -o source/developer/ ../lmcache
 ```
 
 To build HTML
