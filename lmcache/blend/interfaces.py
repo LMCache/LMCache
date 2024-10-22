@@ -121,26 +121,3 @@ class BlendExecutor(metaclass=abc.ABCMeta):
         pass
 
 
-@dataclass
-class BlendMetadata:
-    """The class for cacheblend metadata
-
-    For a single request, there is only one [start, end] tuple in the ROI list
-    Tokens:          |-------------------------------------------------|
-    Prefix caches:   |*********|
-    ROI:                       ^(start)                                ^(end)
-    selected tokens: |               *   *      *    *  *    ***       |
-    positions:                       ^   ^      ^    ^  ^    ^^^        
-
-    When there are multiple requests in a batch, ROI list will have multiple
-    start-end tuples
-
-    :ivar int processed_layer_count: The number of processed layers
-    :ivar torch.Tensor positions: The positions of the selected tokens 
-        in the input sequence
-    :ivar BlendRetrieverHandle retriever_handler: The retriever handler 
-        to retrieve the KV caches
-    """
-    processed_layer_count: int
-    positions: torch.Tensor
-    retrieval_tasks: BlendRetrieverTask
