@@ -116,8 +116,7 @@ def test_retrieve_device(backend, src_device, dst_device, autorelease):
         "lm://localhost:65000",
     ],
 )
-@pytest.mark.parametrize("remote_serde",
-                         ["torch", "safetensor"])  
+@pytest.mark.parametrize("remote_serde", ["torch", "safetensor"])
 @pytest.mark.parametrize("lmserver_process", ["cpu", "remote_disk/"],
                          indirect=True)
 def test_same_retrieve_store(fmt, backend, remote_serde, autorelease,
@@ -149,6 +148,7 @@ def test_same_retrieve_store(fmt, backend, remote_serde, autorelease,
     if backend in ["file://local_disk/"]:
         subprocess.run(shlex.split("rm -rf local_disk/"))
 
+
 @pytest.mark.parametrize("fmt", ["vllm", "huggingface"])
 @pytest.mark.parametrize("backend", ["cuda", "cpu"])
 def test_retrieve_single_tensor(fmt, backend, autorelease):
@@ -157,29 +157,26 @@ def test_retrieve_single_tensor(fmt, backend, autorelease):
 
     tokens = generate_tokens(num_tokens, device)
     kv_cache = generate_kv_cache(num_tokens, fmt, device)
-    
     ''' initialize the engine '''
-    cfg = LMCacheEngineConfig.from_legacy(chunk_size = 256, backend = backend)
+    cfg = LMCacheEngineConfig.from_legacy(chunk_size=256, backend=backend)
     engine = autorelease(LMCacheEngine(cfg, dumb_metadata(fmt)))
-
-    ''' test retrive empty '''
-    retrived_cache, ret_mask = engine.retrieve(tokens, return_tuple = False)
-    assert len(retrived_cache) == 0
+    ''' test retrieve empty '''
+    retrieved_cache, ret_mask = engine.retrieve(tokens, return_tuple=False)
+    assert len(retrieved_cache) == 0
     assert torch.sum(ret_mask).item() == 0
-
     ''' test store '''
     engine.store(tokens, kv_cache)
-
-    ''' test retrive '''
-    retrived_cache, ret_mask = engine.retrieve(tokens, return_tuple = False)
+    ''' test retrieve '''
+    retrieved_cache, ret_mask = engine.retrieve(tokens, return_tuple=False)
 
     assert torch.sum(ret_mask).item() == num_tokens
-    assert retrived_cache.shape[0] == 32 # 32 is num_layers used in generate_kv_cache
-    assert retrived_cache.shape[1] == 2
+    assert retrieved_cache.shape[
+        0] == 32  # 32 is num_layers used in generate_kv_cache
+    assert retrieved_cache.shape[1] == 2
     token_dim = 2 if fmt == "vllm" else 3
-    assert retrived_cache.shape[token_dim] == num_tokens
+    assert retrieved_cache.shape[token_dim] == num_tokens
 
-    
+
 @pytest.mark.parametrize("fmt", ["vllm", "huggingface"])
 @pytest.mark.parametrize("chunk_size", [128, 256])
 @pytest.mark.parametrize(

@@ -1,7 +1,9 @@
-from dataclasses import dataclass
-import torch
-from typing import Tuple, Optional
 import abc
+from dataclasses import dataclass
+from typing import Optional
+
+import torch
+
 
 @dataclass
 class BlendOutput:
@@ -38,22 +40,24 @@ class BlendRetrieverResult:
     v: Optional[torch.Tensor]
     valid_mask: torch.Tensor
 
+
 class BlendRetrieverTask(metaclass=abc.ABCMeta):
     """The KV retrieval task created by the BlendRetriever"""
 
     @abc.abstractmethod
     def result(self, layer_id: int) -> BlendRetrieverResult:
         """Blocking function to get a single layer of K and V tensor.
-        The returned the K and V tensor should match the length of the input tokens
-        passed to the `BlendRetriever.new_request` function.
-        If the KV of a token is not available, the `vaild_mask` will be 0, and the
-        correponding values in the KV tensor will be undefined.
+        The returned the K and V tensor should match the length of the input 
+        tokens passed to the `BlendRetriever.new_request` function.
+        If the KV of a token is not available, the `vaild_mask` will be 0, 
+        and the corresponding values in the KV tensor will be undefined.
 
         :param int layer_id: the layer id 
         :return: The BlendRetrieverResult object
         :rtype: BlendRetrieverResult
         """
         pass
+
 
 class BlendRetriever(metaclass=abc.ABCMeta):
     """The interface for the cacheblend retriever to retrieve the KV caches
@@ -64,10 +68,10 @@ class BlendRetriever(metaclass=abc.ABCMeta):
 
     @abc.abstractmethod
     def new_request(
-            self, 
-            input_tokens: torch.Tensor, 
-            query_start_loc: torch.Tensor,
-        ) -> BlendRetrieverTask:
+        self,
+        input_tokens: torch.Tensor,
+        query_start_loc: torch.Tensor,
+    ) -> BlendRetrieverTask:
         """Create a new BlendRetrieverTask to retrieve the KV caches.
         It may launch async tasks in the background during the retrieval.
 
@@ -82,33 +86,26 @@ class BlendRetriever(metaclass=abc.ABCMeta):
         """
         pass
 
+
 class BlendExecutor(metaclass=abc.ABCMeta):
     """The interface for the cacheblend executor to blend the retrieved KV 
     with fresh KVs
     """
 
     @abc.abstractmethod
-    def blend(
-        self,
-        layer_id: int,
-        retrieved_k: torch.Tensor,
-        retrieved_v: torch.Tensor,
-        valid_mask: torch.Tensor,
-        fresh_q: torch.Tensor,
-        fresh_k: torch.Tensor,
-        fresh_v: torch.Tensor,
-        positions: torch.Tensor,
-        query_start_loc: torch.Tensor,
-        token_dim: int
-    ) -> BlendOutput:
+    def blend(self, layer_id: int, retrieved_k: torch.Tensor,
+              retrieved_v: torch.Tensor, valid_mask: torch.Tensor,
+              fresh_q: torch.Tensor, fresh_k: torch.Tensor,
+              fresh_v: torch.Tensor, positions: torch.Tensor,
+              query_start_loc: torch.Tensor, token_dim: int) -> BlendOutput:
         """This function blends the retrieved KV with fresh KVs, and
         returns the short Q + long KV (blended) + positions of the tokens in Q
 
         :param int layer_id: The layer id
         :param torch.Tensor retrieved_k: The retrieved K tensor
         :param torch.Tensor retrieved_v: The retrieved V tensor
-        :param torch.Tensor valid_mask: A CPU tensor returned from the retriever indicating
-            whether the KV is valid. 
+        :param torch.Tensor valid_mask: A CPU tensor returned from the 
+            retriever indicating whether the KV is valid. 
         :param torch.Tensor fresh_q: The fresh Q tensor from QKV split
         :param torch.Tensor fresh_k: The fresh K tensor from QKV split
         :param torch.Tensor fresh_v: The fresh V tensor from QKV split
@@ -122,6 +119,7 @@ class BlendExecutor(metaclass=abc.ABCMeta):
         :return: The blended Q, K, V, and positions
         """
         pass
+
 
 @dataclass
 class BlendMetadata:

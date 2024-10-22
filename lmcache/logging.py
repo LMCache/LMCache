@@ -7,6 +7,7 @@ logging.basicConfig(
     level=logging.INFO,
 )
 
+
 def init_logger(name: str) -> Logger:
     logger = logging.getLogger(name)
     logger.setLevel(logging.DEBUG)

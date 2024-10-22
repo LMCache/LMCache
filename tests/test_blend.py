@@ -1,33 +1,34 @@
 import pytest
-import time
-import os
 import torch
-import subprocess
-import shlex
 
-from lmcache.config import LMCacheEngineConfig, LMCacheEngineMetadata
-from lmcache.cache_engine import LMCacheEngine, LMCacheEngineBuilder
-from lmcache.blend.retriever import SPTBlendRetriever
 from lmcache.blend.executor import CacheBlendImpl
+from lmcache.blend.retriever import SPTBlendRetriever
+from lmcache.cache_engine import LMCacheEngine
+from lmcache.config import LMCacheEngineConfig, LMCacheEngineMetadata
+
 
 def dumb_metadata(fmt="vllm"):
     dtype = torch.bfloat16 if fmt == "vllm" else torch.float16
     return LMCacheEngineMetadata("test_model", 3, 123, fmt, dtype)
 
-def dumb_cfg():
-    return LMCacheEngineConfig.from_defaults(local_device = "cuda", remote_url = None, remote_serde = None)
 
-def generate_kv_cache(num_tokens, fmt, device, fill = None):
+def dumb_cfg():
+    return LMCacheEngineConfig.from_defaults(local_device="cuda",
+                                             remote_url=None,
+                                             remote_serde=None)
+
+
+def generate_kv_cache(num_tokens, fmt, device, fill=None):
     ret = []
-    num_layers = 32
     num_heads = 8
     head_size = 128
-    shape = [num_tokens, num_heads, head_size] if fmt == "vllm" else [num_heads, num_tokens, head_size]
+    shape = [num_tokens, num_heads, head_size
+             ] if fmt == "vllm" else [num_heads, num_tokens, head_size]
     dtype = torch.bfloat16 if fmt == "vllm" else torch.float16
 
     for i in range(32):
-        k = torch.rand(shape, dtype = dtype, device = device)
-        v = torch.rand(shape, dtype = dtype, device = device)
+        k = torch.rand(shape, dtype=dtype, device=device)
+        v = torch.rand(shape, dtype=dtype, device=device)
         if fill is not None:
             k.fill_(fill)
             v.fill_(fill)
@@ -35,20 +36,25 @@ def generate_kv_cache(num_tokens, fmt, device, fill = None):
 
     return tuple(ret)
 
+
 def generate_tokens(num_tokens, device):
     return torch.randint(0, 10000, size=[num_tokens]).to(device)
 
+
 def generate_spt(length):
     return torch.full((length, ), 10010)
+
 
 def generate_tokens_with_spt(num_tokens, device, spt):
     """
     Generate the tokens ended with spt
     """
     minval = torch.min(spt).item()
-    ret = torch.randint(minval - 100, minval - 10, size=[num_tokens]).to(device)
+    ret = torch.randint(minval - 100, minval - 10,
+                        size=[num_tokens]).to(device)
     ret[-len(spt):] = spt
     return ret
+
 
 def concatenate_kv_caches(kv_chunks, fmt):
     dim = 1 if fmt == "huggingface" else 0
@@ -60,6 +66,7 @@ def concatenate_kv_caches(kv_chunks, fmt):
         ret.append((klayer, vlayer))
     return tuple(ret)
 
+
 def slice_kv_caches(kv_chunk, s: slice, fmt):
     ret = []
     for kv_layer in kv_chunk:
@@ -69,11 +76,11 @@ def slice_kv_caches(kv_chunk, s: slice, fmt):
         ret.append((kslice.detach().clone(), vslice.detach().clone()))
     return tuple(ret)
 
+
 def check_kv_cache_equal(left, right, start_token, end_token, fmt):
     """
     check if the first num_tokens of left and right kv cache are the same
     """
-    dim = 0 if fmt == "vllm" else 1
     left_k = left
     right_k = right.to(left_k.device)
 
@@ -87,12 +94,15 @@ def check_kv_cache_equal(left, right, start_token, end_token, fmt):
         case "vllm":
             assert (left_k[s, :, :] == right_k[s, :, :]).all()
 
-def check_kv_layer_equal(kv_tuple, layer_id, k, v, start_token, end_token, fmt):
+
+def check_kv_layer_equal(kv_tuple, layer_id, k, v, start_token, end_token,
+                         fmt):
     k_layer = kv_tuple[layer_id][0]
     v_layer = kv_tuple[layer_id][1]
 
     check_kv_cache_equal(k_layer, k, start_token, end_token, fmt)
     check_kv_cache_equal(v_layer, v, start_token, end_token, fmt)
+
 
 @pytest.mark.parametrize("fmt", ["vllm", "huggingface"])
 @pytest.mark.parametrize("spt_length", [1, 2])
@@ -105,13 +115,18 @@ def test_spt_full_hit(fmt, spt_length, autorelease):
     - No chunks are hit
     """
 
-
     # generate special tokens
     spt = generate_spt(spt_length)
-    
+
     chunk_lengths = [1000, 2000, 1500, 3000]
-    kvs = [generate_kv_cache(length, fmt, "cuda", fill = None) for idx, length in enumerate(chunk_lengths)]
-    tokens = [generate_tokens_with_spt(length, spt.device, spt) for length in chunk_lengths]
+    kvs = [
+        generate_kv_cache(length, fmt, "cuda", fill=None)
+        for idx, length in enumerate(chunk_lengths)
+    ]
+    tokens = [
+        generate_tokens_with_spt(length, spt.device, spt)
+        for length in chunk_lengths
+    ]
 
     cfg = dumb_cfg()
     metadata = dumb_metadata(fmt)
@@ -126,10 +141,13 @@ def test_spt_full_hit(fmt, spt_length, autorelease):
         input1 = torch.cat([tokens[i] for i in ids])
         target_kv = concatenate_kv_caches([kvs[i] for i in ids], fmt)
         target_len = sum([chunk_lengths[i] for i in ids])
-        ret = retriever.new_request(input1, torch.tensor([0, target_len]).to(torch.int))
+        ret = retriever.new_request(
+            input1,
+            torch.tensor([0, target_len]).to(torch.int))
         for layer_id in range(32):
             result = ret.result(layer_id)
-            check_kv_layer_equal(target_kv, layer_id, result.k, result.v, 0, target_len, fmt)
+            check_kv_layer_equal(target_kv, layer_id, result.k, result.v, 0,
+                                 target_len, fmt)
             assert (result.valid_mask == 1).all(), "Should be all valid!"
 
     check_groups(0)
@@ -137,6 +155,7 @@ def test_spt_full_hit(fmt, spt_length, autorelease):
     check_groups(0, 2)
     check_groups(0, 1, 2, 3)
     check_groups(1, 1, 2, 2)
+
 
 @pytest.mark.parametrize("fmt", ["vllm", "huggingface"])
 @pytest.mark.parametrize("spt_length", [1, 2])
@@ -148,11 +167,17 @@ def test_spt_hit_miss(fmt, spt_length, autorelease):
 
     # generate special tokens
     spt = generate_spt(spt_length)
-    
+
     chunk_lengths = [1000, 2000, 1500, 3000]
     has_insterted = [True, False, True, False]
-    kvs = [generate_kv_cache(length, fmt, "cuda", fill = None) for idx, length in enumerate(chunk_lengths)]
-    tokens = [generate_tokens_with_spt(length, spt.device, spt) for length in chunk_lengths]
+    kvs = [
+        generate_kv_cache(length, fmt, "cuda", fill=None)
+        for idx, length in enumerate(chunk_lengths)
+    ]
+    tokens = [
+        generate_tokens_with_spt(length, spt.device, spt)
+        for length in chunk_lengths
+    ]
 
     cfg = dumb_cfg()
     metadata = dumb_metadata(fmt)
@@ -168,22 +193,28 @@ def test_spt_hit_miss(fmt, spt_length, autorelease):
         input1 = torch.cat([tokens[i] for i in ids])
         target_kv = concatenate_kv_caches([kvs[i] for i in ids], fmt)
         target_len = sum([chunk_lengths[i] for i in ids])
-        ret = retriever.new_request(input1, torch.tensor([0, target_len]).to(torch.int))
+        ret = retriever.new_request(
+            input1,
+            torch.tensor([0, target_len]).to(torch.int))
         for layer_id in range(32):
             result = ret.result(layer_id)
             start_token = 0
             for i in ids:
                 chunk_len = chunk_lengths[i]
                 if has_insterted[i]:
-                    check_kv_layer_equal(target_kv, layer_id, 
-                                         result.k, result.v, start_token, start_token + chunk_len, fmt)
-                    assert (result.valid_mask[start_token:start_token + chunk_len] == 1).all()
+                    check_kv_layer_equal(target_kv, layer_id, result.k,
+                                         result.v, start_token,
+                                         start_token + chunk_len, fmt)
+                    assert (result.valid_mask[start_token:start_token +
+                                              chunk_len] == 1).all()
                 else:
-                    assert (result.valid_mask[start_token:start_token + chunk_len] == 0).all()
+                    assert (result.valid_mask[start_token:start_token +
+                                              chunk_len] == 0).all()
                 start_token += chunk_len
 
-    check_groups(0, 1, 2) # Y, N, Y
-    check_groups(1, 2, 3) # N, Y, N
+    check_groups(0, 1, 2)  # Y, N, Y
+    check_groups(1, 2, 3)  # N, Y, N
+
 
 @pytest.mark.parametrize("fmt", ["vllm", "huggingface"])
 @pytest.mark.parametrize("spt_length", [1, 2])
@@ -195,11 +226,17 @@ def test_spt_all_miss(fmt, spt_length, autorelease):
 
     # generate special tokens
     spt = generate_spt(spt_length)
-    
+
     chunk_lengths = [1000, 2000, 1500, 3000]
     has_insterted = [False, False, False, False]
-    kvs = [generate_kv_cache(length, fmt, "cuda", fill = None) for idx, length in enumerate(chunk_lengths)]
-    tokens = [generate_tokens_with_spt(length, spt.device, spt) for length in chunk_lengths]
+    kvs = [
+        generate_kv_cache(length, fmt, "cuda", fill=None)
+        for idx, length in enumerate(chunk_lengths)
+    ]
+    tokens = [
+        generate_tokens_with_spt(length, spt.device, spt)
+        for length in chunk_lengths
+    ]
 
     cfg = dumb_cfg()
     metadata = dumb_metadata(fmt)
@@ -213,14 +250,16 @@ def test_spt_all_miss(fmt, spt_length, autorelease):
 
     def check_groups(*ids):
         input1 = torch.cat([tokens[i] for i in ids])
-        target_kv = concatenate_kv_caches([kvs[i] for i in ids], fmt)
         target_len = sum([chunk_lengths[i] for i in ids])
-        ret = retriever.new_request(input1, torch.tensor([0, target_len]).to(torch.int))
+        ret = retriever.new_request(
+            input1,
+            torch.tensor([0, target_len]).to(torch.int))
         for layer_id in range(32):
             result = ret.result(layer_id)
             assert result.k is None
             assert result.v is None
             assert (result.valid_mask == 0).all()
+
 
 @pytest.mark.parametrize("fmt", ["vllm", "huggingface"])
 @pytest.mark.parametrize("spt_length", [1, 2])
@@ -232,11 +271,17 @@ def test_spt_partial_hit(fmt, spt_length, autorelease):
 
     # generate special tokens
     spt = generate_spt(spt_length)
-    
+
     chunk_lengths = [1000, 2000, 1500, 3000]
     inserted_length = [500, 1000, 800, 1250]
-    kvs = [generate_kv_cache(length, fmt, "cuda", fill = None) for idx, length in enumerate(chunk_lengths)]
-    tokens = [generate_tokens_with_spt(length, spt.device, spt) for length in chunk_lengths]
+    kvs = [
+        generate_kv_cache(length, fmt, "cuda", fill=None)
+        for idx, length in enumerate(chunk_lengths)
+    ]
+    tokens = [
+        generate_tokens_with_spt(length, spt.device, spt)
+        for length in chunk_lengths
+    ]
 
     cfg = dumb_cfg()
     metadata = dumb_metadata(fmt)
@@ -254,19 +299,25 @@ def test_spt_partial_hit(fmt, spt_length, autorelease):
         input1 = torch.cat([tokens[i] for i in ids])
         target_kv = concatenate_kv_caches([kvs[i] for i in ids], fmt)
         target_len = sum([chunk_lengths[i] for i in ids])
-        ret = retriever.new_request(input1, torch.tensor([0, target_len]).to(torch.int))
+        ret = retriever.new_request(
+            input1,
+            torch.tensor([0, target_len]).to(torch.int))
         for layer_id in range(32):
             result = ret.result(layer_id)
             start_token = 0
             for i in ids:
                 chunk_len = chunk_lengths[i]
-                matched_len = result.valid_mask[start_token:start_token+chunk_len].sum()
+                matched_len = result.valid_mask[start_token:start_token +
+                                                chunk_len].sum()
 
-                check_kv_layer_equal(target_kv, layer_id,
-                                     result.k, result.v,
-                                     start_token, start_token + matched_len, fmt)
-                assert (result.valid_mask[start_token:start_token+matched_len] == 1).all()
-                assert (result.valid_mask[start_token+matched_len:start_token+chunk_len] == 0).all()
+                check_kv_layer_equal(target_kv, layer_id, result.k, result.v,
+                                     start_token, start_token + matched_len,
+                                     fmt)
+                assert (result.valid_mask[start_token:start_token +
+                                          matched_len] == 1).all()
+                assert (result.valid_mask[start_token +
+                                          matched_len:start_token +
+                                          chunk_len] == 0).all()
 
                 start_token += chunk_len
 
@@ -274,6 +325,7 @@ def test_spt_partial_hit(fmt, spt_length, autorelease):
     check_groups(0, 1)
     check_groups(0, 1, 2, 3)
     check_groups(0, 0)
+
 
 @pytest.mark.parametrize("fmt", ["vllm", "huggingface"])
 @pytest.mark.parametrize("spt_length", [1, 2])
@@ -285,9 +337,12 @@ def test_spt_multi_query(fmt, spt_length, autorelease):
     """
     # generate special tokens
     spt = generate_spt(spt_length)
-    
+
     chunk_lengths = [1000, 2000, 1500, 3000]
-    kvs = [generate_kv_cache(length, fmt, "cuda", fill = None) for idx, length in enumerate(chunk_lengths)]
+    kvs = [
+        generate_kv_cache(length, fmt, "cuda", fill=None)
+        for idx, length in enumerate(chunk_lengths)
+    ]
     tokens = [generate_tokens(length, "cpu") for length in chunk_lengths]
 
     cfg = dumb_cfg()
@@ -307,27 +362,31 @@ def test_spt_multi_query(fmt, spt_length, autorelease):
             last = query_start_locs[-1]
             query_start_locs.append(last + chunk_lengths[i])
 
-        ret1 = retriever.new_request(input1, torch.tensor(query_start_locs).to(torch.int))
-        ret2 = retriever.new_request(input1, torch.tensor([0, query_start_locs[-1]]).to(torch.int))
+        ret1 = retriever.new_request(
+            input1,
+            torch.tensor(query_start_locs).to(torch.int))
+        ret2 = retriever.new_request(
+            input1,
+            torch.tensor([0, query_start_locs[-1]]).to(torch.int))
 
         target_len1 = query_start_locs[-1]
         target_len2 = int(query_start_locs[1] // 256) * 256
 
         for layer_id in range(32):
             result1 = ret1.result(layer_id)
-            check_kv_layer_equal(target_kv, layer_id, 
-                                 result1.k, result1.v, 
-                                 0, target_len1, fmt)
+            check_kv_layer_equal(target_kv, layer_id, result1.k, result1.v, 0,
+                                 target_len1, fmt)
             assert (result1.valid_mask == 1).all(), "Should be all valid!"
 
-            # Only the first chunk should be retrieved if there is no "query_start_loc"
+            # Only the first chunk should be retrieved if there is no
+            # "query_start_loc"
             result2 = ret2.result(layer_id)
-            check_kv_layer_equal(target_kv, layer_id, 
-                                 result2.k, result2.v, 
-                                 0, target_len2, fmt)
-            assert (result2.valid_mask[0:target_len2] == 1).all(), "Should be all valid!"
-            assert (result2.valid_mask[target_len2:] == 0).all(), "Should be all valid!"
-
+            check_kv_layer_equal(target_kv, layer_id, result2.k, result2.v, 0,
+                                 target_len2, fmt)
+            assert (result2.valid_mask[0:target_len2] == 1
+                    ).all(), "Should be all valid!"
+            assert (result2.valid_mask[target_len2:] == 0
+                    ).all(), "Should be all valid!"
 
     check_groups(0, 1)
     check_groups(0, 2)
@@ -349,41 +408,49 @@ def test_cacheblend_executor_single_query():
 
     blender = CacheBlendImpl(0.2)
 
-    fq_1 = torch.zeros(q_shape, dtype = dtype, device = device)
+    fq_1 = torch.zeros(q_shape, dtype=dtype, device=device)
     for i in range(query_len):
         fq_1[i] = i
 
     # Newly generated KV is 0 on the "changed_positions"
-    fk_1 = torch.full(kv_shape, 1, dtype = dtype, device = device)
+    fk_1 = torch.full(kv_shape, 1, dtype=dtype, device=device)
     fk_1[changed_positions, ...] = 0
-    fv_1 = torch.full(kv_shape, 1, dtype = dtype, device = device)
+    fv_1 = torch.full(kv_shape, 1, dtype=dtype, device=device)
     fv_1[changed_positions, ...] = 0
 
-    # Retrieved KV are all 1 
-    rk_1 = torch.full(kv_shape, 1, dtype = dtype, device = device)
-    rv_1 = torch.full(kv_shape, 1, dtype = dtype, device = device)
-    valid = torch.full((query_len, ), 1, dtype = torch.long, device = "cpu")
-    positions = torch.arange(prefix_len, prefix_len + query_len, 
-                             dtype = torch.int32, device = "cuda")
-    query_start_loc = torch.tensor([0, query_len], 
-                                   dtype = torch.int32, device = "cuda")
+    # Retrieved KV are all 1
+    rk_1 = torch.full(kv_shape, 1, dtype=dtype, device=device)
+    rv_1 = torch.full(kv_shape, 1, dtype=dtype, device=device)
+    valid = torch.full((query_len, ), 1, dtype=torch.long, device="cpu")
+    positions = torch.arange(prefix_len,
+                             prefix_len + query_len,
+                             dtype=torch.int32,
+                             device="cuda")
+    query_start_loc = torch.tensor([0, query_len],
+                                   dtype=torch.int32,
+                                   device="cuda")
 
     # First layer should do nothing!
-    ret = blender.blend(0, rk_1, rv_1, valid, fq_1, fk_1, fv_1, positions, query_start_loc, 0)
+    ret = blender.blend(0, rk_1, rv_1, valid, fq_1, fk_1, fv_1, positions,
+                        query_start_loc, 0)
     assert torch.equal(ret.q, fq_1)
     assert torch.equal(ret.k, fk_1)
     assert torch.equal(ret.v, fv_1)
     assert torch.equal(ret.positions, positions)
-    assert torch.equal(ret.local_indices, torch.arange(prefix_len, dtype = torch.int, device = "cpu"))
+    assert torch.equal(ret.local_indices,
+                       torch.arange(prefix_len, dtype=torch.int, device="cpu"))
     assert ret.query_start_loc[0].item() == 0
     assert ret.query_start_loc[1].item() == prefix_len
 
     # Second layer should do token selection
-    ret = blender.blend(1, rk_1, rv_1, valid, fq_1, fk_1, fv_1, positions, ret.query_start_loc, 0)
-    assert len(ret.positions) == len(expected_positions) # recompute 2 tokens
-    assert ret.k.shape[0] == query_len                   # long K
-    assert ret.v.shape[0] == query_len                   # long V
-    assert torch.equal(ret.local_indices, torch.tensor(changed_positions, dtype = torch.int, device = "cpu"))
+    ret = blender.blend(1, rk_1, rv_1, valid, fq_1, fk_1, fv_1, positions,
+                        ret.query_start_loc, 0)
+    assert len(ret.positions) == len(expected_positions)  # recompute 2 tokens
+    assert ret.k.shape[0] == query_len  # long K
+    assert ret.v.shape[0] == query_len  # long V
+    assert torch.equal(
+        ret.local_indices,
+        torch.tensor(changed_positions, dtype=torch.int, device="cpu"))
     assert ret.query_start_loc[0].item() == 0
     assert ret.query_start_loc[1].item() == 2
     for i in range(len(expected_positions)):
@@ -392,14 +459,15 @@ def test_cacheblend_executor_single_query():
         assert (ret.k[changed_positions[i]] == 0).all()
         assert (ret.v[changed_positions[i]] == 0).all()
 
-    # Thrid layer should do kv update
+    # Third layer should do kv update
     fq_2 = ret.q
     fk_2 = fk_1[changed_positions]
     fv_2 = fv_1[changed_positions]
     rk_2 = rk_1
     rv_2 = rv_1
     pos_2 = ret.positions
-    ret = blender.blend(2, rk_2, rv_2, valid, ret.q, fk_2, fv_2, pos_2, ret.query_start_loc, 0)
+    ret = blender.blend(2, rk_2, rv_2, valid, ret.q, fk_2, fv_2, pos_2,
+                        ret.query_start_loc, 0)
 
     # Should update the KV without changing q or positions
     assert torch.equal(ret.q, fq_2)
@@ -408,14 +476,16 @@ def test_cacheblend_executor_single_query():
     assert ret.v.shape[0] == prefix_len
     assert (ret.k[changed_positions] == 0).all()
     assert (ret.v[changed_positions] == 0).all()
-    unchanged_positions = list(filter(lambda x: x not in changed_positions, range(query_len)))
+    unchanged_positions = list(
+        filter(lambda x: x not in changed_positions, range(query_len)))
     assert (ret.k[unchanged_positions] == 1).all()
     assert (ret.v[unchanged_positions] == 1).all()
-    assert torch.equal(ret.local_indices, torch.tensor(changed_positions, dtype = torch.int, device = "cpu"))
+    assert torch.equal(
+        ret.local_indices,
+        torch.tensor(changed_positions, dtype=torch.int, device="cpu"))
     assert ret.query_start_loc[0].item() == 0
     assert ret.query_start_loc[1].item() == 2
 
     # TODO: un-tested cases:
     # - some positions are invalid
     # - multiple queries (batch size > 1)
-

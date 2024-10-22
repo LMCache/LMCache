@@ -295,7 +295,7 @@ class LMCacheEngine:
         tokens: torch.Tensor,
         mask: Optional[torch.Tensor] = None,
         return_tuple: bool = True,
-    ) -> Tuple[KVCache, torch.Tensor]:
+    ) -> Tuple[Union[KVCache, torch.Tensor], torch.Tensor]:
         """
         Retrieve the KV cache of the tokens from the cache engine. The 
         retrieved KV cache should be a prefix of the input tokens.
@@ -307,14 +307,16 @@ class LMCacheEngine:
             KV Cache should be retrieved. Currently, only support
             suffix mask.
 
-            return_tuple: whether to return the kv cache as a tuple or a single tensor
+            return_tuple: whether to return the kv cache as a tuple or a 
+            single tensor
 
         Output: 
-            kv_tensors: the kv cache of the tokens, in the format of nested tuples or
-                        a single tensor with shape [num_layers, 2, hidden_dim, num_tokens]
-                        (huggingface) or [num_layers, 2, num_tokens, hidden_dim] (vllm).
-                        Will be an empty tuple if no kv cache is retrieved (no matter 
-                        return_tuple is True or not).
+            kv_tensors: the kv cache of the tokens, in the format of nested 
+            tuples ora single tensor with shape [num_layers, 2, hidden_dim, 
+            num_tokens] (huggingface) or [num_layers, 2, num_tokens, 
+            hidden_dim] (vllm).
+            Will be an empty tuple if no kv cache is retrieved (no matter 
+            return_tuple is True or not).
 
 
             ret_mask: indicate which tokens are retrieved
@@ -340,7 +342,6 @@ class LMCacheEngine:
             if chunk is None:
                 break
             retrieved_kv_chunks.append(chunk)
-
         """ concatenate the kv cache """
         dim = None
         match fmt:
@@ -356,26 +357,26 @@ class LMCacheEngine:
             ret_mask[:] = False
             return (), ret_mask
 
-
         # drop extra tokens in the first chunk
         extra_token_len = num_skip_tok - num_skip_chunk * self.chunk_size
         retrieved_kv_chunks[0] = self._slice_kv_at(extra_token_len,
                                                    retrieved_kv_chunks[0],
                                                    fmt)[0]
 
-
+        ret: Union[KVCache, torch.Tensor]
         if return_tuple:
             st2 = time.perf_counter()
             ret = self._blob_to_tuple_kv(
                 torch.cat(retrieved_kv_chunks, dim=dim + 2))
             ed2 = time.perf_counter()
-            logger.info(
-                f"Concatenated {len(retrieved_kv_chunks)} chunks -- elapsed time"
-                f"{ed2 - st2}")
-            retrieved_token_count = 0 if len(ret) == 0 else ret[0][0].shape[dim]
+            logger.info(f"Concatenated {len(retrieved_kv_chunks)} chunks "
+                        f"-- elapsed time {ed2 - st2}")
+            retrieved_token_count = 0 if len(
+                ret) == 0 else ret[0][0].shape[dim]
         else:
             ret = torch.cat(retrieved_kv_chunks, dim=dim + 2)
-            retrieved_token_count = 0 if ret.numel() == 0 else ret.shape[dim + 2]
+            retrieved_token_count = 0 if ret.numel() == 0 else ret.shape[dim +
+                                                                         2]
 
         ed = time.perf_counter()
         logger.info(f"Retrieved {len(retrieved_kv_chunks)} chunks "
