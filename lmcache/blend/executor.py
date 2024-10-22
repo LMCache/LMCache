@@ -149,7 +149,6 @@ class CacheBlendImpl(BlendExecutor):
             new_query_start_locs = torch.tensor(new_query_start_locs,
                                                 device = query_start_loc.device,
                                                 dtype = query_start_loc.dtype)
-            breakpoint()
             return BlendOutput(new_q, fresh_k, fresh_v, new_positions, 
                                self.indexes_in_kv, new_query_start_locs)
 
