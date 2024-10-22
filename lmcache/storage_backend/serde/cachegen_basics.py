@@ -12,15 +12,16 @@ logger = init_logger(__name__)
 
 CACHEGEN_GPU_MAX_TOKENS_PER_CHUNK = 256
 
+
 @dataclass
 class QuantizationSpec:
     start_layer: int
-    end_layer: int    
+    end_layer: int
     bins: int
-    
+
     def __getitem__(self, key: str) -> int:
         return getattr(self, key)
-    
+
 
 @dataclass
 class CacheGenConfig:
