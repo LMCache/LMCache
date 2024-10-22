@@ -11,7 +11,8 @@ from lmcache.blend.retriever import SPTBlendRetriever
 from lmcache.blend.executor import CacheBlendImpl
 
 def dumb_metadata(fmt="vllm"):
-    return LMCacheEngineMetadata("test_model", 3, 123, fmt)
+    dtype = torch.bfloat16 if fmt == "vllm" else torch.float16
+    return LMCacheEngineMetadata("test_model", 3, 123, fmt, dtype)
 
 def dumb_cfg():
     return LMCacheEngineConfig.from_defaults(local_device = "cuda", remote_url = None, remote_serde = None)

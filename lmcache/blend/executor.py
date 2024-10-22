@@ -62,14 +62,14 @@ class CacheBlendImpl(BlendExecutor):
         num_selected_tokens = int(num_valid_tokens * self.recompute_ratio)
         top_indices = torch.topk(diff_per_token, 
                                 num_selected_tokens).indices
-        logger.debug(f"Indices of the top differences: {top_indices}")
+        #logger.debug(f"Indices of the top differences: {top_indices}")
 
         # Merge the positions with the invalid tokens
         top_mask = indices_to_mask(top_indices, valid.shape[0])
         total_selected_mask = (1 - valid) + top_mask
 
         local_indices = mask_to_indices(total_selected_mask)
-        logger.debug(f"Local indices of the selected tokens: {local_indices}")
+        #logger.debug(f"Local indices of the selected tokens: {local_indices}")
         return local_indices
 
 
