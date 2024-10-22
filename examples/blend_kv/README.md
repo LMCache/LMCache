@@ -1,6 +1,8 @@
 # KV blending example
 This is a minimal example demonstrating the KV blending functionality of LMCache.
 
+The KV blending functionality is enabled by setting `enable_blending: True` in the configuration yaml.
+
 In `blend_kv.py`, the following code will first calculate the KV cache of two text chunks.
 ```python
 for chunk in chunks:
@@ -18,7 +20,7 @@ Finally, the prompt will be sent to the serving engine and the KV blending modul
 
 ## How to run
 ```
-python3 blend_kv.py
+LMCACHE_CONFIG_FILE=example_blending.yaml python3 blend_kv.py
 ```
 
 ## TODO

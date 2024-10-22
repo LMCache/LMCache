@@ -119,5 +119,3 @@ class BlendExecutor(metaclass=abc.ABCMeta):
         :return: The blended Q, K, V, and positions
         """
         pass
-
-

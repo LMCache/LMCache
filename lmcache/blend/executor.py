@@ -138,6 +138,8 @@ class CacheBlendImpl(BlendExecutor):
                 new_query_start_locs,
                 device=query_start_loc.device,
                 dtype=query_start_loc.dtype)
+            logger.info(f"Selected {len(self.indexes_in_kv)} tokens out of "
+                        f"{len(retrieved_k)} tokens to blend")
             return BlendOutput(new_q, fresh_k, fresh_v, new_positions,
                                self.indexes_in_kv, query_start_locs_tensor)
 

@@ -30,6 +30,8 @@ class LMCacheEngineConfig:
 
     save_decode_cache: bool  # whether to store decode kv cache
 
+    enable_blending: bool  # whether to enable blending
+
     @staticmethod
     def from_defaults(
         chunk_size: int = 256,
@@ -38,15 +40,11 @@ class LMCacheEngineConfig:
         remote_serde: str = "torch",
         pipelined_backend: bool = False,
         save_decode_cache: bool = False,
+        enable_blending: bool = False,
     ) -> "LMCacheEngineConfig":
-        return LMCacheEngineConfig(
-            chunk_size,
-            local_device,
-            remote_url,
-            remote_serde,
-            pipelined_backend,
-            save_decode_cache,
-        )
+        return LMCacheEngineConfig(chunk_size, local_device, remote_url,
+                                   remote_serde, pipelined_backend,
+                                   save_decode_cache, enable_blending)
 
     @staticmethod
     def from_legacy(
@@ -79,6 +77,7 @@ class LMCacheEngineConfig:
             remote_serde,
             pipelined_backend,
             save_decode_cache,
+            enable_blending=False,
         )
 
     @staticmethod
@@ -95,6 +94,7 @@ class LMCacheEngineConfig:
         remote_serde = config.get("remote_serde", "torch")
         pipelined_backend = config.get("pipelined_backend", False)
         save_decode_cache = config.get("save_decode_cache", False)
+        enable_blending = config.get("enable_blending", False)
 
         match local_device:
             case "cpu" | "cuda" | None:
@@ -121,6 +121,7 @@ class LMCacheEngineConfig:
             remote_serde,
             pipelined_backend,
             save_decode_cache,
+            enable_blending,
         )
 
 

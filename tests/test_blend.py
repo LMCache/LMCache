@@ -15,7 +15,8 @@ def dumb_metadata(fmt="vllm"):
 def dumb_cfg():
     return LMCacheEngineConfig.from_defaults(local_device="cuda",
                                              remote_url=None,
-                                             remote_serde=None)
+                                             remote_serde=None,
+                                             enable_blending=True)
 
 
 def generate_kv_cache(num_tokens, fmt, device, fill=None):
