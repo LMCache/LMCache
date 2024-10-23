@@ -123,7 +123,7 @@ The core idea is to build a customized vLLM using a wrapper. This wrapper import
 
 
 
-  To summerize,when a new inference request arrives, the following steps occur:
+  To summarize,when a new inference request arrives, the following steps occur:
 
   1. The LLM Engine checks if the KV cache for the prompt is already available by calling ``lmcache_should_retrieve``. If the cache is found, it retrieves the cached values using ``lmcache_retrieve_kv``.If the cache is not available, the model proceeds with prefill and decoding operations.
 
