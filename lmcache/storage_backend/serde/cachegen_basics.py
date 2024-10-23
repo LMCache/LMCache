@@ -127,6 +127,7 @@ class CacheGenConfig:
             except Exception as e:
                 raise ValueError(
                     f"Model {model_name} not supported by CacheGenConfig, the exception is {e}"
+                )
 
 
 @dataclass
