@@ -1,7 +1,7 @@
 import io
 import pickle
 from dataclasses import dataclass
-from typing import List
+from typing import List, Optional
 
 import torch
 
@@ -35,7 +35,7 @@ class CacheGenConfig:
         return getattr(self, key)
 
     @staticmethod
-    def from_model_name(model_name: str) -> "CacheGenConfig":
+    def from_model_name(model_name: str) -> Optional[CacheGenConfig]:
         family_7b = [
             "mistralai/Mistral-7B-Instruct-v0.2", "lmsys/longchat-7b-16k",
             "Qwen/Qwen-7B"
