@@ -9,7 +9,7 @@
 Welcome to LMCache!
 =====================
 
-.. figure:: https://github.com/user-attachments/assets/a0809748-3cb1-4732-9c5a-acfa90cc72d1
+.. figure:: https://people.cs.uchicago.edu/~junchenj/docs/lmcache-logo.png
   :width: 60%
   :align: center
   :alt: LMCache
