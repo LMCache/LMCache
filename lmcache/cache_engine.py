@@ -192,7 +192,7 @@ class LMCacheEngine:
         """
         chunk_hashes = self._prefix_hash(self._chunk_tokens(tokens),
                                          num_skip_chunk)
-        # With num_skip_chunks, the following relative to 
+        # With num_skip_chunks, the following is relative to
         # the new start after skip.
         num_tokens: int = self._num_tokens_in_kv(kv_tensors, fmt)
 
