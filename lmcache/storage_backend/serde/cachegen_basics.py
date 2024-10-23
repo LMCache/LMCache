@@ -4,10 +4,10 @@ from dataclasses import dataclass
 from typing import List
 
 import torch
+from transformers import AutoConfig
 
 from lmcache.logging import init_logger
 from lmcache.utils import _lmcache_nvtx_annotate
-from transformers import AutoConfig
 
 logger = init_logger(__name__)
 
