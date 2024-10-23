@@ -9,10 +9,10 @@ Subpackages
 
    lmcache.server.server_storage_backend
 
-Module contents
----------------
+.. Module contents
+.. ---------------
 
-.. automodule:: lmcache.server
-   :members:
-   :undoc-members:
-   :show-inheritance:
+.. .. automodule:: lmcache.server
+..    :members:
+..    :undoc-members:
+..    :show-inheritance:

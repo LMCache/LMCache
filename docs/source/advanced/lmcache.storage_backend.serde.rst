@@ -60,10 +60,10 @@ lmcache.storage\_backend.serde.torch\_serde module
    :undoc-members:
    :show-inheritance:
 
-Module contents
----------------
+.. Module contents
+.. ---------------
 
-.. automodule:: lmcache.storage_backend.serde
-   :members:
-   :undoc-members:
-   :show-inheritance:
+.. .. automodule:: lmcache.storage_backend.serde
+..    :members:
+..    :undoc-members:
+..    :show-inheritance:

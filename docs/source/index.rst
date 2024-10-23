@@ -56,6 +56,12 @@ Documentation
 
 .. toctree::
    :maxdepth: 1
+   :caption: Models
+
+   models/models
+
+.. toctree::
+   :maxdepth: 1
    :caption: Configuration
 
    configuration/config
@@ -73,6 +79,6 @@ Documentation
 
 .. toctree::
    :maxdepth: 1
-   :caption: Developer Guide
+   :caption: Advanced
 
-   developer/lmcache
+   advanced/lmcache

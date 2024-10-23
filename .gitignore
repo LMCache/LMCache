@@ -88,3 +88,4 @@ perf-test.py
 # docs/build
 /docs/build/
 /docs/build.sh
+/docs/output/

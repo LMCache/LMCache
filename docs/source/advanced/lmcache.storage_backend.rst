@@ -45,10 +45,10 @@ lmcache.storage\_backend.remote\_backend module
    :undoc-members:
    :show-inheritance:
 
-Module contents
----------------
+.. Module contents
+.. ---------------
 
-.. automodule:: lmcache.storage_backend
-   :members:
-   :undoc-members:
-   :show-inheritance:
+.. .. automodule:: lmcache.storage_backend
+..    :members:
+..    :undoc-members:
+..    :show-inheritance:

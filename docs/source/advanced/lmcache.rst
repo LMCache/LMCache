@@ -1,4 +1,4 @@
-lmcache package
+LMCache Modules
 ===============
 
 Subpackages
@@ -17,18 +17,10 @@ lmcache.cache\_engine module
 ----------------------------
 
 .. automodule:: lmcache.cache_engine
-   :members: LMCacheEngineBuilder
-   :undoc-members:
-   :show-inheritance:
-
-lmcache.config module
----------------------
-
-.. automodule:: lmcache.config
    :members:
    :undoc-members:
    :show-inheritance:
-   :noindex:
+
 
 lmcache.logging module
 ----------------------
@@ -54,10 +46,10 @@ lmcache.utils module
    :undoc-members:
    :show-inheritance:
 
-Module contents
----------------
+.. Module contents
+.. ---------------
 
-.. automodule:: lmcache
-   :members:
-   :undoc-members:
-   :show-inheritance:
+.. .. automodule:: lmcache
+..    :members:
+..    :undoc-members:
+..    :show-inheritance:

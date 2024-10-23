@@ -28,10 +28,10 @@ lmcache.storage\_backend.connector.redis\_connector module
    :undoc-members:
    :show-inheritance:
 
-Module contents
----------------
+.. Module contents
+.. ---------------
 
-.. automodule:: lmcache.storage_backend.connector
-   :members:
-   :undoc-members:
-   :show-inheritance:
+.. .. automodule:: lmcache.storage_backend.connector
+..    :members:
+..    :undoc-members:
+..    :show-inheritance:

@@ -65,15 +65,23 @@ Now you can run the following command to launch a vLLM instance with LMCache:
 
    The above will need one GPU and will use port 65432 for the LMCache server. You can change the port number if needed.
 
-* Launch multiple vLLM instances with LMCache?
-
-.. code-block:: console
-
-   # Insert code here
-
 * Launch a vLLM instance with LMCache and share the KV cache across multiple vLLM instances?
 
 LMCache can share the KV cache across multiple vLLM instances. LMCache supports sharing KV using the ``lmcache.server`` module.
+First create an example LMCache config file, e.g., ``example.yaml``:
+
+.. code-block:: yaml
+
+   chunk_size: 256
+   local_device: "cpu"
+   remote_url: "lm://localhost:65432"
+   remote_serde: "cachegen"
+
+   # Whether retrieve() is pipelined or not
+   pipelined_backend: False
+
+Then, start the LMCache server and multiple vLLM instances with the LMCache config file.
+
 Here is a quick example:
 
 .. code-block:: console
@@ -82,8 +90,6 @@ Here is a quick example:
    $ lmcache_server localhost 65432
    
    # Then, start two vLLM instances with the LMCache config file
-
-   $ wget https://raw.githubusercontent.com/LMCache/LMCache/refs/heads/dev/examples/example.yaml
    
    # start the first vLLM instance
    $ LMCACHE_CONFIG_FILE=example.yaml CUDA_VISIBLE_DEVICES=0 lmcache_vllm serve lmsys/longchat-7b-16k --gpu-memory-utilization 0.8 --port 8000
