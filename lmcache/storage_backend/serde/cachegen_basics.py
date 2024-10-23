@@ -1,7 +1,7 @@
 import io
 import pickle
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List
 
 import torch
 
@@ -126,8 +126,8 @@ class CacheGenConfig:
                     )
             except Exception as e:
                 raise ValueError(
-                    f"Model {model_name} not supported by CacheGenConfig, the exception is {e}"
-                )
+                    f"Model {model_name} not supported by CacheGenConfig"
+                ) from e
 
 
 @dataclass
