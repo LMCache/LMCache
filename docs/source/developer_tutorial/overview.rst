@@ -36,4 +36,4 @@ To share the KV Cache across different instances, the LMCache Backend first seri
   :alt: Inter-Instance Overview
   :class: no-scaled-link
 
-For serializer and deserializer, we have implemented four methods: ``torch``, ``safetensor``, ``fast`` and ``cachegen``. The ``cachegen`` method is recommanded for its significant reduction in transmission size, though it may require some GPU computation. For more details, refer to the appendix of the `paper <https://dl.acm.org/doi/10.1145/3651890.3672274>`_.
+For serializer and deserializer, we have implemented four methods: ``torch``, ``safetensor``, ``fast`` and ``cachegen``. The ``cachegen`` method is recommended for its significant reduction in transmission size, though it may require some GPU computation. For more details, refer to the appendix of the `paper <https://dl.acm.org/doi/10.1145/3651890.3672274>`_.
