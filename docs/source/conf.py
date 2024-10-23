@@ -10,6 +10,7 @@ import os
 import sys
 from dataclasses import asdict
 
+from sphinx.ext import autodoc
 from sphinxawesome_theme import ThemeOptions
 
 sys.path.insert(0, os.path.abspath("../../lmcache"))
@@ -26,7 +27,19 @@ extensions = [
     "sphinx.ext.intersphinx",
     "sphinx.ext.githubpages",
     "sphinx.ext.viewcode",
+    "sphinx.ext.napoleon",                                                   
 ]
+
+class MockedClassDocumenter(autodoc.ClassDocumenter):
+    """Remove note about base class when a class is derived from object."""
+
+    def add_line(self, line: str, source: str, *lineno: int) -> None:
+        if line == "   Bases: :py:class:`object`":
+            return
+        super().add_line(line, source, *lineno)
+
+
+autodoc.ClassDocumenter = MockedClassDocumenter
 
 # autodoc_default_options = {
 #     "members": True,
@@ -40,6 +53,8 @@ exclude_patterns = []
 # -- Options for HTML output -------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#options-for-html-output
 
+# html style
+html_title = project
 html_theme = "sphinxawesome_theme"
 html_static_path = ["_static"]
 html_favicon = "assets/lmcache-logo.png"
