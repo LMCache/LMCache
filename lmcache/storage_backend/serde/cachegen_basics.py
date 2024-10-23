@@ -35,7 +35,7 @@ class CacheGenConfig:
         return getattr(self, key)
 
     @staticmethod
-    def from_model_name(model_name: str) -> Optional[CacheGenConfig]:
+    def from_model_name(model_name: str) -> CacheGenConfig:
         family_7b = [
             "mistralai/Mistral-7B-Instruct-v0.2", "lmsys/longchat-7b-16k",
             "Qwen/Qwen-7B"
@@ -125,8 +125,8 @@ class CacheGenConfig:
                         ],
                     )
             except Exception as e:
-                logger.error(f"Failed to get CacheGenConfig: {e}")
-                return None
+                raise ValueError(
+                    f"Model {model_name} not supported by CacheGenConfig, the exception is {e}"
 
 
 @dataclass
