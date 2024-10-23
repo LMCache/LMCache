@@ -64,10 +64,8 @@ class RemoteConnector(metaclass=abc.ABCMeta):
     @abc.abstractmethod
     def close(self) -> None:
         """
-        List all keys in the remote server
+        Close remote server
 
-        Returns:
-            A list of keys in the remote server
         """
         raise NotImplementedError
 

@@ -17,7 +17,7 @@ lmcache.cache\_engine module
 ----------------------------
 
 .. automodule:: lmcache.cache_engine
-   :members:
+   :members: LMCacheEngineBuilder
    :undoc-members:
    :show-inheritance:
 
