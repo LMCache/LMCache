@@ -75,7 +75,7 @@ An snapshot of results from ``test_lmcache_local_cpu.pdf`` is shown below:
     :alt: LMCache
 
 Here we show the improvements in Time To First Token (TTFT) using LMCache. We perform this 
-on a context length of 16384 tokens and re-use the same context for 10 requests.
+on a context length of 16384 tokens and reuse the same context for 10 requests.
 
 Performance metrics
 --------------------
