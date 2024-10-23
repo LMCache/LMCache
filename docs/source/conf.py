@@ -27,11 +27,13 @@ extensions = [
     "sphinx.ext.intersphinx",
     "sphinx.ext.githubpages",
     "sphinx.ext.viewcode",
-    "sphinx.ext.napoleon",                                                   
+    "sphinx.ext.napoleon",
 ]
 
+
 class MockedClassDocumenter(autodoc.ClassDocumenter):
-    """Remove note about base class when a class is derived from object."""
+    """Remove note about base class when a class is 
+    derived from object."""
 
     def add_line(self, line: str, source: str, *lineno: int) -> None:
         if line == "   Bases: :py:class:`object`":
