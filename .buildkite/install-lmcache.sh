@@ -13,6 +13,10 @@ conda activate ${CONDA_ENV_NAME}
 
 set -xe 
 
+cd csrc
+pip install -e .
+cd ..
+
 pip install -e .
 
 git clone --branch dev https://github.com/LMCache/lmcache-server

@@ -46,5 +46,6 @@ follow_imports = "silent"
 # After fixing type errors resulting from follow_imports: "skip" -> "silent",
 # move the directory here and remove it from format.sh and mypy.yaml
 files = [
-    "lmcache"
+    "lmcache",
+    "csrc"
 ]

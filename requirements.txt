@@ -4,4 +4,4 @@ pyyaml
 redis
 nvtx
 safetensors
-torchac_cuda>=0.2.5
+#lmc_ops>=0.0.0
