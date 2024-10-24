@@ -1,6 +1,7 @@
 import torch
 import pytest
 import lmc_ops
+import random
 
 # TODO(Jiayi): add more dtypes
 def test_fast_mem_load():
@@ -26,8 +27,8 @@ def test_fast_mem_load():
         1.0
     )
     
-    key_cache = kv_caches[0].reshape(-1, num_head, head_size)
-    value_cache = kv_caches[1].reshape(-1, num_head, head_size)
+    key_cache = kv_cache[0].reshape(-1, num_head, head_size)
+    value_cache = kv_cache[1].reshape(-1, num_head, head_size)
     key = key_cache[slot_mapping]
     value = value_cache[slot_mapping]
     
