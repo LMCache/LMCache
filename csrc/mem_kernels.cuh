@@ -3,8 +3,8 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/util/Exception.h>
 
-#ifndef LMC_KERNELS_CUH
-#define LMC_KERNELS_CUH
+#ifndef MEM_KERNELS_CUH
+#define MEM_KERNELS_CUH
 
 // TORCH_CHECK is only for host code
 #define DISPATCH_BY_KV_CACHE_DTYPE(SRC_DTYPE, KV_DTYPE, FN)                  \

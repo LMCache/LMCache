@@ -8,7 +8,10 @@ setup(
             'lmc_ops', 
             [
                 'pybind.cpp',
-                'lmc_kernels.cu',
+                'mem_kernels.cu',
+                'cal_cdf.cu',
+                'ac_enc.cu',
+                'ac_dec.cu',
             ],
             #extra_compile_args={'cxx': ['-g'],
             #                    'nvcc': ['-G', '-g']},
