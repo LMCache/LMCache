@@ -104,7 +104,7 @@ user_inputs_batch = [
     "Score your answer from 1-10",
 ]
 context_length = get_context_length(tokenizer, context_messages)
-sampling_params = SamplingParams(temperature=1.0, top_p=0.95, max_tokens=1)
+sampling_params = SamplingParams(temperature=1.0, top_p=0.95, max_tokens=10)
 prompts = gen_prompts(tokenizer, context_messages, user_inputs_batch)
 t3 = time.perf_counter()
 second_outputs = llm.generate(prompts, sampling_params)
