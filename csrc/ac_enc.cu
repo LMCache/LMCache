@@ -143,7 +143,7 @@ __global__ void encode_kernel(
 
     __syncthreads();
 
-    // Do the actual encodin
+    // Do the actual encoding
     uint32_t low = 0U;
     uint32_t high = 0xFFFFFFFFU;
     uint64_t pending_bits = 0;
@@ -251,7 +251,7 @@ __global__ void encode_with_accessor_kernel(
 
     __syncthreads();
 
-    // Do the actual encodin
+    // Do the actual encoding
     uint32_t low = 0U;
     uint32_t high = 0xFFFFFFFFU;
     uint64_t pending_bits = 0;
