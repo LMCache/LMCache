@@ -312,7 +312,7 @@ class LMCacheEngine:
 
         Output: 
             kv_tensors: the kv cache of the tokens, in the format of nested 
-            tuples ora single tensor with shape [num_layers, 2, hidden_dim, 
+            tuples or a single tensor with shape [num_layers, 2, hidden_dim, 
             num_tokens] (huggingface) or [num_layers, 2, num_tokens, 
             hidden_dim] (vllm).
             Will be an empty tuple if no kv cache is retrieved (no matter 
