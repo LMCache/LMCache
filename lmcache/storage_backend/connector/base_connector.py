@@ -52,6 +52,17 @@ class RemoteConnector(metaclass=abc.ABCMeta):
         raise NotImplementedError
 
     @abc.abstractmethod
+    def remove(self, key: str) -> bool:
+        """
+        Remove the objects (bytes) with the key from the remote server
+
+        Input:
+            key: the key of the corresponding object
+
+        """
+        raise NotImplementedError
+
+    @abc.abstractmethod
     def list(self) -> List[str]:
         """
         List all keys in the remote server
@@ -105,6 +116,10 @@ class RemoteConnectorDebugWrapper(RemoteConnector):
             len(obj) / 1e6,
             (end - start) * 1e3,
         )
+
+    def remove(self, key: str) -> bool:
+        self.connector.remove(key)
+        return True
 
     def list(self) -> List[str]:
         return self.connector.list()

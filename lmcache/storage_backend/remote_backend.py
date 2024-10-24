@@ -116,6 +116,30 @@ class LMCRemoteBackend(LMCBackendInterface):
                 self.existing_keys.add(key)
             return flag
 
+    def where_is(
+        self,
+        key: CacheEngineKey,
+    ) -> List[str]:
+        """
+        Query the location that the KV cache resides with key
+        returns "NOT IN CACHE" if not found
+        """
+        if self.contains(key):
+            #TODO (Hanchen) There might be many remote locations in the future
+            return ["remote"]
+        else:
+            return ["NOT IN CACHE"]
+
+    def remove(self, key: CacheEngineKey, location: str) -> bool:
+        #TODO (Hanchen) There might be many remote locations in the future
+
+        if location != 'remote':
+            return False
+        else:
+            self.connection.remove(self._combine_key(key))
+            self.existing_keys.remove(key)
+        return True
+
     def put_blocking(
         self,
         key: CacheEngineKey,

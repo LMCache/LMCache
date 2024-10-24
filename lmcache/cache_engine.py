@@ -302,7 +302,7 @@ class LMCacheEngine:
         Input:
             tokens: the input tokens, with shape [seq_len]
 
-            format: either 'huggingface' or 'vllm'
+            format:  either 'huggingface' or 'vllm'
                 For huggingface, it should have the shape of 
                 [num_heads, num_tokens, head_size]
                 
@@ -379,6 +379,100 @@ class LMCacheEngine:
         ret_mask[num_skip_tok + retrieved_token_count:] = False
 
         return ret, ret_mask
+
+    @_lmcache_nvtx_annotate
+    @torch.no_grad()
+    def get_locations(
+        self,
+        tokens: torch.Tensor,
+    ) -> List[Optional[List[str]]]:
+        """
+        Checks the locations of KV cache of the tokens from the cache engine.
+        The return should be a list of the locations for each block.
+
+        Input:
+            tokens: the input tokens, with shape [seq_len]
+
+
+        Output:
+            List[List[locations]]:
+            List of the locations (ex. ['local DRAM']) of storage of each block 
+            The entry will be None if the block is not found 
+            or the last block is not full (ex. 13 token / (16 token per block)) 
+        """
+
+        chunk_hashes = self._prefix_hash(self._chunk_tokens(tokens))
+
+        ret_locations_list: list[Optional[list[str]]] = []
+        for chunk_hash in chunk_hashes:
+            list_locations = self.engine_.where_is(
+                self._make_key(chunk_hash, self.metadata.fmt))
+            if list_locations[0] == 'NOT IN CACHE':
+                ret_locations_list.append(None)
+            else:
+                ret_locations_list.append(list_locations)
+
+        return ret_locations_list
+
+    @_lmcache_nvtx_annotate
+    @torch.no_grad()
+    def remove(
+        self,
+        token_block: torch.Tensor,
+        locations: List[List[str]],
+        from_block_num: int,
+        blocks_to_delete: int,
+    ) -> List[List[bool]]:
+        """
+        Remove the KV cache entry from the locations specified. 
+        Tokens has to be one block. 
+        Returns validity of token_block and success of deletions
+
+        Input:
+            token_block: the input tokens block
+
+            format is either 'huggingface' or 'vllm'
+                For huggingface, it should have the shape of 
+                [num_heads, num_tokens, head_size]
+                
+                For vllm, it should have the shape of 
+                [num_tokens, num_heads, head_size]
+            
+            locations: locations to remove KV cache of token_block from
+                        one list for each block
+            
+            from_block_num: the starting idx of blocks to remove
+
+            blocks_to_delete: the max number of blocks to delete
+
+        Output:
+            List[ List[deletion successful or not]]
+            First layer is to the number of blocks, 
+            Second layer list is the same length as locations
+        """
+
+        chunk_hashes = self._prefix_hash(self._chunk_tokens(token_block))
+        ret = []
+
+        for idx in range(
+                from_block_num,
+                min(len(chunk_hashes), from_block_num + blocks_to_delete)):
+            print(idx)
+            chunk_hash = chunk_hashes[idx]
+            stored_locations = self.get_locations(token_block)[idx]
+            ret_this_chunk = []
+            for location in locations[idx - from_block_num]:
+                if not stored_locations or location not in stored_locations:
+                    ret_this_chunk.append(False)
+                else:
+                    ret_this_chunk.append(
+                        self.engine_.remove(
+                            self._make_key(chunk_hash, self.metadata.fmt),
+                            location))
+
+            ret.append(ret_this_chunk)
+
+        return ret
 
     def close(self):
         self.engine_.close()

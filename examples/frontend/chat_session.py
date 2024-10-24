@@ -48,7 +48,8 @@ class ChatSession:
     def chat(self, question):
         self.on_user_message(question)
 
-        start = time.perf_counter()
+        start = time.time()
+        print("start is ", start)
         end = None
         chat_completion = self.client.chat.completions.create(
             messages=self.messages,
@@ -59,9 +60,9 @@ class ChatSession:
         server_message = []
         for chunk in chat_completion:
             chunk_message = chunk.choices[0].delta.content
-            if chunk_message is not None:
+            if chunk_message is not None and chunk_message != "":
                 if end is None:
-                    end = time.perf_counter()
+                    end = time.time()
                 yield chunk_message
                 server_message.append(chunk_message)
 

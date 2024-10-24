@@ -1,7 +1,7 @@
 import os
 import queue
 import threading
-from typing import Dict, Optional, Set, Tuple, Union
+from typing import Dict, List, Optional, Set, Tuple, Union
 
 import torch
 from safetensors import safe_open
@@ -68,6 +68,29 @@ class LMCLocalBackend(LMCBackendInterface):
             True if the cache engine contains the key, False otherwise
         """
         return key in self.dict
+
+    def where_is(
+        self,
+        key: CacheEngineKey,
+    ) -> List[str]:
+        self.update_lock.acquire()
+        if self.contains(key):
+            self.update_lock.release()
+            return [f"local {self.device}"]
+        self.update_lock.release()
+
+        return ["NOT IN CACHE"]
+
+    def remove(self, key: CacheEngineKey, location: str) -> bool:
+        if location != f'local {self.device}':
+            return False
+        else:
+            self.update_lock.acquire()
+            if self.contains(key):
+                del self.dict[key]
+            self.update_lock.release()
+
+        return True
 
     @_lmcache_nvtx_annotate
     def put_worker(self, ):
@@ -213,6 +236,27 @@ class LMCLocalDiskBackend(LMCBackendInterface):
             True if the cache engine contains the key, False otherwise
         """
         return key in self.existing_keys
+
+    def where_is(
+        self,
+        key: CacheEngineKey,
+    ) -> List[str]:
+        self.update_lock.acquire()
+        if self.contains(key):
+            self.update_lock.release()
+            return ["local_disk"]
+        self.update_lock.release()
+        return ["NOT IN CACHE"]
+
+    def remove(self, key: CacheEngineKey, location: str) -> bool:
+        if location != 'local disk':
+            return False
+        else:
+            self.update_lock.acquire()
+            os.remove(self._key_to_path(key))
+            self.existing_keys.remove(key)
+            self.update_lock.release()
+            return True
 
     def _key_to_path(
         self,

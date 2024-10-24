@@ -19,3 +19,4 @@ Disk loading in configuration file
 (tests) spin-up the redis/lmcache server during testings
 (refactoring, tests) Refactor unit tests for lmcache engine
 (benchmarking) use pytest-benchmark to benchmark the performance of each sub-component
+(functionality) add more models to cachegen

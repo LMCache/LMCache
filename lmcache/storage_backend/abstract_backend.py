@@ -1,5 +1,5 @@
 import abc
-from typing import Iterable, Optional, Tuple
+from typing import Iterable, List, Optional, Tuple
 
 import torch
 
@@ -42,6 +42,25 @@ class LMCBackendInterface(metaclass=abc.ABCMeta):
     ) -> bool:
         """
         Query if a key is in the cache or not
+        """
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    def where_is(
+        self,
+        key: CacheEngineKey,
+    ) -> List[str]:
+        """
+        Query the location that the KV cache resides with key
+        returns "NOT IN CACHE" if not found
+        """
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    def remove(self, key: CacheEngineKey, location: str) -> bool:
+        """
+        Remove the key from the location
+        If backend is not the location, return False automatically.
         """
         raise NotImplementedError
 
