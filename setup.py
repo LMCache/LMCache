@@ -16,7 +16,7 @@ setup(
         "redis",
         "nvtx",
         "safetensors",
-        "lmc_ops >= 0.0.0",
+        #"lmc_ops >= 0.0.0",
     ],
     classifiers=[
         # Trove classifiers
