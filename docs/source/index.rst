@@ -53,6 +53,7 @@ Documentation
 
    examples/launching
    examples/backend
+   examples/measuring_improvements
 
 .. toctree::
    :maxdepth: 1
