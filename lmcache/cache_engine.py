@@ -238,7 +238,7 @@ class LMCacheEngine:
         self,
         tokens: torch.Tensor,
         kv_tensors_raw: KVCache,
-        kv_tensors_mask: torch.Tensor,
+        kv_tensors_mask: Optional[torch.Tensor] = None,
         skip_existing=True,
         blocking=True,
     ) -> None:
@@ -267,7 +267,8 @@ class LMCacheEngine:
         """
         start_time = time.perf_counter()
         fmt = self.metadata.fmt
-
+        if kv_tensors_mask is None:
+            kv_tensors_mask = torch.ones_like(tokens, dtype=torch.bool)
         assert (len(
             tokens.shape) == 1), f"Invalid shape of tokens: {tokens.shape}"
         assert (len(
