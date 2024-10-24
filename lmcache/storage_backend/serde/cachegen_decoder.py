@@ -1,7 +1,7 @@
 from typing import List, Optional
 
 import torch
-import torchac_cuda  # type: ignore
+import lmc_ops  # type: ignore
 
 import lmcache.storage_backend.serde.cachegen_basics as CGBasics
 from lmcache.config import LMCacheEngineConfig, LMCacheEngineMetadata
