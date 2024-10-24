@@ -1,7 +1,7 @@
 from typing import Dict, Tuple
 
-import torch
 import lmc_ops  # type: ignore
+import torch
 
 import lmcache.storage_backend.serde.cachegen_basics as CGBasics
 from lmcache.config import LMCacheEngineConfig, LMCacheEngineMetadata
@@ -285,8 +285,7 @@ def encode_function(
                              dim=0).reshape(nlayers, chunk_size, nchannels)
 
     new_cdf_key = lmc_ops.calculate_cdf(new_key, int(key_bins.max()))
-    new_cdf_value = lmc_ops.calculate_cdf(new_value,
-                                               int(value_bins.max()))
+    new_cdf_value = lmc_ops.calculate_cdf(new_value, int(value_bins.max()))
     cdf_int = torch.cat([new_cdf_key, new_cdf_value])
 
     output_buffer = torch.zeros(
