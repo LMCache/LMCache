@@ -408,43 +408,27 @@ class LMCacheEngine:
     def lookup(
         self,
         tokens: torch.Tensor,
-        align_to_chunk: bool,
-    ) -> torch.Tensor:
+    ) -> int:
         """
         Checks the existence of KV cache of the tokens from the cache engine.
-        The return should be a boolean tensor indicating the existence of 
-        the KV cache of each token.
 
         Input:
             tokens: the input tokens, with shape [seq_len]
-            align_to_chunk: whether to align the output to the chunk size, 
-            this truncates available tokens to the last full chunk.
 
         Output:
-            a boolean tensor indicating the existence of the KV cache of 
-            each token. The returned tensor only has true in prefix.
+            An int indicating how many prefix tokens are cached.
         """
         # NOTE(Sixian): Now this is a prefix lookup.
         fmt = self.metadata.fmt
         total_token_cnt = len(tokens)
-        ret = torch.zeros(total_token_cnt, dtype=torch.bool)
         current_token_idx = 0
-        full_chunk_cnt = total_token_cnt // self.chunk_size
-        next_token_idx = total_token_cnt if full_chunk_cnt == 0 \
-            else self.chunk_size
         chunk_hashes = self._prefix_hash(self._chunk_tokens(tokens), 0)
         for chunk_hash in chunk_hashes:
-            interval_len = next_token_idx - current_token_idx
-            if interval_len < self.chunk_size and align_to_chunk:
-                break
             if not self.engine_.contains(self._make_key(chunk_hash, fmt)):
                 break
-            else:
-                ret[current_token_idx:next_token_idx] = True
-            current_token_idx = next_token_idx
-            next_token_idx = min(next_token_idx + self.chunk_size,
-                                 total_token_cnt)
-        return ret
+            current_token_idx = min(current_token_idx + self.chunk_size,
+                                    total_token_cnt)
+        return current_token_idx
 
     def close(self):
         self.engine_.close()

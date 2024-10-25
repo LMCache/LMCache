@@ -287,6 +287,55 @@ def test_skipping(fmt, autorelease):
     print("No skip:", t3 - t2)
 
 
+@pytest.mark.parametrize("fmt", ["vllm", "huggingface"])
+def test_lookup(fmt, autorelease):
+    device = "cuda"
+    num_tokens = 12000
+    new_num_tokens = 2000
+    chunk_size = 256
+    persist_path = "/tmp/test-engine-lookup.pth"
+
+    tokens = generate_tokens(num_tokens, device)
+    kv_cache = generate_kv_cache(num_tokens, fmt, device)
+    new_tokens = generate_tokens(new_num_tokens, device)
+    new_kv_cache = generate_kv_cache(new_num_tokens, fmt, device)
+    final_tokens = torch.cat([tokens, new_tokens])
+    final_kv_cache = concatenate_kv_caches([kv_cache, new_kv_cache], fmt)
+
+    cfg = LMCacheEngineConfig.from_legacy(chunk_size=chunk_size,
+                                          persist_path=persist_path)
+    engine = autorelease(LMCacheEngine(cfg, dumb_metadata(fmt)))
+
+    engine.store(tokens, kv_cache)
+
+    prefix_length = engine.lookup(tokens)
+    assert prefix_length == num_tokens, \
+        f"Expected {num_tokens} prefix tokens, but got {prefix_length}"
+
+    short_tokens_len = ((num_tokens // 2) // chunk_size) \
+        * chunk_size
+    short_tokens = tokens[:short_tokens_len]
+    prefix_length = engine.lookup(short_tokens)
+    assert prefix_length == short_tokens_len, \
+        f"Expected {short_tokens_len} prefix tokens, but got {prefix_length}"
+
+    prefix_length = engine.lookup(final_tokens)
+    expected_prefix_length = (num_tokens // chunk_size) * chunk_size
+    assert prefix_length == expected_prefix_length, \
+        f"Expected {expected_prefix_length} prefix tokens,"\
+            f" but got {prefix_length}"
+
+    engine.store(final_tokens, final_kv_cache)
+
+    final_prefix_length = engine.lookup(final_tokens)
+    assert final_prefix_length == num_tokens + new_num_tokens, \
+    f"Expected {num_tokens + new_num_tokens} prefix tokens,"\
+        f" but got {final_prefix_length}"
+
+    if persist_path.startswith("/tmp/"):
+        subprocess.run(shlex.split(f"rm -rf {persist_path}"))
+
+
 def test_builder(autorelease):
     instance_id = "test"
     cfg = LMCacheEngineConfig.from_legacy(chunk_size=256,
