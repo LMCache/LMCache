@@ -336,6 +336,39 @@ def test_lookup(fmt, autorelease):
         subprocess.run(shlex.split(f"rm -rf {persist_path}"))
 
 
+@pytest.mark.parametrize("fmt", ["vllm", "huggingface"])
+def test_store_kv_tensors_mask(fmt, autorelease):
+    device = "cuda"
+    num_tokens = 12000
+    new_num_tokens = 2000
+    chunk_size = 256
+    persist_path = "/tmp/test-engine-store-kv-tensors-mask.pth"
+
+    tokens = generate_tokens(num_tokens, device)
+    kv_cache = generate_kv_cache(num_tokens, fmt, device)
+    new_tokens = generate_tokens(new_num_tokens, device)
+    final_tokens = torch.cat([tokens, new_tokens])
+
+    cfg = LMCacheEngineConfig.from_legacy(chunk_size=chunk_size,
+                                          persist_path=persist_path)
+    engine = autorelease(LMCacheEngine(cfg, dumb_metadata(fmt)))
+
+    engine.store(tokens, kv_cache)
+    prefix_length = engine.lookup(tokens)
+    assert prefix_length == num_tokens, \
+        f"Expected {num_tokens} prefix tokens, but got {prefix_length}"
+    kv_tensor_mask = torch.ones_like(final_tokens, dtype=torch.bool)
+    align_to_chunk_cnt = (num_tokens // chunk_size) * chunk_size
+    kv_tensor_mask[:align_to_chunk_cnt] = False
+    more_cache_tokens = num_tokens + new_num_tokens - align_to_chunk_cnt
+    more_kv_cache = generate_kv_cache(more_cache_tokens, fmt, device)
+    engine.store(final_tokens, more_kv_cache, kv_tensor_mask)
+    prefix_length = engine.lookup(final_tokens)
+    assert prefix_length == num_tokens + new_num_tokens, \
+        f"Expected {num_tokens + new_num_tokens} prefix tokens,"\
+            f" but got {prefix_length}"
+
+
 def test_builder(autorelease):
     instance_id = "test"
     cfg = LMCacheEngineConfig.from_legacy(chunk_size=256,
