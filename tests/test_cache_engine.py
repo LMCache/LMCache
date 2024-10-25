@@ -332,9 +332,6 @@ def test_lookup(fmt, autorelease):
     f"Expected {num_tokens + new_num_tokens} prefix tokens,"\
         f" but got {final_prefix_length}"
 
-    if persist_path.startswith("/tmp/"):
-        subprocess.run(shlex.split(f"rm -rf {persist_path}"))
-
 
 @pytest.mark.parametrize("fmt", ["vllm", "huggingface"])
 def test_store_kv_tensors_mask(fmt, autorelease):
