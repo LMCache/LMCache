@@ -31,6 +31,7 @@ class SPTBlendRetrieverTask(BlendRetrieverTask):
         self.rebuilt_key: Optional[torch.Tensor] = None
         self.rebuilt_value: Optional[torch.Tensor] = None
         self.valid_mask: Optional[torch.Tensor] = None
+        self.rebuilt_positions: Optional[torch.Tensor] = None
 
     @staticmethod
     def _PrepareOutputTensor(
@@ -79,6 +80,7 @@ class SPTBlendRetrieverTask(BlendRetrieverTask):
         keys = []
         values = []
         valid_masks = []
+        all_positions = []
 
         num_layers = None
         num_heads = None
@@ -108,12 +110,19 @@ class SPTBlendRetrieverTask(BlendRetrieverTask):
                                      device="cpu")
             valid_mask[:length] = 1
 
+            positions = torch.zeros(len(token_segment),
+                                    dtype=torch.int,
+                                    device="cpu")
+            positions[:length] = torch.arange(length)
+
             keys.append(k)
             values.append(v)
             valid_masks.append(valid_mask)
+            all_positions.append(positions)
 
-        # Create valid mask before returning
+        # Create valid mask and rebuilt positions before returning
         self.valid_mask = torch.cat(valid_masks, dim=0)
+        self.rebuilt_positions = torch.cat(all_positions, dim=0)
 
         # return if nothing is retrieved
         if num_layers is None:
@@ -159,13 +168,15 @@ class SPTBlendRetrieverTask(BlendRetrieverTask):
             self._wait_for_result()
 
         assert self.valid_mask is not None
+        assert self.rebuilt_positions is not None
 
         ret = BlendRetrieverResult(
                 k = self.rebuilt_key[layer_id] \
                         if self.rebuilt_key is not None else None,
                 v = self.rebuilt_value[layer_id] \
                         if self.rebuilt_value is not None else None,
-                valid_mask = self.valid_mask)
+                valid_mask = self.valid_mask,
+                original_positions = self.rebuilt_positions)
         return ret
 
 

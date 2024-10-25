@@ -150,6 +150,9 @@ def test_spt_full_hit(fmt, spt_length, autorelease):
             check_kv_layer_equal(target_kv, layer_id, result.k, result.v, 0,
                                  target_len, fmt)
             assert (result.valid_mask == 1).all(), "Should be all valid!"
+            gt_positions = torch.cat(
+                [torch.arange(chunk_lengths[i]) for i in ids])
+            assert (result.original_positions == gt_positions).all()
 
     check_groups(0)
     check_groups(0, 1)
@@ -208,9 +211,15 @@ def test_spt_hit_miss(fmt, spt_length, autorelease):
                                          start_token + chunk_len, fmt)
                     assert (result.valid_mask[start_token:start_token +
                                               chunk_len] == 1).all()
+                    gt_positions = torch.arange(chunk_len)
+                    assert (result.original_positions[start_token:start_token +
+                                                      chunk_len] ==
+                            gt_positions).all()
                 else:
                     assert (result.valid_mask[start_token:start_token +
                                               chunk_len] == 0).all()
+                    assert (result.original_positions[start_token:start_token +
+                                                      chunk_len] == 0).all()
                 start_token += chunk_len
 
     check_groups(0, 1, 2)  # Y, N, Y
@@ -260,6 +269,7 @@ def test_spt_all_miss(fmt, spt_length, autorelease):
             assert result.k is None
             assert result.v is None
             assert (result.valid_mask == 0).all()
+            assert (result.original_positions == 0).all()
 
 
 @pytest.mark.parametrize("fmt", ["vllm", "huggingface"])
@@ -319,6 +329,14 @@ def test_spt_partial_hit(fmt, spt_length, autorelease):
                 assert (result.valid_mask[start_token +
                                           matched_len:start_token +
                                           chunk_len] == 0).all()
+
+                gt_positions = torch.arange(matched_len)
+                assert (result.original_positions[start_token:start_token +
+                                                  matched_len] == gt_positions
+                        ).all()
+                assert (result.original_positions[start_token +
+                                                  matched_len:start_token +
+                                                  chunk_len] == 0).all()
 
                 start_token += chunk_len
 
@@ -387,7 +405,7 @@ def test_spt_multi_query(fmt, spt_length, autorelease):
             assert (result2.valid_mask[0:target_len2] == 1
                     ).all(), "Should be all valid!"
             assert (result2.valid_mask[target_len2:] == 0
-                    ).all(), "Should be all valid!"
+                    ).all(), "Should be all invalid!"
 
     check_groups(0, 1)
     check_groups(0, 2)
@@ -407,7 +425,12 @@ def test_cacheblend_executor_single_query():
     changed_positions = [2, 6]
     expected_positions = [p + prefix_len for p in changed_positions]
 
+    def dumb_posional_encoding(p, q, k):
+        return q, k
+
     blender = CacheBlendImpl(0.2)
+    blender.set_positional_encoder(dumb_posional_encoding)
+    blender.set_reverse_positional_encoder(dumb_posional_encoding)
 
     fq_1 = torch.zeros(q_shape, dtype=dtype, device=device)
     for i in range(query_len):
@@ -430,22 +453,22 @@ def test_cacheblend_executor_single_query():
     query_start_loc = torch.tensor([0, query_len],
                                    dtype=torch.int32,
                                    device="cuda")
+    original_positions = torch.arange(query_len)
 
     # First layer should do nothing!
-    ret = blender.blend(0, rk_1, rv_1, valid, fq_1, fk_1, fv_1, positions,
-                        query_start_loc, 0)
+    ret = blender.blend(0, rk_1, rv_1, valid, original_positions, fq_1, fk_1,
+                        fv_1, positions, query_start_loc, 0)
     assert torch.equal(ret.q, fq_1)
     assert torch.equal(ret.k, fk_1)
     assert torch.equal(ret.v, fv_1)
     assert torch.equal(ret.positions, positions)
     assert torch.equal(ret.local_indices,
                        torch.arange(prefix_len, dtype=torch.int, device="cpu"))
-    assert ret.query_start_loc[0].item() == 0
-    assert ret.query_start_loc[1].item() == prefix_len
+    assert ret.query_start_loc is None
 
     # Second layer should do token selection
-    ret = blender.blend(1, rk_1, rv_1, valid, fq_1, fk_1, fv_1, positions,
-                        ret.query_start_loc, 0)
+    ret = blender.blend(1, rk_1, rv_1, valid, original_positions, fq_1, fk_1,
+                        fv_1, positions, query_start_loc, 0)
     assert len(ret.positions) == len(expected_positions)  # recompute 2 tokens
     assert ret.k.shape[0] == query_len  # long K
     assert ret.v.shape[0] == query_len  # long V
@@ -467,8 +490,8 @@ def test_cacheblend_executor_single_query():
     rk_2 = rk_1
     rv_2 = rv_1
     pos_2 = ret.positions
-    ret = blender.blend(2, rk_2, rv_2, valid, ret.q, fk_2, fv_2, pos_2,
-                        ret.query_start_loc, 0)
+    ret = blender.blend(2, rk_2, rv_2, valid, original_positions, ret.q, fk_2,
+                        fv_2, pos_2, query_start_loc, 0)
 
     # Should update the KV without changing q or positions
     assert torch.equal(ret.q, fq_2)
@@ -484,8 +507,7 @@ def test_cacheblend_executor_single_query():
     assert torch.equal(
         ret.local_indices,
         torch.tensor(changed_positions, dtype=torch.int, device="cpu"))
-    assert ret.query_start_loc[0].item() == 0
-    assert ret.query_start_loc[1].item() == 2
+    assert ret.query_start_loc is None
 
     # TODO: un-tested cases:
     # - some positions are invalid

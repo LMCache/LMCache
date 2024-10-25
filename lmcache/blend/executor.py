@@ -1,3 +1,5 @@
+from typing import Callable, Optional, Tuple
+
 import torch
 
 from lmcache.blend.interfaces import BlendExecutor, BlendOutput
@@ -25,13 +27,31 @@ def create_index(ndims, target_dim, index):
     return tuple(index_obj)
 
 
+PositionalEncoder = Callable[[torch.Tensor, torch.Tensor, torch.Tensor],
+                             Tuple[torch.Tensor, torch.Tensor]]
+
+
 class CacheBlendImpl(BlendExecutor):
 
-    def __init__(self, recompute_ratio: float):
+    def __init__(
+        self,
+        recompute_ratio: float,
+    ):
         self.recompute_ratio = recompute_ratio
 
         # Indexes in the retrieved_kv of the tokens from the fresh_q
         self.indexes_in_kv = torch.tensor([], dtype=torch.long, device="cpu")
+
+        self.positional_encoder: Optional[PositionalEncoder] = None
+        self.reverse_positional_encoder: Optional[PositionalEncoder] = \
+                None
+
+    def set_positional_encoder(self, positional_encoder: PositionalEncoder):
+        self.positional_encoder = positional_encoder
+
+    def set_reverse_positional_encoder(
+            self, reverse_positional_encoder: PositionalEncoder):
+        self.reverse_positional_encoder = reverse_positional_encoder
 
     def _select_tokens_single_query(self, rk: torch.Tensor, rv: torch.Tensor,
                                     valid: torch.Tensor, fq: torch.Tensor,
@@ -69,12 +89,23 @@ class CacheBlendImpl(BlendExecutor):
         #logger.debug(f"Local indices of the selected tokens: {local_indices}")
         return local_indices
 
+    def _build_positions(self, query_start_loc: torch.Tensor,
+                         device) -> torch.Tensor:
+        """Rebuild the positions based on the query start locs
+        """
+        #ret = torch.arange(int(query_start_loc[-1]), device=device)
+        ret = torch.arange(query_start_loc[-1], device=device)  # type: ignore
+        for start, end in zip(query_start_loc[:-1], query_start_loc[1:]):
+            ret[start:end] -= start
+        return ret.long()
+
     def blend(
         self,
         layer_id: int,
         retrieved_k: torch.Tensor,
         retrieved_v: torch.Tensor,
         valid_mask: torch.Tensor,
+        original_positions: torch.Tensor,
         fresh_q: torch.Tensor,
         fresh_k: torch.Tensor,
         fresh_v: torch.Tensor,
@@ -92,6 +123,8 @@ class CacheBlendImpl(BlendExecutor):
             [num_tokens, hidden_dims]
         :param torch.Tensor valid_mask: A CPU tensor returned from the 
             retriever indicating whether the KV is valid. 
+        :param torch.Tensor original_positions: The original positions of the
+            tokens in the retrieved KV
         :param torch.Tensor fresh_q: The fresh Q tensor from QKV split,
             in shape [num_tokens, hidden_dims]
         :param torch.Tensor fresh_k: The fresh K tensor from QKV split,
@@ -102,7 +135,8 @@ class CacheBlendImpl(BlendExecutor):
             tokens in the fresh_q
         :param torch.Tensor query_start_loc: The start location of the query if
             input_tokens has multiple requests in a batch. The length should be
-            the number of requests in the batch + 1
+            the number of requests in the batch + 1. Note this will NOT be 
+            changed after token selection.
         :param int token_dim: The token dimension  
 
         :return: The blended Q, K, V, and positions
@@ -111,11 +145,14 @@ class CacheBlendImpl(BlendExecutor):
         assert valid_mask.is_cpu, "valid_mask should be on CPU"
 
         if layer_id == 0:
-            return BlendOutput(
-                fresh_q, fresh_k, fresh_v, positions,
-                torch.arange(fresh_q.shape[token_dim],
-                             device="cpu",
-                             dtype=torch.long), query_start_loc)
+            return BlendOutput(fresh_q,
+                               fresh_k,
+                               fresh_v,
+                               positions,
+                               torch.arange(fresh_q.shape[token_dim],
+                                            device="cpu",
+                                            dtype=torch.long),
+                               query_start_loc=None)
 
         elif layer_id == 1:
             new_query_start_locs = [0]
@@ -147,8 +184,31 @@ class CacheBlendImpl(BlendExecutor):
             assert len(self.indexes_in_kv) == fresh_k.shape[token_dim]
             index_obj = create_index(fresh_k.dim(), token_dim,
                                      self.indexes_in_kv)
-            retrieved_k[index_obj] = fresh_k
+
+            if self.positional_encoder is not None and \
+                    self.reverse_positional_encoder is not None:
+                # Clear the positional encoding
+                dumb_q = torch.zeros(retrieved_k.shape,
+                                     device=fresh_q.device,
+                                     dtype=fresh_q.dtype)
+                dumb_q, rk_no_position = self.reverse_positional_encoder(
+                    original_positions.to(device=retrieved_k.device,
+                                          dtype=torch.long), dumb_q,
+                    retrieved_k)
+
+                # Re-apply positional encodings based on query_start_loc
+                new_positions = self._build_positions(query_start_loc,
+                                                      device=fresh_q.device)
+                dumb_q, rk_with_position = self.positional_encoder(
+                    new_positions, dumb_q, rk_no_position)
+            else:
+                logger.warning("Positional encoder and reverse positional "
+                               "encoder is not set. This may lead to "
+                               "incorrect results.")
+                rk_with_position = retrieved_k
+
+            rk_with_position[index_obj] = fresh_k
             retrieved_v[index_obj] = fresh_v
 
-            return BlendOutput(fresh_q, retrieved_k, retrieved_v, positions,
-                               self.indexes_in_kv, query_start_loc)
+            return BlendOutput(fresh_q, rk_with_position, retrieved_v,
+                               positions, self.indexes_in_kv, None)
