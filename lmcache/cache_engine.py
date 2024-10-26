@@ -248,9 +248,12 @@ class LMCacheEngine:
         Input:
             tokens: the input tokens, with shape [seq_len]
             kv_tensors_raw: the kv cache of the tokens, in the format of nested 
-            tuples
+            tuples. The number of tokens in the kv_tensors_raw should be the 
+            same as trues in kv_tensors_mask if mask is not None.
+            Otherwise, it should be the same as the input tokens.
             kv_tensors_mask: a boolean mask of tokens indicating which tokens'
             KV Cache should be stored. Only support suffix mask.
+            None is taken as trues for all tokens.
             len(kv_tensors_mask) should be the same as len(tokens)
             number of true should be the same as kv_tensors_raw token number
             
