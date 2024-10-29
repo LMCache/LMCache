@@ -1,6 +1,7 @@
 import os
 import queue
 import threading
+import time
 from collections import OrderedDict
 from typing import Optional, Tuple, Union
 
@@ -61,6 +62,8 @@ class LMCLocalBackend(LMCBackendInterface):
         # TODO (Jiayi): The storage size and caching
         self.evictor = DummyEvictor()
 
+        self.put_stream = torch.cuda.Stream()
+
     def contains(
         self,
         key: CacheEngineKey,
@@ -92,12 +95,14 @@ class LMCLocalBackend(LMCBackendInterface):
     @_lmcache_nvtx_annotate
     def put_worker(self, ):
         while True:
+            # TODO: dirty fix to downgrade the priority of the put worker
+            time.sleep(0.01)
             item = self.put_queue.get()
             if isinstance(item, LocalBackendEndSignal):
                 break
             key, value = item
-            # with torch.cuda.stream(self.put_stream):
-            self.put_nonblocking(key, value)
+            with torch.cuda.stream(self.put_stream):
+                self.put_nonblocking(key, value)
 
     def put_nonblocking(self, key, kv_chunk):
         # TODO(Jiayi): torch.cuda.synchronize() needs to be removed
@@ -107,7 +112,7 @@ class LMCLocalBackend(LMCBackendInterface):
             kv_chunk_local = kv_chunk.to(self.device, non_blocking=True)
             torch.cuda.synchronize()
         else:
-            kv_chunk_local = kv_chunk.to(self.device)
+            kv_chunk_local = kv_chunk.to(self.device, non_blocking=True)
         self.update_lock.acquire()
 
         # Obtain keys to evict
