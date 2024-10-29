@@ -82,3 +82,16 @@ class BaseEvictor(metaclass=abc.ABCMeta):
                 f"Encountered unknown kv data type {type(kv_obj)}!")
 
         return size_in_gb
+
+
+class DummyEvictor(BaseEvictor):
+
+    def update_on_get(self, key: Union[CacheEngineKey, str],
+                      cache_dict: OrderedDict) -> None:
+        # Dummy implementation does nothing
+        pass
+
+    def update_on_put(self, cache_dict: OrderedDict,
+                      kv_obj: Union[torch.Tensor, bytes]):
+        # Dummy implementation does not evict anything
+        return [], PutStatus.LEGAL

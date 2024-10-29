@@ -11,7 +11,7 @@ from safetensors.torch import save_file
 from lmcache.config import LMCacheEngineConfig
 from lmcache.logging import init_logger
 from lmcache.storage_backend.abstract_backend import LMCBackendInterface
-from lmcache.storage_backend.evictor import LRUEvictor
+from lmcache.storage_backend.evictor import DummyEvictor
 from lmcache.storage_backend.evictor.base_evictor import PutStatus
 from lmcache.utils import (CacheEngineKey, DiskCacheMetadata, KVCache,
                            _lmcache_nvtx_annotate)
@@ -59,7 +59,7 @@ class LMCLocalBackend(LMCBackendInterface):
         # self.put_events = {}
 
         # TODO (Jiayi): The storage size and caching
-        self.evictor = LRUEvictor()
+        self.evictor = DummyEvictor()
 
     def contains(
         self,
@@ -253,7 +253,7 @@ class LMCLocalDiskBackend(LMCBackendInterface):
         # TODO (Jiayi): please remove this hard code
         self.dst_device = "cuda"
 
-        self.evictor = LRUEvictor()
+        self.evictor = DummyEvictor()
 
     def contains(
         self,

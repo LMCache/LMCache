@@ -6,7 +6,7 @@ from typing import List, Optional
 from lmcache.logging import init_logger
 from lmcache.server.server_storage_backend.abstract_backend import \
     LMSBackendInterface
-from lmcache.storage_backend.evictor import LRUEvictor
+from lmcache.storage_backend.evictor import DummyEvictor
 from lmcache.storage_backend.evictor.base_evictor import PutStatus
 from lmcache.utils import DiskCacheMetadata, _lmcache_nvtx_annotate
 
@@ -31,7 +31,7 @@ class LMSLocalBackend(LMSBackendInterface):
 
         self.update_lock = threading.Lock()
 
-        self.evictor = LRUEvictor()
+        self.evictor = DummyEvictor()
 
     def list_keys(self) -> List[str]:
 
@@ -161,7 +161,7 @@ class LMSLocalDiskBackend(LMSBackendInterface):
 
         self.update_lock = threading.Lock()
 
-        self.evictor = LRUEvictor()
+        self.evictor = DummyEvictor()
 
     def list_keys(self) -> List[str]:
 
