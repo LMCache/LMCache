@@ -72,6 +72,7 @@ def get_tensor_size(tensor):
     return size_in_gb
 
 
+@pytest.mark.skip(reason="Temporarily disbaling the evictor as stated in PR 185")
 @pytest.mark.parametrize("dst_device", ["cuda:0"])
 @pytest.mark.parametrize("backend", ["cuda", "cpu", "file://local_disk/"])
 def test_evict(backend, dst_device, autorelease):
