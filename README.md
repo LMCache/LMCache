@@ -18,7 +18,7 @@ Try LMCache with pre-built vllm docker images [here](https://github.com/LMCache/
 
 # 💻 Quickstart
 
-LMCache provides the integration to the latest vLLM (0.6.1.post2). To install LMCache, use the following command:
+LMCache provides the integration to the latest vLLM (0.6.2). To install LMCache, use the following command:
 ```bash
 # requires python >= 3.10 and nvcc >= 12.1
 pip install lmcache lmcache_vllm
