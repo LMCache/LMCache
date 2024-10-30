@@ -21,9 +21,8 @@ class LMCacheEngine:
         metadata: LMCacheEngineMetadata,
     ):
         """
-        Throws:
-            RuntimeError if the loaded configuration does not match the current
-            configuration
+        raises: RuntimeError if the loaded configuration does not 
+            match the current configuration
         """
 
         self.config = config
@@ -72,12 +71,11 @@ class LMCacheEngine:
         """
         Chunk the tokens into chunks of size self.chunk_size.
 
-        Input:
-            tokens: the input tokens, with shape [seq_len]
+        :param tokens: the input tokens, with shape [seq_len]
             device: the target device after chunking
 
-        Output:
-            a generator of chunks of tokens, each with shape [chunk_size]
+        :return: a generator of chunks of tokens, each with 
+                shape [chunk_size]
         """
         # TODO(Jiayi): the following step can be parallelized
         for i in range(0, len(tokens), self.chunk_size):
@@ -99,9 +97,8 @@ class LMCacheEngine:
         self,
         kv_tensors: KVCache,
     ) -> torch.Tensor:
-        """
-        Convert the nested tuple of kv tensors to a single big tensor with 2
-        extra dimensions
+        """ Convert the nested tuple of kv tensors to a single 
+        big tensor with 2 extra dimensions
         """
         k_temp = []
         v_temp = []
@@ -168,15 +165,14 @@ class LMCacheEngine:
         """
         Chunk the kv cache into chunks of size self.chunk_size.
 
-        Input:
-            tokens: the input tokens, with shape [seq_len]
-            kv_tensors: the kv cache of the tokens, in the format of nested 
-            tuples
-            fmt: either 'huggingface' or 'vllm'
+        
+        :param tokens: the input tokens, with shape [seq_len]
+        :param kv_tensors: the kv cache of the tokens, in the format 
+            of nested tuples
+        :param fmt: either 'huggingface' or 'vllm'
 
-        Output:
-            a generator of tuples, each tuple is a chunk of tokens and the 
-            corresponding kv cache.
+        :return: a generator of tuples, each tuple is a chunk of tokens
+                and the corresponding kv cache.
         """
         return self._slice_kv_at(0, kv_tensors, fmt)
 
@@ -244,28 +240,32 @@ class LMCacheEngine:
     ) -> None:
         """
         Store the KV cache of the tokens into the cache engine.
-
-        Input:
-            tokens: the input tokens, with shape [seq_len]
-            kv_tensors_raw: the kv cache of the tokens, in the format of nested 
-            tuples. The number of tokens in the kv_tensors_raw should be the 
-            same as trues in kv_tensors_mask if mask is not None.
-            Otherwise, it should be the same as the input tokens.
-            kv_tensors_mask: a boolean mask of tokens indicating which tokens'
-            KV Cache should be stored. Only support suffix mask.
-            None is taken as trues for all tokens.
-            len(kv_tensors_mask) should be the same as len(tokens)
-            number of true should be the same as kv_tensors_raw token number
-            
-            format: either 'huggingface' or 'vllm'
-                For huggingface, it should have the shape of 
+        Format: either 'huggingface' or 'vllm' 
+                
+                For huggingface, 
+                it should have the shape of 
                 [num_heads, num_tokens, head_size]
 
-                For vllm, it should have the shape of 
+                For vllm,
+                it should have the shape of 
                 [num_tokens, num_heads, head_size]
 
-        Returns:
-            None
+        :param tokens: the input tokens, with shape [seq_len]
+        :param kv_tensors_raw: the kv cache of the tokens, in 
+            the format of nested tuples. The number of tokens 
+            in the kv_tensors_raw should be the same as trues in 
+            kv_tensors_mask if mask is not None. Otherwise, 
+            it should be the same as the input tokens.
+        :param kv_tensors_mask: a boolean mask of tokens indicating 
+            which tokens' KV Cache should be stored. Only support 
+            suffix mask. None is taken as trues for all tokens.
+            len(kv_tensors_mask) should be the same as len(tokens)
+            number of true should be the same as kv_tensors_raw token 
+            number.
+
+        :param skip_existing: whether to skip the existing chunks
+        :param blocking: whether to wait for the store operation to finish
+        :return: None
 
         Note:
             The KV cache should NOT have the "batch" dimension.
@@ -326,26 +326,25 @@ class LMCacheEngine:
         Retrieve the KV cache of the tokens from the cache engine. The 
         retrieved KV cache should be a prefix of the input tokens.
 
-        Input:
-            tokens: the input tokens, with shape [seq_len]
+        The KV cache of the tokens, in the format of nested 
+        tuples or a single tensor with shape [num_layers, 2, hidden_dim, 
+        num_tokens] (huggingface) or [num_layers, 2, num_tokens, 
+        hidden_dim] (vllm).
 
-            mask: a boolean mask of tokens indicating which tokens'
+        Will be an empty tuple if no kv cache is retrieved (no matter 
+        return_tuple is True or not).
+
+        :param tokens: the input tokens, with shape [seq_len]
+
+        :param mask: a boolean mask of tokens indicating which tokens'
             KV Cache should be retrieved. Currently, only support
             suffix mask.
 
-            return_tuple: whether to return the kv cache as a tuple or a 
+        :param return_tuple: whether to return the kv cache as a tuple or a 
             single tensor
 
-        Output: 
-            kv_tensors: the kv cache of the tokens, in the format of nested 
-            tuples or a single tensor with shape [num_layers, 2, hidden_dim, 
-            num_tokens] (huggingface) or [num_layers, 2, num_tokens, 
-            hidden_dim] (vllm).
-            Will be an empty tuple if no kv cache is retrieved (no matter 
-            return_tuple is True or not).
-
-
-            ret_mask: indicate which tokens are retrieved
+        :return: Tuple[ kv_tensors , ret_mask] indicate which tokens 
+            are retrieved
         """
         num_skip_chunk = 0
         num_skip_tok = 0
@@ -422,11 +421,9 @@ class LMCacheEngine:
         """
         Checks the existence of KV cache of the tokens from the cache engine.
 
-        Input:
-            tokens: the input tokens, with shape [seq_len]
+        :param tokens: the input tokens, with shape [seq_len]
 
-        Output:
-            An int indicating how many prefix tokens are cached.
+        :return: An int indicating how many prefix tokens are cached.
         """
         # NOTE(Sixian): Now this is a prefix lookup.
         fmt = self.metadata.fmt
@@ -460,8 +457,7 @@ class LMCacheEngineBuilder:
         Builds a new LMCacheEngine instance if it doesn't already exist for the
         given ID.
 
-        Raises:
-            ValueError if the instance already exists with a different
+        raises: ValueError if the instance already exists with a different
             configuration.
         """
         if instance_id not in cls._instances:

@@ -241,16 +241,16 @@ def collect_bytes(output_buffer, output_lengths) -> torch.Tensor:
 @_lmcache_nvtx_annotate
 def encode_ntokens(cdf_int, encode_input, output_buffer,
                    output_lengths) -> torch.Tensor:
-    """
-    Input:
-        cdf_int: int16 tensor on GPU with shape [nlayers, nchannels, Lp]
-        encode_input: int8 tensor on GPU with shape 
-        [nlayers, ntokens, nchannels]
-        output_buffer: uint8 tensor on GPU with shape 
+    """Encode a batch of ntokens.
+
+    :param cdf_int: int16 tensor on GPU with shape [nlayers, nchannels, Lp]
+    :param encode_input: int8 tensor on GPU with shape 
+    :param [nlayers, ntokens, nchannels]
+    :param output_buffer: uint8 tensor on GPU with shape 
         [nlayers, nchannels, BUFFER_SIZE]
-        output_lengths: int32 tensor on GPU with shape [nlayers, nchannels]
-    Returns:
-        byte_tensor: the byte tensor
+    :param output_lengths: int32 tensor on GPU with shape [nlayers, nchannels]
+
+    :return byte_tensor: the byte tensor
     """
     torchac_cuda.encode_fast_new(
         cdf_int,

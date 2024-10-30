@@ -187,8 +187,8 @@ class SPTBlendRetriever(BlendRetriever):
     of the input text chunk.
 
     Example:
-      Input = [x, x, x, spt, y, y, spt, z, z, z, z]
-      Requests sent to LMCache engine:
+        Input = [x, x, x, spt, y, y, spt, z, z, z, z]
+        Requests sent to LMCache engine:
         - [x, x, x, spt]
         - [y, y, spt]
         - [z, z, z, z]

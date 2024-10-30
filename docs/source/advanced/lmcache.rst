@@ -5,22 +5,14 @@ Subpackages
 -----------
 
 .. toctree::
-   :maxdepth: 2
+   :maxdepth: 1
 
    lmcache.server
    lmcache.storage_backend
+   lmcache.blend
 
 Submodules
 ----------
-
-lmcache.cache\_engine module
-----------------------------
-
-.. automodule:: lmcache.cache_engine
-   :members:
-   :undoc-members:
-   :show-inheritance:
-
 
 lmcache.logging module
 ----------------------

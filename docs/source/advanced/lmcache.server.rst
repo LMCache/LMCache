@@ -1,11 +1,11 @@
-lmcache.server package
+LMCache Server
 ======================
 
 Subpackages
 -----------
 
 .. toctree::
-   :maxdepth: 4
+   :maxdepth: 2
 
    lmcache.server.server_storage_backend
 

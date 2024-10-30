@@ -82,4 +82,6 @@ Documentation
    :maxdepth: 1
    :caption: Advanced
 
-   advanced/lmcache
+   advanced/lmcache.blend
+   advanced/lmcache.server
+   advanced/lmcache.storage_backend
