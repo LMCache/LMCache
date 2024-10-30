@@ -185,11 +185,15 @@ class LMCacheEngine:
         tokens: torch.Tensor,
         kv_tensors: torch.Tensor,
         fmt: str,
+        num_skip_prefix_chunk=0,
     ) -> Iterable[Tuple[str, torch.Tensor]]:
         """
         Skip the existing chunks and return the rest of the chunks
         """
-        chunk_hashes = self._prefix_hash(self._chunk_tokens(tokens))
+        chunk_hashes = self._prefix_hash(self._chunk_tokens(tokens),
+                                         num_skip_prefix_chunk)
+        # With num_skip_chunks, the following is relative to
+        # the new start after skip.
         num_tokens: int = self._num_tokens_in_kv(kv_tensors, fmt)
 
         start_token_idx = None
@@ -212,14 +216,17 @@ class LMCacheEngine:
         tokens: torch.Tensor,
         kv_tensors: torch.Tensor,
         fmt: str,
+        num_skip_prefix_chunk=0,
         skip_existing=True,
     ) -> Iterable[Tuple[str, torch.Tensor]]:
         """
         Returns a generator of zipped (chunk_hash, chunk_kv) tuples
         """
         if skip_existing:
-            return self._make_chunks_skip_existing(tokens, kv_tensors, fmt)
+            return self._make_chunks_skip_existing(tokens, kv_tensors, fmt,
+                                                   num_skip_prefix_chunk)
         else:
+            assert num_skip_prefix_chunk == 0
             return zip(
                 self._prefix_hash(self._chunk_tokens(tokens)),
                 self._chunk_kv(kv_tensors, fmt),
@@ -231,6 +238,7 @@ class LMCacheEngine:
         self,
         tokens: torch.Tensor,
         kv_tensors_raw: KVCache,
+        kv_tensors_mask: Optional[torch.Tensor] = None,
         skip_existing=True,
         blocking=True,
     ) -> None:
@@ -240,7 +248,14 @@ class LMCacheEngine:
         Input:
             tokens: the input tokens, with shape [seq_len]
             kv_tensors_raw: the kv cache of the tokens, in the format of nested 
-            tuples
+            tuples. The number of tokens in the kv_tensors_raw should be the 
+            same as trues in kv_tensors_mask if mask is not None.
+            Otherwise, it should be the same as the input tokens.
+            kv_tensors_mask: a boolean mask of tokens indicating which tokens'
+            KV Cache should be stored. Only support suffix mask.
+            None is taken as trues for all tokens.
+            len(kv_tensors_mask) should be the same as len(tokens)
+            number of true should be the same as kv_tensors_raw token number
             
             format: either 'huggingface' or 'vllm'
                 For huggingface, it should have the shape of 
@@ -257,19 +272,30 @@ class LMCacheEngine:
         """
         start_time = time.perf_counter()
         fmt = self.metadata.fmt
-
+        if kv_tensors_mask is None:
+            kv_tensors_mask = torch.ones_like(tokens, dtype=torch.bool)
         assert (len(
             tokens.shape) == 1), f"Invalid shape of tokens: {tokens.shape}"
-        assert len(kv_tensors_raw) > 0, "Empty kv_tensors"
+        assert (len(
+            kv_tensors_mask.shape) == 1), \
+        f"Invalid shape of mask: {kv_tensors_mask.shape}"
+        assert len(tokens) == len(kv_tensors_mask), \
+            "token length does not match mask length"
+        # NOTE(Sixian): Now kv_tensors_mask always a suffix mask.
+        num_skip_tok = (len(kv_tensors_mask) - torch.sum(kv_tensors_mask))
+        num_skip_chunk = num_skip_tok // self.chunk_size
+        assert num_skip_tok == num_skip_chunk * self.chunk_size, \
+            "Store KV mask should align to chunk size"
         assert len(tokens) == self._num_tokens_in_kv(
             kv_tensors_raw, fmt
-        ), "Number of tokens in the kv cache does not match the input tokens"
-
+        ) + num_skip_tok, \
+            "Number of tokens in the kv cache does not match the input tokens"
         kv_tensors = self._tuple_kv_to_blob(kv_tensors_raw)
         """ chunk the tokens and the kv caches """
         chunk_hashes_and_kvs = self._make_chunks(tokens,
                                                  kv_tensors,
                                                  fmt,
+                                                 num_skip_chunk,
                                                  skip_existing=skip_existing)
         if not blocking:
             chunk_hashes_and_kvs = list(chunk_hashes_and_kvs)
@@ -294,7 +320,8 @@ class LMCacheEngine:
         self,
         tokens: torch.Tensor,
         mask: Optional[torch.Tensor] = None,
-    ) -> Tuple[KVCache, torch.Tensor]:
+        return_tuple: bool = True,
+    ) -> Tuple[Union[KVCache, torch.Tensor], torch.Tensor]:
         """
         Retrieve the KV cache of the tokens from the cache engine. The 
         retrieved KV cache should be a prefix of the input tokens.
@@ -302,21 +329,21 @@ class LMCacheEngine:
         Input:
             tokens: the input tokens, with shape [seq_len]
 
-            format: either 'huggingface' or 'vllm'
-                For huggingface, it should have the shape of 
-                [num_heads, num_tokens, head_size]
-                
-                For vllm, it should have the shape of 
-                [num_tokens, num_heads, head_size]
-                
             mask: a boolean mask of tokens indicating which tokens'
             KV Cache should be retrieved. Currently, only support
             suffix mask.
 
-        Output:
+            return_tuple: whether to return the kv cache as a tuple or a 
+            single tensor
+
+        Output: 
             kv_tensors: the kv cache of the tokens, in the format of nested 
-                        tuples. Will be an empty tuple if no kv cache is 
-                        retrieved.
+            tuples or a single tensor with shape [num_layers, 2, hidden_dim, 
+            num_tokens] (huggingface) or [num_layers, 2, num_tokens, 
+            hidden_dim] (vllm).
+            Will be an empty tuple if no kv cache is retrieved (no matter 
+            return_tuple is True or not).
+
 
             ret_mask: indicate which tokens are retrieved
         """
@@ -356,21 +383,27 @@ class LMCacheEngine:
             ret_mask[:] = False
             return (), ret_mask
 
-        st2 = time.perf_counter()
-
         # drop extra tokens in the first chunk
         extra_token_len = num_skip_tok - num_skip_chunk * self.chunk_size
         retrieved_kv_chunks[0] = self._slice_kv_at(extra_token_len,
                                                    retrieved_kv_chunks[0],
                                                    fmt)[0]
 
-        ret = self._blob_to_tuple_kv(
-            torch.cat(retrieved_kv_chunks, dim=dim + 2))
-        ed2 = time.perf_counter()
-        logger.info(
-            f"Concatenated {len(retrieved_kv_chunks)} chunks -- elapsed time"
-            f"{ed2 - st2}")
-        retrieved_token_count = 0 if len(ret) == 0 else ret[0][0].shape[dim]
+        ret: Union[KVCache, torch.Tensor]
+        if return_tuple:
+            st2 = time.perf_counter()
+            ret = self._blob_to_tuple_kv(
+                torch.cat(retrieved_kv_chunks, dim=dim + 2))
+            ed2 = time.perf_counter()
+            logger.info(f"Concatenated {len(retrieved_kv_chunks)} chunks "
+                        f"-- elapsed time {ed2 - st2}")
+            retrieved_token_count = 0 if len(
+                ret) == 0 else ret[0][0].shape[dim]
+        else:
+            ret = torch.cat(retrieved_kv_chunks, dim=dim + 2)
+            retrieved_token_count = 0 if ret.numel() == 0 else ret.shape[dim +
+                                                                         2]
+
         ed = time.perf_counter()
         logger.info(f"Retrieved {len(retrieved_kv_chunks)} chunks "
                     f"({retrieved_token_count} tokens in total) --"
@@ -379,6 +412,33 @@ class LMCacheEngine:
         ret_mask[num_skip_tok + retrieved_token_count:] = False
 
         return ret, ret_mask
+
+    @_lmcache_nvtx_annotate
+    @torch.no_grad()
+    def lookup(
+        self,
+        tokens: torch.Tensor,
+    ) -> int:
+        """
+        Checks the existence of KV cache of the tokens from the cache engine.
+
+        Input:
+            tokens: the input tokens, with shape [seq_len]
+
+        Output:
+            An int indicating how many prefix tokens are cached.
+        """
+        # NOTE(Sixian): Now this is a prefix lookup.
+        fmt = self.metadata.fmt
+        total_token_cnt = len(tokens)
+        current_token_idx = 0
+        chunk_hashes = self._prefix_hash(self._chunk_tokens(tokens), 0)
+        for chunk_hash in chunk_hashes:
+            if not self.engine_.contains(self._make_key(chunk_hash, fmt)):
+                break
+            current_token_idx = min(current_token_idx + self.chunk_size,
+                                    total_token_cnt)
+        return current_token_idx
 
     def close(self):
         self.engine_.close()

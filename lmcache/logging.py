@@ -3,7 +3,7 @@ from logging import Logger
 
 logging.basicConfig(
     format="\033[33m%(levelname)s LMCache: \033[0m%(message)s "
-    "[%(asctime)s.%(msecs)03d]",
+    "[%(asctime)s] -- %(pathname)s:%(lineno)d",
     level=logging.INFO,
 )
 

@@ -10,6 +10,12 @@ KVCache = Tuple[Tuple[torch.Tensor, torch.Tensor], ...]
 
 
 @dataclass
+class DiskCacheMetadata:
+    path: str
+    size: float
+
+
+@dataclass
 class CacheEngineKey:
     fmt: str
     model_name: str

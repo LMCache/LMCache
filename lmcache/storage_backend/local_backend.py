@@ -1,7 +1,9 @@
 import os
 import queue
 import threading
-from typing import Dict, Optional, Set, Tuple, Union
+import time
+from collections import OrderedDict
+from typing import Optional, Tuple, Union
 
 import torch
 from safetensors import safe_open
@@ -10,7 +12,10 @@ from safetensors.torch import save_file
 from lmcache.config import LMCacheEngineConfig
 from lmcache.logging import init_logger
 from lmcache.storage_backend.abstract_backend import LMCBackendInterface
-from lmcache.utils import CacheEngineKey, KVCache, _lmcache_nvtx_annotate
+from lmcache.storage_backend.evictor import DummyEvictor
+from lmcache.storage_backend.evictor.base_evictor import PutStatus
+from lmcache.utils import (CacheEngineKey, DiskCacheMetadata, KVCache,
+                           _lmcache_nvtx_annotate)
 
 logger = init_logger(__name__)
 
@@ -35,7 +40,7 @@ class LMCLocalBackend(LMCBackendInterface):
 
         self.chunk_size = config.chunk_size
         self.config = config
-        self.dict: Dict[CacheEngineKey, torch.Tensor] = {}
+        self.dict: OrderedDict[CacheEngineKey, torch.Tensor] = OrderedDict()
         self.device = config.local_device
 
         self.put_queue: queue.Queue[
@@ -54,6 +59,11 @@ class LMCLocalBackend(LMCBackendInterface):
         # self.async_put_flag = False
         # self.put_events = {}
 
+        # TODO (Jiayi): The storage size and caching
+        self.evictor = DummyEvictor()
+
+        self.put_stream = torch.cuda.Stream()
+
     def contains(
         self,
         key: CacheEngineKey,
@@ -69,15 +79,30 @@ class LMCLocalBackend(LMCBackendInterface):
         """
         return key in self.dict
 
+    def remove(
+        self,
+        key: CacheEngineKey,
+    ) -> None:
+        """
+        Remove the KV cache chunk by the given key
+
+        Input:
+            key: the key of the token chunk, including prefix hash and format
+
+        """
+        self.dict.pop(key)
+
     @_lmcache_nvtx_annotate
     def put_worker(self, ):
         while True:
+            # TODO: dirty fix to downgrade the priority of the put worker
+            time.sleep(0.01)
             item = self.put_queue.get()
             if isinstance(item, LocalBackendEndSignal):
                 break
             key, value = item
-            # with torch.cuda.stream(self.put_stream):
-            self.put_nonblocking(key, value)
+            with torch.cuda.stream(self.put_stream):
+                self.put_nonblocking(key, value)
 
     def put_nonblocking(self, key, kv_chunk):
         # TODO(Jiayi): torch.cuda.synchronize() needs to be removed
@@ -87,17 +112,45 @@ class LMCLocalBackend(LMCBackendInterface):
             kv_chunk_local = kv_chunk.to(self.device, non_blocking=True)
             torch.cuda.synchronize()
         else:
-            kv_chunk_local = kv_chunk.to(self.device)
+            kv_chunk_local = kv_chunk.to(self.device, non_blocking=True)
         self.update_lock.acquire()
+
+        # Obtain keys to evict
+        evict_keys, put_status = self.evictor.update_on_put(
+            self.dict, kv_chunk_local)
+        if put_status == PutStatus.ILLEGAL:
+            self.update_lock.release()
+            return
+
+        # evict caches
+        for evict_key in evict_keys:
+            self.remove(evict_key)
+
+        # Store new chunk
         self.dict[key] = kv_chunk_local
         self.update_lock.release()
 
     def put_blocking(self, key, kv_chunk):
         if self.use_pin_memory:
-            self.dict[key] = kv_chunk.to(self.device, non_blocking=True)
+            kv_chunk_local = kv_chunk.to(self.device, non_blocking=True)
             torch.cuda.synchronize()
         else:
-            self.dict[key] = kv_chunk.to(self.device)
+            kv_chunk_local = kv_chunk.to(self.device)
+
+        # Obtain keys to evict
+        evict_keys, put_status = self.evictor.update_on_put(
+            self.dict, kv_chunk_local)
+
+        # Abort put if cache too big
+        if put_status == PutStatus.ILLEGAL:
+            return
+
+        # Evict caches
+        for evict_key in evict_keys:
+            self.remove(evict_key)
+
+        # Store new chunk
+        self.dict[key] = kv_chunk_local
 
     def put(
         self,
@@ -138,9 +191,14 @@ class LMCLocalBackend(LMCBackendInterface):
             the kv cache of the token chunk, in the format of nested tuples
             None if the key is not found
         """
+        self.update_lock.acquire()
         kv_chunk = self.dict.get(key, None)
+
+        # Update cache recency
         if kv_chunk is not None:
+            self.evictor.update_on_get(key, self.dict)
             kv_chunk = kv_chunk.to(self.dst_device)
+        self.update_lock.release()
         return kv_chunk
 
     def close(self):
@@ -175,6 +233,8 @@ class LMCLocalDiskBackend(LMCBackendInterface):
 
         self.chunk_size = config.chunk_size
         self.config = config
+        self.dict: OrderedDict[CacheEngineKey,
+                               DiskCacheMetadata] = OrderedDict()
         self.path = config.local_device
 
         assert self.path is not None, ("Need to specify local path if when "
@@ -182,7 +242,6 @@ class LMCLocalDiskBackend(LMCBackendInterface):
 
         if not os.path.exists(self.path):
             os.makedirs(self.path)
-        self.existing_keys: Set[CacheEngineKey] = set()
 
         # TODO(Jiayi): the following async put code is repeated in all backends
         # Please consider use a parent class that can be inherited by all
@@ -199,6 +258,8 @@ class LMCLocalDiskBackend(LMCBackendInterface):
         # TODO (Jiayi): please remove this hard code
         self.dst_device = "cuda"
 
+        self.evictor = DummyEvictor()
+
     def contains(
         self,
         key: CacheEngineKey,
@@ -212,7 +273,7 @@ class LMCLocalDiskBackend(LMCBackendInterface):
         Returns:
             True if the cache engine contains the key, False otherwise
         """
-        return key in self.existing_keys
+        return key in self.dict
 
     def _key_to_path(
         self,
@@ -228,6 +289,25 @@ class LMCLocalDiskBackend(LMCBackendInterface):
             returns the path name
         """
         return self.path + key.to_string().replace("/", "-") + ".pt"
+
+    def remove(
+        self,
+        key: CacheEngineKey,
+    ) -> None:
+        """
+        Remove the KV cache chunk by the given key
+
+        Input:
+            key: the key of the token chunk, including prefix hash and format
+
+        """
+
+        self.update_lock.acquire()
+        path = self.dict[key].path
+        self.dict.pop(key)
+        self.update_lock.release()
+
+        os.remove(path)
 
     @_lmcache_nvtx_annotate
     def put_worker(self, ):
@@ -245,12 +325,27 @@ class LMCLocalDiskBackend(LMCBackendInterface):
         key: CacheEngineKey,
         kv_chunk: torch.Tensor,
     ) -> None:
-        logger.info(f"Saving cache to {self._key_to_path(key)}")
+        path = self._key_to_path(key)
+        logger.debug(f"Saving cache to {path}")
         # The following order matters of `save_file` and `update dictionary`
         # matters
-        save_file({"kv_chunk": kv_chunk}, self._key_to_path(key))
+
+        # Obtain keys to evict
+        evict_keys, put_status = self.evictor.update_on_put(
+            self.dict, kv_chunk)
+
+        # Abort put if cache too big
+        if put_status == PutStatus.ILLEGAL:
+            return
+
+        # evict caches
+        for evict_key in evict_keys:
+            self.remove(evict_key)
+
+        save_file({"kv_chunk": kv_chunk}, path)
         self.update_lock.acquire()
-        self.existing_keys.add(key)
+        self.dict[key] = DiskCacheMetadata(path,
+                                           self.evictor.get_size(kv_chunk))
         self.update_lock.release()
 
     def put(
@@ -292,13 +387,19 @@ class LMCLocalDiskBackend(LMCBackendInterface):
             the kv cache of the token chunk, in the format of nested tuples
             None if the key is not found
         """
-        if key not in self.existing_keys:
+        self.update_lock.acquire()
+        if key not in self.dict:
+            self.update_lock.release()
             return None
 
-        with safe_open(self._key_to_path(key),
-                       framework="pt",
+        path = self.dict[key].path
+        self.evictor.update_on_get(key, self.dict)
+
+        with safe_open(path, framework="pt",
                        device=self.dst_device) as f:  # type: ignore
-            return f.get_tensor("kv_chunk")
+            kv_chunk = f.get_tensor("kv_chunk")
+        self.update_lock.release()
+        return kv_chunk
 
     def close(self):
         if self.put_thread is not None and self.put_thread.is_alive():

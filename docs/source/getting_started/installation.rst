@@ -34,7 +34,7 @@ You can install LMCache using pip:
 
 .. note::
 
-    LMCache provides the integration to the latest vLLM (0.6.1.post2)
+    LMCache provides the integration to the latest vLLM (0.6.2)
 
 .. note::
     LMCache requires CUDA 12.1. You can check ``nvcc --version`` to see if you loaded CUDA 12. Following, please add the following to your ``~/.bashrc`` file:
@@ -53,8 +53,8 @@ You can install the latest code from the GitHub repository:
 
 .. code-block:: console
 
-    # Install vLLM==0.6.1.post2
-    $ pip install vllm==0.6.1.post2
+    # Install vLLM==0.6.2
+    $ pip install vllm==0.6.2
 
     # Clone and install LMCache
     $ git clone git@github.com:LMCache/LMCache.git

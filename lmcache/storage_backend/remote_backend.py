@@ -1,6 +1,6 @@
 import queue
 import threading
-from typing import Iterable, Iterator, List, Optional, Set, Tuple, Union
+from typing import Iterable, Iterator, List, Optional, Tuple, Union
 
 import torch
 
@@ -34,7 +34,7 @@ class LMCRemoteBackend(LMCBackendInterface):
                 configuration
         """
         super().__init__()
-        self.existing_keys: Set[CacheEngineKey] = set()
+        #self.existing_keys: Set[CacheEngineKey] = set()
         self.put_thread = None
         assert config.remote_url is not None, (
             "Need to provide remote_url when"
@@ -91,8 +91,8 @@ class LMCRemoteBackend(LMCBackendInterface):
         list the remote keys (and also update the 'cached' existing keys set)
         """
         keys = self.connection.list()
-        for key in keys:
-            self.existing_keys.add(self._split_key(key))
+        #for key in keys:
+        #    self.existing_keys.add(self._split_key(key))
         return [self._split_key(key) for key in keys]
 
     def contains(
@@ -108,13 +108,13 @@ class LMCRemoteBackend(LMCBackendInterface):
         Returns:
             True if the cache engine contains the key, False otherwise
         """
-        if key in self.existing_keys:
-            return True
-        else:
-            flag = self.connection.exists(self._combine_key(key))
-            if flag:
-                self.existing_keys.add(key)
-            return flag
+        #if key in self.existing_keys:
+        #    return True
+        #else:
+        flag = self.connection.exists(self._combine_key(key))
+        #    if flag:
+        #        self.existing_keys.add(key)
+        return flag
 
     def put_blocking(
         self,
@@ -123,7 +123,7 @@ class LMCRemoteBackend(LMCBackendInterface):
     ) -> None:
         bs = self.serializer.to_bytes(kv_chunk)
         self.connection.set(self._combine_key(key), bs)
-        self.existing_keys.add(key)
+        #self.existing_keys.add(key)
 
     def put(
         self,
@@ -194,7 +194,8 @@ class LMCPipelinedRemoteBackend(LMCRemoteBackend):
         """
         super().__init__(config, metadata)
 
-        self.existing_keys = set()
+        # Comment out existing_keys for now to avoid consistency issues
+        #self.existing_keys = set()
         self.network_thread = None
         self.deserialize_thread = None
 
