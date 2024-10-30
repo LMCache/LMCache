@@ -47,4 +47,5 @@ for output in outputs:
     generated_text = output.outputs[0].text
     print(f"Newly generated text: {generated_text!r}")
 
+# Graceful exit
 lmcache_vllm.close_lmcache_engine()

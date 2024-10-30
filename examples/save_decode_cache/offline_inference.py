@@ -3,6 +3,7 @@ import json
 import os
 import time
 
+import lmcache_vllm
 from lmcache_vllm.vllm import LLM, SamplingParams
 from transformers import AutoTokenizer
 
@@ -111,3 +112,6 @@ second_outputs = llm.generate(prompts, sampling_params)
 t4 = time.perf_counter()
 print(f"\n\nSecond request Time: {t4 - t3} seconds\n\n")
 append_outputs(output_file, second_outputs, context_length, t4 - t3)
+
+# Graceful exit
+lmcache_vllm.close_lmcache_engine()

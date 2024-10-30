@@ -52,6 +52,8 @@ Documentation
    :caption: Examples
 
    examples/launching
+   examples/save_decode
+   examples/kv_blending
    examples/backend
    examples/measuring_improvements
 
