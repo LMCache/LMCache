@@ -109,18 +109,6 @@ To verify the setup, you can test it using the following ``curl`` command:
 Building Docker from Source
 ----------------------------
 
-To build and run LMCache from source, use the provided Dockerfile. First, clone the LMCache repository and build the Docker image with the following commands:
-
 .. code-block:: bash
 
-    lmcache_version_id=$(pip index versions lmcache | grep "Available" | awk '{print $3}')
-    DOCKER_BUILDKIT=1 docker build \
-        --build-arg LMCACHE_VERSION=$lmcache_version . \
-        --target vllm-lmcache \
-        --tag vllm-lmcache:test \
-        --build-arg max_jobs=32 \
-        --build-arg nvcc_threads=32 \
-        --platform linux/amd64
-
-To run the Docker container, follow the steps in the **Running the Docker Container** section, but replace the image tag ``lmcache/lmcache_vllm:lmcache-0.1.3`` with ``vllm-lmcache:test``.
-
+    # Coming soon
