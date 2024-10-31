@@ -15,6 +15,3 @@ set -xe
 
 pip install -e .
 
-git clone --branch dev https://github.com/LMCache/lmcache-server
-pip install -e lmcache-server/
-
