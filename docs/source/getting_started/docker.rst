@@ -37,8 +37,8 @@ To run the Docker container with your specified model, follow these steps:
 Save the following YAML code to a file, such as ``example.yaml``, in the LMCache repository:
 
 .. code-block:: yaml
-
-   chunk_size: 256
+    
+    chunk_size: 256
     local_device: "cpu"
 
     # Whether retrieve() is pipelined or not
@@ -48,8 +48,25 @@ Save the chat template code below to a file, such as ``chat-template.txt``, in t
 
 .. code-block:: text
 
-    {%- if messages[0]['role'] == 'system' -%}    {%- set system_message = messages[0]['content'] -%}    {%- set messages = messages[1:] -%}{%- else -%}    {% set system_message = '' -%}{%- endif -%}{{ bos_token + system_message }}{%- for message in messages -%}    {%- if (message['role'] == 'user') != (loop.index0 % 2 == 0) -%}        {{ raise_exception('Conversation roles must alternate user/assistant/user/assistant/...') }}    {%- endif -%}    {%- if message['role'] == 'user' -%}        {{ 'USER: ' + message['content'] + '\n' }}    {%- elif message['role'] == 'assistant' -%}        {{ 'ASSISTANT: ' + message['content'] + eos_token + '\n' }}    {%- endif -%}{%- endfor -%}{%- if add_generation_prompt -%}    {{ 'ASSISTANT:' }} {% endif %}
-
+    {%- if messages[0]['role'] == 'system' -%}  
+        {%- set system_message = messages[0]['content'] -%}    
+        {%- set messages = messages[1:] -%}
+    {%- else -%}    
+        {% set system_message = '' -%}{%- endif -%}
+    {{ bos_token + system_message }}
+    {%- for message in messages -%}
+        {%- if (message['role'] == 'user') != (loop.index0 % 2 == 0) -%}
+            {{ raise_exception('Conversation roles must alternate user/assistant/user/assistant/...') }}
+        {%- endif -%}    
+        {%- if message['role'] == 'user' -%}        
+            {{ 'USER: ' + message['content'] + '\n' }}    
+        {%- elif message['role'] == 'assistant' -%}        
+            {{ 'ASSISTANT: ' + message['content'] + eos_token + '\n' }}    
+        {%- endif -%}
+    {%- endfor -%}
+    {%- if add_generation_prompt -%}   
+        {{ 'ASSISTANT:' }} 
+    {% endif %}
 
 3. Run the Docker Command:
 
