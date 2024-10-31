@@ -44,7 +44,10 @@ Save the following YAML code to a file, such as ``example.yaml``, in the LMCache
     # Whether retrieve() is pipelined or not
     pipelined_backend: False
 
-Save the chat template code below to a file, such as ``chat-template.txt``, in the LMCache repository:
+.. note::
+    Some models may require a chat template, if you're using a non-instruct model 
+    (for instruct models such as ``llama-3.1-70b-instruct`` you don't need it). In needed,
+    save the chat template code below to a file, ``chat-template.txt``, in the LMCache repository:
 
 .. code-block:: text
 
@@ -83,7 +86,15 @@ Save the chat template code below to a file, such as ``chat-template.txt``, in t
     --network=host \
     lmcache/lmcache_vllm:lmcache-0.1.3 \
     $model --gpu-memory-utilization 0.7 --port 8000 \
-    --chat_template /etc/lmcache/chat-template.txt 
+
+.. note::
+    If using a model that requires a chat template, make sure to include 
+    the ``--chat_template``  flag in the command. If the chat template file
+    is named ``chat-template.txt``, add to the ``run`` command:
+
+    .. code-block:: bash
+
+        --chat_template /etc/lmcache/chat-template.txt
 
 Testing the Docker Container
 --------------------------------
