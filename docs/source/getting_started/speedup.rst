@@ -58,7 +58,7 @@ Run the demo
 Please replace ``<your HF token>`` with your huggingface token in the bash script above.
 
 .. note::
-    If model weights are not downloaded, they might need to be dowloaded manually. This prevents 
+    If model weights are not downloaded, they might need to be downloaded manually. This prevents 
     multiple serving engines from downloading the same model weights and cause potential write conflicts.
     For this you can use:
 
