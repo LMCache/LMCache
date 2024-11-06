@@ -217,7 +217,7 @@ class SPTBlendRetriever(BlendRetriever):
         :param LMCacheEngineMetadata metadata: The metadata of the cache engine
         """
         self.spt = spt
-        self.tensor_spt = torch.tensor(spt, dtype = torch.int, device = "cpu")
+        self.tensor_spt = torch.tensor(spt, dtype=torch.int, device="cpu")
         self.cache_engine = cache_engine
         self.metadata = metadata
 
@@ -257,11 +257,12 @@ class SPTBlendRetriever(BlendRetriever):
         """
         spt_len = len(self.tensor_spt)
         if spt_len == 1:
-            indices = (
-                input_tokens_single_query == self.tensor_spt).nonzero().squeeze()
+            indices = (input_tokens_single_query == self.tensor_spt
+                       ).nonzero().squeeze()
         else:
             windows = input_tokens_single_query.unfold(0, spt_len, 1)
-            indices = (windows == self.tensor_spt).all(dim=1).nonzero().squeeze()
+            indices = (windows == self.tensor_spt).all(
+                dim=1).nonzero().squeeze()
 
         if indices.dim() == 0:
             indices = indices.unsqueeze(0)
