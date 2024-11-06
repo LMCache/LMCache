@@ -205,25 +205,32 @@ class SPTBlendRetriever(BlendRetriever):
 
     def __init__(
         self,
-        spt: List[int],
+        spt: torch.Tensor,
         cache_engine: LMCacheEngine,
         metadata: LMCacheEngineMetadata,
     ):
         """Initialize the SPT retriever.
 
-        :param List[int] spt: The special token to use as delimiter
+        :param torch.Tensor spt: The special token to use as delimiter
         :param LMCacheEngine cache_engine: The cache engine to retrieve 
             the KV caches
         :param LMCacheEngineMetadata metadata: The metadata of the cache engine
         """
-        self.spt = spt
-        self.tensor_spt = torch.tensor(spt, dtype=torch.int, device="cpu")
+        self.list_spt = spt.tolist()
+        self.tensor_spt = spt
         self.cache_engine = cache_engine
         self.metadata = metadata
 
     def drop_spt_and_get_indices(
             self, full_prompt: List[int]) -> Tuple[List[int], List[int]]:
-        spt_len = len(self.spt)
+        """Drop the special token and get the indices of the split requests.
+
+        :param List[int] full_prompt: The full prompts inside one batch.
+        
+        :return: The new prompts without the special token and the indices of
+            the split segments.
+        """
+        spt_len = len(self.list_spt)
         assert spt_len >= 1
         i = 0
         splitted_tokens = []
@@ -232,7 +239,7 @@ class SPTBlendRetriever(BlendRetriever):
             next_len = i + spt_len
             if next_len > len(full_prompt):
                 break
-            if full_prompt[i:next_len] == self.spt:
+            if full_prompt[i:next_len] == self.list_spt:
                 splitted_tokens.append(full_prompt[start:i])
                 start = next_len
                 i = next_len
