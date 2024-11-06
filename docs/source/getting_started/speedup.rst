@@ -38,7 +38,7 @@ Prerequisites
 * sudo access to run ``docker compose up``
 * A huggingface token with access to ``mistralai/Mistral-7B-Instruct-v0.2``. 
 * A local Python environment which can run ``pip install``.
-* `NVIDIA CUDA Runtime <https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html>`_ installed on the machine.
+* `Docker NVIDIA Runtime <https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html>`_ installed on the machine.
 
 .. note::
     For more information on Huggingface login, please refer 
