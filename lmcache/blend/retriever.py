@@ -214,7 +214,8 @@ class SPTBlendRetriever(BlendRetriever):
         self.cache_engine = cache_engine
         self.metadata = metadata
 
-    def drop_spt_and_get_indices(self, full_prompt: List[int]) -> Tuple[List[int], List[int]]:
+    def drop_spt_and_get_indices(
+            self, full_prompt: List[int]) -> Tuple[List[int], List[int]]:
         spt_len = len(self.spt)
         assert spt_len >= 1
         i = 0
@@ -231,10 +232,9 @@ class SPTBlendRetriever(BlendRetriever):
             else:
                 i += 1
 
-        
         if start < len(full_prompt):
             splitted_tokens.append(full_prompt[start:])
-        
+
         new_prompt = []
         new_indices = [0]
         for split in splitted_tokens:
@@ -243,12 +243,91 @@ class SPTBlendRetriever(BlendRetriever):
         new_indices[-1] = len(new_prompt)
         return new_prompt, new_indices
 
+    def _split_input_tokens(self, input_tokens_single_query: torch.Tensor):
+        """Split the input tokens into multiple requests based on the ROI.
+
+        Returns a list of split tokens for cache_engine to retrieve
+        """
+        spt_len = len(self.spt)
+        if spt_len == 1:
+            indices = (
+                input_tokens_single_query == self.spt).nonzero().squeeze()
+        else:
+            windows = input_tokens_single_query.unfold(0, spt_len, 1)
+            indices = (windows == self.spt).all(dim=1).nonzero().squeeze()
+
+        if indices.dim() == 0:
+            indices = indices.unsqueeze(0)
+
+        start = 0
+        splitted_tokens = []
+
+        for i in indices:
+            splitted_tokens.append(input_tokens_single_query[start:i +
+                                                             spt_len])
+            start = i + spt_len
+
+        if start < len(input_tokens_single_query):
+            splitted_tokens.append(input_tokens_single_query[start:])
+        return splitted_tokens
 
     def new_request(
         self,
+        input_tokens: torch.Tensor,
+        query_start_loc: torch.Tensor,
+    ) -> BlendRetrieverTask:
+        """Create a new BlendRetrieverTask to retrieve the KV caches.
+        It may launch async tasks in the background during the retrieval.
+
+        :param torch.Tensor input_tokens: The input tokens, could include
+            multiple requests in a batch
+        :param torch.Tensor query_start_loc: The start location of the query if
+            input_tokens has multiple requests in a batch. The length should be 
+            the number of requests in the batch + 1.
+
+        :return: The retriever task to retrieve the KV caches
+        :rtype: BlendRetrieverTask
+        """
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            splitted_tokens = []
+            start_loc = query_start_loc[0]
+            for loc in query_start_loc[1:]:
+                logger.debug(f"Request start loc = {start_loc}")
+                splitted_tokens.extend(
+                    self._split_input_tokens(input_tokens[start_loc:loc]))
+                start_loc = loc
+
+            logger.debug("Split input tokens into %d requests",
+                         len(splitted_tokens))
+            tasks = [
+                executor.submit(
+                    self.cache_engine.retrieve,
+                    tokens,  # tokens
+                    None,  # mask
+                    False,  # return_tuple
+                ) for tokens in splitted_tokens
+            ]
+
+        return SPTBlendRetrieverTask(token_segments=splitted_tokens,
+                                     tasks=tasks,
+                                     fmt=self.metadata.fmt)
+
+    def segmented_new_request(
+        self,
         full_prompts: List[torch.Tensor],
         indices: List[List[int]],
-    ) -> BlendRetrieverTask:
+    ) -> Optional[BlendRetrieverTask]:
+        """Create a new BlendRetrieverTask to retrieve the KV caches.
+        It may launch async tasks in the background during the retrieval.
+
+        :param List[torch.Tensor] full_prompts: The full prompts for each
+        request in this batch.
+        :param List[List[int]] indices: The indices of where the 
+        segmengted requests start in the full prompts.
+
+        :return: The retriever task to retrieve the KV caches
+        :rtype: BlendRetrieverTask
+        """
         assert len(full_prompts) == len(indices)
         with ThreadPoolExecutor(max_workers=1) as executor:
             splitted_tokens = []

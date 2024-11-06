@@ -1,6 +1,6 @@
 import abc
 from dataclasses import dataclass
-from typing import Optional
+from typing import List, Optional
 
 import torch
 
@@ -92,6 +92,24 @@ class BlendRetriever(metaclass=abc.ABCMeta):
         :rtype: BlendRetrieverTask
         """
         pass
+
+    def segmented_new_request(
+        self,
+        full_prompts: List[torch.Tensor],
+        indices: List[List[int]],
+    ) -> Optional[BlendRetrieverTask]:
+        """Create a new BlendRetrieverTask to retrieve the KV caches.
+        It may launch async tasks in the background during the retrieval.
+
+        :param List[torch.Tensor] full_prompts: The full prompts for each
+        request in this batch.
+        :param List[List[int]] indices: The indices of where the 
+        segmengted requests start in the full prompts.
+
+        :return: The retriever task to retrieve the KV caches
+        :rtype: BlendRetrieverTask
+        """
+        return None
 
 
 class BlendExecutor(metaclass=abc.ABCMeta):
