@@ -43,14 +43,14 @@ def generate_tokens(num_tokens, device):
 
 
 def generate_spt(length):
-    return torch.full((length, ), 10010)
+    return [10010] * length
 
 
 def generate_tokens_with_spt(num_tokens, device, spt):
     """
     Generate the tokens ended with spt
     """
-    minval = torch.min(spt).item()
+    minval = min(spt)
     ret = torch.randint(minval - 100, minval - 10,
                         size=[num_tokens]).to(device)
     ret[-len(spt):] = spt

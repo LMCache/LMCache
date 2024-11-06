@@ -188,9 +188,15 @@ class SPTBlendRetriever(BlendRetriever):
 
     Example:
         Input = [x, x, x, spt, y, y, spt, z, z, z, z]
-        Requests sent to LMCache engine:
+        Requests sent to LMCache engine when using new_request:
         - [x, x, x, spt]
         - [y, y, spt]
+        - [z, z, z, z]
+
+        Requests sent to LMCache engine when using drop_spt_and_get_indices
+        and segmented_new_request:
+        - [x, x, x]
+        - [y, y]
         - [z, z, z, z]
 
     Therefore, to use this retriever, the text chunks are better to also be 
@@ -205,12 +211,13 @@ class SPTBlendRetriever(BlendRetriever):
     ):
         """Initialize the SPT retriever.
 
-        :param torch.Tensor spt: The special token to use as delimiter
+        :param List[int] spt: The special token to use as delimiter
         :param LMCacheEngine cache_engine: The cache engine to retrieve 
             the KV caches
         :param LMCacheEngineMetadata metadata: The metadata of the cache engine
         """
         self.spt = spt
+        self.tensor_spt = torch.tensor(spt, dtype = torch.int, device = "cpu")
         self.cache_engine = cache_engine
         self.metadata = metadata
 
@@ -248,13 +255,13 @@ class SPTBlendRetriever(BlendRetriever):
 
         Returns a list of split tokens for cache_engine to retrieve
         """
-        spt_len = len(self.spt)
+        spt_len = len(self.tensor_spt)
         if spt_len == 1:
             indices = (
-                input_tokens_single_query == self.spt).nonzero().squeeze()
+                input_tokens_single_query == self.tensor_spt).nonzero().squeeze()
         else:
             windows = input_tokens_single_query.unfold(0, spt_len, 1)
-            indices = (windows == self.spt).all(dim=1).nonzero().squeeze()
+            indices = (windows == self.tensor_spt).all(dim=1).nonzero().squeeze()
 
         if indices.dim() == 0:
             indices = indices.unsqueeze(0)
