@@ -36,8 +36,9 @@ Prerequisites
 * Local SSD disk with peak IO bandwidth > 3GB/s (typical speed for SATA3 SSDs)
 * `docker compose <https://docs.docker.com/compose/install/>`_ installed on the machine
 * sudo access to run ``docker compose up``
-* A huggingface token with access to ``lmsys/longchat-7b-16k``. 
+* A huggingface token with access to ``mistralai/Mistral-7B-Instruct-v0.2``. 
 * A local Python environment which can run ``pip install``.
+* `NVIDIA CUDA Runtime <https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html>`_ installed on the machine.
 
 .. note::
     For more information on Huggingface login, please refer 
@@ -66,7 +67,7 @@ Please replace ``<your HF token>`` with your huggingface token in the bash scrip
 
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
-        model_name = "lmsys/longchat-7b-16k"
+        model_name = "mistralai/Mistral-7B-Instruct-v0.2"
         model = AutoModelForCausalLM.from_pretrained(model_name)
         tokenizer = AutoTokenizer.from_pretrained(model_name)
 
