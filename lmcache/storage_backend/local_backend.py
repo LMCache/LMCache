@@ -111,10 +111,6 @@ class LMCLocalBackend(LMCBackendInterface):
     @_lmcache_nvtx_annotate
     @torch.inference_mode()
     def put_nonblocking(self, key, kv_chunk):
-        # Indexing the tensor (even if it's paged) will end up with
-        # calling device->pageable host memcopy which is blocking
-        if kv_chunk.shape[2] != self.chunk_size:
-            return
         # Allocate the kv chunk
         self.update_lock.acquire()
         kv_obj = self.cpu_mpool.allocate(kv_chunk)
@@ -123,7 +119,15 @@ class LMCLocalBackend(LMCBackendInterface):
         if kv_obj is None:
             return
 
-        kv_obj.data.copy_(kv_chunk, non_blocking=True)
+        self.update_lock.acquire()
+        put_stream = self.put_stream_pool[key]
+        self.update_lock.release()
+
+        put_stream.wait_stream(torch.cuda.default_stream(kv_chunk.device))
+        with torch.cuda.stream(put_stream):
+            kv_obj.data.copy_(kv_chunk, non_blocking=True)
+            kv_chunk.record_stream(put_stream)
+        put_stream.synchronize()
 
         # Obtain keys to evict
         self.update_lock.acquire()
@@ -188,14 +192,11 @@ class LMCLocalBackend(LMCBackendInterface):
         if blocking:
             self.put_blocking(key, kv_chunk)
         else:
-            # If cuda stream created in another thread,
-            # copy_(xxx, non_blocking=True) may result in wrong result
-            self.update_lock.acquire()
+            #self.update_lock.acquire()
             put_stream = torch.cuda.Stream()
             self.put_stream_pool[key] = put_stream
-            self.update_lock.release()
-            with torch.cuda.stream(put_stream):
-                self.put_queue.put((key, kv_chunk))
+            self.put_queue.put((key, kv_chunk))
+            kv_chunk.record_stream(put_stream)
 
     @_lmcache_nvtx_annotate
     def get(
