@@ -62,6 +62,8 @@ class LMCLocalBackend(LMCBackendInterface):
         # TODO (Jiayi): The storage size and caching
         self.evictor = DummyEvictor()
 
+        self.host_mpool = []
+        
         self.put_stream = torch.cuda.Stream()
 
     def contains(
@@ -113,6 +115,7 @@ class LMCLocalBackend(LMCBackendInterface):
             torch.cuda.synchronize()
         else:
             kv_chunk_local = kv_chunk.to(self.device, non_blocking=True)
+            print(kv_chunk_local.shape)
         self.update_lock.acquire()
 
         # Obtain keys to evict
