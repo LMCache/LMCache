@@ -119,10 +119,10 @@ class LMCLocalBackend(LMCBackendInterface):
         if kv_obj is None:
             return
 
-        self.update_lock.acquire()
-        put_stream = self.put_stream_pool[key]
-        self.update_lock.release()
-
+        #self.update_lock.acquire()
+        #put_stream = self.put_stream_pool[key]
+        #self.update_lock.release()
+        put_stream = torch.cuda.Stream()
         put_stream.wait_stream(torch.cuda.default_stream(kv_chunk.device))
         with torch.cuda.stream(put_stream):
             kv_obj.data.copy_(kv_chunk, non_blocking=True)
@@ -131,6 +131,7 @@ class LMCLocalBackend(LMCBackendInterface):
 
         # Obtain keys to evict
         self.update_lock.acquire()
+        #del self.put_stream_pool[key]
         evict_keys, put_status = self.evictor.update_on_put(
             self.dict, kv_obj.data)
         if put_status == PutStatus.ILLEGAL:
@@ -193,10 +194,10 @@ class LMCLocalBackend(LMCBackendInterface):
             self.put_blocking(key, kv_chunk)
         else:
             #self.update_lock.acquire()
-            put_stream = torch.cuda.Stream()
-            self.put_stream_pool[key] = put_stream
+            #put_stream = torch.cuda.Stream()
+            #self.put_stream_pool[key] = put_stream
             self.put_queue.put((key, kv_chunk))
-            kv_chunk.record_stream(put_stream)
+            #kv_chunk.record_stream(put_stream)
 
     @_lmcache_nvtx_annotate
     def get(
