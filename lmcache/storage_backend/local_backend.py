@@ -3,7 +3,8 @@ import queue
 import threading
 import time
 from collections import OrderedDict
-from typing import Optional, Tuple, Union
+from concurrent.futures import Future, ProcessPoolExecutor
+from typing import Dict, Optional, Tuple, Union
 
 import torch
 from safetensors import safe_open
@@ -190,11 +191,7 @@ class LMCLocalBackend(LMCBackendInterface):
         if blocking:
             self.put_blocking(key, kv_chunk)
         else:
-            #self.update_lock.acquire()
-            #put_stream = torch.cuda.Stream()
-            #self.put_stream_pool[key] = put_stream
             self.put_queue.put((key, kv_chunk))
-            #kv_chunk.record_stream(put_stream)
 
     @_lmcache_nvtx_annotate
     def get(
@@ -290,6 +287,10 @@ class LMCLocalDiskBackend(LMCBackendInterface):
         # TODO(Jiayi): share the buffer if both cpu and disk backend are enabled
         self.cpu_mbufferpool = LocalCPUBufferPool(config)
 
+        self.future_pool: Dict[CacheEngineKey, Future] = {}
+
+        self.proc_pool_executor = ProcessPoolExecutor(max_workers=4)
+
     def contains(
         self,
         key: CacheEngineKey,
@@ -350,6 +351,15 @@ class LMCLocalDiskBackend(LMCBackendInterface):
 
     @_lmcache_nvtx_annotate
     @torch.inference_mode()
+    def save_disk(
+        self,
+        path: str,
+        kv_chunk: torch.Tensor,
+    ):
+        save_file({"kv_chunk": kv_chunk}, path)
+
+    @_lmcache_nvtx_annotate
+    @torch.inference_mode()
     def put_nonblocking(
         self,
         key: CacheEngineKey,
@@ -357,6 +367,9 @@ class LMCLocalDiskBackend(LMCBackendInterface):
     ) -> None:
         path = self._key_to_path(key)
         logger.debug(f"Saving cache to {path}")
+
+        if kv_chunk.shape[2] < self.chunk_size:
+            return
 
         self.update_lock.acquire()
 
@@ -392,13 +405,14 @@ class LMCLocalDiskBackend(LMCBackendInterface):
             kv_chunk.record_stream(put_stream)
         put_stream.synchronize()
 
-        # The following order matters of `save_file` and `update dictionary`
-        # matters
-        save_file({"kv_chunk": kv_obj.data}, path)
+        future = self.proc_pool_executor.submit(self.save_disk, path,
+                                                kv_obj.data)
+
         self.update_lock.acquire()
-        kv_obj = self.cpu_mbufferpool.free(kv_obj)
+        self.future_pool[key] = future
         self.dict[key] = DiskCacheMetadata(path,
                                            self.evictor.get_size(kv_obj.data))
+        self.cpu_mbufferpool.free(kv_obj)
         self.update_lock.release()
 
     @_lmcache_nvtx_annotate
@@ -478,6 +492,11 @@ class LMCLocalDiskBackend(LMCBackendInterface):
         if key not in self.dict:
             self.update_lock.release()
             return None
+
+        future = self.future_pool[key]
+        if not future.done():
+            return None
+        del self.future_pool[key]
 
         path = self.dict[key].path
         self.evictor.update_on_get(key, self.dict)
