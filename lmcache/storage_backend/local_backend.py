@@ -509,6 +509,7 @@ class LMCLocalDiskBackend(LMCBackendInterface):
             self.put_queue.put(LocalBackendEndSignal())
             self.put_thread.join()
             logger.info("Closed the put worker in local disk backend")
+        self.proc_pool_executor.shutdown() 
 
     def __del__(self):
         self.close()
