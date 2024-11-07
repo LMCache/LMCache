@@ -229,7 +229,7 @@ class LMCacheEngine:
             )
 
     @_lmcache_nvtx_annotate
-    @torch.no_grad()
+    @torch.inference_mode()
     def store(
         self,
         tokens: torch.Tensor,
@@ -315,7 +315,7 @@ class LMCacheEngine:
     # prefix caching only needs a mask_len
     # but non-prefix might need an roi
     @_lmcache_nvtx_annotate
-    @torch.no_grad()
+    @torch.inference_mode()
     def retrieve(
         self,
         tokens: torch.Tensor,

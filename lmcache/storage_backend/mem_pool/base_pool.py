@@ -1,23 +1,44 @@
 import abc
-import torch
-from lmcache.utils import CacheEngineKey
+from dataclasses import dataclass
+from typing import Optional
 
-class BaseMemPool(metaclass=abc.ABCMeta):
+import torch
+
+
+@dataclass
+class KVObj:
+    chunk_idx: int
+    data: torch.Tensor
+
+
+class BasePool(metaclass=abc.ABCMeta):
     """
     Interface for mem pool
     """
-    
+
     @abc.abstractmethod
-    def put():
+    def allocate(self, kv_chunk: torch.Tensor) -> Optional[KVObj]:
         """
-        Put the KV cache of the tokens into the memory.
+        Allocate a buffer memory pointer from the memory pool.
+        
+        Input:
+            kv_chunk: the kv tensor to be stored
+        
+        Returns:
+            A memory pointer (torch tensor view).
+            None if memory is full.
+        
+        Note:
+            This does not perform the actual memory movement.
         """
         raise NotImplementedError
-    
+
     @abc.abstractmethod
-    def get() -> torch.Tensor:
+    def free(self, kv_obj: KVObj):
         """
-        Get the KV cache of the tokens into the memory.
+        Free the corresponding memory chunk
+        
+        Input:
+            the KVObj to be freed
         """
         raise NotImplementedError
-    
