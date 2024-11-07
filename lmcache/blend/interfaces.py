@@ -76,28 +76,9 @@ class BlendRetriever(metaclass=abc.ABCMeta):
     @abc.abstractmethod
     def new_request(
         self,
-        input_tokens: torch.Tensor,
-        query_start_loc: torch.Tensor,
-    ) -> BlendRetrieverTask:
-        """Create a new BlendRetrieverTask to retrieve the KV caches.
-        It may launch async tasks in the background during the retrieval.
-
-        :param torch.Tensor input_tokens: The input tokens, could include
-            multiple requests in a batch
-        :param torch.Tensor query_start_loc: The start location of the query if
-            input_tokens has multiple requests in a batch. The length should be
-            the number of requests in the batch + 1
-
-        :return: The retriever task to retrieve the KV caches
-        :rtype: BlendRetrieverTask
-        """
-        pass
-
-    def segmented_new_request(
-        self,
         full_prompts: List[torch.Tensor],
         indices: List[List[int]],
-    ) -> Optional[BlendRetrieverTask]:
+    ) -> BlendRetrieverTask:
         """Create a new BlendRetrieverTask to retrieve the KV caches.
         It may launch async tasks in the background during the retrieval.
 
@@ -109,7 +90,7 @@ class BlendRetriever(metaclass=abc.ABCMeta):
         :return: The retriever task to retrieve the KV caches
         :rtype: BlendRetrieverTask
         """
-        return None
+        pass
 
 
 class BlendExecutor(metaclass=abc.ABCMeta):
