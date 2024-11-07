@@ -1,6 +1,7 @@
 import os
 import queue
 import threading
+import time
 from collections import OrderedDict
 from typing import Optional, Tuple, Union
 
@@ -13,7 +14,8 @@ from lmcache.logging import init_logger
 from lmcache.storage_backend.abstract_backend import LMCBackendInterface
 from lmcache.storage_backend.evictor import DummyEvictor
 from lmcache.storage_backend.evictor.base_evictor import PutStatus
-from lmcache.storage_backend.mem_pool import KVObj, LocalCPUPool
+from lmcache.storage_backend.mem_pool import (KVObj, LocalCPUBufferPool,
+                                              LocalCPUPool)
 from lmcache.utils import (CacheEngineKey, DiskCacheMetadata, KVCache,
                            _lmcache_nvtx_annotate)
 
@@ -63,7 +65,6 @@ class LMCLocalBackend(LMCBackendInterface):
         # evictor and mpool need to be configured dynamically
         self.evictor = DummyEvictor()
         self.cpu_mpool = LocalCPUPool(config)
-        self.put_stream_pool: dict[CacheEngineKey, torch.cuda.Stream] = {}
 
         # TODO(Jiayi): A gpu buffer could speed up `get`
         # self.fix_sized_dst_buffer = torch.tensor()
@@ -111,29 +112,10 @@ class LMCLocalBackend(LMCBackendInterface):
     @_lmcache_nvtx_annotate
     @torch.inference_mode()
     def put_nonblocking(self, key, kv_chunk):
-        # Allocate the kv chunk
-        self.update_lock.acquire()
-        kv_obj = self.cpu_mpool.allocate(kv_chunk)
-        self.update_lock.release()
-
-        if kv_obj is None:
-            return
-
-        #self.update_lock.acquire()
-        #put_stream = self.put_stream_pool[key]
-        #self.update_lock.release()
-        put_stream = torch.cuda.Stream()
-        put_stream.wait_stream(torch.cuda.default_stream(kv_chunk.device))
-        with torch.cuda.stream(put_stream):
-            kv_obj.data.copy_(kv_chunk, non_blocking=True)
-            kv_chunk.record_stream(put_stream)
-        put_stream.synchronize()
-
         # Obtain keys to evict
         self.update_lock.acquire()
-        #del self.put_stream_pool[key]
         evict_keys, put_status = self.evictor.update_on_put(
-            self.dict, kv_obj.data)
+            self.dict, kv_chunk)
         if put_status == PutStatus.ILLEGAL:
             self.update_lock.release()
             return
@@ -142,7 +124,22 @@ class LMCLocalBackend(LMCBackendInterface):
         for evict_key in evict_keys:
             self.remove(evict_key)
 
+        # Allocate the kv chunk
+        kv_obj = self.cpu_mpool.allocate(kv_chunk)
+        self.update_lock.release()
+
+        if kv_obj is None:
+            return
+
+        put_stream = torch.cuda.Stream()
+        put_stream.wait_stream(torch.cuda.default_stream(kv_chunk.device))
+        with torch.cuda.stream(put_stream):
+            kv_obj.data.copy_(kv_chunk, non_blocking=True)
+            kv_chunk.record_stream(put_stream)
+        put_stream.synchronize()
+
         # Store new chunk
+        self.update_lock.acquire()
         self.dict[key] = kv_obj
         self.update_lock.release()
 
@@ -218,14 +215,6 @@ class LMCLocalBackend(LMCBackendInterface):
         self.update_lock.acquire()
         kv_obj = self.dict.get(key, None)
 
-        # Make sure the async put is finished
-        put_stream = self.put_stream_pool.get(key, None)
-        if put_stream is not None:
-            put_stream.synchronize()
-            # delete the stream such that the sync is only
-            # done in the first put
-            del self.put_stream_pool[key]
-
         # Update cache recency
         if kv_obj is not None:
             self.evictor.update_on_get(key, self.dict)
@@ -293,7 +282,13 @@ class LMCLocalDiskBackend(LMCBackendInterface):
         # TODO (Jiayi): please remove this hard code
         self.dst_device = "cuda"
 
+        # TODO(Jiayi): The storage size and caching policy for both
+        # evictor and mpool need to be configured dynamically
         self.evictor = DummyEvictor()
+        # NOTE(Jiayi): This mbufferpool should be smaller than the actual
+        # cpu backend but big enough to avoid stalls in save
+        # TODO(Jiayi): share the buffer if both cpu and disk backend are enabled
+        self.cpu_mbufferpool = LocalCPUBufferPool(config)
 
     def contains(
         self,
@@ -346,24 +341,24 @@ class LMCLocalDiskBackend(LMCBackendInterface):
 
     @_lmcache_nvtx_annotate
     def put_worker(self, ):
-        put_stream = torch.cuda.Stream()
         while True:
             item = self.put_queue.get()
             if isinstance(item, LocalBackendEndSignal):
                 break
             key, value = item
-            with torch.cuda.stream(put_stream):
-                self.put_blocking(key, value)
+            self.put_nonblocking(key, value)
 
-    def put_blocking(
+    @_lmcache_nvtx_annotate
+    @torch.inference_mode()
+    def put_nonblocking(
         self,
         key: CacheEngineKey,
         kv_chunk: torch.Tensor,
     ) -> None:
         path = self._key_to_path(key)
         logger.debug(f"Saving cache to {path}")
-        # The following order matters of `save_file` and `update dictionary`
-        # matters
+
+        self.update_lock.acquire()
 
         # Obtain keys to evict
         evict_keys, put_status = self.evictor.update_on_put(
@@ -371,13 +366,70 @@ class LMCLocalDiskBackend(LMCBackendInterface):
 
         # Abort put if cache too big
         if put_status == PutStatus.ILLEGAL:
+            self.update_lock.release()
             return
 
         # evict caches
         for evict_key in evict_keys:
             self.remove(evict_key)
+        self.update_lock.release()
 
+        kv_obj = None
+
+        # Allocate the kv chunk
+        while kv_obj is None:
+            self.update_lock.acquire()
+            kv_obj = self.cpu_mbufferpool.allocate(kv_chunk)
+            self.update_lock.release()
+            if kv_obj is None:
+                # TODO(Jiayi): Please tune the sleep time for better performance
+                time.sleep(0.01)
+
+        put_stream = torch.cuda.Stream()
+        put_stream.wait_stream(torch.cuda.default_stream(kv_chunk.device))
+        with torch.cuda.stream(put_stream):
+            kv_obj.data.copy_(kv_chunk, non_blocking=True)
+            kv_chunk.record_stream(put_stream)
+        put_stream.synchronize()
+
+        # The following order matters of `save_file` and `update dictionary`
+        # matters
+        save_file({"kv_chunk": kv_obj.data}, path)
+        self.update_lock.acquire()
+        kv_obj = self.cpu_mbufferpool.free(kv_obj)
+        self.dict[key] = DiskCacheMetadata(path,
+                                           self.evictor.get_size(kv_obj.data))
+        self.update_lock.release()
+
+    @_lmcache_nvtx_annotate
+    @torch.inference_mode()
+    def put_blocking(
+        self,
+        key: CacheEngineKey,
+        kv_chunk: torch.Tensor,
+    ) -> None:
+        path = self._key_to_path(key)
+        logger.debug(f"Saving cache to {path}")
+
+        self.update_lock.acquire()
+        # Obtain keys to evict
+        evict_keys, put_status = self.evictor.update_on_put(
+            self.dict, kv_chunk)
+
+        # Abort put if cache too big
+        if put_status == PutStatus.ILLEGAL:
+            self.update_lock.release()
+            return
+
+        # evict caches
+        for evict_key in evict_keys:
+            self.remove(evict_key)
+        self.update_lock.release()
+
+        # The following order matters of `save_file` and `update dictionary`
+        # matters
         save_file({"kv_chunk": kv_chunk}, path)
+
         self.update_lock.acquire()
         self.dict[key] = DiskCacheMetadata(path,
                                            self.evictor.get_size(kv_chunk))

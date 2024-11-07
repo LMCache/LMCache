@@ -20,8 +20,7 @@ class LocalCPUPool(BasePool):
         kv_dtype = torch.bfloat16
 
         mem_shape = (32, 2, self.chunk_size, 8, 128)
-        logger.info(
-            f"Initializing cpu mem buffer, is_pinned: {use_pinned_memory}")
+        logger.info(f"Initializing cpu mem, is_pinned: {use_pinned_memory}")
         with torch.inference_mode():
             self.mem_pool = [
                 torch.empty(mem_shape,
@@ -50,7 +49,9 @@ class LocalCPUPool(BasePool):
         num_tok = kv_chunk.shape[2]
         assert num_tok <= self.chunk_size
         if not self.free_pool:
-            logger.warning("No free memory chunks. Evictor might be failing!")
+            logger.error("No free memory chunks. Evictor might be failing!")
+            raise Exception("No free chunks in cpu memory. \
+                Shouldn't happen in local cpu-only backend.")
         chunk_idx = self.free_pool.pop()
         return KVObj(chunk_idx, self.mem_pool[chunk_idx][:, :, 0:num_tok])
 
@@ -62,3 +63,28 @@ class LocalCPUPool(BasePool):
             the KVObj to be freed
         """
         self.free_pool.append(kv_obj.chunk_idx)
+
+
+class LocalCPUBufferPool(LocalCPUPool):
+
+    def allocate(self, kv_chunk: torch.Tensor) -> Optional[KVObj]:
+        """
+        Allocate a buffer memory pointer from the memory pool.
+        
+        Input:
+            kv_chunk: the kv tensor to be stored
+        
+        Returns:
+            A memory pointer (torch tensor view).
+            None if memory is full.
+        
+        Note:
+            This does not perform the actual memory movement.
+        """
+        num_tok = kv_chunk.shape[2]
+        assert num_tok <= self.chunk_size
+        while not self.free_pool:
+            logger.info("No free memory chunks. Waiting...")
+            return None
+        chunk_idx = self.free_pool.pop()
+        return KVObj(chunk_idx, self.mem_pool[chunk_idx][:, :, 0:num_tok])
