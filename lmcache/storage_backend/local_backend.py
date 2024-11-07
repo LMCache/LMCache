@@ -30,13 +30,13 @@ class LMCLocalBackend(LMCBackendInterface):
     memory.
     """
 
-    def __init__(self, config: LMCacheEngineConfig):
+    def __init__(self, config: LMCacheEngineConfig, dst_device: str = "cuda"):
         """
         Throws:
             RuntimeError if the loaded configuration does not match the current
                 configuration
         """
-        super().__init__()
+        super().__init__(dst_device)
 
         self.chunk_size = config.chunk_size
         self.config = config
@@ -55,7 +55,6 @@ class LMCLocalBackend(LMCBackendInterface):
         self.use_pin_memory = False
         logger.info(f"Using pinned cpu memory: {self.use_pin_memory}")
 
-        self.dst_device = "cuda"
         # self.async_put_flag = False
         # self.put_events = {}
 
@@ -197,7 +196,8 @@ class LMCLocalBackend(LMCBackendInterface):
         # Update cache recency
         if kv_chunk is not None:
             self.evictor.update_on_get(key, self.dict)
-            kv_chunk = kv_chunk.to(self.dst_device)
+            if kv_chunk.device != self.dst_device:
+                kv_chunk = kv_chunk.to(self.dst_device)
         self.update_lock.release()
         return kv_chunk
 
@@ -223,13 +223,13 @@ class LMCLocalDiskBackend(LMCBackendInterface):
     Cache engine for storing the KV cache of the tokens in the local disk.
     """
 
-    def __init__(self, config: LMCacheEngineConfig):
+    def __init__(self, config: LMCacheEngineConfig, dst_device: str = "cuda"):
         """
         Throws:
             RuntimeError if the loaded configuration does not match the current
                 configuration
         """
-        super().__init__()
+        super().__init__(dst_device)
 
         self.chunk_size = config.chunk_size
         self.config = config
@@ -254,9 +254,6 @@ class LMCLocalDiskBackend(LMCBackendInterface):
         self.put_thread = threading.Thread(target=self.put_worker, args=())
         self.put_thread.start()
         self.update_lock = threading.Lock()
-
-        # TODO (Jiayi): please remove this hard code
-        self.dst_device = "cuda"
 
         self.evictor = DummyEvictor()
 

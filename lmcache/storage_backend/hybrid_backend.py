@@ -23,16 +23,18 @@ class LMCHybridBackend(LMCBackendInterface):
 
     # TODO: LRU eviction policy
 
-    def __init__(self, config: LMCacheEngineConfig,
-                 metadata: LMCacheEngineMetadata):
-        self.local_store = LMCLocalBackend(config)
+    def __init__(self,
+                 config: LMCacheEngineConfig,
+                 metadata: LMCacheEngineMetadata,
+                 dst_device: str = "cuda"):
+        super().__init__(dst_device)
+        self.local_store = LMCLocalBackend(config, dst_device)
         self.remote_store: Union[LMCPipelinedRemoteBackend, LMCRemoteBackend]
         if config.pipelined_backend:
-            self.remote_store = LMCPipelinedRemoteBackend(config, metadata)
+            self.remote_store = LMCPipelinedRemoteBackend(
+                config, metadata, dst_device)
         else:
-            self.remote_store = LMCRemoteBackend(config, metadata)
-        # NOTE: no need to add `dst_device` in hybrid bckend
-        # as the logic is handled in local/remote backend
+            self.remote_store = LMCRemoteBackend(config, metadata, dst_device)
         # TODO add a configuration item to do this
         self._prefetch(metadata)
 

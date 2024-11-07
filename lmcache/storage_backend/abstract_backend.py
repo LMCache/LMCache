@@ -11,6 +11,22 @@ logger = init_logger(__name__)
 
 class LMCBackendInterface(metaclass=abc.ABCMeta):
 
+    def __init__(
+        self,
+        dst_device: str = "cuda",
+    ):
+        """Initialize the storage backend. 
+
+        :param dst_device: the device where the retrieved KV be stored,
+            could be either "cpu" or "cuda"
+
+        :raise: ValueError if the dst_device is not "cpu" or "cuda"
+        """
+        if dst_device not in ["cpu", "cuda"]:
+            raise ValueError(f"Invalid dst device for backend {dst_device}")
+
+        self.dst_device = dst_device
+
     @abc.abstractmethod
     def put(
         self,
