@@ -125,8 +125,7 @@ def test_creation_from_file(autorelease, lmserver_process):
 
 @pytest.mark.parametrize("backend_type",
                          ["local", "remote", "hybrid", "hybrid_pipelined"])
-@pytest.mark.parametrize("dst_device",
-                         ["cuda", "cpu"])
+@pytest.mark.parametrize("dst_device", ["cuda", "cpu"])
 @pytest.mark.parametrize("lmserver_process", ["cpu", "remote_disk/"],
                          indirect=True)
 def test_backends(backend_type, dst_device, autorelease, lmserver_process):

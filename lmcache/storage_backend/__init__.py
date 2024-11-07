@@ -10,10 +10,9 @@ from lmcache.storage_backend.remote_backend import LMCRemoteBackend
 logger = init_logger(__name__)
 
 
-def CreateStorageBackend(
-        config: LMCacheEngineConfig,
-        metadata: LMCacheEngineMetadata,
-        dst_device: str = "cuda") -> LMCBackendInterface:
+def CreateStorageBackend(config: LMCacheEngineConfig,
+                         metadata: LMCacheEngineMetadata,
+                         dst_device: str = "cuda") -> LMCBackendInterface:
     match config:
         case LMCacheEngineConfig(_, local_device=None,
                                  remote_url=str(p)) if p is not None:
