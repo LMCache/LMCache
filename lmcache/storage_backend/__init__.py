@@ -12,13 +12,14 @@ logger = init_logger(__name__)
 
 def CreateStorageBackend(
         config: LMCacheEngineConfig,
-        metadata: LMCacheEngineMetadata) -> LMCBackendInterface:
+        metadata: LMCacheEngineMetadata,
+        dst_device: str = "cuda") -> LMCBackendInterface:
     match config:
         case LMCacheEngineConfig(_, local_device=None,
                                  remote_url=str(p)) if p is not None:
             # remote only
             logger.info("Initializing remote-only backend")
-            return LMCRemoteBackend(config, metadata)
+            return LMCRemoteBackend(config, metadata, dst_device)
 
         case LMCacheEngineConfig(_, local_device=str(p),
                                  remote_url=None) if p is not None:
@@ -28,17 +29,17 @@ def CreateStorageBackend(
                     logger.info(
                         f"Initializing local-only ({config.local_device})"
                         f" backend")
-                    return LMCLocalBackend(config)
+                    return LMCLocalBackend(config, dst_device)
                 case _:
                     logger.info(f"Initializing local-only (disk) backend at"
                                 f" {config.local_device}")
-                    return LMCLocalDiskBackend(config)
+                    return LMCLocalDiskBackend(config, dst_device)
 
         case LMCacheEngineConfig(
                 _, local_device=str(p),
                 remote_url=str(q)) if p is not None and q is not None:
             logger.info("Initializing hybrid backend")
-            return LMCHybridBackend(config, metadata)
+            return LMCHybridBackend(config, metadata, dst_device)
 
         case _:
             raise ValueError(f"Invalid configuration: {config}")

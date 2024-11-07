@@ -125,12 +125,14 @@ def test_creation_from_file(autorelease, lmserver_process):
 
 @pytest.mark.parametrize("backend_type",
                          ["local", "remote", "hybrid", "hybrid_pipelined"])
+@pytest.mark.parametrize("dst_device",
+                         ["cuda", "cpu"])
 @pytest.mark.parametrize("lmserver_process", ["cpu", "remote_disk/"],
                          indirect=True)
-def test_backends(backend_type, autorelease, lmserver_process):
+def test_backends(backend_type, dst_device, autorelease, lmserver_process):
     config = get_config(backend_type)
     metadata = get_metadata()
-    backend = autorelease(CreateStorageBackend(config, metadata))
+    backend = autorelease(CreateStorageBackend(config, metadata, dst_device))
 
     N = 10
     keys = [generate_random_key() for i in range(N)]
@@ -142,6 +144,7 @@ def test_backends(backend_type, autorelease, lmserver_process):
         assert backend.contains(key)
         retrieved = backend.get(key)
         assert retrieved.shape == value.shape
+        assert retrieved.device.type == dst_device
         if config.remote_serde == "torch":
             assert torch.equal(value, retrieved.to(value.device))
 
