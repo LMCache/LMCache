@@ -356,7 +356,7 @@ class LMCLocalDiskBackend(LMCBackendInterface):
         path: str,
         kv_chunk: torch.Tensor,
     ):
-        save_file({"kv_chunk": kv_chunk}, path)
+        save_file({"kv_chunk": kv_chunk.contiguous()}, path)
 
     @_lmcache_nvtx_annotate
     @torch.inference_mode()
@@ -367,9 +367,6 @@ class LMCLocalDiskBackend(LMCBackendInterface):
     ) -> None:
         path = self._key_to_path(key)
         logger.debug(f"Saving cache to {path}")
-
-        if kv_chunk.shape[2] < self.chunk_size:
-            return
 
         self.update_lock.acquire()
 
