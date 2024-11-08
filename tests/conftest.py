@@ -1,8 +1,9 @@
-import shlex
-from dataclasses import dataclass
 import random
+import socket
+import shlex
 import subprocess
 import time
+from dataclasses import dataclass
 from unittest.mock import patch
 
 import pytest
@@ -42,11 +43,11 @@ class MockRedisSentinel:
     def slave_for(self, service_name, socket_timeout):
         return self.redis
 
+
 @dataclass
 class LMCacheServerProcess:
     server_url: str
     server_process: object
-
 
 
 @pytest.fixture(scope="function", autouse=True)
@@ -64,25 +65,55 @@ def mock_redis_sentinel():
 
 @pytest.fixture(scope="module")
 def lmserver_process(request):
+    def ensure_connection(host, port):
+        retries = 10
+        client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        successful = False
+        while retries > 0:
+            retries -= 1
+            try:
+                print("Probing connection, remaining retries: ", retries)
+                client_socket.connect((host, port))
+                successful = True
+                break
+            except ConnectionRefusedError:
+                time.sleep(1)
+                print("Connection refused!")
+                continue
+            except Exception as e:
+                print(f"other Exception: {e}")
+                continue
+    
+        client_socket.close()
+        return successful
+
     # Specify remote device
     device = request.param
 
     # Start the process
-    while True:
+    max_retries = 5
+    while max_retries > 0:
+        max_retries -= 1
         port_number = random.randint(10000, 65500)
+        print("Starting the lmcache server process on port")
         proc = subprocess.Popen(
-            shlex.split(f"python3 -m lmcache.server localhost {port_number} {device}"))
+            shlex.split(
+                f"python3 -m lmcache.server localhost {port_number} {device}"))
 
         # Wait for lmcache process to start
         time.sleep(5)
 
+        successful = False 
         if proc.poll() is not None:
+            successful = True
+        else:
+            successful = ensure_connection("localhost", port_number)
+
+        if not successful:
             proc.terminate()
             proc.wait()
         else:
             break
-
-
 
     # Yield control back to the test until it finishes
     server_url = f"lm://localhost:{port_number}"

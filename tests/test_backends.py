@@ -40,11 +40,11 @@ def get_config(t, remote_url):
             return LMCacheEngineConfig.from_defaults(local_device="cuda",
                                                      remote_url=None)
         case "remote":
-            return LMCacheEngineConfig.from_defaults(
-                local_device=None, remote_url=remote_url)
+            return LMCacheEngineConfig.from_defaults(local_device=None,
+                                                     remote_url=remote_url)
         case "hybrid":
-            return LMCacheEngineConfig.from_defaults(
-                local_device="cuda", remote_url=remote_url)
+            return LMCacheEngineConfig.from_defaults(local_device="cuda",
+                                                     remote_url=remote_url)
         case "hybrid_pipelined":
             return LMCacheEngineConfig.from_defaults(
                 local_device="cuda",
@@ -67,10 +67,10 @@ def test_creation(autorelease, lmserver_process):
     config_local = LMCacheEngineConfig.from_defaults(local_device="cuda",
                                                      remote_url=None)
     lmserver_url = lmserver_process.server_url
-    config_remote = LMCacheEngineConfig.from_defaults(
-        local_device=None, remote_url=lmserver_url)
-    config_hybrid = LMCacheEngineConfig.from_defaults(
-        local_device="cuda", remote_url=lmserver_url)
+    config_remote = LMCacheEngineConfig.from_defaults(local_device=None,
+                                                      remote_url=lmserver_url)
+    config_hybrid = LMCacheEngineConfig.from_defaults(local_device="cuda",
+                                                      remote_url=lmserver_url)
     _metadata = get_metadata()
 
     backend_local = autorelease(
