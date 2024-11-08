@@ -10,7 +10,7 @@ import torch
 from safetensors import safe_open
 from safetensors.torch import save_file
 
-from lmcache.config import LMCacheEngineConfig
+from lmcache.config import LMCacheEngineConfig, LMCacheMemPoolMetadata
 from lmcache.logging import init_logger
 from lmcache.storage_backend.abstract_backend import LMCBackendInterface
 from lmcache.storage_backend.evictor import DummyEvictor
@@ -33,7 +33,8 @@ class LMCLocalBackend(LMCBackendInterface):
     memory.
     """
 
-    def __init__(self, config: LMCacheEngineConfig):
+    def __init__(self, config: LMCacheEngineConfig,
+                 metadata: LMCacheMemPoolMetadata):
         """
         Throws:
             RuntimeError if the loaded configuration does not match the current
@@ -65,7 +66,7 @@ class LMCLocalBackend(LMCBackendInterface):
         # TODO(Jiayi): The storage size and caching policy for both
         # evictor and mpool need to be configured dynamically
         self.evictor = DummyEvictor()
-        self.cpu_mpool = LocalCPUPool(config)
+        self.cpu_mpool = LocalCPUPool(metadata)
 
         # TODO(Jiayi): A gpu buffer could speed up `get`
         # self.fix_sized_dst_buffer = torch.tensor()
@@ -244,7 +245,8 @@ class LMCLocalDiskBackend(LMCBackendInterface):
     Cache engine for storing the KV cache of the tokens in the local disk.
     """
 
-    def __init__(self, config: LMCacheEngineConfig):
+    def __init__(self, config: LMCacheEngineConfig,
+                 metadata: LMCacheMemPoolMetadata):
         """
         Throws:
             RuntimeError if the loaded configuration does not match the current
@@ -285,7 +287,7 @@ class LMCLocalDiskBackend(LMCBackendInterface):
         # NOTE(Jiayi): This mbufferpool should be smaller than the actual
         # cpu backend but big enough to avoid stalls in save
         # TODO(Jiayi): share the buffer if both cpu and disk backend are enabled
-        self.cpu_mbufferpool = LocalCPUBufferPool(config)
+        self.cpu_mbufferpool = LocalCPUBufferPool(metadata)
 
         self.future_pool: Dict[CacheEngineKey, Future] = {}
 

@@ -5,7 +5,8 @@ from typing import Dict, Iterable, List, Optional, Tuple, Union
 
 import torch
 
-from lmcache.config import LMCacheEngineConfig, LMCacheEngineMetadata
+from lmcache.config import (LMCacheEngineConfig, LMCacheEngineMetadata,
+                            LMCacheMemPoolMetadata)
 from lmcache.logging import init_logger
 from lmcache.storage_backend import CreateStorageBackend
 from lmcache.utils import CacheEngineKey, KVCache, _lmcache_nvtx_annotate
@@ -30,7 +31,10 @@ class LMCacheEngine:
         self.chunk_size = config.chunk_size
         self.save_decode_cache = config.save_decode_cache
 
-        self.engine_ = CreateStorageBackend(config, metadata)
+        mpool_metadata = LMCacheMemPoolMetadata(metadata.kv_shape,
+                                                metadata.kv_dtype)
+
+        self.engine_ = CreateStorageBackend(config, metadata, mpool_metadata)
         logger.debug(f"Current storage backend type {type(self.engine_)}")
 
     def _make_key(self, chunk_hash: str, fmt: str) -> CacheEngineKey:

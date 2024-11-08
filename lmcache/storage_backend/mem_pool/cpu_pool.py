@@ -2,7 +2,7 @@ from typing import Optional
 
 import torch
 
-from lmcache.config import LMCacheEngineConfig
+from lmcache.config import LMCacheMemPoolMetadata
 from lmcache.logging import init_logger
 from lmcache.storage_backend.mem_pool.base_pool import BasePool, KVObj
 
@@ -11,19 +11,18 @@ logger = init_logger(__name__)
 
 class LocalCPUPool(BasePool):
 
-    def __init__(self, config: LMCacheEngineConfig):
-        self.chunk_size = config.chunk_size
+    def __init__(self, metadata: LMCacheMemPoolMetadata):
+        self.chunk_size = metadata.kv_shape[2]
         # TODO(Jiayi): the `max_chunk_num` should be computed
         # from `config.max_cache_size`
         max_chunk_num = 200
         use_pinned_memory = True
-        kv_dtype = torch.bfloat16
+        kv_dtype = metadata.kv_dtype
 
-        mem_shape = (32, 2, self.chunk_size, 8, 128)
         logger.info(f"Initializing cpu mem, is_pinned: {use_pinned_memory}")
         with torch.inference_mode():
             self.mem_pool = [
-                torch.empty(mem_shape,
+                torch.empty(metadata.kv_shape,
                             dtype=kv_dtype,
                             device='cpu',
                             pin_memory=use_pinned_memory)
