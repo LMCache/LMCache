@@ -48,7 +48,7 @@ class LMCacheEngineConfig:
     ) -> "LMCacheEngineConfig":
         return LMCacheEngineConfig(chunk_size, local_device, remote_url,
                                    remote_serde, pipelined_backend,
-                                   save_decode_cache, enable_blending, 
+                                   save_decode_cache, enable_blending,
                                    blend_recompute_ratio, blend_min_tokens)
 
     @staticmethod
