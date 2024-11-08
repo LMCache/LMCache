@@ -1,5 +1,9 @@
 from lmcache.storage_backend.mem_pool.base_pool import KVObj
-from lmcache.storage_backend.mem_pool.cpu_pool import (LocalCPUBufferPool,
-                                                       LocalCPUPool)
+from lmcache.storage_backend.mem_pool.local_pool import (LocalCPUBufferPool,
+                                                         LocalCPUPool,
+                                                         LocalGPUPool,
+                                                         LocalPool)
 
-__all__ = ["LocalCPUPool", "LocalCPUBufferPool", "KVObj"]
+__all__ = [
+    "LocalPool", "LocalCPUPool", "LocalGPUPool", "LocalCPUBufferPool", "KVObj"
+]

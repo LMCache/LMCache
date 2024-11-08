@@ -12,8 +12,10 @@ logger = init_logger(__name__)
 
 
 def CreateStorageBackend(
-        config: LMCacheEngineConfig, metadata: LMCacheEngineMetadata,
-        mpool_metadata: LMCacheMemPoolMetadata) -> LMCBackendInterface:
+        config: LMCacheEngineConfig,
+        metadata: LMCacheEngineMetadata) -> LMCBackendInterface:
+    mpool_metadata = LMCacheMemPoolMetadata(metadata.kv_shape,
+                                            metadata.kv_dtype)
     match config:
         case LMCacheEngineConfig(_, local_device=None,
                                  remote_url=str(p)) if p is not None:

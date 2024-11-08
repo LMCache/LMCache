@@ -16,7 +16,8 @@ from lmcache.storage_backend.abstract_backend import LMCBackendInterface
 from lmcache.storage_backend.evictor import DummyEvictor
 from lmcache.storage_backend.evictor.base_evictor import PutStatus
 from lmcache.storage_backend.mem_pool import (KVObj, LocalCPUBufferPool,
-                                              LocalCPUPool)
+                                              LocalCPUPool, LocalGPUPool,
+                                              LocalPool)
 from lmcache.utils import (CacheEngineKey, DiskCacheMetadata, KVCache,
                            _lmcache_nvtx_annotate)
 
@@ -66,7 +67,11 @@ class LMCLocalBackend(LMCBackendInterface):
         # TODO(Jiayi): The storage size and caching policy for both
         # evictor and mpool need to be configured dynamically
         self.evictor = DummyEvictor()
-        self.cpu_mpool = LocalCPUPool(metadata)
+        self.mpool: LocalPool
+        if self.device == "cpu":
+            self.mpool = LocalCPUPool(metadata)
+        elif self.device == "cuda":
+            self.mpool = LocalGPUPool(metadata)
 
         # TODO(Jiayi): A gpu buffer could speed up `get`
         # self.fix_sized_dst_buffer = torch.tensor()
@@ -98,7 +103,7 @@ class LMCLocalBackend(LMCBackendInterface):
 
         """
         kv_obj = self.dict.pop(key)
-        self.cpu_mpool.free(kv_obj)
+        self.mpool.free(kv_obj)
 
     @_lmcache_nvtx_annotate
     def put_worker(self, ):
@@ -127,14 +132,15 @@ class LMCLocalBackend(LMCBackendInterface):
             self.remove(evict_key)
 
         # Allocate the kv chunk
-        kv_obj = self.cpu_mpool.allocate(kv_chunk)
+        kv_obj = self.mpool.allocate(kv_chunk)
         self.update_lock.release()
 
         if kv_obj is None:
             return
 
         put_stream = torch.cuda.Stream()
-        put_stream.wait_stream(torch.cuda.default_stream(kv_chunk.device))
+        if kv_chunk.device != torch.cpu:
+            put_stream.wait_stream(torch.cuda.default_stream(kv_chunk.device))
         with torch.cuda.stream(put_stream):
             kv_obj.data.copy_(kv_chunk, non_blocking=True)
             kv_chunk.record_stream(put_stream)
@@ -147,7 +153,7 @@ class LMCLocalBackend(LMCBackendInterface):
 
     @torch.inference_mode()
     def put_blocking(self, key, kv_chunk):
-        kv_obj = self.cpu_mpool.allocate(kv_chunk)
+        kv_obj = self.mpool.allocate(kv_chunk)
 
         if kv_obj is None:
             return
@@ -217,7 +223,7 @@ class LMCLocalBackend(LMCBackendInterface):
         if kv_obj is not None:
             self.evictor.update_on_get(key, self.dict)
             kv_chunk = kv_obj.data.to(self.dst_device)
-            self.cpu_mpool.free(kv_obj)
+            self.mpool.free(kv_obj)
 
         self.update_lock.release()
 
@@ -492,10 +498,11 @@ class LMCLocalDiskBackend(LMCBackendInterface):
             self.update_lock.release()
             return None
 
-        future = self.future_pool[key]
-        if not future.done():
-            return None
-        del self.future_pool[key]
+        if key in self.future_pool:
+            future = self.future_pool[key]
+            if not future.done():
+                return None
+            del self.future_pool[key]
 
         path = self.dict[key].path
         self.evictor.update_on_get(key, self.dict)
