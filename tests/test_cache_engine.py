@@ -124,6 +124,9 @@ def test_same_retrieve_store(fmt, backend, remote_serde, autorelease,
     device = "cpu" if backend == "cpu" else "cuda"
     num_tokens = 2000
 
+    if backend.startswith("lm"):
+        backend = lmserver_process.server_url
+
     tokens = generate_tokens(num_tokens, device)
     kv_cache = generate_kv_cache(num_tokens, fmt, device)
     """ initialize the engine """
@@ -195,6 +198,9 @@ def test_retrieve_prefix(fmt, chunk_size, backend, autorelease,
     device = "cpu" if backend == "cpu" else "cuda"
     num_tokens = 2000
     new_num_tokens = 1000
+    if backend.startswith("lm"):
+        backend = lmserver_process.server_url
+
     print(fmt, chunk_size, backend)
     t1 = time.perf_counter()
     tokens = generate_tokens(num_tokens, device)
@@ -239,6 +245,9 @@ def test_mixed_retrieve(fmt, chunk_size, backend, autorelease,
     device = "cuda"
     num_tokens = 2000
     new_num_tokens = 1000
+    if backend.startswith("lm"):
+        backend = lmserver_process.server_url
+
     print(fmt, chunk_size, backend)
     tokens = generate_tokens(num_tokens, device)
     kv_cache = generate_kv_cache(num_tokens, fmt, device)

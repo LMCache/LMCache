@@ -1,4 +1,5 @@
 import shlex
+from dataclasses import dataclass
 import random
 import subprocess
 import time
@@ -41,6 +42,12 @@ class MockRedisSentinel:
     def slave_for(self, service_name, socket_timeout):
         return self.redis
 
+@dataclass
+class LMCacheServerProcess:
+    server_url: str
+    server_process: object
+
+
 
 @pytest.fixture(scope="function", autouse=True)
 def mock_redis():
@@ -78,7 +85,8 @@ def lmserver_process(request):
 
 
     # Yield control back to the test until it finishes
-    yield proc
+    server_url = f"lm://localhost:{port_number}"
+    yield LMCacheServerProcess(server_url, proc)
 
     # Terminate the process
     proc.terminate()

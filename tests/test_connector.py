@@ -20,6 +20,9 @@ def random_string(N):
     ],
 )
 def test_lm_connector(url, autorelease, lmserver_process):
+    if url.startswith("lm"):
+        url = lmserver_process.server_url
+
     connector = autorelease(CreateConnector(url))
 
     assert not connector.exists("some-special-key-12345")
