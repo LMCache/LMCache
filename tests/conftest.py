@@ -1,6 +1,6 @@
 import random
-import socket
 import shlex
+import socket
 import subprocess
 import time
 from dataclasses import dataclass
@@ -65,6 +65,7 @@ def mock_redis_sentinel():
 
 @pytest.fixture(scope="module")
 def lmserver_process(request):
+
     def ensure_connection(host, port):
         retries = 10
         client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -83,7 +84,7 @@ def lmserver_process(request):
             except Exception as e:
                 print(f"other Exception: {e}")
                 continue
-    
+
         client_socket.close()
         return successful
 
@@ -103,7 +104,7 @@ def lmserver_process(request):
         # Wait for lmcache process to start
         time.sleep(5)
 
-        successful = False 
+        successful = False
         if proc.poll() is not None:
             successful = True
         else:
