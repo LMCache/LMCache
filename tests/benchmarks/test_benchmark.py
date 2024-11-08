@@ -53,8 +53,7 @@ def test_cachegen_decoder_bench(benchmark, fmt, chunk_size):
         worker_id=0,
         fmt=fmt,
         kv_dtype=torch.bfloat16,
-        kv_shape=None
-    )
+        kv_shape=None)
     serializer = CacheGenSerializer(config, metadata)
     deserializer = CacheGenDeserializer(config, metadata)
 
