@@ -2,6 +2,7 @@ import torch
 
 from lmcache.logging import init_logger
 from lmcache.storage_backend.serde.serde import Deserializer, Serializer
+from lmcache.config import LMCacheEngineConfig, LMCacheEngineMetadata
 
 logger = init_logger(__name__)
 
