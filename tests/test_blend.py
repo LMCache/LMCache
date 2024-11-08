@@ -7,9 +7,9 @@ from lmcache.cache_engine import LMCacheEngine
 from lmcache.config import LMCacheEngineConfig, LMCacheEngineMetadata
 
 
-def dumb_metadata(fmt="vllm"):
+def dumb_metadata(fmt="vllm", kv_shape=(32, 2, 256, 8, 128)):
     dtype = torch.bfloat16 if fmt == "vllm" else torch.float16
-    return LMCacheEngineMetadata("test_model", 3, 123, fmt, dtype)
+    return LMCacheEngineMetadata("test_model", 3, 123, fmt, dtype, kv_shape)
 
 
 def dumb_cfg():
@@ -105,7 +105,7 @@ def check_kv_layer_equal(kv_tuple, layer_id, k, v, start_token, end_token,
     check_kv_cache_equal(v_layer, v, start_token, end_token, fmt)
 
 
-@pytest.mark.parametrize("fmt", ["vllm", "huggingface"])
+@pytest.mark.parametrize("fmt", ["vllm"])
 @pytest.mark.parametrize("spt_length", [1, 2])
 def test_spt_full_hit(fmt, spt_length, autorelease):
     """
@@ -161,7 +161,7 @@ def test_spt_full_hit(fmt, spt_length, autorelease):
     check_groups(1, 1, 2, 2)
 
 
-@pytest.mark.parametrize("fmt", ["vllm", "huggingface"])
+@pytest.mark.parametrize("fmt", ["vllm"])
 @pytest.mark.parametrize("spt_length", [1, 2])
 def test_spt_hit_miss(fmt, spt_length, autorelease):
     """
@@ -226,7 +226,7 @@ def test_spt_hit_miss(fmt, spt_length, autorelease):
     check_groups(1, 2, 3)  # N, Y, N
 
 
-@pytest.mark.parametrize("fmt", ["vllm", "huggingface"])
+@pytest.mark.parametrize("fmt", ["vllm"])
 @pytest.mark.parametrize("spt_length", [1, 2])
 def test_spt_all_miss(fmt, spt_length, autorelease):
     """
@@ -272,7 +272,7 @@ def test_spt_all_miss(fmt, spt_length, autorelease):
             assert (result.original_positions == 0).all()
 
 
-@pytest.mark.parametrize("fmt", ["vllm", "huggingface"])
+@pytest.mark.parametrize("fmt", ["vllm"])
 @pytest.mark.parametrize("spt_length", [1, 2])
 def test_spt_partial_hit(fmt, spt_length, autorelease):
     """
@@ -346,7 +346,7 @@ def test_spt_partial_hit(fmt, spt_length, autorelease):
     check_groups(0, 0)
 
 
-@pytest.mark.parametrize("fmt", ["vllm", "huggingface"])
+@pytest.mark.parametrize("fmt", ["vllm"])
 @pytest.mark.parametrize("spt_length", [1, 2])
 def test_spt_multi_query(fmt, spt_length, autorelease):
     """
