@@ -60,11 +60,20 @@ def lmserver_process(request):
     device = request.param
 
     # Start the process
-    proc = subprocess.Popen(
-        shlex.split(f"python3 -m lmcache.server localhost 65000 {device}"))
+    while True:
+        proc = subprocess.Popen(
+            shlex.split(f"python3 -m lmcache.server localhost 65000 {device}"))
 
-    # Wait for lmcache process to start
-    time.sleep(5)
+        # Wait for lmcache process to start
+        time.sleep(5)
+
+        if proc.poll() is not None:
+            proc.terminate()
+            proc.wait()
+        else:
+            break
+
+
 
     # Yield control back to the test until it finishes
     yield proc
