@@ -1,4 +1,5 @@
 import shlex
+import random
 import subprocess
 import time
 from unittest.mock import patch
@@ -61,8 +62,9 @@ def lmserver_process(request):
 
     # Start the process
     while True:
+        port_number = random.randint(10000, 65500)
         proc = subprocess.Popen(
-            shlex.split(f"python3 -m lmcache.server localhost 65000 {device}"))
+            shlex.split(f"python3 -m lmcache.server localhost {port_number} {device}"))
 
         # Wait for lmcache process to start
         time.sleep(5)
