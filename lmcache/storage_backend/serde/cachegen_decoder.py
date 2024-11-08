@@ -17,7 +17,7 @@ logger = init_logger(__name__)
 @_lmcache_nvtx_annotate
 def quant(bins: int, xq: torch.Tensor, max1: float):
     C = bins // 2 - 1
-    x = xq / C * max1  # .to(torch.float16)
+    x = xq / C * max1  # .to(self.dtype)
     return x
 
 
@@ -115,6 +115,7 @@ class CacheGenDeserializer(Deserializer):
         self.chunk_size = config.chunk_size
         self.output_buffer: Optional[torch.Tensor] = None
         self.fmt = metadata.fmt
+        self.dtype=metadata.dtype
         self.key_bins = self.make_key_bins(self.cachegen_config)
         self.value_bins = self.make_value_bins(self.cachegen_config)
 
@@ -190,12 +191,12 @@ class CacheGenDeserializer(Deserializer):
             case "vllm":
                 return blob.permute(
                     (1, 0, 2, 3,
-                     4)).to(torch.bfloat16
+                     4)).to(self.dtype
                             )  # [nlayers, 2, ntokens, num_heads, head_size]
             case "huggingface":
                 return blob.permute(
                     (1, 0, 3, 2,
-                     4)).to(torch.float16
+                     4)).to(self.dtype
                             )  # [nlayers, 2, num_heads, ntokens, head_size]
             case _:
                 raise RuntimeError("Unknown format %s" % self.fmt)

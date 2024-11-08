@@ -8,8 +8,10 @@ logger = init_logger(__name__)
 
 class FastSerializer(Serializer):
 
-    def __init__(self):
+    def __init__(self, metadata: LMCacheEngineMetadata):
         super().__init__()
+        self.dtype=metadata.dtype
+        
 
     def to_bytes(self, t: torch.Tensor) -> bytes:
         # make tensor into bit stream
@@ -19,13 +21,13 @@ class FastSerializer(Serializer):
 
 class FastDeserializer(Deserializer):
 
-    def __init__(self):
+    def __init__(self, metadata: LMCacheEngineMetadata):
         super().__init__()
+        self.dtype=metadata.dtype
 
     def from_bytes_normal(self,
-                          b: bytes,
-                          dtype=torch.bfloat16) -> torch.Tensor:
-        return torch.frombuffer(b, dtype=dtype)
+                          b: bytes) -> torch.Tensor:
+        return torch.frombuffer(b, dtype=self.dtype)
 
     def from_bytes(self, b: bytes) -> torch.Tensor:
         return self.from_bytes_normal(b)
