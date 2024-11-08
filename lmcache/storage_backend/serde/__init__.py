@@ -31,7 +31,7 @@ def CreateSerde(
         s, d = CacheGenSerializer(config, metadata), CacheGenDeserializer(
             config, metadata)
     elif serde_type == "fast":
-        s, d = FastSerializer(), FastDeserializer()
+        s, d = FastSerializer(metadata), FastDeserializer(metadata)
     else:
         raise ValueError(f"Invalid serde type: {serde_type}")
 
