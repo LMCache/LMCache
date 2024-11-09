@@ -1,6 +1,6 @@
 .. _docker:
 
-LMCache with Docker
+Docker Installation
 =========================
 
 LMCache offers an official Docker image for deployment. 
