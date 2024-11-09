@@ -2,17 +2,14 @@ import torch
 
 from lmcache.logging import init_logger
 from lmcache.storage_backend.serde.serde import Deserializer, Serializer
-from lmcache.config import LMCacheEngineMetadata
 
 logger = init_logger(__name__)
 
 
 class FastSerializer(Serializer):
 
-    def __init__(self, metadata: LMCacheEngineMetadata):
+    def __init__(self):
         super().__init__()
-        self.dtype=metadata.dtype
-        
 
     def to_bytes(self, t: torch.Tensor) -> bytes:
         # make tensor into bit stream
@@ -22,12 +19,11 @@ class FastSerializer(Serializer):
 
 class FastDeserializer(Deserializer):
 
-    def __init__(self, metadata: LMCacheEngineMetadata):
-        super().__init__()
-        self.dtype=metadata.dtype
+    def __init__(self,dtype):
+        super().__init__(dtype)
 
-    def from_bytes_normal(self,
-                          b: bytes) -> torch.Tensor:
+    def from_bytes_normal(self, b: bytes) -> torch.Tensor:
+        print(self.dtype)
         return torch.frombuffer(b, dtype=self.dtype)
 
     def from_bytes(self, b: bytes) -> torch.Tensor:
