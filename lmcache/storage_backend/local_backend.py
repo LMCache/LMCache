@@ -130,11 +130,11 @@ class LMCLocalBackend(LMCBackendInterface):
         # evict caches
         for evict_key in evict_keys:
             self.remove(evict_key)
-        
+
         # free old block to avoid mem leak
         if key in self.dict:
             self.remove(key)
-        
+
         # Allocate the kv chunk
         kv_obj = self.mpool.allocate(kv_chunk)
         self.update_lock.release()
@@ -172,12 +172,11 @@ class LMCLocalBackend(LMCBackendInterface):
             return
 
         kv_obj.data.copy_(kv_chunk, non_blocking=False)
-        
-        
+
         # free old block to avoid mem leak
         if key in self.dict:
             self.remove(key)
-        
+
         # Evict caches
         for evict_key in evict_keys:
             self.remove(evict_key)

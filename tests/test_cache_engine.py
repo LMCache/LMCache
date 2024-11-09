@@ -286,15 +286,7 @@ def test_mixed_retrieve(fmt, chunk_size, backend, autorelease,
     retrieved_cache, ret_mask = engine.retrieve(final_tokens)
     length = torch.sum(ret_mask)
     assert length == num_tokens + new_num_tokens
-    
-    right_k = retrieved_cache[0][0]
-    left_k = final_kv_cache[0][0]
-    start = 1792 + 256 *2
-    end = 2048 + 256 * 2
-    print(f"left: {left_k[start:end]}")
-    print(f"right: {right_k[start:end]}")
-    print(f"Diff: {torch.sum(left_k[start:end]-right_k[start:end])}")
-    
+
     check_kv_cache_equal(retrieved_cache, final_kv_cache, length, fmt)
     """destroy local disk path"""
     if backend in ["file://local_disk/"]:
