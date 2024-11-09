@@ -87,7 +87,7 @@ class LocalCPUBufferPool(LocalCPUPool):
 
 
 class LocalGPUPool(LocalPool):
-    """ only for testing, might not be useful in testing """
+    """ only for unit testing, might not be useful in production """
     """ incur double copy, but we can use this as the only gpu buffer"""
 
     def __init__(self, metadata: LMCacheMemPoolMetadata):
