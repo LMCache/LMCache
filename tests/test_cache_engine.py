@@ -204,7 +204,7 @@ def test_retrieve_prefix(fmt, chunk_size, backend, autorelease,
     device = "cpu" if backend == "cpu" else "cuda"
     num_tokens = 2000
     new_num_tokens = 1000
-    kv_shape = (16, 2, chunk_size, 8, 128)
+    kv_shape = (32, 2, chunk_size, 8, 128)
 
     t1 = time.perf_counter()
     tokens = generate_tokens(num_tokens, device)
@@ -286,6 +286,15 @@ def test_mixed_retrieve(fmt, chunk_size, backend, autorelease,
     retrieved_cache, ret_mask = engine.retrieve(final_tokens)
     length = torch.sum(ret_mask)
     assert length == num_tokens + new_num_tokens
+    
+    right_k = retrieved_cache[0][0]
+    left_k = final_kv_cache[0][0]
+    start = 1792 + 256 *2
+    end = 2048 + 256 * 2
+    print(f"left: {left_k[start:end]}")
+    print(f"right: {right_k[start:end]}")
+    print(f"Diff: {torch.sum(left_k[start:end]-right_k[start:end])}")
+    
     check_kv_cache_equal(retrieved_cache, final_kv_cache, length, fmt)
     """destroy local disk path"""
     if backend in ["file://local_disk/"]:
@@ -333,7 +342,7 @@ def test_lookup(fmt, autorelease):
     new_num_tokens = 2000
     chunk_size = 256
     persist_path = "/tmp/test-engine-lookup.pth"
-    kv_shape = (16, 2, chunk_size, 8, 128)
+    kv_shape = (32, 2, chunk_size, 8, 128)
 
     tokens = generate_tokens(num_tokens, device)
     kv_cache = generate_kv_cache(num_tokens, fmt, device)

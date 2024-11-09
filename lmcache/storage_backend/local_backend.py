@@ -130,7 +130,11 @@ class LMCLocalBackend(LMCBackendInterface):
         # evict caches
         for evict_key in evict_keys:
             self.remove(evict_key)
-
+        
+        # free old block to avoid mem leak
+        if key in self.dict:
+            self.remove(key)
+        
         # Allocate the kv chunk
         kv_obj = self.mpool.allocate(kv_chunk)
         self.update_lock.release()
@@ -153,21 +157,27 @@ class LMCLocalBackend(LMCBackendInterface):
 
     @torch.inference_mode()
     def put_blocking(self, key, kv_chunk):
+
+        # Obtain keys to evict
+        evict_keys, put_status = self.evictor.update_on_put(
+            self.dict, kv_chunk)
+
+        # Abort put if cache too big
+        if put_status == PutStatus.ILLEGAL:
+            return
+
         kv_obj = self.mpool.allocate(kv_chunk)
 
         if kv_obj is None:
             return
 
         kv_obj.data.copy_(kv_chunk, non_blocking=False)
-
-        # Obtain keys to evict
-        evict_keys, put_status = self.evictor.update_on_put(
-            self.dict, kv_obj.data)
-
-        # Abort put if cache too big
-        if put_status == PutStatus.ILLEGAL:
-            return
-
+        
+        
+        # free old block to avoid mem leak
+        if key in self.dict:
+            self.remove(key)
+        
         # Evict caches
         for evict_key in evict_keys:
             self.remove(evict_key)
@@ -223,7 +233,6 @@ class LMCLocalBackend(LMCBackendInterface):
         if kv_obj is not None:
             self.evictor.update_on_get(key, self.dict)
             kv_chunk = kv_obj.data.to(self.dst_device)
-            self.mpool.free(kv_obj)
 
         self.update_lock.release()
 
