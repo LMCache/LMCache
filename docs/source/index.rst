@@ -35,21 +35,31 @@ Welcome to LMCache!
 
 :raw-html:`<br />`
 
-Documentation
+What's next?
 =====================
 
+Follow these links to get started with LMCache:
+
+* :ref:`speedup` 
+* :ref:`installation`
+* :ref:`docker`
+
+:raw-html:`<br />`
+
+Documentation
+=====================
 
 .. toctree::
    :maxdepth: 1
    :caption: Getting Started
 
-   getting_started/installation
-   getting_started/quickstart
+   getting_started/speedup
+   getting_started/installation   
    getting_started/docker
 
 .. toctree::
    :maxdepth: 1
-   :caption: Examples
+   :caption: Detailed Examples
 
    examples/launching
    examples/save_decode
@@ -75,9 +85,7 @@ Documentation
 
    developer_tutorial/overview
    developer_tutorial/LLM_Engine
-
    developer_tutorial/LMCache_Engine
-   
    developer_tutorial/LMCache_Backend
 
 .. toctree::

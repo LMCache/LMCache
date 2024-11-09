@@ -1,6 +1,6 @@
 .. _launching:
 
-Basic usage
+Usage
 ===========
 
 LMCache can be launched in multiple ways. Here are some examples:
