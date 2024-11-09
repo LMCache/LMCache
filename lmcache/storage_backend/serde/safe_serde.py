@@ -21,7 +21,7 @@ class SafeSerializer(Serializer):
 
 class SafeDeserializer(Deserializer):
 
-    def __init__(self,dtype):
+    def __init__(self, dtype):
         super().__init__(dtype)
         self.debug = GlobalConfig.is_debug()
 

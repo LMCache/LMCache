@@ -1,5 +1,7 @@
 from typing import Optional, Tuple
 
+import torch
+
 from lmcache.config import (GlobalConfig, LMCacheEngineConfig,
                             LMCacheEngineMetadata)
 from lmcache.storage_backend.serde.cachegen_decoder import CacheGenDeserializer
@@ -15,7 +17,6 @@ from lmcache.storage_backend.serde.serde import (Deserializer,
 from lmcache.storage_backend.serde.torch_serde import (TorchDeserializer,
                                                        TorchSerializer)
 
-import torch
 STR_DTYPE_TO_TORCH_DTYPE = {
     "half": torch.float16,
     "float16": torch.float16,
@@ -36,14 +37,17 @@ def CreateSerde(
     s: Optional[Serializer] = None
     d: Optional[Deserializer] = None
     if serde_type == "torch":
-        s, d = TorchSerializer(), TorchDeserializer(STR_DTYPE_TO_TORCH_DTYPE[metadata.dtype])
+        s, d = TorchSerializer(), TorchDeserializer(
+            STR_DTYPE_TO_TORCH_DTYPE[metadata.dtype])
     elif serde_type == "safetensor":
-        s, d = SafeSerializer(), SafeDeserializer(STR_DTYPE_TO_TORCH_DTYPE[metadata.dtype])
+        s, d = SafeSerializer(), SafeDeserializer(
+            STR_DTYPE_TO_TORCH_DTYPE[metadata.dtype])
     elif serde_type == "cachegen":
         s, d = CacheGenSerializer(config, metadata), CacheGenDeserializer(
-            config, metadata,STR_DTYPE_TO_TORCH_DTYPE[metadata.dtype])
+            config, metadata, STR_DTYPE_TO_TORCH_DTYPE[metadata.dtype])
     elif serde_type == "fast":
-        s, d = FastSerializer(), FastDeserializer(STR_DTYPE_TO_TORCH_DTYPE[metadata.dtype])
+        s, d = FastSerializer(), FastDeserializer(
+            STR_DTYPE_TO_TORCH_DTYPE[metadata.dtype])
     else:
         raise ValueError(f"Invalid serde type: {serde_type}")
 

@@ -109,8 +109,8 @@ def decode_function_gpu(
 class CacheGenDeserializer(Deserializer):
 
     def __init__(self, config: LMCacheEngineConfig,
-                 metadata: LMCacheEngineMetadata,dtype):
-        self.dtype=dtype
+                 metadata: LMCacheEngineMetadata, dtype):
+        self.dtype = dtype
         self.cachegen_config = CacheGenConfig.from_model_name(
             metadata.model_name)
         self.chunk_size = config.chunk_size

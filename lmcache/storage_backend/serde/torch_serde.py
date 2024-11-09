@@ -21,7 +21,7 @@ class TorchSerializer(Serializer):
 
 class TorchDeserializer(Deserializer):
 
-    def __init__(self,dtype):
+    def __init__(self, dtype):
         super().__init__(dtype)
 
     def from_bytes_normal(self, b: bytes) -> torch.Tensor:
