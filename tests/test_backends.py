@@ -34,21 +34,21 @@ def generate_random_key() -> CacheEngineKey:
     return CacheEngineKey(fmt, model_name, world_size, worker_id, chunk_hash)
 
 
-def get_config(t):
+def get_config(t, remote_url):
     match t:
         case "local":
             return LMCacheEngineConfig.from_defaults(local_device="cuda",
                                                      remote_url=None)
         case "remote":
-            return LMCacheEngineConfig.from_defaults(
-                local_device=None, remote_url="lm://localhost:65000")
+            return LMCacheEngineConfig.from_defaults(local_device=None,
+                                                     remote_url=remote_url)
         case "hybrid":
-            return LMCacheEngineConfig.from_defaults(
-                local_device="cuda", remote_url="lm://localhost:65000")
+            return LMCacheEngineConfig.from_defaults(local_device="cuda",
+                                                     remote_url=remote_url)
         case "hybrid_pipelined":
             return LMCacheEngineConfig.from_defaults(
                 local_device="cuda",
-                remote_url="lm://localhost:65000",
+                remote_url=remote_url,
                 pipelined_backend=True,
             )
         case _:
@@ -66,10 +66,11 @@ def get_metadata():
 def test_creation(autorelease, lmserver_process):
     config_local = LMCacheEngineConfig.from_defaults(local_device="cuda",
                                                      remote_url=None)
-    config_remote = LMCacheEngineConfig.from_defaults(
-        local_device=None, remote_url="lm://localhost:65000")
-    config_hybrid = LMCacheEngineConfig.from_defaults(
-        local_device="cuda", remote_url="lm://localhost:65000")
+    lmserver_url = lmserver_process.server_url
+    config_remote = LMCacheEngineConfig.from_defaults(local_device=None,
+                                                      remote_url=lmserver_url)
+    config_hybrid = LMCacheEngineConfig.from_defaults(local_device="cuda",
+                                                      remote_url=lmserver_url)
     _metadata = get_metadata()
 
     backend_local = autorelease(
@@ -101,6 +102,9 @@ def test_creation_from_file(autorelease, lmserver_process):
         BASE_DIR / "data/test_creation_from_file/remote.yaml")
     config_hybrid = LMCacheEngineConfig.from_file(
         BASE_DIR / "data/test_creation_from_file/hybrid.yaml")
+
+    config_remote.remote_url = lmserver_process.server_url
+    config_hybrid.remote_url = lmserver_process.server_url
     _metadata = get_metadata()
 
     backend_local = autorelease(
@@ -128,7 +132,7 @@ def test_creation_from_file(autorelease, lmserver_process):
 @pytest.mark.parametrize("lmserver_process", ["cpu", "remote_disk/"],
                          indirect=True)
 def test_backends(backend_type, autorelease, lmserver_process):
-    config = get_config(backend_type)
+    config = get_config(backend_type, lmserver_process.server_url)
     metadata = get_metadata()
     backend = autorelease(CreateStorageBackend(config, metadata))
 
@@ -150,7 +154,7 @@ def test_backends(backend_type, autorelease, lmserver_process):
 @pytest.mark.parametrize("lmserver_process", ["cpu", "remote_disk/"],
                          indirect=True)
 def test_nonblocking_put(backend_type, autorelease, lmserver_process):
-    config = get_config(backend_type)
+    config = get_config(backend_type, lmserver_process.server_url)
     metadata = get_metadata()
     backend = autorelease(CreateStorageBackend(config, metadata))
 
@@ -181,7 +185,7 @@ def test_nonblocking_put(backend_type, autorelease, lmserver_process):
 @pytest.mark.parametrize("lmserver_process", ["cpu", "remote_disk/"],
                          indirect=True)
 def test_restart(autorelease, lmserver_process):
-    config = get_config("hybrid")
+    config = get_config("hybrid", lmserver_process.server_url)
     # LMCacheEngineConfig.from_defaults(local_device = "cuda",
     # remote_url = None)
     metadata = get_metadata()
