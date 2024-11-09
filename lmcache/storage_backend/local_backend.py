@@ -57,12 +57,7 @@ class LMCLocalBackend(LMCBackendInterface):
 
         # FIXME(Jiayi): `use_pin_memory` and `dst_device` should be configged
         # dynamically
-        self.use_pin_memory = False
-        logger.info(f"Using pinned cpu memory: {self.use_pin_memory}")
-
         self.dst_device = "cuda"
-        # self.async_put_flag = False
-        # self.put_events = {}
 
         # TODO(Jiayi): The storage size and caching policy for both
         # evictor and mpool need to be configured dynamically

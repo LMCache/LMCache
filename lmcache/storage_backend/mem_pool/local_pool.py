@@ -26,7 +26,7 @@ class LocalPool(BasePool):
             kv_chunk: the kv tensor to be stored
         
         Returns:
-            A memory pointer (torch tensor view).
+            KVObj with a memory pointer (torch tensor view).
             None if memory is full.
         
         Note:
