@@ -187,6 +187,8 @@ class SPTBlendRetriever(BlendRetriever):
     of the input text chunk.
 
     Example:
+        Input = [x, x, x, spt, y, y, spt, z, z, z, z]
+        
         Requests sent to LMCache engine when using drop_spt_and_get_indices
         and new_request:
         - [x, x, x]
@@ -218,7 +220,7 @@ class SPTBlendRetriever(BlendRetriever):
             self, full_prompt: List[int]) -> Tuple[List[int], List[int]]:
         """Drop the special token and get the indices of the split requests.
 
-        :param List[int] full_prompt: The full prompts inside one batch.
+        :param List[int] full_prompt: The full prompt after tokenization.
         
         :return: The new prompts without the special token and the indices of
             the split segments.
@@ -262,7 +264,8 @@ class SPTBlendRetriever(BlendRetriever):
         It may launch async tasks in the background during the retrieval.
 
         :param List[torch.Tensor] full_prompts: The full prompts for each
-        request in this batch.
+        request in this batch, which will contain the tokens 
+        hitting the vLLM's internal prefix caching.
         :param List[List[int]] indices: The indices of where the 
         segmengted requests start in the full prompts.
 
