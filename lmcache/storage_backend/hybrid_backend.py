@@ -25,7 +25,7 @@ class LMCHybridBackend(LMCBackendInterface):
 
     def __init__(self, config: LMCacheEngineConfig,
                  metadata: LMCacheEngineMetadata):
-        self.local_store = LMCLocalBackend(config)
+        self.local_store = LMCLocalBackend(config, metadata)
         self.remote_store: Union[LMCPipelinedRemoteBackend, LMCRemoteBackend]
         if config.pipelined_backend:
             self.remote_store = LMCPipelinedRemoteBackend(config, metadata)
