@@ -55,7 +55,7 @@ class LMCRemoteBackend(LMCBackendInterface):
         self.put_thread.start()
 
         # FIXME(Jiayi): please remove this hard code
-        self.dst_device = "cuda"
+        self.dst_device = f"cuda:{metadata.worker_id}"
 
     @_lmcache_nvtx_annotate
     def put_worker(self, ):

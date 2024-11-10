@@ -9,7 +9,7 @@ import torch
 from safetensors import safe_open
 from safetensors.torch import save_file
 
-from lmcache.config import LMCacheEngineConfig
+from lmcache.config import LMCacheEngineConfig, LMCacheEngineMetadata
 from lmcache.logging import init_logger
 from lmcache.storage_backend.abstract_backend import LMCBackendInterface
 from lmcache.storage_backend.evictor import DummyEvictor
@@ -30,7 +30,7 @@ class LMCLocalBackend(LMCBackendInterface):
     memory.
     """
 
-    def __init__(self, config: LMCacheEngineConfig):
+    def __init__(self, config: LMCacheEngineConfig, metadata: LMCacheEngineMetadata):
         """
         Throws:
             RuntimeError if the loaded configuration does not match the current
@@ -55,7 +55,7 @@ class LMCLocalBackend(LMCBackendInterface):
         self.use_pin_memory = False
         logger.info(f"Using pinned cpu memory: {self.use_pin_memory}")
 
-        self.dst_device = "cuda"
+        self.dst_device = f"cuda:{metadata.worker_id}"
         # self.async_put_flag = False
         # self.put_events = {}
 
@@ -223,7 +223,7 @@ class LMCLocalDiskBackend(LMCBackendInterface):
     Cache engine for storing the KV cache of the tokens in the local disk.
     """
 
-    def __init__(self, config: LMCacheEngineConfig):
+    def __init__(self, config: LMCacheEngineConfig, metadata: LMCacheEngineMetadata):
         """
         Throws:
             RuntimeError if the loaded configuration does not match the current
@@ -256,7 +256,7 @@ class LMCLocalDiskBackend(LMCBackendInterface):
         self.update_lock = threading.Lock()
 
         # TODO (Jiayi): please remove this hard code
-        self.dst_device = "cuda"
+        self.dst_device = f"cuda:{metadata.worker_id}"
 
         self.evictor = DummyEvictor()
 
