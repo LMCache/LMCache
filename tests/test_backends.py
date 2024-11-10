@@ -132,7 +132,7 @@ def test_creation_from_file(autorelease, lmserver_process):
 @pytest.mark.parametrize("dst_device", ["cuda", "cpu"])
 @pytest.mark.parametrize("lmserver_process", ["cpu", "remote_disk/"],
                          indirect=True)
-def test_backends(backend_type, autorelease, lmserver_process):
+def test_backends(backend_type, dst_device, autorelease, lmserver_process):
     config = get_config(backend_type, lmserver_process.server_url)
     metadata = get_metadata()
     backend = autorelease(CreateStorageBackend(config, metadata, dst_device))
