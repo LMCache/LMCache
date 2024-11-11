@@ -19,13 +19,12 @@ class FastSerializer(Serializer):
 
 class FastDeserializer(Deserializer):
 
-    def __init__(self):
-        super().__init__()
+    def __init__(self, dtype):
+        super().__init__(dtype)
 
-    def from_bytes_normal(self,
-                          b: bytes,
-                          dtype=torch.bfloat16) -> torch.Tensor:
-        return torch.frombuffer(b, dtype=dtype)
+    def from_bytes_normal(self, b: bytes) -> torch.Tensor:
+        print(self.dtype)
+        return torch.frombuffer(b, dtype=self.dtype)
 
     def from_bytes(self, b: bytes) -> torch.Tensor:
         return self.from_bytes_normal(b)

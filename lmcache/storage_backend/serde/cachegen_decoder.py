@@ -17,7 +17,7 @@ logger = init_logger(__name__)
 @_lmcache_nvtx_annotate
 def quant(bins: int, xq: torch.Tensor, max1: float):
     C = bins // 2 - 1
-    x = xq / C * max1  # .to(torch.float16)
+    x = xq / C * max1
     return x
 
 
@@ -109,7 +109,8 @@ def decode_function_gpu(
 class CacheGenDeserializer(Deserializer):
 
     def __init__(self, config: LMCacheEngineConfig,
-                 metadata: LMCacheEngineMetadata):
+                 metadata: LMCacheEngineMetadata, dtype):
+        self.dtype = dtype
         self.cachegen_config = CacheGenConfig.from_model_name(
             metadata.model_name)
         self.chunk_size = config.chunk_size
@@ -188,14 +189,10 @@ class CacheGenDeserializer(Deserializer):
         ))
         match self.fmt:
             case "vllm":
-                return blob.permute(
-                    (1, 0, 2, 3,
-                     4)).to(torch.bfloat16
-                            )  # [nlayers, 2, ntokens, num_heads, head_size]
+                return blob.permute((1, 0, 2, 3, 4)).to(
+                    self.dtype)  # [nlayers, 2, ntokens, num_heads, head_size]
             case "huggingface":
-                return blob.permute(
-                    (1, 0, 3, 2,
-                     4)).to(torch.float16
-                            )  # [nlayers, 2, num_heads, ntokens, head_size]
+                return blob.permute((1, 0, 3, 2, 4)).to(
+                    self.dtype)  # [nlayers, 2, num_heads, ntokens, head_size]
             case _:
                 raise RuntimeError("Unknown format %s" % self.fmt)

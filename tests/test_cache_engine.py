@@ -9,10 +9,10 @@ from lmcache.cache_engine import LMCacheEngine, LMCacheEngineBuilder
 from lmcache.config import LMCacheEngineConfig, LMCacheEngineMetadata
 
 
+
 def dumb_metadata(fmt="vllm", kv_shape=(32, 2, 256, 8, 128)):
     return LMCacheEngineMetadata("test_model", 3, 123, fmt, torch.bfloat16,
                                  kv_shape)
-
 
 def generate_kv_cache(num_tokens, fmt, device):
     ret = []
