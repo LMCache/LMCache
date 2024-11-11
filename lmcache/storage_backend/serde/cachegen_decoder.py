@@ -17,7 +17,7 @@ logger = init_logger(__name__)
 @_lmcache_nvtx_annotate
 def quant(bins: int, xq: torch.Tensor, max1: float):
     C = bins // 2 - 1
-    x = xq / C * max1  # .to(self.dtype)
+    x = xq / C * max1 
     return x
 
 
