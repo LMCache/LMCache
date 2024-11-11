@@ -57,8 +57,7 @@ def get_config(t, remote_url):
 
 
 def get_metadata():
-    return LMCacheEngineMetadata("lmsys/longchat-7b-16k", 1, 0, "vllm",
-                                 "half")
+    return LMCacheEngineMetadata("lmsys/longchat-7b-16k", 1, 0, "vllm", "half")
 
 
 @pytest.mark.parametrize("lmserver_process", ["cpu", "remote_disk/"],
