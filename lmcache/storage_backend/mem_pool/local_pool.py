@@ -79,7 +79,7 @@ class LocalCPUBufferPool(LocalCPUPool):
     def allocate(self, kv_chunk: torch.Tensor) -> Optional[KVObj]:
         num_tok = kv_chunk.shape[2]
         assert num_tok <= self.chunk_size
-        while not self.free_pool:
+        if not self.free_pool:
             logger.info("No free memory chunks. Waiting...")
             return None
         chunk_idx = self.free_pool.pop()
