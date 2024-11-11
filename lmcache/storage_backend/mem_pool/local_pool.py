@@ -13,10 +13,10 @@ class LocalPool(BasePool):
 
     def __init__(self, metadata: LMCacheMemPoolMetadata):
         self.chunk_size = metadata.kv_shape[2]
-        max_chunk_num = 0
+        self.max_chunk_num = 0
         self.mem_pool: List[torch.Tensor] = []
 
-        self.free_pool = [i for i in range(max_chunk_num)]
+        self.free_pool = [i for i in range(self.max_chunk_num)]
 
     def allocate(self, kv_chunk: torch.Tensor) -> Optional[KVObj]:
         """
@@ -53,11 +53,11 @@ class LocalPool(BasePool):
 
 class LocalCPUPool(LocalPool):
 
-    def __init__(self, metadata: LMCacheMemPoolMetadata):
+    def __init__(self, metadata: LMCacheMemPoolMetadata, max_chunk_num=200):
         self.chunk_size = metadata.kv_shape[2]
         # TODO(Jiayi): the `max_chunk_num` should be computed
         # from `config.max_cache_size`
-        max_chunk_num = 200
+        self.max_chunk_num = max_chunk_num
         use_pinned_memory = True
         kv_dtype = metadata.kv_dtype
 
@@ -68,10 +68,10 @@ class LocalCPUPool(LocalPool):
                             dtype=kv_dtype,
                             device='cpu',
                             pin_memory=use_pinned_memory)
-                for i in range(max_chunk_num)
+                for i in range(self.max_chunk_num)
             ]
 
-        self.free_pool = [i for i in range(max_chunk_num)]
+        self.free_pool = [i for i in range(self.max_chunk_num)]
 
 
 class LocalCPUBufferPool(LocalCPUPool):
@@ -90,18 +90,18 @@ class LocalGPUPool(LocalPool):
     """ only for unit testing, might not be useful in production """
     """ incur double copy, but we can use this as the only gpu buffer"""
 
-    def __init__(self, metadata: LMCacheMemPoolMetadata):
+    def __init__(self, metadata: LMCacheMemPoolMetadata, max_chunk_num=100):
         self.chunk_size = metadata.kv_shape[2]
         # TODO(Jiayi): the `max_chunk_num` should be computed
         # from `config.max_cache_size`
-        max_chunk_num = 100
+        self.max_chunk_num = max_chunk_num
         kv_dtype = metadata.kv_dtype
 
         logger.info("Initializing gpu mem")
         with torch.inference_mode():
             self.mem_pool = [
                 torch.empty(metadata.kv_shape, dtype=kv_dtype, device='cuda')
-                for i in range(max_chunk_num)
+                for i in range(self.max_chunk_num)
             ]
 
-        self.free_pool = [i for i in range(max_chunk_num)]
+        self.free_pool = [i for i in range(self.max_chunk_num)]

@@ -6,9 +6,7 @@ from lmcache.storage_backend.mem_pool import (LocalCPUBufferPool, LocalCPUPool,
                                               LocalGPUPool)
 
 
-def dumb_metadata(fmt="vllm",
-                  kv_shape=(32, 2, 256, 8, 128),
-                  kv_dtype=torch.bfloat16):
+def dumb_metadata(kv_shape=(32, 2, 256, 8, 128), kv_dtype=torch.bfloat16):
     return LMCacheMemPoolMetadata(kv_shape, kv_dtype)
 
 
@@ -17,10 +15,9 @@ def dumb_metadata(fmt="vllm",
 def test_alloc_full(mem_pool_type):
     kv_shape = (32, 2, 256, 8, 128)
     kv_dtype = torch.bfloat16
-    metadata = dumb_metadata(kv_shape, kv_dtype)
-    mem_pool = mem_pool_type(metadata)
     max_chunk_num = 5
-    mem_pool.max_chunk_num = max_chunk_num
+    metadata = dumb_metadata(kv_shape, kv_dtype)
+    mem_pool = mem_pool_type(metadata, max_chunk_num)
     kv_obj_list = []
 
     # allocate max_num chunks
@@ -34,9 +31,9 @@ def test_alloc_full(mem_pool_type):
                 Shouldn't happen in local cpu-only backend."
 
         with pytest.raises(Exception, match=expected_err_msg):
-            mem_pool.alloc(kv_tensor)
+            mem_pool.allocate(kv_tensor)
     else:
-        kv_obj_none = mem_pool.alloc(kv_tensor)
+        kv_obj_none = mem_pool.allocate(kv_tensor)
         assert kv_obj_none is None
 
 
@@ -54,4 +51,4 @@ def test_alloc_partial(mem_pool_type):
     kv_shape_partial = (32, 2, partial_tok_num, 8, 128)
     kv_tensor = torch.rand(kv_shape_partial, dtype=kv_dtype)
     kv_obj = mem_pool.allocate(kv_tensor)
-    assert kv_obj.shape[2] == partial_tok_num
+    assert kv_obj.data.shape[2] == partial_tok_num
