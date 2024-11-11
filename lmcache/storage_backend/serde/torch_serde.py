@@ -26,7 +26,7 @@ class TorchDeserializer(Deserializer):
 
     def from_bytes_normal(self, b: bytes) -> torch.Tensor:
         with io.BytesIO(b) as f:
-            return torch.load(f).to(dtype=self.dtype)
+            return torch.load(f)
 
     def from_bytes(self, b: bytes) -> torch.Tensor:
-        return self.from_bytes_normal(b)
+        return self.from_bytes_normal(b).to(dtype=self.dtype)

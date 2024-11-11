@@ -74,7 +74,7 @@ def test_cachegen_decoder(fmt, chunk_size):
         dtype="bfloat16",
     )
     serializer = CacheGenSerializer(config, metadata)
-    deserializer = CacheGenDeserializer(config, metadata)
+    deserializer = CacheGenDeserializer(config, metadata, torch.bfloat16)
 
     kv = to_blob(generate_kv_cache(chunk_size, fmt, "cuda"))
     output = serializer.to_bytes(kv)
@@ -97,7 +97,7 @@ def test_cachegen_unmatched_size(fmt):
         dtype="bfloat16",
     )
     serializer = CacheGenSerializer(config, metadata)
-    deserializer = CacheGenDeserializer(config, metadata)
+    deserializer = CacheGenDeserializer(config, metadata, torch.bfloat16)
 
     kv = to_blob(generate_kv_cache(chunk_size - 20, fmt, "cuda"))
     output = serializer.to_bytes(kv)

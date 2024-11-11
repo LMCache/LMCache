@@ -6,7 +6,8 @@ from lmcache.config import LMCacheEngineConfig, LMCacheEngineMetadata
 
 
 def dumb_metadata(fmt="vllm"):
-    return LMCacheEngineMetadata("test_model", 3, 123, fmt, "half")
+    return LMCacheEngineMetadata("test_model", 3, 123, fmt,
+                                 "bfloat16" if fmt == "vllm" else "float16")
 
 
 def check_kv_cache_equal(left, right, num_tokens, fmt):

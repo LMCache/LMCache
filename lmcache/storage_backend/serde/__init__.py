@@ -18,7 +18,7 @@ from lmcache.storage_backend.serde.torch_serde import (TorchDeserializer,
                                                        TorchSerializer)
 
 STR_DTYPE_TO_TORCH_DTYPE = {
-    "half": torch.float16,
+    "half": torch.half,
     "float16": torch.float16,
     "bfloat16": torch.bfloat16,
     "float": torch.float32,
@@ -36,6 +36,7 @@ def CreateSerde(
 ) -> Tuple[Serializer, Deserializer]:
     s: Optional[Serializer] = None
     d: Optional[Deserializer] = None
+    print(STR_DTYPE_TO_TORCH_DTYPE[metadata.dtype])
     if serde_type == "torch":
         s, d = TorchSerializer(), TorchDeserializer(
             STR_DTYPE_TO_TORCH_DTYPE[metadata.dtype])

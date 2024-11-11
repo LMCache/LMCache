@@ -138,7 +138,9 @@ def test_backends(backend_type, autorelease, lmserver_process):
 
     N = 10
     keys = [generate_random_key() for i in range(N)]
-    random_tensors = [torch.rand((16, 2, 128, 4, 128)) for i in range(N)]
+    random_tensors = [
+        torch.rand((16, 2, 128, 4, 128), dtype=torch.half) for i in range(N)
+    ]
     for key, value in zip(keys, random_tensors):
         backend.put(key, value)
 
@@ -160,7 +162,9 @@ def test_nonblocking_put(backend_type, autorelease, lmserver_process):
 
     N = 10
     keys = [generate_random_key() for i in range(N)]
-    random_tensors = [torch.rand((16, 2, 128, 4, 128)) for i in range(N)]
+    random_tensors = [
+        torch.rand((16, 2, 128, 4, 128), dtype=torch.half) for i in range(N)
+    ]
 
     for key, value in zip(keys, random_tensors):
         start = time.perf_counter()
@@ -193,7 +197,9 @@ def test_restart(autorelease, lmserver_process):
 
     N = 10
     keys = [generate_random_key() for i in range(N)]
-    random_tensors = [torch.rand((1000, 1000)) for i in range(N)]
+    random_tensors = [
+        torch.rand((1000, 1000), dtype=torch.half) for i in range(N)
+    ]
     for key, value in zip(keys, random_tensors):
         backend.put(key, value)
 
