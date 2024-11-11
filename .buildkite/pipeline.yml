@@ -10,7 +10,7 @@ steps:
       eval "$(conda shell.bash hook)"
       conda activate buildkite
       bash .buildkite/install-lmcache.sh
-      coverage run --source=lmcache/ -m pytest -v --junitxml=junit/test-results.xml 
+      coverage run --source=lmcache/ -m pytest -xsv --junitxml=junit/test-results.xml 
       coverage report -m > coverage.txt
     artifact_paths:
       - junit/test-results.xml

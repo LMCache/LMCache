@@ -1,6 +1,6 @@
 .. _measuring_improvements:
 
-Measuring improvements
+End-to-end measurements
 =======================
 
 We provide a suite of end-to-end testing examples to demonstrate the performance improvements of using 
