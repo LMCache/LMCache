@@ -139,7 +139,10 @@ class LMCLocalBackend(LMCBackendInterface):
 
         put_stream = torch.cuda.Stream()
         if kv_chunk.device != torch.cpu:
+            # wait operation in main stream to finish
+            # e.g., view operations on kv_chunk
             put_stream.wait_stream(torch.cuda.default_stream(kv_chunk.device))
+        
         with torch.cuda.stream(put_stream):
             kv_obj.data.copy_(kv_chunk, non_blocking=True)
             kv_chunk.record_stream(put_stream)
