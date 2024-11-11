@@ -57,7 +57,7 @@ def get_config(t, remote_url):
 
 
 def get_metadata():
-    return LMCacheEngineMetadata("lmsys/longchat-7b-16k", 1, -1, "vllm",
+    return LMCacheEngineMetadata("lmsys/longchat-7b-16k", 1, 0, "vllm",
                                  "half")
 
 

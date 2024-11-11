@@ -10,7 +10,7 @@ from lmcache.config import LMCacheEngineConfig, LMCacheEngineMetadata
 
 
 def dumb_metadata(fmt="vllm"):
-    return LMCacheEngineMetadata("test_model", 3, 123, fmt, "half")
+    return LMCacheEngineMetadata("test_model", 1, 0, fmt, "half")
 
 
 def generate_kv_cache(num_tokens, fmt, device):
