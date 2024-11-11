@@ -143,7 +143,6 @@ def test_backends(backend_type, autorelease, lmserver_process):
 
     random_tensors = [torch.rand(kv_shape, dtype=torch.half) for i in range(N)]
 
-
     for key, value in zip(keys, random_tensors):
         backend.put(key, value)
 
