@@ -1,7 +1,8 @@
 import re
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Tuple
 
+import torch
 import yaml
 
 
@@ -16,7 +17,18 @@ class LMCacheEngineMetadata:
     """ the format of kv tensors """
     fmt: str
     """ the data type of kv tensors """
-    dtype: str
+    kv_dtype: torch.dtype
+    """ the data type of kv tensors """
+    """ (num_layer, 2, chunk_size, num_kv_head, head_size) """
+    kv_shape: tuple[int, int, int, int, int]
+
+
+@dataclass
+class LMCacheMemPoolMetadata:
+    """ Subset of `LMCacheEngineMetadata` to initialize MemPool"""
+
+    kv_shape: Tuple[int, int, int, int, int]
+    kv_dtype: torch.dtype
 
 
 @dataclass

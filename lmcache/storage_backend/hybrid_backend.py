@@ -3,7 +3,8 @@ from typing import Iterable, List, Optional, Union
 
 import torch
 
-from lmcache.config import LMCacheEngineConfig, LMCacheEngineMetadata
+from lmcache.config import (LMCacheEngineConfig, LMCacheEngineMetadata,
+                            LMCacheMemPoolMetadata)
 from lmcache.logging import init_logger
 from lmcache.storage_backend.abstract_backend import LMCBackendInterface
 from lmcache.storage_backend.local_backend import LMCLocalBackend
@@ -21,18 +22,20 @@ class LMCHybridBackend(LMCBackendInterface):
     It implements write-through and read-through caching.
     """
 
-    # TODO: LRU eviction policy
+    def __init__(self,
+                 config: LMCacheEngineConfig,
+                 metadata: LMCacheEngineMetadata,
+                 mpool_metadata: LMCacheMemPoolMetadata,
+                 dst_device: str = "cuda"):
+        super().__init__(dst_device)
+        self.local_store = LMCLocalBackend(config, mpool_metadata, dst_device)
 
-    def __init__(self, config: LMCacheEngineConfig,
-                 metadata: LMCacheEngineMetadata):
-        self.local_store = LMCLocalBackend(config, metadata)
         self.remote_store: Union[LMCPipelinedRemoteBackend, LMCRemoteBackend]
         if config.pipelined_backend:
-            self.remote_store = LMCPipelinedRemoteBackend(config, metadata)
+            self.remote_store = LMCPipelinedRemoteBackend(
+                config, metadata, dst_device)
         else:
-            self.remote_store = LMCRemoteBackend(config, metadata)
-        # NOTE: no need to add `dst_device` in hybrid bckend
-        # as the logic is handled in local/remote backend
+            self.remote_store = LMCRemoteBackend(config, metadata, dst_device)
         # TODO add a configuration item to do this
         self._prefetch(metadata)
 
