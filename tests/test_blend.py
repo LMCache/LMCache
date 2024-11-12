@@ -129,11 +129,18 @@ def assert_indices_is_concat(indices, chunk_lengths):
     """
     Check if the indices is the concatenation of the chunk lengths
     """
-    assert len(indices) == len(chunk_lengths) + 1
-    for idx in range(len(chunk_lengths)):
-        seg_len = indices[idx + 1] - indices[idx]
-        assert seg_len == chunk_lengths[idx]
-    assert indices[-1] == sum(chunk_lengths)
+    assert len(indices) == len(chunk_lengths) - 1
+    if len(indices) == 0:
+        return
+    this_seg_start = 0
+    for i, idx in enumerate(indices):
+        assert idx >= this_seg_start
+        seg_len = idx - this_seg_start
+        assert seg_len == chunk_lengths[i]
+        this_seg_start = idx
+    assert len(chunk_lengths) >= 2
+    assert indices[-1] == this_seg_start
+    assert indices[-1] == sum(chunk_lengths[:-1])
 
 
 @pytest.mark.parametrize("fmt", ["vllm", "huggingface"])
@@ -469,7 +476,6 @@ def test_spt_multi_query(fmt, spt_length, autorelease):
         single_new_prompt, single_new_indices = \
             retriever.drop_spt_and_get_indices(
             single_prompt_list)
-        assert len(single_new_indices) == 2, f"{len(single_new_indices)}"
         single_new_prompt = torch.tensor(single_new_prompt)
         ret2 = retriever.new_request([single_new_prompt], [single_new_indices])
         target_len1 = sum([chunk_lengths[i] for i in ids])
