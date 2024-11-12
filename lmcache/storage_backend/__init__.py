@@ -1,3 +1,5 @@
+import torch
+
 from lmcache.config import LMCacheEngineConfig, LMCacheEngineMetadata
 from lmcache.logging import init_logger
 from lmcache.storage_backend.abstract_backend import LMCBackendInterface
@@ -13,6 +15,10 @@ logger = init_logger(__name__)
 def CreateStorageBackend(config: LMCacheEngineConfig,
                          metadata: LMCacheEngineMetadata,
                          dst_device: str = "cuda") -> LMCBackendInterface:
+    # Replace 'cuda' with 'cuda:<device id>'
+    if dst_device == "cuda":
+        dst_device = f"cuda:{torch.cuda.current_device()}"
+
     match config:
         case LMCacheEngineConfig(_, local_device=None,
                                  remote_url=str(p)) if p is not None:
