@@ -18,12 +18,14 @@ class LMCBackendInterface(metaclass=abc.ABCMeta):
         """Initialize the storage backend. 
 
         :param dst_device: the device where the retrieved KV be stored,
-            could be either "cpu" or "cuda"
+            could be either "cpu", "cuda", or "cuda:0", "cuda:1", etc.
 
-        :raise: ValueError if the dst_device is not "cpu" or "cuda"
+        :raise: RuntimeError if the device is not valid
         """
-        if dst_device not in ["cpu", "cuda"]:
-            raise ValueError(f"Invalid dst device for backend {dst_device}")
+        try:
+            torch.device(dst_device)
+        except RuntimeError:
+            raise
 
         self.dst_device = dst_device
 
