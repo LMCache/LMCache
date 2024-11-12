@@ -21,15 +21,14 @@ class LMCHybridBackend(LMCBackendInterface):
     retrieve data.
     It implements write-through and read-through caching.
     """
-    
+
     def __init__(self,
                  config: LMCacheEngineConfig,
                  metadata: LMCacheEngineMetadata,
                  mpool_metadata: LMCacheMemPoolMetadata,
                  dst_device: str = "cuda"):
         super().__init__(dst_device)
-        self.local_store = LMCLocalBackend(config, mpool_metadata, 
-                                           dst_device)
+        self.local_store = LMCLocalBackend(config, mpool_metadata, dst_device)
 
         self.remote_store: Union[LMCPipelinedRemoteBackend, LMCRemoteBackend]
         if config.pipelined_backend:

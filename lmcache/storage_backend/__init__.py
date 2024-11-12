@@ -2,7 +2,6 @@ import torch
 
 from lmcache.config import (LMCacheEngineConfig, LMCacheEngineMetadata,
                             LMCacheMemPoolMetadata)
-
 from lmcache.logging import init_logger
 from lmcache.storage_backend.abstract_backend import LMCBackendInterface
 from lmcache.storage_backend.hybrid_backend import \
@@ -12,7 +11,6 @@ from lmcache.storage_backend.local_backend import (LMCLocalBackend,
 from lmcache.storage_backend.remote_backend import LMCRemoteBackend
 
 logger = init_logger(__name__)
-
 
 
 def CreateStorageBackend(config: LMCacheEngineConfig,
@@ -40,22 +38,19 @@ def CreateStorageBackend(config: LMCacheEngineConfig,
                         f"Initializing local-only ({config.local_device})"
                         f" backend")
 
-                    return LMCLocalBackend(config, mpool_metadata, 
-                                           dst_device)
+                    return LMCLocalBackend(config, mpool_metadata, dst_device)
                 case _:
                     logger.info(f"Initializing local-only (disk) backend at"
                                 f" {config.local_device}")
-                    return LMCLocalDiskBackend(config, mpool_metadata, 
+                    return LMCLocalDiskBackend(config, mpool_metadata,
                                                dst_device)
-
 
         case LMCacheEngineConfig(
                 _, local_device=str(p),
                 remote_url=str(q)) if p is not None and q is not None:
             logger.info("Initializing hybrid backend")
-            return LMCHybridBackend(config, metadata, mpool_metadata, 
+            return LMCHybridBackend(config, metadata, mpool_metadata,
                                     dst_device)
-
 
         case _:
             raise ValueError(f"Invalid configuration: {config}")

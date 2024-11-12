@@ -34,8 +34,10 @@ class LMCLocalBackend(LMCBackendInterface):
     memory.
     """
 
-    def __init__(self, config: LMCacheEngineConfig, 
-                 metadata: LMCacheMemPoolMetadata, dst_device: str = "cuda"):
+    def __init__(self,
+                 config: LMCacheEngineConfig,
+                 metadata: LMCacheMemPoolMetadata,
+                 dst_device: str = "cuda"):
         """
         Throws:
             RuntimeError if the loaded configuration does not match the current
@@ -54,7 +56,6 @@ class LMCLocalBackend(LMCBackendInterface):
         self.put_thread = threading.Thread(target=self.put_worker, args=())
         self.put_thread.start()
         self.update_lock = threading.Lock()
-
 
         # TODO(Jiayi): The storage size and caching policy for both
         # evictor and mpool need to be configured dynamically
@@ -254,8 +255,10 @@ class LMCLocalDiskBackend(LMCBackendInterface):
     Cache engine for storing the KV cache of the tokens in the local disk.
     """
 
-    def __init__(self, config: LMCacheEngineConfig, 
-                 metadata: LMCacheMemPoolMetadata, dst_device: str = "cuda"):
+    def __init__(self,
+                 config: LMCacheEngineConfig,
+                 metadata: LMCacheMemPoolMetadata,
+                 dst_device: str = "cuda"):
         """
         Throws:
             RuntimeError if the loaded configuration does not match the current
@@ -286,7 +289,6 @@ class LMCLocalDiskBackend(LMCBackendInterface):
         self.put_thread = threading.Thread(target=self.put_worker, args=())
         self.put_thread.start()
         self.update_lock = threading.Lock()
-
 
         # TODO(Jiayi): The storage size and caching policy for both
         # evictor and mpool need to be configured dynamically
