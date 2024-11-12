@@ -3,7 +3,7 @@ import queue
 import threading
 import time
 from collections import OrderedDict
-from typing import Optional, Tuple, Union
+from typing import Optional, Tuple, Union,List
 
 import torch
 from safetensors import safe_open
@@ -206,6 +206,38 @@ class LMCDiskKeyManager(LMCKeyManagerInterface):
         self.update_lock.release()
         print("Point4")
         return self.dict[key]
+    
+    def batched_get(
+        self,
+        keys_str: List[str],
+    ) -> List[str]:
+        #(TODO) Add read lock if needed
+        """
+        Retrieve the KV cache chunk by the given key
+
+        Input:
+            key: the key of the token chunk, including prefix hash and format
+        Output:
+            the kv cache of the token chunk, in the format of nested tuples
+            None if the key is not found
+        """
+        paths=[]
+        self.update_lock.acquire()
+        for key_str in keys_str:
+            key = LMCKeyManagerKey.from_string(key_str)
+            if key not in self.dict:
+                paths.append("")
+                continue
+
+            if self.dict[key].status == 1:
+                paths.append("")
+                continue
+            
+            self.evictor.update_on_get(key, self.dict)
+            paths.append(self.dict[key].path)
+        
+        self.update_lock.release()
+        return paths
     
     def Info(self):
         return self.info

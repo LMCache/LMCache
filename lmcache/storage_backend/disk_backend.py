@@ -3,7 +3,7 @@ import queue
 import threading
 import time
 from collections import OrderedDict
-from typing import Optional, Tuple, Union
+from typing import Iterable, List, Optional, Tuple, Union
 
 import torch
 from safetensors import safe_open
@@ -74,7 +74,7 @@ class LMCDiskBackend(LMCBackendInterface):
 
         self.evictor = DummyEvictor()
 
-    def _key_transform(self, key: CacheEngineKey) -> LMCKeyManagerKey:
+    def _key_transform(self, key: CacheEngineKey) -> str:
         return LMCKeyManagerKey(key.model_name, key.world_size, key.worker_id, key.chunk_hash).to_string()
     
     def contains(
@@ -178,6 +178,49 @@ class LMCDiskBackend(LMCBackendInterface):
             kv_chunk = f.get_tensor("kv_chunk")
         self.update_lock.release()
         return kv_chunk
+    
+    def batched_contains(
+        self,
+        key: CacheEngineKey,
+    ) -> bool:
+        """
+        Check if the cache engine contains the key.
+
+        Input:
+            key: the key of the token chunk, including prefix hash and format
+
+        Returns:
+            True if the cache engine contains the key, False otherwise
+        """
+        return self.proxy.contains(self._key_transform(key))=="YES"
+
+    def batched_get(
+        self,
+        keys: List[str],
+    ) -> Iterable[Optional[torch.Tensor]]:
+        """
+        Retrieve the kv cache chunks by the given keys in a batched manner
+
+        
+        :param keys: the iterator of keys of the token chunks, including prefix 
+                hash and format
+
+        :return: the iterator of kv cache of the token chunks, in the format
+            of a big tensor and None if the key is not found
+        """
+        logger.info("Using default batched implementation of the get() method")
+        keys_str=[self._key_transform(key) for key in keys]
+        time0=time.time()
+        paths=self.proxy.batched_get(keys_str)
+        print("Time taken for batched_get",time.time()-time0)
+        for path in paths:
+            if path == "":
+                yield None
+            else:
+                with safe_open(path, framework="pt",
+                               device=self.dst_device) as f:
+                    kv_chunk = f.get_tensor("kv_chunk")
+                yield kv_chunk
 
     def close(self):
         if self.put_thread is not None and self.put_thread.is_alive():
