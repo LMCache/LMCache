@@ -4,7 +4,7 @@ from typing import Iterable, Optional, Tuple
 import torch
 
 from lmcache.logging import init_logger
-from lmcache.utils import CacheEngineKey
+from lmcache.utils import CacheEngineKey,LMCKeyManagerKey,LMCKeyManagerValue,CacheBackendInfo
 
 logger = init_logger(__name__)
 
@@ -100,6 +100,87 @@ class LMCBackendInterface(metaclass=abc.ABCMeta):
             of a big tensor and None if the key is not found
         """
         logger.info("Using default batched implementation of the get() method")
+        for key in keys:
+            if self.contains(key):  # Jiayi: This seems to be redundant?
+                yield self.get(key)
+            else:
+                yield None
+
+    @abc.abstractmethod
+    def close(self):
+        """
+        Do the cleanup things
+        Children classes should override this method if necessary
+        """
+        pass
+
+
+class LMCKeyManagerInterface(metaclass=abc.ABCMeta):
+    """
+        Query if a key is in the cache or not
+    """
+    @abc.abstractmethod
+    def Info(
+        self,
+    ) -> CacheBackendInfo:
+        raise NotImplementedError
+    
+    @abc.abstractmethod
+    def contains(
+        self,
+        key: LMCKeyManagerKey,
+    ) -> bool:
+        """
+        Query if a key is in the cache or not
+        """
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    def get(
+        self,
+        key: LMCKeyManagerKey,
+    ) -> LMCKeyManagerValue:
+        """
+        Retrieve the path/url of KV cache chunk by the given key
+
+        :param key: the key of the token chunk, including 
+         prefix hash and format
+
+        :return: the path/url of KV cache chunk
+        """
+        raise NotImplementedError
+    
+    @abc.abstractmethod
+    def put(
+        self,
+        key: LMCKeyManagerKey,
+        status: bool
+    ) -> None:
+        """
+        Retrieve the path/url of KV cache chunk by the given key
+
+        :param key: the key of the token chunk, including 
+         prefix hash and format
+
+        :parm status: 0 for start and 1 for finish
+
+        :return: the path/url of KV cache chunk
+        """
+        raise NotImplementedError
+
+    def batched_put(
+        self,
+        keys: Iterable[LMCKeyManagerKey],
+        status:bool
+    ) -> None:
+        logger.info("Using default batched implementation of the put() method")
+        for key in keys:
+            self.put(key,status=status)
+
+    def batched_get(
+        self,
+        keys: Iterable[LMCKeyManagerKey],
+    ) -> Iterable[Optional[LMCKeyManagerValue]]:
         for key in keys:
             if self.contains(key):  # Jiayi: This seems to be redundant?
                 yield self.get(key)

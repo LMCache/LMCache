@@ -16,18 +16,7 @@ from lmcache.storage_backend.serde.serde import (Deserializer,
                                                  SerializerDebugWrapper)
 from lmcache.storage_backend.serde.torch_serde import (TorchDeserializer,
                                                        TorchSerializer)
-
-STR_DTYPE_TO_TORCH_DTYPE = {
-    "half": torch.half,
-    "float16": torch.float16,
-    "bfloat16": torch.bfloat16,
-    "float": torch.float32,
-    "double": torch.float64,
-    "fp8": torch.uint8,
-    "fp8_e4m3": torch.float8_e4m3fn,
-    "fp8_e5m2": torch.float8_e5m2,
-}
-
+from lmcache.utils import STR_DTYPE_TO_TORCH_DTYPE
 
 def CreateSerde(
     serde_type: str,

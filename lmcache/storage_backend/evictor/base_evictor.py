@@ -6,7 +6,7 @@ from typing import List, Tuple, Union
 import torch
 
 from lmcache.logging import init_logger
-from lmcache.utils import CacheEngineKey, DiskCacheMetadata
+from lmcache.utils import CacheEngineKey, DiskCacheMetadata,LMCKeyManagerValue
 
 logger = init_logger(__name__)
 
@@ -77,6 +77,9 @@ class BaseEvictor(metaclass=abc.ABCMeta):
 
         elif isinstance(kv_obj, DiskCacheMetadata):
             size_in_gb = kv_obj.size
+
+        elif isinstance(kv_obj, LMCKeyManagerValue):
+            size_in_gb = kv_obj.size
         else:
             raise Exception(
                 f"Encountered unknown kv data type {type(kv_obj)}!")
@@ -92,6 +95,6 @@ class DummyEvictor(BaseEvictor):
         pass
 
     def update_on_put(self, cache_dict: OrderedDict,
-                      kv_obj: Union[torch.Tensor, bytes]):
+                      kv_obj: Union[torch.Tensor, LMCKeyManagerValue, bytes]):
         # Dummy implementation does not evict anything
         return [], PutStatus.LEGAL
