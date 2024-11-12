@@ -274,10 +274,11 @@ class SPTBlendRetriever(BlendRetriever):
         """
         assert len(full_prompts) == len(indices)
         with ThreadPoolExecutor(max_workers=1) as executor:
-            splitted_tokens = []
+            splitted_tokens: List[torch.Tensor] = []
             for prompt_idx, prompt in enumerate(full_prompts):
                 prompt_indices = indices[prompt_idx]
-                splitted_tokens.extend(torch.tensor_split(prompt, prompt_indices))
+                splitted_tokens.extend(
+                    torch.tensor_split(prompt, prompt_indices))
             logger.debug("Split input tokens into %d requests",
                          len(splitted_tokens))
             tasks = [
