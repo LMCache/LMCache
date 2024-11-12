@@ -21,12 +21,12 @@ class TorchSerializer(Serializer):
 
 class TorchDeserializer(Deserializer):
 
-    def __init__(self):
-        super().__init__()
+    def __init__(self, dtype):
+        super().__init__(dtype)
 
     def from_bytes_normal(self, b: bytes) -> torch.Tensor:
         with io.BytesIO(b) as f:
             return torch.load(f)
 
     def from_bytes(self, b: bytes) -> torch.Tensor:
-        return self.from_bytes_normal(b)
+        return self.from_bytes_normal(b).to(dtype=self.dtype)

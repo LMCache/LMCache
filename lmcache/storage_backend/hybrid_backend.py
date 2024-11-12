@@ -3,7 +3,8 @@ from typing import Iterable, List, Optional, Union
 
 import torch
 
-from lmcache.config import LMCacheEngineConfig, LMCacheEngineMetadata
+from lmcache.config import (LMCacheEngineConfig, LMCacheEngineMetadata,
+                            LMCacheMemPoolMetadata)
 from lmcache.logging import init_logger
 from lmcache.storage_backend.abstract_backend import LMCBackendInterface
 from lmcache.storage_backend.local_backend import LMCLocalBackend
@@ -20,15 +21,16 @@ class LMCHybridBackend(LMCBackendInterface):
     retrieve data.
     It implements write-through and read-through caching.
     """
-
-    # TODO: LRU eviction policy
-
+    
     def __init__(self,
                  config: LMCacheEngineConfig,
                  metadata: LMCacheEngineMetadata,
+                 mpool_metadata: LMCacheMemPoolMetadata,
                  dst_device: str = "cuda"):
         super().__init__(dst_device)
-        self.local_store = LMCLocalBackend(config, dst_device)
+        self.local_store = LMCLocalBackend(config, mpool_metadata, 
+                                           dst_device)
+
         self.remote_store: Union[LMCPipelinedRemoteBackend, LMCRemoteBackend]
         if config.pipelined_backend:
             self.remote_store = LMCPipelinedRemoteBackend(

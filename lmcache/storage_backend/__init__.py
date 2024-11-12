@@ -1,6 +1,8 @@
 import torch
 
-from lmcache.config import LMCacheEngineConfig, LMCacheEngineMetadata
+from lmcache.config import (LMCacheEngineConfig, LMCacheEngineMetadata,
+                            LMCacheMemPoolMetadata)
+
 from lmcache.logging import init_logger
 from lmcache.storage_backend.abstract_backend import LMCBackendInterface
 from lmcache.storage_backend.hybrid_backend import \
@@ -12,6 +14,7 @@ from lmcache.storage_backend.remote_backend import LMCRemoteBackend
 logger = init_logger(__name__)
 
 
+
 def CreateStorageBackend(config: LMCacheEngineConfig,
                          metadata: LMCacheEngineMetadata,
                          dst_device: str = "cuda") -> LMCBackendInterface:
@@ -19,6 +22,8 @@ def CreateStorageBackend(config: LMCacheEngineConfig,
     if dst_device == "cuda":
         dst_device = f"cuda:{torch.cuda.current_device()}"
 
+    mpool_metadata = LMCacheMemPoolMetadata(metadata.kv_shape,
+                                            metadata.kv_dtype)
     match config:
         case LMCacheEngineConfig(_, local_device=None,
                                  remote_url=str(p)) if p is not None:
@@ -34,17 +39,23 @@ def CreateStorageBackend(config: LMCacheEngineConfig,
                     logger.info(
                         f"Initializing local-only ({config.local_device})"
                         f" backend")
-                    return LMCLocalBackend(config, dst_device)
+
+                    return LMCLocalBackend(config, mpool_metadata, 
+                                           dst_device)
                 case _:
                     logger.info(f"Initializing local-only (disk) backend at"
                                 f" {config.local_device}")
-                    return LMCLocalDiskBackend(config, dst_device)
+                    return LMCLocalDiskBackend(config, mpool_metadata, 
+                                               dst_device)
+
 
         case LMCacheEngineConfig(
                 _, local_device=str(p),
                 remote_url=str(q)) if p is not None and q is not None:
             logger.info("Initializing hybrid backend")
-            return LMCHybridBackend(config, metadata, dst_device)
+            return LMCHybridBackend(config, metadata, mpool_metadata, 
+                                    dst_device)
+
 
         case _:
             raise ValueError(f"Invalid configuration: {config}")

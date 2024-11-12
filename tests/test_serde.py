@@ -39,15 +39,15 @@ def test_cachegen_encoder(chunk_size):
         world_size=1,
         worker_id=0,
         fmt=fmt,
-        dtype="bfloat16",
-    )
+        kv_dtype=torch.bfloat16,
+        kv_shape=None)
     metadata2 = LMCacheEngineMetadata(
         model_name="mistralai/Mistral-7B-Instruct-v0.2",
         world_size=1,
         worker_id=0,
         fmt=fmt2,
-        dtype="bfloat16",
-    )
+        kv_dtype=torch.bfloat16,
+        kv_shape=None)
     serializer = CacheGenSerializer(config, metadata)
     serializer2 = CacheGenSerializer(config, metadata2)
 
@@ -71,10 +71,10 @@ def test_cachegen_decoder(fmt, chunk_size):
         world_size=1,
         worker_id=0,
         fmt=fmt,
-        dtype="bfloat16",
-    )
+        kv_dtype=torch.bfloat16,
+        kv_shape=None)
     serializer = CacheGenSerializer(config, metadata)
-    deserializer = CacheGenDeserializer(config, metadata)
+    deserializer = CacheGenDeserializer(config, metadata, torch.bfloat16)
 
     kv = to_blob(generate_kv_cache(chunk_size, fmt, "cuda"))
     output = serializer.to_bytes(kv)
@@ -94,10 +94,10 @@ def test_cachegen_unmatched_size(fmt):
         world_size=1,
         worker_id=0,
         fmt=fmt,
-        dtype="bfloat16",
-    )
+        kv_dtype=torch.bfloat16,
+        kv_shape=None)
     serializer = CacheGenSerializer(config, metadata)
-    deserializer = CacheGenDeserializer(config, metadata)
+    deserializer = CacheGenDeserializer(config, metadata, torch.bfloat16)
 
     kv = to_blob(generate_kv_cache(chunk_size - 20, fmt, "cuda"))
     output = serializer.to_bytes(kv)
