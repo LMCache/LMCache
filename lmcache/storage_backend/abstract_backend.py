@@ -11,6 +11,24 @@ logger = init_logger(__name__)
 
 class LMCBackendInterface(metaclass=abc.ABCMeta):
 
+    def __init__(
+        self,
+        dst_device: str = "cuda",
+    ):
+        """Initialize the storage backend. 
+
+        :param dst_device: the device where the retrieved KV be stored,
+            could be either "cpu", "cuda", or "cuda:0", "cuda:1", etc.
+
+        :raise: RuntimeError if the device is not valid
+        """
+        try:
+            torch.device(dst_device)
+        except RuntimeError:
+            raise
+
+        self.dst_device = dst_device
+
     @abc.abstractmethod
     def put(
         self,

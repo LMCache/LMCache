@@ -55,7 +55,7 @@ class LRUEvictor(BaseEvictor):
         iter_cache_dict = iter(cache_dict)
 
         if cache_size > self.MAX_CACHE_SIZE:
-            logger.info("Put failed due to limited cache storage")
+            logger.warning("Put failed due to limited cache storage")
             return [], PutStatus.ILLEGAL
 
         # evict cache until there's enough space

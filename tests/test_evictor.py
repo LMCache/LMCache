@@ -5,9 +5,9 @@ from lmcache.cache_engine import LMCacheEngine
 from lmcache.config import LMCacheEngineConfig, LMCacheEngineMetadata
 
 
-def dumb_metadata(fmt="vllm"):
-    return LMCacheEngineMetadata("test_model", 3, 123, fmt,
-                                 "bfloat16" if fmt == "vllm" else "float16")
+def dumb_metadata(fmt="vllm", kv_shape=(32, 2, 256, 8, 128)):
+    return LMCacheEngineMetadata("test_model", 3, 123, fmt, torch.bfloat16,
+                                 kv_shape)
 
 
 def check_kv_cache_equal(left, right, num_tokens, fmt):
