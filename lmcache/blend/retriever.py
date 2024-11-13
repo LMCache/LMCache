@@ -188,7 +188,7 @@ class SPTBlendRetriever(BlendRetriever):
 
     Example:
         Input = [x, x, x, spt, y, y, spt, z, z, z, z]
-        
+
         Requests sent to LMCache engine when using drop_spt_and_get_indices
         and new_request:
         - [x, x, x]
@@ -248,11 +248,14 @@ class SPTBlendRetriever(BlendRetriever):
             splitted_tokens.append(full_prompt[start:])
 
         new_prompt = []
-        new_indices = [0]
+        new_indices = []
+        this_seg_start = 0
         for split in splitted_tokens:
             new_prompt.extend(split)
-            new_indices.append(new_indices[-1] + len(split))
-        new_indices[-1] = len(new_prompt)
+            new_indices.append(this_seg_start + len(split))
+            this_seg_start = new_indices[-1]
+        if len(new_indices) > 0:
+            new_indices.pop()
         return new_prompt, new_indices
 
     def new_request(
@@ -274,16 +277,11 @@ class SPTBlendRetriever(BlendRetriever):
         """
         assert len(full_prompts) == len(indices)
         with ThreadPoolExecutor(max_workers=1) as executor:
-            splitted_tokens = []
+            splitted_tokens: List[torch.Tensor] = []
             for prompt_idx, prompt in enumerate(full_prompts):
                 prompt_indices = indices[prompt_idx]
-                assert len(prompt_indices) >= 2
-                segment_num = len(prompt_indices) - 1
-                for i in range(segment_num):
-                    start_loc = prompt_indices[i]
-                    end_loc = prompt_indices[i + 1]
-                    if end_loc > start_loc:
-                        splitted_tokens.append(prompt[start_loc:end_loc])
+                splitted_tokens.extend(
+                    torch.tensor_split(prompt, prompt_indices))
             logger.debug("Split input tokens into %d requests",
                          len(splitted_tokens))
             tasks = [
@@ -292,7 +290,7 @@ class SPTBlendRetriever(BlendRetriever):
                     tokens,  # tokens
                     None,  # mask
                     False,  # return_tuple
-                ) for tokens in splitted_tokens
+                ) for tokens in splitted_tokens if len(tokens) > 0
             ]
 
         return SPTBlendRetrieverTask(token_segments=splitted_tokens,

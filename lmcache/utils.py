@@ -15,6 +15,20 @@ class DiskCacheMetadata:
     size: float
 
 
+TORCH_DTYPE_TO_STR_DTYPE = {
+    torch.half: "half",
+    torch.float16: "half",
+    torch.bfloat16: "bfloat16",
+    torch.float: "float",
+    torch.float32: "float",
+    torch.float64: "double",
+    torch.double: "double",
+    torch.uint8: "fp8",
+    torch.float8_e4m3fn: "fp8_e4m3",
+    torch.float8_e5m2: "fp8_e5m2",
+}
+
+
 @dataclass
 class CacheEngineKey:
     fmt: str

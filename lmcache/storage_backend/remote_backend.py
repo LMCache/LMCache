@@ -26,14 +26,16 @@ class LMCRemoteBackend(LMCBackendInterface):
     Cache engine for storing the KV cache of the tokens in the remote server.
     """
 
-    def __init__(self, config: LMCacheEngineConfig,
-                 metadata: LMCacheEngineMetadata):
+    def __init__(self,
+                 config: LMCacheEngineConfig,
+                 metadata: LMCacheEngineMetadata,
+                 dst_device: str = "cuda"):
         """
         Throws:
             RuntimeError if the loaded configuration does not match the current
                 configuration
         """
-        super().__init__()
+        super().__init__(dst_device)
         #self.existing_keys: Set[CacheEngineKey] = set()
         self.put_thread = None
         assert config.remote_url is not None, (
@@ -53,9 +55,6 @@ class LMCRemoteBackend(LMCBackendInterface):
                   RemoteBackendEndSignal]] = queue.Queue()
         self.put_thread = threading.Thread(target=self.put_worker, args=())
         self.put_thread.start()
-
-        # FIXME(Jiayi): please remove this hard code
-        self.dst_device = "cuda"
 
     @_lmcache_nvtx_annotate
     def put_worker(self, ):
@@ -185,14 +184,16 @@ class LMCPipelinedRemoteBackend(LMCRemoteBackend):
     Implements the pipelined get functionality for the remote backend.
     """
 
-    def __init__(self, config: LMCacheEngineConfig,
-                 metadata: LMCacheEngineMetadata):
+    def __init__(self,
+                 config: LMCacheEngineConfig,
+                 metadata: LMCacheEngineMetadata,
+                 dst_device: str = "cuda"):
         """
         Throws:
             RuntimeError if the loaded configuration does not match the current
                 configuration
         """
-        super().__init__(config, metadata)
+        super().__init__(config, metadata, dst_device)
 
         # Comment out existing_keys for now to avoid consistency issues
         #self.existing_keys = set()

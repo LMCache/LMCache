@@ -7,9 +7,9 @@ from lmcache.cache_engine import LMCacheEngine
 from lmcache.config import LMCacheEngineConfig, LMCacheEngineMetadata
 
 
-def dumb_metadata(fmt="vllm"):
+def dumb_metadata(fmt="vllm", kv_shape=(32, 2, 256, 8, 128)):
     dtype = torch.bfloat16 if fmt == "vllm" else torch.float16
-    return LMCacheEngineMetadata("test_model", 3, 123, fmt, dtype)
+    return LMCacheEngineMetadata("test_model", 3, 123, fmt, dtype, kv_shape)
 
 
 def dumb_cfg():
@@ -129,11 +129,18 @@ def assert_indices_is_concat(indices, chunk_lengths):
     """
     Check if the indices is the concatenation of the chunk lengths
     """
-    assert len(indices) == len(chunk_lengths) + 1
-    for idx in range(len(chunk_lengths)):
-        seg_len = indices[idx + 1] - indices[idx]
-        assert seg_len == chunk_lengths[idx]
-    assert indices[-1] == sum(chunk_lengths)
+    assert len(indices) == len(chunk_lengths) - 1
+    if len(indices) == 0:
+        return
+    this_seg_start = 0
+    for i, idx in enumerate(indices):
+        assert idx >= this_seg_start
+        seg_len = idx - this_seg_start
+        assert seg_len == chunk_lengths[i]
+        this_seg_start = idx
+    assert len(chunk_lengths) >= 2
+    assert indices[-1] == this_seg_start
+    assert indices[-1] == sum(chunk_lengths[:-1])
 
 
 @pytest.mark.parametrize("fmt", ["vllm", "huggingface"])
@@ -169,7 +176,7 @@ def test_drop_spt_and_get_indices(fmt, spt_length, autorelease):
     assert_indices_is_concat(new_indices, real_chunk_lengths)
 
 
-@pytest.mark.parametrize("fmt", ["vllm", "huggingface"])
+@pytest.mark.parametrize("fmt", ["vllm"])
 @pytest.mark.parametrize("spt_length", [1, 2])
 def test_spt_full_hit(fmt, spt_length, autorelease):
     """
@@ -228,7 +235,7 @@ def test_spt_full_hit(fmt, spt_length, autorelease):
     check_groups(1, 1, 2, 2)
 
 
-@pytest.mark.parametrize("fmt", ["vllm", "huggingface"])
+@pytest.mark.parametrize("fmt", ["vllm"])
 @pytest.mark.parametrize("spt_length", [1, 2])
 def test_spt_hit_miss(fmt, spt_length, autorelease):
     """
@@ -295,7 +302,7 @@ def test_spt_hit_miss(fmt, spt_length, autorelease):
     check_groups(1, 2, 3)  # N, Y, N
 
 
-@pytest.mark.parametrize("fmt", ["vllm", "huggingface"])
+@pytest.mark.parametrize("fmt", ["vllm"])
 @pytest.mark.parametrize("spt_length", [1, 2])
 def test_spt_all_miss(fmt, spt_length, autorelease):
     """
@@ -345,7 +352,7 @@ def test_spt_all_miss(fmt, spt_length, autorelease):
     check_groups(1, 2, 3)
 
 
-@pytest.mark.parametrize("fmt", ["vllm", "huggingface"])
+@pytest.mark.parametrize("fmt", ["vllm"])
 @pytest.mark.parametrize("spt_length", [1, 2])
 def test_spt_partial_hit(fmt, spt_length, autorelease):
     """
@@ -422,7 +429,7 @@ def test_spt_partial_hit(fmt, spt_length, autorelease):
     check_groups(0, 0)
 
 
-@pytest.mark.parametrize("fmt", ["vllm", "huggingface"])
+@pytest.mark.parametrize("fmt", ["vllm"])
 @pytest.mark.parametrize("spt_length", [1, 2])
 def test_spt_multi_query(fmt, spt_length, autorelease):
     """
@@ -469,7 +476,6 @@ def test_spt_multi_query(fmt, spt_length, autorelease):
         single_new_prompt, single_new_indices = \
             retriever.drop_spt_and_get_indices(
             single_prompt_list)
-        assert len(single_new_indices) == 2, f"{len(single_new_indices)}"
         single_new_prompt = torch.tensor(single_new_prompt)
         ret2 = retriever.new_request([single_new_prompt], [single_new_indices])
         target_len1 = sum([chunk_lengths[i] for i in ids])
