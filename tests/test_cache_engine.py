@@ -90,11 +90,21 @@ def check_kv_cache_device(kvs, device):
 # TODO(Jiayi): this test needs to be improved once more dst_device is supported
 @pytest.mark.parametrize("src_device", ["cuda:0", "cuda", "cpu"])
 @pytest.mark.parametrize("dst_device", ["cuda:0"])
-@pytest.mark.parametrize("backend", ["cuda", "cpu", "file://local_disk/"])
+@pytest.mark.parametrize("backend", ["cuda", "cpu", "file://local_disk/","disk_url:http://localhost:4321"])
 def test_retrieve_device(backend, src_device, dst_device, autorelease):
 
     fmt = "vllm"
     num_tokens = 500
+
+    disk_process=None
+    if backend.startswith("disk_url:"):
+        print("Starting disk_keymanager")
+        disk_process=subprocess.Popen(shlex.split("python ../lmcache/storage_backend/disk_keymanager.py"))
+        time.sleep(5)
+
+        # Optional: Get process ID and output details
+        print(f"Started background process with PID: {disk_process.pid}")
+
     """ initialize the engine """
     tokens = generate_tokens(num_tokens, src_device)
     kv_cache = generate_kv_cache(num_tokens, fmt, src_device)
@@ -105,6 +115,10 @@ def test_retrieve_device(backend, src_device, dst_device, autorelease):
     retrieved_cache, ret_mask = engine.retrieve(tokens)
     check_kv_cache_device(retrieved_cache, dst_device)
 
+    if disk_process is not None:
+        disk_process.kill()
+        disk_process.wait()
+
 
 @pytest.mark.parametrize("fmt", ["vllm", "huggingface"])
 @pytest.mark.parametrize(
@@ -113,6 +127,7 @@ def test_retrieve_device(backend, src_device, dst_device, autorelease):
         "cuda",
         "cpu",
         "file://local_disk/",
+        "disk_url:http://localhost:4321",
         "redis://localhost:6379",
         "lm://localhost:65000",
     ],
@@ -127,6 +142,16 @@ def test_same_retrieve_store(fmt, backend, remote_serde, autorelease,
 
     if backend.startswith("lm"):
         backend = lmserver_process.server_url
+
+    disk_process=None
+    if backend.startswith("disk_url:"):
+        print("Starting disk_keymanager")
+        disk_process=subprocess.Popen(shlex.split("python ../lmcache/storage_backend/disk_keymanager.py"))
+        time.sleep(5)
+
+        # Optional: Get process ID and output details
+        print(f"Started background process with PID: {disk_process.pid}")
+
 
     tokens = generate_tokens(num_tokens, device)
     kv_cache = generate_kv_cache(num_tokens, fmt, device)
@@ -151,6 +176,10 @@ def test_same_retrieve_store(fmt, backend, remote_serde, autorelease,
     """erase local cache"""
     if backend in ["file://local_disk/"]:
         subprocess.run(shlex.split("rm -rf local_disk/"))
+
+    if disk_process is not None:
+        disk_process.kill()
+        disk_process.wait()
 
 
 @pytest.mark.parametrize("fmt", ["vllm", "huggingface"])
@@ -189,6 +218,7 @@ def test_retrieve_single_tensor(fmt, backend, autorelease):
         "cuda",
         "cpu",
         "file://local_disk/",
+        "disk_url:http://localhost:4321",
         "redis://localhost:6379",
         "lm://localhost:65000",
     ],
@@ -201,6 +231,14 @@ def test_retrieve_prefix(fmt, chunk_size, backend, autorelease,
     new_num_tokens = 1000
     if backend.startswith("lm"):
         backend = lmserver_process.server_url
+
+    disk_process=None
+    if backend.startswith("disk_url:"):
+        print("Starting disk_keymanager")
+        disk_process=subprocess.Popen(shlex.split("python ../lmcache/storage_backend/disk_keymanager.py"))
+        time.sleep(5)
+        # Optional: Get process ID and output details
+        print(f"Started background process with PID: {disk_process.pid}")
 
     print(fmt, chunk_size, backend)
     t1 = time.perf_counter()
@@ -234,6 +272,10 @@ def test_retrieve_prefix(fmt, chunk_size, backend, autorelease,
 
     if backend in ["file://local_disk/"]:
         subprocess.run(shlex.split("rm -rf local_disk/"))
+    
+    if disk_process is not None:
+        disk_process.kill()
+        disk_process.wait()
 
 
 @pytest.mark.parametrize("fmt", ["vllm", "huggingface"])

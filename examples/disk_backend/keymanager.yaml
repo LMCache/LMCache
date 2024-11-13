@@ -1,0 +1,6 @@
+disk_url: "http://localhost:4321"
+disk_path: "/dataheart/qinyuyang2003/local_disk/"
+fmt: 'vllm'
+dtype: "bfloat16"
+chunk_size: 256
+serde: None
