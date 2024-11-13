@@ -1,24 +1,19 @@
 import os
-import queue
+import re
 import threading
-import time
 from collections import OrderedDict
-from typing import Optional, Tuple, Union, List
+from dataclasses import dataclass
+from typing import Iterable, Optional
+from xmlrpc.server import SimpleXMLRPCRequestHandler, SimpleXMLRPCServer
 
-import torch
-from safetensors import safe_open
-from safetensors.torch import save_file
+import yaml
 
-from lmcache.config import LMCacheEngineConfig
 from lmcache.logging import init_logger
-from lmcache.storage_backend.abstract_backend import LMCKeyManagerInterface, LMCBackendInterface
-from lmcache.utils import LMCKeyManagerKey, LMCKeyManagerValue, CacheBackendInfo
+from lmcache.storage_backend.abstract_backend import LMCKeyManagerInterface
 from lmcache.storage_backend.evictor import DummyEvictor
 from lmcache.storage_backend.evictor.base_evictor import PutStatus
-from lmcache.utils import (DiskCacheMetadata, KVCache, _lmcache_nvtx_annotate)
-from dataclasses import dataclass
-import re
-import yaml
+from lmcache.utils import (CacheBackendInfo, LMCKeyManagerKey,
+                           LMCKeyManagerValue)
 
 logger = init_logger(__name__)
 
@@ -63,7 +58,10 @@ class LMCDiskKeyManager(LMCKeyManagerInterface):
                 configuration
         """
         super().__init__()
-        self.info: CacheBackendInfo = config
+        self.info: CacheBackendInfo = CacheBackendInfo(config.fmt,
+                                                       config.dtype,
+                                                       config.chunk_size,
+                                                       config.serde)
 
         self.dict: OrderedDict[LMCKeyManagerKey,
                                LMCKeyManagerValue] = OrderedDict()
@@ -165,7 +163,7 @@ class LMCDiskKeyManager(LMCKeyManagerInterface):
     def get(
         self,
         key_str: str,
-    ) -> [LMCKeyManagerValue, None]:
+    ) -> LMCKeyManagerValue:
         #(TODO) Add read lock if needed
         """
         Retrieve the KV cache chunk by the given key
@@ -197,8 +195,8 @@ class LMCDiskKeyManager(LMCKeyManagerInterface):
 
     def batched_get(
         self,
-        keys_str: List[str],
-    ) -> List[str]:
+        keys_str: Iterable[str],
+    ) -> Iterable[str]:
         #(TODO) Add read lock if needed
         """
         Retrieve the KV cache chunk by the given key
@@ -237,10 +235,6 @@ class LMCDiskKeyManager(LMCKeyManagerInterface):
         self.close()
 
 
-from xmlrpc.server import SimpleXMLRPCServer
-from xmlrpc.server import SimpleXMLRPCRequestHandler
-
-
 # Restrict to a particular path.
 class RequestHandler(SimpleXMLRPCRequestHandler):
     rpc_paths = ('/RPC2', )
@@ -270,7 +264,8 @@ if __name__ == '__main__':
     # Determine the directory of the current script (disk_keymanager.py)
     script_dir = os.path.dirname(os.path.abspath(__file__))
 
-    # Construct the absolute path to keymanager.yaml based on disk_keymanager.py's location
+    # Construct the absolute path to keymanager.yaml
+    # based on disk_keymanager.py's location
     config_path = os.path.join(script_dir,
                                "../../examples/disk_backend/keymanager.yaml")
     print("Starting the server with the configuration file at", config_path)

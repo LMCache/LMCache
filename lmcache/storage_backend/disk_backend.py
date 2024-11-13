@@ -1,9 +1,8 @@
-import os
 import queue
 import threading
 import time
-from collections import OrderedDict
-from typing import Iterable, List, Optional, Tuple, Union
+import xmlrpc.client
+from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
 import torch
 from safetensors import safe_open
@@ -11,13 +10,10 @@ from safetensors.torch import save_file
 
 from lmcache.config import LMCacheEngineConfig
 from lmcache.logging import init_logger
-from lmcache.storage_backend.abstract_backend import LMCKeyManagerInterface, LMCKeyManagerValue, LMCBackendInterface
+from lmcache.storage_backend.abstract_backend import LMCBackendInterface
 from lmcache.storage_backend.evictor import DummyEvictor
-from lmcache.storage_backend.evictor.base_evictor import PutStatus
-from lmcache.utils import (CacheEngineKey, DiskCacheMetadata, KVCache,
-                           LMCKeyManagerKey, LMCKeyManagerValue,
+from lmcache.utils import (CacheEngineKey, KVCache, LMCKeyManagerKey,
                            _lmcache_nvtx_annotate)
-import xmlrpc.client
 
 logger = init_logger(__name__)
 
@@ -50,7 +46,7 @@ class LMCDiskBackend(LMCBackendInterface):
             "Need to specify local path if when "
             "using LMCLocalDiskBackend")
         self.proxy = xmlrpc.client.ServerProxy(config.disk_url)
-        Info = self.proxy.Info()
+        Info: Dict[str, Any] = self.proxy.Info()  # type: ignore
 
         self.remote_fmt = Info["fmt"]
         self.remote_dtype = Info["dtype"]
@@ -113,8 +109,9 @@ class LMCDiskBackend(LMCBackendInterface):
     ) -> None:
         self.update_lock.acquire()
         print(self._key_transform(key), self.evictor.get_size(kv_chunk), 0)
-        path = self.proxy.put(self._key_transform(key),
-                              self.evictor.get_size(kv_chunk), 0)
+        path: str = self.proxy.put(self._key_transform(key),
+                                   self.evictor.get_size(kv_chunk),
+                                   0)  # type: ignore
 
         print(path)
 
@@ -155,7 +152,7 @@ class LMCDiskBackend(LMCBackendInterface):
     def get(
         self,
         key: CacheEngineKey,
-    ) -> Optional[KVCache]:
+    ) -> Optional[KVCache]:  # type: ignore
         """
         Retrieve the KV cache chunk by the given key
 
@@ -166,12 +163,13 @@ class LMCDiskBackend(LMCBackendInterface):
             None if the key is not found
         """
         print(self._key_transform(key))
-        value = self.proxy.get(self._key_transform(key))
+        value: Dict[str, Any] = self.proxy.get(
+            self._key_transform(key))  # type: ignore
         print(value)
         # breakpoint()
         while value['status'] == 1:
             time.sleep(0.1)
-            value = self.proxy.get(self._key_transform(key))
+            value = self.proxy.get(self._key_transform(key))  # type: ignore
 
         if value['status'] == 0:
             return None
@@ -200,7 +198,7 @@ class LMCDiskBackend(LMCBackendInterface):
 
     def batched_get(
         self,
-        keys: List[str],
+        keys: Iterable[CacheEngineKey],
     ) -> Iterable[Optional[torch.Tensor]]:
         """
         Retrieve the kv cache chunks by the given keys in a batched manner
@@ -215,14 +213,14 @@ class LMCDiskBackend(LMCBackendInterface):
         logger.info("Using default batched implementation of the get() method")
         keys_str = [self._key_transform(key) for key in keys]
         time0 = time.time()
-        paths = self.proxy.batched_get(keys_str)
+        paths: List[str] = self.proxy.batched_get(keys_str)  # type: ignore
         print("Time taken for batched_get", time.time() - time0)
         for path in paths:
             if path == "":
                 yield None
             else:
                 with safe_open(path, framework="pt",
-                               device=self.dst_device) as f:
+                               device=self.dst_device) as f:  # type: ignore
                     kv_chunk = f.get_tensor("kv_chunk")
                 yield kv_chunk
 

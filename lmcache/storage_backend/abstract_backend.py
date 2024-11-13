@@ -4,7 +4,7 @@ from typing import Iterable, Optional, Tuple
 import torch
 
 from lmcache.logging import init_logger
-from lmcache.utils import CacheEngineKey, LMCKeyManagerKey, LMCKeyManagerValue, CacheBackendInfo
+from lmcache.utils import CacheBackendInfo, CacheEngineKey, LMCKeyManagerValue
 
 logger = init_logger(__name__)
 
@@ -145,8 +145,8 @@ class LMCKeyManagerInterface(metaclass=abc.ABCMeta):
     @abc.abstractmethod
     def contains(
         self,
-        key: LMCKeyManagerKey,
-    ) -> bool:
+        key_str: str,
+    ) -> str:
         """
         Query if a key is in the cache or not
         """
@@ -155,7 +155,7 @@ class LMCKeyManagerInterface(metaclass=abc.ABCMeta):
     @abc.abstractmethod
     def get(
         self,
-        key: LMCKeyManagerKey,
+        key_str: str,
     ) -> LMCKeyManagerValue:
         """
         Retrieve the path/url of KV cache chunk by the given key
@@ -168,32 +168,28 @@ class LMCKeyManagerInterface(metaclass=abc.ABCMeta):
         raise NotImplementedError
 
     @abc.abstractmethod
-    def put(self, key: LMCKeyManagerKey, status: bool) -> None:
+    def put(self, key_str: str, kv_size: float, status: bool) -> Optional[str]:
         """
         Retrieve the path/url of KV cache chunk by the given key
 
         :param key: the key of the token chunk, including 
          prefix hash and format
 
-        :parm status: 0 for start and 1 for finish
+        :param kv_size: the size of the KV cache chunk
+
+        :param status: 0 for start and 1 for finish
 
         :return: the path/url of KV cache chunk
         """
         raise NotImplementedError
 
-    def batched_put(self, keys: Iterable[LMCKeyManagerKey],
-                    status: bool) -> None:
-        logger.info("Using default batched implementation of the put() method")
-        for key in keys:
-            self.put(key, status=status)
-
     def batched_get(
         self,
-        keys: Iterable[LMCKeyManagerKey],
-    ) -> Iterable[Optional[LMCKeyManagerValue]]:
+        keys: Iterable[str],
+    ) -> Iterable[Optional[str]]:
         for key in keys:
             if self.contains(key):  # Jiayi: This seems to be redundant?
-                yield self.get(key)
+                yield self.get(key).path
             else:
                 yield None
 

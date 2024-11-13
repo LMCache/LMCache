@@ -51,7 +51,9 @@ class BaseEvictor(metaclass=abc.ABCMeta):
 
     # TODO (Jiayi): KV object should have a better abstraction
     # e.g., a kv_obj class wize size field
-    def get_size(self, kv_obj: Union[torch.Tensor, bytes]) -> float:
+    def get_size(
+            self, kv_obj: Union[torch.Tensor, LMCKeyManagerValue,
+                                bytes]) -> float:
         """
         Get the size of the kv cache
         

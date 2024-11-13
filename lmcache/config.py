@@ -51,7 +51,7 @@ class LMCacheEngineConfig:
     def from_defaults(
         chunk_size: int = 256,
         local_device: str = "cuda",
-        disk_url: str = None,
+        disk_url: Optional[str] = None,
         remote_url: str = "redis://localhost:6379",
         remote_serde: str = "torch",
         pipelined_backend: bool = False,
