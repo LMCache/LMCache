@@ -37,13 +37,14 @@ class LMCacheEngineConfig:
     def from_defaults(
         chunk_size: int = 256,
         local_device: str = "cuda",
+        disk_url: str = None,
         remote_url: str = "redis://localhost:6379",
         remote_serde: str = "torch",
         pipelined_backend: bool = False,
         save_decode_cache: bool = False,
         enable_blending: bool = False,
     ) -> "LMCacheEngineConfig":
-        return LMCacheEngineConfig(chunk_size, local_device, remote_url,
+        return LMCacheEngineConfig(chunk_size, local_device, disk_url,remote_url,
                                    remote_serde, pipelined_backend,
                                    save_decode_cache, enable_blending)
 
@@ -59,6 +60,7 @@ class LMCacheEngineConfig:
 
         local_device: Optional[str] = None
         remote_url: Optional[str] = None
+        disk_url: Optional[str] = None
 
         match backend:
             case "cpu" | "cuda":
@@ -68,12 +70,18 @@ class LMCacheEngineConfig:
                                   path):  # local disk directory
                 local_device = path[7:]
                 remote_url = None
+            case path if re.match(r"disk_url:(.*)/",
+                                  path):  # local disk directory
+                local_device = "disk"
+                disk_url=path[9:]
+                remote_url = None
             case url if re.match(r"(.*)://(.*):(\d+)", url):
                 local_device = None
                 remote_url = url
         return LMCacheEngineConfig(
             chunk_size,
             local_device,
+            disk_url,
             remote_url,
             remote_serde,
             pipelined_backend,

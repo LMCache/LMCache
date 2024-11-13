@@ -277,4 +277,11 @@ def start_server(config):
 
 
 if __name__=='__main__':
-    start_server(LMCKeyManagerConfig.from_file("/dataheart/qinyuyang2003/LMCache_test/LMCache/examples/disk_backend/keymanager.yaml"))
+    # Determine the directory of the current script (disk_keymanager.py)
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    
+    # Construct the absolute path to keymanager.yaml based on disk_keymanager.py's location
+    config_path = os.path.join(script_dir, "../../examples/disk_backend/keymanager.yaml")
+    print("Starting the server with the configuration file at", config_path)
+    # Start the server with the configuration file
+    start_server(LMCKeyManagerConfig.from_file(config_path))
