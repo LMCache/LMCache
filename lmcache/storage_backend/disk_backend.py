@@ -11,10 +11,11 @@ from safetensors.torch import save_file
 
 from lmcache.config import LMCacheEngineConfig
 from lmcache.logging import init_logger
-from lmcache.storage_backend.abstract_backend import LMCKeyManagerInterface,LMCKeyManagerValue,LMCBackendInterface
+from lmcache.storage_backend.abstract_backend import LMCKeyManagerInterface, LMCKeyManagerValue, LMCBackendInterface
 from lmcache.storage_backend.evictor import DummyEvictor
 from lmcache.storage_backend.evictor.base_evictor import PutStatus
-from lmcache.utils import (CacheEngineKey, DiskCacheMetadata, KVCache,LMCKeyManagerKey,LMCKeyManagerValue,
+from lmcache.utils import (CacheEngineKey, DiskCacheMetadata, KVCache,
+                           LMCKeyManagerKey, LMCKeyManagerValue,
                            _lmcache_nvtx_annotate)
 import xmlrpc.client
 
@@ -23,7 +24,6 @@ logger = init_logger(__name__)
 
 class LocalBackendEndSignal:
     pass
-
 
 
 # TODO(Jiayi): need to optimize disk saving/loading
@@ -37,6 +37,7 @@ class LMCDiskBackend(LMCBackendInterface):
     """
     Cache engine for storing the KV cache of the tokens in the local disk.
     """
+
     def __init__(self, config: LMCacheEngineConfig):
         """
         Throws:
@@ -44,9 +45,10 @@ class LMCDiskBackend(LMCBackendInterface):
                 configuration
         """
         super().__init__()
-        
-        assert config.disk_url is not None, ("Need to specify local path if when "
-                                       "using LMCLocalDiskBackend")
+
+        assert config.disk_url is not None, (
+            "Need to specify local path if when "
+            "using LMCLocalDiskBackend")
         self.proxy = xmlrpc.client.ServerProxy(config.disk_url)
         Info = self.proxy.Info()
 
@@ -75,8 +77,9 @@ class LMCDiskBackend(LMCBackendInterface):
         self.evictor = DummyEvictor()
 
     def _key_transform(self, key: CacheEngineKey) -> str:
-        return LMCKeyManagerKey(key.model_name, key.world_size, key.worker_id, key.chunk_hash).to_string()
-    
+        return LMCKeyManagerKey(key.model_name, key.world_size, key.worker_id,
+                                key.chunk_hash).to_string()
+
     def contains(
         self,
         key: CacheEngineKey,
@@ -90,7 +93,7 @@ class LMCDiskBackend(LMCBackendInterface):
         Returns:
             True if the cache engine contains the key, False otherwise
         """
-        return self.proxy.contains(self._key_transform(key))=="YES"
+        return self.proxy.contains(self._key_transform(key)) == "YES"
 
     @_lmcache_nvtx_annotate
     def put_worker(self, ):
@@ -109,8 +112,9 @@ class LMCDiskBackend(LMCBackendInterface):
         kv_chunk: torch.Tensor,
     ) -> None:
         self.update_lock.acquire()
-        print(self._key_transform(key), self.evictor.get_size(kv_chunk),0)
-        path=self.proxy.put(self._key_transform(key), self.evictor.get_size(kv_chunk),0)
+        print(self._key_transform(key), self.evictor.get_size(kv_chunk), 0)
+        path = self.proxy.put(self._key_transform(key),
+                              self.evictor.get_size(kv_chunk), 0)
 
         print(path)
 
@@ -120,7 +124,7 @@ class LMCDiskBackend(LMCBackendInterface):
 
         save_file({"kv_chunk": kv_chunk}, path)
         self.update_lock.release()
-        self.proxy.put(self._key_transform(key), 0,1)
+        self.proxy.put(self._key_transform(key), 0, 1)
 
     def put(
         self,
@@ -162,13 +166,13 @@ class LMCDiskBackend(LMCBackendInterface):
             None if the key is not found
         """
         print(self._key_transform(key))
-        value=self.proxy.get(self._key_transform(key))
+        value = self.proxy.get(self._key_transform(key))
         print(value)
         # breakpoint()
         while value['status'] == 1:
             time.sleep(0.1)
-            value=self.proxy.get(self._key_transform(key))
-        
+            value = self.proxy.get(self._key_transform(key))
+
         if value['status'] == 0:
             return None
 
@@ -178,7 +182,7 @@ class LMCDiskBackend(LMCBackendInterface):
             kv_chunk = f.get_tensor("kv_chunk")
         self.update_lock.release()
         return kv_chunk
-    
+
     def batched_contains(
         self,
         key: CacheEngineKey,
@@ -192,7 +196,7 @@ class LMCDiskBackend(LMCBackendInterface):
         Returns:
             True if the cache engine contains the key, False otherwise
         """
-        return self.proxy.contains(self._key_transform(key))=="YES"
+        return self.proxy.contains(self._key_transform(key)) == "YES"
 
     def batched_get(
         self,
@@ -209,10 +213,10 @@ class LMCDiskBackend(LMCBackendInterface):
             of a big tensor and None if the key is not found
         """
         logger.info("Using default batched implementation of the get() method")
-        keys_str=[self._key_transform(key) for key in keys]
-        time0=time.time()
-        paths=self.proxy.batched_get(keys_str)
-        print("Time taken for batched_get",time.time()-time0)
+        keys_str = [self._key_transform(key) for key in keys]
+        time0 = time.time()
+        paths = self.proxy.batched_get(keys_str)
+        print("Time taken for batched_get", time.time() - time0)
         for path in paths:
             if path == "":
                 yield None
@@ -230,4 +234,3 @@ class LMCDiskBackend(LMCBackendInterface):
 
     def __del__(self):
         self.close()
-

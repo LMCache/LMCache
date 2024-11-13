@@ -4,7 +4,7 @@ from typing import Iterable, Optional, Tuple
 import torch
 
 from lmcache.logging import init_logger
-from lmcache.utils import CacheEngineKey,LMCKeyManagerKey,LMCKeyManagerValue,CacheBackendInfo
+from lmcache.utils import CacheEngineKey, LMCKeyManagerKey, LMCKeyManagerValue, CacheBackendInfo
 
 logger = init_logger(__name__)
 
@@ -137,12 +137,11 @@ class LMCKeyManagerInterface(metaclass=abc.ABCMeta):
     """
         Query if a key is in the cache or not
     """
+
     @abc.abstractmethod
-    def Info(
-        self,
-    ) -> CacheBackendInfo:
+    def Info(self, ) -> CacheBackendInfo:
         raise NotImplementedError
-    
+
     @abc.abstractmethod
     def contains(
         self,
@@ -167,13 +166,9 @@ class LMCKeyManagerInterface(metaclass=abc.ABCMeta):
         :return: the path/url of KV cache chunk
         """
         raise NotImplementedError
-    
+
     @abc.abstractmethod
-    def put(
-        self,
-        key: LMCKeyManagerKey,
-        status: bool
-    ) -> None:
+    def put(self, key: LMCKeyManagerKey, status: bool) -> None:
         """
         Retrieve the path/url of KV cache chunk by the given key
 
@@ -186,14 +181,11 @@ class LMCKeyManagerInterface(metaclass=abc.ABCMeta):
         """
         raise NotImplementedError
 
-    def batched_put(
-        self,
-        keys: Iterable[LMCKeyManagerKey],
-        status:bool
-    ) -> None:
+    def batched_put(self, keys: Iterable[LMCKeyManagerKey],
+                    status: bool) -> None:
         logger.info("Using default batched implementation of the put() method")
         for key in keys:
-            self.put(key,status=status)
+            self.put(key, status=status)
 
     def batched_get(
         self,

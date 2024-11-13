@@ -38,7 +38,7 @@ class LRUEvictor(BaseEvictor):
     # FIXME(Jiayi): comment out return type to bypass type checks
     # Need to align CacheEngineKey & str
     def update_on_put(self, cache_dict: OrderedDict, kv_obj: Union[
-        torch.Tensor,LMCKeyManagerValue,
+        torch.Tensor, LMCKeyManagerValue,
         bytes]):  #-> Tuple[List[Union[CacheEngineKey, str]], PutStatus]:
         """
         Evict cache when a new cache comes and the storage is full

@@ -60,8 +60,8 @@ class LMCacheEngineConfig:
         blend_recompute_ratio: float = 0.15,
         blend_min_tokens: int = 256,
     ) -> "LMCacheEngineConfig":
-        return LMCacheEngineConfig(chunk_size, local_device, disk_url,remote_url,
-                                   remote_serde, pipelined_backend,
+        return LMCacheEngineConfig(chunk_size, local_device, disk_url,
+                                   remote_url, remote_serde, pipelined_backend,
                                    save_decode_cache, enable_blending,
                                    blend_recompute_ratio, blend_min_tokens)
 
@@ -90,7 +90,7 @@ class LMCacheEngineConfig:
             case path if re.match(r"disk_url:(.*)/",
                                   path):  # local disk directory
                 local_device = "disk"
-                disk_url=path[9:]
+                disk_url = path[9:]
                 remote_url = None
             case url if re.match(r"(.*)://(.*):(\d+)", url):
                 local_device = None
@@ -118,7 +118,7 @@ class LMCacheEngineConfig:
 
         chunk_size = config.get("chunk_size", 256)
         local_device = config.get("local_device", None)
-        disk_url=config.get("disk_url", None)
+        disk_url = config.get("disk_url", None)
         remote_url = config.get("remote_url", None)
         remote_serde = config.get("remote_serde", "torch")
         pipelined_backend = config.get("pipelined_backend", False)
