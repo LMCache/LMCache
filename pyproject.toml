@@ -48,3 +48,6 @@ follow_imports = "silent"
 files = [
     "lmcache"
 ]
+
+[tool.codespell]
+skip = ["*.txt"]
