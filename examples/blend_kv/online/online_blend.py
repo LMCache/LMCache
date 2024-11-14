@@ -3,14 +3,12 @@ import threading
 import time
 from io import StringIO
 
+from lmcache_vllm.blend_adapter import combine_input_prompt_chunks
 from openai import OpenAI
 
-import time
-
-import lmcache_vllm
-from lmcache_vllm.blend_adapter import combine_input_prompt_chunks
 
 class KVPreCompute:
+
     def __init__(self, openai_api_key, openai_api_base):
         self.client = OpenAI(
             # defaults to os.environ.get("OPENAI_API_KEY")
@@ -18,6 +16,7 @@ class KVPreCompute:
             base_url=openai_api_base,
         )
         self.model = self.client.models.list().data[0].id
+
     def precompute_kv(self, text_chunk):
         completion = self.client.completions.create(
             prompt=text_chunk,
@@ -25,7 +24,6 @@ class KVPreCompute:
             max_tokens=1,
         )
         return completion.choices[0].text
-    
 
 
 class Printer:
@@ -70,8 +68,7 @@ class ChatSession:
         self.model = models.data[0].id
         self.messages = [
             {
-                "role":
-                "user",
+                "role": "user",
                 "content": context_text
             },
             {
@@ -116,6 +113,7 @@ class ChatSession:
         print("\033[33mTTFT:", end - start, "\033[0m")
         print("Total time:", time.perf_counter() - start)
 
+
 if __name__ == "__main__":
     if len(sys.argv) != 2:
         print(f"Usage: {sys.argv[0]} <port>", file=sys.stderr)
@@ -136,13 +134,14 @@ if __name__ == "__main__":
         chunks.append(context)
 
     kv_precompute = KVPreCompute(openai_api_key, openai_api_base)
-    print(
-        "-------------- Pre-computing KV cache for the chunks -------------------")
+    print("-------------- Pre-computing KV cache "
+          "for the chunks -------------------")
     for chunk in chunks:
         kv_precompute.precompute_kv(chunk)
 
     sys_prompt = "Here's a document from the user: "
-    context_text = combine_input_prompt_chunks([sys_prompt, chunks[0], chunks[1]])
+    context_text = combine_input_prompt_chunks(
+        [sys_prompt, chunks[0], chunks[1]])
 
     chat_session = ChatSession(openai_api_key, openai_api_base, context_text)
 

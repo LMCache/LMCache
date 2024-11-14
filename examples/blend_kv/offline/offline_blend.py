@@ -5,7 +5,6 @@ from lmcache_vllm.blend_adapter import combine_input_prompt_chunks
 from lmcache_vllm.vllm import LLM, SamplingParams
 
 
-
 def precompute_kv(text_chunk, llm):
     sampling_params_prefix = SamplingParams(temperature=0.0,
                                             top_p=0.95,
@@ -26,12 +25,12 @@ if __name__ == "__main__":
     question = "What can ffmpeg be used for?"
 
     llm = LLM(model="mistralai/Mistral-7B-Instruct-v0.2",
-            gpu_memory_utilization=0.8,
-            tensor_parallel_size=1)
+              gpu_memory_utilization=0.8,
+              tensor_parallel_size=1)
 
     # It is common to precompute docs && system prompt.
-    print(
-        "-------------- Pre-computing KV cache for the chunks and system prompt -------------------")
+    print("-------------- Pre-computing KV cache"
+          " for the chunks and system prompt -------------------")
     for chunk in chunks:
         precompute_kv(chunk, llm)
 
