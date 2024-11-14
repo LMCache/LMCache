@@ -1,0 +1,30 @@
+# KV blending offline example
+This is a minimal offline example demonstrating the KV blending functionality of LMCache.
+
+The KV blending functionality is enabled by setting `enable_blending: True` in the configuration yaml.
+
+In `offline_blend.py`, the following code will first calculate the KV cache of text chunks.
+```python
+for chunk in chunks:
+    precompute_kv(chunk, llm)
+```
+
+Then, the text chunks are concatenated together, prepended with a system prompt, and appended with a user's quest.
+```python
+user_prompt= [sys_prompt, chunks[0], chunks[1], question]
+user_prompt = combine_input_prompt_chunks(user_prompt)
+```
+
+Finally, the prompt will be sent to the serving engine and the KV blending module will blend the KV for the text chunks.
+
+
+## How to run
+Run with  
+```
+LMCACHE_CONFIG_FILE=../example_blending.yaml python3 offline_blend.py
+```
+Note, if running with tensor parallel size > 1, run with  
+```
+LMCACHE_CONFIG_FILE=../example_blending.yaml VLLM_WORKER_MULTIPROC_METHOD=spawn python3 offline_blend.py
+```
+(Add VLLM_WORKER_MULTIPROC_METHOD=spawn and change tensor_parallel_size in the script).  
