@@ -92,7 +92,7 @@ def check_kv_cache_device(kvs, device):
 @pytest.mark.parametrize("dst_device", ["cuda:0"])
 @pytest.mark.parametrize(
     "backend",
-    ["cuda", "cpu", "file://local_disk/", "disk_url:http://localhost:4321"])
+    ["cuda", "cpu", "file://local_disk/", "disk_url:http://localhost:4322"])
 def test_retrieve_device(backend, src_device, dst_device, autorelease):
 
     fmt = "vllm"
@@ -133,7 +133,7 @@ def test_retrieve_device(backend, src_device, dst_device, autorelease):
         "cuda",
         "cpu",
         "file://local_disk/",
-        "disk_url:http://localhost:4321",
+        "disk_url:http://localhost:4322",
         "redis://localhost:6379",
         "lm://localhost:65000",
     ],
@@ -230,7 +230,7 @@ def test_retrieve_single_tensor(fmt, backend, autorelease):
         "cuda",
         "cpu",
         "file://local_disk/",
-        "disk_url:http://localhost:4321",
+        "disk_url:http://localhost:4322",
         "redis://localhost:6379",
         "lm://localhost:65000",
     ],

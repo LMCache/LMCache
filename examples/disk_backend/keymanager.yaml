@@ -1,4 +1,4 @@
-disk_url: "http://localhost:4321"
+disk_url: "http://localhost:4322"
 disk_path: "/dataheart/qinyuyang2003/local_disk/"
 fmt: 'vllm'
 dtype: "bfloat16"
