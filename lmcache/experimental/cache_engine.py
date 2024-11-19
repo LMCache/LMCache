@@ -1,5 +1,3 @@
-
-
 """
 High-level design
 
