@@ -161,7 +161,7 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
             if block.size >= aligned_size:
                 break
         else:
-            logger.warning(f"Failed to allocate memory for "
+            logger.warning("Failed to allocate memory for "
                             "tensor({shape}, {dtype}) because "
                             "no memory is available")
             return None
