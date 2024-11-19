@@ -18,6 +18,7 @@ setup(
         "safetensors",
         "transformers",
         "torchac_cuda >= 0.2.5",
+        "sortedcontainers",
     ],
     classifiers=[
         # Trove classifiers
