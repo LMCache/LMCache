@@ -1,11 +1,11 @@
 """
 High-level design
 
-MemoryObj: 
+MemoryObj:  -- Done
     raw_array
     metadata
 
-PinBuffer:
+PinBuffer: -- Done
     - Allocate(shape) -> MemoryOb 
     - Free(MemoryObj)
 
@@ -16,7 +16,7 @@ GPUConnector:
     - to_host(dst_MemoryObj, **kwargs) 
 
 TokenDB:
-    - match(tokens, mask) -> List[CacheEngineKey], matched_len
+    - process_tokens(tokens, mask) -> List[CacheEngineKey]
     - insert(tokens, mask) -> List[CacheEngineKey]
 
 LMCacheEngine:

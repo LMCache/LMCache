@@ -1,10 +1,10 @@
-import torch
 import pytest
+import torch
 
-from lmcache.experimental.memory_management import (TensorMemoryAllocator,
+from lmcache.experimental.memory_management import (GPUMemoryAllocator,
                                                     HostMemoryAllocator,
                                                     PinMemoryAllocator,
-                                                    GPUMemoryAllocator)
+                                                    TensorMemoryAllocator)
 
 
 def check_allocator(allocator, max_size):
