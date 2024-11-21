@@ -378,7 +378,7 @@ class LMCLocalDiskBackend(LMCBackendInterface):
 
         self.update_lock.acquire()
 
-        # Skip store if task is already being exceuted
+        # Skip store if task is already being executed
         # TODO(Jiayi): what if already stored, should we
         # overwrite or skip?
         if key in self.future_pool:
