@@ -509,7 +509,8 @@ class LMCLocalDiskBackend(LMCBackendInterface):
 
             # NOTE(Jiayi): the following code is blocking
             # if future.exception():
-            #   raise Exception(f"Task raised an exception: {future.exception()}")
+            #   raise Exception(f"Task raised an exception: \
+            #   {future.exception()}")
             if not future.done():
                 self.update_lock.release()
                 return None
