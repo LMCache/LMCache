@@ -201,9 +201,6 @@ def test_mixed_retrieve(fmt, chunk_size, backend, autorelease):
     kv_shape = (32, 2, chunk_size, 8, 128)
     connector = create_gpu_connector(1024, 32)
 
-    if backend.startswith("lm"):
-        backend = lmserver_process.server_url
-
     tokens = generate_tokens(num_tokens, device)
     kv_cache = generate_kv_cache(num_tokens, fmt, device)
     new_tokens = generate_tokens(new_num_tokens, device)
