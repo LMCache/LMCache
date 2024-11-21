@@ -1,5 +1,6 @@
 import abc
 from dataclasses import dataclass
+from enum import Enum
 from typing import Optional, Tuple, Union
 
 import sortedcontainers
@@ -8,6 +9,23 @@ import torch
 from lmcache.logging import init_logger
 
 logger = init_logger(__name__)
+
+
+class MemoryFormat(Enum):
+    UNDEFINED = 0
+    """[2, num_layers, num_tokens, hidden_dim]
+    """
+    KV_BLOB = 1
+    """Compressed binary array format
+    """
+    BINARY = 2
+
+    def token_dim(self) -> int:
+        if self == MemoryFormat.KV_BLOB:
+            return 2
+        elif self == MemoryFormat.BINARY:
+            return 0
+        return 0
 
 
 @dataclass
@@ -23,10 +41,20 @@ class FreeBlock:
 
 @dataclass
 class MemoryObjMetadata:
-    shape: torch.Size  # The 'logical' shape of the tensor
-    dtype: torch.dtype  # The 'logical' dtype of the tensor
-    address: int  # The 'physical address' of the tensor
-    phy_size: int  # The 'physical size' in bytes of the allocated memory
+    # The 'logical' shape of the tensor
+    shape: torch.Size
+
+    # The 'logical' dtype of the tensor
+    dtype: torch.dtype
+
+    # The 'physical address' of the tensor
+    address: int
+
+    # The 'physical size' in bytes of the allocated memory
+    phy_size: int
+
+    # The 'logical' format of the tensor
+    fmt: MemoryFormat = MemoryFormat.UNDEFINED
 
 
 class MemoryObj:
@@ -45,6 +73,7 @@ class MemoryObj:
     def is_valid(self):
         return self.valid
 
+    @property
     def tensor(self) -> Optional[torch.Tensor]:
         if not self.valid:
             logger.warn("Trying to access an invalidated MemoryObj")
@@ -57,7 +86,7 @@ class MemoryObj:
 class MemoryAllocatorInterface(metaclass=abc.ABCMeta):
 
     @abc.abstractmethod
-    def allocate(self, shape: torch.Size,
+    def allocate(self, shape: Union[torch.Size, Tuple[int, ...]],
                  dtype: torch.dtype) -> Optional[MemoryObj]:
         """
         Allocates the memory to hold a tensor of the given shape.
@@ -135,7 +164,10 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         elif merge_succ:
             # NOTE: logically, this won't change the order of the succ_block,
             #       so we don't need to do a "remove" and "reinsert" here
+            self.explicit_list.remove(succ_block)
             succ_block.start -= curr_block.size  # type: ignore
+            succ_block.size += curr_block.size  # type: ignore
+            self.explicit_list.add(succ_block)
 
         return merge_prev or merge_succ
 
@@ -227,7 +259,7 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         return clear
 
 
-class HostMemoryAllocator:
+class HostMemoryAllocator(MemoryAllocatorInterface):
     """Allocates memory in the pre-allocated Host memory.
     """
 
@@ -249,7 +281,7 @@ class HostMemoryAllocator:
         return self.allocator.memcheck()
 
 
-class PinMemoryAllocator:
+class PinMemoryAllocator(MemoryAllocatorInterface):
     """Allocates memory in the pre-allocated pinned memory.
     """
 
@@ -271,7 +303,7 @@ class PinMemoryAllocator:
         return self.allocator.memcheck()
 
 
-class GPUMemoryAllocator:
+class GPUMemoryAllocator(MemoryAllocatorInterface):
     """Allocates memory in the pre-allocated Host memory.
     """
 

@@ -1,26 +1,29 @@
 import abc
 import hashlib
-import torch
-from typing import Iterable, Tuple, Optional
+from typing import Iterable, Optional, Tuple
 
-from lmcache.utils import CacheEngineKey
+import torch
+
 from lmcache.config import LMCacheEngineConfig, LMCacheEngineMetadata
+from lmcache.utils import CacheEngineKey
+
 
 class TokenDatabase(metaclass=abc.ABCMeta):
     """TokenDatabase is used to convert input tokens into list of
     cache engine keys. There are multiple ways to implement this:
 
-    - ChunkedTokenDatabase: It processes tokens into chunks and covert
+    - ChunkedTokenDatabase: It processes tokens into chunks and convert 
     each chunk into a cache engine key using prefix hash.
 
     - RadixTokenDatabase: more advanced implementation using radix tree.
     """
+
     @abc.abstractmethod
     def process_tokens(
-            self,
-            tokens: torch.Tensor,
-            mask: Optional[torch.Tensor] = None,
-        ) -> Iterable[Tuple[int, int, CacheEngineKey]]:
+        self,
+        tokens: torch.Tensor,
+        mask: Optional[torch.Tensor] = None,
+    ) -> Iterable[Tuple[int, int, CacheEngineKey]]:
         """Process the tokens and return the corresponding cache engine keys.
 
         :param torch.Tensor tokens: The tokens to process, in 1-D CPU tensor.
@@ -38,20 +41,18 @@ class TokenDatabase(metaclass=abc.ABCMeta):
 
         raise NotImplementedError
 
+
 class ChunkedTokenDatabase(TokenDatabase):
-    def __init__(self, 
-                 config: LMCacheEngineConfig,
+
+    def __init__(self, config: LMCacheEngineConfig,
                  metadata: LMCacheEngineMetadata):
         self.chunk_size = config.chunk_size
         self.metadata = metadata
 
     def _make_key_by_hash(self, chunk_hash: str):
-        return CacheEngineKey(
-                self.metadata.fmt,
-                self.metadata.model_name,
-                self.metadata.world_size,
-                self.metadata.worker_id,
-                chunk_hash)
+        return CacheEngineKey(self.metadata.fmt, self.metadata.model_name,
+                              self.metadata.world_size,
+                              self.metadata.worker_id, chunk_hash)
 
     def _get_init_hash(self) -> str:
         return ""
@@ -92,10 +93,10 @@ class ChunkedTokenDatabase(TokenDatabase):
             yield prefix_hash
 
     def process_tokens(
-            self,
-            tokens: torch.Tensor,
-            mask: Optional[torch.Tensor] = None,
-        ) -> Iterable[Tuple[int, int, CacheEngineKey]]:
+        self,
+        tokens: torch.Tensor,
+        mask: Optional[torch.Tensor] = None,
+    ) -> Iterable[Tuple[int, int, CacheEngineKey]]:
         """Process the tokens and return the corresponding cache engine keys.
 
         :param torch.Tensor tokens: The tokens to process, in 1-D CPU tensor.
@@ -122,7 +123,7 @@ class ChunkedTokenDatabase(TokenDatabase):
             raise ValueError("The number of Falses in the mask is not a "
                              "multiple of the chunk size.")
         total_len = len(tokens)
-        
+
         token_chunks = self._chunk_tokens(tokens)
         prefix_hashes = self._prefix_hash(token_chunks)
 
