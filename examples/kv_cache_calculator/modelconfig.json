@@ -28,5 +28,11 @@
     "num_attention_heads": 32,
     "num_hidden_layers": 32,
     "num_key_value_heads": 32
+  },
+  "Sao10K/L3-8B-Lunaris-v1": {
+    "hidden_size": 4096,
+    "num_attention_heads": 32,
+    "num_hidden_layers": 32,
+    "num_key_value_heads": 8
   }
 }
