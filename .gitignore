@@ -89,3 +89,6 @@ perf-test.py
 /docs/build/
 /docs/build.sh
 /docs/output/
+
+# others
+local_test/
