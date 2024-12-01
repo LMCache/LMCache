@@ -296,7 +296,7 @@ class LMCLocalDiskBackend(LMCBackendInterface):
         self.put_thread.start()
 
         self.future_pool: Dict[CacheEngineKey, Tuple[Future, KVObj]] = {}
-
+        self.stop_event = threading.Event()
         self.sweeper_thread = threading.Thread(target=self.buffer_sweeper,
                                                args=())
         self.sweeper_thread.start()
@@ -373,7 +373,7 @@ class LMCLocalDiskBackend(LMCBackendInterface):
         """
         Sweep the future pool to free up memory.
         """
-        while True:
+        while not self.stop_event:
             logger.debug("Sweeping memory buffer")
             self.update_lock.acquire()
             for key in list(self.future_pool.keys()):
@@ -559,6 +559,7 @@ class LMCLocalDiskBackend(LMCBackendInterface):
             self.put_thread.join()
 
         if self.sweeper_thread is not None and self.sweeper_thread.is_alive():
+            self.stop_event.set()
             self.sweeper_thread.join()
 
         self.proc_pool_executor.shutdown()
