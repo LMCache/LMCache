@@ -443,9 +443,8 @@ class LMCLocalDiskBackend(LMCBackendInterface):
                                            self.evictor.get_size(kv_obj.data))
         # NOTE(Jiayi): the following `free` will result in data corruption
         # The serialized object (`kv_obj.data` in `submit`) may reference
-        # the external memory, and if the tensor is deleted, the underlying
-        # data buffer might be invalidated or freed. This results in
-        # incomplete or corrupted data in the worker process.
+        # the external memory (cpu tensor might be shared in multiprocessing),
+        # and if the tensor is deleted, it might be invalidated.
         # self.cpu_mbufferpool.free(kv_obj)
         self.update_lock.release()
 
