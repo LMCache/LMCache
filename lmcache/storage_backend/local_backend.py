@@ -250,6 +250,15 @@ class LMCLocalBackend(LMCBackendInterface):
 # TODO(Jiayi): need to support prefetch for disk
 
 
+@_lmcache_nvtx_annotate
+@torch.inference_mode()
+def save_disk(
+    path: str,
+    kv_chunk: torch.Tensor,
+):
+    save_file({"kv_chunk": kv_chunk.contiguous()}, path)
+
+
 class LMCLocalDiskBackend(LMCBackendInterface):
     """
     Cache engine for storing the KV cache of the tokens in the local disk.
@@ -278,11 +287,8 @@ class LMCLocalDiskBackend(LMCBackendInterface):
         if not os.path.exists(self.path):
             os.makedirs(self.path)
 
-        # TODO(Jiayi): the following async put code is repeated in all backends
-        # Please consider use a parent class that can be inherited by all
-        # (local) backends
-        # This should be also be helpful for more flexible hierarchical backends
-        # For async put
+        self.update_lock = threading.Lock()
+
         self.put_queue: queue.Queue[
             Union[Tuple[CacheEngineKey, torch.Tensor],
                   LocalBackendEndSignal]] = queue.Queue()
@@ -298,7 +304,7 @@ class LMCLocalDiskBackend(LMCBackendInterface):
         # TODO(Jiayi): share the buffer if both cpu and disk backend are enabled
         self.cpu_mbufferpool = LocalCPUBufferPool(metadata)
 
-        self.future_pool: Dict[CacheEngineKey, Future] = {}
+        self.future_pool: Dict[CacheEngineKey, Tuple[Future, KVObj]] = {}
 
         self.proc_pool_executor = ProcessPoolExecutor(max_workers=4)
 
@@ -362,15 +368,6 @@ class LMCLocalDiskBackend(LMCBackendInterface):
 
     @_lmcache_nvtx_annotate
     @torch.inference_mode()
-    def save_disk(
-        self,
-        path: str,
-        kv_chunk: torch.Tensor,
-    ):
-        save_file({"kv_chunk": kv_chunk.contiguous()}, path)
-
-    @_lmcache_nvtx_annotate
-    @torch.inference_mode()
     def put_nonblocking(
         self,
         key: CacheEngineKey,
@@ -380,6 +377,13 @@ class LMCLocalDiskBackend(LMCBackendInterface):
         logger.debug(f"Saving cache to {path}")
 
         self.update_lock.acquire()
+
+        # Skip store if task is already being executed
+        # TODO(Jiayi): what if already stored, should we
+        # overwrite or skip?
+        if key in self.future_pool:
+            self.update_lock.release()
+            return
 
         # Obtain keys to evict
         evict_keys, put_status = self.evictor.update_on_put(
@@ -413,14 +417,12 @@ class LMCLocalDiskBackend(LMCBackendInterface):
             kv_chunk.record_stream(put_stream)
         put_stream.synchronize()
 
-        future = self.proc_pool_executor.submit(self.save_disk, path,
-                                                kv_obj.data)
+        future = self.proc_pool_executor.submit(save_disk, path, kv_obj.data)
 
         self.update_lock.acquire()
-        self.future_pool[key] = future
+        self.future_pool[key] = (future, kv_obj)
         self.dict[key] = DiskCacheMetadata(path,
                                            self.evictor.get_size(kv_obj.data))
-        self.cpu_mbufferpool.free(kv_obj)
         self.update_lock.release()
 
     @_lmcache_nvtx_annotate
@@ -502,9 +504,17 @@ class LMCLocalDiskBackend(LMCBackendInterface):
             return None
 
         if key in self.future_pool:
-            future = self.future_pool[key]
+            future = self.future_pool[key][0]
+            kv_obj = self.future_pool[key][1]
+
+            # NOTE(Jiayi): the following code is blocking
+            # if future.exception():
+            #   raise Exception(f"Task raised an exception: \
+            #   {future.exception()}")
             if not future.done():
+                self.update_lock.release()
                 return None
+            self.cpu_mbufferpool.free(kv_obj)
             del self.future_pool[key]
 
         path = self.dict[key].path

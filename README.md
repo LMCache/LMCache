@@ -14,8 +14,6 @@ Try LMCache with pre-built vllm docker images [here](https://github.com/LMCache/
 # 🚀 Performance snapshot
 ![image](https://github.com/user-attachments/assets/7db9510f-0104-4fb3-9976-8ad5d7fafe26)
 
-
-
 # 💻 Quickstart
 
 LMCache provides the integration to the latest vLLM (0.6.2). To install LMCache, use the following command:
@@ -64,6 +62,10 @@ We also provide multiple docker-based demos at [🔗LMCache-demos repo](https://
 - Share KV caches across multiple serving engines [(🔗link)](https://github.com/LMCache/demo/tree/master/demo2-multi-node-sharing)
 - Loading non-prefix KV caches for RAG [(🔗link)](https://github.com/LMCache/demo/tree/master/demo3-KV-blending)
 
+# Interested in Connecting?
+Fill out the interest form and our team will reach out to you!
+https://forms.gle/mQfQDUXbKfp2St1z7
+
 # 🛣️ Incoming Milestones
 
 - [x] First release of LMCache 
@@ -71,11 +73,34 @@ We also provide multiple docker-based demos at [🔗LMCache-demos repo](https://
 - [ ] Stable support for non-prefix KV caches
 - [ ] User and developer documentation
 
-# 📖 Blogs and papers
-LMCache is built on two key techniques:
-1. [**CacheGen [SIGCOMM'24]**](https://arxiv.org/abs/2310.07240): A KV-cache compression system that encodes KV caches into compact bitstreams.
-2. [**CacheBlend [EuroSys'25]**](https://arxiv.org/abs/2405.16444): A KV-cache blending system that dynamically composes new KV caches from smaller ones.
+# 📖 Blogs and documentations
 
-Please read our [blog posts](https://lmcache.github.io) for more details.
+Our [blog posts](https://lmcache.github.io) and [documentations](https://docs.lmcache.ai/) are available online
 
+## Citation
+If you use LMCache for your research, please cite our papers:
+
+```
+@inproceedings{liu2024cachegen,
+  title={Cachegen: Kv cache compression and streaming for fast large language model serving},
+  author={Liu, Yuhan and Li, Hanchen and Cheng, Yihua and Ray, Siddhant and Huang, Yuyang and Zhang, Qizheng and Du, Kuntai and Yao, Jiayi and Lu, Shan and Ananthanarayanan, Ganesh and others},
+  booktitle={Proceedings of the ACM SIGCOMM 2024 Conference},
+  pages={38--56},
+  year={2024}
+}
+
+@article{cheng2024large,
+  title={Do Large Language Models Need a Content Delivery Network?},
+  author={Cheng, Yihua and Du, Kuntai and Yao, Jiayi and Jiang, Junchen},
+  journal={arXiv preprint arXiv:2409.13761},
+  year={2024}
+}
+
+@article{yao2024cacheblend,
+  title={CacheBlend: Fast Large Language Model Serving with Cached Knowledge Fusion},
+  author={Yao, Jiayi and Li, Hanchen and Liu, Yuhan and Ray, Siddhant and Cheng, Yihua and Zhang, Qizheng and Du, Kuntai and Lu, Shan and Jiang, Junchen},
+  journal={arXiv preprint arXiv:2405.16444},
+  year={2024}
+}
+```
 
