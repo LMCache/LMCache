@@ -294,7 +294,10 @@ class LMCLocalDiskBackend(LMCBackendInterface):
                   LocalBackendEndSignal]] = queue.Queue()
         self.put_thread = threading.Thread(target=self.put_worker, args=())
         self.put_thread.start()
-        self.update_lock = threading.Lock()
+
+        self.sweeper_thread = threading.Thread(target=self.buffer_sweeper,
+                                               args=())
+        self.sweeper_thread.start()
 
         # TODO(Jiayi): The storage size and caching policy for both
         # evictor and mpool need to be configured dynamically
@@ -366,6 +369,21 @@ class LMCLocalDiskBackend(LMCBackendInterface):
             key, value = item
             self.put_nonblocking(key, value)
 
+    def buffer_sweeper(self, ):
+        while True:
+            self.update_lock.acquire()
+            for key, value in self.future_pool.items():
+                future = value[0]
+                kv_obj = value[1]
+                if not future.done():
+                    continue
+                self.cpu_mbufferpool.free(kv_obj)
+                del self.future_pool[key]
+            self.update_lock.acquire()
+
+            # sweep the memory every 30s
+            time.sleep(30)
+
     @_lmcache_nvtx_annotate
     @torch.inference_mode()
     def put_nonblocking(
@@ -423,6 +441,12 @@ class LMCLocalDiskBackend(LMCBackendInterface):
         self.future_pool[key] = (future, kv_obj)
         self.dict[key] = DiskCacheMetadata(path,
                                            self.evictor.get_size(kv_obj.data))
+        # NOTE(Jiayi): the following `free` will result in data corruption
+        # The serialized object (`kv_obj.data` in `submit`) may reference
+        # the external memory, and if the tensor is deleted, the underlying
+        # data buffer might be invalidated or freed. This results in
+        # incomplete or corrupted data in the worker process.
+        # self.cpu_mbufferpool.free(kv_obj)
         self.update_lock.release()
 
     @_lmcache_nvtx_annotate
@@ -530,8 +554,12 @@ class LMCLocalDiskBackend(LMCBackendInterface):
         if self.put_thread is not None and self.put_thread.is_alive():
             self.put_queue.put(LocalBackendEndSignal())
             self.put_thread.join()
-            logger.info("Closed the put worker in local disk backend")
+
+        if self.sweeper_thread is not None and self.sweeper_thread.is_alive():
+            self.sweeper_thread.join()
+
         self.proc_pool_executor.shutdown()
+        logger.info("Closed the workers in local disk backend")
 
     def __del__(self):
         self.close()
