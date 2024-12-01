@@ -295,6 +295,8 @@ class LMCLocalDiskBackend(LMCBackendInterface):
         self.put_thread = threading.Thread(target=self.put_worker, args=())
         self.put_thread.start()
 
+        self.future_pool: Dict[CacheEngineKey, Tuple[Future, KVObj]] = {}
+
         self.sweeper_thread = threading.Thread(target=self.buffer_sweeper,
                                                args=())
         self.sweeper_thread.start()
@@ -306,8 +308,6 @@ class LMCLocalDiskBackend(LMCBackendInterface):
         # cpu backend but big enough to avoid stalls in save
         # TODO(Jiayi): share the buffer if both cpu and disk backend are enabled
         self.cpu_mbufferpool = LocalCPUBufferPool(metadata)
-
-        self.future_pool: Dict[CacheEngineKey, Tuple[Future, KVObj]] = {}
 
         self.proc_pool_executor = ProcessPoolExecutor(max_workers=4)
 
@@ -370,16 +370,20 @@ class LMCLocalDiskBackend(LMCBackendInterface):
             self.put_nonblocking(key, value)
 
     def buffer_sweeper(self, ):
+        """
+        Sweep the future pool to free up memory.
+        """
         while True:
+            logger.debug("Sweeping memory buffer")
             self.update_lock.acquire()
-            for key, value in self.future_pool.items():
-                future = value[0]
-                kv_obj = value[1]
+            for key in list(self.future_pool.keys()):
+                future = self.future_pool[key][0]
+                kv_obj = self.future_pool[key][1]
                 if not future.done():
                     continue
                 self.cpu_mbufferpool.free(kv_obj)
                 del self.future_pool[key]
-            self.update_lock.acquire()
+            self.update_lock.release()
 
             # sweep the memory every 30s
             time.sleep(30)
