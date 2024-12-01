@@ -42,7 +42,7 @@ def CreateStorageBackend(config: LMCacheEngineConfig,
                 case "disk":
                     logger.info(f"Initializing Disk backend at"
                                 f" {config.disk_url}")
-                    return LMCDiskBackend(config)
+                    return LMCDiskBackend(config, mpool_metadata, dst_device)
                 case _:
                     logger.info(f"Initializing local-only (disk) backend at"
                                 f" {config.local_device}")

@@ -3,7 +3,7 @@ import re
 import threading
 from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Iterable, Optional
+from typing import Iterable, Optional,List,Union
 from xmlrpc.server import SimpleXMLRPCRequestHandler, SimpleXMLRPCServer
 
 import yaml
@@ -92,7 +92,7 @@ class LMCDiskKeyManager(LMCKeyManagerInterface):
         """
         key = LMCKeyManagerKey.from_string(key_str)
         # return "Yes" if key in self.dict else "No"
-        print("YES" if key in self.dict else "NO")
+        # print("YES" if key in self.dict else "NO")
         # return key in self.dict
         return "YES" if key in self.dict else "NO"
 
@@ -160,6 +160,47 @@ class LMCDiskKeyManager(LMCKeyManagerInterface):
 
         return path
 
+    def batched_put(self, key_strs: List[str], kv_sizes: Union[List[float],int], status: bool) -> List[str]:
+        if status == 1:
+            for key in key_strs:
+                key = LMCKeyManagerKey.from_string(key)
+                self.dict[key].status = 2
+            return [""]
+        Paths=[]
+        for key_str, kv_size in zip(key_strs, kv_sizes):
+            key = LMCKeyManagerKey.from_string(key_str)
+            if self.contains(key_str) == "YES" and status == 0:
+                Paths.append("")
+                continue
+
+            path = self._key_to_path(key)
+
+            # Obtain keys to evict
+            evict_keys, put_status = self.evictor.update_on_put(
+                self.dict, LMCKeyManagerValue(2, path, kv_size))
+
+            # Abort put if cache too big
+            if put_status == PutStatus.ILLEGAL:
+                Paths.append("")
+                continue
+
+            # evict caches
+            for evict_key in evict_keys:
+                self.remove(evict_key)
+
+            self.update_lock.acquire()
+            self.dict[key] = LMCKeyManagerValue(1, path, kv_size)
+            self.update_lock.release()
+
+            Paths.append(path)
+        return Paths
+    
+    def clear(self):
+        self.update_lock.acquire()
+        # for key in self.dict:
+        #     os.remove(self.dict[key].path)
+        self.dict.clear()
+        self.update_lock.release()
     def get(
         self,
         key_str: str,
