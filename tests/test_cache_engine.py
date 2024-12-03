@@ -1,6 +1,7 @@
 import shlex
 import subprocess
 import time
+from pathlib import Path
 
 import pytest
 import torch
@@ -8,7 +9,6 @@ import torch
 from lmcache.cache_engine import LMCacheEngine, LMCacheEngineBuilder
 from lmcache.config import LMCacheEngineConfig, LMCacheEngineMetadata
 
-from pathlib import Path
 BASE_DIR = Path(__file__).parent
 key_manager_path = BASE_DIR / "../lmcache/storage_backend/disk_keymanager.py"
 # print(key_manager_path)
@@ -109,8 +109,7 @@ def test_retrieve_device(backend, src_device, dst_device, autorelease):
     if backend.startswith("disk_url:"):
         print("Starting disk_keymanager")
         disk_process = subprocess.Popen(
-            shlex.split(
-                f"python {key_manager_path}"))
+            shlex.split(f"python {key_manager_path}"))
         time.sleep(5)
 
         # Optional: Get process ID and output details
@@ -160,8 +159,7 @@ def test_same_retrieve_store(fmt, backend, remote_serde, autorelease,
     if backend.startswith("disk_url:"):
         print("Starting disk_keymanager")
         disk_process = subprocess.Popen(
-            shlex.split(
-                f"python {key_manager_path}"))
+            shlex.split(f"python {key_manager_path}"))
         time.sleep(5)
 
         # Optional: Get process ID and output details
@@ -254,8 +252,7 @@ def test_retrieve_prefix(fmt, chunk_size, backend, autorelease,
     if backend.startswith("disk_url:"):
         print("Starting disk_keymanager")
         disk_process = subprocess.Popen(
-            shlex.split(
-                f"python {key_manager_path}"))
+            shlex.split(f"python {key_manager_path}"))
         time.sleep(5)
         # Optional: Get process ID and output details
         print(f"Started background process with PID: {disk_process.pid}")

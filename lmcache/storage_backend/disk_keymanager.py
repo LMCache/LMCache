@@ -331,8 +331,7 @@ def function_start(disk_url, disk_path):
 
 if __name__ == '__main__':
     # From function arguments
-    function_start("http://localhost:4322",
-                   "/local/local_disk/")
+    function_start("http://localhost:4322", "/local/local_disk/")
 
     # From file
     # script_dir = os.path.dirname(os.path.abspath(__file__))
