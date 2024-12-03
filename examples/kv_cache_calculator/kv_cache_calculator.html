@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>KV Cache Size Calculator</title>
+    <style>
+        .container {
+            font-family: Arial, sans-serif;
+            max-width: 400px;
+            margin: 0 auto;
+            padding: 20px;
+            border: 1px solid #ccc;
+            border-radius: 8px;
+            background-color: #f9f9f9;
+        }
+
+        label, select, input, button {
+            display: block;
+            width: 100%;
+            margin-bottom: 15px;
+        }
+
+        label {
+            font-weight: bold;
+            margin-bottom: 5px;
+        }
+
+        select, input, button {
+            padding: 10px;
+            font-size: 16px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            box-sizing: border-box;
+        }
+
+        button {
+            background-color: #3898ec;
+            color: white;
+            cursor: pointer;
+        }
+
+        button:hover {
+            background-color: #0056b3;
+        }
+
+        #result {
+            margin-top: 20px;
+            font-size: 16px;
+            font-weight: bold;
+        }
+
+        /* New CSS for calculation steps */
+        #calculation-steps {
+            font-size: 12px;
+            margin-top: 10px;
+            color: #555;
+        }
+
+        /* New button for GitHub repo */
+        #githubButton {
+            background-color: #d3d3d3; /* Light grey color */
+            color: black; /* Black text color */
+            text-align: center;
+            cursor: pointer;
+            margin-top: 20px;
+            border: 1px solid #ccc;
+        }
+
+        #githubButton:hover {
+            background-color: #b3b3b3; /* Darker grey when hovered */
+        }
+
+        footer {
+            text-align: center;
+            margin-top: 20px;
+            font-size: 12px;
+            color: #555;
+        }
+
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>KV Cache Size Calculator</h1>
+        <label for="model">Select LLM Model:</label>
+        <select id="model">
+            <!-- Options will be dynamically generated -->
+        </select>
+        <label for="dtype">Select data type:</label>
+        <select id="dtype">
+            <option value="float16">float16</option>
+            <option value="bfloat16">bfloat16</option>
+            <option value="float32">float32</option>
+            <option value="int8">int8</option>
+        </select>
+        <label for="tokens">Enter Number of Tokens:</label>
+        <input type="number" id="tokens" placeholder="Enter number of tokens">
+        <button onclick="calculateKVCache()">Calculate KV Cache Size</button>
+        <div id="result"></div>
+        <!-- New div for calculation steps -->
+        <div id="calculation-steps"></div>
+        <button id="githubButton" onclick="openGitHubRepo()">Contribute new models on GitHub</button>
+    </div>
+    <footer>
+        Developed by Zhuohan Gu @ LMCache team
+    </footer>
+    <script>
+        let modelConfigs = {};
+
+        function openGitHubRepo() {
+            const githubUrl = 'https://github.com/LMCache/LMCache/issues/244#:~:text=https%3A//github.com/LMCache/LMCache/tree/dev/examples/kv_cache_calculator';
+            window.open(githubUrl, '_blank');
+        }
+
+
+        // Load model configurations from GitHub
+        async function loadModelConfigs() {
+            const url = 'https://raw.githubusercontent.com/LMCache/LMCache/refs/heads/dev/examples/kv_cache_calculator/modelconfig.json';
+            try {
+                const response = await fetch(url);
+                if (!response.ok) {
+                    throw new Error(`HTTP error! Status: ${response.status}`);
+                }
+                modelConfigs = await response.json();
+                console.log('Model configurations loaded successfully:', modelConfigs);
+                populateModelDropdown();
+            } catch (error) {
+                console.error('Failed to load model configurations:', error);
+                document.getElementById('result').textContent = "Failed to load model configurations. Please try again later.";
+            }
+        }
+
+        // Populate the model dropdown dynamically
+        function populateModelDropdown() {
+            const modelSelect = document.getElementById('model');
+            modelSelect.innerHTML = ""; // Clear existing options
+            for (const modelName in modelConfigs) {
+                const option = document.createElement('option');
+                option.value = modelName;
+                option.textContent = modelName;
+                modelSelect.appendChild(option);
+            }
+        }
+
+        async function calculateKVCache() {
+            // Ensure model configs are loaded before running calculations
+            if (Object.keys(modelConfigs).length === 0) {
+                await loadModelConfigs();
+            }
+
+            const model = document.getElementById('model').value;
+            const tokens = parseInt(document.getElementById('tokens').value);
+            const dtype = document.getElementById('dtype').value;
+
+            if (isNaN(tokens) || tokens <= 0) {
+                document.getElementById('result').textContent = "Please enter a valid number of tokens.";
+                document.getElementById('calculation-steps').innerHTML = "";
+                return;
+            }
+
+            const config = modelConfigs[model];
+            if (!config) {
+                document.getElementById('result').textContent = "Model not recognized.";
+                document.getElementById('calculation-steps').innerHTML = "";
+                return;
+            }
+
+            const { hidden_size, num_attention_heads, num_hidden_layers, num_key_value_heads } = config;
+
+            // Calculate head_size
+            const head_size = hidden_size / num_attention_heads;
+
+            // Determine dtype size in bytes
+            let dtype_size;
+            if (dtype === 'float32') {
+                dtype_size = 4;
+            } else if (dtype === 'float16' || dtype === 'bfloat16') {
+                dtype_size = 2;
+            } else if (dtype === 'int8') {
+                dtype_size = 1;
+            } else {
+                document.getElementById('result').textContent = "Invalid data type selected.";
+                document.getElementById('calculation-steps').innerHTML = "";
+                return;
+            }
+
+            // Calculate KV cache size
+            const total_elements = 2 * num_hidden_layers * tokens * num_key_value_heads * head_size;
+            const total_bytes = total_elements * dtype_size;
+            const kvCacheSizeGB = total_bytes / (1024 ** 3); // Convert bytes to GB
+
+            document.getElementById('result').innerHTML =
+                `KV Cache Size: ${kvCacheSizeGB.toFixed(4)} GB`;
+
+            // Prepare calculation steps
+            let steps = `
+                <strong>Calculation Details:</strong><br><br>
+                <b>Selected Model:</b> ${model}<br>
+                <b>Hidden Size:</b> ${hidden_size}<br>
+                <b>Number of Attention Heads:</b> ${num_attention_heads}<br>
+                <b>Number of Hidden Layers:</b> ${num_hidden_layers}<br>
+                <b>Number of Key-Value Heads:</b> ${num_key_value_heads}<br>
+                <b>Head Size:</b> ${head_size} (Hidden Size / Attention Heads)<br>
+                <b>Data Type Size:</b> ${dtype_size} bytes<br>
+                <b>Total Elements:</b> 2 × ${num_hidden_layers} × ${tokens} × ${num_key_value_heads} × ${head_size} = ${total_elements}<br>
+                <b>Total Bytes:</b> ${total_elements} × ${dtype_size} = ${total_bytes} bytes<br>
+                <b>KV Cache Size:</b> ${total_bytes} / (1024³) ≈ ${kvCacheSizeGB.toFixed(4)} GB
+            `;
+            // Display calculation steps
+            document.getElementById('calculation-steps').innerHTML = steps;
+        }
+
+        // Add event listener for Enter key
+        document.getElementById('tokens').addEventListener('keydown', function(event) {
+            if (event.key === 'Enter') {
+                calculateKVCache();
+            }
+        });
+
+        // Load model configurations when the page loads
+        window.onload = function() {
+            loadModelConfigs();
+        };
+
+    </script>
+</body>
+</html>
