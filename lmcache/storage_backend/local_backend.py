@@ -520,9 +520,11 @@ class LMCLocalDiskBackend(LMCBackendInterface):
         path = self.dict[key].path
         self.evictor.update_on_get(key, self.dict)
 
+        time0 = time.time()
         with safe_open(path, framework="pt",
                        device=self.dst_device) as f:  # type: ignore
             kv_chunk = f.get_tensor("kv_chunk")
+        print(f"Time to load: {time.time()-time0}")
         self.update_lock.release()
         return kv_chunk
 

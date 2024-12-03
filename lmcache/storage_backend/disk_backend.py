@@ -1,12 +1,10 @@
-import os
+import copy
 import queue
 import threading
 import time
 import xmlrpc.client
-from collections import OrderedDict
 from concurrent.futures import Future, ProcessPoolExecutor
 from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
-import copy
 
 import torch
 from safetensors import safe_open
@@ -16,10 +14,7 @@ from lmcache.config import LMCacheEngineConfig, LMCacheMemPoolMetadata
 from lmcache.logging import init_logger
 from lmcache.storage_backend.abstract_backend import LMCBackendInterface
 from lmcache.storage_backend.evictor import DummyEvictor
-from lmcache.storage_backend.evictor.base_evictor import PutStatus
-from lmcache.storage_backend.mem_pool import (KVObj, LocalCPUBufferPool,
-                                              LocalCPUPool, LocalGPUPool,
-                                              LocalPool)
+from lmcache.storage_backend.mem_pool import LocalCPUBufferPool
 from lmcache.utils import (CacheEngineKey, KVCache, LMCKeyManagerKey,
                            _lmcache_nvtx_annotate)
 
@@ -34,17 +29,19 @@ class LocalBackendEndSignal:
 # current impl. with "safetensors" might not be efficient
 # but it is better than "torch.save/load"
 
+
 # TODO(Jiayi): need to support prefetch for disk
 @_lmcache_nvtx_annotate
 @torch.inference_mode()
 def save_disk(
     path: str,
     kv_chunk: torch.Tensor,
-    key:str
+    key: str,
+    chunk_idx: int,
 ):
-    # print("SAVE_DISK"+str(path))
     save_file({"kv_chunk": kv_chunk.contiguous()}, path)
-    return key
+    return key, chunk_idx
+
 
 class LMCDiskBackend(LMCBackendInterface):
     """
@@ -73,8 +70,8 @@ class LMCDiskBackend(LMCBackendInterface):
         self.remote_chunk_size = Info["chunk_size"]
         self.remote_serde = Info["serde"]
 
-        self.write_key_buffer:int = 10
-        self.remain_writing:int=0
+        self.write_key_buffer: int = 50
+        self.remain_writing: int = 0
 
         self.chunk_size = config.chunk_size
 
@@ -86,9 +83,10 @@ class LMCDiskBackend(LMCBackendInterface):
         self.put_queue: queue.Queue[
             Union[Tuple[CacheEngineKey, torch.Tensor],
                   LocalBackendEndSignal]] = queue.Queue()
-        self.start_query_pool: List[str]=[]
-        self.end_query_pool: List[str]=[]
-        self.put_thread = threading.Thread(target=self.batched_put_worker, args=())
+        self.start_query_pool: List[tuple[CacheEngineKey, torch.Tensor]] = []
+        self.end_query_pool: List[str] = []
+        self.put_thread = threading.Thread(target=self.batched_put_worker,
+                                           args=())
         self.put_thread.start()
         self.update_lock = threading.Lock()
 
@@ -128,18 +126,14 @@ class LMCDiskBackend(LMCBackendInterface):
             if isinstance(item, LocalBackendEndSignal):
                 break
             key, value = item
-            # print(self._key_transform(key),
-            #                        self.evictor.get_size(value),
-            #                        0)
             self.update_lock.acquire()
-            # print("xmlrpc:put in put_worker")
             path: str = self.proxy.put(self._key_transform(key),
-                                   self.evictor.get_size(value),
-                                   0)
+                                       self.evictor.get_size(value),
+                                       0)  # type: ignore
             self.update_lock.release()
 
-            path=copy.deepcopy(path)
-            self.put_nonblocking(key, value,path)
+            path = copy.deepcopy(path)
+            self.put_nonblocking(key, value, path)
 
     @_lmcache_nvtx_annotate
     def batched_put_worker(self, ):
@@ -147,46 +141,51 @@ class LMCDiskBackend(LMCBackendInterface):
             if self.put_queue.empty():
                 time.sleep(0.1)
                 continue
-            batch_size = min(self.put_queue.qsize(),self.write_key_buffer)
-            self.start_query_pool=[]
-            key_list=[]
-            size_list=[]
+            batch_size = min(self.put_queue.qsize(), self.write_key_buffer)
+            print("Saving", batch_size, "Chunks")
+            self.start_query_pool = []
+            key_list = []
+            size_list = []
             for i in range(batch_size):
                 item = self.put_queue.get()
                 if isinstance(item, LocalBackendEndSignal):
-                    break
+                    del self.proxy
+                    return
                 self.start_query_pool.append(item)
                 key_list.append(self._key_transform(item[0]))
                 size_list.append(self.evictor.get_size(item[1]))
 
-            # print("xmlrpc:put in batched_put_worker")
-            paths: str = self.proxy.batched_put(key_list, size_list, 0)
+            time0 = time.time()
+            paths: str = self.proxy.batched_put(key_list, size_list,
+                                                0)  # type: ignore
+            print("Network Time taken for batched_put", time.time() - time0)
 
             for i in range(batch_size):
                 item = self.start_query_pool[i]
                 if isinstance(item, LocalBackendEndSignal):
-                    break
+                    return
                 key, value = item
-                path=copy.deepcopy(paths[i])
-                self.put_nonblocking(key, value,path)
-    
-    def save_end_callback(self,future: Future):
-        # print(future)
+                path = copy.deepcopy(paths[i])
+                self.put_nonblocking(key, value, path)
+
+    def save_end_callback(self, future: Future):
         try:
-            key = future.result()  # This will raise an exception if the Future failed.
-            # print("save_end_callback success:", key)
+            key, chunk_idx = future.result(
+            )  # This will raise an exception if the Future failed.
         except Exception as e:
             logger.error(f"Exception in save_end_callback: {e}")
         finally:
-            # print(key)
+            self.cpu_mbufferpool.idx_free(chunk_idx)
             logger.debug(f"Saving cache {key} finished.")
-            self.remain_writing=self.remain_writing-1
+            self.remain_writing = self.remain_writing - 1
             self.end_query_pool.append(key)
-            if len(self.end_query_pool) > self.write_key_buffer or self.remain_writing==0:
+            if len(self.end_query_pool
+                   ) > self.write_key_buffer or self.remain_writing == 0:
                 self.update_lock.acquire()
+                print("End Query", self.end_query_pool)
                 self.proxy.batched_put(self.end_query_pool, 0, 1)
                 self.update_lock.release()
-                self.end_query_pool=[]
+                self.end_query_pool = []
 
     @_lmcache_nvtx_annotate
     @torch.inference_mode()
@@ -197,13 +196,11 @@ class LMCDiskBackend(LMCBackendInterface):
         path: str,
     ) -> None:
         # Abort put if cache too big
-        # print(path)
-        # print("Point1")
         if path == "":
             return
 
         kv_obj = None
-        # print("Point2")
+
         # Allocate the kv chunk
         while kv_obj is None:
             self.update_lock.acquire()
@@ -219,28 +216,15 @@ class LMCDiskBackend(LMCBackendInterface):
             kv_obj.data.copy_(kv_chunk, non_blocking=True)
             kv_chunk.record_stream(put_stream)
         put_stream.synchronize()
-        self.remain_writing=self.remain_writing+1
-        # print("!!!",save_disk,path,self._key_transform(key))
-        try:
-            import pickle
-            pickle.dumps(kv_obj.data)
-            pickle.dumps(path)
-            # print("kv_chunk is serializable.")
-        except Exception as e:
-            print(f"Serialization error for kv_chunk: {e}")
-        future = self.proc_pool_executor.submit(save_disk, path,
-                                                kv_obj.data,self._key_transform(key))
-        # if not future.done():
-        #     time.sleep(0.1)
-        # print(future)
-        # result = future.result()
-        # print(result)
-        # print("Point3")
+        self.remain_writing = self.remain_writing + 1
+        future = self.proc_pool_executor.submit(save_disk, path, kv_obj.data,
+                                                self._key_transform(key),
+                                                kv_obj.chunk_idx)
         future.add_done_callback(self.save_end_callback)
 
-        self.update_lock.acquire()
-        self.cpu_mbufferpool.free(kv_obj)
-        self.update_lock.release()
+        # self.update_lock.acquire()
+        # self.cpu_mbufferpool.free(kv_obj)
+        # self.update_lock.release()
 
     @_lmcache_nvtx_annotate
     @torch.inference_mode()
@@ -250,13 +234,9 @@ class LMCDiskBackend(LMCBackendInterface):
         kv_chunk: torch.Tensor,
     ) -> None:
         self.update_lock.acquire()
-        print(self._key_transform(key), self.evictor.get_size(kv_chunk), 0)
-        print("xmlrpc:put in put_blocking")
         path: str = self.proxy.put(self._key_transform(key),
                                    self.evictor.get_size(kv_chunk),
                                    0)  # type: ignore
-
-        print(path)
 
         if path == "":
             return
@@ -264,8 +244,7 @@ class LMCDiskBackend(LMCBackendInterface):
 
         save_file({"kv_chunk": kv_chunk}, path)
         self.update_lock.release()
-        print("xmlrpc:put in put_blocking1")
-        
+
         self.proxy.put(self._key_transform(key), 0, 1)
 
     def put(
@@ -288,6 +267,7 @@ class LMCDiskBackend(LMCBackendInterface):
         Note:
             The KV cache should NOT have the "batch" dimension.
         """
+        # logger.debug(f"Saving cache {key}")
         if blocking:
             self.put_blocking(key, kv_chunk)
         else:
@@ -307,12 +287,8 @@ class LMCDiskBackend(LMCBackendInterface):
             the kv cache of the token chunk, in the format of nested tuples
             None if the key is not found
         """
-        print(self._key_transform(key))
-        
-        print("xmlrpc:get in get")
         value: Dict[str, Any] = self.proxy.get(
             self._key_transform(key))  # type: ignore
-        print(value)
 
         # still writing
         while value['status'] == 1:
@@ -331,8 +307,8 @@ class LMCDiskBackend(LMCBackendInterface):
 
     def batched_contains(
         self,
-        key: CacheEngineKey,
-    ) -> bool:
+        keys: Iterable[CacheEngineKey],
+    ) -> Iterable[bool]:
         """
         Check if the cache engine contains the key.
 
@@ -342,7 +318,9 @@ class LMCDiskBackend(LMCBackendInterface):
         Returns:
             True if the cache engine contains the key, False otherwise
         """
-        return self.proxy.contains(self._key_transform(key)) == "YES"
+        answers: List[str] = self.proxy.batched_contains(
+            [self._key_transform(key) for key in keys])  # type: ignore
+        return [answer == "YES" for answer in answers]
 
     def batched_get(
         self,
@@ -361,9 +339,8 @@ class LMCDiskBackend(LMCBackendInterface):
         logger.info("Using default batched implementation of the get() method")
         keys_str = [self._key_transform(key) for key in keys]
         time0 = time.time()
-        print("xmlrpc:get in batched_get")
         paths: List[str] = self.proxy.batched_get(keys_str)  # type: ignore
-        print("Time taken for batched_get", time.time() - time0)
+        print("Network Time taken for batched_get", time.time() - time0)
         for path in paths:
             if path == "":
                 yield None

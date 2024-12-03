@@ -190,14 +190,17 @@ class LMCacheEngine:
                                          num_skip_prefix_chunk)
         # With num_skip_chunks, the following is relative to
         # the new start after skip.
-        num_tokens: int = self._num_tokens_in_kv(kv_tensors, fmt)
+        # num_tokens: int = self._num_tokens_in_kv(kv_tensors, fmt)
 
         start_token_idx = None
         start_chunk_idx = 0
-        for chunk_hash, idx in zip(chunk_hashes,
-                                   range(0, num_tokens, self.chunk_size)):
-            if not self.engine_.contains(self._make_key(chunk_hash, fmt)):
-                start_token_idx = idx
+        keys = []
+        for chunk_hash in chunk_hashes:
+            keys.append(self._make_key(chunk_hash, fmt))
+        anws = self.engine_.batched_contains(keys)
+        for anw in anws:
+            if not anw:
+                start_token_idx = start_chunk_idx * self.chunk_size
                 break
             start_chunk_idx += 1
 
@@ -359,6 +362,7 @@ class LMCacheEngine:
         chunk_hashes = self._prefix_hash(self._chunk_tokens(tokens),
                                          num_skip_chunk)
 
+        time0 = time.perf_counter()
         retrival_iterator = self.engine_.batched_get(
             (self._make_key(chunk_hash, fmt) for chunk_hash in chunk_hashes), )
 
@@ -367,6 +371,8 @@ class LMCacheEngine:
             if chunk is None:
                 break
             retrieved_kv_chunks.append(chunk)
+
+        print(f"Overall batched_get time: {time.perf_counter() - time0}")
         """ concatenate the kv cache """
         dim = None
         match fmt:
@@ -430,8 +436,12 @@ class LMCacheEngine:
         total_token_cnt = len(tokens)
         current_token_idx = 0
         chunk_hashes = self._prefix_hash(self._chunk_tokens(tokens), 0)
+        keys = []
         for chunk_hash in chunk_hashes:
-            if not self.engine_.contains(self._make_key(chunk_hash, fmt)):
+            keys.append(self._make_key(chunk_hash, fmt))
+        anws = self.engine_.batched_contains(keys)
+        for anw in anws:
+            if not anw:
                 break
             current_token_idx = min(current_token_idx + self.chunk_size,
                                     total_token_cnt)

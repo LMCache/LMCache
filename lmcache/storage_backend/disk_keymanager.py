@@ -3,7 +3,7 @@ import re
 import threading
 from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Iterable, Optional,List,Union
+from typing import Iterable, List, Optional, Union
 from xmlrpc.server import SimpleXMLRPCRequestHandler, SimpleXMLRPCServer
 
 import yaml
@@ -90,11 +90,28 @@ class LMCDiskKeyManager(LMCKeyManagerInterface):
         Returns:
             True if the cache engine contains the key, False otherwise
         """
+        # print("CONTAINS")
         key = LMCKeyManagerKey.from_string(key_str)
         # return "Yes" if key in self.dict else "No"
         # print("YES" if key in self.dict else "NO")
         # return key in self.dict
         return "YES" if key in self.dict else "NO"
+
+    def batched_contains(
+        self,
+        keys_str: Iterable[str],
+    ) -> Iterable[str]:
+        print("BATCHED_CONTAINS")
+        print([
+            "YES"
+            if LMCKeyManagerKey.from_string(key_str) in self.dict else "NO"
+            for key_str in keys_str
+        ])
+        return [
+            "YES"
+            if LMCKeyManagerKey.from_string(key_str) in self.dict else "NO"
+            for key_str in keys_str
+        ]
 
     def _key_to_path(
         self,
@@ -160,14 +177,16 @@ class LMCDiskKeyManager(LMCKeyManagerInterface):
 
         return path
 
-    def batched_put(self, key_strs: List[str], kv_sizes: Union[List[float],int], status: bool) -> List[str]:
+    def batched_put(self, key_strs: List[str], kv_sizes: Union[Iterable[float],
+                                                               int],
+                    status: bool) -> List[str]:
         if status == 1:
-            for key in key_strs:
-                key = LMCKeyManagerKey.from_string(key)
+            for key_str in key_strs:
+                key: LMCKeyManagerKey = LMCKeyManagerKey.from_string(key_str)
                 self.dict[key].status = 2
             return [""]
-        Paths=[]
-        for key_str, kv_size in zip(key_strs, kv_sizes):
+        Paths = []
+        for key_str, kv_size in zip(key_strs, kv_sizes):  # type: ignore
             key = LMCKeyManagerKey.from_string(key_str)
             if self.contains(key_str) == "YES" and status == 0:
                 Paths.append("")
@@ -194,13 +213,14 @@ class LMCDiskKeyManager(LMCKeyManagerInterface):
 
             Paths.append(path)
         return Paths
-    
+
     def clear(self):
         self.update_lock.acquire()
         # for key in self.dict:
         #     os.remove(self.dict[key].path)
         self.dict.clear()
         self.update_lock.release()
+
     def get(
         self,
         key_str: str,
@@ -248,6 +268,7 @@ class LMCDiskKeyManager(LMCKeyManagerInterface):
             the kv cache of the token chunk, in the format of nested tuples
             None if the key is not found
         """
+        print("BATCHED_GET")
         paths = []
         self.update_lock.acquire()
         for key_str in keys_str:
@@ -301,14 +322,25 @@ def start_server(config):
     server.serve_forever()
 
 
-if __name__ == '__main__':
-    # Determine the directory of the current script (disk_keymanager.py)
-    script_dir = os.path.dirname(os.path.abspath(__file__))
+def function_start(disk_url, disk_path):
+    config = LMCKeyManagerConfig(disk_url, disk_path, 'vllm', "bfloat16", 256,
+                                 'None')
+    print(config)
+    start_server(config)
 
-    # Construct the absolute path to keymanager.yaml
-    # based on disk_keymanager.py's location
-    config_path = os.path.join(script_dir,
-                               "../../examples/disk_backend/keymanager.yaml")
-    print("Starting the server with the configuration file at", config_path)
-    # Start the server with the configuration file
-    start_server(LMCKeyManagerConfig.from_file(config_path))
+
+if __name__ == '__main__':
+    # From function arguments
+    function_start("http://localhost:4322",
+                   "/dataheart/qinyuyang2003/local_disk/")
+
+    # # From file
+    # script_dir = os.path.dirname(os.path.abspath(__file__))
+
+    # # Construct the absolute path to keymanager.yaml
+    # # based on disk_keymanager.py's location
+    # config_path = os.path.join(script_dir,
+    #                            "../../examples/disk_backend/keymanager.yaml")
+    # print("Starting the server with the configuration file at", config_path)
+    # # Start the server with the configuration file
+    # start_server(LMCKeyManagerConfig.from_file(config_path))
