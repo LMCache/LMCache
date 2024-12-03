@@ -332,9 +332,9 @@ def function_start(disk_url, disk_path):
 if __name__ == '__main__':
     # From function arguments
     function_start("http://localhost:4322",
-                   "/dataheart/qinyuyang2003/local_disk/")
+                   "/local/local_disk/")
 
-    # # From file
+    # From file
     # script_dir = os.path.dirname(os.path.abspath(__file__))
 
     # # Construct the absolute path to keymanager.yaml
