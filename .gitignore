@@ -61,6 +61,9 @@ perf-test.py
 *.so
 .ycm_extra_conf.py
 
+# temp tests
+lmcache/experimental/tests
+
 # example
 /examples/example_local.yaml
 /examples/openai_chat_completion_client_local.py
