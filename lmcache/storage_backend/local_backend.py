@@ -504,6 +504,7 @@ class LMCLocalDiskBackend(LMCBackendInterface):
         if key in self.future_pool:
             future = self.future_pool[key]
             if not future.done():
+                self.update_lock.release()
                 return None
             del self.future_pool[key]
 

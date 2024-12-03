@@ -175,14 +175,21 @@ class LMCacheEngine:
         ret_mask = torch.zeros_like(tokens, dtype=torch.bool, device="cpu")
         for start, end, key in self.token_database.process_tokens(
                 tokens, mask):
-            if not self.storage_manager.contains(key):
-                break
-
-            ret_mask[start:end] = True
+            #if not self.storage_manager.contains(key):
+            #    break
 
             # Get the memory object from the storage backend
             memory_obj = self.storage_manager.get(key)
+            
+            if memory_obj is None:
+                break
+            
+            ret_mask[start:end] = True
 
+            # FIXME(Jiayi): gpu connector shouldn't be used here for the
+            # sake of performance. For example, disk->gpu is faster than
+            # disk->cpu->gpu. RDMA is another example.
+            
             # Move the memory object to the GPU
             if memory_obj is not None:
                 self.gpu_connector.to_gpu(memory_obj, start, end, **kwargs)
@@ -190,6 +197,8 @@ class LMCacheEngine:
                 logger.warning("Failed to retrieve the KV cache "
                                "when storage backend contains the key.")
                 break
+        # TODO(Jiayi): should compose the KV cache to a contiguous
+        # buffer here
         return ret_mask
 
     def prefetch(

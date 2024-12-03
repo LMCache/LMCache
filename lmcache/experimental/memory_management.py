@@ -1,4 +1,5 @@
 import abc
+import threading
 from dataclasses import dataclass
 from enum import Enum
 from typing import Optional, Tuple, Union
@@ -82,6 +83,19 @@ class MemoryObj:
         return self.raw_data.view(self.metadata.dtype)\
                             .view(self.metadata.shape)
 
+
+class BufferMemoryObj(MemoryObj):
+    """
+    A naive buffer memory
+    """
+
+    def __init__(self, raw_data: torch.Tensor):
+        self.raw_data = raw_data
+        self.valid = True
+        
+    @property
+    def tensor(self) -> Optional[torch.Tensor]:
+        return self.raw_data
 
 class MemoryAllocatorInterface(metaclass=abc.ABCMeta):
 
@@ -269,10 +283,15 @@ class HostMemoryAllocator(MemoryAllocatorInterface):
         """
         buffer = torch.empty(size, dtype=torch.uint8, device="cpu")
         self.allocator = TensorMemoryAllocator(buffer)
+        
+        self.host_mem_lock = threading.Lock()
 
     def allocate(self, shape: Union[torch.Size, Tuple[int, ...]],
                  dtype: torch.dtype) -> Optional[MemoryObj]:
-        return self.allocator.allocate(shape, dtype)
+        self.host_mem_lock.acquire()
+        memory_obj = self.allocator.allocate(shape, dtype)
+        self.host_mem_lock.release()
+        return 
 
     def free(self, memory_obj: MemoryObj):
         self.allocator.free(memory_obj)
