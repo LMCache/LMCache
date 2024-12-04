@@ -21,7 +21,7 @@ def save_disk(
 @torch.inference_mode()
 def load_disk(
     path: str,
-    dst_device:str,
+    dst_device: str,
 ) -> torch.Tensor:
     with safe_open(path, framework="pt",
                    device=dst_device) as f:
@@ -55,7 +55,7 @@ class LocalDiskBackend(StorageWorkerInterface):
         key: CacheEngineKey,
         size: int):
         path = self._key_to_path(path)
-        self.disk_lock:
+        with self.disk_lock:
             self.dict[key] = DiskCacheMetadata(path, size)
     
     
@@ -81,10 +81,13 @@ class LocalDiskBackend(StorageWorkerInterface):
 
         :param CacheEngineKey key: The key of the MemoryObj.
         """
+        self.disk_lock.acquire()
         if key not in self.dict:
+            self.disk_lock.release()
             return None
-        
         path = self.dict[key].path
+        self.disk_lock.release()
+        
         future = self.prefetch_executor.submit(load_disk, path, "cpu")
         return future
     
