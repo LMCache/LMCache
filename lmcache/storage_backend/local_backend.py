@@ -548,7 +548,7 @@ class LMCLocalDiskBackend(LMCBackendInterface):
         self.evictor.update_on_get(key, self.dict)
 
         with safe_open(path, framework="pt",
-                       device=self.dst_device) as f:  # type: ignore
+                       device=self.dst_device) as f:
             kv_chunk = f.get_tensor("kv_chunk")
         self.update_lock.release()
         return kv_chunk

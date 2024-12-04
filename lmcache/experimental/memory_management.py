@@ -73,7 +73,11 @@ class MemoryObj:
 
     def is_valid(self):
         return self.valid
-
+    
+    # TODO(Jiayi): please implement
+    def get_size(self) -> int:
+        pass
+    
     @property
     def tensor(self) -> Optional[torch.Tensor]:
         if not self.valid:

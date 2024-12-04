@@ -42,9 +42,11 @@ class StorageManager:
         """
         self.manager_lock.acquire()
         memory_obj = self.put_tasks[storage_type][key]
+        size = memory_obj.get_size()
         if not self.use_hot:
             self.memory_allocator.free(memory_obj)
         self.put_tasks[storage_type].pop(key)
+        self.storage_backends[storage_type].insert_key(key, size)
         self.manager_lock.release()
         
     def put(
@@ -119,7 +121,20 @@ class StorageManager:
         Update metadata after prefetch.
         """
         self.manager_lock.acquire()
-        self.prefetch_tasks.pop(key)
+        prefetch_task = self.prefetch_tasks.pop(key)
+        kv_chunk = prefetch_task.result()
+        kv_shape = kv_chunk.shape
+        kv_dtype = kv_chunk.kv_dtype
+        memory_obj = self.memory_allocator.allocate(kv_shape, kv_dtype)
+        self.manager_lock.release()
+        
+        prefetch_stream = torch.cuda.Stream()
+        with torch.cuda.stream(put_stream):
+            memory_obj.tensor.copy_(kv_chunk, non_blocking=True)
+        prefetch_stream.synchronize()
+        
+        self.manager_lock.acquire()
+        self.hot_cahce[key] = memory_obj
         self.manager_lock.release()
         
     
@@ -136,13 +151,14 @@ class StorageManager:
             self.manager_lock.release()
             return
         for storage_backend in self.storage_backends:
-            if storage_backend.contains():
-                task = staorage_backend.submit_get_task(key)
-                lambda_callback = lambda f: self.prefetch_callback(
-                    f, key)
-                prefetch_task.add_done_callback(self.prefetch_callback)
-                self.prefetch_tasks[key] = task
-                break
+            task = staorage_backend.submit_prefetch_task(key)
+            if task is None:
+                continue
+            lambda_callback = lambda f: self.prefetch_callback(
+                f, key)
+            prefetch_task.add_done_callback(self.prefetch_callback)
+            self.prefetch_tasks[key] = task
+            break
         self.manager_lock.release()
 
     def contains(self, key: CacheEngineKey) -> bool:
