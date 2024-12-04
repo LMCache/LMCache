@@ -1,9 +1,9 @@
 import re
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Optional
 
-import torch
 import yaml
+
 
 @dataclass
 class LMCacheEngineConfig:
@@ -32,9 +32,9 @@ class LMCacheEngineConfig:
         blend_min_tokens: int = 256,
     ) -> "LMCacheEngineConfig":
         return LMCacheEngineConfig(chunk_size, local_cpu, local_disk,
-                                   remote_url, remote_serde,
-                                   save_decode_cache, enable_blending,
-                                   blend_recompute_ratio, blend_min_tokens)
+                                   remote_url, remote_serde, save_decode_cache,
+                                   enable_blending, blend_recompute_ratio,
+                                   blend_min_tokens)
 
     @staticmethod
     def from_file(file_path: str) -> "LMCacheEngineConfig":
