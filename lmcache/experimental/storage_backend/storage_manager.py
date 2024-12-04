@@ -27,7 +27,7 @@ class StorageManager:
                  allocator: MemoryAllocatorInterface):
         self.memory_allocator = allocator
         self.hot_cache = SortedDict()
-        self.use_hot = True
+        self.use_hot = config.local_cpu
 
         dst_device = "cuda"
         self.storage_backends: Dict[str, StorageBackendInterface] =\
