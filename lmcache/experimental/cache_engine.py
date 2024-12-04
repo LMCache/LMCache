@@ -51,7 +51,8 @@ from typing import Dict, Optional
 
 import torch
 
-from lmcache.config import LMCacheEngineConfig, LMCacheEngineMetadata
+from lmcache.config import LMCacheEngineMetadata
+from lmcache.experimental.config import LMCacheEngineConfig
 from lmcache.experimental.gpu_connector import GPUConnectorInterface
 from lmcache.experimental.memory_management import (MemoryAllocatorInterface,
                                                     PinMemoryAllocator)
@@ -180,16 +181,16 @@ class LMCacheEngine:
 
             # Get the memory object from the storage backend
             memory_obj = self.storage_manager.get(key)
-            
+
             if memory_obj is None:
                 break
-            
+
             ret_mask[start:end] = True
 
             # FIXME(Jiayi): gpu connector shouldn't be used here for the
             # sake of performance. For example, disk->gpu is faster than
             # disk->cpu->gpu. RDMA is another example.
-            
+
             # Move the memory object to the GPU
             if memory_obj is not None:
                 self.gpu_connector.to_gpu(memory_obj, start, end, **kwargs)

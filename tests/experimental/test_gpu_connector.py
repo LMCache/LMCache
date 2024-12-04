@@ -1,9 +1,10 @@
-import torch
 import pytest
+import torch
 
 from lmcache.experimental.gpu_connector import VLLMNestedTupleGPUConnector
-from lmcache.experimental.memory_management import HostMemoryAllocator
-from lmcache.experimental.memory_management import MemoryFormat
+from lmcache.experimental.memory_management import (HostMemoryAllocator,
+                                                    MemoryFormat)
+
 
 def generate_kv_cache(num_tokens, fmt, device):
     ret = []
@@ -20,6 +21,7 @@ def generate_kv_cache(num_tokens, fmt, device):
         ret.append((k, v))
 
     return tuple(ret)
+
 
 def check_kv_cache_equal(left, right, num_tokens, fmt):
     """

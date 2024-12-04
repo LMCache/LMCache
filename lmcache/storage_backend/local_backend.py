@@ -247,8 +247,6 @@ class LMCLocalBackend(LMCBackendInterface):
 # current impl. with "safetensors" might not be efficient
 # but it is better than "torch.save/load"
 
-# TODO(Jiayi): need to support prefetch for disk
-
 
 @_lmcache_nvtx_annotate
 @torch.inference_mode()
@@ -548,7 +546,7 @@ class LMCLocalDiskBackend(LMCBackendInterface):
         self.evictor.update_on_get(key, self.dict)
 
         with safe_open(path, framework="pt",
-                       device=self.dst_device) as f:
+                       device=self.dst_device) as f:  # type: ignore
             kv_chunk = f.get_tensor("kv_chunk")
         self.update_lock.release()
         return kv_chunk

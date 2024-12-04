@@ -4,7 +4,8 @@ from typing import Iterable, Optional, Tuple
 
 import torch
 
-from lmcache.config import LMCacheEngineConfig, LMCacheEngineMetadata
+from lmcache.config import LMCacheEngineMetadata
+from lmcache.experimental.config import LMCacheEngineConfig
 from lmcache.utils import CacheEngineKey
 
 

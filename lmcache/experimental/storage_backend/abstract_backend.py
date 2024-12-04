@@ -1,35 +1,84 @@
 import abc
-from typing import Callable
+from concurrent.futures import Future
+from typing import Optional
+
+import torch
 
 from lmcache.experimental.memory_management import MemoryObj
 from lmcache.utils import CacheEngineKey
 
 
-class StorageWorkerInterface(metaclass=abc.ABCMeta):
+class StorageBackendInterface(metaclass=abc.ABCMeta):
+
+    def __init__(
+        self,
+        dst_device: str = "cuda",
+    ):
+        """
+        Initialize the storage backend. 
+
+        :param dst_device: the device where the blocking retrieved KV is stored,
+            could be either "cpu", "cuda", or "cuda:0", "cuda:1", etc.
+
+        :raise: RuntimeError if the device is not valid
+        """
+        try:
+            torch.device(dst_device)
+        except RuntimeError:
+            raise
+
+        self.dst_device = dst_device
 
     @abc.abstractmethod
-    async def put_task(self, key: CacheEngineKey, obj: MemoryObj) -> None:
-        """An async function to put the MemoryObj into the storage backend.
-        It should free the memory object after finish putting the object.
-
-        :param CacheEngineKey key: The key of the MemoryObj.
-        :param MemoryObj obj: The MemoryObj to be stored.
+    def contains(self, key: CacheEngineKey) -> bool:
+        """
+        Check whether key is in the storage backend. 
         """
         raise NotImplementedError
 
     @abc.abstractmethod
-    async def get_task(
-        self,
-        key: CacheEngineKey,
-        callback: Callable[[
-            MemoryObj,
-        ], None],
-    ) -> None:
-        """An async function to get the MemoryObj from the storage backend.
-        Will call the callback with the MemoryObj when finished.
+    def insert_key(self, key: CacheEngineKey, size: int):
+        """
+        Insert the keu after data is put to storage backend.
+        """
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    def submit_put_task(self, key: CacheEngineKey, obj: MemoryObj) -> Future:
+        """
+        An async function to put the MemoryObj into the storage backend.
 
         :param CacheEngineKey key: The key of the MemoryObj.
-        :param Callable[MemoryObj, None] callback: The callback function to 
-            be called with the MemoryObj.
+        :param MemoryObj obj: The MemoryObj to be stored.
+        
+        :return: a future object
+        """
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    def submit_prefetch_task(
+        self,
+        key: CacheEngineKey,
+    ) -> Optional[Future]:
+        """
+        An async function to get the MemoryObj from the storage backend.
+
+        :param CacheEngineKey key: The key of the MemoryObj.
+
+        :return: a future object
+        """
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    def get_blocking(
+        self,
+        key: CacheEngineKey,
+    ) -> Optional[torch.Tensor]:
+        """
+        A blcocking function to get the kv cache from the storage backend.
+        
+        :param CacheEngineKey key: The key of the MemoryObj.
+        
+        :return: a torch tensor
         """
         raise NotImplementedError

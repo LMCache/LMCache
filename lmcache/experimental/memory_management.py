@@ -73,16 +73,18 @@ class MemoryObj:
 
     def is_valid(self):
         return self.valid
-    
-    # TODO(Jiayi): please implement
+
     def get_size(self) -> int:
-        pass
-    
+        num_elements = self.raw_data.numel()
+        element_size = self.raw_data.element_size()
+        size_in_bytes = num_elements * element_size
+        return size_in_bytes
+
     @property
-    def tensor(self) -> Optional[torch.Tensor]:
+    def tensor(self) -> torch.Tensor:
         if not self.valid:
-            logger.warn("Trying to access an invalidated MemoryObj")
-            return None
+            #logger.warn("Trying to access an invalidated MemoryObj")
+            raise Exception("Trying to access an invalidated MemoryObj")
 
         return self.raw_data.view(self.metadata.dtype)\
                             .view(self.metadata.shape)
@@ -96,10 +98,11 @@ class BufferMemoryObj(MemoryObj):
     def __init__(self, raw_data: torch.Tensor):
         self.raw_data = raw_data
         self.valid = True
-        
+
     @property
-    def tensor(self) -> Optional[torch.Tensor]:
+    def tensor(self) -> torch.Tensor:
         return self.raw_data
+
 
 class MemoryAllocatorInterface(metaclass=abc.ABCMeta):
 
@@ -287,21 +290,21 @@ class HostMemoryAllocator(MemoryAllocatorInterface):
         """
         buffer = torch.empty(size, dtype=torch.uint8, device="cpu")
         self.allocator = TensorMemoryAllocator(buffer)
-        
+
         self.host_mem_lock = threading.Lock()
 
     def allocate(self, shape: Union[torch.Size, Tuple[int, ...]],
                  dtype: torch.dtype) -> Optional[MemoryObj]:
-        self.host_mem_lock.acquire()
-        memory_obj = self.allocator.allocate(shape, dtype)
-        self.host_mem_lock.release()
-        return 
+        with self.host_mem_lock:
+            return self.allocator.allocate(shape, dtype)
 
     def free(self, memory_obj: MemoryObj):
-        self.allocator.free(memory_obj)
+        with self.host_mem_lock:
+            self.allocator.free(memory_obj)
 
     def memcheck(self):
-        return self.allocator.memcheck()
+        with self.host_mem_lock:
+            return self.allocator.memcheck()
 
 
 class PinMemoryAllocator(MemoryAllocatorInterface):
