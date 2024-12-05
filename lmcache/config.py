@@ -52,7 +52,7 @@ class LMCacheEngineConfig:
     def from_defaults(
         chunk_size: int = 256,
         local_device: str = "cuda",
-        max_local_cache_size: int = 20,
+        max_local_cache_size: int = 5,
         remote_url: str = "redis://localhost:6379",
         remote_serde: str = "torch",
         pipelined_backend: bool = False,
@@ -71,7 +71,7 @@ class LMCacheEngineConfig:
     def from_legacy(
         chunk_size: int = 256,
         backend: str = "cuda",
-        max_local_cache_size: int = 20,
+        max_local_cache_size: int = 5,
         persist_path: Optional[str] = None,
         remote_serde: Optional[str] = "torch",
         pipelined_backend: bool = False,
