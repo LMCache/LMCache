@@ -2,9 +2,10 @@ import os
 import queue
 import threading
 import time
+import xmlrpc.client
 from collections import OrderedDict
 from concurrent.futures import Future, ProcessPoolExecutor
-from typing import Dict, Optional, Tuple, Union
+from typing import Dict, Optional, Tuple, Union,Iterable,Any
 
 import torch
 from safetensors import safe_open
@@ -19,7 +20,7 @@ from lmcache.storage_backend.mem_pool import (KVObj, LocalCPUBufferPool,
                                               LocalCPUPool, LocalGPUPool,
                                               LocalPool)
 from lmcache.utils import (CacheEngineKey, DiskCacheMetadata, KVCache,
-                           _lmcache_nvtx_annotate)
+                           _lmcache_nvtx_annotate,_get_size_in_gb)
 
 logger = init_logger(__name__)
 
@@ -567,3 +568,206 @@ class LMCLocalDiskBackend(LMCBackendInterface):
 
     def __del__(self):
         self.close()
+
+@_lmcache_nvtx_annotate
+@torch.inference_mode()
+def save_disk_with_callback(
+    path: str,
+    kv_obj: KVObj,
+    key: CacheEngineKey,
+)->Tuple[CacheEngineKey,float, int]:
+    save_file({"kv_chunk": kv_obj.data.contiguous()}, path)
+    return key, _get_size_in_gb(kv_obj.data), kv_obj.chunk_idx
+
+class LMCDiskBackend(LMCLocalDiskBackend):
+    """
+    Cache engine for storing the KV cache of the tokens in the local disk.
+    """
+
+    def __init__(self,
+                 config: LMCacheEngineConfig,
+                 metadata: LMCacheMemPoolMetadata,
+                 dst_device: str = "cuda"):
+        """
+        Throws:
+            RuntimeError if the loaded configuration does not match the current
+                configuration
+        """
+        super().__init__(config,metadata,dst_device)
+
+        assert config.disk_url is not None, (
+            "Need to specify local path if when "
+            "using LMCLocalDiskBackend")
+        self.proxy = xmlrpc.client.ServerProxy(config.disk_url)
+        # Info: Dict[str, Any] = self.proxy.Info()  # type: ignore
+        # self.remote_chunk_size = Info["chunk_size"]
+
+        self.cached_paths:Dict[CacheEngineKey,str]={}
+
+        self.written_buffer_size: int = 10
+        self.remain_writing: int = 0
+        
+        self.written_key=[]
+        self.written_size=[]
+        
+        self.update_lock = threading.Lock()
+
+    def contains(
+        self,
+        key: CacheEngineKey,
+    ) -> bool:
+        ans:str=self.proxy.contains(key.to_string)
+        self.cached_paths[key]=ans
+        return ans!=""
+    
+    def batched_contains(
+        self,
+        keys: Iterable[CacheEngineKey],
+        total_size: float=0
+    ) -> Iterable[bool]:
+        if total_size==0:    
+            paths: Iterable[str] = self.proxy.batched_contains(
+                [key.to_string() for key in keys])
+            return [path !="" for path in paths]
+        
+        # Write check
+        paths: Iterable[str] = self.proxy.batched_write_check(
+                [key.to_string() for key in keys], total_size)
+        
+        an=[]
+        for path,key in zip(paths,keys):
+            if path == "":
+                an.append(True)
+            else:
+                self.cached_paths[key] = path
+                an.append(False)
+        return an
+
+    def save_end_callback(self, future: Future):
+        key, size,chunk_idx = future.result()
+        self.cpu_mbufferpool.idx_free(chunk_idx)
+        # logger.debug(f"Saving cache {key} finished.")
+        self.remain_writing = self.remain_writing - 1
+        self.written_key.append(key.to_string())
+        self.written_size.append(size)
+        if len(self.written_key
+                ) >= self.written_buffer_size or self.remain_writing == 0:
+            self.update_lock.acquire()
+            logger.debug(f"Betched Read Signal for {len(self.written_key)} keys:")
+            # print("Write Ready",self.written_key,self.written_size)
+            signal=self.proxy.batched_write_ready(self.written_key, self.written_size)
+            self.update_lock.release()
+            self.written_key=[]
+            self.written_size=[]
+
+    @_lmcache_nvtx_annotate
+    @torch.inference_mode()
+    def put_nonblocking(
+        self,
+        key: CacheEngineKey,
+        kv_chunk: torch.Tensor,
+    ) -> None:
+        path=self.cached_paths[key]
+        del self.cached_paths[key]
+        # Abort put if cache too big
+        if path == "" or path is None:
+            return
+
+        kv_obj = None
+
+        # Allocate the kv chunk
+        while kv_obj is None:
+            self.update_lock.acquire()
+            kv_obj = self.cpu_mbufferpool.allocate(kv_chunk)
+            self.update_lock.release()
+            if kv_obj is None:
+                # TODO(Jiayi): Please tune the sleep time for better performance
+                time.sleep(0.01)
+
+        put_stream = torch.cuda.Stream()
+        put_stream.wait_stream(torch.cuda.default_stream(kv_chunk.device))
+        with torch.cuda.stream(put_stream):
+            kv_obj.data.copy_(kv_chunk, non_blocking=True)
+            kv_chunk.record_stream(put_stream)
+        put_stream.synchronize()
+
+        self.remain_writing = self.remain_writing + 1
+        future = self.proc_pool_executor.submit(save_disk_with_callback, path, kv_obj,
+                                                key)
+        future.add_done_callback(self.save_end_callback)
+
+    @_lmcache_nvtx_annotate
+    @torch.inference_mode()
+    def put_blocking(
+        self,
+        key: CacheEngineKey,
+        kv_chunk: torch.Tensor,
+    ) -> None:
+        path=self.cached_paths[key]
+        del self.cached_paths[key]
+
+        if path == "":
+            return
+        logger.debug(f"Saving cache to {path}")
+
+        self.update_lock.acquire()
+        save_file({"kv_chunk": kv_chunk}, path)
+        self.update_lock.release()
+
+        self.proxy.write_ready(key.to_string(),_get_size_in_gb(kv_chunk))
+
+    @_lmcache_nvtx_annotate
+    def get(
+        self,
+        key: CacheEngineKey,
+    ) -> Optional[KVCache]:  # type: ignore
+        """
+        Retrieve the KV cache chunk by the given key
+
+        Input:
+            key: the key of the token chunk, including prefix hash and format
+        Output:
+            the kv cache of the token chunk, in the format of nested tuples
+            None if the key is not found
+        """
+        path = self.proxy.read_check(
+            key.to_string())  # type: ignore
+
+        if path == "":
+            return None
+
+        self.update_lock.acquire()
+        with safe_open(path, framework="pt",
+                       device=self.dst_device) as f:  # type: ignore
+            kv_chunk = f.get_tensor("kv_chunk")
+        self.update_lock.release()
+        return kv_chunk
+
+
+    def batched_get(
+        self,
+        keys: Iterable[CacheEngineKey],
+    ) -> Iterable[Optional[torch.Tensor]]:
+        """
+        Retrieve the kv cache chunks by the given keys in a batched manner
+
+        
+        :param keys: the iterator of keys of the token chunks, including prefix 
+                hash and format
+
+        :return: the iterator of kv cache of the token chunks, in the format
+            of a big tensor and None if the key is not found
+        """
+        logger.info("Using default batched implementation of the get() method")
+        keys_strs = [key.to_string() for key in keys]
+        time0 = time.perf_counter()
+        paths: Iterable[str] = self.proxy.batched_read_check(keys_strs)  # type: ignore
+        logger.debug(f"Network Time taken for batched_get {time.perf_counter() - time0}s")
+        for path in paths:
+            if path == "":
+                yield None
+            else:
+                with safe_open(path, framework="pt",
+                               device=self.dst_device) as f:  # type: ignore
+                    kv_chunk = f.get_tensor("kv_chunk")
+                yield kv_chunk

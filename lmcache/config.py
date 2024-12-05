@@ -35,6 +35,7 @@ class LMCacheMemPoolMetadata:
 class LMCacheEngineConfig:
     chunk_size: int
     local_device: Optional[str]
+    disk_url: Optional[str]
     remote_url: Optional[str]
     remote_serde: Optional[str]  # Can be "torch" or "cachegen"
 
@@ -50,6 +51,7 @@ class LMCacheEngineConfig:
     def from_defaults(
         chunk_size: int = 256,
         local_device: str = "cuda",
+        disk_url: Optional[str] = None,
         remote_url: str = "redis://localhost:6379",
         remote_serde: str = "torch",
         pipelined_backend: bool = False,
@@ -58,8 +60,8 @@ class LMCacheEngineConfig:
         blend_recompute_ratio: float = 0.15,
         blend_min_tokens: int = 256,
     ) -> "LMCacheEngineConfig":
-        return LMCacheEngineConfig(chunk_size, local_device, remote_url,
-                                   remote_serde, pipelined_backend,
+        return LMCacheEngineConfig(chunk_size, local_device, disk_url,
+                                   remote_url, remote_serde, pipelined_backend,
                                    save_decode_cache, enable_blending,
                                    blend_recompute_ratio, blend_min_tokens)
 
@@ -75,6 +77,7 @@ class LMCacheEngineConfig:
 
         local_device: Optional[str] = None
         remote_url: Optional[str] = None
+        disk_url: Optional[str] = None
 
         match backend:
             case "cpu" | "cuda":
@@ -84,12 +87,18 @@ class LMCacheEngineConfig:
                                   path):  # local disk directory
                 local_device = path[7:]
                 remote_url = None
+            case path if re.match(r"disk_url://(.*)/",
+                                  path):  # local disk directory
+                local_device = "disk"
+                disk_url = path[11:]
+                remote_url = None
             case url if re.match(r"(.*)://(.*):(\d+)", url):
                 local_device = None
                 remote_url = url
         return LMCacheEngineConfig(
             chunk_size,
             local_device,
+            disk_url,
             remote_url,
             remote_serde,
             pipelined_backend,
@@ -109,6 +118,7 @@ class LMCacheEngineConfig:
 
         chunk_size = config.get("chunk_size", 256)
         local_device = config.get("local_device", None)
+        disk_url = config.get("disk_url", None)
         remote_url = config.get("remote_url", None)
         remote_serde = config.get("remote_serde", "torch")
         pipelined_backend = config.get("pipelined_backend", False)
@@ -123,6 +133,10 @@ class LMCacheEngineConfig:
             case path if re.match(r"file://(.*)/",
                                   path):  # local disk directory
                 local_device = path[7:]
+            case path if re.match(r"disk_url://(.*)",
+                                  path):  # local disk directory
+                local_device = "disk"
+                disk_url = path[11:]
             case _:
                 raise ValueError(
                     f"Invalid local storage device: {local_device}")
@@ -138,6 +152,7 @@ class LMCacheEngineConfig:
         return LMCacheEngineConfig(
             chunk_size,
             local_device,
+            disk_url,
             remote_url,
             remote_serde,
             pipelined_backend,

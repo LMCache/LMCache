@@ -123,6 +123,24 @@ class LMCBackendInterface(metaclass=abc.ABCMeta):
                 yield self.get(key)
             else:
                 yield None
+    
+    def batched_contains(
+        self,
+        keys: Iterable[CacheEngineKey],
+        total_size:float
+    ) -> Iterable[bool]:
+        """
+        Query if the keys are in the cache or not in a batched manner
+
+        :param keys: the iterator of keys of the token chunks, including prefix 
+                hash and format
+
+        :return: the iterator of boolean values, indicating if the key is in 
+                the cache or not
+        """
+        logger.info("Using default batched implementation of the contains() method")
+        for key in keys:
+            yield self.contains(key)
 
     @abc.abstractmethod
     def close(self):

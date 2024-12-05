@@ -33,6 +33,7 @@ setup(
             # Add command-line scripts here
             # e.g., "my_command=my_package.module:function"
             "lmcache_server=lmcache.server.__main__:main",
+            "lmcache_disk_address_manager=lmcache.address_manager.disk_address_manager:main",
         ],
     },
 )
