@@ -14,7 +14,7 @@ from safetensors.torch import save_file
 from lmcache.config import LMCacheEngineConfig, LMCacheMemPoolMetadata
 from lmcache.logging import init_logger
 from lmcache.storage_backend.abstract_backend import LMCBackendInterface
-from lmcache.storage_backend.evictor import DummyEvictor
+from lmcache.storage_backend.evictor import LRUEvictor
 from lmcache.storage_backend.evictor.base_evictor import PutStatus
 from lmcache.storage_backend.mem_pool import (KVObj, LocalCPUBufferPool,
                                               LocalCPUPool, LocalGPUPool,
@@ -60,7 +60,8 @@ class LMCLocalBackend(LMCBackendInterface):
 
         # TODO(Jiayi): The storage size and caching policy for both
         # evictor and mpool need to be configured dynamically
-        self.evictor = DummyEvictor()
+        max_cache_size = self.config.max_local_cache_size
+        self.evictor = LRUEvictor(max_cache_size)
         self.mpool: LocalPool
         if self.device == "cpu":
             self.mpool = LocalCPUPool(metadata)
@@ -102,8 +103,6 @@ class LMCLocalBackend(LMCBackendInterface):
     @_lmcache_nvtx_annotate
     def put_worker(self, ):
         while True:
-            # TODO: dirty fix to downgrade the priority of the put worker
-            # time.sleep(0.01)
             item = self.put_queue.get()
             if isinstance(item, LocalBackendEndSignal):
                 break
@@ -304,7 +303,7 @@ class LMCLocalDiskBackend(LMCBackendInterface):
 
         # TODO(Jiayi): The storage size and caching policy for both
         # evictor and mpool need to be configured dynamically
-        self.evictor = DummyEvictor()
+        self.evictor = LRUEvictor(config.max_local_cache_size)
         # NOTE(Jiayi): This mbufferpool should be smaller than the actual
         # cpu backend but big enough to avoid stalls in save
         # TODO(Jiayi): share the buffer if both cpu and disk backend are enabled
@@ -354,11 +353,8 @@ class LMCLocalDiskBackend(LMCBackendInterface):
 
         """
 
-        self.update_lock.acquire()
         path = self.dict[key].path
         self.dict.pop(key)
-        self.update_lock.release()
-
         os.remove(path)
 
     @_lmcache_nvtx_annotate

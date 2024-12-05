@@ -1,6 +1,7 @@
 import hashlib
 from dataclasses import dataclass
 from typing import Tuple,Union
+from lmcache.storage_backend.mem_pool import KVObj
 
 import torch
 from nvtx import annotate  # type: ignore
@@ -79,7 +80,7 @@ def _lmcache_nvtx_annotate(func, domain="lmcache"):
         domain=domain,
     )(func)
 
-def _get_size_in_gb(kv_obj: Union[torch.Tensor, bytes,DiskCacheMetadata]) -> float:
+def _get_size_in_gb(kv_obj: Union[torch.Tensor, bytes,DiskCacheMetadata,KVObj]) -> float:
         # Get size of one element in bytes
         if isinstance(kv_obj, torch.Tensor):
             num_elements = kv_obj.numel()
@@ -92,6 +93,9 @@ def _get_size_in_gb(kv_obj: Union[torch.Tensor, bytes,DiskCacheMetadata]) -> flo
             size_in_bytes = len(kv_obj)
             # Convert to gigabytes (GB)
             size_in_gb = size_in_bytes / (1024**3)
+
+        elif isinstance(kv_obj, KVObj):
+            size_in_gb = kv_obj.size
 
         elif isinstance(kv_obj, DiskCacheMetadata):
             size_in_gb = kv_obj.size

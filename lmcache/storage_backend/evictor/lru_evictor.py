@@ -68,5 +68,6 @@ class LRUEvictor(BaseEvictor):
 
         # update cache size
         self.current_cache_size += cache_size
-        logger.debug(f"Evicting {len(evict_keys)} chunks")
+        if len(evict_keys) > 0:
+            logger.debug(f"Evicting {len(evict_keys)} chunks")
         return evict_keys, PutStatus.LEGAL

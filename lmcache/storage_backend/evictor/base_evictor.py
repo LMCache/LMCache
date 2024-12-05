@@ -6,6 +6,7 @@ from typing import List, Tuple, Union
 import torch
 
 from lmcache.logging import init_logger
+from lmcache.storage_backend.mem_pool import KVObj
 from lmcache.utils import CacheEngineKey, DiskCacheMetadata,_get_size_in_gb
 
 logger = init_logger(__name__)
@@ -50,7 +51,7 @@ class BaseEvictor(metaclass=abc.ABCMeta):
 
     # TODO (Jiayi): KV object should have a better abstraction
     # e.g., a kv_obj class wize size field
-    def get_size(self, kv_obj: Union[torch.Tensor, bytes,DiskCacheMetadata]) -> float:
+    def get_size(self, kv_obj: Union[torch.Tensor, bytes,DiskCacheMetadata, KVObj]) -> float:
         """
         Get the size of the kv cache
         

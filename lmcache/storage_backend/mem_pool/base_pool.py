@@ -10,6 +10,12 @@ class KVObj:
     chunk_idx: int
     data: torch.Tensor
 
+    @property
+    def size(self):
+        """Get size in GB"""
+        size_in_bytes = self.data.numel() * self.data.element_size()
+        return size_in_bytes / (1024**3)
+
 
 class BasePool(metaclass=abc.ABCMeta):
     """
