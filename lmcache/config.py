@@ -29,12 +29,14 @@ class LMCacheMemPoolMetadata:
 
     kv_shape: Tuple[int, int, int, int, int]
     kv_dtype: torch.dtype
+    max_local_cache_size: int
 
 
 @dataclass
 class LMCacheEngineConfig:
     chunk_size: int
     local_device: Optional[str]
+    max_local_cache_size: int
     remote_url: Optional[str]
     remote_serde: Optional[str]  # Can be "torch" or "cachegen"
 
@@ -50,6 +52,7 @@ class LMCacheEngineConfig:
     def from_defaults(
         chunk_size: int = 256,
         local_device: str = "cuda",
+        max_local_cache_size: int = 20,
         remote_url: str = "redis://localhost:6379",
         remote_serde: str = "torch",
         pipelined_backend: bool = False,
@@ -58,7 +61,8 @@ class LMCacheEngineConfig:
         blend_recompute_ratio: float = 0.15,
         blend_min_tokens: int = 256,
     ) -> "LMCacheEngineConfig":
-        return LMCacheEngineConfig(chunk_size, local_device, remote_url,
+        return LMCacheEngineConfig(chunk_size, local_device,
+                                   max_local_cache_size, remote_url,
                                    remote_serde, pipelined_backend,
                                    save_decode_cache, enable_blending,
                                    blend_recompute_ratio, blend_min_tokens)
@@ -67,6 +71,7 @@ class LMCacheEngineConfig:
     def from_legacy(
         chunk_size: int = 256,
         backend: str = "cuda",
+        max_local_cache_size: int = 20,
         persist_path: Optional[str] = None,
         remote_serde: Optional[str] = "torch",
         pipelined_backend: bool = False,
@@ -90,6 +95,7 @@ class LMCacheEngineConfig:
         return LMCacheEngineConfig(
             chunk_size,
             local_device,
+            max_local_cache_size,
             remote_url,
             remote_serde,
             pipelined_backend,
@@ -109,6 +115,7 @@ class LMCacheEngineConfig:
 
         chunk_size = config.get("chunk_size", 256)
         local_device = config.get("local_device", None)
+        max_local_cache_size = config.get("max_local_cache_size", 20)
         remote_url = config.get("remote_url", None)
         remote_serde = config.get("remote_serde", "torch")
         pipelined_backend = config.get("pipelined_backend", False)
@@ -138,6 +145,7 @@ class LMCacheEngineConfig:
         return LMCacheEngineConfig(
             chunk_size,
             local_device,
+            max_local_cache_size,
             remote_url,
             remote_serde,
             pipelined_backend,

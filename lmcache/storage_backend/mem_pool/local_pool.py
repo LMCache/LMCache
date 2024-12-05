@@ -1,3 +1,4 @@
+from math import prod
 from typing import List, Optional
 
 import torch
@@ -13,10 +14,16 @@ class LocalPool(BasePool):
 
     def __init__(self, metadata: LMCacheMemPoolMetadata):
         self.chunk_size = metadata.kv_shape[2]
-        self.max_chunk_num = 0
+        self.max_chunk_num = 100
         self.mem_pool: List[torch.Tensor] = []
 
         self.free_pool = [i for i in range(self.max_chunk_num)]
+
+    def get_max_chunk_num(self, metadata: LMCacheMemPoolMetadata) -> int:
+        size_per_chunk = prod(metadata.kv_shape) * metadata.kv_dtype.itemsize
+        max_chunk_num = metadata.max_local_cache_size *\
+            1024**3 // size_per_chunk + 1
+        return max_chunk_num
 
     def allocate(self, kv_chunk: torch.Tensor) -> Optional[KVObj]:
         """
@@ -35,13 +42,14 @@ class LocalPool(BasePool):
         num_tok = kv_chunk.shape[2]
         assert num_tok <= self.chunk_size
         if not self.free_pool:
-            logger.error("No free memory chunks. Evictor might be failing!")
+            logger.warning("No free memory chunks."
+                           "Shouldn't happen! Evictor might be failing!")
             raise Exception("No free chunks in cpu memory. \
                 Shouldn't happen in local cpu-only backend.")
         chunk_idx = self.free_pool.pop()
         return KVObj(chunk_idx, self.mem_pool[chunk_idx][:, :, 0:num_tok])
 
-    def free(self, kv_obj: KVObj):
+    def free(self, kv_obj: KVObj) -> None:
         """
         Free the corresponding memory chunk
         
@@ -53,11 +61,9 @@ class LocalPool(BasePool):
 
 class LocalCPUPool(LocalPool):
 
-    def __init__(self, metadata: LMCacheMemPoolMetadata, max_chunk_num=200):
+    def __init__(self, metadata: LMCacheMemPoolMetadata):
         self.chunk_size = metadata.kv_shape[2]
-        # TODO(Jiayi): the `max_chunk_num` should be computed
-        # from `config.max_cache_size`
-        self.max_chunk_num = max_chunk_num
+        self.max_chunk_num = self.get_max_chunk_num(metadata)
         use_pinned_memory = True
         kv_dtype = metadata.kv_dtype
 
@@ -90,11 +96,9 @@ class LocalGPUPool(LocalPool):
     """ only for unit testing, might not be useful in production """
     """ incur double copy, but we can use this as the only gpu buffer"""
 
-    def __init__(self, metadata: LMCacheMemPoolMetadata, max_chunk_num=100):
+    def __init__(self, metadata: LMCacheMemPoolMetadata):
         self.chunk_size = metadata.kv_shape[2]
-        # TODO(Jiayi): the `max_chunk_num` should be computed
-        # from `config.max_cache_size`
-        self.max_chunk_num = max_chunk_num
+        self.max_chunk_num = self.get_max_chunk_num(metadata)
         kv_dtype = metadata.kv_dtype
 
         logger.info("Initializing gpu mem")

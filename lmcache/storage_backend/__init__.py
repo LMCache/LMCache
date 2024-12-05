@@ -21,7 +21,8 @@ def CreateStorageBackend(config: LMCacheEngineConfig,
         dst_device = f"cuda:{torch.cuda.current_device()}"
 
     mpool_metadata = LMCacheMemPoolMetadata(metadata.kv_shape,
-                                            metadata.kv_dtype)
+                                            metadata.kv_dtype,
+                                            config.max_local_cache_size)
     match config:
         case LMCacheEngineConfig(_, local_device=None,
                                  remote_url=str(p)) if p is not None:
