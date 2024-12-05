@@ -8,7 +8,8 @@ import torch
 from lmcache.config import LMCacheEngineConfig, LMCacheEngineMetadata
 from lmcache.logging import init_logger
 from lmcache.storage_backend import CreateStorageBackend
-from lmcache.utils import CacheEngineKey, KVCache, _lmcache_nvtx_annotate,_get_size_in_gb
+from lmcache.utils import (CacheEngineKey, KVCache, _get_size_in_gb,
+                           _lmcache_nvtx_annotate)
 
 logger = init_logger(__name__)
 
@@ -200,7 +201,8 @@ class LMCacheEngine:
         keys = []
         for chunk_hash in chunk_hashes:
             keys.append(self._make_key(chunk_hash, fmt))
-        anws = self.engine_.batched_contains(keys,total_size=_get_size_in_gb(kv_tensors))
+        anws = self.engine_.batched_contains(
+            keys, total_size=_get_size_in_gb(kv_tensors))
         for anw in anws:
             if not anw:
                 start_token_idx = start_chunk_idx * self.chunk_size
@@ -375,7 +377,8 @@ class LMCacheEngine:
                 break
             retrieved_kv_chunks.append(chunk)
 
-        logger.debug(f"Overall disk retrieve time: {time.perf_counter() - time0}")
+        logger.debug(
+            f"Overall disk retrieve time: {time.perf_counter() - time0}")
         """ concatenate the kv cache """
         dim = None
         match fmt:
@@ -447,7 +450,7 @@ class LMCacheEngine:
         keys = []
         for chunk_hash in chunk_hashes:
             keys.append(self._make_key(chunk_hash, fmt))
-        anws = self.engine_.batched_contains(keys,total_size=0)
+        anws = self.engine_.batched_contains(keys, total_size=0)
         for anw in anws:
             if not anw:
                 break

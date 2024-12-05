@@ -3,15 +3,15 @@ import re
 import threading
 from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Iterable, List, Optional, Union,Tuple
+from typing import Iterable, Optional
 from xmlrpc.server import SimpleXMLRPCRequestHandler, SimpleXMLRPCServer
 
 import yaml
 
 from lmcache.logging import init_logger
-from lmcache.storage_backend.evictor import DummyEvictor, LRUEvictor
+from lmcache.storage_backend.evictor import LRUEvictor
 from lmcache.storage_backend.evictor.base_evictor import PutStatus
-from lmcache.utils import (CacheEngineKey,DiskCacheMetadata)
+from lmcache.utils import CacheEngineKey, DiskCacheMetadata
 
 logger = init_logger(__name__)
 
@@ -29,8 +29,9 @@ class LMCAddressManagerConfig:
         with open(file_path, "r") as fin:
             config = yaml.safe_load(fin)
 
-        local_device = config.get("local_device", "disk_url://http://localhost:4322")
-        disk_url=local_device[11:]
+        local_device = config.get("local_device",
+                                  "disk_url://http://localhost:4322")
+        disk_url = local_device[11:]
         disk_path = config.get("disk_path", "/local/local_disk/")
 
         return LMCAddressManagerConfig(disk_url, disk_path)
@@ -52,7 +53,7 @@ class LMCDiskAddressManager():
         # Dict key to path & size
         self.dict: OrderedDict[CacheEngineKey,
                                DiskCacheMetadata] = OrderedDict()
-        
+
         self.path = config.disk_path
 
         assert self.path is not None, ("Need to specify local path if when "
@@ -99,7 +100,6 @@ class LMCDiskAddressManager():
 
         os.remove(path)
 
-    
     def contains(
         self,
         key_str: str,
@@ -125,9 +125,11 @@ class LMCDiskAddressManager():
     def write_check(self, key_str: str, kv_size: float) -> str:
         """
         The logic here is that:
-            return "" if the key is already in the cache, so that backend will not write it again
-            return path if the key is not in the cache, so that backend will write it to the path
-        if path is not in the cahce, initialize the cache with ("",0)
+            return "" if the key is already in the cache, 
+                so that backend will not write it again
+            return path if the key is not in the cache, 
+                so that backend will write it to the path
+        if path is not in the cache, initialize the cache with ("",0)
         """
         evict_keys, put_status = self.evictor.update_on_put(
             self.dict, DiskCacheMetadata("", kv_size))
@@ -144,49 +146,54 @@ class LMCDiskAddressManager():
         if key in self.dict:
             return ""
         else:
-            self.dict[key] = DiskCacheMetadata("",0)
+            self.dict[key] = DiskCacheMetadata("", 0)
             return self._key_to_path(key)
- 
-    def batched_write_check(self, key_strs: Iterable[str], kv_size: float) -> Iterable[str]:
+
+    def batched_write_check(self, key_strs: Iterable[str],
+                            kv_size: float) -> Iterable[str]:
         evict_keys, put_status = self.evictor.update_on_put(
             self.dict, DiskCacheMetadata("", kv_size))
 
         # Abort put if cache too big
         if put_status == PutStatus.ILLEGAL:
             # print("Illegal")
-            return [""] * len(key_strs)
+            return [""] * len(key_strs)  # type: ignore
 
         # evict caches
         for evict_key in evict_keys:
             self.remove(evict_key)
 
-        paths=[]
+        paths = []
         for key_str in key_strs:
             key = CacheEngineKey.from_string(key_str)
             if key in self.dict:
                 paths.append("")
             else:
-                self.dict[key] = DiskCacheMetadata("",0)
+                self.dict[key] = DiskCacheMetadata("", 0)
                 paths.append(self._key_to_path(key))
         return paths
-    
+
     def write_ready(self, key_str: str, kv_size: float):
         """
-        When backend has finished writing the cache, it will call this function to update the cache from ("",0) to the actual path and size
+        When backend has finished writing the cache, 
+            it will call this function to update the cache 
+            from ("",0) to the actual path and size
         """
         key = CacheEngineKey.from_string(key_str)
-        self.dict[key] = DiskCacheMetadata(self._key_to_path(key),kv_size)
+        self.dict[key] = DiskCacheMetadata(self._key_to_path(key), kv_size)
         return True
 
-    def batched_write_ready(self, key_strs: Iterable[str], kv_sizes: Iterable[float]):
+    def batched_write_ready(self, key_strs: Iterable[str],
+                            kv_sizes: Iterable[float]):
         for key_str, kv_size in zip(key_strs, kv_sizes):
             key = CacheEngineKey.from_string(key_str)
-            self.dict[key] = DiskCacheMetadata(self._key_to_path(key),kv_size)
+            self.dict[key] = DiskCacheMetadata(self._key_to_path(key), kv_size)
         return True
 
     def read_check(self, key_str: str) -> str:
         """
-        return the path if the key is in the cache, "" otherwise, including cache that is not ready
+        return the path if the key is in the cache, 
+            "" otherwise, including cache that is not ready
         """
         self.update_lock.acquire()
         key = CacheEngineKey.from_string(key_str)
@@ -198,7 +205,7 @@ class LMCDiskAddressManager():
 
         self.update_lock.release()
         return self.dict[key].path
-    
+
     def batched_read_check(self, key_strs: Iterable[str]) -> Iterable[str]:
         paths = []
         self.update_lock.acquire()
@@ -259,11 +266,11 @@ def start_server(config):
 
 def main():
     if "LMCACHE_CONFIG_FILE" not in os.environ:
-        config=LMCAddressManagerConfig("http://localhost:4322", "/local/local_disk/", 'vllm', "bfloat16", 256,
-                                 'None')
+        config = LMCAddressManagerConfig("http://localhost:4322",
+                                         "/local/local_disk/")
     else:
         config_file = os.environ["LMCACHE_CONFIG_FILE"]
-        config=LMCAddressManagerConfig.from_file(config_file)
+        config = LMCAddressManagerConfig.from_file(config_file)
     start_server(config)
 
 

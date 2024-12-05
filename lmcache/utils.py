@@ -1,10 +1,11 @@
 import hashlib
 from dataclasses import dataclass
-from typing import Tuple,Union
-from lmcache.storage_backend.mem_pool import KVObj
+from typing import Tuple, Union
 
 import torch
 from nvtx import annotate  # type: ignore
+
+from lmcache.storage_backend.mem_pool import KVObj
 
 # Type definition
 KVCache = Tuple[Tuple[torch.Tensor, torch.Tensor], ...]
@@ -80,27 +81,28 @@ def _lmcache_nvtx_annotate(func, domain="lmcache"):
         domain=domain,
     )(func)
 
-def _get_size_in_gb(kv_obj: Union[torch.Tensor, bytes,DiskCacheMetadata,KVObj]) -> float:
-        # Get size of one element in bytes
-        if isinstance(kv_obj, torch.Tensor):
-            num_elements = kv_obj.numel()
-            element_size = kv_obj.element_size()
-            size_in_bytes = num_elements * element_size
-            # Convert to gigabytes (GB)
-            size_in_gb = size_in_bytes / (1024**3)
 
-        elif isinstance(kv_obj, bytearray):
-            size_in_bytes = len(kv_obj)
-            # Convert to gigabytes (GB)
-            size_in_gb = size_in_bytes / (1024**3)
+def _get_size_in_gb(
+        kv_obj: Union[torch.Tensor, bytes, DiskCacheMetadata, KVObj]) -> float:
+    # Get size of one element in bytes
+    if isinstance(kv_obj, torch.Tensor):
+        num_elements = kv_obj.numel()
+        element_size = kv_obj.element_size()
+        size_in_bytes = num_elements * element_size
+        # Convert to gigabytes (GB)
+        size_in_gb = size_in_bytes / (1024**3)
 
-        elif isinstance(kv_obj, KVObj):
-            size_in_gb = kv_obj.size
+    elif isinstance(kv_obj, bytearray):
+        size_in_bytes = len(kv_obj)
+        # Convert to gigabytes (GB)
+        size_in_gb = size_in_bytes / (1024**3)
 
-        elif isinstance(kv_obj, DiskCacheMetadata):
-            size_in_gb = kv_obj.size
-        else:
-            raise Exception(
-                f"Encountered unknown kv data type {type(kv_obj)}!")
+    elif isinstance(kv_obj, KVObj):
+        size_in_gb = kv_obj.size
 
-        return size_in_gb
+    elif isinstance(kv_obj, DiskCacheMetadata):
+        size_in_gb = kv_obj.size
+    else:
+        raise Exception(f"Encountered unknown kv data type {type(kv_obj)}!")
+
+    return size_in_gb

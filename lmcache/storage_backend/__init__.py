@@ -6,9 +6,9 @@ from lmcache.logging import init_logger
 from lmcache.storage_backend.abstract_backend import LMCBackendInterface
 from lmcache.storage_backend.hybrid_backend import \
     LMCHybridBackend  # , LMCPipelinedHybridBackend
-from lmcache.storage_backend.local_backend import (LMCLocalBackend,
-                                                   LMCLocalDiskBackend,
-                                                   LMCDiskBackend)
+from lmcache.storage_backend.local_backend import (LMCDiskBackend,
+                                                   LMCLocalBackend,
+                                                   LMCLocalDiskBackend)
 from lmcache.storage_backend.remote_backend import LMCRemoteBackend
 
 logger = init_logger(__name__)

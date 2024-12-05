@@ -56,7 +56,7 @@ class LocalPool(BasePool):
             the KVObj to be freed
         """
         self.free_pool.append(kv_obj.chunk_idx)
-    
+
     def idx_free(self, chunk_idx: int):
         """
         Free the corresponding memory chunk

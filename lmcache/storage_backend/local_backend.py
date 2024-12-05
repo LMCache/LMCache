@@ -5,7 +5,7 @@ import time
 import xmlrpc.client
 from collections import OrderedDict
 from concurrent.futures import Future, ProcessPoolExecutor
-from typing import Dict, Optional, Tuple, Union,Iterable,Any
+from typing import Dict, Iterable, List, Optional, Tuple, Union
 
 import torch
 from safetensors import safe_open
@@ -20,7 +20,7 @@ from lmcache.storage_backend.mem_pool import (KVObj, LocalCPUBufferPool,
                                               LocalCPUPool, LocalGPUPool,
                                               LocalPool)
 from lmcache.utils import (CacheEngineKey, DiskCacheMetadata, KVCache,
-                           _lmcache_nvtx_annotate,_get_size_in_gb)
+                           _get_size_in_gb, _lmcache_nvtx_annotate)
 
 logger = init_logger(__name__)
 
@@ -565,15 +565,17 @@ class LMCLocalDiskBackend(LMCBackendInterface):
     def __del__(self):
         self.close()
 
+
 @_lmcache_nvtx_annotate
 @torch.inference_mode()
 def save_disk_with_callback(
     path: str,
     kv_obj: KVObj,
     key: CacheEngineKey,
-)->Tuple[CacheEngineKey,float, int]:
+) -> Tuple[CacheEngineKey, float, int]:
     save_file({"kv_chunk": kv_obj.data.contiguous()}, path)
     return key, _get_size_in_gb(kv_obj.data), kv_obj.chunk_idx
+
 
 class LMCDiskBackend(LMCLocalDiskBackend):
     """
@@ -589,7 +591,7 @@ class LMCDiskBackend(LMCLocalDiskBackend):
             RuntimeError if the loaded configuration does not match the current
                 configuration
         """
-        super().__init__(config,metadata,dst_device)
+        super().__init__(config, metadata, dst_device)
 
         assert config.disk_url is not None, (
             "Need to specify local path if when "
@@ -598,63 +600,65 @@ class LMCDiskBackend(LMCLocalDiskBackend):
         # Info: Dict[str, Any] = self.proxy.Info()  # type: ignore
         # self.remote_chunk_size = Info["chunk_size"]
 
-        self.cached_paths:Dict[CacheEngineKey,str]={}
+        self.cached_paths: Dict[CacheEngineKey, str] = {}
 
         self.written_buffer_size: int = 10
         self.remain_writing: int = 0
-        
-        self.written_key=[]
-        self.written_size=[]
-        
+
+        self.written_key: List[str] = []
+        self.written_size: List[float] = []
+
         self.update_lock = threading.Lock()
 
     def contains(
         self,
         key: CacheEngineKey,
     ) -> bool:
-        ans:str=self.proxy.contains(key.to_string)
-        self.cached_paths[key]=ans
-        return ans!=""
-    
-    def batched_contains(
-        self,
-        keys: Iterable[CacheEngineKey],
-        total_size: float=0
-    ) -> Iterable[bool]:
-        if total_size==0:    
-            paths: Iterable[str] = self.proxy.batched_contains(
-                [key.to_string() for key in keys])
-            return [path !="" for path in paths]
-        
-        # Write check
-        paths: Iterable[str] = self.proxy.batched_write_check(
-                [key.to_string() for key in keys], total_size)
-        
-        an=[]
-        for path,key in zip(paths,keys):
-            if path == "":
-                an.append(True)
-            else:
-                self.cached_paths[key] = path
-                an.append(False)
-        return an
+        anws: str = self.proxy.contains(key.to_string)  # type: ignore
+        self.cached_paths[key] = anws
+        return anws != ""
+
+    def batched_contains(self,
+                         keys: Iterable[CacheEngineKey],
+                         total_size: float = 0) -> Iterable[bool]:
+        if total_size == 0:
+            contains_paths: Iterable[str] = self.proxy.batched_contains(
+                [key.to_string() for key in keys])  # type: ignore
+            return [path != "" for path in contains_paths]
+        else:
+            # Write check
+            paths: Iterable[str] = self.proxy.batched_write_check(
+                [key.to_string() for key in keys], total_size)  # type: ignore
+
+            an = []
+            for path, key in zip(paths, keys):
+                if path == "":
+                    an.append(True)
+                else:
+                    self.cached_paths[key] = path
+                    an.append(False)
+            return an
 
     def save_end_callback(self, future: Future):
-        key, size,chunk_idx = future.result()
+        key, size, chunk_idx = future.result()
         self.cpu_mbufferpool.idx_free(chunk_idx)
         # logger.debug(f"Saving cache {key} finished.")
         self.remain_writing = self.remain_writing - 1
         self.written_key.append(key.to_string())
         self.written_size.append(size)
         if len(self.written_key
-                ) >= self.written_buffer_size or self.remain_writing == 0:
+               ) >= self.written_buffer_size or self.remain_writing == 0:
             self.update_lock.acquire()
-            logger.debug(f"Betched Read Signal for {len(self.written_key)} keys:")
+            logger.debug(
+                f"Betched Read Signal for {len(self.written_key)} keys:")
             # print("Write Ready",self.written_key,self.written_size)
-            signal=self.proxy.batched_write_ready(self.written_key, self.written_size)
+            signal = self.proxy.batched_write_ready(self.written_key,
+                                                    self.written_size)
+            if not signal:
+                logger.error("Write Ready Signal Failed")
             self.update_lock.release()
-            self.written_key=[]
-            self.written_size=[]
+            self.written_key = []
+            self.written_size = []
 
     @_lmcache_nvtx_annotate
     @torch.inference_mode()
@@ -663,7 +667,7 @@ class LMCDiskBackend(LMCLocalDiskBackend):
         key: CacheEngineKey,
         kv_chunk: torch.Tensor,
     ) -> None:
-        path=self.cached_paths[key]
+        path = self.cached_paths[key]
         del self.cached_paths[key]
         # Abort put if cache too big
         if path == "" or path is None:
@@ -688,8 +692,8 @@ class LMCDiskBackend(LMCLocalDiskBackend):
         put_stream.synchronize()
 
         self.remain_writing = self.remain_writing + 1
-        future = self.proc_pool_executor.submit(save_disk_with_callback, path, kv_obj,
-                                                key)
+        future = self.proc_pool_executor.submit(save_disk_with_callback, path,
+                                                kv_obj, key)
         future.add_done_callback(self.save_end_callback)
 
     @_lmcache_nvtx_annotate
@@ -699,7 +703,7 @@ class LMCDiskBackend(LMCLocalDiskBackend):
         key: CacheEngineKey,
         kv_chunk: torch.Tensor,
     ) -> None:
-        path=self.cached_paths[key]
+        path = self.cached_paths[key]
         del self.cached_paths[key]
 
         if path == "":
@@ -710,7 +714,7 @@ class LMCDiskBackend(LMCLocalDiskBackend):
         save_file({"kv_chunk": kv_chunk}, path)
         self.update_lock.release()
 
-        self.proxy.write_ready(key.to_string(),_get_size_in_gb(kv_chunk))
+        self.proxy.write_ready(key.to_string(), _get_size_in_gb(kv_chunk))
 
     @_lmcache_nvtx_annotate
     def get(
@@ -726,8 +730,7 @@ class LMCDiskBackend(LMCLocalDiskBackend):
             the kv cache of the token chunk, in the format of nested tuples
             None if the key is not found
         """
-        path = self.proxy.read_check(
-            key.to_string())  # type: ignore
+        path = self.proxy.read_check(key.to_string())  # type: ignore
 
         if path == "":
             return None
@@ -738,7 +741,6 @@ class LMCDiskBackend(LMCLocalDiskBackend):
             kv_chunk = f.get_tensor("kv_chunk")
         self.update_lock.release()
         return kv_chunk
-
 
     def batched_get(
         self,
@@ -757,8 +759,11 @@ class LMCDiskBackend(LMCLocalDiskBackend):
         logger.info("Using default batched implementation of the get() method")
         keys_strs = [key.to_string() for key in keys]
         time0 = time.perf_counter()
-        paths: Iterable[str] = self.proxy.batched_read_check(keys_strs)  # type: ignore
-        logger.debug(f"Network Time taken for batched_get {time.perf_counter() - time0}s")
+        paths: Iterable[str] = self.proxy.batched_read_check(
+            keys_strs)  # type: ignore
+        logger.debug(
+            f"Network Time taken for batched_get {time.perf_counter() - time0}s"
+        )
         for path in paths:
             if path == "":
                 yield None

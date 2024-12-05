@@ -54,7 +54,7 @@ class LMCacheEngineConfig:
         chunk_size: int = 256,
         local_device: str = "cuda",
         max_local_cache_size: int = 5,
-        disk_url: Optional[str],
+        disk_url: str = "",
         remote_url: str = "redis://localhost:6379",
         remote_serde: str = "torch",
         pipelined_backend: bool = False,
@@ -63,7 +63,8 @@ class LMCacheEngineConfig:
         blend_recompute_ratio: float = 0.15,
         blend_min_tokens: int = 256,
     ) -> "LMCacheEngineConfig":
-        return LMCacheEngineConfig(chunk_size, local_device,max_local_cache_size, disk_url,remote_url,
+        return LMCacheEngineConfig(chunk_size, local_device,
+                                   max_local_cache_size, disk_url, remote_url,
                                    remote_serde, pipelined_backend,
                                    save_decode_cache, enable_blending,
                                    blend_recompute_ratio, blend_min_tokens)
