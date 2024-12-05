@@ -131,6 +131,10 @@ class LMCDiskAddressManager():
                 so that backend will write it to the path
         if path is not in the cache, initialize the cache with ("",0)
         """
+        key = CacheEngineKey.from_string(key_str)
+        if key in self.dict:
+            return ""
+        
         evict_keys, put_status = self.evictor.update_on_put(
             self.dict, DiskCacheMetadata("", kv_size))
 
@@ -142,15 +146,21 @@ class LMCDiskAddressManager():
         for evict_key in evict_keys:
             self.remove(evict_key)
 
-        key = CacheEngineKey.from_string(key_str)
-        if key in self.dict:
-            return ""
-        else:
-            self.dict[key] = DiskCacheMetadata("", 0)
-            return self._key_to_path(key)
+        self.dict[key] = DiskCacheMetadata("", 0)
+        return self._key_to_path(key)
 
     def batched_write_check(self, key_strs: Iterable[str],
                             kv_size: float) -> Iterable[str]:
+        paths = []
+        for key_str in key_strs:
+            key = CacheEngineKey.from_string(key_str)
+            if key in self.dict:
+                kv_size = kv_size - self.dict[key].size
+                paths.append("")
+            else:
+                self.dict[key] = DiskCacheMetadata("", 0)
+                paths.append(self._key_to_path(key))
+
         evict_keys, put_status = self.evictor.update_on_put(
             self.dict, DiskCacheMetadata("", kv_size))
 
@@ -163,14 +173,6 @@ class LMCDiskAddressManager():
         for evict_key in evict_keys:
             self.remove(evict_key)
 
-        paths = []
-        for key_str in key_strs:
-            key = CacheEngineKey.from_string(key_str)
-            if key in self.dict:
-                paths.append("")
-            else:
-                self.dict[key] = DiskCacheMetadata("", 0)
-                paths.append(self._key_to_path(key))
         return paths
 
     def write_ready(self, key_str: str, kv_size: float):
