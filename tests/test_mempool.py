@@ -6,9 +6,9 @@ from lmcache.storage_backend.mem_pool import (LocalCPUBufferPool, LocalCPUPool,
                                               LocalGPUPool)
 
 
-def dumb_metadata(kv_shape=(32, 2, 256, 8, 128), 
-                  kv_dtype=torch.bfloat16,
-                  max_cache_size=10):
+def dumb_metadata(
+        kv_shape=(32, 2, 256, 8, 128), kv_dtype=torch.bfloat16,
+        max_cache_size=10):
     return LMCacheMemPoolMetadata(kv_shape, kv_dtype, max_cache_size)
 
 
