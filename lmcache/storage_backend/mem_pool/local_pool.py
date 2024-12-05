@@ -14,7 +14,7 @@ class LocalPool(BasePool):
 
     def __init__(self, metadata: LMCacheMemPoolMetadata):
         self.chunk_size = metadata.kv_shape[2]
-        self.max_chunk_num = 100
+        self.max_chunk_num = 200
         self.mem_pool: List[torch.Tensor] = []
 
         self.free_pool = [i for i in range(self.max_chunk_num)]
@@ -44,8 +44,7 @@ class LocalPool(BasePool):
         if not self.free_pool:
             logger.warning("No free memory chunks."
                            "Shouldn't happen! Evictor might be failing!")
-            raise Exception("No free chunks in cpu memory. \
-                Shouldn't happen in local cpu-only backend.")
+            raise Exception("Mempool allocation failed")
         chunk_idx = self.free_pool.pop()
         return KVObj(chunk_idx, self.mem_pool[chunk_idx][:, :, 0:num_tok])
 
