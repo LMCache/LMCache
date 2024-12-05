@@ -352,11 +352,8 @@ class LMCLocalDiskBackend(LMCBackendInterface):
 
         """
 
-        self.update_lock.acquire()
         path = self.dict[key].path
         self.dict.pop(key)
-        self.update_lock.release()
-
         os.remove(path)
 
     @_lmcache_nvtx_annotate
