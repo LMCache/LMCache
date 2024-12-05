@@ -134,7 +134,7 @@ class LMCDiskAddressManager():
         key = CacheEngineKey.from_string(key_str)
         if key in self.dict:
             return ""
-        
+
         evict_keys, put_status = self.evictor.update_on_put(
             self.dict, DiskCacheMetadata("", kv_size))
 
