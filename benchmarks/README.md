@@ -28,10 +28,17 @@ python3 multi-round-qa.py \
     --num-users 10 \
     --num-rounds 5 \
     --qps 0.5 \
-    --system-prompt-len 3000 \
+    --shared-system-prompt 1000 \
+    --user-history-prompt 2000 \
     --answer-len 100 \
     --model mistralai/Mistral-7B-Instruct-v0.2 \
     --base-url http://localhost:8000/v1
+```
+
+*Note:* the above command requires there is a serving engine with the `mistralai/Mistral-7B-Instruct-v0.2` model served locally at `http://localhost:8000/v1`. Here's an example command to launch the serving engine:
+
+```bash
+vllm serve mistralai/Mistral-7B-Instruct-v0.2 --disable-log-requests
 ```
 
 ### Arguments
@@ -39,7 +46,8 @@ python3 multi-round-qa.py \
 - `--num-users`: The maximum number of concurrent users in the system.
 - `--num-rounds`: The number of rounds per user.
 - `--qps`: The overall queries per second (QPS) rate for the system.
-- `--system-prompt-len`: Length of the system prompt (in tokens).
+- `--shared-system-prompt`: Length of the system prompt shared across all users (in tokens).
+- `--user-history-prompt`: Length of the user-specific context (simulating existing chat history) (in tokens).
 - `--answer-len`: Length of the answer expected (in tokens).
 - `--model`: The model name (e.g., `mistralai/Mistral-7B-Instruct-v0.2`).
 - `--base-url`: The URL endpoint for the language model server.

@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import logging
 import time
 from dataclasses import dataclass
 
@@ -7,7 +8,7 @@ import openai
 import pandas as pd
 from utils import AsyncLoopWrapper, init_logger
 
-logger = init_logger(__name__)
+logger = init_logger(__name__, logging.INFO)
 
 
 @dataclass
@@ -15,8 +16,11 @@ class WorkloadConfig:
     # Max number of users in the system concurrently
     num_users: int
 
-    # Length of system prompt
+    # Length of shared system prompt
     system_prompt_len: int
+
+    # Length of the user-specific data
+    user_info_len: int
 
     # Length of the answer in one round
     answer_len: int
@@ -39,6 +43,9 @@ class UserConfig:
     # System prompt length
     system_prompt_len: int
 
+    # Length of the user-specific data
+    user_info_len: int
+
     # Answer length
     answer_len: int
 
@@ -53,6 +60,7 @@ class UserConfig:
                         workload_config: WorkloadConfig) -> 'UserConfig':
         return UserConfig(user_id=user_id,
                           system_prompt_len=workload_config.system_prompt_len,
+                          user_info_len=workload_config.user_info_len,
                           answer_len=workload_config.answer_len,
                           gap_between_requests=workload_config.num_users /
                           workload_config.qps,
@@ -79,6 +87,9 @@ class ChatHistory:
 
     def get_messages_for_openai(self):
         return self.history
+
+    def __len__(self):
+        return len(self.history)
 
 
 @dataclass
@@ -172,10 +183,15 @@ class UserSession:
         self.finish_times.append(response.finish_time)
 
     def _build_system_prompt(self):
-        dummy_text = ' '.join(["hi"] *
-                              (self.user_config.system_prompt_len - 10))
-        system_prompt = f"Hi, I'm user {self.user_config.user_id}." + \
-                        f"Here are some text: {dummy_text}."
+
+        def gen_dummy_text(length):
+            return ' '.join(["hi"] * length)
+
+        dummy_text_sys = gen_dummy_text(self.user_config.system_prompt_len)
+        dummy_text_user = gen_dummy_text(self.user_config.user_info_len)
+        system_prompt = f"Hi, here's some system prompt: {dummy_text_sys}." + \
+                        f"For user {self.user_config.user_id}, " + \
+                        f"here are some other context: {dummy_text_user}."
         return system_prompt
 
     def _build_new_question(self):
@@ -186,7 +202,7 @@ class UserSession:
     def _launch_new_request(self, timestamp: float,
                             request_executor: RequestExecutor):
         prompt = self._build_new_question()
-        if self.last_request_time is None:
+        if len(self.chat_history) == 0:
             prompt = self._build_system_prompt() + prompt
         self.chat_history.on_user_query(prompt)
         logger.debug(
@@ -194,17 +210,35 @@ class UserSession:
         )
         request_executor.launch_request(self.chat_history,
                                         self.user_config.answer_len,
-                                        self.on_request_finished)
+                                        self._on_request_finished)
         self.has_unfinished_request = True
         self.last_request_time = timestamp
 
-    def on_request_finished(self, response: Response):
+    def _on_request_finished(self, response: Response):
         self.chat_history.on_system_response(response.body)
         self.has_unfinished_request = False
         logger.debug(f"User {self.user_config.user_id} finished one request. "
                      f"Prompt tokens: {response.prompt_tokens}, "
                      f"generation tokens: {response.generation_tokens}")
         self._update_result(response)
+
+    def set_internal_state(self, offset: float, timestamp: float):
+        """Tell the session is the 'offset' seconds after the start"""
+        assert len(self.chat_history) == 0, "Internal state should be set " \
+                "before the first request"
+
+        num_passed_questions = \
+                int(offset / self.user_config.gap_between_requests) + 1
+
+        passed_time = (num_passed_questions - 1) \
+                * self.user_config.gap_between_requests
+
+        self.last_request_time = timestamp - offset + passed_time
+        self.question_id = num_passed_questions
+        logger.debug(
+            f"Set internal state for user {self.user_config.user_id}, "
+            f"question_id: {self.question_id}, "
+            f"last_request_time: {self.last_request_time}")
 
     def step(self, timestamp: float, request_executor: RequestExecutor):
         if self.question_id >= self.user_config.num_rounds:
@@ -251,18 +285,29 @@ class UserSessionManager:
                 (workload_config.num_rounds - 1)
         self.gap_between_users = session_alive_time / (
             workload_config.num_users + 0)
+        self.ramp_up_time = workload_config.num_users * self.gap_between_users
 
         logger.info(
             f"Gap between users: {self.gap_between_users} secs.\n"
             f"Gap between user reqs: {gap_between_requests_per_user} secs.\n"
             f"Expected length of user session: {session_alive_time} "
-            "secs.\nExpected ramp-up time: "
-            f"{workload_config.num_users * self.gap_between_users} secs")
+            f"secs.\nExpected ramp-up time: {self.ramp_up_time} secs")
 
         self.user_id = 0
         self.last_user_join = 0
         self.session_summaries = []
         self.start_time = None
+
+        self.need_ramp_up = True
+
+    def _ramp_up(self, timestamp: float, ramp_up_time: float):
+        for i in range(self.workload_config.num_users):
+            new_session = self._create_user_session()
+            offset = ramp_up_time - i * self.gap_between_users
+            if offset < 0:
+                break
+            new_session.set_internal_state(offset, timestamp)
+        self.need_ramp_up = False
 
     def _create_user_session(self):
         self.user_id += 1
@@ -270,6 +315,7 @@ class UserSessionManager:
                                                  self.workload_config)
         user_session = UserSession(user_config)
         self.sessions.append(user_session)
+        return user_session
 
     def _remove_finished_sessions(self):
         sessions_to_remove = [s for s in self.sessions if s.finished]
@@ -283,6 +329,9 @@ class UserSessionManager:
         self.sessions = [s for s in self.sessions if not s.finished]
 
     def step(self, timestamp: float, executor: RequestExecutor):
+        if self.need_ramp_up:
+            self._ramp_up(timestamp, self.ramp_up_time)
+
         if self.start_time is None:
             self.start_time = timestamp
 
@@ -314,12 +363,8 @@ class UserSessionManager:
                      f"pending queries: {pending_queries}, "
                      f"finished queries: {len(df)}")
 
-        # Metrics to calculate:
-        # - QPS
-        # - Average prompt throughput
-        # - Average generation throughput
-        # - Average TTFT
         start_time = max(self.start_time, start_time)
+        end_time = min(end_time, df["finish_time"].max())
         total_time = end_time - start_time
 
         total_requests = launched_queries + pending_queries
@@ -331,30 +376,37 @@ class UserSessionManager:
         total_prompt_tokens = df["prompt_tokens"].sum()
         total_generation_tokens = df["generation_tokens"].sum()
         average_prefill_speed = total_prompt_tokens / total_time
-        average_generation_speed = total_generation_tokens / total_time
+        average_generation_speed = \
+                total_generation_tokens / total_time
         average_generation_speed_per_request = \
-                total_generation_tokens / total_finished_requests
+                (df["generation_tokens"] / df["generation_time"]).mean()
         average_ttft = df["ttft"].mean()
+        logger.info("Calculating performance summary")
+        print("\n")
         print(
             "==================== Performance summary ======================")
-        print(f"  \033[33mQPS: \033[32m{qps:.4f} reqs/s\033[0m")
+        print(f"  \033[33mQPS: \033[32m{qps:.4f} reqs/s\033[0m\n")
 
         print(f"  \033[33mProcessing speed: "
-              f"\033[32m{finished_qps:.4f} reqs/s\033[0m")
+              f"\033[32m{finished_qps:.4f} reqs/s\033[0m\n")
 
-        print("  \033[33mAverage prompt throughput: "
-              f"\033[32m{average_prefill_speed:.4f} tokens/s\033[0m")
+        print("  \033[33mInput tokens per second: "
+              f"\033[32m{average_prefill_speed:.4f} tokens/s\033[0m\n")
 
-        print("  \033[33mAverage generation throughput: "
-              f"\033[32m{average_generation_speed:.4f} tokens/s\033[0m")
+        print("  \033[33mOutput tokens per second: "
+              f"\033[32m{average_generation_speed:.4f} tokens/s\033[0m\n")
+
         print("  \033[33mAverage generation throughput (per request): "
               f"\033[32m{average_generation_speed_per_request:.4f} "
-              "tokens/req/s\033[0m")
+              "tokens/req/s\033[0m\n")
 
-        print(f"  \033[33mAverage TTFT: \033[32m{average_ttft:.4f}s\033[0m")
+        print(f"  \033[33mAverage TTFT: \033[32m{average_ttft:.4f}s\033[0m\n")
+
+        print(f"Time range: {start_time} - {end_time} ({total_time:.2f}s)")
 
         print(
             "===============================================================")
+        print("\n")
         return df
 
 
@@ -377,10 +429,15 @@ def parse_arguments() -> WorkloadConfig:
                         type=int,
                         required=True,
                         help="Max number of users in the system concurrently")
-    parser.add_argument("--system-prompt-len",
+    parser.add_argument("--shared-system-prompt",
                         type=int,
                         required=True,
-                        help="Length of system prompt")
+                        help="Length of the shared system prompt (tokens)")
+    parser.add_argument(
+        "--user-history-prompt",
+        type=int,
+        required=True,
+        help="Length of the user-specific history prompt (tokens)")
     parser.add_argument("--answer-len",
                         type=int,
                         required=True,
@@ -401,19 +458,20 @@ def parse_arguments() -> WorkloadConfig:
         default=30,
         help="The time between two summary loggings in seconds")
 
+    parser.add_argument("--verbose",
+                        action="store_true",
+                        help="Whether to enable verbose logging")
+
     args = parser.parse_args()
     return args
-
-    return WorkloadConfig(num_users=args.num_users,
-                          system_prompt_len=args.system_prompt_len,
-                          answer_len=args.answer_len,
-                          num_rounds=args.num_rounds,
-                          qps=args.qps,
-                          model=args.model)
 
 
 def main():
     args = parse_arguments()
+    if args.verbose:
+        global logger
+        logger = init_logger(__name__, level=logging.DEBUG)
+
     step_interval = 0.1
 
     executor = RequestExecutor(base_url=args.base_url,
@@ -421,12 +479,14 @@ def main():
                                model=args.model)
 
     warmup_engine(executor)
-    workload_config = WorkloadConfig(num_users=args.num_users,
-                                     system_prompt_len=args.system_prompt_len,
-                                     answer_len=args.answer_len,
-                                     num_rounds=args.num_rounds,
-                                     qps=args.qps,
-                                     model=args.model)
+    workload_config = WorkloadConfig(
+        num_users=args.num_users,
+        system_prompt_len=args.shared_system_prompt,
+        user_info_len=args.user_history_prompt,
+        answer_len=args.answer_len,
+        num_rounds=args.num_rounds,
+        qps=args.qps,
+        model=args.model)
 
     manager = UserSessionManager(workload_config)
 
