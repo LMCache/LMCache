@@ -88,6 +88,8 @@ class Response:
     generation_time: float
     prompt_tokens: int
     generation_tokens: int
+    launch_time: float
+    finish_time: float
 
 
 class RequestExecutor:
@@ -96,6 +98,7 @@ class RequestExecutor:
         self.client = openai.AsyncOpenAI(api_key=api_key, base_url=base_url)
         self.model = model
         self.loop = AsyncLoopWrapper.GetOrStartLoop()
+        self.request_history = []
 
     async def _async_launch_request(self, messages, max_tokens):
         start_time = time.time()
@@ -125,7 +128,9 @@ class RequestExecutor:
                         ttft=first_token_time - start_time,
                         generation_time=time.time() - first_token_time,
                         prompt_tokens=tokens_prefill,
-                        generation_tokens=tokens_out)
+                        generation_tokens=tokens_out,
+                        launch_time=start_time,
+                        finish_time=time.time())
 
     def launch_request(self, chat_history: ChatHistory, max_tokens: int,
                        finish_callback):
@@ -153,6 +158,8 @@ class UserSession:
         self.generation_lengths = []
         self.ttfts = []
         self.generation_times = []
+        self.launch_times = []
+        self.finish_times = []
 
         self.finished = False
 
@@ -161,6 +168,8 @@ class UserSession:
         self.generation_lengths.append(response.generation_tokens)
         self.ttfts.append(response.ttft)
         self.generation_times.append(response.generation_time)
+        self.launch_times.append(response.launch_time)
+        self.finish_times.append(response.finish_time)
 
     def _build_system_prompt(self):
         dummy_text = ' '.join(["hi"] *
@@ -173,6 +182,21 @@ class UserSession:
         self.question_id += 1
         return f"Here's question #{self.question_id}: can you tell me " + \
                 "a new long story with a happy ending?"
+
+    def _launch_new_request(self, timestamp: float,
+                            request_executor: RequestExecutor):
+        prompt = self._build_new_question()
+        if self.last_request_time is None:
+            prompt = self._build_system_prompt() + prompt
+        self.chat_history.on_user_query(prompt)
+        logger.debug(
+            f"User {self.user_config.user_id} issues request {self.question_id}"
+        )
+        request_executor.launch_request(self.chat_history,
+                                        self.user_config.answer_len,
+                                        self.on_request_finished)
+        self.has_unfinished_request = True
+        self.last_request_time = timestamp
 
     def on_request_finished(self, response: Response):
         self.chat_history.on_system_response(response.body)
@@ -188,15 +212,7 @@ class UserSession:
             return
 
         if self.last_request_time is None:
-            logger.debug(f"Issuing the request {self.question_id}")
-            self.last_request_time = timestamp
-            system_prompt = self._build_system_prompt()
-            question = self._build_new_question()
-            self.chat_history.on_user_query(system_prompt + question)
-            request_executor.launch_request(self.chat_history,
-                                            self.user_config.answer_len,
-                                            self.on_request_finished)
-            self.has_unfinished_request = True
+            self._launch_new_request(timestamp, request_executor)
             return
 
         if timestamp - self.last_request_time > \
@@ -207,14 +223,7 @@ class UserSession:
                     "request and unable to fit the QPS requirement.")
                 return
 
-            logger.debug(f"Issuing the request {self.question_id}")
-            self.last_request_time = timestamp
-            question = self._build_new_question()
-            self.chat_history.on_user_query(question)
-            request_executor.launch_request(self.chat_history,
-                                            self.user_config.answer_len,
-                                            self.on_request_finished)
-            self.has_unfinished_request = True
+            self._launch_new_request(timestamp, request_executor)
             return
 
     def summary(self) -> pd.DataFrame:
@@ -225,6 +234,8 @@ class UserSession:
         df["generation_time"] = self.generation_times
         df["user_id"] = self.user_config.user_id
         df["question_id"] = range(1, len(self.prompt_lengths) + 1)
+        df["launch_time"] = self.launch_times
+        df["finish_time"] = self.finish_times
         return df
 
 
@@ -239,10 +250,11 @@ class UserSessionManager:
         session_alive_time = gap_between_requests_per_user * \
                 (workload_config.num_rounds - 1)
         self.gap_between_users = session_alive_time / (
-            workload_config.num_users + 1)
+            workload_config.num_users + 0)
 
         logger.info(
             f"Gap between users: {self.gap_between_users} secs.\n"
+            f"Gap between user reqs: {gap_between_requests_per_user} secs.\n"
             f"Expected length of user session: {session_alive_time} "
             "secs.\nExpected ramp-up time: "
             f"{workload_config.num_users * self.gap_between_users} secs")
@@ -285,34 +297,62 @@ class UserSessionManager:
 
         self._remove_finished_sessions()
 
-    def summary(self, timestamp: float) -> pd.DataFrame:
+    def summary(self, start_time: float, end_time: float) -> pd.DataFrame:
         if len(self.session_summaries) == 0 and len(self.sessions) == 0:
             return pd.DataFrame()
 
         df = pd.concat([s for s in self.session_summaries] +
                        [s.summary() for s in self.sessions])
 
+        launched_queries = len(
+            df.query(f"{start_time} <= launch_time <= {end_time}"))
+        pending_queries = len(
+            [s for s in self.sessions if s.has_unfinished_request])
+        df = df.query(f"{start_time} <= finish_time <= {end_time}")
+
+        logger.debug(f"Launched queries: {launched_queries}, "
+                     f"pending queries: {pending_queries}, "
+                     f"finished queries: {len(df)}")
+
         # Metrics to calculate:
         # - QPS
         # - Average prompt throughput
         # - Average generation throughput
         # - Average TTFT
-        total_time = timestamp - self.start_time
-        total_requests = len(df)
+        start_time = max(self.start_time, start_time)
+        total_time = end_time - start_time
+
+        total_requests = launched_queries + pending_queries
         qps = total_requests / total_time
+
+        total_finished_requests = len(df)
+        finished_qps = total_finished_requests / total_time
+
         total_prompt_tokens = df["prompt_tokens"].sum()
         total_generation_tokens = df["generation_tokens"].sum()
         average_prefill_speed = total_prompt_tokens / total_time
         average_generation_speed = total_generation_tokens / total_time
+        average_generation_speed_per_request = \
+                total_generation_tokens / total_finished_requests
         average_ttft = df["ttft"].mean()
         print(
             "==================== Performance summary ======================")
-        print(f"  \033[33mQPS: \033[32m{qps:.4f}\033[0m")
+        print(f"  \033[33mQPS: \033[32m{qps:.4f} reqs/s\033[0m")
+
+        print(f"  \033[33mProcessing speed: "
+              f"\033[32m{finished_qps:.4f} reqs/s\033[0m")
+
         print("  \033[33mAverage prompt throughput: "
-              f"\033[32m{average_prefill_speed:.4f}\033[0m")
+              f"\033[32m{average_prefill_speed:.4f} tokens/s\033[0m")
+
         print("  \033[33mAverage generation throughput: "
-              f"\033[32m{average_generation_speed:.4f}\033[0m")
-        print(f"  \033[33mAverage TTFT: \033[32m{average_ttft:.4f}\033[0m")
+              f"\033[32m{average_generation_speed:.4f} tokens/s\033[0m")
+        print("  \033[33mAverage generation throughput (per request): "
+              f"\033[32m{average_generation_speed_per_request:.4f} "
+              "tokens/req/s\033[0m")
+
+        print(f"  \033[33mAverage TTFT: \033[32m{average_ttft:.4f}s\033[0m")
+
         print(
             "===============================================================")
         return df
@@ -391,23 +431,26 @@ def main():
     manager = UserSessionManager(workload_config)
 
     num_steps = 0
+    last_summary_time = time.time()
     try:
         while True:
             num_steps += 1
             manager.step(time.time(), executor)
             time.sleep(0.1)
+            time.sleep(0.01)
 
             if num_steps % int(args.log_interval / step_interval) == 0:
-                manager.summary(time.time())
+                manager.summary(last_summary_time, time.time())
+                last_summary_time = time.time()
 
     except KeyboardInterrupt:
-        logger.info("Interrupted, printing the final result")
-
-    logger.info("Finished the simulation")
-    summary = manager.summary(time.time())
-    summary.to_csv("summary.csv", index=False)
+        logger.info("Interrupted, waiting for the final result")
 
     AsyncLoopWrapper.StopLoop()
+
+    logger.info("Finished the simulation")
+    summary = manager.summary(0, time.time())
+    summary.to_csv("summary.csv", index=False)
 
 
 if __name__ == "__main__":
