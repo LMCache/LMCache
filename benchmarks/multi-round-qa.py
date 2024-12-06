@@ -179,7 +179,7 @@ class UserSession:
         self.has_unfinished_request = False
         logger.debug(
             f"User {self.user_config.user_id} finished one request. "
-            f"Prompt tokens: {response.prompt_tokens}, ",
+            f"Prompt tokens: {response.prompt_tokens}, "
             f"generation tokens: {response.generation_tokens}")
         self._update_result(response)
 
@@ -239,7 +239,7 @@ class UserSessionManager:
                 workload_config.num_users / workload_config.qps
         session_alive_time = gap_between_requests_per_user * \
                 (workload_config.num_rounds - 1)
-        self.gap_between_users = session_alive_time / workload_config.num_users
+        self.gap_between_users = session_alive_time / (workload_config.num_users + 1)
 
         self.user_id = 0
         self.last_user_join = 0
