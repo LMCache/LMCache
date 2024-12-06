@@ -177,10 +177,9 @@ class UserSession:
     def on_request_finished(self, response: Response):
         self.chat_history.on_system_response(response.body)
         self.has_unfinished_request = False
-        logger.debug(
-            f"User {self.user_config.user_id} finished one request. "
-            f"Prompt tokens: {response.prompt_tokens}, "
-            f"generation tokens: {response.generation_tokens}")
+        logger.debug(f"User {self.user_config.user_id} finished one request. "
+                     f"Prompt tokens: {response.prompt_tokens}, "
+                     f"generation tokens: {response.generation_tokens}")
         self._update_result(response)
 
     def step(self, timestamp: float, request_executor: RequestExecutor):
@@ -239,7 +238,14 @@ class UserSessionManager:
                 workload_config.num_users / workload_config.qps
         session_alive_time = gap_between_requests_per_user * \
                 (workload_config.num_rounds - 1)
-        self.gap_between_users = session_alive_time / (workload_config.num_users + 1)
+        self.gap_between_users = session_alive_time / (
+            workload_config.num_users + 1)
+
+        logger.info(
+            f"Gap between users: {self.gap_between_users} secs.\n"
+            f"Expected length of user session: {session_alive_time} "
+            "secs.\nExpected ramp-up time: "
+            f"{workload_config.num_users * self.gap_between_users} secs")
 
         self.user_id = 0
         self.last_user_join = 0
