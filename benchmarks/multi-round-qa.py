@@ -368,7 +368,7 @@ class UserSessionManager:
         total_time = end_time - start_time
 
         total_requests = launched_queries + pending_queries
-        qps = total_requests / total_time
+        _qps = total_requests / total_time
 
         total_finished_requests = len(df)
         finished_qps = total_finished_requests / total_time
@@ -385,10 +385,13 @@ class UserSessionManager:
         print("\n")
         print(
             "==================== Performance summary ======================")
-        print(f"  \033[33mQPS: \033[32m{qps:.4f} reqs/s\033[0m\n")
+        print(f"  \033[33mQPS: \033[32m{self.workload_config.qps:.4f} "
+              "reqs/s\033[0m\n")
 
         print(f"  \033[33mProcessing speed: "
               f"\033[32m{finished_qps:.4f} reqs/s\033[0m\n")
+
+        print(f"  \033[33mUnfinished requests: {pending_queries}\033[0m\n")
 
         print("  \033[33mInput tokens per second: "
               f"\033[32m{average_prefill_speed:.4f} tokens/s\033[0m\n")
