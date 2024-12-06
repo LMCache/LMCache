@@ -1,12 +1,15 @@
-import logging
 import asyncio
+import logging
 import threading
 from logging import Logger
+
 
 def build_format(color):
     reset = "\x1b[0m"
     underline = "\x1b[3m"
-    return f"{color}[%(asctime)s] %(levelname)s:{reset} %(message)s {underline}(%(filename)s:%(lineno)d:%(name)s){reset}"
+    return f"{color}[%(asctime)s] %(levelname)s:{reset} %(message)s " + \
+           f"{underline}(%(filename)s:%(lineno)d:%(name)s){reset}"
+
 
 class CustomFormatter(logging.Formatter):
 
@@ -30,6 +33,7 @@ class CustomFormatter(logging.Formatter):
         formatter = logging.Formatter(log_fmt)
         return formatter.format(record)
 
+
 def init_logger(name: str) -> Logger:
     logger = logging.getLogger(name)
 
@@ -41,6 +45,7 @@ def init_logger(name: str) -> Logger:
 
     return logger
 
+
 class AsyncLoopWrapper:
     _loop: asyncio.AbstractEventLoop = None
     _thread: threading.Thread = None
@@ -48,11 +53,14 @@ class AsyncLoopWrapper:
 
     @classmethod
     def WaitLoop(cls):
-        assert cls._loop is not None, "Loop is not started, call StartLoop first"
+        assert cls._loop is not None, "Loop is not started"
 
         async def wait_for_tasks():
             current_task = asyncio.current_task(cls._loop)
-            tasks = [task for task in asyncio.all_tasks(cls._loop) if not task.done() and task is not current_task]
+            tasks = [
+                task for task in asyncio.all_tasks(cls._loop)
+                if not task.done() and task is not current_task
+            ]
             cls._logger.info(f"Waiting for {len(tasks)} tasks to finish")
             if tasks:
                 await asyncio.gather(*tasks)
@@ -69,7 +77,7 @@ class AsyncLoopWrapper:
     def StartLoop(cls):
         if cls._loop is not None:
             cls._logger.warning("Loop is already started")
-            return 
+            return
 
         if cls._loop is None:
             cls._loop = asyncio.new_event_loop()
@@ -84,37 +92,22 @@ class AsyncLoopWrapper:
 
     @classmethod
     def StopLoop(cls):
-        assert cls._loop is not None, "Loop is not started, call StartLoop first"
-        assert cls._thread is not None, "Thread is not started, call StartLoop first"
-        def stop_loop():
-            cls._logger.debug("Stoping the loop!")
-            cls._loop.stop()
+        assert cls._loop is not None, "Loop is not started"
+        assert cls._thread is not None, "Thread is not started"
 
+        def stop_loop():
+            cls._logger.debug("Stopping the loop!")
+            cls._loop.stop()
 
         cls._logger.info("Waiting for remaining tasks to finish")
         cls.WaitLoop()
-        #async def wait_for_tasks():
-        #    current_task = asyncio.current_task(cls._loop)
-        #    tasks = [task for task in asyncio.all_tasks(cls._loop) if not task.done() and task is not current_task]
-        #    cls._logger.info(f"Waiting for {len(tasks)} tasks to finish")
-        #    if tasks:
-        #        await asyncio.gather(*tasks)
-
-        ## Schedule the wait_for_tasks coroutine to be executed in the loop
-        #future = asyncio.run_coroutine_threadsafe(wait_for_tasks(), cls._loop)
-        #try:
-        #    # Wait for wait_for_tasks to complete
-        #    future.result()
-        #except Exception as e:
-        #    cls._logger.error(f"Error while waiting for tasks: {e}")
 
         cls._loop.call_soon_threadsafe(stop_loop)
         cls._thread.join()
 
-
     @classmethod
     def GetLoop(cls) -> asyncio.AbstractEventLoop:
-        assert cls._loop is not None, "Loop is not started, call StartLoop first"
+        assert cls._loop is not None, "Loop is not started"
         return cls._loop
 
     @classmethod
