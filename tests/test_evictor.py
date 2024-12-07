@@ -5,8 +5,9 @@ from lmcache.cache_engine import LMCacheEngine
 from lmcache.config import LMCacheEngineConfig, LMCacheEngineMetadata
 
 
-def dumb_metadata(fmt="vllm"):
-    return LMCacheEngineMetadata("test_model", 3, 123, fmt, "half")
+def dumb_metadata(fmt="vllm", kv_shape=(32, 2, 256, 8, 128)):
+    return LMCacheEngineMetadata("test_model", 3, 123, fmt, torch.bfloat16,
+                                 kv_shape)
 
 
 def check_kv_cache_equal(left, right, num_tokens, fmt):
@@ -72,11 +73,9 @@ def get_tensor_size(tensor):
     return size_in_gb
 
 
-@pytest.mark.skip(
-    reason="Temporarily disabling the evictor as stated in PR 185")
 @pytest.mark.parametrize("dst_device", ["cuda:0"])
 @pytest.mark.parametrize("backend", ["cuda", "cpu", "file://local_disk/"])
-def test_evict(backend, dst_device, autorelease):
+def test_lru_evict(backend, dst_device, autorelease):
     fmt = "vllm"
     num_tokens = 256
     src_device = "cuda:0"

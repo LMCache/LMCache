@@ -23,15 +23,16 @@ def CreateSerde(
 ) -> Tuple[Serializer, Deserializer]:
     s: Optional[Serializer] = None
     d: Optional[Deserializer] = None
+
     if serde_type == "torch":
-        s, d = TorchSerializer(), TorchDeserializer()
+        s, d = TorchSerializer(), TorchDeserializer(metadata.kv_dtype)
     elif serde_type == "safetensor":
-        s, d = SafeSerializer(), SafeDeserializer()
+        s, d = SafeSerializer(), SafeDeserializer(metadata.kv_dtype)
     elif serde_type == "cachegen":
         s, d = CacheGenSerializer(config, metadata), CacheGenDeserializer(
-            config, metadata)
+            config, metadata, metadata.kv_dtype)
     elif serde_type == "fast":
-        s, d = FastSerializer(), FastDeserializer()
+        s, d = FastSerializer(), FastDeserializer(metadata.kv_dtype)
     else:
         raise ValueError(f"Invalid serde type: {serde_type}")
 

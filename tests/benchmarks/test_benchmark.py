@@ -52,10 +52,10 @@ def test_cachegen_decoder_bench(benchmark, fmt, chunk_size):
         world_size=1,
         worker_id=0,
         fmt=fmt,
-        dtype="bfloat16",
-    )
+        kv_dtype=torch.bfloat16,
+        kv_shape=None)
     serializer = CacheGenSerializer(config, metadata)
-    deserializer = CacheGenDeserializer(config, metadata)
+    deserializer = CacheGenDeserializer(config, metadata, torch.bfloat16)
 
     kv = to_blob(generate_kv_cache(chunk_size, fmt, "cuda"))
     output = serializer.to_bytes(kv)

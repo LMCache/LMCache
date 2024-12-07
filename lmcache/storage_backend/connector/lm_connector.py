@@ -20,13 +20,18 @@ class LMCServerConnector(RemoteConnector):
         self.socket_lock = threading.Lock()
 
     def receive_all(self, n):
-        data = bytearray()
-        while len(data) < n:
-            packet = self.client_socket.recv(n - len(data))
-            if not packet:
+        received = 0
+        buffer = bytearray(n)
+        view = memoryview(buffer)
+
+        while received < n:
+            num_bytes = self.client_socket.recv_into(view[received:],
+                                                     n - received)
+            if num_bytes == 0:
                 return None
-            data.extend(packet)
-        return data
+            received += num_bytes
+
+        return buffer
 
     def send_all(self, data):
         """

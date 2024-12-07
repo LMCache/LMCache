@@ -43,6 +43,9 @@ class SerializerDebugWrapper(Serializer):
 
 class Deserializer(metaclass=abc.ABCMeta):
 
+    def __init__(self, dtype):
+        self.dtype = dtype
+
     @abc.abstractmethod
     def from_bytes(self, bs: bytes) -> torch.Tensor:
         """
