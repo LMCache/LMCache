@@ -22,8 +22,11 @@ class LocalPool(BasePool):
         self.free_pool = [i for i in range(self.max_chunk_num)]
 
     def init_max_chunk_num(self, metadata: LMCacheMemPoolMetadata) -> int:
-        max_chunk_num = metadata.max_local_cache_size *\
-            1024**3 // self.size_per_chunk + 1
+        """
+        Initialize the maximum number of chunks in the memory pool.
+        """
+        max_chunk_num = int(metadata.max_local_cache_size *\
+            1024**3) // self.size_per_chunk + 1
         return int(max_chunk_num)
 
     def allocate(self, kv_chunk: torch.Tensor) -> Optional[KVObj]:
