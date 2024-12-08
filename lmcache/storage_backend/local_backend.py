@@ -155,7 +155,7 @@ class LMCLocalBackend(LMCBackendInterface):
 
         # Obtain keys to evict
         evict_keys, put_status = self.evictor.update_on_put(
-            self.dict, self.evictor.get_size(kv_chunk))
+            self.dict, self.mpool.size_per_chunk)
 
         # Abort put if cache too big
         if put_status == PutStatus.ILLEGAL:

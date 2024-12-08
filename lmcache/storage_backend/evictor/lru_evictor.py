@@ -14,9 +14,8 @@ class LRUEvictor(BaseEvictor):
     """
 
     def __init__(self, max_cache_size: float = 10.0):
-        # TODO(Jiayi): need to be configured
-        # the storage size limit (in bytes)
-        self.MAX_CACHE_SIZE = max_cache_size * 1024**3
+        # The storage size limit (in bytes)
+        self.MAX_CACHE_SIZE = int(max_cache_size * 1024**3)
 
         # TODO(Jiayi): need a way to avoid fragmentation
         # current storage size (in bytes)
