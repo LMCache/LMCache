@@ -1,9 +1,9 @@
 import argparse
-from typing import Optional
 import asyncio
 import logging
 import time
 from dataclasses import dataclass
+from typing import Optional
 
 import openai
 import pandas as pd
@@ -347,8 +347,8 @@ class UserSessionManager:
         self._remove_finished_sessions()
 
     @staticmethod
-    def ProcessSummary(df: pd.DataFrame, 
-                       start_time: Optional[float] = None, 
+    def ProcessSummary(df: pd.DataFrame,
+                       start_time: Optional[float] = None,
                        end_time: Optional[float] = None,
                        pending_queries: int = 0,
                        qps: Optional[int] = None):
@@ -364,7 +364,7 @@ class UserSessionManager:
                      f"finished queries: {len(df)}")
 
         if qps is None:
-            qps = 0.0 
+            qps = 0.0
 
         if start_time is None:
             start_time = df["launch_time"].min()
@@ -416,7 +416,6 @@ class UserSessionManager:
         print("\n")
         return df
 
-
     def summary(self, start_time: float, end_time: float) -> pd.DataFrame:
         if len(self.session_summaries) == 0 and len(self.sessions) == 0:
             return pd.DataFrame()
@@ -429,11 +428,8 @@ class UserSessionManager:
         end_time = min(end_time, df["finish_time"].max())
         qps = self.workload_config.qps
 
-        df = UserSessionManager.ProcessSummary(df, 
-                                               start_time,
-                                               end_time, 
-                                               pending_queries,
-                                               qps)
+        df = UserSessionManager.ProcessSummary(df, start_time, end_time,
+                                               pending_queries, qps)
         return df
 
 
@@ -479,15 +475,15 @@ def parse_arguments() -> WorkloadConfig:
                         type=str,
                         required=True,
                         help="Base URL of the serving engine endpoint")
-    parser.add_argument("--time", 
+    parser.add_argument("--time",
                         type=int,
                         required=False,
                         help="The time to run the simulation in seconds")
     parser.add_argument("--output",
                         type=str,
                         default="summary.csv",
-                        help="The output file name (ended with csv or txt) " 
-                             "for the summary csv and txt")
+                        help="The output file name (ended with csv or txt) "
+                        "for the summary csv and txt")
     parser.add_argument(
         "--log-interval",
         type=int,
@@ -501,24 +497,22 @@ def parse_arguments() -> WorkloadConfig:
     args = parser.parse_args()
     return args
 
+
 def parse_process_summary():
     parser = argparse.ArgumentParser(
-        description="Parse benchmark configurations.",
-        add_help=False)
+        description="Parse benchmark configurations.", add_help=False)
 
-    parser.add_argument("--process-summary",
-                        type=str,
-                        default=None)
+    parser.add_argument("--process-summary", type=str, default=None)
 
     args, _ = parser.parse_known_args()
     return args
 
+
 def process_output(filename):
     logger.warning(f"Processing the existing summary file {filename}"
-                    ", ignoring all the other arguments")
-    UserSessionManager.ProcessSummary(
-        pd.read_csv(filename),
-        pending_queries=0)
+                   ", ignoring all the other arguments")
+    UserSessionManager.ProcessSummary(pd.read_csv(filename), pending_queries=0)
+
 
 def main():
     args = parse_process_summary()
