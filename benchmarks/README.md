@@ -35,6 +35,9 @@ python3 multi-round-qa.py \
     --base-url http://localhost:8000/v1
 ```
 
+Use ctrl-C to terminate the benchmark at any time, and the the script will write each request's detailed stats to `summary.csv`.
+
+
 *Note:* the above command requires there is a serving engine with the `mistralai/Mistral-7B-Instruct-v0.2` model served locally at `http://localhost:8000/v1`. Here's an example command to launch the serving engine:
 
 ```bash
@@ -43,14 +46,26 @@ vllm serve mistralai/Mistral-7B-Instruct-v0.2 --disable-log-requests
 
 ### Arguments
 
-- `--num-users`: The maximum number of concurrent users in the system.
-- `--num-rounds`: The number of rounds per user.
-- `--qps`: The overall queries per second (QPS) rate for the system.
-- `--shared-system-prompt`: Length of the system prompt shared across all users (in tokens).
-- `--user-history-prompt`: Length of the user-specific context (simulating existing chat history) (in tokens).
-- `--answer-len`: Length of the answer expected (in tokens).
-- `--model`: The model name (e.g., `mistralai/Mistral-7B-Instruct-v0.2`).
-- `--base-url`: The URL endpoint for the language model server.
+#### Configuring the workload
+- `--num-users <int>`: The maximum number of concurrent users in the system.
+- `--num-rounds <int>`: The number of rounds per user.
+- `--qps <float>`: The overall queries per second (QPS) rate for the system.
+- `--shared-system-prompt <int>`: Length of the system prompt shared across all users (in tokens).
+- `--user-history-prompt <int>`: Length of the user-specific context (simulating existing chat history) (in tokens).
+- `--answer-len <int>`: Length of the answer expected (in tokens).
+
+#### Configuring the serving engine connection
+- `--model <str>`: The model name (e.g., `mistralai/Mistral-7B-Instruct-v0.2`).
+- `--base-url <str>`: The URL endpoint for the language model server.
+
+#### Configuring the experiment (Optional)
+- `--output <str>`: The csv file to dump the detailed stats for each query (default = summary.csv)
+- `--log-interval <float>`: Time between each performance summary log in seconds (default = 30)
+- `--time <float>`: Total time to run the experiment (default = forever)
+
+#### Processing previous outputs only (Optional)
+- `--process-summary <filename>`: if this option is present, the script will only process the existing output csv and print out the summary without running any experiment.
+
 
 ### Example Use Case
 
@@ -73,4 +88,3 @@ The `multi-round-qa.py` script works by:
 - **Average Generation Throughput**: Tokens generated as part of the response per second.
 - **Average TTFT (Time to First Token)**: Average time taken for the model to generate the first token of a response.
 
-##

@@ -1,4 +1,5 @@
 import argparse
+from typing import Optional
 import asyncio
 import logging
 import time
@@ -290,8 +291,7 @@ class UserSessionManager:
         logger.info(
             f"Gap between users: {self.gap_between_users} secs.\n"
             f"Gap between user reqs: {gap_between_requests_per_user} secs.\n"
-            f"Expected length of user session: {session_alive_time} "
-            f"secs.\nExpected ramp-up time: {self.ramp_up_time} secs")
+            f"Expected length of user session: {session_alive_time} secs.")
 
         self.user_id = 0
         self.last_user_join = 0
@@ -346,25 +346,30 @@ class UserSessionManager:
 
         self._remove_finished_sessions()
 
-    def summary(self, start_time: float, end_time: float) -> pd.DataFrame:
-        if len(self.session_summaries) == 0 and len(self.sessions) == 0:
-            return pd.DataFrame()
-
-        df = pd.concat([s for s in self.session_summaries] +
-                       [s.summary() for s in self.sessions])
-
-        launched_queries = len(
-            df.query(f"{start_time} <= launch_time <= {end_time}"))
-        pending_queries = len(
-            [s for s in self.sessions if s.has_unfinished_request])
-        df = df.query(f"{start_time} <= finish_time <= {end_time}")
+    @staticmethod
+    def ProcessSummary(df: pd.DataFrame, 
+                       start_time: Optional[float] = None, 
+                       end_time: Optional[float] = None,
+                       pending_queries: int = 0,
+                       qps: Optional[int] = None):
+        if start_time and end_time:
+            launched_queries = len(
+                df.query(f"{start_time} <= launch_time <= {end_time}"))
+            df = df.query(f"{start_time} <= finish_time <= {end_time}")
+        else:
+            launched_queries = len(df)
 
         logger.debug(f"Launched queries: {launched_queries}, "
                      f"pending queries: {pending_queries}, "
                      f"finished queries: {len(df)}")
 
-        start_time = max(self.start_time, start_time)
-        end_time = min(end_time, df["finish_time"].max())
+        if qps is None:
+            qps = 0.0 
+
+        if start_time is None:
+            start_time = df["launch_time"].min()
+        if end_time is None:
+            end_time = df["finish_time"].max()
         total_time = end_time - start_time
 
         total_requests = launched_queries + pending_queries
@@ -385,8 +390,7 @@ class UserSessionManager:
         print("\n")
         print(
             "==================== Performance summary ======================")
-        print(f"  \033[33mQPS: \033[32m{self.workload_config.qps:.4f} "
-              "reqs/s\033[0m\n")
+        print(f"  \033[33mQPS: \033[32m{qps:.4f} reqs/s\033[0m\n")
 
         print(f"  \033[33mProcessing speed: "
               f"\033[32m{finished_qps:.4f} reqs/s\033[0m\n")
@@ -410,6 +414,26 @@ class UserSessionManager:
         print(
             "===============================================================")
         print("\n")
+        return df
+
+
+    def summary(self, start_time: float, end_time: float) -> pd.DataFrame:
+        if len(self.session_summaries) == 0 and len(self.sessions) == 0:
+            return pd.DataFrame()
+
+        df = pd.concat([s for s in self.session_summaries] +
+                       [s.summary() for s in self.sessions])
+        pending_queries = len(
+            [s for s in self.sessions if s.has_unfinished_request])
+        start_time = max(self.start_time, start_time)
+        end_time = min(end_time, df["finish_time"].max())
+        qps = self.workload_config.qps
+
+        df = UserSessionManager.ProcessSummary(df, 
+                                               start_time,
+                                               end_time, 
+                                               pending_queries,
+                                               qps)
         return df
 
 
@@ -455,6 +479,15 @@ def parse_arguments() -> WorkloadConfig:
                         type=str,
                         required=True,
                         help="Base URL of the serving engine endpoint")
+    parser.add_argument("--time", 
+                        type=int,
+                        required=False,
+                        help="The time to run the simulation in seconds")
+    parser.add_argument("--output",
+                        type=str,
+                        default="summary.csv",
+                        help="The output file name (ended with csv or txt) " 
+                             "for the summary csv and txt")
     parser.add_argument(
         "--log-interval",
         type=int,
@@ -468,8 +501,31 @@ def parse_arguments() -> WorkloadConfig:
     args = parser.parse_args()
     return args
 
+def parse_process_summary():
+    parser = argparse.ArgumentParser(
+        description="Parse benchmark configurations.",
+        add_help=False)
+
+    parser.add_argument("--process-summary",
+                        type=str,
+                        default=None)
+
+    args, _ = parser.parse_known_args()
+    return args
+
+def process_output(filename):
+    logger.warning(f"Processing the existing summary file {filename}"
+                    ", ignoring all the other arguments")
+    UserSessionManager.ProcessSummary(
+        pd.read_csv(filename),
+        pending_queries=0)
 
 def main():
+    args = parse_process_summary()
+    if args.process_summary:
+        process_output(args.process_summary)
+        return
+
     args = parse_arguments()
     if args.verbose:
         global logger
@@ -494,26 +550,29 @@ def main():
     manager = UserSessionManager(workload_config)
 
     num_steps = 0
-    last_summary_time = time.time()
+    start_time = time.time()
+    last_summary_time = start_time
     try:
         while True:
             num_steps += 1
             manager.step(time.time(), executor)
-            time.sleep(0.1)
-            time.sleep(0.01)
+            time.sleep(step_interval)
 
-            if num_steps % int(args.log_interval / step_interval) == 0:
+            if time.time() - last_summary_time > args.log_interval:
                 manager.summary(last_summary_time, time.time())
                 last_summary_time = time.time()
+
+            if args.time is not None and time.time() - start_time > args.time:
+                break
 
     except KeyboardInterrupt:
         logger.info("Interrupted, waiting for the final result")
 
     AsyncLoopWrapper.StopLoop()
 
-    logger.info("Finished the simulation")
+    logger.info(f"Finished benchmarking, dumping summary to {args.output}")
     summary = manager.summary(0, time.time())
-    summary.to_csv("summary.csv", index=False)
+    summary.to_csv(args.output, index=False)
 
 
 if __name__ == "__main__":
