@@ -2,7 +2,7 @@
 
 ## Overview
 
-This repository contains benchmarking tools for evaluating the performance of language models in various scenarios. The initial focus of this benchmark is on the multi-round QA (Question Answering) use case. The script `multi-round-qa.py` simulates multiple users interacting with a language model concurrently, allowing you to analyze the model's response quality, throughput, and latency.
+This repository contains benchmarking tools for evaluating the performance of language models in various scenarios. The initial focus of this benchmark is on the multi-round QA (Question Answering) use case. The script `multi-round-qa.py` simulates multiple users interacting with a language model concurrently, allowing you to analyze the serving engine's throughput and latency.
 
 ### Current Workloads
 
