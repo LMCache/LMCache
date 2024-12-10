@@ -201,8 +201,8 @@ class LMCacheEngine:
         keys = []
         for chunk_hash in chunk_hashes:
             keys.append(self._make_key(chunk_hash, fmt))
-        anws = self.engine_.batched_contains(
-            keys, total_size=_get_size(kv_tensors))
+        anws = self.engine_.batched_contains(keys,
+                                             total_size=_get_size(kv_tensors))
         for anw in anws:
             if not anw:
                 start_token_idx = start_chunk_idx * self.chunk_size

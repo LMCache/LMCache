@@ -628,7 +628,8 @@ class LMCDiskBackend(LMCLocalDiskBackend):
         else:
             # Write check
             paths: Iterable[str] = self.proxy.batched_write_check(
-                [key.to_string() for key in keys], total_size/(1024*1024))  # type: ignore
+                [key.to_string() for key in keys],
+                total_size / (1024 * 1024))  # type: ignore
 
             an = []
             for path, key in zip(paths, keys):
@@ -645,7 +646,7 @@ class LMCDiskBackend(LMCLocalDiskBackend):
         # logger.debug(f"Saving cache {key} finished.")
         self.remain_writing = self.remain_writing - 1
         self.written_key.append(key.to_string())
-        self.written_size.append(size/(1024*1024))
+        self.written_size.append(size / (1024 * 1024))
         if len(self.written_key
                ) >= self.written_buffer_size or self.remain_writing == 0:
             self.update_lock.acquire()
