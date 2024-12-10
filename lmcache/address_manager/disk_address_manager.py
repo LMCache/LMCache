@@ -136,7 +136,7 @@ class LMCDiskAddressManager():
                 return ""
 
             evict_keys, put_status = self.evictor.update_on_put(
-                self.dict, DiskCacheMetadata("", kv_size))
+                self.dict, int(kv_size*(1024*1024)))
 
         # Abort put if cache too big
         if put_status == PutStatus.ILLEGAL:
@@ -154,6 +154,7 @@ class LMCDiskAddressManager():
     def batched_write_check(self, key_strs: Iterable[str],
                             kv_size: float) -> Iterable[str]:
         paths = []
+        kv_size = int(kv_size*(1024*1024))
 
         self.update_lock.acquire()
         for key_str in key_strs:
@@ -166,7 +167,7 @@ class LMCDiskAddressManager():
                 paths.append(self._key_to_path(key))
 
         evict_keys, put_status = self.evictor.update_on_put(
-            self.dict, DiskCacheMetadata("", kv_size))
+            self.dict, kv_size)
 
         self.update_lock.release()
 
@@ -190,7 +191,7 @@ class LMCDiskAddressManager():
         key = CacheEngineKey.from_string(key_str)
 
         with self.update_lock:
-            self.dict[key] = DiskCacheMetadata(self._key_to_path(key), kv_size)
+            self.dict[key] = DiskCacheMetadata(self._key_to_path(key), int(kv_size*(1024*1024)))
 
         return True
 
@@ -199,7 +200,7 @@ class LMCDiskAddressManager():
         self.update_lock.acquire()
         for key_str, kv_size in zip(key_strs, kv_sizes):
             key = CacheEngineKey.from_string(key_str)
-            self.dict[key] = DiskCacheMetadata(self._key_to_path(key), kv_size)
+            self.dict[key] = DiskCacheMetadata(self._key_to_path(key), int(kv_size*(1024*1024)))
         self.update_lock.release()
         return True
 

@@ -12,6 +12,6 @@ This will use port 65432(for LMCache).
 ## Steps
 1.  ```LMCACHE_CONFIG_FILE=example.yaml lmcache_disk_address_manager```  
 And wait until it's ready.  
-2. ```LMCACHE_CONFIG_FILE=example.yaml python3 offline_inference.py```  
+2. ```LMCACHE_CONFIG_FILE=example.yaml CUDA_VISIBLE_DEVICES=1 python3 offline_inference.py```  
 ## What to expect
 LMCache should be able to reduce the generation time of the second generate call.  

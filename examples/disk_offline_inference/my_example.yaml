@@ -1,0 +1,5 @@
+chunk_size: 256
+local_device: "disk_url://localhost:4322"
+disk_path: "/local/local_disk/"
+pipelined_backend: False
+

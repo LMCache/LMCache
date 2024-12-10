@@ -7,7 +7,7 @@ import torch
 
 from lmcache.logging import init_logger
 from lmcache.storage_backend.mem_pool import KVObj
-from lmcache.utils import CacheEngineKey, DiskCacheMetadata, _get_size_in_gb
+from lmcache.utils import CacheEngineKey, DiskCacheMetadata, _get_size
 
 logger = init_logger(__name__)
 

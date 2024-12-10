@@ -20,7 +20,7 @@ from lmcache.storage_backend.mem_pool import (KVObj, LocalCPUBufferPool,
                                               LocalCPUPool, LocalGPUPool,
                                               LocalPool)
 from lmcache.utils import (CacheEngineKey, DiskCacheMetadata, KVCache,
-                           _get_size_in_gb, _lmcache_nvtx_annotate)
+                           _get_size, _lmcache_nvtx_annotate)
 
 logger = init_logger(__name__)
 
@@ -573,7 +573,7 @@ def save_disk_with_callback(
     key: CacheEngineKey,
 ) -> Tuple[CacheEngineKey, float, int]:
     save_file({"kv_chunk": kv_obj.data.contiguous()}, path)
-    return key, _get_size_in_gb(kv_obj.data), kv_obj.chunk_idx
+    return key, _get_size(kv_obj.data), kv_obj.chunk_idx
 
 
 class LMCDiskBackend(LMCLocalDiskBackend):
@@ -628,7 +628,7 @@ class LMCDiskBackend(LMCLocalDiskBackend):
         else:
             # Write check
             paths: Iterable[str] = self.proxy.batched_write_check(
-                [key.to_string() for key in keys], total_size)  # type: ignore
+                [key.to_string() for key in keys], total_size/(1024*1024))  # type: ignore
 
             an = []
             for path, key in zip(paths, keys):
@@ -645,7 +645,7 @@ class LMCDiskBackend(LMCLocalDiskBackend):
         # logger.debug(f"Saving cache {key} finished.")
         self.remain_writing = self.remain_writing - 1
         self.written_key.append(key.to_string())
-        self.written_size.append(size)
+        self.written_size.append(size/(1024*1024))
         if len(self.written_key
                ) >= self.written_buffer_size or self.remain_writing == 0:
             self.update_lock.acquire()
@@ -715,7 +715,7 @@ class LMCDiskBackend(LMCLocalDiskBackend):
         save_file({"kv_chunk": kv_chunk}, path)
         self.update_lock.release()
 
-        self.proxy.write_ready(key.to_string(), _get_size_in_gb(kv_chunk))
+        self.proxy.write_ready(key.to_string(), _get_size(kv_chunk))
 
     @_lmcache_nvtx_annotate
     def get(
