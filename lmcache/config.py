@@ -117,7 +117,7 @@ class LMCacheEngineConfig:
         local_device = config.get("local_device", None)
         max_local_cache_size = config.get("max_local_cache_size", 20)
         remote_url = config.get("remote_url", None)
-        remote_serde = config.get("remote_serde", "torch")
+        remote_serde = config.get("remote_serde", None)
         pipelined_backend = config.get("pipelined_backend", False)
         save_decode_cache = config.get("save_decode_cache", False)
         enable_blending = config.get("enable_blending", False)

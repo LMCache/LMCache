@@ -114,7 +114,7 @@ class LMCLocalBackend(LMCBackendInterface):
         # Obtain keys to evict
         self.update_lock.acquire()
         evict_keys, put_status = self.evictor.update_on_put(
-            self.dict, kv_chunk)
+            self.dict, self.mpool.size_per_chunk)
         if put_status == PutStatus.ILLEGAL:
             self.update_lock.release()
             return
@@ -155,7 +155,7 @@ class LMCLocalBackend(LMCBackendInterface):
 
         # Obtain keys to evict
         evict_keys, put_status = self.evictor.update_on_put(
-            self.dict, kv_chunk)
+            self.dict, self.mpool.size_per_chunk)
 
         # Abort put if cache too big
         if put_status == PutStatus.ILLEGAL:
@@ -405,7 +405,7 @@ class LMCLocalDiskBackend(LMCBackendInterface):
 
         # Obtain keys to evict
         evict_keys, put_status = self.evictor.update_on_put(
-            self.dict, kv_chunk)
+            self.dict, self.evictor.get_size(kv_chunk))
 
         # Abort put if cache too big
         if put_status == PutStatus.ILLEGAL:
@@ -439,8 +439,7 @@ class LMCLocalDiskBackend(LMCBackendInterface):
 
         self.update_lock.acquire()
         self.future_pool[key] = (future, kv_obj)
-        self.dict[key] = DiskCacheMetadata(path,
-                                           self.evictor.get_size(kv_obj.data))
+        self.dict[key] = DiskCacheMetadata(path, kv_obj.size)
         # NOTE(Jiayi): the following `free` will result in data corruption
         # The serialized object (`kv_obj.data` in `submit`) may reference
         # the external memory (cpu tensor might be shared in multiprocessing),
@@ -461,7 +460,7 @@ class LMCLocalDiskBackend(LMCBackendInterface):
         self.update_lock.acquire()
         # Obtain keys to evict
         evict_keys, put_status = self.evictor.update_on_put(
-            self.dict, kv_chunk)
+            self.dict, self.evictor.get_size(kv_chunk))
 
         # Abort put if cache too big
         if put_status == PutStatus.ILLEGAL:

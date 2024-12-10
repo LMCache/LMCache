@@ -12,7 +12,7 @@ KVCache = Tuple[Tuple[torch.Tensor, torch.Tensor], ...]
 @dataclass
 class DiskCacheMetadata:
     path: str
-    size: float
+    size: int  # in bytes
 
 
 TORCH_DTYPE_TO_STR_DTYPE = {
