@@ -91,7 +91,7 @@ class LMSLocalBackend(LMSBackendInterface):
         self.update_lock.acquire()
         # Obtain keys to evict
         evict_keys, put_status = self.evictor.update_on_put(
-            self.dict, kv_chunk_bytes)
+            self.dict, self.evictor.get_size(kv_chunk_bytes))
 
         # Abort put if cache too big
         if put_status == PutStatus.ILLEGAL:
@@ -241,7 +241,7 @@ class LMSLocalDiskBackend(LMSBackendInterface):
 
         # Obtain keys to evict
         evict_keys, put_status = self.evictor.update_on_put(
-            self.dict, kv_chunk_bytes)
+            self.dict, self.evictor.get_size(kv_chunk_bytes))
 
         # Abort put if cache too big
         if put_status == PutStatus.ILLEGAL:

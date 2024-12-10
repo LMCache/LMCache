@@ -36,7 +36,7 @@ class BaseEvictor(metaclass=abc.ABCMeta):
 
     @abc.abstractmethod
     def update_on_put(
-        self, cache_dict: OrderedDict, kv_obj: Union[torch.Tensor, bytes]
+            self, cache_dict: OrderedDict, cache_size: int
     ) -> Tuple[List[Union[CacheEngineKey, str]], PutStatus]:
         """
         Evict cache when a new cache comes and the storage is full
@@ -54,7 +54,7 @@ class BaseEvictor(metaclass=abc.ABCMeta):
     # e.g., a kv_obj class wize size field
     def get_size(
             self, kv_obj: Union[torch.Tensor, bytes, DiskCacheMetadata,
-                                KVObj]) -> float:
+                                KVObj]) -> int:
         """
         Get the size of the kv cache
         
@@ -62,9 +62,9 @@ class BaseEvictor(metaclass=abc.ABCMeta):
             kv_obj: kv cache
 
         Return:
-            the size of the cache (in GB)
+            the size of the cache (in bytes)
         """
-        return _get_size_in_gb(kv_obj)
+        return _get_size(kv_obj)
 
 
 class DummyEvictor(BaseEvictor):
@@ -74,7 +74,6 @@ class DummyEvictor(BaseEvictor):
         # Dummy implementation does nothing
         pass
 
-    def update_on_put(self, cache_dict: OrderedDict,
-                      kv_obj: Union[torch.Tensor, bytes]):
+    def update_on_put(self, cache_dict: OrderedDict, cache_size: int):
         # Dummy implementation does not evict anything
         return [], PutStatus.LEGAL
