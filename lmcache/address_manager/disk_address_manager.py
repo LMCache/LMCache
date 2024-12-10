@@ -29,10 +29,9 @@ class LMCAddressManagerConfig:
         with open(file_path, "r") as fin:
             config = yaml.safe_load(fin)
 
-        local_device = config.get("local_device",
-                                  "disk_url://http://localhost:4322")
-        disk_url = local_device[11:]
-        disk_path = config.get("disk_path", "/local/local_disk/")
+        local_device = config.get("local_device", "disk_url://localhost:4322")
+        disk_url = "http://" + local_device[11:]
+        disk_path = config.get("disk_path", "/local_disk/")
 
         return LMCAddressManagerConfig(disk_url, disk_path)
 
@@ -48,7 +47,6 @@ class LMCDiskAddressManager():
             RuntimeError if the loaded configuration does not match the current
                 configuration
         """
-        super().__init__()
 
         # Dict key to path & size
         self.dict: OrderedDict[CacheEngineKey,
@@ -114,7 +112,8 @@ class LMCDiskAddressManager():
             path if the cache engine contains the key, "" otherwise
         """
         key = CacheEngineKey.from_string(key_str)
-        return self.dict[key].path if key in self.dict else ""
+        with self.update_lock:
+            return self.dict[key].path if key in self.dict else ""
 
     def batched_contains(
         self,
@@ -132,11 +131,12 @@ class LMCDiskAddressManager():
         if path is not in the cache, initialize the cache with ("",0)
         """
         key = CacheEngineKey.from_string(key_str)
-        if key in self.dict:
-            return ""
+        with self.update_lock:
+            if key in self.dict:
+                return ""
 
-        evict_keys, put_status = self.evictor.update_on_put(
-            self.dict, DiskCacheMetadata("", kv_size))
+            evict_keys, put_status = self.evictor.update_on_put(
+                self.dict, DiskCacheMetadata("", kv_size))
 
         # Abort put if cache too big
         if put_status == PutStatus.ILLEGAL:
@@ -146,12 +146,16 @@ class LMCDiskAddressManager():
         for evict_key in evict_keys:
             self.remove(evict_key)
 
-        self.dict[key] = DiskCacheMetadata("", 0)
+        with self.update_lock:
+            self.dict[key] = DiskCacheMetadata("", 0)
+
         return self._key_to_path(key)
 
     def batched_write_check(self, key_strs: Iterable[str],
                             kv_size: float) -> Iterable[str]:
         paths = []
+
+        self.update_lock.acquire()
         for key_str in key_strs:
             key = CacheEngineKey.from_string(key_str)
             if key in self.dict:
@@ -163,6 +167,8 @@ class LMCDiskAddressManager():
 
         evict_keys, put_status = self.evictor.update_on_put(
             self.dict, DiskCacheMetadata("", kv_size))
+
+        self.update_lock.release()
 
         # Abort put if cache too big
         if put_status == PutStatus.ILLEGAL:
@@ -182,14 +188,19 @@ class LMCDiskAddressManager():
             from ("",0) to the actual path and size
         """
         key = CacheEngineKey.from_string(key_str)
-        self.dict[key] = DiskCacheMetadata(self._key_to_path(key), kv_size)
+
+        with self.update_lock:
+            self.dict[key] = DiskCacheMetadata(self._key_to_path(key), kv_size)
+
         return True
 
     def batched_write_ready(self, key_strs: Iterable[str],
                             kv_sizes: Iterable[float]):
+        self.update_lock.acquire()
         for key_str, kv_size in zip(key_strs, kv_sizes):
             key = CacheEngineKey.from_string(key_str)
             self.dict[key] = DiskCacheMetadata(self._key_to_path(key), kv_size)
+        self.update_lock.release()
         return True
 
     def read_check(self, key_str: str) -> str:
@@ -205,8 +216,9 @@ class LMCDiskAddressManager():
 
         self.evictor.update_on_get(key, self.dict)
 
+        path = self.dict[key].path
         self.update_lock.release()
-        return self.dict[key].path
+        return path
 
     def batched_read_check(self, key_strs: Iterable[str]) -> Iterable[str]:
         paths = []
@@ -230,15 +242,6 @@ class LMCDiskAddressManager():
         self.dict.clear()
         self.update_lock.release()
         return True
-
-    # def Info(self):
-    #     return self.info
-
-    def close(self):
-        pass
-
-    def __del__(self):
-        self.close()
 
 
 # Restrict to a particular path.
@@ -268,8 +271,8 @@ def start_server(config):
 
 def main():
     if "LMCACHE_CONFIG_FILE" not in os.environ:
-        config = LMCAddressManagerConfig("http://localhost:4322",
-                                         "/local/local_disk/")
+        config = LMCAddressManagerConfig("disk_url://localhost:4322",
+                                         "/local_disk/")
     else:
         config_file = os.environ["LMCACHE_CONFIG_FILE"]
         config = LMCAddressManagerConfig.from_file(config_file)

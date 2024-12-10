@@ -8,6 +8,7 @@ from lmcache_vllm.vllm import LLM, SamplingParams
 from transformers import AutoTokenizer
 
 model_name = "mistralai/Mistral-7B-Instruct-v0.2"
+
 context_file = os.path.join(os.pardir, 'ffmpeg.txt')
 output_file = "offline_inference_outputs.jsonl"
 
@@ -24,6 +25,18 @@ context_messages = [
         "content":
         "I've got a document, "
         f"here's the content:```\n{context_text}\n```."
+    },
+    {
+        "role": "assistant",
+        "content": "I've got your document"
+    },
+]
+strs = "hello" * 500
+warm_up_context_messages = [
+    {
+        "role": "user",
+        "content": "I've got a document, "
+        f"here's the content:```\n{strs}\n```."
     },
     {
         "role": "assistant",
@@ -73,6 +86,8 @@ context_length = get_context_length(tokenizer, context_messages)
 # Create a sampling params object.
 sampling_params = SamplingParams(temperature=0.8, top_p=0.95, max_tokens=1024)
 prompts = gen_prompts(tokenizer, context_messages, user_inputs_batch)
+warm_up_prompts = gen_prompts(tokenizer, warm_up_context_messages,
+                              user_inputs_batch)
 # Create an LLM.
 llm = LLM(model=model_name,
           gpu_memory_utilization=0.6,
@@ -82,6 +97,9 @@ llm = LLM(model=model_name,
 # Clear output file.
 with open(output_file, "w") as f:
     pass
+
+first_outputs0 = llm.generate(warm_up_prompts, sampling_params)
+time.sleep(10)
 
 # Generate texts from the prompts. The output is a list of RequestOutput objects
 # that contain the prompt, generated text, and other information.

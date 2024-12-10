@@ -596,6 +596,7 @@ class LMCDiskBackend(LMCLocalDiskBackend):
         assert config.disk_url is not None, (
             "Need to specify local path if when "
             "using LMCLocalDiskBackend")
+        print(f"Connecting to {config.disk_url}")
         self.proxy = xmlrpc.client.ServerProxy(config.disk_url)
         # Info: Dict[str, Any] = self.proxy.Info()  # type: ignore
         # self.remote_chunk_size = Info["chunk_size"]
@@ -620,7 +621,7 @@ class LMCDiskBackend(LMCLocalDiskBackend):
 
     def batched_contains(self,
                          keys: Iterable[CacheEngineKey],
-                         total_size: float = 0) -> Iterable[bool]:
+                         total_size: float = 0) -> List[bool]:
         if total_size == 0:
             contains_paths: Iterable[str] = self.proxy.batched_contains(
                 [key.to_string() for key in keys])  # type: ignore
@@ -650,7 +651,8 @@ class LMCDiskBackend(LMCLocalDiskBackend):
                ) >= self.written_buffer_size or self.remain_writing == 0:
             self.update_lock.acquire()
             logger.debug(
-                f"Betched Read Signal for {len(self.written_key)} keys:")
+                f"Betched Write Finish Signal for {len(self.written_key)} keys:"
+            )
             # print("Write Ready",self.written_key,self.written_size)
             signal = self.proxy.batched_write_ready(self.written_key,
                                                     self.written_size)

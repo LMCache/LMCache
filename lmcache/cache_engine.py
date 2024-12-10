@@ -377,8 +377,7 @@ class LMCacheEngine:
                 break
             retrieved_kv_chunks.append(chunk)
 
-        logger.debug(
-            f"Overall disk retrieve time: {time.perf_counter() - time0}")
+        logger.debug(f"Overall Retrieve Time: {time.perf_counter() - time0}")
         """ concatenate the kv cache """
         dim = None
         match fmt:
