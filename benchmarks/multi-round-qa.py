@@ -165,6 +165,7 @@ class UserSession:
         self.question_id = 0
 
         self.has_unfinished_request = False
+        self.last_unfinished_log = 0
 
         self.prompt_lengths = []
         self.generation_lengths = []
@@ -253,9 +254,11 @@ class UserSession:
         if timestamp - self.last_request_time > \
                 self.user_config.gap_between_requests:
             if self.has_unfinished_request:
-                logger.warning(
-                    f"User {self.user_config.user_id} has an unfinished "
-                    "request and unable to fit the QPS requirement.")
+                if timestamp - self.last_unfinished_log > 10:
+                    logger.warning(
+                        f"User {self.user_config.user_id} has an unfinished "
+                        "request and unable to fit the QPS requirement.")
+                    self.last_unfinished_log = timestamp
                 return
 
             self._launch_new_request(timestamp, request_executor)
@@ -338,8 +341,8 @@ class UserSessionManager:
         if timestamp - self.last_user_join > self.gap_between_users:
             self._create_user_session()
             self.last_user_join = timestamp
-            logger.info(
-                f"Joined a new user, now active users: {len(self.sessions)}")
+            logger.info(f"Joined a new user {self.user_id}, "
+                        f"now active users: {len(self.sessions)}")
 
         for session in self.sessions:
             session.step(timestamp, executor)
