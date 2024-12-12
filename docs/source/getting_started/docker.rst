@@ -122,7 +122,7 @@ Building Docker from Source
 
 .. note::
 
-    This section users who want to build the Docker image from source.
+    This section is for users who want to build the Docker image from source.
     For this please visit the link here `lmcache-vllm <https://github.com/LMCache/lmcache-vllm/tree/dev/docker>`_.
 
     
