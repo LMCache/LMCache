@@ -610,6 +610,7 @@ class LMCGlobalDiskBackend(LMCLocalDiskBackend):
         self.written_size: List[float] = []
 
         self.update_lock = threading.Lock()
+        self.callback_lock = threading.Lock()
 
     def contains(
         self,
@@ -648,7 +649,7 @@ class LMCGlobalDiskBackend(LMCLocalDiskBackend):
             paths: Iterable[str] = self.proxy.batched_write_check(
                 [key.to_string() for key in keys],
                 total_size / (1024 * 1024))  # type: ignore
-
+            self.update_lock.acquire()
             an = []
             for path, key in zip(paths, keys):
                 if path == "":
@@ -656,29 +657,28 @@ class LMCGlobalDiskBackend(LMCLocalDiskBackend):
                 else:
                     self.cached_paths[key] = path
                     an.append(False)
+            self.update_lock.release()
             return an
 
     def save_end_callback(self, future: Future):
         key, size, chunk_idx = future.result()
         self.cpu_mbufferpool.idx_free(chunk_idx)
         # logger.debug(f"Saving cache {key} finished.")
+        self.callback_lock.acquire()
         self.remain_writing = self.remain_writing - 1
         self.written_key.append(key.to_string())
         self.written_size.append(size / (1024 * 1024))
         if len(self.written_key
                ) >= self.written_buffer_size or self.remain_writing == 0:
-            self.update_lock.acquire()
             logger.debug(
                 f"Betched Write Finish Signal for {len(self.written_key)} keys:"
             )
             # print("Write Ready",self.written_key,self.written_size)
-            signal = self.proxy.batched_write_ready(self.written_key,
-                                                    self.written_size)
-            if not signal:
-                logger.error("Write Ready Signal Failed")
-            self.update_lock.release()
+            self.proxy.batched_write_ready(self.written_key,self.written_size)
+
             self.written_key = []
             self.written_size = []
+        self.callback_lock.release()
 
     @_lmcache_nvtx_annotate
     @torch.inference_mode()
@@ -687,8 +687,9 @@ class LMCGlobalDiskBackend(LMCLocalDiskBackend):
         key: CacheEngineKey,
         kv_chunk: torch.Tensor,
     ) -> None:
-        path = self.cached_paths[key]
-        del self.cached_paths[key]
+        with self.update_lock:
+            path = self.cached_paths[key]
+            del self.cached_paths[key]
         # Abort put if cache too big
         if path == "" or path is None:
             return
