@@ -1,4 +1,6 @@
 import shlex
+from dataclasses import fields
+import os
 import subprocess
 import time
 
@@ -431,3 +433,24 @@ def test_builder(autorelease):
 
     with pytest.raises(ValueError):
         LMCacheEngineBuilder.get_or_create(instance_id, cfg2, dumb_metadata())
+
+def test_env_configure():
+    # Test the parsing of the configurations
+    config = LMCacheEngineConfig.from_defaults()
+    for attr in fields(config):
+        expected_env_name = f"LMCACHE_{attr.name.upper()}"
+        os.environ[expected_env_name] = "0"
+    newconfig = LMCacheEngineConfig.from_env()
+    for attr in fields(newconfig):
+        value = getattr(newconfig, attr.name)
+        if isinstance(value, int) or isinstance(value, float):
+            assert value == 0
+        elif isinstance(value, bool):
+            assert value is bool("0") 
+        elif isinstance(value, str):
+            assert value == "0"
+        else:
+            assert False, "Unexpected type in LMCacheEngineConfig"
+
+        expected_env_name = f"LMCACHE_{attr.name.upper()}"
+        del os.environ[expected_env_name]

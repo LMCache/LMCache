@@ -1,6 +1,8 @@
 import re
+import os
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Any
+
 
 import torch
 import yaml
@@ -155,6 +157,48 @@ class LMCacheEngineConfig:
             blend_min_tokens,
         )
 
+    @staticmethod
+    def from_env() -> "LMCacheEngineConfig":
+        """Load the config from the environment variables
+
+        It will first create a config by `from_defaults` and overwrite
+        the configuration values from the environment variables.
+
+        The environment variables should starts with LMCACHE and be in
+        uppercase. For example, `LMCACHE_CHUNK_SIZE`.
+        """
+        def get_env_name(attr_name: str) -> str:
+            return f"LMCACHE_{attr_name.upper()}"
+
+        def parse_env(name: str, default: str) -> str:
+            return os.getenv(name, default)
+
+        config = LMCacheEngineConfig.from_defaults()
+        config.chunk_size = int(parse_env(get_env_name("chunk_size"),
+                                          str(config.chunk_size)))
+        config.local_device = parse_env(get_env_name("local_device"),
+                                        config.local_device)
+        config.max_local_cache_size = int(parse_env(
+            get_env_name("max_local_cache_size"),
+            str(config.max_local_cache_size)))
+        config.remote_url = parse_env(get_env_name("remote_url"),
+                                      config.remote_url)
+        config.remote_serde = parse_env(get_env_name("remote_serde"),
+                                        config.remote_serde)
+        config.pipelined_backend = parse_env(get_env_name("pipelined_backend"),
+                                             str(config.pipelined_backend))
+        config.save_decode_cache = parse_env(get_env_name("save_decode_cache"),
+                                             str(config.save_decode_cache))
+        config.enable_blending = parse_env(get_env_name("enable_blending"),
+                                           str(config.enable_blending))
+        config.blend_recompute_ratio = float(parse_env(
+            get_env_name("blend_recompute_ratio"),
+            str(config.blend_recompute_ratio)))
+        config.blend_min_tokens = int(parse_env(
+            get_env_name("blend_min_tokens"),
+            str(config.blend_min_tokens)))
+
+        return config
 
 ### SOME GLOBAL CONFIGS
 # TODO: it needs to be manually updated in the code here, but cannot be really
