@@ -65,14 +65,15 @@ def test_multi_users_single_data(backend):
         operation = random.choice(["contains", "write", "read"])
         match operation:
             case "contains":
-                answer: str = proxies[cli].contains(key)
+                answer: str = proxies[cli].contains(key)  # type: ignore
                 if key in keys_dict:
                     assert answer == keys_dict[key]
                 else:
                     assert answer == ""
 
             case "write":
-                answer: str = proxies[cli].write_check(key, kv_size)
+                answer: str = proxies[cli].write_check(key,
+                                                       kv_size)  # type: ignore
                 if key in keys_dict:
                     assert answer == ""
                     continue
@@ -80,28 +81,31 @@ def test_multi_users_single_data(backend):
                     assert answer != ""
                     keys_dict[key] = answer
 
-                answer: str = proxies[(cli + 1) %
-                                      client_number].read_check(key)
+                answer: str = proxies[(cli + 1) % client_number].read_check(
+                    key)  # type: ignore
                 assert answer == ""
-                answer: str = proxies[(cli + 2) % client_number].contains(key)
+                answer: str = proxies[(cli + 2) % client_number].contains(
+                    key)  # type: ignore
                 assert answer == ""
                 answer: str = proxies[(cli + 3) % client_number].write_check(
-                    key, kv_size)
+                    key, kv_size)  # type: ignore
                 assert answer == ""
 
                 assert proxies[cli].write_ready(key, kv_size) is True
 
-                answer: str = proxies[(cli + 1) %
-                                      client_number].read_check(key)
+                answer: str = proxies[(cli + 1) % client_number].read_check(
+                    key)  # type: ignore
                 assert answer == keys_dict[key]
-                answer: str = proxies[(cli + 2) % client_number].contains(key)
+                answer: str = proxies[(cli + 2) % client_number].contains(
+                    key)  # type: ignore
                 assert answer == keys_dict[key]
                 answer: str = proxies[(cli + 3) % client_number].write_check(
-                    key, kv_size)
+                    key, kv_size)  # type: ignore
                 assert answer == ""
 
             case "read_check":
-                answer: str = proxies[cli].read_check(key, kv_size)
+                answer: str = proxies[cli].read_check(key,
+                                                      kv_size)  # type: ignore
                 if key in keys_dict:
                     assert answer == keys_dict[key]
                 else:
@@ -130,7 +134,7 @@ def test_multi_users_multi_data(backend):
         for i in range(key_number)
     ]
     sizes_pool = [random.uniform(0.0001, 0.01) for i in range(key_number)]
-    keys_dict = {}
+    keys_dict:Dict[str,str] = {}
     proxies = [
         xmlrpc.client.ServerProxy("http://localhost:4322")
         for i in range(client_number)
@@ -149,7 +153,8 @@ def test_multi_users_multi_data(backend):
         operation = random.choice(["contains", "write", "read"])
         match operation:
             case "contains":
-                answers: List[str] = proxies[cli].batched_contains(keys)
+                answers: List[str] = proxies[cli].batched_contains(
+                    keys)  # type: ignore
                 for answer, key in zip(answers, keys):
                     if key in keys_dict:
                         assert answer == keys_dict[key]
@@ -157,12 +162,12 @@ def test_multi_users_multi_data(backend):
                         assert answer == ""
 
             case "write":
-                answers: List[str] = proxies[cli].batched_write_check(
-                    keys, total_size)
+                answers1: List[str] = proxies[cli].batched_write_check(
+                    keys, total_size)  # type: ignore
                 new_keys = []
                 new_sizes = []
                 results = []
-                for answer, key, kv_size in zip(answers, keys, kv_sizes):
+                for answer, key, kv_size in zip(answers1, keys, kv_sizes):
                     if key in keys_dict:
                         assert answer == ""
                         results.append(keys_dict[key])
@@ -174,37 +179,41 @@ def test_multi_users_multi_data(backend):
                         new_sizes.append(kv_size)
                         results.append("")
 
-                answers: List[str] = proxies[
-                    (cli + 1) % client_number].batched_read_check(keys)
-                assert answers == results
-                answers: List[str] = proxies[
-                    (cli + 2) % client_number].batched_contains(keys)
-                assert answers == results
-                answers: List[str] = proxies[
+                answers2: List[str] = proxies[
+                    (cli + 1) % client_number].batched_read_check(
+                        keys)  # type: ignore
+                assert answers2 == results
+                answers3: List[str] = proxies[(cli + 2) %
+                                              client_number].batched_contains(
+                                                  keys)  # type: ignore
+                assert answers3 == results
+                answers4: List[str] = proxies[
                     (cli + 3) % client_number].batched_write_check(
-                        keys, kv_size)
-                assert answers == [""] * len(keys)
+                        keys, kv_size)  # type: ignore
+                assert answers4 == [""] * len(keys)
 
                 assert proxies[cli].batched_write_ready(new_keys,
                                                         new_sizes) is True
 
-                answers: List[str] = proxies[
-                    (cli + 1) % client_number].batched_read_check(keys)
-                for answer, key in zip(answers, keys):
+                answers5: List[str] = proxies[
+                    (cli + 1) % client_number].batched_read_check(
+                        keys)  # type: ignore
+                for answer, key in zip(answers5, keys):
                     assert answer == keys_dict[key]
-                answers: List[str] = proxies[
-                    (cli + 2) % client_number].batched_contains(keys)
-                for answer, key in zip(answers, keys):
+                answers6: List[str] = proxies[(cli + 2) %
+                                              client_number].batched_contains(
+                                                  keys)  # type: ignore
+                for answer, key in zip(answers6, keys):
                     assert answer == keys_dict[key]
-                answers: List[str] = proxies[
+                answers7: List[str] = proxies[
                     (cli + 3) % client_number].batched_write_check(
-                        keys, kv_size)
-                assert answers == [""] * len(keys)
+                        keys, kv_size)  # type: ignore
+                assert answers7 == [""] * len(keys)
 
             case "read_check":
-                answers: List[str] = proxies[cli].batched_read_check(
-                    key, kv_size)
-                for answer, key in zip(answers, keys):
+                answers8: List[str] = proxies[cli].batched_read_check(
+                    key, kv_size)  # type: ignore
+                for answer, key in zip(answers8, keys):
                     assert answer == keys_dict[key]
                 else:
                     assert answer == ""
