@@ -712,7 +712,9 @@ class LMCGlobalDiskBackend(LMCLocalDiskBackend):
             kv_chunk.record_stream(put_stream)
         put_stream.synchronize()
 
+        self.callback_lock.acquire()
         self.remain_writing = self.remain_writing + 1
+        self.callback_lock.release()
         future = self.proc_pool_executor.submit(save_disk, path, kv_obj, key)
         future.add_done_callback(self.save_end_callback)
 
@@ -723,16 +725,15 @@ class LMCGlobalDiskBackend(LMCLocalDiskBackend):
         key: CacheEngineKey,
         kv_chunk: torch.Tensor,
     ) -> None:
-        path = self.cached_paths[key]
-        del self.cached_paths[key]
+        with self.update_lock:
+            path = self.cached_paths[key]
+            del self.cached_paths[key]
 
         if path == "":
             return
         logger.debug(f"Saving cache to {path}")
 
-        self.update_lock.acquire()
         save_file({"kv_chunk": kv_chunk}, path)
-        self.update_lock.release()
 
         self.proxy.write_ready(key.to_string(), get_kv_chunk_size(kv_chunk))
 
@@ -755,11 +756,9 @@ class LMCGlobalDiskBackend(LMCLocalDiskBackend):
         if path == "":
             return None
 
-        self.update_lock.acquire()
         with safe_open(path, framework="pt",
                        device=self.dst_device) as f:  # type: ignore
             kv_chunk = f.get_tensor("kv_chunk")
-        self.update_lock.release()
         return kv_chunk
 
     def batched_get(
