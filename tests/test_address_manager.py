@@ -5,6 +5,7 @@ import subprocess
 import time
 import xmlrpc.client
 from multiprocessing import Process
+from typing import Dict, List
 
 import pytest
 
@@ -50,7 +51,7 @@ def test_multi_users_single_data(backend):
         for i in range(key_number)
     ]
     sizes_pool = [random.uniform(0.0001, 0.01) for i in range(key_number)]
-    keys_dict = {}
+    keys_dict: Dict[str, str] = {}
     proxies = [
         xmlrpc.client.ServerProxy("http://localhost:4322")
         for i in range(client_number)
@@ -64,14 +65,14 @@ def test_multi_users_single_data(backend):
         operation = random.choice(["contains", "write", "read"])
         match operation:
             case "contains":
-                answer = proxies[cli].contains(key)
+                answer: str = proxies[cli].contains(key)
                 if key in keys_dict:
                     assert answer == keys_dict[key]
                 else:
                     assert answer == ""
 
             case "write":
-                answer = proxies[cli].write_check(key, kv_size)
+                answer: str = proxies[cli].write_check(key, kv_size)
                 if key in keys_dict:
                     assert answer == ""
                     continue
@@ -79,26 +80,28 @@ def test_multi_users_single_data(backend):
                     assert answer != ""
                     keys_dict[key] = answer
 
-                answer = proxies[(cli + 1) % client_number].read_check(key)
+                answer: str = proxies[(cli + 1) %
+                                      client_number].read_check(key)
                 assert answer == ""
-                answer = proxies[(cli + 2) % client_number].contains(key)
+                answer: str = proxies[(cli + 2) % client_number].contains(key)
                 assert answer == ""
-                answer = proxies[(cli + 3) % client_number].write_check(
+                answer: str = proxies[(cli + 3) % client_number].write_check(
                     key, kv_size)
                 assert answer == ""
 
                 assert proxies[cli].write_ready(key, kv_size) is True
 
-                answer = proxies[(cli + 1) % client_number].read_check(key)
+                answer: str = proxies[(cli + 1) %
+                                      client_number].read_check(key)
                 assert answer == keys_dict[key]
-                answer = proxies[(cli + 2) % client_number].contains(key)
+                answer: str = proxies[(cli + 2) % client_number].contains(key)
                 assert answer == keys_dict[key]
-                answer = proxies[(cli + 3) % client_number].write_check(
+                answer: str = proxies[(cli + 3) % client_number].write_check(
                     key, kv_size)
                 assert answer == ""
 
             case "read_check":
-                answer = proxies[cli].read_check(key, kv_size)
+                answer: str = proxies[cli].read_check(key, kv_size)
                 if key in keys_dict:
                     assert answer == keys_dict[key]
                 else:
@@ -146,7 +149,7 @@ def test_multi_users_multi_data(backend):
         operation = random.choice(["contains", "write", "read"])
         match operation:
             case "contains":
-                answers = proxies[cli].batched_contains(keys)
+                answers: List[str] = proxies[cli].batched_contains(keys)
                 for answer, key in zip(answers, keys):
                     if key in keys_dict:
                         assert answer == keys_dict[key]
@@ -154,7 +157,8 @@ def test_multi_users_multi_data(backend):
                         assert answer == ""
 
             case "write":
-                answers = proxies[cli].batched_write_check(keys, total_size)
+                answers: List[str] = proxies[cli].batched_write_check(
+                    keys, total_size)
                 new_keys = []
                 new_sizes = []
                 results = []
@@ -170,35 +174,36 @@ def test_multi_users_multi_data(backend):
                         new_sizes.append(kv_size)
                         results.append("")
 
-                answers = proxies[(cli + 1) %
-                                  client_number].batched_read_check(keys)
+                answers: List[str] = proxies[
+                    (cli + 1) % client_number].batched_read_check(keys)
                 assert answers == results
-                answers = proxies[(cli + 2) %
-                                  client_number].batched_contains(keys)
+                answers: List[str] = proxies[
+                    (cli + 2) % client_number].batched_contains(keys)
                 assert answers == results
-                answers = proxies[(cli + 3) %
-                                  client_number].batched_write_check(
-                                      keys, kv_size)
+                answers: List[str] = proxies[
+                    (cli + 3) % client_number].batched_write_check(
+                        keys, kv_size)
                 assert answers == [""] * len(keys)
 
                 assert proxies[cli].batched_write_ready(new_keys,
                                                         new_sizes) is True
 
-                answers = proxies[(cli + 1) %
-                                  client_number].batched_read_check(keys)
+                answers: List[str] = proxies[
+                    (cli + 1) % client_number].batched_read_check(keys)
                 for answer, key in zip(answers, keys):
                     assert answer == keys_dict[key]
-                answers = proxies[(cli + 2) %
-                                  client_number].batched_contains(keys)
+                answers: List[str] = proxies[
+                    (cli + 2) % client_number].batched_contains(keys)
                 for answer, key in zip(answers, keys):
                     assert answer == keys_dict[key]
-                answers = proxies[(cli + 3) %
-                                  client_number].batched_write_check(
-                                      keys, kv_size)
+                answers: List[str] = proxies[
+                    (cli + 3) % client_number].batched_write_check(
+                        keys, kv_size)
                 assert answers == [""] * len(keys)
 
             case "read_check":
-                answers = proxies[cli].batched_read_check(key, kv_size)
+                answers: List[str] = proxies[cli].batched_read_check(
+                    key, kv_size)
                 for answer, key in zip(answers, keys):
                     assert answer == keys_dict[key]
                 else:
