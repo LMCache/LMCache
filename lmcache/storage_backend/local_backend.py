@@ -674,7 +674,7 @@ class LMCGlobalDiskBackend(LMCLocalDiskBackend):
                 f"Betched Write Finish Signal for {len(self.written_key)} keys:"
             )
             # print("Write Ready",self.written_key,self.written_size)
-            self.proxy.batched_write_ready(self.written_key,self.written_size)
+            self.proxy.batched_write_ready(self.written_key, self.written_size)
 
             self.written_key = []
             self.written_size = []
