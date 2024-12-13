@@ -166,6 +166,8 @@ class LMCacheEngineConfig:
 
         The environment variables should starts with LMCACHE and be in
         uppercase. For example, `LMCACHE_CHUNK_SIZE`.
+        
+        :note: the default configuration only uses cpu
         """
         def get_env_name(attr_name: str) -> str:
             return f"LMCACHE_{attr_name.upper()}"
@@ -173,7 +175,11 @@ class LMCacheEngineConfig:
         def parse_env(name: str, default: str) -> str:
             return os.getenv(name, default)
 
-        config = LMCacheEngineConfig.from_defaults()
+        config = LMCacheEngineConfig.from_defaults(
+                local_device = "cpu",
+                remote_url = None,
+                remote_serde = None)
+
         config.chunk_size = int(parse_env(get_env_name("chunk_size"),
                                           str(config.chunk_size)))
         config.local_device = parse_env(get_env_name("local_device"),
