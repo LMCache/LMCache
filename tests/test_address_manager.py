@@ -72,44 +72,44 @@ def test_multi_users_single_data(backend):
                     assert answer == ""
 
             case "write":
-                answer: str = proxies[cli].write_check(key,
-                                                       kv_size)  # type: ignore
+                answer1: str = proxies[cli].write_check(
+                    key, kv_size)  # type: ignore
                 if key in keys_dict:
-                    assert answer == ""
+                    assert answer1 == ""
                     continue
                 else:
-                    assert answer != ""
-                    keys_dict[key] = answer
+                    assert answer1 != ""
+                    keys_dict[key] = answer1
 
-                answer: str = proxies[(cli + 1) % client_number].read_check(
+                answer2: str = proxies[(cli + 1) % client_number].read_check(
                     key)  # type: ignore
-                assert answer == ""
-                answer: str = proxies[(cli + 2) % client_number].contains(
+                assert answer2 == ""
+                answer3: str = proxies[(cli + 2) % client_number].contains(
                     key)  # type: ignore
-                assert answer == ""
-                answer: str = proxies[(cli + 3) % client_number].write_check(
+                assert answer3 == ""
+                answer4: str = proxies[(cli + 3) % client_number].write_check(
                     key, kv_size)  # type: ignore
-                assert answer == ""
+                assert answer4 == ""
 
                 assert proxies[cli].write_ready(key, kv_size) is True
 
-                answer: str = proxies[(cli + 1) % client_number].read_check(
+                answer5: str = proxies[(cli + 1) % client_number].read_check(
                     key)  # type: ignore
-                assert answer == keys_dict[key]
-                answer: str = proxies[(cli + 2) % client_number].contains(
+                assert answer5 == keys_dict[key]
+                answer6: str = proxies[(cli + 2) % client_number].contains(
                     key)  # type: ignore
-                assert answer == keys_dict[key]
-                answer: str = proxies[(cli + 3) % client_number].write_check(
+                assert answer6 == keys_dict[key]
+                answer7: str = proxies[(cli + 3) % client_number].write_check(
                     key, kv_size)  # type: ignore
-                assert answer == ""
+                assert answer7 == ""
 
             case "read_check":
-                answer: str = proxies[cli].read_check(key,
-                                                      kv_size)  # type: ignore
+                answer8: str = proxies[cli].read_check(key,
+                                                       kv_size)  # type: ignore
                 if key in keys_dict:
-                    assert answer == keys_dict[key]
+                    assert answer8 == keys_dict[key]
                 else:
-                    assert answer == ""
+                    assert answer8 == ""
 
     if backend in ["disk_url://localhost:4322"]:
         address_manager.terminate()
@@ -134,7 +134,7 @@ def test_multi_users_multi_data(backend):
         for i in range(key_number)
     ]
     sizes_pool = [random.uniform(0.0001, 0.01) for i in range(key_number)]
-    keys_dict:Dict[str,str] = {}
+    keys_dict: Dict[str, str] = {}
     proxies = [
         xmlrpc.client.ServerProxy("http://localhost:4322")
         for i in range(client_number)
