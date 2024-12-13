@@ -243,21 +243,6 @@ class LMCLocalBackend(LMCBackendInterface):
         self.close()
 
 
-# TODO(Jiayi): need to optimize disk saving/loading
-# current impl. with "safetensors" might not be efficient
-# but it is better than "torch.save/load"
-
-# TODO(Jiayi): need to support prefetch for disk
-
-# @_lmcache_nvtx_annotate
-# @torch.inference_mode()
-# def save_disk(
-#     path: str,
-#     kv_chunk: torch.Tensor,
-# ):
-#     save_file({"kv_chunk": kv_chunk.contiguous()}, path)
-
-
 @_lmcache_nvtx_annotate
 @torch.inference_mode()
 def save_disk(
@@ -662,7 +647,8 @@ class LMCGlobalDiskBackend(LMCLocalDiskBackend):
 
     def save_end_callback(self, future: Future):
         key, size, chunk_idx = future.result()
-        self.cpu_mbufferpool.idx_free(chunk_idx)
+        with self.update_lock:
+            self.cpu_mbufferpool.idx_free(chunk_idx)
         # logger.debug(f"Saving cache {key} finished.")
         self.callback_lock.acquire()
         self.remain_writing = self.remain_writing - 1
@@ -715,6 +701,7 @@ class LMCGlobalDiskBackend(LMCLocalDiskBackend):
         self.callback_lock.acquire()
         self.remain_writing = self.remain_writing + 1
         self.callback_lock.release()
+
         future = self.proc_pool_executor.submit(save_disk, path, kv_obj, key)
         future.add_done_callback(self.save_end_callback)
 

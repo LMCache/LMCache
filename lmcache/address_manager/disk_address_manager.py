@@ -2,6 +2,7 @@ import os
 import re
 import threading
 from collections import OrderedDict
+from socketserver import ThreadingMixIn
 from typing import Iterable
 from xmlrpc.server import SimpleXMLRPCRequestHandler, SimpleXMLRPCServer
 
@@ -252,6 +253,10 @@ class RequestHandler(SimpleXMLRPCRequestHandler):
     rpc_paths = ('/RPC2', )
 
 
+class ThreadedXMLRPCServer(ThreadingMixIn, SimpleXMLRPCServer):
+    pass
+
+
 # Initialize the server
 def start_server(config):
     pattern = r"(.+)://(.*):(.*)"
@@ -262,7 +267,8 @@ def start_server(config):
 
     connector_type, host, port = m.group(1), m.group(2), int(m.group(3))
     print(connector_type, host, port)
-    server = SimpleXMLRPCServer((host, port), requestHandler=RequestHandler)
+    # server = SimpleXMLRPCServer((host, port), requestHandler=RequestHandler)
+    server = ThreadedXMLRPCServer((host, port), requestHandler=RequestHandler)
     server.register_introspection_functions(
     )  # Optional: provides a list of registered functions
     server.register_instance(
