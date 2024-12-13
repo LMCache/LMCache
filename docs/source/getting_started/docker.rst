@@ -18,7 +18,7 @@ To get started, pull the official Docker image with the following command:
 
 .. code-block:: bash
 
-    docker pull lmcache/lmcache_vllm:lmcache-0.1.3.post1
+    docker pull lmcache/lmcache_vllm:lmcache-0.1.4
 
 Running the Docker Container
 ---------------------------------------
@@ -122,7 +122,7 @@ Building Docker from Source
 
 .. note::
 
-    This section users who want to build the Docker image from source.
+    This section is for users who want to build the Docker image from source.
     For this please visit the link here `lmcache-vllm <https://github.com/LMCache/lmcache-vllm/tree/dev/docker>`_.
 
     

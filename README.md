@@ -58,7 +58,7 @@ LMCACHE_CONFIG_FILE=example.yaml CUDA_VISIBLE_DEVICES=1 lmcache_vllm serve lmsys
 ```
 
 
-## - What's next
+# - What's next
 We also provide multiple docker-based demos at [🔗LMCache-demos repo](https://github.com/LMCache/demo). The demos cover the following use cases:
 - Share KV caches across multiple serving engines [(🔗link)](https://github.com/LMCache/demo/tree/master/demo2-multi-node-sharing)
 - Loading non-prefix KV caches for RAG [(🔗link)](https://github.com/LMCache/demo/tree/master/demo3-KV-blending)
@@ -77,6 +77,13 @@ https://forms.gle/mQfQDUXbKfp2St1z7
 # 📖 Blogs and documentations
 
 Our [blog posts](https://lmcache.github.io) and [documentations](https://docs.lmcache.ai/) are available online
+
+# Community meeting
+
+- :link: Meeting link - https://uchicago.zoom.us/j/91454186439?pwd=Qu3IMJH7c83Qbg9hHsXZ3BxzLaEFoF.1
+- :page_facing_up: Community Meeting Document - https://docs.google.com/document/d/1SnCKnB2UFBUyPhIpL9zzdZsn_hGp50spoZue-2SoxJY/edit?usp=sharing
+- 🗓️ Calendar - https://calendar.app.google/rsu7Xgq4y4y5YuDj7
+
 
 ## Citation
 If you use LMCache for your research, please cite our papers:
