@@ -27,7 +27,7 @@ Configurations are set in the format of a YAML file.
       # Set to 5 by default
       max_local_cache_size: int
 
-      # Remote URL for the sotrage backend (can be redis or redis-sentinel)
+      # Remote URL for the storage backend (can be redis or redis-sentinel)
       # Should have the format url://<host>:<port>
       # E.g. redis://localhost:65432
       # E.g. redis-sentinel://localhost:26379 
@@ -83,7 +83,7 @@ The following are the list of environment variables that can be set for LMCache.
       # Set to 5 by default
       LM_CACHE_MAX_LOCAL_CACHE_SIZE: int
 
-      # Remote URL for the sotrage backend (can be redis or redis-sentinel)
+      # Remote URL for the storage backend (can be redis or redis-sentinel)
       # Should have the format url://<host>:<port>
       # E.g. redis://localhost:65432
       # E.g. redis-sentinel://localhost:26379 
