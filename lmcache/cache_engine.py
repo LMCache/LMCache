@@ -8,8 +8,8 @@ import torch
 from lmcache.config import LMCacheEngineConfig, LMCacheEngineMetadata
 from lmcache.logging import init_logger
 from lmcache.storage_backend import CreateStorageBackend
-from lmcache.utils import (CacheEngineKey, KVCache, _get_size,
-                           _lmcache_nvtx_annotate)
+from lmcache.utils import (CacheEngineKey, KVCache, _lmcache_nvtx_annotate,
+                           get_kv_chunk_size)
 
 logger = init_logger(__name__)
 
@@ -201,8 +201,8 @@ class LMCacheEngine:
         keys = []
         for chunk_hash in chunk_hashes:
             keys.append(self._make_key(chunk_hash, fmt))
-        anws = self.engine_.batched_contains(keys,
-                                             total_size=_get_size(kv_tensors))
+        anws = self.engine_.batched_contains_before_put(
+            keys, total_size=get_kv_chunk_size(kv_tensors))
         for anw in anws:
             if not anw:
                 start_token_idx = start_chunk_idx * self.chunk_size
@@ -449,7 +449,7 @@ class LMCacheEngine:
         keys = []
         for chunk_hash in chunk_hashes:
             keys.append(self._make_key(chunk_hash, fmt))
-        anws = self.engine_.batched_contains(keys, total_size=0)
+        anws = self.engine_.batched_contains(keys)
         for anw in anws:
             if not anw:
                 break

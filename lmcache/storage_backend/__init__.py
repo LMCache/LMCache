@@ -6,7 +6,7 @@ from lmcache.logging import init_logger
 from lmcache.storage_backend.abstract_backend import LMCBackendInterface
 from lmcache.storage_backend.hybrid_backend import \
     LMCHybridBackend  # , LMCPipelinedHybridBackend
-from lmcache.storage_backend.local_backend import (LMCDiskBackend,
+from lmcache.storage_backend.local_backend import (LMCGlobalDiskBackend,
                                                    LMCLocalBackend,
                                                    LMCLocalDiskBackend)
 from lmcache.storage_backend.remote_backend import LMCRemoteBackend
@@ -41,15 +41,19 @@ def CreateStorageBackend(config: LMCacheEngineConfig,
                         f" backend")
 
                     return LMCLocalBackend(config, mpool_metadata, dst_device)
-                case "disk":
+                case "global_disk":
                     logger.info(f"Initializing Disk backend at"
                                 f" {config.disk_url}")
-                    return LMCDiskBackend(config, mpool_metadata, dst_device)
-                case _:
+                    return LMCGlobalDiskBackend(config, mpool_metadata,
+                                                dst_device)
+                case "local_disk":
                     logger.info(f"Initializing local-only (disk) backend at"
-                                f" {config.local_device}")
+                                f" {config.disk_url}")
                     return LMCLocalDiskBackend(config, mpool_metadata,
                                                dst_device)
+                case _:
+                    raise ValueError(
+                        f"Invalid local device: {config.local_device}")
 
         case LMCacheEngineConfig(
                 _, local_device=str(p),

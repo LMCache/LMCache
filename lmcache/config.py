@@ -37,7 +37,8 @@ class LMCacheEngineConfig:
     chunk_size: int
     local_device: Optional[str]
     max_local_cache_size: int
-    disk_url: Optional[str]
+    disk_url: Optional[
+        str]  # path for local disk and address manager url for global disk
     remote_url: Optional[str]
     remote_serde: Optional[str]  # Can be "torch" or "cachegen"
 
@@ -54,7 +55,7 @@ class LMCacheEngineConfig:
         chunk_size: int = 256,
         local_device: str = "cuda",
         max_local_cache_size: int = 5,
-        disk_url: str = "",
+        disk_url: Optional[str] = None,
         remote_url: str = "redis://localhost:6379",
         remote_serde: str = "torch",
         pipelined_backend: bool = False,
@@ -90,11 +91,12 @@ class LMCacheEngineConfig:
                 remote_url = None
             case path if re.match(r"file://(.*)/",
                                   path):  # local disk directory
-                local_device = path[7:]
+                local_device = "local_disk"
+                disk_url = path[7:]
                 remote_url = None
-            case path if re.match(r"disk_url://(.*)/",
+            case path if re.match(r"disk_url://(.*)",
                                   path):  # local disk directory
-                local_device = "disk"
+                local_device = "global_disk"
                 disk_url = "http://" + path[11:]
                 remote_url = None
             case url if re.match(r"(.*)://(.*):(\d+)", url):
@@ -139,12 +141,12 @@ class LMCacheEngineConfig:
                 pass
             case path if re.match(r"file://(.*)/",
                                   path):  # local disk directory
-                local_device = path[7:]
+                local_device = "local_disk"
+                disk_url = path[7:]
             case path if re.match(r"disk_url://(.*)",
                                   path):  # local disk directory
-                local_device = "disk"
+                local_device = "global_disk"
                 disk_url = "http://" + path[11:]
-                print(disk_url)
             case _:
                 raise ValueError(
                     f"Invalid local storage device: {local_device}")
@@ -185,3 +187,23 @@ class GlobalConfig:
     @classmethod
     def is_debug(cls) -> bool:
         return cls.enable_debug
+
+
+@dataclass
+class LMCAddressManagerConfig:
+    disk_url: Optional[str]
+    disk_path: Optional[str]
+
+    @staticmethod
+    def from_file(file_path: str) -> "LMCAddressManagerConfig":
+        """
+        Load the config from a yaml file
+        """
+        with open(file_path, "r") as fin:
+            config = yaml.safe_load(fin)
+
+        local_device = config.get("local_device", "disk_url://localhost:4322")
+        disk_url = "http://" + local_device[11:]
+        disk_path = config.get("disk_path", "/local_disk/")
+
+        return LMCAddressManagerConfig(disk_url, disk_path)

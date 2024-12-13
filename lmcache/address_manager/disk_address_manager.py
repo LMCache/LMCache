@@ -2,12 +2,10 @@ import os
 import re
 import threading
 from collections import OrderedDict
-from dataclasses import dataclass
-from typing import Iterable, Optional
+from typing import Iterable
 from xmlrpc.server import SimpleXMLRPCRequestHandler, SimpleXMLRPCServer
 
-import yaml
-
+from lmcache.config import LMCAddressManagerConfig
 from lmcache.logging import init_logger
 from lmcache.storage_backend.evictor import LRUEvictor
 from lmcache.storage_backend.evictor.base_evictor import PutStatus
@@ -16,29 +14,11 @@ from lmcache.utils import CacheEngineKey, DiskCacheMetadata
 logger = init_logger(__name__)
 
 
-@dataclass
-class LMCAddressManagerConfig:
-    disk_url: Optional[str]
-    disk_path: Optional[str]
-
-    @staticmethod
-    def from_file(file_path: str) -> "LMCAddressManagerConfig":
-        """
-        Load the config from a yaml file
-        """
-        with open(file_path, "r") as fin:
-            config = yaml.safe_load(fin)
-
-        local_device = config.get("local_device", "disk_url://localhost:4322")
-        disk_url = "http://" + local_device[11:]
-        disk_path = config.get("disk_path", "/local_disk/")
-
-        return LMCAddressManagerConfig(disk_url, disk_path)
-
-
 class LMCDiskAddressManager():
     """
-    Cache engine for storing the KV cache of the tokens in the local disk.
+    The address managers centralize the key-path dictionary and 
+        the evictor of each disk engine into an independent process, 
+        enabling multiple LMCache Disk Backends to share KV Cache files.
     """
 
     def __init__(self, config: LMCAddressManagerConfig):
@@ -123,12 +103,25 @@ class LMCDiskAddressManager():
 
     def write_check(self, key_str: str, kv_size: float) -> str:
         """
-        The logic here is that:
-            return "" if the key is already in the cache, 
-                so that backend will not write it again
-            return path if the key is not in the cache, 
-                so that backend will write it to the path
-        if path is not in the cache, initialize the cache with ("",0)
+        Principal: Only the backend that first encounter the key 
+            should write it to the disk
+
+        return "" if the key doesn't need to be write again,
+            when the key already written or 
+            other backend is writing the same KV Cache chunks,
+            Backend SHOULD NOT write it again
+        return path if the key needs to be write, 
+            when the key is new and not in the dict
+            Backend SHOULD write it to the path in the later put function
+
+        kv_size: the size of the KV Cache chunk group in GB, 
+            free up the space if the existing cache is too big
+
+        if path is not in the cache, initialize the cache with ("",0), so that 
+            when other backend try to write the same KV Cache chunks, 
+                it will be blocked by the "" value
+            when other backend try to read the same KV Cache chunks, 
+                it will be blocked by the "" value
         """
         key = CacheEngineKey.from_string(key_str)
         with self.update_lock:
@@ -160,6 +153,7 @@ class LMCDiskAddressManager():
         for key_str in key_strs:
             key = CacheEngineKey.from_string(key_str)
             if key in self.dict:
+                # Do not free up space for existed KV Cache chunks
                 kv_size = kv_size - self.dict[key].size
                 paths.append("")
             else:
@@ -186,6 +180,9 @@ class LMCDiskAddressManager():
         When backend has finished writing the cache, 
             it will call this function to update the cache 
             from ("",0) to the actual path and size
+        
+        kv_size: the size of the KV Cache chunk in GB,
+            for evictor
         """
         key = CacheEngineKey.from_string(key_str)
 
@@ -207,8 +204,12 @@ class LMCDiskAddressManager():
 
     def read_check(self, key_str: str) -> str:
         """
-        return the path if the key is in the cache, 
-            "" otherwise, including cache that is not ready
+        return the path if the key is in the cache
+            Backend SHOULD read the cache from the path
+        
+        return "" otherwise, including cache that is 
+            being written by other backend
+            Backend SHOULD NOT read this cache
         """
         self.update_lock.acquire()
         key = CacheEngineKey.from_string(key_str)

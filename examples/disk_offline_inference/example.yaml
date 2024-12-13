@@ -1,7 +1,5 @@
 chunk_size: 256
-local_device: "file:///local/qinyuyang2003/local_disk/"
-# local_device: "disk_url://localhost:4322"
-# disk_path: "/local/qinyuyang2003/local_disk/"
-# disk_path: "/dataheart/qinyuyang2003/local_disk/"
+local_device: "disk_url://localhost:4322"
+disk_path: "local_disk/"
 pipelined_backend: False
 

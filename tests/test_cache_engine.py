@@ -1,12 +1,15 @@
 import shlex
 import subprocess
 import time
+from multiprocessing import Process
 
 import pytest
 import torch
 
+from lmcache.address_manager.disk_address_manager import start_server
 from lmcache.cache_engine import LMCacheEngine, LMCacheEngineBuilder
-from lmcache.config import LMCacheEngineConfig, LMCacheEngineMetadata
+from lmcache.config import (LMCacheEngineConfig, LMCacheEngineMetadata,
+                            LMCAddressManagerConfig)
 
 
 def dumb_metadata(fmt="vllm", kv_shape=(32, 2, 256, 8, 128)):
@@ -90,9 +93,17 @@ def check_kv_cache_device(kvs, device):
 # TODO(Jiayi): this test needs to be improved once more dst_device is supported
 @pytest.mark.parametrize("src_device", ["cuda:0", "cuda", "cpu"])
 @pytest.mark.parametrize("dst_device", ["cuda:0"])
-@pytest.mark.parametrize("backend", ["cuda", "cpu", "file://local_disk/"])
+@pytest.mark.parametrize(
+    "backend",
+    ["cuda", "cpu", "file://local_disk/", "disk_url://localhost:4322"])
 def test_retrieve_device(backend, src_device, dst_device, autorelease):
-
+    if backend in ["disk_url://localhost:4322"]:
+        address_manager = Process(target=start_server,
+                                  args=(LMCAddressManagerConfig(
+                                      "disk_url://localhost:4322",
+                                      "local_disk/"), ))
+        address_manager.start()
+        time.sleep(10)
     fmt = "vllm"
     num_tokens = 500
     chunk_size = 256
@@ -107,6 +118,9 @@ def test_retrieve_device(backend, src_device, dst_device, autorelease):
     engine.store(tokens, kv_cache)
     retrieved_cache, ret_mask = engine.retrieve(tokens)
     check_kv_cache_device(retrieved_cache, dst_device)
+    if backend in ["disk_url://localhost:4322"]:
+        address_manager.terminate()
+        time.sleep(1)
 
 
 @pytest.mark.parametrize("fmt", ["vllm"])
@@ -116,6 +130,7 @@ def test_retrieve_device(backend, src_device, dst_device, autorelease):
         "cuda",
         "cpu",
         "file://local_disk/",
+        "disk_url://localhost:4322",
         "redis://localhost:6379",
         "lm://localhost:65000",
     ],
@@ -125,6 +140,14 @@ def test_retrieve_device(backend, src_device, dst_device, autorelease):
                          indirect=True)
 def test_same_retrieve_store(fmt, backend, remote_serde, autorelease,
                              lmserver_process):
+    if backend in ["disk_url://localhost:4322"]:
+        address_manager = Process(target=start_server,
+                                  args=(LMCAddressManagerConfig(
+                                      "disk_url://localhost:4322",
+                                      "local_disk/"), ))
+        address_manager.start()
+        time.sleep(10)
+
     device = "cpu" if backend == "cpu" else "cuda"
     num_tokens = 2000
     chunk_size = 256
@@ -153,8 +176,12 @@ def test_same_retrieve_store(fmt, backend, remote_serde, autorelease,
 
     assert length == num_tokens
     check_kv_cache_equal(retrieved_cache, kv_cache, num_tokens, fmt)
+
+    if backend in ["disk_url://localhost:4322"]:
+        address_manager.terminate()
+        time.sleep(1)
     """erase local cache"""
-    if backend in ["file://local_disk/"]:
+    if backend in ["file://local_disk/", "disk_url://localhost:4322"]:
         subprocess.run(shlex.split("rm -rf local_disk/"))
 
 
@@ -197,6 +224,7 @@ def test_retrieve_single_tensor(fmt, backend, autorelease):
         "cuda",
         "cpu",
         "file://local_disk/",
+        "disk_url://localhost:4322",
         "redis://localhost:6379",
         "lm://localhost:65000",
     ],
@@ -204,6 +232,14 @@ def test_retrieve_single_tensor(fmt, backend, autorelease):
 @pytest.mark.parametrize("lmserver_process", ["cpu"], indirect=True)
 def test_retrieve_prefix(fmt, chunk_size, backend, autorelease,
                          lmserver_process):
+    if backend in ["disk_url://localhost:4322"]:
+        address_manager = Process(target=start_server,
+                                  args=(LMCAddressManagerConfig(
+                                      "disk_url://localhost:4322",
+                                      "local_disk/"), ))
+        address_manager.start()
+        time.sleep(10)
+
     device = "cpu" if backend == "cpu" else "cuda"
     num_tokens = 2000
     new_num_tokens = 1000
@@ -241,7 +277,11 @@ def test_retrieve_prefix(fmt, chunk_size, backend, autorelease,
     assert length == expected_length
     check_kv_cache_equal(retrieved_cache, kv_cache, expected_length, fmt)
 
-    if backend in ["file://local_disk/"]:
+    if backend in ["disk_url://localhost:4322"]:
+        address_manager.terminate()
+        time.sleep(1)
+
+    if backend in ["file://local_disk/", "disk_url://localhost:4322"]:
         subprocess.run(shlex.split("rm -rf local_disk/"))
 
 
@@ -296,9 +336,6 @@ def test_mixed_retrieve(fmt, chunk_size, backend, autorelease,
     assert length == num_tokens + new_num_tokens
 
     check_kv_cache_equal(retrieved_cache, final_kv_cache, length, fmt)
-    """destroy local disk path"""
-    if backend in ["file://local_disk/"]:
-        subprocess.run(shlex.split("rm -rf local_disk/"))
 
 
 @pytest.mark.parametrize("fmt", ["vllm"])

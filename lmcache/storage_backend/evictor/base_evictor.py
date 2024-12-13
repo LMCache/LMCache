@@ -7,7 +7,7 @@ import torch
 
 from lmcache.logging import init_logger
 from lmcache.storage_backend.mem_pool import KVObj
-from lmcache.utils import CacheEngineKey, DiskCacheMetadata, _get_size
+from lmcache.utils import CacheEngineKey, DiskCacheMetadata, get_kv_chunk_size
 
 logger = init_logger(__name__)
 
@@ -64,7 +64,7 @@ class BaseEvictor(metaclass=abc.ABCMeta):
         Return:
             the size of the cache (in bytes)
         """
-        return _get_size(kv_obj)
+        return get_kv_chunk_size(kv_obj)
 
 
 class DummyEvictor(BaseEvictor):

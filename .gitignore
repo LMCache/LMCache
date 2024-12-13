@@ -91,3 +91,7 @@ perf-test.py
 /docs/output/
 
 /try
+
+# disk address manager
+examples/disk_offline_inference/my_example.yaml
+examples/disk_offline_inference/offline_inference_outputs.jsonl

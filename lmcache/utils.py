@@ -82,7 +82,7 @@ def _lmcache_nvtx_annotate(func, domain="lmcache"):
     )(func)
 
 
-def _get_size(
+def get_kv_chunk_size(
         kv_obj: Union[torch.Tensor, bytes, DiskCacheMetadata, KVObj]) -> int:
     # Get size of one element in bytes
     if isinstance(kv_obj, torch.Tensor):

@@ -20,7 +20,7 @@ from lmcache.storage_backend.mem_pool import (KVObj, LocalCPUBufferPool,
                                               LocalCPUPool, LocalGPUPool,
                                               LocalPool)
 from lmcache.utils import (CacheEngineKey, DiskCacheMetadata, KVCache,
-                           _get_size, _lmcache_nvtx_annotate)
+                           _lmcache_nvtx_annotate, get_kv_chunk_size)
 
 logger = init_logger(__name__)
 
@@ -249,14 +249,24 @@ class LMCLocalBackend(LMCBackendInterface):
 
 # TODO(Jiayi): need to support prefetch for disk
 
+# @_lmcache_nvtx_annotate
+# @torch.inference_mode()
+# def save_disk(
+#     path: str,
+#     kv_chunk: torch.Tensor,
+# ):
+#     save_file({"kv_chunk": kv_chunk.contiguous()}, path)
+
 
 @_lmcache_nvtx_annotate
 @torch.inference_mode()
 def save_disk(
     path: str,
-    kv_chunk: torch.Tensor,
-):
-    save_file({"kv_chunk": kv_chunk.contiguous()}, path)
+    kv_obj: KVObj,
+    key: CacheEngineKey,
+) -> Tuple[CacheEngineKey, float, int]:
+    save_file({"kv_chunk": kv_obj.data.contiguous()}, path)
+    return key, get_kv_chunk_size(kv_obj.data), kv_obj.chunk_idx
 
 
 class LMCLocalDiskBackend(LMCBackendInterface):
@@ -392,6 +402,7 @@ class LMCLocalDiskBackend(LMCBackendInterface):
         key: CacheEngineKey,
         kv_chunk: torch.Tensor,
     ) -> None:
+
         path = self._key_to_path(key)
         logger.debug(f"Saving cache to {path}")
 
@@ -436,7 +447,7 @@ class LMCLocalDiskBackend(LMCBackendInterface):
             kv_chunk.record_stream(put_stream)
         put_stream.synchronize()
 
-        future = self.proc_pool_executor.submit(save_disk, path, kv_obj.data)
+        future = self.proc_pool_executor.submit(save_disk, path, kv_obj, key)
 
         self.update_lock.acquire()
         self.future_pool[key] = (future, kv_obj)
@@ -565,20 +576,10 @@ class LMCLocalDiskBackend(LMCBackendInterface):
         self.close()
 
 
-@_lmcache_nvtx_annotate
-@torch.inference_mode()
-def save_disk_with_callback(
-    path: str,
-    kv_obj: KVObj,
-    key: CacheEngineKey,
-) -> Tuple[CacheEngineKey, float, int]:
-    save_file({"kv_chunk": kv_obj.data.contiguous()}, path)
-    return key, _get_size(kv_obj.data), kv_obj.chunk_idx
-
-
-class LMCDiskBackend(LMCLocalDiskBackend):
+class LMCGlobalDiskBackend(LMCLocalDiskBackend):
     """
-    Cache engine for storing the KV cache of the tokens in the local disk.
+    Cache engine for storing the KV cache of the tokens in the disk.
+    Sync with other LMCache Backend.
     """
 
     def __init__(self,
@@ -614,17 +615,34 @@ class LMCDiskBackend(LMCLocalDiskBackend):
         self,
         key: CacheEngineKey,
     ) -> bool:
+        """
+            Verify if the disk contains the KV Cache for the key.
+        """
+
         anws: str = self.proxy.contains(key.to_string)  # type: ignore
         self.cached_paths[key] = anws
         return anws != ""
 
-    def batched_contains(self,
-                         keys: Iterable[CacheEngineKey],
-                         total_size: float = 0) -> List[bool]:
+    def batched_contains(self, keys: Iterable[CacheEngineKey]) -> List[bool]:
+        """
+            Verify if the disk contains the KV Caches for the keys.
+        """
+        contains_paths: Iterable[str] = self.proxy.batched_contains(
+            [key.to_string() for key in keys])  # type: ignore
+        return [path != "" for path in contains_paths]
+
+    def batched_contains_before_put(self,
+                                    keys: Iterable[CacheEngineKey],
+                                    total_size: float = 0) -> List[bool]:
+        """
+            Verify if the disk contains the KV Cache for the key.
+            Utilize the total size to evict existed cache if necessary.
+            Cache the new path to put if the key do not exist.
+            Do it in a batched manner.
+            total_size=0 means no eviction, just check if the key exists.
+        """
         if total_size == 0:
-            contains_paths: Iterable[str] = self.proxy.batched_contains(
-                [key.to_string() for key in keys])  # type: ignore
-            return [path != "" for path in contains_paths]
+            return self.batched_contains(keys)
         else:
             # Write check
             paths: Iterable[str] = self.proxy.batched_write_check(
@@ -694,8 +712,7 @@ class LMCDiskBackend(LMCLocalDiskBackend):
         put_stream.synchronize()
 
         self.remain_writing = self.remain_writing + 1
-        future = self.proc_pool_executor.submit(save_disk_with_callback, path,
-                                                kv_obj, key)
+        future = self.proc_pool_executor.submit(save_disk, path, kv_obj, key)
         future.add_done_callback(self.save_end_callback)
 
     @_lmcache_nvtx_annotate
@@ -716,7 +733,7 @@ class LMCDiskBackend(LMCLocalDiskBackend):
         save_file({"kv_chunk": kv_chunk}, path)
         self.update_lock.release()
 
-        self.proxy.write_ready(key.to_string(), _get_size(kv_chunk))
+        self.proxy.write_ready(key.to_string(), get_kv_chunk_size(kv_chunk))
 
     @_lmcache_nvtx_annotate
     def get(
