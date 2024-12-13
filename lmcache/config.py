@@ -207,6 +207,7 @@ class LMCacheEngineConfig:
         config.max_local_cache_size = int(
             parse_env(get_env_name("max_local_cache_size"),
                       config.max_local_cache_size))
+        config.disk_url = parse_env(get_env_name("disk_url"), config.disk_url)
         config.remote_url = parse_env(get_env_name("remote_url"),
                                       config.remote_url)
         config.remote_serde = parse_env(get_env_name("remote_serde"),
