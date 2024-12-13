@@ -18,7 +18,7 @@ To get started, pull the official Docker image with the following command:
 
 .. code-block:: bash
 
-    docker pull lmcache/lmcache_vllm:lmcache-0.1.3.post1
+    docker pull lmcache/lmcache_vllm:lmcache-0.1.4
 
 Running the Docker Container
 ---------------------------------------
