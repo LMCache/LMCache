@@ -1,8 +1,8 @@
-import shlex
-from dataclasses import fields
 import os
+import shlex
 import subprocess
 import time
+from dataclasses import fields
 
 import pytest
 import torch
@@ -434,6 +434,7 @@ def test_builder(autorelease):
     with pytest.raises(ValueError):
         LMCacheEngineBuilder.get_or_create(instance_id, cfg2, dumb_metadata())
 
+
 def test_env_configure():
     # Test the parsing of the configurations
     config = LMCacheEngineConfig.from_defaults()
@@ -446,11 +447,19 @@ def test_env_configure():
         if isinstance(value, int) or isinstance(value, float):
             assert value == 0
         elif isinstance(value, bool):
-            assert value is bool("0") 
+            assert value is bool("0")
         elif isinstance(value, str):
             assert value == "0"
         else:
-            assert False, "Unexpected type in LMCacheEngineConfig"
+            raise AssertionError("Unexpected type in LMCacheEngineConfig")
 
+    exclude_env_name = "LMCACHE_REMOTE_URL"
+    del os.environ[exclude_env_name]
+
+    newconfig2 = LMCacheEngineConfig.from_env()
+    assert newconfig2.remote_url is None
+
+    for attr in fields(newconfig):
         expected_env_name = f"LMCACHE_{attr.name.upper()}"
-        del os.environ[expected_env_name]
+        if expected_env_name in os.environ:
+            del os.environ[expected_env_name]
