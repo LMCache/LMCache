@@ -29,6 +29,7 @@ class StorageManager:
         self.hot_cache = SortedDict()
         self.use_hot = config.local_cpu
 
+        #TODO: pass in real device
         dst_device = "cuda"
         self.storage_backends: Dict[str, StorageBackendInterface] =\
             CreateStorageBackends(config, metadata, dst_device)

@@ -134,7 +134,9 @@ class LMCacheEngine:
             kv_dtype = self.metadata.kv_dtype
             memory_obj = self.memory_allocator.allocate(kv_shape, kv_dtype)
             if memory_obj is None:
-                logger.warning("Failed to allocate memory for the KV cache.")
+                logger.warning("Failed to allocate memory for the KV cache.\n"
+                               "The KV cache will not be stored.")
+                
                 # TODO: let StorageManager know the failure here
                 return
 
@@ -143,7 +145,7 @@ class LMCacheEngine:
             # after store is finished
             self.gpu_connector.from_gpu(memory_obj, start, end, **kwargs)
 
-            # TODO: Store the memory object into the storage backend
+            # Put the memory object to the storage backend
             self.storage_manager.put(key, memory_obj)
 
     @_lmcache_nvtx_annotate
@@ -176,8 +178,6 @@ class LMCacheEngine:
         ret_mask = torch.zeros_like(tokens, dtype=torch.bool, device="cpu")
         for start, end, key in self.token_database.process_tokens(
                 tokens, mask):
-            #if not self.storage_manager.contains(key):
-            #    break
 
             # Get the memory object from the storage backend
             memory_obj = self.storage_manager.get(key)
@@ -187,19 +187,15 @@ class LMCacheEngine:
 
             ret_mask[start:end] = True
 
-            # FIXME(Jiayi): gpu connector shouldn't be used here for the
-            # sake of performance. For example, disk->gpu is faster than
-            # disk->cpu->gpu. RDMA is another example.
+            # NOTE(Jiayi): memory_obj doesn't haeve to be a pinned
+            # cpu tensor for the sake of performance.
+            # For example, disk->gpu is faster than disk->cpu->gpu.
+            # RDMA is another example.
 
-            # Move the memory object to the GPU
-            if memory_obj is not None:
-                self.gpu_connector.to_gpu(memory_obj, start, end, **kwargs)
-            else:
-                logger.warning("Failed to retrieve the KV cache "
-                               "when storage backend contains the key.")
-                break
-        # TODO(Jiayi): should compose the KV cache to a contiguous
-        # buffer here
+            # TODO(Jiayi): Move the memory object directly to
+            # paged memory to avoid data copies
+            self.gpu_connector.to_gpu(memory_obj, start, end, **kwargs)
+
         return ret_mask
 
     def prefetch(
