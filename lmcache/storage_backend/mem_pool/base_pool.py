@@ -8,6 +8,7 @@ import torch
 @dataclass
 class KVObj:
     chunk_idx: int
+    size: int  # size of the obj in bytes
     data: torch.Tensor
 
 

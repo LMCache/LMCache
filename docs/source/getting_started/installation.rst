@@ -25,7 +25,7 @@ You can install LMCache using pip:
     $ conda activate venv
 
     $ # Install vLLM with CUDA 12.1.
-    $ pip install lmcache lmcache_vllm
+    $ pip install lmcache==0.1.4 lmcache_vllm==0.6.2.3
 
 .. note::
 
@@ -34,7 +34,7 @@ You can install LMCache using pip:
 
 .. note::
 
-    LMCache provides the integration to the latest vLLM (0.6.2)
+    The latest LMCache (0.1.4) provides the integration to the vLLM==0.6.2
 
 .. note::
     LMCache requires CUDA 12.1. You can check ``nvcc --version`` to see if you loaded CUDA 12. Following, please add the following to your ``~/.bashrc`` file:
@@ -53,8 +53,8 @@ You can install the latest code from the GitHub repository:
 
 .. code-block:: console
 
-    # Install vLLM==0.6.2
-    $ pip install vllm==0.6.2
+    # Install vLLM version
+    $ pip install vllm==0.6.2.3
 
     # Clone and install LMCache
     $ git clone git@github.com:LMCache/LMCache.git

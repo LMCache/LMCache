@@ -1,6 +1,7 @@
+import os
 import re
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Any, Optional, Tuple
 
 import torch
 import yaml
@@ -29,12 +30,14 @@ class LMCacheMemPoolMetadata:
 
     kv_shape: Tuple[int, int, int, int, int]
     kv_dtype: torch.dtype
+    max_local_cache_size: int
 
 
 @dataclass
 class LMCacheEngineConfig:
     chunk_size: int
     local_device: Optional[str]
+    max_local_cache_size: int
     remote_url: Optional[str]
     remote_serde: Optional[str]  # Can be "torch" or "cachegen"
 
@@ -50,15 +53,17 @@ class LMCacheEngineConfig:
     def from_defaults(
         chunk_size: int = 256,
         local_device: str = "cuda",
-        remote_url: str = "redis://localhost:6379",
-        remote_serde: str = "torch",
+        max_local_cache_size: int = 5,
+        remote_url: Optional[str] = "redis://localhost:6379",
+        remote_serde: Optional[str] = "torch",
         pipelined_backend: bool = False,
         save_decode_cache: bool = False,
         enable_blending: bool = False,
         blend_recompute_ratio: float = 0.15,
         blend_min_tokens: int = 256,
     ) -> "LMCacheEngineConfig":
-        return LMCacheEngineConfig(chunk_size, local_device, remote_url,
+        return LMCacheEngineConfig(chunk_size, local_device,
+                                   max_local_cache_size, remote_url,
                                    remote_serde, pipelined_backend,
                                    save_decode_cache, enable_blending,
                                    blend_recompute_ratio, blend_min_tokens)
@@ -67,6 +72,7 @@ class LMCacheEngineConfig:
     def from_legacy(
         chunk_size: int = 256,
         backend: str = "cuda",
+        max_local_cache_size: int = 5,
         persist_path: Optional[str] = None,
         remote_serde: Optional[str] = "torch",
         pipelined_backend: bool = False,
@@ -90,6 +96,7 @@ class LMCacheEngineConfig:
         return LMCacheEngineConfig(
             chunk_size,
             local_device,
+            max_local_cache_size,
             remote_url,
             remote_serde,
             pipelined_backend,
@@ -109,8 +116,9 @@ class LMCacheEngineConfig:
 
         chunk_size = config.get("chunk_size", 256)
         local_device = config.get("local_device", None)
+        max_local_cache_size = config.get("max_local_cache_size", 20)
         remote_url = config.get("remote_url", None)
-        remote_serde = config.get("remote_serde", "torch")
+        remote_serde = config.get("remote_serde", None)
         pipelined_backend = config.get("pipelined_backend", False)
         save_decode_cache = config.get("save_decode_cache", False)
         enable_blending = config.get("enable_blending", False)
@@ -138,6 +146,7 @@ class LMCacheEngineConfig:
         return LMCacheEngineConfig(
             chunk_size,
             local_device,
+            max_local_cache_size,
             remote_url,
             remote_serde,
             pipelined_backend,
@@ -146,6 +155,58 @@ class LMCacheEngineConfig:
             blend_recompute_ratio,
             blend_min_tokens,
         )
+
+    @staticmethod
+    def from_env() -> "LMCacheEngineConfig":
+        """Load the config from the environment variables
+
+        It will first create a config by `from_defaults` and overwrite
+        the configuration values from the environment variables.
+
+        The environment variables should starts with LMCACHE and be in
+        uppercase. For example, `LMCACHE_CHUNK_SIZE`.
+        
+        :note: the default configuration only uses cpu
+        """
+
+        def get_env_name(attr_name: str) -> str:
+            return f"LMCACHE_{attr_name.upper()}"
+
+        def parse_env(name: str, default: Optional[Any]):
+            if default is not None:
+                return os.getenv(name, str(default))
+            else:
+                return os.getenv(name)
+
+        config = LMCacheEngineConfig.from_defaults(local_device="cpu",
+                                                   remote_url=None,
+                                                   remote_serde=None)
+
+        config.chunk_size = int(
+            parse_env(get_env_name("chunk_size"), config.chunk_size))
+        config.local_device = parse_env(get_env_name("local_device"),
+                                        config.local_device)
+        config.max_local_cache_size = int(
+            parse_env(get_env_name("max_local_cache_size"),
+                      config.max_local_cache_size))
+        config.remote_url = parse_env(get_env_name("remote_url"),
+                                      config.remote_url)
+        config.remote_serde = parse_env(get_env_name("remote_serde"),
+                                        config.remote_serde)
+        config.pipelined_backend = parse_env(get_env_name("pipelined_backend"),
+                                             config.pipelined_backend)
+        config.save_decode_cache = parse_env(get_env_name("save_decode_cache"),
+                                             config.save_decode_cache)
+        config.enable_blending = parse_env(get_env_name("enable_blending"),
+                                           config.enable_blending)
+        config.blend_recompute_ratio = float(
+            parse_env(get_env_name("blend_recompute_ratio"),
+                      config.blend_recompute_ratio))
+        config.blend_min_tokens = int(
+            parse_env(get_env_name("blend_min_tokens"),
+                      config.blend_min_tokens))
+
+        return config
 
 
 ### SOME GLOBAL CONFIGS

@@ -5,12 +5,13 @@ from typing import List, Optional, Tuple, Union
 import redis
 
 from lmcache.logging import init_logger
-from lmcache.storage_backend.connector.base_connector import RemoteConnector
+from lmcache.storage_backend.connector.base_connector import \
+    RemoteBytesConnector
 
 logger = init_logger(__name__)
 
 
-class RedisConnector(RemoteConnector):
+class RedisConnector(RemoteBytesConnector):
     """
     The remote url should start with "redis://" and only have one host-port pair
     """
@@ -29,7 +30,7 @@ class RedisConnector(RemoteConnector):
 
         return result if result is None else bytes(result)
 
-    def set(self, key: str, obj: bytes) -> None:
+    def set(self, key: str, obj: bytes) -> None:  # type: ignore[override]
         self.connection.set(key, obj)
 
     def list(self):
@@ -50,7 +51,7 @@ class RedisConnector(RemoteConnector):
         self.connection.close()
 
 
-class RedisSentinelConnector(RemoteConnector):
+class RedisSentinelConnector(RemoteBytesConnector):
     """
     Uses redis.Sentinel to connect to a Redis cluster.
     The hosts are specified in the config file, started with "redis-sentinel://" 
@@ -68,7 +69,6 @@ class RedisSentinelConnector(RemoteConnector):
     ENV_REDIS_SERVICE_NAME = "REDIS_SERVICE_NAME"
 
     def __init__(self, hosts_and_ports: List[Tuple[str, Union[str, int]]]):
-
         # Get service name
         match os.environ.get(self.ENV_REDIS_SERVICE_NAME):
             case None:
@@ -100,7 +100,7 @@ class RedisSentinelConnector(RemoteConnector):
     def get(self, key: str) -> Optional[bytes]:
         return self.slave.get(key)
 
-    def set(self, key: str, obj: bytes) -> None:
+    def set(self, key: str, obj: bytes) -> None:  # type: ignore[override]
         self.master.set(key, obj)
 
     def list(self):

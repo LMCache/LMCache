@@ -6,8 +6,10 @@ from lmcache.storage_backend.mem_pool import (LocalCPUBufferPool, LocalCPUPool,
                                               LocalGPUPool)
 
 
-def dumb_metadata(kv_shape=(32, 2, 256, 8, 128), kv_dtype=torch.bfloat16):
-    return LMCacheMemPoolMetadata(kv_shape, kv_dtype)
+def dumb_metadata(
+        kv_shape=(32, 2, 256, 8, 128), kv_dtype=torch.bfloat16,
+        max_cache_size=10):
+    return LMCacheMemPoolMetadata(kv_shape, kv_dtype, max_cache_size)
 
 
 @pytest.mark.parametrize("mem_pool_type",
@@ -15,9 +17,9 @@ def dumb_metadata(kv_shape=(32, 2, 256, 8, 128), kv_dtype=torch.bfloat16):
 def test_alloc_full(mem_pool_type):
     kv_shape = (32, 2, 256, 8, 128)
     kv_dtype = torch.bfloat16
-    max_chunk_num = 5
-    metadata = dumb_metadata(kv_shape, kv_dtype)
-    mem_pool = mem_pool_type(metadata, max_chunk_num)
+    metadata = dumb_metadata(kv_shape, kv_dtype, max_cache_size=1)
+    mem_pool = mem_pool_type(metadata)
+    max_chunk_num = mem_pool.max_chunk_num
     kv_obj_list = []
 
     # allocate max_num chunks
@@ -26,9 +28,8 @@ def test_alloc_full(mem_pool_type):
         kv_obj_list.append(mem_pool.allocate(kv_tensor))
 
     kv_tensor = torch.rand(kv_shape, dtype=kv_dtype)
-    if mem_pool_type in [LocalGPUPool, LocalCPUPool]:
-        expected_err_msg = "No free chunks in cpu memory. \
-                Shouldn't happen in local cpu-only backend."
+    if mem_pool_type in [LocalCPUPool, LocalGPUPool]:
+        expected_err_msg = "Mempool allocation failed"
 
         with pytest.raises(Exception, match=expected_err_msg):
             mem_pool.allocate(kv_tensor)

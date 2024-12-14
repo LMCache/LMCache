@@ -57,7 +57,7 @@ def parse_remote_url(url: str) -> ParsedRemoteURL:
     return ParsedRemoteURL(connector_type, hosts, ports)
 
 
-def CreateConnector(url: str) -> RemoteConnector:
+def CreateConnector(url: str, device=None) -> RemoteConnector:
     """
     Creates the corresponding remote connector from the given URL.
     """

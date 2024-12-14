@@ -31,7 +31,7 @@ class LMCHybridBackend(LMCBackendInterface):
         self.local_store = LMCLocalBackend(config, mpool_metadata, dst_device)
 
         self.remote_store: Union[LMCPipelinedRemoteBackend, LMCRemoteBackend]
-        if config.pipelined_backend:
+        if config.pipelined_backend and config.remote_serde is not None:
             self.remote_store = LMCPipelinedRemoteBackend(
                 config, metadata, dst_device)
         else:

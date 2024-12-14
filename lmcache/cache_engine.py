@@ -30,6 +30,10 @@ class LMCacheEngine:
         self.chunk_size = config.chunk_size
         self.save_decode_cache = config.save_decode_cache
 
+        self.miss_tokens_count = 0
+        self.hit_tokens_count = 0
+        self.hit_rate = 0.0
+
         self.engine_ = CreateStorageBackend(config, metadata)
         logger.debug(f"Current storage backend type {type(self.engine_)}")
 
@@ -379,6 +383,7 @@ class LMCacheEngine:
 
         if len(retrieved_kv_chunks) == 0:
             logging.info("Retrieved 0 chunks")
+            self.miss_tokens_count += tokens.shape[0]
             ret_mask[:] = False
             return (), ret_mask
 
@@ -404,8 +409,12 @@ class LMCacheEngine:
                                                                          2]
 
         ed = time.perf_counter()
+        self.hit_tokens_count += retrieved_token_count
+        self.hit_rate = self.hit_tokens_count / (self.miss_tokens_count +
+                                                 self.hit_tokens_count)
         logger.info(f"Retrieved {len(retrieved_kv_chunks)} chunks "
                     f"({retrieved_token_count} tokens in total) --"
+                    f"hit rate {self.hit_rate:.2%} -- "
                     f"elapsed time {ed - st}")
 
         ret_mask[num_skip_tok + retrieved_token_count:] = False

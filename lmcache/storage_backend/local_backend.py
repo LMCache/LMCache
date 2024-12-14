@@ -13,7 +13,7 @@ from safetensors.torch import save_file
 from lmcache.config import LMCacheEngineConfig, LMCacheMemPoolMetadata
 from lmcache.logging import init_logger
 from lmcache.storage_backend.abstract_backend import LMCBackendInterface
-from lmcache.storage_backend.evictor import DummyEvictor
+from lmcache.storage_backend.evictor import LRUEvictor
 from lmcache.storage_backend.evictor.base_evictor import PutStatus
 from lmcache.storage_backend.mem_pool import (KVObj, LocalCPUBufferPool,
                                               LocalCPUPool, LocalGPUPool,
@@ -59,7 +59,8 @@ class LMCLocalBackend(LMCBackendInterface):
 
         # TODO(Jiayi): The storage size and caching policy for both
         # evictor and mpool need to be configured dynamically
-        self.evictor = DummyEvictor()
+        max_cache_size = self.config.max_local_cache_size
+        self.evictor = LRUEvictor(max_cache_size)
         self.mpool: LocalPool
         if self.device == "cpu":
             self.mpool = LocalCPUPool(metadata)
@@ -101,8 +102,6 @@ class LMCLocalBackend(LMCBackendInterface):
     @_lmcache_nvtx_annotate
     def put_worker(self, ):
         while True:
-            # TODO: dirty fix to downgrade the priority of the put worker
-            # time.sleep(0.01)
             item = self.put_queue.get()
             if isinstance(item, LocalBackendEndSignal):
                 break
@@ -115,7 +114,7 @@ class LMCLocalBackend(LMCBackendInterface):
         # Obtain keys to evict
         self.update_lock.acquire()
         evict_keys, put_status = self.evictor.update_on_put(
-            self.dict, kv_chunk)
+            self.dict, self.mpool.size_per_chunk)
         if put_status == PutStatus.ILLEGAL:
             self.update_lock.release()
             return
@@ -156,7 +155,7 @@ class LMCLocalBackend(LMCBackendInterface):
 
         # Obtain keys to evict
         evict_keys, put_status = self.evictor.update_on_put(
-            self.dict, kv_chunk)
+            self.dict, self.mpool.size_per_chunk)
 
         # Abort put if cache too big
         if put_status == PutStatus.ILLEGAL:
@@ -301,7 +300,7 @@ class LMCLocalDiskBackend(LMCBackendInterface):
 
         # TODO(Jiayi): The storage size and caching policy for both
         # evictor and mpool need to be configured dynamically
-        self.evictor = DummyEvictor()
+        self.evictor = LRUEvictor(config.max_local_cache_size)
         # NOTE(Jiayi): This mbufferpool should be smaller than the actual
         # cpu backend but big enough to avoid stalls in save
         # TODO(Jiayi): share the buffer if both cpu and disk backend are enabled
@@ -351,11 +350,8 @@ class LMCLocalDiskBackend(LMCBackendInterface):
 
         """
 
-        self.update_lock.acquire()
         path = self.dict[key].path
         self.dict.pop(key)
-        self.update_lock.release()
-
         os.remove(path)
 
     @_lmcache_nvtx_annotate
@@ -407,7 +403,7 @@ class LMCLocalDiskBackend(LMCBackendInterface):
 
         # Obtain keys to evict
         evict_keys, put_status = self.evictor.update_on_put(
-            self.dict, kv_chunk)
+            self.dict, self.evictor.get_size(kv_chunk))
 
         # Abort put if cache too big
         if put_status == PutStatus.ILLEGAL:
@@ -441,8 +437,7 @@ class LMCLocalDiskBackend(LMCBackendInterface):
 
         self.update_lock.acquire()
         self.future_pool[key] = (future, kv_obj)
-        self.dict[key] = DiskCacheMetadata(path,
-                                           self.evictor.get_size(kv_obj.data))
+        self.dict[key] = DiskCacheMetadata(path, kv_obj.size)
         # NOTE(Jiayi): the following `free` will result in data corruption
         # The serialized object (`kv_obj.data` in `submit`) may reference
         # the external memory (cpu tensor might be shared in multiprocessing),
@@ -463,7 +458,7 @@ class LMCLocalDiskBackend(LMCBackendInterface):
         self.update_lock.acquire()
         # Obtain keys to evict
         evict_keys, put_status = self.evictor.update_on_put(
-            self.dict, kv_chunk)
+            self.dict, self.evictor.get_size(kv_chunk))
 
         # Abort put if cache too big
         if put_status == PutStatus.ILLEGAL:

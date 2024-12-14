@@ -1,8 +1,6 @@
 from collections import OrderedDict
 from typing import Union
 
-import torch
-
 from lmcache.logging import init_logger
 from lmcache.storage_backend.evictor.base_evictor import BaseEvictor, PutStatus
 from lmcache.utils import CacheEngineKey
@@ -16,18 +14,17 @@ class LRUEvictor(BaseEvictor):
     """
 
     def __init__(self, max_cache_size: float = 10.0):
-        # TODO(Jiayi): need to be configured
-        # the storage size limit (in GB)
-        self.MAX_CACHE_SIZE = max_cache_size
+        # The storage size limit (in bytes)
+        self.MAX_CACHE_SIZE = int(max_cache_size * 1024**3)
 
         # TODO(Jiayi): need a way to avoid fragmentation
-        # current storage size (in GB)
+        # current storage size (in bytes)
         self.current_cache_size = 0.0
 
     def update_on_get(self, key: Union[CacheEngineKey, str],
                       cache_dict: OrderedDict) -> None:
         """
-        Evict cache when a new cache comes and the storage is full
+        Update cache recency when a cache is used
 
         Input:
             key: a CacheEngineKey or a str
@@ -37,9 +34,7 @@ class LRUEvictor(BaseEvictor):
 
     # FIXME(Jiayi): comment out return type to bypass type checks
     # Need to align CacheEngineKey & str
-    def update_on_put(self, cache_dict: OrderedDict, kv_obj: Union[
-        torch.Tensor,
-        bytes]):  #-> Tuple[List[Union[CacheEngineKey, str]], PutStatus]:
+    def update_on_put(self, cache_dict: OrderedDict, cache_size: int):
         """
         Evict cache when a new cache comes and the storage is full
 
@@ -51,7 +46,6 @@ class LRUEvictor(BaseEvictor):
             evict_keys: a list of keys to be evicted
         """
         evict_keys = []
-        cache_size = self.get_size(kv_obj)
         iter_cache_dict = iter(cache_dict)
 
         if cache_size > self.MAX_CACHE_SIZE:
@@ -68,5 +62,9 @@ class LRUEvictor(BaseEvictor):
 
         # update cache size
         self.current_cache_size += cache_size
-        logger.debug(f"Evicting {len(evict_keys)} chunks")
+        if len(evict_keys) > 0:
+            logger.debug(
+                f"Evicting {len(evict_keys)} chunks, "
+                f"Current cache size: {self.current_cache_size} bytes, "
+                f"Max cache size: {self.MAX_CACHE_SIZE} bytes")
         return evict_keys, PutStatus.LEGAL

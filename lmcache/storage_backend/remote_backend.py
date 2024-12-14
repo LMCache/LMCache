@@ -8,7 +8,9 @@ from lmcache.config import LMCacheEngineConfig, LMCacheEngineMetadata
 from lmcache.logging import init_logger
 from lmcache.storage_backend.abstract_backend import LMCBackendInterface
 from lmcache.storage_backend.connector import CreateConnector
-from lmcache.storage_backend.serde import CreateSerde
+from lmcache.storage_backend.connector.base_connector import (
+    ConnectorType, check_connector_type)
+from lmcache.storage_backend.serde import CreateSerde, Deserializer
 from lmcache.utils import CacheEngineKey, _lmcache_nvtx_annotate
 
 logger = init_logger(__name__)
@@ -38,17 +40,28 @@ class LMCRemoteBackend(LMCBackendInterface):
         super().__init__(dst_device)
         #self.existing_keys: Set[CacheEngineKey] = set()
         self.put_thread = None
+
         assert config.remote_url is not None, (
             "Need to provide remote_url when"
             " using LMCRemoteBackend")
-        self.connection = CreateConnector(config.remote_url)
-        assert config.remote_serde is not None, (
-            "Need to provide remote_serde "
-            "when using LMCRemoteBackend")
-        s, d = CreateSerde(config.remote_serde, config, metadata)
+        self.connection = CreateConnector(config.remote_url, dst_device)
+        self.remote_url = config.remote_url
+
+        if check_connector_type(self.connection) == ConnectorType.BYTES:
+            assert config.remote_serde is not None, (
+                "Need to provide remote_serde when"
+                f" using {config.remote_url}")
+        elif check_connector_type(self.connection) == ConnectorType.TENSOR:
+            assert config.remote_serde is None, (
+                "Cannot provide remote_serde when"
+                f" using {config.remote_url}")
+
+        s, d = CreateSerde(
+            config.remote_serde, config,
+            metadata) if config.remote_serde is not None else (None, None)
+
         self.serializer = s
         self.deserializer = d
-
         # For async put
         self.put_queue: queue.Queue[
             Union[Tuple[CacheEngineKey, torch.Tensor],
@@ -120,8 +133,13 @@ class LMCRemoteBackend(LMCBackendInterface):
         key: CacheEngineKey,
         kv_chunk: torch.Tensor,
     ) -> None:
-        bs = self.serializer.to_bytes(kv_chunk)
-        self.connection.set(self._combine_key(key), bs)
+        obj: Union[bytes | torch.Tensor]
+        if check_connector_type(self.connection) == ConnectorType.BYTES:
+            assert self.serializer is not None
+            obj = self.serializer.to_bytes(kv_chunk)
+        else:
+            obj = kv_chunk
+        self.connection.set(self._combine_key(key), obj)
         #self.existing_keys.add(key)
 
     def put(
@@ -160,11 +178,19 @@ class LMCRemoteBackend(LMCBackendInterface):
         if not self.contains(key):
             return None
 
-        bs = self.connection.get(self._combine_key(key))
-        if bs is None or len(bs) == 0:
+        obj = self.connection.get(self._combine_key(key))
+        if obj is None:
             return None
 
-        return self.deserializer.from_bytes(bs).to(self.dst_device)
+        if isinstance(obj, bytes):
+            if len(obj) == 0:
+                return None
+            assert self.deserializer is not None, (
+                f"Need to provide deserializer for {self.remote_url}")
+            return self.deserializer.from_bytes(obj).to(self.dst_device)
+        else:
+            assert isinstance(obj, torch.Tensor)
+            return obj.to(self.dst_device)
 
     def close(self):
         if self.put_thread is not None and self.put_thread.is_alive():
@@ -194,6 +220,9 @@ class LMCPipelinedRemoteBackend(LMCRemoteBackend):
                 configuration
         """
         super().__init__(config, metadata, dst_device)
+
+        assert self.deserializer is not None
+        self.deserializer: Deserializer
 
         # Comment out existing_keys for now to avoid consistency issues
         #self.existing_keys = set()
@@ -228,6 +257,7 @@ class LMCPipelinedRemoteBackend(LMCRemoteBackend):
             idx, key = item
             if self.contains(key):
                 data = self.connection.get(self._combine_key(key))
+                assert isinstance(data, bytes)
                 self.deserialize_queue.put_nowait((idx, data))
 
             self.network_queue.task_done()
@@ -241,6 +271,7 @@ class LMCPipelinedRemoteBackend(LMCRemoteBackend):
 
             idx, data = item
             if data is not None:
+                assert isinstance(data, bytes)
                 result = self.deserializer.from_bytes(data).to(self.dst_device)
             else:
                 result = None

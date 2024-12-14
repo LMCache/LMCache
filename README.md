@@ -3,9 +3,10 @@
 </a>
 </div>
 
+| [**Blog**](https://lmcache.github.io) | [**Documentation**](https://docs.lmcache.ai/) | [**Join Slack**](https://join.slack.com/t/lmcacheworkspace/shared_invite/zt-2viziwhue-5Amprc9k5hcIdXT7XevTaQ) | [**Interest Form**](https://forms.gle/mQfQDUXbKfp2St1z7) | [**Official Email**](contact@lmcache.ai) |
 
 # 💡 What is LMCache?
-LMCache lets LLMs prefill each text only once. By storing the KV caches of all reusable texts, LMCache can reuse the KV caches of **_any_** reused text (not necessarily prefix) in **_any_** serving engine instance. It thus reduces prefill delay, i.e., time to first token (TTFT), as well as saves the precious GPU cycles. 
+LMCache is a **LLM** serving engine extension to **reduce TTFT** and **increase throughput**, especially under long-context scenarios. By storing the KV caches of reusable texts across various locations including (GPU, CPU DRAM, Local Disk), LMCache reuse the KV caches of **_any_** reused text (not necessarily prefix) in **_any_** serving engine instance. Thus, LMCache saves precious GPU cycles and reduces response delay for users.  
 
 By combining LMCache with vLLM, LMCaches achieves 3-10x delay savings and GPU cycle reduction in many LLM use cases, including multi-round QA and RAG.
 
@@ -57,7 +58,7 @@ LMCACHE_CONFIG_FILE=example.yaml CUDA_VISIBLE_DEVICES=1 lmcache_vllm serve lmsys
 ```
 
 
-## - What's next
+# - What's next
 We also provide multiple docker-based demos at [🔗LMCache-demos repo](https://github.com/LMCache/demo). The demos cover the following use cases:
 - Share KV caches across multiple serving engines [(🔗link)](https://github.com/LMCache/demo/tree/master/demo2-multi-node-sharing)
 - Loading non-prefix KV caches for RAG [(🔗link)](https://github.com/LMCache/demo/tree/master/demo3-KV-blending)
@@ -76,6 +77,13 @@ https://forms.gle/mQfQDUXbKfp2St1z7
 # 📖 Blogs and documentations
 
 Our [blog posts](https://lmcache.github.io) and [documentations](https://docs.lmcache.ai/) are available online
+
+# Community meeting
+
+- :link: Meeting link - https://uchicago.zoom.us/j/91454186439?pwd=Qu3IMJH7c83Qbg9hHsXZ3BxzLaEFoF.1
+- :page_facing_up: Community Meeting Document - https://docs.google.com/document/d/1SnCKnB2UFBUyPhIpL9zzdZsn_hGp50spoZue-2SoxJY/edit?usp=sharing
+- 🗓️ Calendar - https://calendar.app.google/rsu7Xgq4y4y5YuDj7
+
 
 ## Citation
 If you use LMCache for your research, please cite our papers:
