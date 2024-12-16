@@ -11,8 +11,6 @@ export PATH=$CUDA_HOME/bin:$PATH
 eval "$(conda shell.bash hook)"
 conda activate ${CONDA_ENV_NAME}
 
-git clone https://github.com/LMCache/lmcache-vllm.git lmcache-vllm
-cd lmcache-vllm
+git clone https://github.com/LMCache/lmcache-vllm.git ../lmcache-vllm
+cd ../lmcache-vllm
 pip install -e .
-cd ..
-
