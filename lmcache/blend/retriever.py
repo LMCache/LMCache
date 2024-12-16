@@ -201,62 +201,18 @@ class SPTBlendRetriever(BlendRetriever):
 
     def __init__(
         self,
-        spt: List[int],
         cache_engine: LMCacheEngine,
         metadata: LMCacheEngineMetadata,
     ):
         """Initialize the SPT retriever.
 
-        :param List[int] spt: The special token to use as delimiter
         :param LMCacheEngine cache_engine: The cache engine to retrieve 
             the KV caches
         :param LMCacheEngineMetadata metadata: The metadata of the cache engine
         """
-        self.spt = spt
         self.cache_engine = cache_engine
         self.metadata = metadata
 
-    def drop_spt_and_get_indices(
-            self, full_prompt: List[int]) -> Tuple[List[int], List[int]]:
-        """Drop the special token and get the indices of the split requests.
-
-        :param List[int] full_prompt: The full prompt after tokenization.
-        
-        :return: The new prompts without the special token and the indices of
-            the split segments.
-            The indices is recording the start of each segment, ending with
-            the end of the full prompt. 
-            e.g. [0, index_of_segment2, len(full_prompt)]
-        """
-        spt_len = len(self.spt)
-        assert spt_len >= 1
-        i = 0
-        splitted_tokens = []
-        start = 0
-        while True:
-            next_len = i + spt_len
-            if next_len > len(full_prompt):
-                break
-            if full_prompt[i:next_len] == self.spt:
-                splitted_tokens.append(full_prompt[start:i])
-                start = next_len
-                i = next_len
-            else:
-                i += 1
-
-        if start < len(full_prompt):
-            splitted_tokens.append(full_prompt[start:])
-
-        new_prompt = []
-        new_indices = []
-        this_seg_start = 0
-        for split in splitted_tokens:
-            new_prompt.extend(split)
-            new_indices.append(this_seg_start + len(split))
-            this_seg_start = new_indices[-1]
-        if len(new_indices) > 0:
-            new_indices.pop()
-        return new_prompt, new_indices
 
     def new_request(
         self,
