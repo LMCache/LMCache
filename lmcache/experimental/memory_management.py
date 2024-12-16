@@ -81,27 +81,36 @@ class MemoryObj:
         return size_in_bytes
 
     @property
-    def tensor(self) -> torch.Tensor:
+    def tensor(self) -> Optional[torch.Tensor]:
         if not self.valid:
-            #logger.warn("Trying to access an invalidated MemoryObj")
-            raise Exception("Trying to access an invalidated MemoryObj")
-
+            logger.warn("Trying to access an invalidated MemoryObj")
+            return None
         return self.raw_data.view(self.metadata.dtype)\
                             .view(self.metadata.shape)
 
 
-class BufferMemoryObj(MemoryObj):
+# The inheritan
+@dataclass
+class BufferMemoryObjMetadata:
+
+    # The 'logical' format of the tensor
+    fmt: MemoryFormat = MemoryFormat.UNDEFINED
+
+
+class BufferMemoryObj:
     """
-    A naive buffer memory
+    A naive on-gpu buffer memory
     """
 
-    def __init__(self, raw_data: torch.Tensor):
-        self.raw_data = raw_data
+    def __init__(self, kv_chunk: torch.Tensor,
+                 metadata: BufferMemoryObjMetadata):
+        self.metadata = metadata
+        self.kv_chunk = kv_chunk
         self.valid = True
 
     @property
     def tensor(self) -> torch.Tensor:
-        return self.raw_data
+        return self.kv_chunk
 
 
 class MemoryAllocatorInterface(metaclass=abc.ABCMeta):
@@ -279,6 +288,9 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
                 clear = False
         return clear
 
+    def __del__(self):
+        del self.buffer
+
 
 class HostMemoryAllocator(MemoryAllocatorInterface):
     """Allocates memory in the pre-allocated Host memory.
@@ -315,18 +327,28 @@ class PinMemoryAllocator(MemoryAllocatorInterface):
         """
         :param int size: The size of the pinned memory in bytes.
         """
+        torch.cuda.empty_cache()
         buffer = torch.empty(size, dtype=torch.uint8, pin_memory=True)
+        # NOTE(Jiayi): Without this, IPC over a tensor
+        # (a view of a tensor) will have unexpected behaviors
+        # even though `buffer.is_shared()` returns True.
+        buffer.share_memory_()
         self.allocator = TensorMemoryAllocator(buffer)
+
+        self.host_mem_lock = threading.Lock()
 
     def allocate(self, shape: Union[torch.Size, Tuple[int, ...]],
                  dtype: torch.dtype) -> Optional[MemoryObj]:
-        return self.allocator.allocate(shape, dtype)
+        with self.host_mem_lock:
+            return self.allocator.allocate(shape, dtype)
 
     def free(self, memory_obj: MemoryObj):
-        self.allocator.free(memory_obj)
+        with self.host_mem_lock:
+            self.allocator.free(memory_obj)
 
     def memcheck(self):
-        return self.allocator.memcheck()
+        with self.host_mem_lock:
+            return self.allocator.memcheck()
 
 
 class GPUMemoryAllocator(MemoryAllocatorInterface):

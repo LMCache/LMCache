@@ -1,17 +1,9 @@
 import pytest
 import torch
+from utils import dumb_metadata, generate_tokens
 
-from lmcache.config import LMCacheEngineConfig, LMCacheEngineMetadata
+from lmcache.experimental.config import LMCacheEngineConfig
 from lmcache.experimental.token_database import ChunkedTokenDatabase
-
-
-def dumb_metadata(fmt="vllm", kv_shape=(32, 2, 256, 8, 128)):
-    return LMCacheEngineMetadata("test_model", 3, 123, fmt, torch.bfloat16,
-                                 kv_shape)
-
-
-def generate_tokens(num_tokens, device):
-    return torch.randint(0, 10000, size=[num_tokens]).to(device)
 
 
 @pytest.mark.parametrize('chunk_length', [16, 64, 256])

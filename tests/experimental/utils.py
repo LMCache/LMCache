@@ -1,3 +1,9 @@
+import torch
+
+from lmcache.config import LMCacheEngineMetadata
+from lmcache.experimental.gpu_connector import VLLMNestedTupleGPUConnector
+
+
 def dumb_metadata(fmt="vllm", kv_shape=(32, 2, 256, 8, 128)):
     return LMCacheEngineMetadata("test_model", 3, 123, fmt, torch.bfloat16,
                                  kv_shape)
@@ -63,8 +69,12 @@ def check_kv_cache_equal(left, right, num_tokens, fmt, offset=0):
                 assert (left_k[:, st:ed, :] == right_k[:, st:ed, :]).all()
                 assert (left_v[:, st:ed, :] == right_v[:, offset:ed, :]).all()
             case "vllm":
+                #try:
                 assert (left_k[st:ed, :, :] == right_k[st:ed, :, :]).all()
                 assert (left_v[st:ed, :, :] == right_v[st:ed, :, :]).all()
+                #except:
+                #    import pdb; pdb.set_trace()
+                #    raise AssertionError
 
 
 def check_kv_cache_device(kvs, device):
@@ -72,3 +82,7 @@ def check_kv_cache_device(kvs, device):
         k, v = kv
         assert k.device == torch.device(device)
         assert v.device == torch.device(device)
+
+
+def create_gpu_connector(hidden_dim, num_layers):
+    return VLLMNestedTupleGPUConnector(hidden_dim, num_layers)

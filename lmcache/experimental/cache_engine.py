@@ -1,53 +1,6 @@
-"""
-High-level design
-
-MemoryObj:  -- Done
-    raw_array
-    metadata
-
-PinBuffer: -- Done
-    - Allocate(shape) -> MemoryOb 
-    - Free(MemoryObj)
-
-GPUConnector: -- Should be in lmcache_vllm
-    # MemoryObj is flat + shape as metadata
-    # Target buffer is paged memory or something else
-    - to_gpu(MemoryObj, **kwargs)
-    - to_host(dst_MemoryObj, **kwargs) 
-
-TokenDB: -- Done
-    - process_tokens(tokens, mask) -> List[CacheEngineKey]
-    - insert(tokens, mask) -> List[CacheEngineKey]
-
-LMCacheEngine:
-    - __init__() # pin buffer, gpu connector, token db, backend manager
-    - store_from_paged_memory()
-    - retrieve_to_paged_memory()
-    - retrieve_layers()
-    - prefetch
-
-LMCBackendInterface:
-    - put()
-    - get()
-    - prefetch()
-
-LMCBackendConnector:
-    - put_task()
-    - get_task()
-
-MemoryObjs is allocated in CacheEngine.store(), and StorageManager.get().
-The allocated memory objects should be managed by the StorageManager, and 
-When the allocation fails, StorageManager should know this and determine
-how to evict the memory objects.
-
-Current design: 
-- When the allocation fails in CacheEngine, it will directly stop the storing 
-process.
-- When the allocation fails in the StorageManager, it will try to do some
-internal evictions and retry the allocation.
-"""
-
-from typing import Dict, Optional
+import queue
+import threading
+from typing import Dict, List, Optional
 
 import torch
 
@@ -63,6 +16,10 @@ from lmcache.logging import init_logger
 from lmcache.utils import _lmcache_nvtx_annotate
 
 logger = init_logger(__name__)
+
+
+class CacheEngineEndSignal:
+    pass
 
 
 class LMCacheEngine:
@@ -99,6 +56,27 @@ class LMCacheEngine:
         self.storage_manager = StorageManager(config, metadata,
                                               self.memory_allocator)
 
+        # GPU->CPU transfer should be asynchronous
+        self.put_queue: queue.Queue = queue.Queue()
+        #queue.Queue[
+        #    Union[Tuple[CacheEngineKey, torch.Tensor],
+        #          LocalBackendEndSignal]] = queue.Queue()
+        self.put_thread = threading.Thread(target=self.put_worker, args=())
+        self.put_thread.start()
+
+    @_lmcache_nvtx_annotate
+    def put_worker(self, ):
+        while True:
+            item = self.put_queue.get()
+            if isinstance(item, CacheEngineEndSignal):
+                break
+            key, memory_obj, start, end, kwargs = item
+            # Copy the KV from GPU to memory obj
+            self.gpu_connector.from_gpu(memory_obj, start, end, **kwargs)
+
+            # Put the memory object to the storage backend
+            self.storage_manager.put(key, memory_obj)
+
     @_lmcache_nvtx_annotate
     @torch.inference_mode()
     def store(self,
@@ -125,9 +103,7 @@ class LMCacheEngine:
         for start, end, key in self.token_database.process_tokens(
                 tokens, mask):
             if self.storage_manager.contains(key):
-                # TODO: update the hit information to the storage manager
                 continue
-
             # Allocate the memory object
             num_tokens = end - start
             kv_shape = self.gpu_connector.get_shape(num_tokens)
@@ -136,17 +112,16 @@ class LMCacheEngine:
             if memory_obj is None:
                 logger.warning("Failed to allocate memory for the KV cache.\n"
                                "The KV cache will not be stored.")
-                
-                # TODO: let StorageManager know the failure here
-                return
 
-            # Copy the KV from GPU to memory obj
-            # TODO: remember to free the memory obj in the storage backend
-            # after store is finished
-            self.gpu_connector.from_gpu(memory_obj, start, end, **kwargs)
+                # TODO: Need eviction here
+                break
 
             # Put the memory object to the storage backend
-            self.storage_manager.put(key, memory_obj)
+            self.put_queue.put((key, memory_obj, start, end, kwargs))
+
+            # For debugging purpose
+            #self.gpu_connector.from_gpu(memory_obj, start, end, **kwargs)
+            #self.storage_manager.put(key, memory_obj)
 
     @_lmcache_nvtx_annotate
     @torch.inference_mode()
@@ -201,7 +176,7 @@ class LMCacheEngine:
     def prefetch(
         self,
         tokens: torch.Tensor,
-        mask: Optional[torch.Tensor],
+        mask: Optional[torch.Tensor] = None,
     ) -> None:
         """Launch the prefetching process in the storage manager to load the 
         KV to the local CPU memory
@@ -210,26 +185,38 @@ class LMCacheEngine:
                 tokens, mask):
             self.storage_manager.prefetch(key)
 
+    # TODO(Jiayi): Currently, search_range is only used for testing.
     def lookup(
         self,
         tokens: torch.Tensor,
+        search_range: Optional[List[str]] = None,
     ) -> int:
         """
         Checks the existence of KV cache of the tokens from the cache engine.
 
         :param tokens: the input tokens, with shape [seq_len]
+        
+        :param Optional[List[str]] search_range: The range of storage backends
+        to search in. Should be a subset of ["Hot", "LocalDiskBackend"] for now.
+        If None, search in all backends.
 
         :return: An int indicating how many prefix tokens are cached.
         """
 
         for start, end, key in self.token_database.process_tokens(tokens):
-            if not self.storage_manager.contains(key):
+            if not self.storage_manager.contains(key, search_range):
                 return start
         return end
 
     def close(self) -> None:
         """Close the cache engine and free all the resources"""
-        pass
+        if self.put_thread is not None and self.put_thread.is_alive():
+            self.put_queue.put(CacheEngineEndSignal())
+            self.put_thread.join()
+        for storage_backend in self.storage_manager.storage_backends.values():
+            storage_backend.close()
+
+        logger.info("LMCacheEngine closed.")
 
 
 class LMCacheEngineBuilder:
@@ -242,8 +229,8 @@ class LMCacheEngineBuilder:
         config: LMCacheEngineConfig,
         metadata: LMCacheEngineMetadata,
     ) -> MemoryAllocatorInterface:
-        # TODO: change this based on the config in the future
-        return PinMemoryAllocator(8 * 1024 * 1024 * 1024)
+        max_local_cpu_size = config.max_local_cpu_size
+        return PinMemoryAllocator(int(max_local_cpu_size * 1024**3))
 
     @staticmethod
     def _Create_token_database(
@@ -268,6 +255,7 @@ class LMCacheEngineBuilder:
         raises: ValueError if the instance already exists with a different
             configuration.
         """
+        logger.info(f"Creating LMCacheEngine instance {instance_id}")
         if instance_id not in cls._instances:
             memory_allocator = cls._Create_memory_allocator(config, metadata)
             token_database = cls._Create_token_database(config, metadata)

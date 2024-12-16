@@ -321,7 +321,8 @@ class LMCLocalDiskBackend(LMCBackendInterface):
         Returns:
             True if the cache engine contains the key, False otherwise
         """
-        return key in self.dict
+        with self.update_lock:
+            return key in self.dict
 
     def _key_to_path(
         self,

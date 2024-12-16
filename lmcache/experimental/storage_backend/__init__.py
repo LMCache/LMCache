@@ -24,14 +24,14 @@ def CreateStorageBackends(
     storage_backends: Dict[str, StorageBackendInterface] = {}
 
     # TODO(Jiayi): The hierarchy is fixed for now
-
-    if config.local_disk:
+    if config.local_disk and config.max_local_disk_size > 0:
         backend = LocalDiskBackend(config, dst_device)
         backend_name = str(backend)
         storage_backends[backend_name] = backend
 
-    # TODO(Jiayi): please modify the following checks if
-    # the corresponding backends are supported
+    # TODO(Jiayi): Please support other backends
+    config.remote_url = None
+    config.enable_blending = False
     assert config.remote_url is None, \
         "remote backends are not supported for now"
     assert config.enable_blending is False, \

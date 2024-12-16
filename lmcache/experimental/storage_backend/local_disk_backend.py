@@ -1,3 +1,4 @@
+import os
 import threading
 from collections import OrderedDict
 from concurrent.futures import Future, ProcessPoolExecutor
@@ -8,11 +9,16 @@ from safetensors import safe_open
 from safetensors.torch import save_file
 
 from lmcache.experimental.config import LMCacheEngineConfig
-from lmcache.experimental.memory_management import MemoryObj
+from lmcache.experimental.memory_management import (BufferMemoryObj,
+                                                    BufferMemoryObjMetadata,
+                                                    MemoryFormat, MemoryObj)
 from lmcache.experimental.storage_backend.abstract_backend import \
     StorageBackendInterface
+from lmcache.logging import init_logger
 from lmcache.utils import (CacheEngineKey, DiskCacheMetadata,
                            _lmcache_nvtx_annotate)
+
+logger = init_logger(__name__)
 
 
 @_lmcache_nvtx_annotate
@@ -20,8 +26,13 @@ from lmcache.utils import (CacheEngineKey, DiskCacheMetadata,
 def save_disk(
     path: str,
     kv_chunk: torch.Tensor,
+    fmt_str: str,
 ) -> None:
-    save_file({"kv_chunk": kv_chunk.contiguous()}, path)
+    """
+    Save KV to disk.
+    """
+    save_file({"kv_chunk": kv_chunk}, path, {"fmt": fmt_str})
+    del kv_chunk
 
 
 @_lmcache_nvtx_annotate
@@ -29,11 +40,16 @@ def save_disk(
 def load_disk(
     path: str,
     dst_device: str,
-) -> torch.Tensor:
+) -> BufferMemoryObj:
+    """
+    Load KV from disk.
+    """
     with safe_open(path, framework="pt",
                    device=dst_device) as f:  # type: ignore
         kv_chunk = f.get_tensor("kv_chunk")
-    return kv_chunk
+        metadata = f.metadata()
+    return BufferMemoryObj(
+        kv_chunk, BufferMemoryObjMetadata(MemoryFormat(int(metadata["fmt"]))))
 
 
 class LocalDiskBackend(StorageBackendInterface):
@@ -41,15 +57,22 @@ class LocalDiskBackend(StorageBackendInterface):
     def __init__(self, config: LMCacheEngineConfig, dst_device: str = "cuda"):
         self.dict: OrderedDict[CacheEngineKey,
                                DiskCacheMetadata] = OrderedDict()
-        self.device = dst_device
+        self.dst_device = dst_device
+
+        # TODO: Tune the number of workers for better performance
         self.put_executor = ProcessPoolExecutor(max_workers=4)
-        self.prefetch_executor = ProcessPoolExecutor(max_workers=1)
+        #self.prefetch_executor = ProcessPoolExecutor(max_workers=1)
 
         self.disk_lock = threading.Lock()
         assert config.local_disk is not None
         self.path: str = config.local_disk
+        if not os.path.exists(self.path):
+            os.makedirs(self.path)
+            logger.info(f"Created local disk cache directory: {self.path}")
 
         # TODO(Jiayi): Size and evictor should be configured
+
+        self.is_shutdown = False
 
     def __str__(self):
         return self.__class__.__name__
@@ -69,12 +92,31 @@ class LocalDiskBackend(StorageBackendInterface):
         with self.disk_lock:
             self.dict[key] = DiskCacheMetadata(path, size)
 
-    def submit_put_task(self, key: CacheEngineKey,
-                        memory_obj: MemoryObj) -> Future:
-
+    def submit_put_task(
+        self,
+        key: CacheEngineKey,
+        memory_obj: MemoryObj,
+    ) -> Future:
+        kv_chunk = memory_obj.tensor
+        fmt_str = str(memory_obj.metadata.fmt.value)
         path = self._key_to_path(key)
-        future = self.put_executor.submit(save_disk, path, memory_obj.tensor)
+        future = self.put_executor.submit(save_disk, path, kv_chunk, fmt_str)
         return future
+
+    def put_blocking(
+        self,
+        key: CacheEngineKey,
+        memory_obj: MemoryObj,
+    ) -> None:
+        """
+        Blocking put function.
+        This is for debugging and testing purposes.
+        """
+        path = self._key_to_path(key)
+        kv_chunk = memory_obj.tensor
+        fmt_str = str(memory_obj.metadata.fmt.value)
+        save_disk(path, kv_chunk, fmt_str)
+        self.insert_key(key, memory_obj.get_size())
 
     def submit_prefetch_task(
         self,
@@ -87,19 +129,33 @@ class LocalDiskBackend(StorageBackendInterface):
             return None
         path = self.dict[key].path
         self.disk_lock.release()
-
-        future = self.prefetch_executor.submit(load_disk, path, "cpu")
+        logger.info(f"Prefetching {key} from disk.")
+        #future = self.prefetch_executor.submit(load_disk, path, "cpu")
+        future = self.put_executor.submit(load_disk, path, "cpu")
         return future
 
     def get_blocking(
         self,
         key: CacheEngineKey,
-    ) -> Optional[torch.Tensor]:
+    ) -> Optional[BufferMemoryObj]:
+        """
+        Blocking get function.
+        """
         self.disk_lock.acquire()
         if key not in self.dict:
             self.disk_lock.release()
             return None
         path = self.dict[key].path
-        kv_chunk = load_disk(path, self.dst_device)
+        buffer_memory_obj = load_disk(path, self.dst_device)
         self.disk_lock.release()
-        return kv_chunk
+        return buffer_memory_obj
+
+    def close(self):
+        # TODO: Might be contention here
+        if not self.is_shutdown:
+            self.put_executor.shutdown()
+            #self.prefetch_executor.shutdown()
+        logger.info("Local disk backend closed.")
+
+    def __del__(self):
+        self.close()

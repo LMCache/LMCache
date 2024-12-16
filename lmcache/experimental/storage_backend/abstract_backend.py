@@ -4,7 +4,7 @@ from typing import Optional
 
 import torch
 
-from lmcache.experimental.memory_management import MemoryObj
+from lmcache.experimental.memory_management import BufferMemoryObj, MemoryObj
 from lmcache.utils import CacheEngineKey
 
 
@@ -73,12 +73,19 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
     def get_blocking(
         self,
         key: CacheEngineKey,
-    ) -> Optional[torch.Tensor]:
+    ) -> Optional[BufferMemoryObj]:
         """
         A blcocking function to get the kv cache from the storage backend.
         
         :param CacheEngineKey key: The key of the MemoryObj.
         
-        :return: a torch tensor
+        :return: BufferMemoryObj
+        """
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    def close(self, ) -> None:
+        """
+        Close the storage backend.
         """
         raise NotImplementedError

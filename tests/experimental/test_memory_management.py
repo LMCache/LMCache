@@ -8,16 +8,19 @@ from lmcache.experimental.memory_management import (GPUMemoryAllocator,
 
 
 def check_allocator(allocator, max_size):
+    # 512 * 512 * 4 = 1MB
     data1 = allocator.allocate([512, 512], torch.float)
     assert data1 is not None
     assert data1.tensor.dtype == torch.float
     assert data1.tensor.shape == (512, 512)
 
+    # 1024 * 1024 * 2 = 2MB
     data2 = allocator.allocate([1024, 1024], dtype=torch.bfloat16)
     assert data2 is not None
     assert data2.tensor.dtype == torch.bfloat16
     assert data2.tensor.shape == (1024, 1024)
 
+    # 2048 * 2048 * 1 = 4MB
     data3 = allocator.allocate([2048, 2048], dtype=torch.int8)
     assert data3 is not None
     assert data3.tensor.dtype == torch.int8
@@ -53,7 +56,7 @@ def check_allocator(allocator, max_size):
 
 
 def test_tensor_allocator():
-    total_size = 1 << 25  # 32MB
+    total_size = 1024 * 1024 * 32  # 32MB
     tensor_buffer = torch.zeros(total_size, dtype=torch.uint8, device="cpu")
 
     allocator = TensorMemoryAllocator(tensor_buffer)
