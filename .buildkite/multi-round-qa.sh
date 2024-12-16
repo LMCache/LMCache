@@ -25,7 +25,7 @@ pip install -e .
 
 pip install -r ./benchmarks/requirements.txt
 lmcache_vllm serve mistralai/Mistral-7B-Instruct-v0.2 --disable-log-requests
-python3 multi-round-qa.py \
+python3 benchmarks/multi-round-qa.py \
     --num-users 10 \
     --num-rounds 5 \
     --qps 0.5 \
