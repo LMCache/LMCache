@@ -160,7 +160,7 @@ class LMCacheEngine:
 
             ret_mask[start:end] = True
 
-            # NOTE(Jiayi): memory_obj doesn't haeve to be a pinned
+            # NOTE(Jiayi): memory_obj doesn't have to be a pinned
             # cpu tensor for the sake of performance.
             # For example, disk->gpu is faster than disk->cpu->gpu.
             # RDMA is another example.
