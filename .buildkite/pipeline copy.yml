@@ -6,37 +6,25 @@ steps:
   - label: ":pip: Install lmcache"
     key: "lmcache"
     depends_on: ["conda"]
-    command: |
-      eval "$(conda shell.bash hook)"
-      conda activate buildkite
-      bash .buildkite/install-lmcache.sh
+    command: bash .buildkite/install-lmcache.sh
 
   - label: ":pip: Install lmcache-vllm"
     key: "vllm"
     depends_on: ["lmcache"]
-    command: |
-      eval "$(conda shell.bash hook)"
-      conda activate buildkite
-      bash .buildkite/install-vllm.sh
+    command: bash .buildkite/install-vllm.sh
 
   - label: ":serve: Run server"
     key: "server"
     depends_on: ["vllm"]
-    command: |
-      eval "$(conda shell.bash hook)"
-      conda activate buildkite
-      bash .buildkite/multi-round-qa-server.sh
+    command: bash .buildkite/multi-round-qa-server.sh
 
   - label: ":test: Run tests"
     key: "test"
     depends_on: ["server"]
-    command: |
-      eval "$(conda shell.bash hook)"
-      conda activate buildkite
-      bash .buildkite/multi-round-qa.sh
+    command: bash .buildkite/multi-round-qa.sh
     artifact_paths: summary.csv
 
   - label: ":clean: Kill all"
     key: "clean"
     depends_on: ["test"]
-    command: ps -e | grep pt_main_thread | awk '{print $1}' | xargs kill -9
+    command: bash .buildkite/clean.sh
