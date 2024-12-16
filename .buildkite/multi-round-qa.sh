@@ -24,7 +24,7 @@ pip install -r requirements-test.txt
 pip install -e .
 
 pip install -r ./benchmarks/requirements.txt
-vllm serve mistralai/Mistral-7B-Instruct-v0.2 --disable-log-requests
+lmcache_vllm serve mistralai/Mistral-7B-Instruct-v0.2 --disable-log-requests
 python3 multi-round-qa.py \
     --num-users 10 \
     --num-rounds 5 \
@@ -33,4 +33,5 @@ python3 multi-round-qa.py \
     --user-history-prompt 2000 \
     --answer-len 100 \
     --model mistralai/Mistral-7B-Instruct-v0.2 \
-    --base-url http://localhost:8000/v1
+    --base-url http://localhost:8000/v1 \
+    --time 300
