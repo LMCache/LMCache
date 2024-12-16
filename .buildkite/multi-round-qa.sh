@@ -23,8 +23,14 @@ pip install -r requirements-test.txt
 
 pip install -e .
 
+git clone https://github.com/LMCache/lmcache-vllm.git ../lmcache-vllm
+cd ../lmcache-vllm
+pip install -e .
+cd ../LMCache
+
 pip install -r ./benchmarks/requirements.txt
 lmcache_vllm serve mistralai/Mistral-7B-Instruct-v0.2 --disable-log-requests
+sleep 10s
 python3 benchmarks/multi-round-qa.py \
     --num-users 10 \
     --num-rounds 5 \
