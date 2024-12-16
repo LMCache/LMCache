@@ -6,7 +6,8 @@ cd ../lmcache-vllm
 pip install .
 cd ../multi-round-qa
 pip install -r ./benchmarks/requirements.txt
-lmcache_vllm serve mistralai/Mistral-7B-Instruct-v0.2 --disable-log-requests &
+
+lmcache_vllm serve mistralai/Mistral-7B-Instruct-v0.2 --disable-log-requests > lmcache_vllm.log 2>&1 &
 
 echo "Waiting for service to start..."
 until curl --silent --head --fail http://localhost:8000/v1; do
