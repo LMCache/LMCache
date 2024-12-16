@@ -7,7 +7,13 @@ pip install .
 cd ../multi-round-qa
 pip install -r ./benchmarks/requirements.txt
 lmcache_vllm serve mistralai/Mistral-7B-Instruct-v0.2 --disable-log-requests &
-sleep 100
+
+echo "Waiting for service to start..."
+until curl --silent --head --fail http://localhost:8000/v1; do
+  sleep 10
+  echo "Waiting..."
+done
+
 python3 benchmarks/multi-round-qa.py \
     --num-users 10 \
     --num-rounds 5 \
