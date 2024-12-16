@@ -1,50 +1,0 @@
-[33mINFO LMCache: [0mInitializing lmcache_vllm version 0.6.2.3, supporting vllm versions: ['0.6.1.post2', '0.6.1.dev238+ge2c6e0a82'] [2024-12-16 14:49:51,139] -- /local/shaotingf/lmcache1/lmcache-vllm/lmcache_vllm/__init__.py:35
-[33mWARNING LMCache: [0mNo LMCache configuration file is set. Returning default config [2024-12-16 14:49:51,204] -- /local/shaotingf/lmcache1/lmcache-vllm/lmcache_vllm/vllm_adapter.py:113
-[33mWARNING LMCache: [0mPlease set the configuration file through the environment variable: LMCACHE_CONFIG_FILE [2024-12-16 14:49:51,204] -- /local/shaotingf/lmcache1/lmcache-vllm/lmcache_vllm/vllm_adapter.py:114
-INFO 12-16 14:49:51 api_server.py:526] vLLM API server version 0.6.1.dev238+ge2c6e0a82
-INFO 12-16 14:49:51 api_server.py:527] args: Namespace(model_tag='mistralai/Mistral-7B-Instruct-v0.2', config='', host=None, port=8000, uvicorn_log_level='info', allow_credentials=False, allowed_origins=['*'], allowed_methods=['*'], allowed_headers=['*'], api_key=None, lora_modules=None, prompt_adapters=None, chat_template=None, response_role='assistant', ssl_keyfile=None, ssl_certfile=None, ssl_ca_certs=None, ssl_cert_reqs=0, root_path=None, middleware=[], return_tokens_as_token_ids=False, disable_frontend_multiprocessing=False, enable_auto_tool_choice=False, tool_call_parser=None, model='mistralai/Mistral-7B-Instruct-v0.2', tokenizer=None, skip_tokenizer_init=False, revision=None, code_revision=None, tokenizer_revision=None, tokenizer_mode='auto', trust_remote_code=False, download_dir=None, load_format='auto', config_format='auto', dtype='auto', kv_cache_dtype='auto', quantization_param_path=None, max_model_len=None, guided_decoding_backend='outlines', distributed_executor_backend=None, worker_use_ray=False, pipeline_parallel_size=1, tensor_parallel_size=1, max_parallel_loading_workers=None, ray_workers_use_nsight=False, block_size=16, enable_prefix_caching=False, disable_sliding_window=False, use_v2_block_manager=False, num_lookahead_slots=0, seed=0, swap_space=4, cpu_offload_gb=0, gpu_memory_utilization=0.9, num_gpu_blocks_override=None, max_num_batched_tokens=None, max_num_seqs=256, max_logprobs=20, disable_log_stats=False, quantization=None, rope_scaling=None, rope_theta=None, enforce_eager=False, max_context_len_to_capture=None, max_seq_len_to_capture=8192, disable_custom_all_reduce=False, tokenizer_pool_size=0, tokenizer_pool_type='ray', tokenizer_pool_extra_config=None, limit_mm_per_prompt=None, mm_processor_kwargs=None, enable_lora=False, max_loras=1, max_lora_rank=16, lora_extra_vocab_size=256, lora_dtype='auto', long_lora_scaling_factors=None, max_cpu_loras=None, fully_sharded_loras=False, enable_prompt_adapter=False, max_prompt_adapters=1, max_prompt_adapter_token=0, device='auto', num_scheduler_steps=1, multi_step_stream_outputs=False, scheduler_delay_factor=0.0, enable_chunked_prefill=None, speculative_model=None, speculative_model_quantization=None, num_speculative_tokens=None, speculative_draft_tensor_parallel_size=None, speculative_max_model_len=None, speculative_disable_by_batch_size=None, ngram_prompt_lookup_max=None, ngram_prompt_lookup_min=None, spec_decoding_acceptance_method='rejection_sampler', typical_acceptance_sampler_posterior_threshold=None, typical_acceptance_sampler_posterior_alpha=None, disable_logprobs_during_spec_decoding=None, model_loader_extra_config=None, ignore_patterns=[], preemption_mode=None, served_model_name=None, qlora_adapter_name_or_path=None, otlp_traces_endpoint=None, collect_detailed_traces=None, disable_async_output_proc=False, override_neuron_config=None, disable_log_requests=True, max_log_len=None, disable_fastapi_docs=False, dispatch_function=<function serve at 0x7f5470420ee0>)
-INFO 12-16 14:49:51 api_server.py:164] Multiprocessing frontend to use ipc:///tmp/37b9a997-f05a-45e3-a754-dd3a5af7d378 for IPC Path.
-INFO 12-16 14:49:51 api_server.py:177] Started engine process with PID 4174605
-/local/shaotingf/anaconda3/envs/lm_from_source/lib/python3.10/site-packages/vllm/transformers_utils/tokenizer_group/tokenizer_group.py:23: FutureWarning: It is strongly recommended to run mistral models with `--tokenizer_mode "mistral"` to ensure correct encoding and decoding.
-  self.tokenizer = get_tokenizer(self.tokenizer_id, **tokenizer_config)
-INFO 12-16 14:49:55 llm_engine.py:226] Initializing an LLM engine (v0.6.1.dev238+ge2c6e0a82) with config: model='mistralai/Mistral-7B-Instruct-v0.2', speculative_config=None, tokenizer='mistralai/Mistral-7B-Instruct-v0.2', skip_tokenizer_init=False, tokenizer_mode=auto, revision=None, override_neuron_config=None, rope_scaling=None, rope_theta=None, tokenizer_revision=None, trust_remote_code=False, dtype=torch.bfloat16, max_seq_len=32768, download_dir=None, load_format=LoadFormat.AUTO, tensor_parallel_size=1, pipeline_parallel_size=1, disable_custom_all_reduce=False, quantization=None, enforce_eager=False, kv_cache_dtype=auto, quantization_param_path=None, device_config=cuda, decoding_config=DecodingConfig(guided_decoding_backend='outlines'), observability_config=ObservabilityConfig(otlp_traces_endpoint=None, collect_model_forward_time=False, collect_model_execute_time=False), seed=0, served_model_name=mistralai/Mistral-7B-Instruct-v0.2, use_v2_block_manager=False, num_scheduler_steps=1, multi_step_stream_outputs=False, enable_prefix_caching=False, use_async_output_proc=True, use_cached_outputs=True, mm_processor_kwargs=None)
-/local/shaotingf/anaconda3/envs/lm_from_source/lib/python3.10/site-packages/vllm/transformers_utils/tokenizer_group/tokenizer_group.py:23: FutureWarning: It is strongly recommended to run mistral models with `--tokenizer_mode "mistral"` to ensure correct encoding and decoding.
-  self.tokenizer = get_tokenizer(self.tokenizer_id, **tokenizer_config)
-INFO 12-16 14:49:57 model_runner.py:1014] Starting to load model mistralai/Mistral-7B-Instruct-v0.2...
-INFO 12-16 14:49:58 weight_utils.py:242] Using model weights format ['*.safetensors']
-Loading safetensors checkpoint shards:   0% Completed | 0/3 [00:00<?, ?it/s]
-Loading safetensors checkpoint shards:  33% Completed | 1/3 [00:01<00:03,  1.51s/it]
-Loading safetensors checkpoint shards:  67% Completed | 2/3 [00:02<00:01,  1.48s/it]
-Loading safetensors checkpoint shards: 100% Completed | 3/3 [00:04<00:00,  1.49s/it]
-Loading safetensors checkpoint shards: 100% Completed | 3/3 [00:04<00:00,  1.49s/it]
-
-INFO 12-16 14:50:03 model_runner.py:1025] Loading model weights took 13.4966 GB
-INFO 12-16 14:50:08 gpu_executor.py:122] # GPU blocks: 11481, # CPU blocks: 2048
-INFO 12-16 14:50:13 model_runner.py:1329] Capturing the model for CUDA graphs. This may lead to unexpected consequences if the model is not static. To run the model in eager mode, set 'enforce_eager=True' or use '--enforce-eager' in the CLI.
-INFO 12-16 14:50:13 model_runner.py:1333] CUDA graphs can take additional 1~3 GiB memory per GPU. If you are running out of memory, consider decreasing `gpu_memory_utilization` or enforcing eager mode. You can also reduce the `max_num_seqs` as needed to decrease memory usage.
-INFO 12-16 14:50:36 model_runner.py:1456] Graph capturing finished in 22 secs.
-INFO 12-16 14:50:36 api_server.py:230] vLLM to use /tmp/tmpsj18tdof as PROMETHEUS_MULTIPROC_DIR
-WARNING 12-16 14:50:36 serving_embedding.py:189] embedding_mode is False. Embedding API will not work.
-INFO 12-16 14:50:36 launcher.py:19] Available routes are:
-INFO 12-16 14:50:36 launcher.py:27] Route: /openapi.json, Methods: GET, HEAD
-INFO 12-16 14:50:36 launcher.py:27] Route: /docs, Methods: GET, HEAD
-INFO 12-16 14:50:36 launcher.py:27] Route: /docs/oauth2-redirect, Methods: GET, HEAD
-INFO 12-16 14:50:36 launcher.py:27] Route: /redoc, Methods: GET, HEAD
-INFO 12-16 14:50:36 launcher.py:27] Route: /health, Methods: GET
-INFO 12-16 14:50:36 launcher.py:27] Route: /tokenize, Methods: POST
-INFO 12-16 14:50:36 launcher.py:27] Route: /detokenize, Methods: POST
-INFO 12-16 14:50:36 launcher.py:27] Route: /v1/models, Methods: GET
-INFO 12-16 14:50:36 launcher.py:27] Route: /version, Methods: GET
-INFO 12-16 14:50:36 launcher.py:27] Route: /v1/chat/completions, Methods: POST
-INFO 12-16 14:50:36 launcher.py:27] Route: /v1/completions, Methods: POST
-INFO 12-16 14:50:36 launcher.py:27] Route: /v1/embeddings, Methods: POST
-INFO:     Started server process [4174284]
-INFO:     Waiting for application startup.
-INFO:     Application startup complete.
-INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
-INFO 12-16 14:50:46 metrics.py:351] Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.0 tokens/s, Running: 0 reqs, Swapped: 0 reqs, Pending: 0 reqs, GPU KV cache usage: 0.0%, CPU KV cache usage: 0.0%.
-INFO 12-16 14:50:56 metrics.py:351] Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.0 tokens/s, Running: 0 reqs, Swapped: 0 reqs, Pending: 0 reqs, GPU KV cache usage: 0.0%, CPU KV cache usage: 0.0%.
-INFO 12-16 14:51:06 metrics.py:351] Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.0 tokens/s, Running: 0 reqs, Swapped: 0 reqs, Pending: 0 reqs, GPU KV cache usage: 0.0%, CPU KV cache usage: 0.0%.
-INFO 12-16 14:51:16 metrics.py:351] Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.0 tokens/s, Running: 0 reqs, Swapped: 0 reqs, Pending: 0 reqs, GPU KV cache usage: 0.0%, CPU KV cache usage: 0.0%.
-/local/shaotingf/anaconda3/envs/lm_from_source/lib/python3.10/multiprocessing/resource_tracker.py:224: UserWarning: resource_tracker: There appear to be 1 leaked semaphore objects to clean up at shutdown
-  warnings.warn('resource_tracker: There appear to be %d '
