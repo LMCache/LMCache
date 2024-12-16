@@ -1,3 +1,3 @@
 #!/bin/bash
 
-ps -e | grep pt_main_thread | awk '{print $1}' | xargs kill -9
+ps -e | grep pt_main_thread | awk '{print $1}' | xargs kill -9 || true
