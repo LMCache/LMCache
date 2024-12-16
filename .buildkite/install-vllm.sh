@@ -13,4 +13,4 @@ conda activate ${CONDA_ENV_NAME}
 
 git clone https://github.com/LMCache/lmcache-vllm.git ../lmcache-vllm
 cd ../lmcache-vllm
-pip install -e .
+pip install .
