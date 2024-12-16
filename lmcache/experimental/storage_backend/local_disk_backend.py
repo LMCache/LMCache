@@ -60,8 +60,7 @@ class LocalDiskBackend(StorageBackendInterface):
         self.dst_device = dst_device
 
         # TODO: Tune the number of workers for better performance
-        self.put_executor = ProcessPoolExecutor(max_workers=4)
-        #self.prefetch_executor = ProcessPoolExecutor(max_workers=1)
+        self.proc_pool_executor = ProcessPoolExecutor(max_workers=4)
 
         self.disk_lock = threading.Lock()
         assert config.local_disk is not None
@@ -100,7 +99,8 @@ class LocalDiskBackend(StorageBackendInterface):
         kv_chunk = memory_obj.tensor
         fmt_str = str(memory_obj.metadata.fmt.value)
         path = self._key_to_path(key)
-        future = self.put_executor.submit(save_disk, path, kv_chunk, fmt_str)
+        future = self.proc_pool_executor.submit(save_disk, path, kv_chunk,
+                                                fmt_str)
         return future
 
     def put_blocking(
@@ -130,8 +130,7 @@ class LocalDiskBackend(StorageBackendInterface):
         path = self.dict[key].path
         self.disk_lock.release()
         logger.info(f"Prefetching {key} from disk.")
-        #future = self.prefetch_executor.submit(load_disk, path, "cpu")
-        future = self.put_executor.submit(load_disk, path, "cpu")
+        future = self.proc_pool_executor.submit(load_disk, path, "cpu")
         return future
 
     def get_blocking(
@@ -153,8 +152,7 @@ class LocalDiskBackend(StorageBackendInterface):
     def close(self):
         # TODO: Might be contention here
         if not self.is_shutdown:
-            self.put_executor.shutdown()
-            #self.prefetch_executor.shutdown()
+            self.proc_pool_executor.shutdown()
         logger.info("Local disk backend closed.")
 
     def __del__(self):

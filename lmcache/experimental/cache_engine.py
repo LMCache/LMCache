@@ -58,9 +58,7 @@ class LMCacheEngine:
 
         # GPU->CPU transfer should be asynchronous
         self.put_queue: queue.Queue = queue.Queue()
-        #queue.Queue[
-        #    Union[Tuple[CacheEngineKey, torch.Tensor],
-        #          LocalBackendEndSignal]] = queue.Queue()
+
         self.put_thread = threading.Thread(target=self.put_worker, args=())
         self.put_thread.start()
 
