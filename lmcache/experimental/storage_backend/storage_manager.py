@@ -130,7 +130,8 @@ class StorageManager:
                          "Optimally, this should not happen.")
             # Calling result() twice (already once in callback) will have
             # no effect
-            #prefetch_task.result(timeout=1)
+            # Tune the timeout for better performance
+            prefetch_task.result(timeout=1)
 
         # Search in hot_cache
         self.manager_lock.acquire()
