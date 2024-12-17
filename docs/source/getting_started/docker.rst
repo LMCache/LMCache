@@ -84,7 +84,7 @@ Save the following YAML code to a file, such as ``example.yaml``, in the LMCache
     --env "VLLM_WORKER_MULTIPROC_METHOD=spawn"\
     --ipc=host \
     --network=host \
-    lmcache/lmcache_vllm:lmcache-0.1.3 \
+    lmcache/lmcache_vllm:lmcache-0.1.4 \
     $model --gpu-memory-utilization 0.7 --port 8000 \
 
 .. note::
