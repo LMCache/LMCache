@@ -438,7 +438,7 @@ def test_spt_multi_query(fmt, autorelease):
     def check_groups(*ids):
         query_prompt_list = [tokens[i] for i in ids]
         input_ids_list = []
-        blend_indices_list = []
+        blend_indices_list: List[int] = []
         for query_prompt in query_prompt_list:
             input_ids = fake_encode(query_prompt)
             input_ids_list.append(torch.tensor(input_ids, device="cpu"))
