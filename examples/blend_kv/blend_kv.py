@@ -1,3 +1,5 @@
+import time
+
 import lmcache_vllm
 import torch
 from lmcache_vllm.blend_adapter import (OfflineKVPreCompute,
@@ -30,6 +32,7 @@ offline_precompute = OfflineKVPreCompute(llm)
 for chunk in chunks:
     offline_precompute.precompute_kv(chunk)
 
+time.sleep(3)
 print("Running the real query here!")
 
 user_prompt = [sys_prompt, chunks[0], chunks[1], question]
