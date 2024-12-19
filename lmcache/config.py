@@ -221,6 +221,11 @@ class LMCacheEngineConfig:
         config.blend_min_tokens = int(
             parse_env(get_env_name("blend_min_tokens"),
                       config.blend_min_tokens))
+        config.blend_separator = parse_env(get_env_name("blend_separator"),
+                                           config.blend_separator)
+        config.blend_add_special_in_precomp = bool(
+            parse_env(get_env_name("blend_add_special_in_precomp"),
+                      config.blend_add_special_in_precomp))
 
         return config
 
