@@ -213,7 +213,6 @@ class SPTBlendRetriever(BlendRetriever):
         self.cache_engine = cache_engine
         self.metadata = metadata
 
-
     def new_request(
         self,
         full_prompts: List[torch.Tensor],

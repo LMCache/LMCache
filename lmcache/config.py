@@ -32,7 +32,10 @@ class LMCacheMemPoolMetadata:
     kv_dtype: torch.dtype
     max_local_cache_size: int
 
+
 blend_default_separator = "[BLEND_SEP]"
+
+
 @dataclass
 class LMCacheEngineConfig:
     chunk_size: int
@@ -48,30 +51,30 @@ class LMCacheEngineConfig:
     enable_blending: bool  # whether to enable blending
     blend_recompute_ratio: float  # the ratio of blending recompute
     blend_min_tokens: int  # the minimum number of tokens for blending
-    blend_separator: str # the separator for blending
-    blend_add_special_in_precomp: bool # whether to add special tokens in precomputations
+    blend_separator: str  # the separator for blending
+    blend_add_special_in_precomp: bool
+    # whether to add special tokens in pre-computations
 
     @staticmethod
     def from_defaults(
-        chunk_size: int = 256,
-        local_device: str = "cuda",
-        max_local_cache_size: int = 5,
-        remote_url: Optional[str] = "redis://localhost:6379",
-        remote_serde: Optional[str] = "torch",
-        pipelined_backend: bool = False,
-        save_decode_cache: bool = False,
-        enable_blending: bool = False,
-        blend_recompute_ratio: float = 0.15,
-        blend_min_tokens: int = 256,
-        blend_separator: str = blend_default_separator,
-        blend_add_special_in_precomp: bool = False
+            chunk_size: int = 256,
+            local_device: str = "cuda",
+            max_local_cache_size: int = 5,
+            remote_url: Optional[str] = "redis://localhost:6379",
+            remote_serde: Optional[str] = "torch",
+            pipelined_backend: bool = False,
+            save_decode_cache: bool = False,
+            enable_blending: bool = False,
+            blend_recompute_ratio: float = 0.15,
+            blend_min_tokens: int = 256,
+            blend_separator: str = blend_default_separator,
+            blend_add_special_in_precomp: bool = False
     ) -> "LMCacheEngineConfig":
-        return LMCacheEngineConfig(chunk_size, local_device,
-                                   max_local_cache_size, remote_url,
-                                   remote_serde, pipelined_backend,
-                                   save_decode_cache, enable_blending,
-                                   blend_recompute_ratio, blend_min_tokens, 
-                                   blend_separator, blend_add_special_in_precomp)
+        return LMCacheEngineConfig(
+            chunk_size, local_device, max_local_cache_size, remote_url,
+            remote_serde, pipelined_backend, save_decode_cache,
+            enable_blending, blend_recompute_ratio, blend_min_tokens,
+            blend_separator, blend_add_special_in_precomp)
 
     @staticmethod
     def from_legacy(
@@ -131,8 +134,10 @@ class LMCacheEngineConfig:
         enable_blending = config.get("enable_blending", False)
         blend_recompute_ratio = config.get("blend_recompute_ratio", 0.15)
         blend_min_tokens = config.get("blend_min_tokens", 256)
-        blend_separator = config.get("blend_separator", blend_default_separator)
-        blend_add_special_in_precomp = config.get("blend_add_special_in_precomp", False)
+        blend_separator = config.get("blend_separator",
+                                     blend_default_separator)
+        blend_add_special_in_precomp = config.get(
+            "blend_add_special_in_precomp", False)
 
         match local_device:
             case "cpu" | "cuda" | None:
