@@ -86,6 +86,12 @@ Now you can run the following command to blend the KV cache using LMCache:
 
     $ LMCACHE_CONFIG_FILE=kv_blend.yaml CUDA_VISIBLE_DEVICES=0 python kv_blend.py
 
+.. note::
+
+    KV Blending in LMCache currently uses a special separator (``# #``) to separate text chunks. 
+    This separator is added to the end of each chunk before execution by the user.
+    To do this, the function ``combine_input_prompt_chunks()`` should be used.
+
 
 
 

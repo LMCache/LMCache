@@ -9,6 +9,8 @@ Subpackages
 
    lmcache.storage_backend.connector
    lmcache.storage_backend.serde
+   lmcache.storage_backend.evictor
+   lmcache.storage_backend.mem_pool
 
 Submodules
 ----------
