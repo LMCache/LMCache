@@ -359,11 +359,12 @@ def test_spt_partial_hit(fmt, autorelease):
     metadata = dumb_metadata(fmt)
     engine = autorelease(LMCacheEngine(cfg, dumb_metadata(fmt)))
 
-    for ilen, token, kv in zip(inserted_length, tokens, kvs):
-        assert ilen < len(token)
+    for ilen, token_ids_tensor, kv in zip(inserted_length, token_ids_tensors,
+                                          kvs):
+        assert ilen < len(token_ids_tensor)
         s = slice(0, ilen)
         partial_kv = slice_kv_caches(kv, s, fmt)
-        partial_token_ids_tensor = token_ids_tensors[s]
+        partial_token_ids_tensor = token_ids_tensor[s]
         engine.store(partial_token_ids_tensor, partial_kv)
 
     retriever = SPTBlendRetriever(engine, metadata)
