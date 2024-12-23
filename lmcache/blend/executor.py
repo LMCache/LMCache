@@ -1,4 +1,4 @@
-from typing import Callable, Optional, Tuple, List
+from typing import Callable, Optional, Tuple
 
 import torch
 
@@ -36,7 +36,7 @@ class CacheBlendImpl(BlendExecutor):
     def __init__(
         self,
         recompute_ratio: float,
-        all_reduce_function = None,
+        all_reduce_function=None,
     ):
         self.recompute_ratio = recompute_ratio
 
@@ -100,20 +100,20 @@ class CacheBlendImpl(BlendExecutor):
         for start, end in zip(query_start_loc[:-1], query_start_loc[1:]):
             ret[start:end] -= start
         return ret.long()
-    
-    def _select_tokens_all_queries(self, rk: torch.Tensor, rv: torch.Tensor,
-                                   valid: torch.Tensor, fq: torch.Tensor,
-                                   fk: torch.Tensor, fv: torch.Tensor,
-                                   token_dim: int,
-                                   query_start_loc: torch.Tensor) -> torch.Tensor:
-        
+
+    def _select_tokens_all_queries(
+            self, rk: torch.Tensor, rv: torch.Tensor, valid: torch.Tensor,
+            fq: torch.Tensor, fk: torch.Tensor, fv: torch.Tensor,
+            token_dim: int, query_start_loc: torch.Tensor) -> torch.Tensor:
         """
-        Input: retrieved KV, valid_mask, and fresh QKV for a single query, and query_start_loc
+        Input: retrieved KV, valid_mask, and fresh QKV for a single query, 
+        and query_start_loc
         Output: new_query_start_locs
         """
         # Consider TP here.
-        # But we cannot couple it with serving engine, so we need to pass a group coordinator.
-        
+        # But we cannot couple it with serving engine,
+        # so pass a all_reduce_function.
+
         # We compare the retrieved KVs with the fresh KVs and keep the
         # following tokens:
         #  1. Invalid tokens
@@ -137,13 +137,18 @@ class CacheBlendImpl(BlendExecutor):
             local_valid = valid[qstart:qend]
             num_valid_tokens = local_valid.sum()
             num_selected_tokens = int(num_valid_tokens * self.recompute_ratio)
-            top_indices = torch.topk(diff_per_token[qstart:qend], num_selected_tokens).indices
+            top_indices = torch.topk(diff_per_token[qstart:qend],
+                                     num_selected_tokens).indices
             top_mask = indices_to_mask(top_indices, local_valid.shape[0])
             total_selected_mask = (1 - local_valid) + top_mask
             local_indices = mask_to_indices(total_selected_mask)
-            new_query_start_locs.append(new_query_start_locs[-1] + len(local_indices))
-            self.indexes_in_kv = torch.cat((self.indexes_in_kv, local_indices + int(qstart)))
-        return torch.tensor(new_query_start_locs, device=query_start_loc.device, dtype=query_start_loc.dtype)
+            new_query_start_locs.append(new_query_start_locs[-1] +
+                                        len(local_indices))
+            self.indexes_in_kv = torch.cat(
+                (self.indexes_in_kv, local_indices + int(qstart)))
+        return torch.tensor(new_query_start_locs,
+                            device=query_start_loc.device,
+                            dtype=query_start_loc.dtype)
 
     def blend(
         self,
@@ -202,8 +207,8 @@ class CacheBlendImpl(BlendExecutor):
 
         elif layer_id == 1:
             query_start_locs_tensor = self._select_tokens_all_queries(
-                retrieved_k, retrieved_v, valid_mask, fresh_q, fresh_k, fresh_v,
-                token_dim, query_start_loc)
+                retrieved_k, retrieved_v, valid_mask, fresh_q, fresh_k,
+                fresh_v, token_dim, query_start_loc)
             new_q = fresh_q[self.indexes_in_kv]
             new_positions = positions[self.indexes_in_kv]
             logger.info(f"Selected {len(self.indexes_in_kv)} tokens out of "

@@ -26,8 +26,7 @@ sampling_params_generation = SamplingParams(temperature=0.0,
                                             top_p=0.95,
                                             max_tokens=30)
 
-print(
-    "-------------- Pre-computing KV cache for the chunks -------------------")
+print("-------------- Pre-computing KV cache for chunks -------------------")
 offline_precompute = OfflineKVPreCompute(llm)
 for chunk in chunks:
     offline_precompute.precompute_kv(chunk)
