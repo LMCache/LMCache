@@ -21,6 +21,9 @@ Finally, the prompt will be sent to the serving engine and the KV blending modul
 ## How to run
 ```
 LMCACHE_CONFIG_FILE=example_blending.yaml python3 blend_kv.py
+LMCACHE_CONFIG_FILE=example_blending.yaml python3 batched_kv.py
+LMCACHE_CONFIG_FILE=example_blending.yaml VLLM_WORKER_MULTIPROC_METHOD=spawn python3 tp_kv.py
+LMCACHE_CONFIG_FILE=example_blending.yaml VLLM_WORKER_MULTIPROC_METHOD=spawn python3 batched_tp_kv.py
 ```
 
 ## TODO
