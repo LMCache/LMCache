@@ -1,15 +1,12 @@
-import os
 import sys
 import threading
 import time
 from io import StringIO
+
 from lmcache_vllm.blend_adapter import (OnlineKVPreCompute,
                                         combine_input_prompt_chunks)
-from transformers import AutoTokenizer
-'''
-def __init__(self, openai_api_key, openai_api_base, tokenizer=None):
-'''
 from openai import OpenAI
+from transformers import AutoTokenizer
 
 if len(sys.argv) != 2:
     print(f"Usage: {sys.argv[0]} <port>")
@@ -76,13 +73,12 @@ class ChatSession:
 
         self.context_chunks = context_chunks
         self.sys_prompt = "I've got a document, here's the content:```\n"
-        user_prompt = combine_input_prompt_chunks([self.sys_prompt, *context_chunks, "\n```."])
+        user_prompt = combine_input_prompt_chunks(
+            [self.sys_prompt, *context_chunks, "\n```."])
         self.messages = [
             {
-                "role":
-                "user",
-                "content":
-                user_prompt,
+                "role": "user",
+                "content": user_prompt,
             },
             {
                 "role": "assistant",
