@@ -1,5 +1,5 @@
 import threading
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Future
 from typing import Dict, List, Optional, Tuple
 
 import torch
@@ -103,7 +103,7 @@ class StorageManager:
 
             lambda_callback = lambda f, backend_name=backend_name: \
                    self.put_callback(f, backend_name, key)
-            
+
             self.manager_lock.acquire()
             self.put_tasks[backend_name][key] = (put_task, memory_obj)
             put_task.add_done_callback(lambda_callback)
