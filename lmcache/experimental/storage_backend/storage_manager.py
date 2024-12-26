@@ -39,7 +39,6 @@ class StorageManager:
         self.prefetch_tasks: Dict[CacheEngineKey, Future] = {}
         self.put_tasks: Dict[str, Dict[CacheEngineKey, Tuple[Future,
                                                              MemoryObj]]] = {}
-        self.callback_executor = ThreadPoolExecutor(max_workers=1)
 
         for backend_name in self.storage_backends.keys():
             self.put_tasks[backend_name] = {}
@@ -103,9 +102,8 @@ class StorageManager:
             #backend.put_blocking(key, memory_obj)
 
             lambda_callback = lambda f, backend_name=backend_name: \
-                self.callback_executor.submit(
-                   self.put_callback, f, backend_name, key
-                )
+                   self.put_callback(f, backend_name, key)
+            
             self.manager_lock.acquire()
             self.put_tasks[backend_name][key] = (put_task, memory_obj)
             put_task.add_done_callback(lambda_callback)
@@ -209,8 +207,7 @@ class StorageManager:
             if prefetch_task is None:
                 continue
             lambda_callback = lambda f: \
-                self.callback_executor.submit(
-                    self.prefetch_callback, f, key)
+                self.prefetch_callback(f, key)
 
             self.manager_lock.acquire()
             self.prefetch_tasks[key] = prefetch_task
@@ -241,7 +238,7 @@ class StorageManager:
                     return True
 
             for backend_name, backend in self.storage_backends.items():
-                if search_range is not None and\
+                if search_range is not None and \
                     backend_name not in search_range:
                     continue
                 if backend.contains(key):

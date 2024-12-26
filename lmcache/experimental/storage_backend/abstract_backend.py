@@ -39,7 +39,7 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
     @abc.abstractmethod
     def insert_key(self, key: CacheEngineKey, size: int):
         """
-        Insert the keu after data is put to storage backend.
+        Insert the key after data is put to storage backend.
         """
         raise NotImplementedError
 
@@ -65,7 +65,7 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
 
         :param CacheEngineKey key: The key of the MemoryObj.
 
-        :return: a future object
+        :return: a future object. None if the key does not exist.
         """
         raise NotImplementedError
 
@@ -79,7 +79,7 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
         
         :param CacheEngineKey key: The key of the MemoryObj.
         
-        :return: BufferMemoryObj
+        :return: BufferMemoryObj. None if the key does not exist.
         """
         raise NotImplementedError
 
