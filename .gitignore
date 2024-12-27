@@ -94,3 +94,6 @@ lmcache/experimental/tests
 /docs/output/
 
 /try
+
+# reference kernels
+/csrc/temp.cu
