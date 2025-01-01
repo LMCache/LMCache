@@ -1,6 +1,7 @@
 import random
 from typing import List
 
+import pytest
 import torch
 from utils import (check_mem_obj_equal, check_paged_kv_cache_equal,
                    generate_kv_cache_paged)
@@ -41,11 +42,11 @@ def _slice_kv_at(
     ]
 
 
-def test_extract_and_load_back():
+@pytest.mark.parametrize("num_tokens", [256, 500, 1024, 8000])
+def test_extract_and_load_back(num_tokens):
     device = "cuda"
-    num_tokens = 500
 
-    num_blocks = 500
+    num_blocks = 1000
     block_size = 16
     num_heads = 8
     head_size = 128
@@ -55,13 +56,16 @@ def test_extract_and_load_back():
     slot_mapping = random.sample(range(0, num_blocks * block_size), num_tokens)
     slot_mapping = torch.tensor(slot_mapping, device=device)
 
-    pinned_cpu_size = 2 * 1024 * 1024 * 1024  # 2GB
+    pinned_cpu_size = 4 * 1024 * 1024 * 1024  # 4GB
     mem_allocator = PinMemoryAllocator(pinned_cpu_size)
 
     # Old extract
     kv_tuple_list = []
     memory_obj_old_list = []
     chunk_size = 256
+    start_event = torch.cuda.Event(enable_timing=True)
+    end_event = torch.cuda.Event(enable_timing=True)
+    start_event.record()
     for layer_id in range(32):
         key_cache = kv_cache[layer_id][0].reshape(-1, num_heads, head_size)
         value_cache = kv_cache[layer_id][1].reshape(-1, num_heads, head_size)
@@ -83,9 +87,16 @@ def test_extract_and_load_back():
                                   layer_id].copy_(chunk[layer_id,
                                                         1].reshape(-1, 1024))
         memory_obj_old_list.append(memory_obj_old)
+    end_event.record()
+    torch.cuda.synchronize()
+    elapsed_time_ms = start_event.elapsed_time(end_event)
+    print("Old extract time: ", elapsed_time_ms / 1000)
 
     # New extract (zero-copy kernels)
     memory_obj_new_list = []
+    start_event = torch.cuda.Event(enable_timing=True)
+    end_event = torch.cuda.Event(enable_timing=True)
+    start_event.record()
     slot_mapping_chunked = torch.split(slot_mapping, chunk_size)
     for chunk_id, slot_mapping_temp in enumerate(slot_mapping_chunked):
         mem_obj_shape = [2, 32, len(slot_mapping_temp), num_heads * head_size]
@@ -97,7 +108,11 @@ def test_extract_and_load_back():
                                            kv_cache[layer_id][1],
                                            slot_mapping_temp, layer_id)
         memory_obj_new_list.append(memory_obj_new)
-
+    end_event.record()
+    # wait for all the operations to finish
+    torch.cuda.synchronize()
+    elapsed_time_ms = start_event.elapsed_time(end_event)
+    print("New extract time: ", elapsed_time_ms / 1000)
     check_mem_obj_equal(
         memory_obj_old_list,
         memory_obj_new_list,

@@ -87,19 +87,14 @@ def check_kv_cache_equal(left, right, num_tokens, fmt, offset=0):
                 assert (left_k[:, st:ed, :] == right_k[:, st:ed, :]).all()
                 assert (left_v[:, st:ed, :] == right_v[:, offset:ed, :]).all()
             case "vllm":
-                #try:
                 assert (left_k[st:ed, :, :] == right_k[st:ed, :, :]).all()
                 assert (left_v[st:ed, :, :] == right_v[st:ed, :, :]).all()
-                #except:
-                #    import pdb; pdb.set_trace()
-                #    raise AssertionError
 
 
-def check_mem_obj_equal(left, right, num_tokens, offset=0):
+def check_mem_obj_equal(left, right, offset=0):
     """
-    check if the first num_tokens of left and right kv cache are the same
+    check whether two memory objects are the same
     """
-    token_dim = 2
     for left_mem_obj, right_mem_obj in zip(left, right):
         left_kv, right_kv = left_mem_obj.tensor, right_mem_obj.tensor
         left_k, left_v = left_kv[0], left_kv[1]
@@ -112,15 +107,8 @@ def check_mem_obj_equal(left, right, num_tokens, offset=0):
         assert len(right_k.shape) == 3
         assert len(right_v.shape) == 3
 
-        st = offset
-        ed = offset + num_tokens
-        assert left_k.shape[token_dim] >= ed
-        assert left_v.shape[token_dim] >= ed
-        assert right_k.shape[token_dim] >= ed
-        assert right_v.shape[token_dim] >= ed
-
-        assert (left_k[:, :, st:ed] == right_k[:, :, st:ed]).all()
-        assert (left_v[:, :, st:ed] == right_v[:, :, st:ed]).all()
+        assert (left_k[:, :, :] == right_k[:, :, :]).all()
+        assert (left_v[:, :, :] == right_v[:, :, :]).all()
 
 
 def check_paged_kv_cache_equal(left,
@@ -130,7 +118,7 @@ def check_paged_kv_cache_equal(left,
                                num_heads=8,
                                head_size=128):
     """
-    check if the first num_tokens of left and right kv cache are the same
+    check whether two paged kv caches are the same at slot_mapping
     """
     token_dim = 0
     for left_kv, right_kv in zip(left, right):
