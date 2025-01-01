@@ -467,12 +467,10 @@ def test_prefetch_retrieve(backend, prefetch_from, autorelease_experimental):
         start_time = time.time()
         while engine.lookup(torch.cat([tokens, new_tokens]),
                             ["Hot"]) < expected_length:
-            #import pdb; pdb.set_trace()
             if time.time() - start_time > timeout:
                 raise TimeoutError(
                     f"Operation timed out after {timeout} seconds.")
             time.sleep(0.01)
-        #import pdb; pdb.set_trace()
         engine.storage_manager.storage_backends["LocalDiskBackend"].dict.clear(
         )
     """ test retrieve """
