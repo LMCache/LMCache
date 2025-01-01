@@ -159,5 +159,5 @@ def autorelease_experimental(request):
     LMCacheEngineBuilder.destroy("test")
 
     # Cleanup all objects created by the factory
-    for obj in objects:
-        obj.close()
+    #for obj in objects:
+    #    obj.close()

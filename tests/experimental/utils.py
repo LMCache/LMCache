@@ -26,6 +26,24 @@ def generate_kv_cache(num_tokens, fmt, device):
     return tuple(ret)
 
 
+def generate_kv_cache_paged(num_blocks,
+                            device,
+                            block_size=16,
+                            dtype=torch.bfloat16):
+    ret = []
+    num_layers = 32
+    num_heads = 8
+    head_size = 128
+    shape = [num_blocks, block_size, num_heads, head_size]
+
+    for i in range(num_layers):
+        k = torch.rand(shape, dtype=dtype, device=device)
+        v = torch.rand(shape, dtype=dtype, device=device)
+        ret.append((k, v))
+
+    return tuple(ret)
+
+
 def generate_tokens(num_tokens, device):
     return torch.randint(0, 10000, size=[num_tokens]).to(device)
 
@@ -75,6 +93,68 @@ def check_kv_cache_equal(left, right, num_tokens, fmt, offset=0):
                 #except:
                 #    import pdb; pdb.set_trace()
                 #    raise AssertionError
+
+
+def check_mem_obj_equal(left, right, num_tokens, offset=0):
+    """
+    check if the first num_tokens of left and right kv cache are the same
+    """
+    token_dim = 2
+    for left_mem_obj, right_mem_obj in zip(left, right):
+        left_kv, right_kv = left_mem_obj.tensor, right_mem_obj.tensor
+        left_k, left_v = left_kv[0], left_kv[1]
+        right_k, right_v = right_kv[0], right_kv[1]
+        right_k = right_k.to(left_k.device)
+        right_v = right_v.to(left_v.device)
+
+        assert len(left_k.shape) == 3
+        assert len(left_v.shape) == 3
+        assert len(right_k.shape) == 3
+        assert len(right_v.shape) == 3
+
+        st = offset
+        ed = offset + num_tokens
+        assert left_k.shape[token_dim] >= ed
+        assert left_v.shape[token_dim] >= ed
+        assert right_k.shape[token_dim] >= ed
+        assert right_v.shape[token_dim] >= ed
+
+        assert (left_k[:, :, st:ed] == right_k[:, :, st:ed]).all()
+        assert (left_v[:, :, st:ed] == right_v[:, :, st:ed]).all()
+
+
+def check_paged_kv_cache_equal(left,
+                               right,
+                               num_tokens,
+                               slot_mapping,
+                               num_heads=8,
+                               head_size=128):
+    """
+    check if the first num_tokens of left and right kv cache are the same
+    """
+    token_dim = 0
+    for left_kv, right_kv in zip(left, right):
+        left_k = left_kv[0].reshape(-1, num_heads, head_size)
+        left_v = left_kv[1].reshape(-1, num_heads, head_size)
+        right_k = right_kv[0].reshape(-1, num_heads, head_size)
+        right_v = right_kv[1].reshape(-1, num_heads, head_size)
+
+        #import pdb; pdb.set_trace()
+
+        assert len(left_k.shape) == 3
+        assert len(left_v.shape) == 3
+        assert len(right_k.shape) == 3
+        assert len(right_v.shape) == 3
+
+        assert left_k.shape[token_dim] >= num_tokens
+        assert left_v.shape[token_dim] >= num_tokens
+        assert right_k.shape[token_dim] >= num_tokens
+        assert right_v.shape[token_dim] >= num_tokens
+
+        assert (
+            left_k[slot_mapping, :, :] == right_k[slot_mapping, :, :]).all()
+        assert (
+            left_v[slot_mapping, :, :] == right_v[slot_mapping, :, :]).all()
 
 
 def check_kv_cache_device(kvs, device):

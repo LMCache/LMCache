@@ -329,10 +329,13 @@ class PinMemoryAllocator(MemoryAllocatorInterface):
         """
         torch.cuda.empty_cache()
         buffer = torch.empty(size, dtype=torch.uint8, pin_memory=True)
-        # NOTE(Jiayi): Without this, IPC over a tensor
+        # NOTE(Jiayi): Without `clone()`, IPC over a tensor
         # (a view of a tensor) will have unexpected behaviors
         # even though `buffer.is_shared()` returns True.
-        buffer.share_memory_()
+        # Directly calling `share_memory_()` on the buffer will
+        # make the memory unpinned.
+        # TODO(Jiayi): need a way to share memory without cloning.
+        #buffer.share_memory_()
         self.allocator = TensorMemoryAllocator(buffer)
 
         self.host_mem_lock = threading.Lock()

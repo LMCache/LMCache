@@ -29,7 +29,7 @@ class LMCacheEngineConfig:
         chunk_size: int = 256,
         local_cpu: bool = True,
         max_local_cpu_size=5,
-        local_disk: str = "local_disk/",
+        local_disk: str = "/local/disk_test/local_disk/",
         max_local_disk_size=0,
         remote_url: str = "redis://localhost:6379",
         remote_serde: str = "torch",
@@ -63,12 +63,12 @@ class LMCacheEngineConfig:
         elif backend == "local_disk":
             local_cpu = False
             max_local_cpu_size = 5
-            local_disk = "local_disk/"
+            local_disk = "/local/disk_test/local_disk/"
             max_local_disk_size = 5
         elif backend == "local_cpu_disk":
             local_cpu = True
             max_local_cpu_size = 5
-            local_disk = "local_disk/"
+            local_disk = "/local/disk_test/local_disk/"
             max_local_disk_size = 5
         else:
             raise ValueError(f"Invalid backend: {backend}")

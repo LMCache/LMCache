@@ -1,3 +1,4 @@
+import multiprocessing
 import queue
 import threading
 from typing import Dict, List, Optional
@@ -52,6 +53,9 @@ class LMCacheEngine:
         self.memory_allocator = memory_allocator
         self.token_database = token_database
         self.gpu_connector = gpu_connector
+
+        # NOTE: Unix systems use fork by default
+        multiprocessing.set_start_method('spawn', force=True)
 
         self.storage_manager = StorageManager(config, metadata,
                                               self.memory_allocator)

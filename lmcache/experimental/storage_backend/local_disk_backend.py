@@ -27,12 +27,15 @@ def save_disk(
     path: str,
     kv_chunk: torch.Tensor,
     fmt_str: str,
+    backend: str = "safetensors",
 ) -> None:
     """
     Save KV to disk.
     """
-    save_file({"kv_chunk": kv_chunk}, path, {"fmt": fmt_str})
-    del kv_chunk
+    if backend == "safetensors":
+        save_file({"kv_chunk": kv_chunk}, path, {"fmt": fmt_str})
+    elif backend == "torch":
+        torch.save({"kv_chunk": kv_chunk, "fmt": fmt_str}, path)
 
 
 @_lmcache_nvtx_annotate
@@ -40,16 +43,23 @@ def save_disk(
 def load_disk(
     path: str,
     dst_device: str,
+    backend: str = "safetensors",
 ) -> BufferMemoryObj:
     """
     Load KV from disk.
     """
-    with safe_open(path, framework="pt",
-                   device=dst_device) as f:  # type: ignore
-        kv_chunk = f.get_tensor("kv_chunk")
-        metadata = f.metadata()
-    return BufferMemoryObj(
-        kv_chunk, BufferMemoryObjMetadata(MemoryFormat(int(metadata["fmt"]))))
+    if backend == "safetensors":
+        with safe_open(path, framework="pt",
+                       device=dst_device) as f:  # type: ignore
+            kv_chunk = f.get_tensor("kv_chunk")
+            metadata = f.metadata()
+            fmt_str = metadata["fmt"]
+    elif backend == "torch":
+        data_dict = torch.load(path)
+        kv_chunk = data_dict["kv_chunk"]
+        fmt_str = data_dict["fmt"]
+    return BufferMemoryObj(kv_chunk,
+                           BufferMemoryObjMetadata(MemoryFormat(int(fmt_str))))
 
 
 class LocalDiskBackend(StorageBackendInterface):
@@ -96,7 +106,11 @@ class LocalDiskBackend(StorageBackendInterface):
         key: CacheEngineKey,
         memory_obj: MemoryObj,
     ) -> Future:
-        kv_chunk = memory_obj.tensor
+        # TODO(Jiayi): Please get rid of this `clone()`
+        # with shared memory. Directly passing a view of the tensor
+        # will result in wrong result.
+        assert memory_obj.tensor is not None
+        kv_chunk = memory_obj.tensor.clone()
         fmt_str = str(memory_obj.metadata.fmt.value)
         path = self._key_to_path(key)
         future = self.proc_pool_executor.submit(save_disk, path, kv_chunk,

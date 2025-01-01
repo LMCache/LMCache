@@ -55,6 +55,7 @@ class StorageManager:
         # raises exception if put failed
         try:
             future.result()
+            #logger.debug(f"{future} ")
         except Exception as e:
             logger.error(
                 f"Exception captured from future in put_callback: {e}")
@@ -82,8 +83,8 @@ class StorageManager:
         Do not store if the same object is being stored (handled here by 
         storage manager) or has been stored (handled by storage backend).
         """
-
         self.manager_lock.acquire()
+
         if self.use_hot:
             self.hot_cache[key] = memory_obj
 
