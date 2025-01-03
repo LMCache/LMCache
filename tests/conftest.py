@@ -8,6 +8,8 @@ from unittest.mock import patch
 
 import pytest
 
+from lmcache.experimental.cache_engine import LMCacheEngineBuilder
+
 
 class MockRedis:
 
@@ -142,3 +144,20 @@ def autorelease(request):
     # Cleanup all objects created by the factory
     for obj in objects:
         obj.close()
+
+
+@pytest.fixture(scope="function")
+def autorelease_experimental(request):
+    objects = []
+
+    def _factory(obj):
+        objects.append(obj)
+        return obj
+
+    yield _factory
+
+    LMCacheEngineBuilder.destroy("test")
+
+    # Cleanup all objects created by the factory
+    #for obj in objects:
+    #    obj.close()

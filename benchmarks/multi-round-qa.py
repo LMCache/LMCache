@@ -243,7 +243,8 @@ class UserSession:
             f"last_request_time: {self.last_request_time}")
 
     def step(self, timestamp: float, request_executor: RequestExecutor):
-        if self.question_id >= self.user_config.num_rounds:
+        if self.question_id >= self.user_config.num_rounds \
+            and not self.has_unfinished_request:
             self.finished = True
             return
 

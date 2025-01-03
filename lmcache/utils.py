@@ -29,7 +29,7 @@ TORCH_DTYPE_TO_STR_DTYPE = {
 }
 
 
-@dataclass
+@dataclass(order=True)
 class CacheEngineKey:
     fmt: str
     model_name: str

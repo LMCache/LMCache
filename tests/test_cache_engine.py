@@ -250,6 +250,59 @@ def test_retrieve_prefix(fmt, chunk_size, backend, autorelease,
 @pytest.mark.parametrize("fmt", ["vllm"])
 @pytest.mark.parametrize("chunk_size", [128, 256])
 @pytest.mark.parametrize(
+    "backend",
+    [
+        "file://local_disk/",
+    ],
+)
+def test_retrieve_prefix_async(fmt, chunk_size, backend, autorelease):
+    device = "cpu" if backend == "cpu" else "cuda"
+    num_tokens = 2000
+    new_num_tokens = 1000
+    kv_shape = (32, 2, chunk_size, 8, 128)
+
+    print(fmt, chunk_size, backend)
+    t1 = time.perf_counter()
+    tokens = generate_tokens(num_tokens, device)
+    kv_cache = generate_kv_cache(num_tokens, fmt, device)
+    new_tokens = generate_tokens(new_num_tokens, device)
+    _new_kv_cache = generate_kv_cache(new_num_tokens, fmt, device)
+    t2 = time.perf_counter()
+    print(f"init tensor takes {t2-t1}")
+    """ initialize the engine """
+    cfg = LMCacheEngineConfig.from_legacy(chunk_size=chunk_size,
+                                          backend=backend)
+    engine = autorelease(LMCacheEngine(cfg, dumb_metadata(fmt, kv_shape)))
+    t3 = time.perf_counter()
+    print(f"init engine takes {t3-t2}")
+    """ test store """
+    engine.store(tokens, kv_cache, blocking=False)
+    t4 = time.perf_counter()
+    print(f"store takes {t4-t3}")
+
+    expected_chunk_cnt = num_tokens // chunk_size
+    expected_length = expected_chunk_cnt * chunk_size
+
+    time.sleep(30)
+
+    print(f"{engine.lookup(tokens)} exists in cache")
+    """ test retrieve """
+    retrieved_cache, ret_mask = engine.retrieve(torch.cat([tokens,
+                                                           new_tokens]))
+    length = torch.sum(ret_mask)
+    t5 = time.perf_counter()
+    print(f"retrieve takes {t5-t4}")
+
+    assert length == expected_length
+    check_kv_cache_equal(retrieved_cache, kv_cache, expected_length, fmt)
+
+    if backend in ["file://local_disk/"]:
+        subprocess.run(shlex.split("rm -rf local_disk/"))
+
+
+@pytest.mark.parametrize("fmt", ["vllm"])
+@pytest.mark.parametrize("chunk_size", [128, 256])
+@pytest.mark.parametrize(
     "backend", ["cuda", "redis://localhost:6379", "lm://localhost:65000"])
 @pytest.mark.parametrize("lmserver_process", ["cpu"], indirect=True)
 def test_mixed_retrieve(fmt, chunk_size, backend, autorelease,

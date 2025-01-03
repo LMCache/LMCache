@@ -246,8 +246,6 @@ class LMCLocalBackend(LMCBackendInterface):
 # current impl. with "safetensors" might not be efficient
 # but it is better than "torch.save/load"
 
-# TODO(Jiayi): need to support prefetch for disk
-
 
 @_lmcache_nvtx_annotate
 @torch.inference_mode()
@@ -323,7 +321,8 @@ class LMCLocalDiskBackend(LMCBackendInterface):
         Returns:
             True if the cache engine contains the key, False otherwise
         """
-        return key in self.dict
+        with self.update_lock:
+            return key in self.dict
 
     def _key_to_path(
         self,
