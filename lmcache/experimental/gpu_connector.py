@@ -3,6 +3,7 @@ from typing import Tuple, Union
 
 import torch
 
+from lmcache.c_ops import lmc_ops
 from lmcache.experimental.memory_management import (BufferMemoryObj,
                                                     MemoryFormat, MemoryObj)
 from lmcache.utils import _lmcache_nvtx_annotate
@@ -151,6 +152,7 @@ class VLLMNestedTupleGPUConnector(GPUConnectorInterface):
         return torch.Size(
             [2, self.num_layers, num_tokens, self.hidden_dim_size])
 
+
 class VLLMPagedMemGPUConnector(GPUConnectorInterface):
     """
     The GPU KV cache should be a nested tuple of K and V tensors.
@@ -188,7 +190,7 @@ class VLLMPagedMemGPUConnector(GPUConnectorInterface):
 
         if "kvcaches" not in kwargs:
             raise ValueError("'kvcaches' should be provided in kwargs.")
-        
+
         if "slot_mapping" not in kwargs:
             raise ValueError("'slot_mapping' should be provided in kwargs.")
 
@@ -197,17 +199,13 @@ class VLLMPagedMemGPUConnector(GPUConnectorInterface):
 
         for layer_id, layer in enumerate(kvcaches):
             k, v = layer[0], layer[1]
-            lmc_ops.reshape_and_cache_back_flash(
-                memory_obj.tensor,
-                k,
-                v,
-                slot_mapping[start:end],
-                layer_id)
-        
+            lmc_ops.reshape_and_cache_back_flash(memory_obj.tensor, k, v,
+                                                 slot_mapping[start:end],
+                                                 layer_id)
+
         # TODO(Jiayi): Currently, this is a blocking operation.
         # We might be able to continue other decode jobs while
         # waiting for the copy to finish.
-
 
     @_lmcache_nvtx_annotate
     def from_gpu(self, memory_obj: MemoryObj, start: int, end: int, **kwargs):
@@ -222,7 +220,7 @@ class VLLMPagedMemGPUConnector(GPUConnectorInterface):
 
         if "kvcaches" not in kwargs:
             raise ValueError("'kvcaches' should be provided in kwargs.")
-        
+
         if "slot_mapping" not in kwargs:
             raise ValueError("'slot_mapping' should be provided in kwargs.")
 
@@ -242,12 +240,10 @@ class VLLMPagedMemGPUConnector(GPUConnectorInterface):
         with torch.cuda.stream(put_stream):
             for layer_id, layer in enumerate(kvcaches):
                 k, v = layer[0], layer[1]
-                lmc_ops.load_and_reshape_flash(memory_obj.tensor,
-                                           k,
-                                           v,
-                                           slot_mapping[start:end],
-                                           layer_id)
-                
+                lmc_ops.load_and_reshape_flash(memory_obj.tensor, k, v,
+                                               slot_mapping[start:end],
+                                               layer_id)
+
         put_stream.synchronize()
         memory_obj.metadata.fmt = MemoryFormat.KV_BLOB
 
