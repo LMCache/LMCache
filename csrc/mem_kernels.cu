@@ -16,9 +16,8 @@ __global__ void load_and_reshape_flash_kernel(
     const scalar_t* __restrict__ value_cache,   // [num_blocks, block_size, num_heads,
                                          // head_size]
     const int64_t* __restrict__ slot_mapping,  // [num_tokens]
-    const int block_stride, const int key_value_stride,
-    const int num_heads, const int head_size, const int block_size,
-    const int elements_per_entry,
+    const int block_stride_in_64bit, const int key_value_stride,
+    const int num_heads, const int head_size_in_64bit, const int block_size,
     const int key_layer_offset, const int value_layer_offset) {
   const int64_t token_idx = blockIdx.x;
   const int64_t slot_idx = slot_mapping[token_idx];
@@ -29,18 +28,17 @@ __global__ void load_and_reshape_flash_kernel(
 
   const int64_t block_idx = slot_idx / block_size;
   const int64_t block_offset = slot_idx % block_size;
-  const int n = num_heads * head_size / elements_per_entry;
+  const int n = num_heads * head_size_in_64bit;
 
   for (int i = threadIdx.x; i < n; i += blockDim.x) {
     const int64_t tgt_key_idx = key_layer_offset + token_idx * key_value_stride + i;
     const int64_t tgt_value_idx = value_layer_offset + token_idx * key_value_stride + i;
 
-    const int head_idx = i / (head_size / elements_per_entry);
-    const int head_offset = i % (head_size / elements_per_entry);
-    const int64_t src_key_value_idx = block_idx * block_stride +
-                                      block_offset * num_heads * head_size 
-                                      / elements_per_entry +
-                                      head_idx * head_size / elements_per_entry + head_offset;
+    const int head_idx = i / head_size_in_64bit;
+    const int head_offset = i % head_size_in_64bit;
+    const int64_t src_key_value_idx = block_idx * block_stride_in_64bit +
+                                      block_offset * num_heads * head_size_in_64bit +
+                                      head_idx * head_size_in_64bit + head_offset;
     
     scalar_t tgt_key = key_cache[src_key_value_idx];
     scalar_t tgt_value = value_cache[src_key_value_idx];
@@ -58,9 +56,8 @@ __global__ void reshape_and_cache_back_flash_kernel(
     scalar_t* __restrict__ value_cache,   // [num_blocks, block_size, num_heads,
                                          // head_size]
     const int64_t* __restrict__ slot_mapping,  // [num_tokens]
-    const int block_stride, const int key_value_stride,
-    const int num_heads, const int head_size, const int block_size,
-    const int elements_per_entry,
+    const int block_stride_in_64bit, const int key_value_stride,
+    const int num_heads, const int head_size_in_64bit, const int block_size,
     const int key_layer_offset, const int value_layer_offset) {
   const int64_t token_idx = blockIdx.x;
   const int64_t slot_idx = slot_mapping[token_idx];
@@ -71,18 +68,17 @@ __global__ void reshape_and_cache_back_flash_kernel(
 
   const int64_t block_idx = slot_idx / block_size;
   const int64_t block_offset = slot_idx % block_size;
-  const int n = num_heads * head_size / elements_per_entry;
+  const int n = num_heads * head_size_in_64bit;
 
   for (int i = threadIdx.x; i < n; i += blockDim.x) {
     const int64_t tgt_key_idx = key_layer_offset + token_idx * key_value_stride + i;
     const int64_t tgt_value_idx = value_layer_offset + token_idx * key_value_stride + i;
 
-    const int head_idx = i / (head_size / elements_per_entry);
-    const int head_offset = i % (head_size / elements_per_entry);
-    const int64_t src_key_value_idx = block_idx * block_stride +
-                                      block_offset * num_heads * head_size 
-                                      / elements_per_entry +
-                                      head_idx * head_size / elements_per_entry + head_offset;
+    const int head_idx = i / head_size_in_64bit;
+    const int head_offset = i % head_size_in_64bit;
+    const int64_t src_key_value_idx = block_idx * block_stride_in_64bit +
+                                      block_offset * num_heads * head_size_in_64bit +
+                                      head_idx * head_size_in_64bit + head_offset;
     
     scalar_t tgt_key = key_value[tgt_key_idx];
     scalar_t tgt_value = key_value[tgt_value_idx];
@@ -142,7 +138,7 @@ void load_and_reshape_flash(
 
   int num_tokens = slot_mapping.size(0);
   int num_heads= key_cache.size(2);
-  int head_size = key_cache.size(3);
+  int head_size_in_64bit = key_cache.size(3) / elements_per_entry;
 
 
   int block_size = key_cache.size(1);
@@ -152,21 +148,21 @@ void load_and_reshape_flash(
   
   int num_layers = key_value.size(1);
   int key_layer_offset = layer_idx * key_value.stride(1) / elements_per_entry;
-  int value_layer_offset = (layer_idx+num_layers) * key_value.stride(1) \
+  int value_layer_offset = (layer_idx+num_layers) * key_value.stride(1)
             / elements_per_entry;
 
-  int block_stride = key_cache.stride(0) / elements_per_entry;
+  int block_stride_in_64bit = key_cache.stride(0) / elements_per_entry;
   TORCH_CHECK(key_cache.stride(0) == value_cache.stride(0));
 
   dim3 grid(num_tokens);
-  dim3 block(std::min(num_heads * head_size / elements_per_entry, 128));
+  dim3 block(std::min(num_heads * head_size_in_64bit, 128));
   const at::cuda::OptionalCUDAGuard device_guard(device_of(key_cache));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
   lmc::load_and_reshape_flash_kernel<int64_t><<<grid, block, 0, stream>>>(
       key_value_ptr, key_cache_ptr, value_cache_ptr, slot_mapping_ptr,
-      block_stride, key_value_stride, num_heads, head_size, block_size,
-      elements_per_entry, key_layer_offset, value_layer_offset);
+      block_stride_in_64bit, key_value_stride, num_heads, head_size_in_64bit, block_size,
+      key_layer_offset, value_layer_offset);
 }
 
 
@@ -195,7 +191,7 @@ void reshape_and_cache_back_flash(
 
   int num_tokens = slot_mapping.size(0);
   int num_heads= key_cache.size(2);
-  int head_size = key_cache.size(3);
+  int head_size_in_64bit = key_cache.size(3) / elements_per_entry;
 
 
   int block_size = key_cache.size(1);
@@ -204,20 +200,20 @@ void reshape_and_cache_back_flash(
   
   int num_layers = key_value.size(1);
   int key_layer_offset = layer_idx * key_value.stride(1) / elements_per_entry;
-  int value_layer_offset = (layer_idx+num_layers) * key_value.stride(1) \
+  int value_layer_offset = (layer_idx+num_layers) * key_value.stride(1)
             / elements_per_entry;
 
 
-  int block_stride = key_cache.stride(0) / elements_per_entry;
+  int block_stride_in_64bit = key_cache.stride(0) / elements_per_entry;
   TORCH_CHECK(key_cache.stride(0) == value_cache.stride(0));
 
   dim3 grid(num_tokens);
-  dim3 block(std::min(num_heads * head_size / elements_per_entry, 128));
+  dim3 block(std::min(num_heads * head_size_in_64bit, 128));
   const at::cuda::OptionalCUDAGuard device_guard(device_of(key_cache));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
   lmc::reshape_and_cache_back_flash_kernel<int64_t><<<grid, block, 0, stream>>>(
       key_value_ptr, key_cache_ptr, value_cache_ptr, slot_mapping_ptr,
-      block_stride, key_value_stride, num_heads, head_size, block_size,
-      elements_per_entry, key_layer_offset, value_layer_offset);
+      block_stride_in_64bit, key_value_stride, num_heads, head_size_in_64bit, block_size,
+      key_layer_offset, value_layer_offset);
 }

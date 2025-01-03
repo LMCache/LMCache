@@ -31,12 +31,6 @@ const int RENORMALIZATION_FACTOR = 2 << (PRECISION - 1);
 const int STRIDE = 1;
 
 
-std::vector<py::bytes> encode_cuda(const at::Tensor &cdf, 
-                                   const at::Tensor &input_sym, 
-                                   const uint32_t max_out_size,
-                                   const int blockNum, 
-                                   const int threadNum);
-
 void encode_cuda_new(
         const at::Tensor &cdf, 
         const at::Tensor &input_sym,
@@ -55,9 +49,6 @@ void decode_cuda_prefsum(
         const at::Tensor &lengths,
         at::Tensor &output);
 
-void decode_fast(torch::Tensor out_tensor, const at::Tensor &cdf,
-                     at::Tensor concated_string, const at::Tensor start_indices, const int all_tokens, 
-                     const int blockNum, const int threadNum, const int scale);
 
 const struct cdf_ptr get_cdf_ptr_cuda(const at::Tensor &cdf);
 

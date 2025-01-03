@@ -28,9 +28,9 @@ class LMCacheEngineConfig:
     def from_defaults(
         chunk_size: int = 256,
         local_cpu: bool = True,
-        max_local_cpu_size=5,
-        local_disk: str = "/local/disk_test/local_disk/",
-        max_local_disk_size=0,
+        max_local_cpu_size: int = 5,
+        local_disk: Optional[str] = None,
+        max_local_disk_size: int = 0,
         remote_url: str = "redis://localhost:6379",
         remote_serde: str = "torch",
         save_decode_cache: bool = False,

@@ -34,7 +34,7 @@ def test_same_retrieve_store(autorelease_experimental):
     with pytest.raises(AssertionError):
         check_kv_cache_equal(retrieved_cache, kv_cache, num_tokens, fmt)
     """ initialize the engine """
-    cfg = LMCacheEngineConfig.from_defaults(chunk_size=chunk_size)
+    cfg = LMCacheEngineConfig.from_legacy(chunk_size=chunk_size)
 
     engine = autorelease_experimental(
         LMCacheEngineBuilder.get_or_create("test", cfg,

@@ -55,7 +55,6 @@ class StorageManager:
         # raises exception if put failed
         try:
             future.result()
-            #logger.debug(f"{future} ")
         except Exception as e:
             logger.error(
                 f"Exception captured from future in put_callback: {e}")
