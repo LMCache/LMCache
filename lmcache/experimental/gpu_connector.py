@@ -239,13 +239,12 @@ class VLLMPagedMemGPUConnector(GPUConnectorInterface):
 
         with torch.cuda.stream(put_stream):
             # slot_mapping is a list
-            slot_mapping_gpu = torch.tensor(
-                slot_mapping[start:end], device=kvcaches[0][0].device)
+            slot_mapping_gpu = torch.tensor(slot_mapping[start:end],
+                                            device=kvcaches[0][0].device)
             for layer_id, layer in enumerate(kvcaches):
                 k, v = layer[0], layer[1]
                 lmc_ops.load_and_reshape_flash(memory_obj.tensor, k, v,
-                                               slot_mapping_gpu,
-                                               layer_id)
+                                               slot_mapping_gpu, layer_id)
 
         put_stream.synchronize()
         memory_obj.metadata.fmt = MemoryFormat.KV_BLOB
