@@ -1,5 +1,5 @@
 # Offline inference on LLM
-This will help with offline inference on vLLM + LMCache.  
+This will help with offline inference on vLLM + LMCache (experiemntal).  
 The default context is a ffmpeg man page.  
 
 Results are stores in offline_inference_outputs.jsonl. Each line is a call to generate function.  
