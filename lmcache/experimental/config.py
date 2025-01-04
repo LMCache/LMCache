@@ -102,8 +102,9 @@ class LMCacheEngineConfig:
         blend_recompute_ratio = config.get("blend_recompute_ratio", 0.15)
         blend_min_tokens = config.get("blend_min_tokens", 256)
 
-        local_disk_path = None
         match local_disk:
+            case None:
+                local_disk_path = None
             case path if re.match(r"file://(.*)/",
                                   path):  # local disk directory
                 local_disk_path = path[7:]

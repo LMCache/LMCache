@@ -1,5 +1,5 @@
 # Offline inference on LLM
-This will help with offline inference on vLLM + LMCache (experiemntal).  
+This will help with offline inference on vLLM + LMCache (experimental).  
 The default context is a ffmpeg man page.  
 
 Results are stores in offline_inference_outputs.jsonl. Each line is a call to generate function.  
@@ -12,6 +12,6 @@ This will use port 65432(for LMCache).
 ## Steps
 1.  ```lmcache_server localhost 65432```  
 And wait until it's ready.  
-2. ```LMCACHE_CONFIG_FILE=example.yaml CUDA_VISIBLE_DEVICES=0 python3 offline_inference.py```  
+2. ```EXPERIMENTAL=True LMCACHE_CONFIG_FILE=example.yaml CUDA_VISIBLE_DEVICES=0 python3 offline_inference.py```  
 ## What to expect
 LMCache should be able to reduce the generation time of the second generate call.  

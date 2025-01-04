@@ -1,8 +1,8 @@
 import torch
 
 from lmcache.config import LMCacheEngineMetadata
-from lmcache.experimental.gpu_connector import VLLMNestedTupleGPUConnector, \
-    VLLMPagedMemGPUConnector
+from lmcache.experimental.gpu_connector import (VLLMNestedTupleGPUConnector,
+                                                VLLMPagedMemGPUConnector)
 
 
 def dumb_metadata(fmt="vllm", kv_shape=(32, 2, 256, 8, 128)):

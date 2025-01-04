@@ -1,16 +1,14 @@
+import random
 import shlex
 import subprocess
 import time
-import random
 from copy import deepcopy
 
 import pytest
 import torch
-import lmcache.c_ops as lmc_ops
-from utils import (check_kv_cache_equal, concatenate_kv_caches,
-                   create_gpu_connector, dumb_metadata, generate_kv_cache,
-                   generate_tokens, check_paged_kv_cache_equal,
-                   generate_kv_cache_paged)
+from utils import (check_kv_cache_equal, check_paged_kv_cache_equal,
+                   concatenate_kv_caches, create_gpu_connector, dumb_metadata,
+                   generate_kv_cache, generate_kv_cache_paged, generate_tokens)
 
 from lmcache.experimental.cache_engine import LMCacheEngineBuilder
 from lmcache.experimental.config import LMCacheEngineConfig
@@ -140,7 +138,8 @@ def test_retrieve_prefix(fmt, chunk_size, backend, autorelease_experimental):
         "local_disk",
     ],
 )
-def test_paged_retrieve_prefix(fmt, chunk_size, backend, autorelease_experimental):
+def test_paged_retrieve_prefix(fmt, chunk_size, backend,
+                               autorelease_experimental):
     device = "cuda"
     num_tokens = 2000
     new_num_tokens = 1000
@@ -153,15 +152,14 @@ def test_paged_retrieve_prefix(fmt, chunk_size, backend, autorelease_experimenta
     tokens = generate_tokens(num_tokens, device)
     kv_cache = generate_kv_cache_paged(num_blocks, device, block_size, dtype)
     new_tokens = generate_tokens(new_num_tokens, device)
-    retrieved_cache = kv_cache = generate_kv_cache_paged(num_blocks, 
-                                    device, block_size, dtype)
+    retrieved_cache = kv_cache = generate_kv_cache_paged(
+        num_blocks, device, block_size, dtype)
     slot_mapping = random.sample(range(0, num_blocks * block_size), num_tokens)
     slot_mapping = torch.tensor(slot_mapping, device=device)
-    
-    new_slot_mapping = random.sample(
-        range(0, num_blocks * block_size), new_num_tokens)
+
+    new_slot_mapping = random.sample(range(0, num_blocks * block_size),
+                                     new_num_tokens)
     new_slot_mapping = torch.tensor(slot_mapping, device=device)
-    
     """ initialize the engine """
     cfg = LMCacheEngineConfig.from_legacy(chunk_size=chunk_size,
                                           backend=backend)
@@ -190,10 +188,10 @@ def test_paged_retrieve_prefix(fmt, chunk_size, backend, autorelease_experimenta
         time.sleep(0.01)
     """ test retrieve """
     t4 = time.perf_counter()
-    ret_mask = engine.retrieve(
-        torch.cat([tokens, new_tokens]),
-        kvcaches=retrieved_cache,
-        slot_mapping=torch.cat([slot_mapping, new_slot_mapping]))
+    ret_mask = engine.retrieve(torch.cat([tokens, new_tokens]),
+                               kvcaches=retrieved_cache,
+                               slot_mapping=torch.cat(
+                                   [slot_mapping, new_slot_mapping]))
 
     length = torch.sum(ret_mask)
     t5 = time.perf_counter()
@@ -206,10 +204,11 @@ def test_paged_retrieve_prefix(fmt, chunk_size, backend, autorelease_experimenta
         num_tokens,
         slot_mapping,
     )
-    
+
     if backend in ["local_disk"]:
         subprocess.run(shlex.split("rm -rf /local/disk_test/local_disk/"))
     LMCacheEngineBuilder.destroy("test")
+
 
 @pytest.mark.parametrize("fmt", ["vllm"])
 @pytest.mark.parametrize("chunk_size", [128, 256])
@@ -492,7 +491,6 @@ def test_hierarchy_retrieve(fmt, chunk_size, backend, retrieve_from,
     ],
 )
 def test_prefetch_retrieve(backend, prefetch_from, autorelease_experimental):
-    mp.set_start_method("fork", force=True)
     device = "cuda"
     num_tokens = 2000
     new_num_tokens = 1000
