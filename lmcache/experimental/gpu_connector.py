@@ -3,7 +3,7 @@ from typing import Tuple, Union
 
 import torch
 
-from lmcache.c_ops import lmc_ops
+import lmcache.c_ops as lmc_ops
 from lmcache.experimental.memory_management import (BufferMemoryObj,
                                                     MemoryFormat, MemoryObj)
 from lmcache.utils import _lmcache_nvtx_annotate

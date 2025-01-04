@@ -1,7 +1,8 @@
 import torch
 
 from lmcache.config import LMCacheEngineMetadata
-from lmcache.experimental.gpu_connector import VLLMNestedTupleGPUConnector
+from lmcache.experimental.gpu_connector import VLLMNestedTupleGPUConnector, \
+    VLLMPagedMemGPUConnector
 
 
 def dumb_metadata(fmt="vllm", kv_shape=(32, 2, 256, 8, 128)):
@@ -127,8 +128,6 @@ def check_paged_kv_cache_equal(left,
         right_k = right_kv[0].reshape(-1, num_heads, head_size)
         right_v = right_kv[1].reshape(-1, num_heads, head_size)
 
-        #import pdb; pdb.set_trace()
-
         assert len(left_k.shape) == 3
         assert len(left_v.shape) == 3
         assert len(right_k.shape) == 3
@@ -152,5 +151,8 @@ def check_kv_cache_device(kvs, device):
         assert v.device == torch.device(device)
 
 
-def create_gpu_connector(hidden_dim, num_layers):
-    return VLLMNestedTupleGPUConnector(hidden_dim, num_layers)
+def create_gpu_connector(hidden_dim, num_layers, paged=False):
+    if paged:
+        return VLLMPagedMemGPUConnector(hidden_dim, num_layers)
+    else:
+        return VLLMNestedTupleGPUConnector(hidden_dim, num_layers)
