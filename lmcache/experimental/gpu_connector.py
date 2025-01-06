@@ -227,26 +227,15 @@ class VLLMPagedMemGPUConnector(GPUConnectorInterface):
         kvcaches: Tuple[Tuple[torch.Tensor, ...], ...] = kwargs["kvcaches"]
         slot_mapping: torch.Tensor = kwargs["slot_mapping"]
 
-        put_stream = torch.cuda.Stream()
-        # Wait for all operations on the default stream to finish
-        put_stream.wait_stream(torch.cuda.default_stream(
-            kvcaches[0][0].device))
-
+        # slot_mapping is a list
+        slot_mapping_gpu = torch.tensor(slot_mapping[start:end],
+                                        device=kvcaches[0][0].device)
         for layer_id, layer in enumerate(kvcaches):
             k, v = layer[0], layer[1]
-            k.record_stream(put_stream)
-            v.record_stream(put_stream)
+            lmc_ops.load_and_reshape_flash(memory_obj.tensor, k, v,
+                                           slot_mapping_gpu, layer_id)
 
-        with torch.cuda.stream(put_stream):
-            # slot_mapping is a list
-            slot_mapping_gpu = torch.tensor(slot_mapping[start:end],
-                                            device=kvcaches[0][0].device)
-            for layer_id, layer in enumerate(kvcaches):
-                k, v = layer[0], layer[1]
-                lmc_ops.load_and_reshape_flash(memory_obj.tensor, k, v,
-                                               slot_mapping_gpu, layer_id)
-
-        put_stream.synchronize()
+        torch.cuda.synchronize()
         memory_obj.metadata.fmt = MemoryFormat.KV_BLOB
 
     def get_shape(self, num_tokens: int) -> torch.Size:

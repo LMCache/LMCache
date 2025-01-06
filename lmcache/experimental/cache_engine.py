@@ -1,6 +1,4 @@
 import multiprocessing
-import queue
-import threading
 from typing import Dict, List, Optional
 
 import torch
@@ -60,25 +58,6 @@ class LMCacheEngine:
         self.storage_manager = StorageManager(config, metadata,
                                               self.memory_allocator)
 
-        # GPU->CPU transfer should be asynchronous
-        self.put_queue: queue.Queue = queue.Queue()
-
-        self.put_thread = threading.Thread(target=self.put_worker, args=())
-        self.put_thread.start()
-
-    @_lmcache_nvtx_annotate
-    def put_worker(self, ):
-        while True:
-            item = self.put_queue.get()
-            if isinstance(item, CacheEngineEndSignal):
-                break
-            key, memory_obj, start, end, kwargs = item
-            # Copy the KV from GPU to memory obj
-            self.gpu_connector.from_gpu(memory_obj, start, end, **kwargs)
-
-            # Put the memory object to the storage backend
-            self.storage_manager.put(key, memory_obj)
-
     @_lmcache_nvtx_annotate
     @torch.inference_mode()
     def store(self,
@@ -119,11 +98,13 @@ class LMCacheEngine:
                 break
 
             # Put the memory object to the storage backend
-            self.put_queue.put((key, memory_obj, start, end, kwargs))
+            # Disabling put_queue for now, as it's not necessary
+            # and bringing big overhead
+            # self.put_queue.put((key, memory_obj, start, end, kwargs))
 
             # For debugging purpose
-            #self.gpu_connector.from_gpu(memory_obj, start, end, **kwargs)
-            #self.storage_manager.put(key, memory_obj)
+            self.gpu_connector.from_gpu(memory_obj, start, end, **kwargs)
+            self.storage_manager.put(key, memory_obj)
 
     @_lmcache_nvtx_annotate
     @torch.inference_mode()
@@ -212,9 +193,6 @@ class LMCacheEngine:
 
     def close(self) -> None:
         """Close the cache engine and free all the resources"""
-        if self.put_thread is not None and self.put_thread.is_alive():
-            self.put_queue.put(CacheEngineEndSignal())
-            self.put_thread.join()
         for storage_backend in self.storage_manager.storage_backends.values():
             storage_backend.close()
 
