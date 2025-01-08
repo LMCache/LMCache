@@ -102,7 +102,6 @@ class LMCacheEngine:
             # and bringing big overhead
             # self.put_queue.put((key, memory_obj, start, end, kwargs))
 
-            # For debugging purpose
             self.gpu_connector.from_gpu(memory_obj, start, end, **kwargs)
             self.storage_manager.put(key, memory_obj)
 

@@ -180,6 +180,7 @@ class VLLMPagedMemGPUConnector(GPUConnectorInterface):
 
         :raises ValueError: If 'kvcaches' is not provided in kwargs.
         :raises AssertionError: If the memory object does not have a tensor.
+        :raises ValueError: If 'slot_mapping' is not provided in kwargs.
         """
         assert memory_obj.tensor is not None
 
@@ -215,6 +216,7 @@ class VLLMPagedMemGPUConnector(GPUConnectorInterface):
         :raises ValueError: If 'kvcaches' is not provided in kwargs, or the 
             memory object is not in KV_BLOB format.
         :raises AssertionError: If the memory object does not have a tensor.
+        :raises ValueError: If 'slot_mapping' is not provided in kwargs.
         """
         assert memory_obj.tensor is not None
 
@@ -224,16 +226,16 @@ class VLLMPagedMemGPUConnector(GPUConnectorInterface):
         if "slot_mapping" not in kwargs:
             raise ValueError("'slot_mapping' should be provided in kwargs.")
 
+        if "offset" in kwargs:
+            start = start - kwargs["offset"]
+            end = end - kwargs["offset"]
+
         kvcaches: Tuple[Tuple[torch.Tensor, ...], ...] = kwargs["kvcaches"]
         slot_mapping: torch.Tensor = kwargs["slot_mapping"]
-
-        # slot_mapping is a list
-        slot_mapping_gpu = torch.tensor(slot_mapping[start:end],
-                                        device=kvcaches[0][0].device)
         for layer_id, layer in enumerate(kvcaches):
             k, v = layer[0], layer[1]
             lmc_ops.load_and_reshape_flash(memory_obj.tensor, k, v,
-                                           slot_mapping_gpu, layer_id)
+                                           slot_mapping[start:end], layer_id)
 
         torch.cuda.synchronize()
         memory_obj.metadata.fmt = MemoryFormat.KV_BLOB
