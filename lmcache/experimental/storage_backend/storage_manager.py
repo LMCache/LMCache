@@ -60,6 +60,8 @@ class StorageManager:
                 f"Exception captured from future in put_callback: {e}")
             raise e
         size = memory_obj.get_size()
+        shape = memory_obj.metadata.shape
+        dtype = memory_obj.metadata.dtype
         self.put_tasks[backend_name].pop(key)
 
         # TODO: Might need to modify free such that it's `ref_count-1`
@@ -69,7 +71,7 @@ class StorageManager:
         if not self.use_hot:
             self.memory_allocator.free(memory_obj)
 
-        self.storage_backends[backend_name].insert_key(key, size)
+        self.storage_backends[backend_name].insert_key(key, size, shape, dtype)
         self.manager_lock.release()
 
     def put(

@@ -1,10 +1,14 @@
 import os
 import threading
+import ctypes
+import asyncio
+import aiofiles
 from collections import OrderedDict
-from concurrent.futures import Future, ProcessPoolExecutor
+from concurrent.futures import Future, ProcessPoolExecutor, ThreadPoolExecutor
 from typing import Optional
 
 import torch
+import numpy as np
 from safetensors import safe_open
 from safetensors.torch import save_file
 
@@ -20,30 +24,87 @@ from lmcache.utils import (CacheEngineKey, DiskCacheMetadata,
 
 logger = init_logger(__name__)
 
+async def async_save_bytes_to_disk(
+    path: str,
+    kv_chunk: torch.Tensor,
+) -> None:
+    """
+    Convert KV to bytes and async store bytes to disk.
+    """
+    try:
+        num_bytes = kv_chunk.numel() * kv_chunk.element_size()
+        ptr = kv_chunk.data_ptr()
+        ubyte_ptr = ctypes.cast(ptr, ctypes.POINTER(ctypes.c_ubyte))
+        byte_array = (ctypes.c_ubyte * num_bytes).from_address(
+                        ctypes.addressof(ubyte_ptr.contents))
+        async with aiofiles.open(path, 'wb') as f:
+            await f.write(byte_array)
+    except Exception as e:
+        print(f"Error: {e}")
 
 @_lmcache_nvtx_annotate
 @torch.inference_mode()
 def save_disk(
     path: str,
     kv_chunk: torch.Tensor,
-    fmt_str: str,
     backend: str = "safetensors",
 ) -> None:
     """
     Save KV to disk.
     """
     if backend == "safetensors":
-        save_file({"kv_chunk": kv_chunk}, path, {"fmt": fmt_str})
+        save_file({"kv_chunk": kv_chunk}, path)
     elif backend == "torch":
-        torch.save({"kv_chunk": kv_chunk, "fmt": fmt_str}, path)
+        torch.save({"kv_chunk": kv_chunk}, path)
+    else:
+        raise ValueError(f"Invalid backend: {backend}")
 
+async def async_load_bytes_from_disk(
+    path: str,
+    dst_device: str,
+    dtype: torch.dtype,
+    shape: torch.Size,
+) -> BufferMemoryObj:
+    """
+    Async Load bytearray from disk.
+    """
+    async with aiofiles.open(path, 'rb') as f:
+        bytes_data = await f.read()
+    kv_chunk = torch.frombuffer(
+        bytes_data, dtype=dtype).reshape(shape).to(dst_device)
+    return BufferMemoryObj(kv_chunk,
+                           BufferMemoryObjMetadata(MemoryFormat.KV_BLOB))
+
+def load_bytes_from_disk(
+    path: str,
+    dst_device: str,
+    dtype: torch.dtype,
+    shape: torch.Size,
+) -> torch.Tensor:
+    """
+    Load bytearray from disk.
+    """
+    with open(path, 'rb') as f:
+        bytes_data = f.read()
+    #dst_device = "cuda:0"
+    #import pdb; pdb.set_trace()
+    kv_chunk = torch.frombuffer(
+        bytes_data, dtype=dtype).view(shape)
+    try:
+        kv_chunk = kv_chunk.to(dst_device)
+    except Exception as e:
+        print(f"Error on first attempt: {e}")
+        kv_chunk = kv_chunk.to(dst_device)
+    return kv_chunk
 
 @_lmcache_nvtx_annotate
 @torch.inference_mode()
 def load_disk(
     path: str,
     dst_device: str,
-    backend: str = "safetensors",
+    backend: str = "bytes",
+    dtype: Optional[torch.dtype] = None,
+    shape: Optional[torch.Size] = None,
 ) -> BufferMemoryObj:
     """
     Load KV from disk.
@@ -52,14 +113,16 @@ def load_disk(
         with safe_open(path, framework="pt",
                        device=dst_device) as f:  # type: ignore
             kv_chunk = f.get_tensor("kv_chunk")
-            metadata = f.metadata()
-            fmt_str = metadata["fmt"]
     elif backend == "torch":
         data_dict = torch.load(path)
         kv_chunk = data_dict["kv_chunk"]
-        fmt_str = data_dict["fmt"]
+        kv_chunk = kv_chunk.to(dst_device)
+    elif backend == "bytes":
+        kv_chunk = load_bytes_from_disk(path, dst_device, dtype, shape)
+    else:
+        raise ValueError(f"Invalid backend: {backend}")
     return BufferMemoryObj(kv_chunk,
-                           BufferMemoryObjMetadata(MemoryFormat(int(fmt_str))))
+                           BufferMemoryObjMetadata(MemoryFormat.KV_BLOB))
 
 
 class LocalDiskBackend(StorageBackendInterface):
@@ -69,9 +132,16 @@ class LocalDiskBackend(StorageBackendInterface):
                                DiskCacheMetadata] = OrderedDict()
         self.dst_device = dst_device
 
-        # TODO: Tune the number of workers for better performance
-        self.proc_pool_executor = ProcessPoolExecutor(max_workers=4)
-
+        self.use_ipc = False
+        
+        if self.use_ipc:
+            # TODO: Tune the number of workers for better performance
+            self.proc_pool_executor = ProcessPoolExecutor(max_workers=4)
+        else:
+            self.loop = asyncio.new_event_loop()
+            self.thread = threading.Thread(target=self.loop.run_forever)
+            self.thread.start()
+        
         self.disk_lock = threading.Lock()
         assert config.local_disk is not None
         self.path: str = config.local_disk
@@ -96,25 +166,36 @@ class LocalDiskBackend(StorageBackendInterface):
     ) -> str:
         return self.path + key.to_string().replace("/", "-") + ".pt"
 
-    def insert_key(self, key: CacheEngineKey, size: int):
+    def insert_key(
+        self, 
+        key: CacheEngineKey, 
+        size: int, 
+        shape: torch.Size, 
+        dtype: torch.dtype
+    ) -> None:
         path = self._key_to_path(key)
         with self.disk_lock:
-            self.dict[key] = DiskCacheMetadata(path, size)
+            self.dict[key] = DiskCacheMetadata(path, size, shape, dtype)
 
     def submit_put_task(
         self,
         key: CacheEngineKey,
         memory_obj: MemoryObj,
     ) -> Future:
-        # TODO(Jiayi): Please get rid of this `clone()`
-        # with shared memory. Directly passing a view of the tensor
-        # will result in wrong result.
         assert memory_obj.tensor is not None
-        kv_chunk = memory_obj.tensor.clone()
-        fmt_str = str(memory_obj.metadata.fmt.value)
         path = self._key_to_path(key)
-        future = self.proc_pool_executor.submit(save_disk, path, kv_chunk,
-                                                fmt_str)
+        if self.use_ipc:
+            # TODO(Jiayi): Please get rid of this `clone()`
+            # with shared memory. Directly passing a view of the tensor
+            # will result in wrong result.
+            assert memory_obj.tensor is not None
+            kv_chunk = memory_obj.tensor.clone()
+            path = self._key_to_path(key)
+            future = self.proc_pool_executor.submit(save_disk, path, kv_chunk)
+        else:
+            kv_chunk = memory_obj.tensor
+            future = asyncio.run_coroutine_threadsafe(
+                async_save_bytes_to_disk(path, kv_chunk), self.loop)
         return future
 
     def put_blocking(
@@ -142,9 +223,15 @@ class LocalDiskBackend(StorageBackendInterface):
             self.disk_lock.release()
             return None
         path = self.dict[key].path
+        dtype = self.dict[key].dtype
+        shape = self.dict[key].shape
         self.disk_lock.release()
         logger.info(f"Prefetching {key} from disk.")
-        future = self.proc_pool_executor.submit(load_disk, path, "cpu")
+        if self.use_ipc:
+            future = self.proc_pool_executor.submit(load_disk, path, "cpu")
+        else:
+            future = asyncio.run_coroutine_threadsafe(
+                async_load_bytes_from_disk(path, "cpu", dtype, shape), self.loop)
         return future
 
     def get_blocking(
@@ -159,14 +246,25 @@ class LocalDiskBackend(StorageBackendInterface):
             self.disk_lock.release()
             return None
         path = self.dict[key].path
-        buffer_memory_obj = load_disk(path, self.dst_device)
+        dtype = self.dict[key].dtype
+        shape = self.dict[key].shape
+        buffer_memory_obj = load_disk(
+            path, self.dst_device, dtype=dtype, shape=shape)
         self.disk_lock.release()
         return buffer_memory_obj
 
     def close(self):
         # TODO: Might be contention here
-        if not self.is_shutdown:
+        if self.is_shutdown:
+            logger.info("Local disk backend already closed.")
+            return
+        if self.use_ipc:
             self.proc_pool_executor.shutdown()
+        else:
+            # using threadsafe method here as stop modifies
+            # the internal state of the loop (in another thread)
+            self.loop.call_soon_threadsafe(self.loop.stop)
+            self.thread.join()
         logger.info("Local disk backend closed.")
 
     def __del__(self):

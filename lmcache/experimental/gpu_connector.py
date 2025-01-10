@@ -126,26 +126,26 @@ class VLLMNestedTupleGPUConnector(GPUConnectorInterface):
 
         kvcaches: Tuple[Tuple[torch.Tensor, ...], ...] = kwargs["kvcaches"]
 
-        put_stream = torch.cuda.Stream()
+        #put_stream = torch.cuda.Stream()
         # Wait for all operations on the default stream to finish
-        put_stream.wait_stream(torch.cuda.default_stream(
-            kvcaches[0][0].device))
+        #put_stream.wait_stream(torch.cuda.default_stream(
+        #    kvcaches[0][0].device))
 
+        #for layer_id, layer in enumerate(kvcaches):
+        #    k, v = layer
+        #    k.record_stream(put_stream)
+        #    v.record_stream(put_stream)
+
+        #with torch.cuda.stream(put_stream):
         for layer_id, layer in enumerate(kvcaches):
             k, v = layer
-            k.record_stream(put_stream)
-            v.record_stream(put_stream)
-
-        with torch.cuda.stream(put_stream):
-            for layer_id, layer in enumerate(kvcaches):
-                k, v = layer
-                memory_obj.tensor[1, layer_id].copy_(v[start:end].reshape(
-                    -1, self.hidden_dim_size).contiguous(),
-                                                     non_blocking=True)
-                memory_obj.tensor[0, layer_id].copy_(k[start:end].reshape(
-                    -1, self.hidden_dim_size).contiguous(),
-                                                     non_blocking=True)
-        put_stream.synchronize()
+            memory_obj.tensor[1, layer_id].copy_(v[start:end].reshape(
+                -1, self.hidden_dim_size),
+                                                    non_blocking=False)#True)
+            memory_obj.tensor[0, layer_id].copy_(k[start:end].reshape(
+                -1, self.hidden_dim_size),
+                                                    non_blocking=False)#True)
+        #put_stream.synchronize()
         memory_obj.metadata.fmt = MemoryFormat.KV_BLOB
 
     def get_shape(self, num_tokens: int) -> torch.Size:

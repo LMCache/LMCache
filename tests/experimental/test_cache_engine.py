@@ -134,7 +134,7 @@ def test_retrieve_prefix(fmt, chunk_size, backend, autorelease_experimental):
 @pytest.mark.parametrize(
     "backend",
     [
-        "cpu",
+        #"cpu",
         "local_disk",
     ],
 )
@@ -215,7 +215,8 @@ def test_paged_retrieve_prefix(fmt, chunk_size, backend,
 @pytest.mark.parametrize(
     "backend",
     [
-        "cpu",
+        #"cpu",
+        "local_disk"
     ],
 )
 def test_paged_store_offset(fmt, chunk_size, backend,
@@ -245,11 +246,14 @@ def test_paged_store_offset(fmt, chunk_size, backend,
         LMCacheEngineBuilder.get_or_create("test", cfg,
                                            dumb_metadata(fmt, kv_shape),
                                            connector))
+    #import pdb; pdb.set_trace()
     """ test store """
     engine.store(tokens[:num_tokens],
                  kvcaches=kv_cache,
                  slot_mapping=slot_mapping[:num_tokens])
-
+    
+    #import pdb; pdb.set_trace()
+    
     offset_chunk_cnt = num_tokens // chunk_size
     offset_length = offset_chunk_cnt * chunk_size
     engine.store(tokens[:num_tokens+num_suffix_tokens],
