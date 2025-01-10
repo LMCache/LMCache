@@ -115,10 +115,12 @@ def test_paged_retrieve_prefix(fmt, chunk_size, backend,
     """ Store is async. Need to wait for the store to finish """
     if backend == "cpu":
         timeout = 1
+        search_range = "Hot"
     elif backend == "local_disk":
         timeout = 30
+        search_range = "LocalDiskBackend"
     start_time = time.time()
-    while engine.lookup(tokens) < expected_length:
+    while engine.lookup(tokens, search_range) < expected_length:
         if time.time() - start_time > timeout:
             raise TimeoutError(f"Operation timed out after {timeout} seconds.")
         time.sleep(0.01)
