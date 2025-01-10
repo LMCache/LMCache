@@ -37,7 +37,7 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
         raise NotImplementedError
 
     @abc.abstractmethod
-    def insert_key(self, key: CacheEngineKey, size: int):
+    def insert_key(self, key: CacheEngineKey, memory_obj: MemoryObj) -> None:
         """
         Insert the key after data is put to storage backend.
         """

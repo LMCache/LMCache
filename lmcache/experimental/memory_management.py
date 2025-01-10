@@ -89,7 +89,6 @@ class MemoryObj:
                             .view(self.metadata.shape)
 
 
-# The inheritan
 @dataclass
 class BufferMemoryObjMetadata:
 
@@ -220,9 +219,10 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
                            "no memory is available")
             return None
 
+        # Do not add the block back if `block.size == aligned_size`
+        self.explicit_list.remove(block)
         # Update the explicit list
         if block.size > aligned_size:
-            self.explicit_list.remove(block)
             self.explicit_list.add(
                 FreeBlock(start=block.start + aligned_size,
                           size=block.size - aligned_size))
@@ -252,7 +252,6 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
 
         if not coalesced:
             self.explicit_list.add(new_free_block)
-
         memory_obj.invalidate()
 
         # Update debug status
@@ -327,7 +326,6 @@ class PinMemoryAllocator(MemoryAllocatorInterface):
         """
         :param int size: The size of the pinned memory in bytes.
         """
-        torch.cuda.empty_cache()
         buffer = torch.empty(size, dtype=torch.uint8, pin_memory=True)
         # NOTE(Jiayi): Without `clone()`, IPC over a tensor
         # (a view of a tensor) will have unexpected behaviors

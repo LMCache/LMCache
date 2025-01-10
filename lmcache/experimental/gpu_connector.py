@@ -105,10 +105,6 @@ class VLLMNestedTupleGPUConnector(GPUConnectorInterface):
             v[start:end].copy_(memory_obj.tensor[1, layer_id].reshape(
                 -1, *hidden_shape),
                                non_blocking=False)
-        # TODO(Jiayi): Currently, this is a blocking operation.
-        # We might be able to continue other decode jobs while
-        # waiting for the copy to finish.
-        #torch.cuda.default_stream().synchronize()
 
     @_lmcache_nvtx_annotate
     def from_gpu(self, memory_obj: MemoryObj, start: int, end: int, **kwargs):
@@ -126,26 +122,14 @@ class VLLMNestedTupleGPUConnector(GPUConnectorInterface):
 
         kvcaches: Tuple[Tuple[torch.Tensor, ...], ...] = kwargs["kvcaches"]
 
-        #put_stream = torch.cuda.Stream()
-        # Wait for all operations on the default stream to finish
-        #put_stream.wait_stream(torch.cuda.default_stream(
-        #    kvcaches[0][0].device))
-
-        #for layer_id, layer in enumerate(kvcaches):
-        #    k, v = layer
-        #    k.record_stream(put_stream)
-        #    v.record_stream(put_stream)
-
-        #with torch.cuda.stream(put_stream):
         for layer_id, layer in enumerate(kvcaches):
             k, v = layer
             memory_obj.tensor[1, layer_id].copy_(v[start:end].reshape(
                 -1, self.hidden_dim_size),
-                                                    non_blocking=False)#True)
+                                                 non_blocking=False)
             memory_obj.tensor[0, layer_id].copy_(k[start:end].reshape(
                 -1, self.hidden_dim_size),
-                                                    non_blocking=False)#True)
-        #put_stream.synchronize()
+                                                 non_blocking=False)
         memory_obj.metadata.fmt = MemoryFormat.KV_BLOB
 
     def get_shape(self, num_tokens: int) -> torch.Size:
@@ -229,6 +213,7 @@ class VLLMPagedMemGPUConnector(GPUConnectorInterface):
         if "offset" in kwargs:
             start = start - kwargs["offset"]
             end = end - kwargs["offset"]
+        assert start >= 0 and end >= start
 
         kvcaches: Tuple[Tuple[torch.Tensor, ...], ...] = kwargs["kvcaches"]
         slot_mapping: torch.Tensor = kwargs["slot_mapping"]

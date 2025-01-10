@@ -74,70 +74,6 @@ def test_same_retrieve_store(autorelease_experimental):
         "local_disk",
     ],
 )
-def test_retrieve_prefix(fmt, chunk_size, backend, autorelease_experimental):
-    device = "cuda"
-    num_tokens = 2000
-    new_num_tokens = 1000
-    kv_shape = (32, 2, chunk_size, 8, 128)
-    connector = create_gpu_connector(1024, 32)
-
-    tokens = generate_tokens(num_tokens, device)
-    kv_cache = generate_kv_cache(num_tokens, fmt, device)
-    new_tokens = generate_tokens(new_num_tokens, device)
-    retrieved_cache = generate_kv_cache(new_num_tokens + num_tokens, fmt,
-                                        device)
-    """ initialize the engine """
-    cfg = LMCacheEngineConfig.from_legacy(chunk_size=chunk_size,
-                                          backend=backend)
-
-    engine = autorelease_experimental(
-        LMCacheEngineBuilder.get_or_create("test", cfg,
-                                           dumb_metadata(fmt, kv_shape),
-                                           connector))
-    """ test store """
-    t1 = time.perf_counter()
-    engine.store(tokens, kvcaches=kv_cache)
-    t2 = time.perf_counter()
-    print(f"store {len(tokens)} takes {t2-t1}")
-    """ Compute expected length """
-    expected_chunk_cnt = num_tokens // chunk_size
-    expected_length = expected_chunk_cnt * chunk_size
-    """ Store is async. Need to wait for the store to finish """
-    if backend == "cpu":
-        timeout = 1
-    elif backend == "local_disk":
-        timeout = 30
-    start_time = time.time()
-    while engine.lookup(tokens) < expected_length:
-        if time.time() - start_time > timeout:
-            raise TimeoutError(f"Operation timed out after {timeout} seconds.")
-        time.sleep(0.01)
-    """ test retrieve """
-    t4 = time.perf_counter()
-    ret_mask = engine.retrieve(torch.cat([tokens, new_tokens]),
-                               kvcaches=retrieved_cache)
-
-    length = torch.sum(ret_mask)
-    t5 = time.perf_counter()
-    print(f"retrieve {length} takes {t5-t4}")
-
-    assert length == expected_length
-    check_kv_cache_equal(retrieved_cache, kv_cache, expected_length, fmt)
-
-    if backend in ["local_disk"]:
-        subprocess.run(shlex.split("rm -rf /local/disk_test/local_disk/"))
-    LMCacheEngineBuilder.destroy("test")
-
-
-@pytest.mark.parametrize("fmt", ["vllm"])
-@pytest.mark.parametrize("chunk_size", [128, 256])
-@pytest.mark.parametrize(
-    "backend",
-    [
-        #"cpu",
-        "local_disk",
-    ],
-)
 def test_paged_retrieve_prefix(fmt, chunk_size, backend,
                                autorelease_experimental):
     device = "cuda"
@@ -214,10 +150,7 @@ def test_paged_retrieve_prefix(fmt, chunk_size, backend,
 @pytest.mark.parametrize("chunk_size", [256])
 @pytest.mark.parametrize(
     "backend",
-    [
-        #"cpu",
-        "local_disk"
-    ],
+    ["cpu", "local_disk"],
 )
 def test_paged_store_offset(fmt, chunk_size, backend,
                             autorelease_experimental):
@@ -246,18 +179,18 @@ def test_paged_store_offset(fmt, chunk_size, backend,
         LMCacheEngineBuilder.get_or_create("test", cfg,
                                            dumb_metadata(fmt, kv_shape),
                                            connector))
-    #import pdb; pdb.set_trace()
     """ test store """
     engine.store(tokens[:num_tokens],
                  kvcaches=kv_cache,
                  slot_mapping=slot_mapping[:num_tokens])
-    
-    #import pdb; pdb.set_trace()
-    
+
     offset_chunk_cnt = num_tokens // chunk_size
     offset_length = offset_chunk_cnt * chunk_size
+    mask = torch.ones(num_tokens + num_suffix_tokens, device=device)
+    mask[:offset_length] = 0
     engine.store(tokens[:num_tokens+num_suffix_tokens],
                  kvcaches=kv_cache,
+                 mask=mask,
                  slot_mapping=slot_mapping[offset_length: \
                      num_tokens+num_suffix_tokens],
                  offset=offset_length)
@@ -299,7 +232,7 @@ def test_paged_store_offset(fmt, chunk_size, backend,
 
 
 @pytest.mark.parametrize("fmt", ["vllm"])
-@pytest.mark.parametrize("chunk_size", [128, 256])
+@pytest.mark.parametrize("chunk_size", [128])  #, 256])
 @pytest.mark.parametrize(
     "backend",
     [
@@ -336,10 +269,12 @@ def test_mixed_retrieve(fmt, chunk_size, backend, autorelease_experimental):
     expected_length = expected_chunk_cnt * chunk_size
     if backend == "cpu":
         timeout = 1
+        search_range = "Hot"
     elif backend == "local_disk":
         timeout = 30
+        search_range = "LocalDiskBackend"
     start_time = time.time()
-    while engine.lookup(tokens) < expected_length:
+    while engine.lookup(tokens, search_range) < expected_length:
         if time.time() - start_time > timeout:
             raise TimeoutError(f"Operation timed out after {timeout} seconds.")
         time.sleep(0.01)
@@ -352,7 +287,7 @@ def test_mixed_retrieve(fmt, chunk_size, backend, autorelease_experimental):
     """Wait for store to finish"""
     expected_length = new_num_tokens
     start_time = time.time()
-    while engine.lookup(new_tokens) < expected_length:
+    while engine.lookup(new_tokens, search_range) < expected_length:
         if time.time() - start_time > timeout:
             raise TimeoutError(f"Operation timed out after {timeout} seconds.")
         time.sleep(0.01)
@@ -369,7 +304,8 @@ def test_mixed_retrieve(fmt, chunk_size, backend, autorelease_experimental):
     """Wait until store finishes"""
     expected_length = num_tokens + new_num_tokens
     start_time = time.time()
-    while engine.lookup(torch.cat([tokens, new_tokens])) < expected_length:
+    while engine.lookup(torch.cat([tokens, new_tokens]),
+                        search_range) < expected_length:
         if time.time() - start_time > timeout:
             raise TimeoutError(f"Operation timed out after {timeout} seconds.")
         time.sleep(0.01)

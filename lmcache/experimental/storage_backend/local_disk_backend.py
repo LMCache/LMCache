@@ -1,14 +1,13 @@
+import asyncio
+import ctypes
 import os
 import threading
-import ctypes
-import asyncio
-import aiofiles
 from collections import OrderedDict
-from concurrent.futures import Future, ProcessPoolExecutor, ThreadPoolExecutor
+from concurrent.futures import Future, ProcessPoolExecutor
 from typing import Optional
 
+import aiofiles
 import torch
-import numpy as np
 from safetensors import safe_open
 from safetensors.torch import save_file
 
@@ -24,6 +23,9 @@ from lmcache.utils import (CacheEngineKey, DiskCacheMetadata,
 
 logger = init_logger(__name__)
 
+
+@_lmcache_nvtx_annotate
+@torch.inference_mode()
 async def async_save_bytes_to_disk(
     path: str,
     kv_chunk: torch.Tensor,
@@ -31,16 +33,14 @@ async def async_save_bytes_to_disk(
     """
     Convert KV to bytes and async store bytes to disk.
     """
-    try:
-        num_bytes = kv_chunk.numel() * kv_chunk.element_size()
-        ptr = kv_chunk.data_ptr()
-        ubyte_ptr = ctypes.cast(ptr, ctypes.POINTER(ctypes.c_ubyte))
-        byte_array = (ctypes.c_ubyte * num_bytes).from_address(
-                        ctypes.addressof(ubyte_ptr.contents))
-        async with aiofiles.open(path, 'wb') as f:
-            await f.write(byte_array)
-    except Exception as e:
-        print(f"Error: {e}")
+    num_bytes = kv_chunk.numel() * kv_chunk.element_size()
+    ptr = kv_chunk.data_ptr()
+    ubyte_ptr = ctypes.cast(ptr, ctypes.POINTER(ctypes.c_ubyte))
+    byte_array = (ctypes.c_ubyte * num_bytes).from_address(
+        ctypes.addressof(ubyte_ptr.contents))
+    async with aiofiles.open(path, 'wb') as f:
+        await f.write(byte_array)
+
 
 @_lmcache_nvtx_annotate
 @torch.inference_mode()
@@ -59,6 +59,7 @@ def save_disk(
     else:
         raise ValueError(f"Invalid backend: {backend}")
 
+
 async def async_load_bytes_from_disk(
     path: str,
     dst_device: str,
@@ -70,10 +71,11 @@ async def async_load_bytes_from_disk(
     """
     async with aiofiles.open(path, 'rb') as f:
         bytes_data = await f.read()
-    kv_chunk = torch.frombuffer(
-        bytes_data, dtype=dtype).reshape(shape).to(dst_device)
+    kv_chunk = torch.frombuffer(bytes_data,
+                                dtype=dtype).reshape(shape).to(dst_device)
     return BufferMemoryObj(kv_chunk,
                            BufferMemoryObjMetadata(MemoryFormat.KV_BLOB))
+
 
 def load_bytes_from_disk(
     path: str,
@@ -86,16 +88,10 @@ def load_bytes_from_disk(
     """
     with open(path, 'rb') as f:
         bytes_data = f.read()
-    #dst_device = "cuda:0"
-    #import pdb; pdb.set_trace()
-    kv_chunk = torch.frombuffer(
-        bytes_data, dtype=dtype).view(shape)
-    try:
-        kv_chunk = kv_chunk.to(dst_device)
-    except Exception as e:
-        print(f"Error on first attempt: {e}")
-        kv_chunk = kv_chunk.to(dst_device)
+    kv_chunk = torch.frombuffer(bytes_data, dtype=dtype).view(shape)
+    kv_chunk = kv_chunk.to(dst_device)
     return kv_chunk
+
 
 @_lmcache_nvtx_annotate
 @torch.inference_mode()
@@ -118,6 +114,8 @@ def load_disk(
         kv_chunk = data_dict["kv_chunk"]
         kv_chunk = kv_chunk.to(dst_device)
     elif backend == "bytes":
+        assert dtype is not None
+        assert shape is not None
         kv_chunk = load_bytes_from_disk(path, dst_device, dtype, shape)
     else:
         raise ValueError(f"Invalid backend: {backend}")
@@ -133,7 +131,7 @@ class LocalDiskBackend(StorageBackendInterface):
         self.dst_device = dst_device
 
         self.use_ipc = False
-        
+
         if self.use_ipc:
             # TODO: Tune the number of workers for better performance
             self.proc_pool_executor = ProcessPoolExecutor(max_workers=4)
@@ -141,7 +139,7 @@ class LocalDiskBackend(StorageBackendInterface):
             self.loop = asyncio.new_event_loop()
             self.thread = threading.Thread(target=self.loop.run_forever)
             self.thread.start()
-        
+
         self.disk_lock = threading.Lock()
         assert config.local_disk is not None
         self.path: str = config.local_disk
@@ -150,8 +148,6 @@ class LocalDiskBackend(StorageBackendInterface):
             logger.info(f"Created local disk cache directory: {self.path}")
 
         # TODO(Jiayi): Size and evictor should be configured
-
-        self.is_shutdown = False
 
     def __str__(self):
         return self.__class__.__name__
@@ -166,14 +162,11 @@ class LocalDiskBackend(StorageBackendInterface):
     ) -> str:
         return self.path + key.to_string().replace("/", "-") + ".pt"
 
-    def insert_key(
-        self, 
-        key: CacheEngineKey, 
-        size: int, 
-        shape: torch.Size, 
-        dtype: torch.dtype
-    ) -> None:
+    def insert_key(self, key: CacheEngineKey, memory_obj: MemoryObj) -> None:
         path = self._key_to_path(key)
+        size = memory_obj.get_size()
+        shape = memory_obj.metadata.shape
+        dtype = memory_obj.metadata.dtype
         with self.disk_lock:
             self.dict[key] = DiskCacheMetadata(path, size, shape, dtype)
 
@@ -198,26 +191,10 @@ class LocalDiskBackend(StorageBackendInterface):
                 async_save_bytes_to_disk(path, kv_chunk), self.loop)
         return future
 
-    def put_blocking(
-        self,
-        key: CacheEngineKey,
-        memory_obj: MemoryObj,
-    ) -> None:
-        """
-        Blocking put function.
-        This is for debugging and testing purposes.
-        """
-        path = self._key_to_path(key)
-        kv_chunk = memory_obj.tensor
-        fmt_str = str(memory_obj.metadata.fmt.value)
-        save_disk(path, kv_chunk, fmt_str)
-        self.insert_key(key, memory_obj.get_size())
-
     def submit_prefetch_task(
         self,
         key: CacheEngineKey,
     ) -> Optional[Future]:
-
         self.disk_lock.acquire()
         if key not in self.dict:
             self.disk_lock.release()
@@ -230,8 +207,11 @@ class LocalDiskBackend(StorageBackendInterface):
         if self.use_ipc:
             future = self.proc_pool_executor.submit(load_disk, path, "cpu")
         else:
+            assert dtype is not None
+            assert shape is not None
             future = asyncio.run_coroutine_threadsafe(
-                async_load_bytes_from_disk(path, "cpu", dtype, shape), self.loop)
+                async_load_bytes_from_disk(path, "cpu", dtype, shape),
+                self.loop)
         return future
 
     def get_blocking(
@@ -248,23 +228,23 @@ class LocalDiskBackend(StorageBackendInterface):
         path = self.dict[key].path
         dtype = self.dict[key].dtype
         shape = self.dict[key].shape
-        buffer_memory_obj = load_disk(
-            path, self.dst_device, dtype=dtype, shape=shape)
+        buffer_memory_obj = load_disk(path,
+                                      self.dst_device,
+                                      dtype=dtype,
+                                      shape=shape)
         self.disk_lock.release()
         return buffer_memory_obj
 
     def close(self):
-        # TODO: Might be contention here
-        if self.is_shutdown:
-            logger.info("Local disk backend already closed.")
-            return
         if self.use_ipc:
             self.proc_pool_executor.shutdown()
         else:
             # using threadsafe method here as stop modifies
             # the internal state of the loop (in another thread)
-            self.loop.call_soon_threadsafe(self.loop.stop)
-            self.thread.join()
+            if self.loop.is_running():
+                self.loop.call_soon_threadsafe(self.loop.stop)
+            if self.thread.is_alive():
+                self.thread.join()
         logger.info("Local disk backend closed.")
 
     def __del__(self):

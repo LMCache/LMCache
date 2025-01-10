@@ -1,3 +1,0 @@
-chunk_size: 256
-local_disk: "file:///local/jiayi3/disk_local/"
-max_local_disk_size: 5
