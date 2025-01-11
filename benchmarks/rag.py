@@ -262,6 +262,7 @@ class RAGManager:
                 quality.append(max([compute_rl(self._generated_text[i], answer) for answer in self._answers[i]]))
             else:
                 raise ValueError(f"Invalid prompt build method {self._build_method}")
+        avg_quality = sum(quality) / cnt
         df = pd.DataFrame({
             "quality": quality,
             "ttft": self._ttft,
@@ -270,7 +271,7 @@ class RAGManager:
             "prefill_token_cnt": self._prefill_tok_cnt,
             "generation_token_cnt": self._generation_tok_cnt
         })
-        logger.info(f"Summary: {cnt} requests, average_ttft={avg_ttft}, average_tpot={avg_tpot}")
+        logger.info(f"Summary: {cnt} requests, average_ttft={avg_ttft}, average_tpot={avg_tpot}, average_quality={avg_quality}")
         return df
         
 
