@@ -352,6 +352,9 @@ def main():
             args.end_index = ed_idx
         if len(args.model_api_name) == 0:
             args.model_api_name = model
+    else:
+        if len(args.model_api_name) == 0:
+            args.model_api_name = args.model
     run_rag(args)
     
 
