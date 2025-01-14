@@ -14,6 +14,8 @@ class PrecomputeConfig:
     dataset: str
     # Start index.
     start_idx: int
+    # End index.
+    end_idx: int
     # KV storage size.
     kv_storage_size: int
     # KV storage token unit.
@@ -42,6 +44,10 @@ def precompute_all_kv(config: PrecomputeConfig) -> Tuple[int, int, str]:
                                           model_config.head_dim, model_config.num_hidden_layers, config.kv_precision)
     eval_dataset = load_dataset(config.dataset)
     start_idx = config.start_idx
+    end_idx = config.end_idx
+    if end_idx >= 0:
+        assert end_idx <= len(eval_dataset), \
+            f"end_index {end_idx} > length of dataset {len(eval_dataset)}"
     assert start_idx >= 0, f"start_idx {start_idx} < 0"
     assert start_idx < len(eval_dataset), f"start_idx {start_idx} >= length of dataset {len(eval_dataset)}"
     precompute_kv = OnlineKVPreCompute(config.api_key, config.base_url, tokenizer)
@@ -52,7 +58,14 @@ def precompute_all_kv(config: PrecomputeConfig) -> Tuple[int, int, str]:
     current_idx = start_idx
     round_up_token_cnt = config.kv_storage_token_unit
     assert round_up_token_cnt >= 1
-    while current_size_taken < size_upper_bound and current_idx < len(eval_dataset):
+    doc_token_cnt = 0
+    while True:
+        if end_idx >= 0:
+            if current_idx >= end_idx:
+                break
+        else:
+            if current_size_taken >= size_upper_bound or current_idx >= len(eval_dataset):
+                break
         example = eval_dataset[current_idx]
         doc_prompts = None
         this_case_size = 0
@@ -62,6 +75,7 @@ def precompute_all_kv(config: PrecomputeConfig) -> Tuple[int, int, str]:
             doc_prompts, _ = build_fewshot_prompt(example)
         # NOTE: Do not need chat template here.
         # It should only affect system prompt and query prompt.
+        temp_doc_token_cnt = 0
         token_cnt = 0
         for doc_prompt in doc_prompts:
             assert len(doc_prompt) > 0
@@ -71,6 +85,7 @@ def precompute_all_kv(config: PrecomputeConfig) -> Tuple[int, int, str]:
             if not with_bos:
                 if input_comps[0] == tokenizer.bos_token_id:
                     temp_cnt -= 1
+            temp_doc_token_cnt += temp_cnt # Add doc token count before round up.
             temp_cnt = ((temp_cnt + round_up_token_cnt - 1) // round_up_token_cnt) * round_up_token_cnt
             token_cnt += temp_cnt
         assert token_cnt > 0, f"token_cnt {token_cnt} <= 0"
@@ -81,8 +96,9 @@ def precompute_all_kv(config: PrecomputeConfig) -> Tuple[int, int, str]:
             precompute_kv.precompute_kv(prompt)
         current_idx += 1
         current_size_taken += this_case_size
+        doc_token_cnt += temp_doc_token_cnt
     
-    return start_idx, current_idx, precompute_kv.model
+    return start_idx, current_idx, precompute_kv.model, doc_token_cnt
         
         
     
@@ -101,6 +117,10 @@ def parse_arguments():
                         type=int,
                         default=0,
                         help="Start index of the workload")
+    parser.add_argument("--end-index",
+                        type=int,
+                        default=-1,
+                        help="End index of the workload")
     parser.add_argument("--prompt-build-method",
                         type=str,
                         required=True,
@@ -166,14 +186,15 @@ def run_precompute(args):
     config = PrecomputeConfig(model=args.model, 
                               dataset=args.dataset,
                               start_idx=args.start_index, 
+                              end_idx=args.end_index,
                               kv_storage_size=kv_storage_size,
                               kv_storage_token_unit=kv_storage_token_unit,
                               prompt_build_method=prompt_build_method,
                               api_key=args.api_key,
                               base_url=args.base_url,
                               kv_precision=kv_precision)
-    start_idx, end_idx, model_name = precompute_all_kv(config)
-    return start_idx, end_idx, model_name
+    start_idx, end_idx, model_name, doc_token_cnt = precompute_all_kv(config)
+    return start_idx, end_idx, model_name, doc_token_cnt
     
 
 def main():

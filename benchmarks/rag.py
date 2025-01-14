@@ -39,10 +39,13 @@ class WorkloadConfig:
     max_tokens: int
     # Model name for openai API.
     model_api_name: str
+    # Document token count.
+    doc_token_cnt: int
     
 
 @dataclass
 class Response:
+    request_id: int
     body: str
     ttft: float
     generation_time: float
@@ -129,6 +132,9 @@ def parse_arguments():
     parser.add_argument("--model-api-name", type=str,
                         default="",
                         help="Model API name.")
+    parser.add_argument("--doc-token-cnt", type=int,
+                        default=-1,
+                        help="Document token count.")
     args = parser.parse_args()
     return args
 
@@ -138,7 +144,7 @@ class RequestExecutor:
         self.model = model
         self.loop = AsyncLoopWrapper.GetOrStartLoop()
         self.prompt_build_method = prompt_build_method
-    async def _async_launch_request(self, prompt, max_tokens):
+    async def _async_launch_request(self, request_id, prompt, max_tokens):
         start_time = time.time()
         first_token_time = None
         words = ""
@@ -173,20 +179,21 @@ class RequestExecutor:
         tokens_out = tok.usage.completion_tokens
         tokens_prefill = tok.usage.prompt_tokens
         finish_time = time.time()
-        return Response(body=words,
+        return Response(request_id=request_id,
+                        body=words,
                         ttft=first_token_time - start_time,
                         generation_time=finish_time - first_token_time,
                         prompt_tokens=tokens_prefill,
                         generation_tokens=tokens_out,
                         launch_time=start_time,
                         finish_time=finish_time)
-    def launch_request(self, prompt, max_tokens, finish_callback):
+    def launch_request(self, request_id: int, prompt, max_tokens, finish_callback):
         """
         finish_callback: Callable[[Response], None]
         """
         real_callback = lambda x: finish_callback(x.result())
         future = asyncio.run_coroutine_threadsafe(
-            self._async_launch_request(prompt, max_tokens), self.loop)
+            self._async_launch_request(request_id, prompt, max_tokens), self.loop)
         future.add_done_callback(real_callback)
 
 def warmup_engine(executor: RequestExecutor):
@@ -208,9 +215,16 @@ class RAGManager:
         eval_dataset = eval_dataset[start_index:end_index]
         if workload_config.shuffle:
             random.shuffle(eval_dataset)
+        self._doc_token_cnt = workload_config.doc_token_cnt
         self._prompts = []
         self._answers = []
         self._build_method = workload_config.prompt_build_method
+        self._generated_text = []
+        self._generation_time = []
+        self._prefill_tok_cnt = []
+        self._generation_tok_cnt = []
+        self._ttft = []
+        self._tpot = []
         for ex in eval_dataset:
             prompt, _ = build_rag_prompt(workload_config.system_prompt, 
                              ex,
@@ -219,33 +233,35 @@ class RAGManager:
                              workload_config.prompt_build_method)
             self._prompts.append(prompt)
             self._answers.append(ex["answers"])
+            self._generated_text.append(None)
+            self._generation_time.append(None)
+            self._prefill_tok_cnt.append(None)
+            self._generation_tok_cnt.append(None)
+            self._ttft.append(None)
+            self._tpot.append(None)
         self._tokenizer = AutoTokenizer.from_pretrained(workload_config.model)
         self._last_request_time = -1.0
         self._last_request_index = 0
         assert workload_config.qps > 0
         self._gap = 1.0 / workload_config.qps
         self._max_tokens = workload_config.max_tokens
-        self._generated_text = []
-        self._generation_time = []
-        self._prefill_tok_cnt = []
-        self._generation_tok_cnt = []
-        self._ttft = []
-        self._tpot = []
+        
     def _update_result(self, response: Response):
-        self._generated_text.append(response.body)
-        self._ttft.append(response.ttft)
-        self._tpot.append(response.generation_time / response.generation_tokens)
-        self._generation_time.append(response.generation_time)
-        self._prefill_tok_cnt.append(response.prompt_tokens)
-        self._generation_tok_cnt.append(response.generation_tokens)
+        self._generated_text[response.request_id] = response.body
+        self._ttft[response.request_id] = response.ttft
+        self._tpot[response.request_id] = response.generation_time / response.generation_tokens
+        self._generation_time[response.request_id] = response.generation_time
+        self._prefill_tok_cnt[response.request_id] = response.prompt_tokens
+        self._generation_tok_cnt[response.request_id] = response.generation_tokens
     def step(self, timestamp: float, executor: RequestExecutor) -> bool:
         if self._last_request_index >= len(self._prompts):
             return False
         if self._last_request_time < 0 or timestamp >= self._last_request_time + self._gap:
             prompt = self._prompts[self._last_request_index]
+            request_id = self._last_request_index
             self._last_request_time = timestamp
             self._last_request_index += 1
-            executor.launch_request(prompt, self._max_tokens, self._update_result)
+            executor.launch_request(request_id, prompt, self._max_tokens, self._update_result)
         return True
     
     def summary(self, start_time: float, end_time: float) -> pd.DataFrame:
@@ -257,11 +273,16 @@ class RAGManager:
         quality = []
         for i in range(cnt):
             if self._build_method == PromptBuildMethodType.QA:
-                quality.append(max([compute_f1(self._generated_text[i], answer, self._tokenizer) for answer in self._answers[i]]))
+                quality.append(max([compute_f1(self._generated_text[i], 
+                                               answer, self._tokenizer) 
+                                    for answer in self._answers[i]]))
             elif self._build_method == PromptBuildMethodType.FEW_SHOT:
-                quality.append(max([compute_rl(self._generated_text[i], answer) for answer in self._answers[i]]))
+                quality.append(max([compute_rl(self._generated_text[i], 
+                                               answer) 
+                                    for answer in self._answers[i]]))
             else:
-                raise ValueError(f"Invalid prompt build method {self._build_method}")
+                raise ValueError("Invalid prompt build "
+                                 f"method {self._build_method}")
         avg_quality = sum(quality) / cnt
         df = pd.DataFrame({
             "quality": quality,
@@ -271,7 +292,12 @@ class RAGManager:
             "prefill_token_cnt": self._prefill_tok_cnt,
             "generation_token_cnt": self._generation_tok_cnt
         })
-        logger.info(f"Summary: {cnt} requests, average_ttft={avg_ttft}, average_tpot={avg_tpot}, average_quality={avg_quality}")
+        doc_token_ratio = None
+        if self._doc_token_cnt >= 0:
+            doc_token_ratio = self._doc_token_cnt / sum(self._prefill_tok_cnt)
+        logger.info(f"Summary: {cnt} requests, average_ttft={avg_ttft},"
+                    f" average_tpot={avg_tpot}, average_quality={avg_quality},"
+                    f" doc_token_ratio={doc_token_ratio}")
         return df
         
 
@@ -297,7 +323,8 @@ def run_rag(args):
         query_prompt=args.query_prompt,
         prompt_build_method=build_prompt_method,
         max_tokens=args.max_tokens,
-        model_api_name=args.model_api_name)
+        model_api_name=args.model_api_name, 
+        doc_token_cnt=args.doc_token_cnt)
     executor = RequestExecutor(base_url=args.base_url,
                                api_key=args.api_key,
                                prompt_build_method=build_prompt_method, 
@@ -345,13 +372,15 @@ def main():
         logger = init_logger(__name__, level=logging.DEBUG)
     if not args.skip_precompute:
         from precompute import run_precompute
-        st_idx, ed_idx, model = run_precompute(args)
+        st_idx, ed_idx, model, doc_token_cnt = run_precompute(args)
         logger.info(f"Precompute finished, start index={st_idx}, end index={ed_idx}, model {model}")
         assert st_idx == args.start_index
         if args.end_index < 0:
             args.end_index = ed_idx
         if len(args.model_api_name) == 0:
             args.model_api_name = model
+        if args.doc_token_cnt < 0:
+            args.doc_token_cnt = doc_token_cnt
     else:
         if len(args.model_api_name) == 0:
             args.model_api_name = args.model
