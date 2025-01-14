@@ -135,6 +135,10 @@ def parse_arguments():
     parser.add_argument("--doc-token-cnt", type=int,
                         default=-1,
                         help="Document token count.")
+    parser.add_argument("--step-interval",
+                        type=float,
+                        default=0.02,
+                        help="Step interval")
     args = parser.parse_args()
     return args
 
@@ -332,8 +336,7 @@ def run_rag(args):
     if args.skip_precompute:
         warmup_engine(executor)
     manager = RAGManager(workload_config)
-    # TODO: Step interval accuracy.
-    step_interval = 0.1
+    step_interval = args.step_interval
     num_steps = 0
     start_time = time.time()
     # last_summary_time = start_time
