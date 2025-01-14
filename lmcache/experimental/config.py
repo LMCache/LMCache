@@ -1,6 +1,7 @@
+import os
 import re
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 
 import yaml
 
@@ -31,8 +32,8 @@ class LMCacheEngineConfig:
         max_local_cpu_size: int = 5,
         local_disk: Optional[str] = None,
         max_local_disk_size: int = 0,
-        remote_url: str = "redis://localhost:6379",
-        remote_serde: str = "torch",
+        remote_url: Optional[str] = "redis://localhost:6379",
+        remote_serde: Optional[str] = "torch",
         save_decode_cache: bool = False,
         enable_blending: bool = False,
         blend_recompute_ratio: float = 0.15,
@@ -130,3 +131,57 @@ class LMCacheEngineConfig:
             blend_recompute_ratio,
             blend_min_tokens,
         )
+
+    @staticmethod
+    def from_env() -> "LMCacheEngineConfig":
+        """Load the config from the environment variables
+
+        It will first create a config by `from_defaults` and overwrite
+        the configuration values from the environment variables.
+
+        The environment variables should starts with LMCACHE and be in
+        uppercase. For example, `LMCACHE_CHUNK_SIZE`.
+        
+        :note: the default configuration only uses cpu
+        """
+
+        def get_env_name(attr_name: str) -> str:
+            return f"LMCACHE_{attr_name.upper()}"
+
+        def parse_env(name: str, default: Optional[Any]):
+            if default is not None:
+                return os.getenv(name, str(default))
+            else:
+                return os.getenv(name)
+
+        config = LMCacheEngineConfig.from_defaults(remote_url=None,
+                                                   remote_serde=None)
+
+        config.chunk_size = int(
+            parse_env(get_env_name("chunk_size"), config.chunk_size))
+        config.local_cpu = parse_env(get_env_name("local_cpu"),
+                                     config.local_cpu)
+        config.max_local_cpu_size = int(
+            parse_env(get_env_name("max_local_cpu_size"),
+                      config.max_local_cpu_size))
+        config.local_disk = parse_env(get_env_name("local_disk"),
+                                      config.local_disk)
+        config.max_local_disk_size = int(
+            parse_env(get_env_name("max_local_disk_size"),
+                      config.max_local_disk_size))
+        config.remote_url = parse_env(get_env_name("remote_url"),
+                                      config.remote_url)
+        config.remote_serde = parse_env(get_env_name("remote_serde"),
+                                        config.remote_serde)
+        config.save_decode_cache = parse_env(get_env_name("save_decode_cache"),
+                                             config.save_decode_cache)
+        config.enable_blending = parse_env(get_env_name("enable_blending"),
+                                           config.enable_blending)
+        config.blend_recompute_ratio = float(
+            parse_env(get_env_name("blend_recompute_ratio"),
+                      config.blend_recompute_ratio))
+        config.blend_min_tokens = int(
+            parse_env(get_env_name("blend_min_tokens"),
+                      config.blend_min_tokens))
+
+        return config
