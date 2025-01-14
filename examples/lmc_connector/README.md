@@ -8,7 +8,6 @@ Each element in the two lists belong to one prompt in that call to generate func
 ## Prerequisites
 Your server should have at least 1 GPU.  
 
-This will use port 65432(for LMCache).  
 ## Steps
 1. ```LMCACHE_USE_EXPERIMENTAL=True LMCACHE_CONFIG_FILE=example.yaml CUDA_VISIBLE_DEVICES=0 python3 offline_inference.py```  
 ## What to expect
