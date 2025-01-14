@@ -2,11 +2,12 @@ import argparse
 import glob
 import importlib.util
 import os
-import sys
 
-sys.path.append('../../lmcache-tests/outputs')
-spec = importlib.util.spec_from_file_location(
-    "process_result", "../../lmcache-tests/outputs//process_result.py")
+base_dir = os.path.abspath('../../lmcache-tests/outputs')
+process_result_path = os.path.join(base_dir, 'process_result.py')
+
+spec = importlib.util.spec_from_file_location("process_result",
+                                              process_result_path)
 process_result = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(process_result)
 

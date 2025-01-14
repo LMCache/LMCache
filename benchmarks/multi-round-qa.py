@@ -35,6 +35,9 @@ class WorkloadConfig:
     # Model name
     model: str
 
+    # Whether to include user id in request header
+    enable_user_id: bool
+
 
 @dataclass
 class UserConfig:
@@ -56,6 +59,9 @@ class UserConfig:
     # Num rounds
     num_rounds: int
 
+    # Whether to include user id in request header
+    enable_user_id: bool
+
     @staticmethod
     def new_user_config(user_id: int,
                         workload_config: WorkloadConfig) -> 'UserConfig':
@@ -65,7 +71,8 @@ class UserConfig:
                           answer_len=workload_config.answer_len,
                           gap_between_requests=workload_config.num_users /
                           workload_config.qps,
-                          num_rounds=workload_config.num_rounds)
+                          num_rounds=workload_config.num_rounds,
+                          enable_user_id=workload_config.enable_user_id)
 
 
 class ChatHistory:
@@ -112,7 +119,10 @@ class RequestExecutor:
         self.loop = AsyncLoopWrapper.GetOrStartLoop()
         self.request_history = []
 
-    async def _async_launch_request(self, messages, max_tokens):
+    async def _async_launch_request(self,
+                                    messages,
+                                    max_tokens,
+                                    extra_headers=None):
         start_time = time.time()
         first_token_time = None
         words = ""
@@ -123,7 +133,8 @@ class RequestExecutor:
             temperature=0,
             stream=True,
             max_tokens=max_tokens,
-            stream_options={"include_usage": True})
+            stream_options={"include_usage": True},
+            extra_headers=extra_headers)
 
         async for tok in response:
             if not tok.choices:
@@ -144,15 +155,19 @@ class RequestExecutor:
                         launch_time=start_time,
                         finish_time=time.time())
 
-    def launch_request(self, chat_history: ChatHistory, max_tokens: int,
-                       finish_callback):
+    def launch_request(self,
+                       chat_history: ChatHistory,
+                       max_tokens: int,
+                       finish_callback,
+                       extra_headers=None):
         """
         finish_callback: Callable[[Response], None]
         """
         messages = chat_history.get_messages_for_openai()
         real_callback = lambda x: finish_callback(x.result())
         future = asyncio.run_coroutine_threadsafe(
-            self._async_launch_request(messages, max_tokens), self.loop)
+            self._async_launch_request(messages, max_tokens, extra_headers),
+            self.loop)
         future.add_done_callback(real_callback)
 
 
@@ -210,9 +225,11 @@ class UserSession:
         logger.debug(
             f"User {self.user_config.user_id} issues request {self.question_id}"
         )
-        request_executor.launch_request(self.chat_history,
-                                        self.user_config.answer_len,
-                                        self._on_request_finished)
+        request_executor.launch_request(
+            self.chat_history,
+            self.user_config.answer_len,
+            self._on_request_finished,
+            extra_headers={"x-user-id": str(self.user_config.user_id)})
         self.has_unfinished_request = True
         self.last_request_time = timestamp
 
@@ -280,7 +297,7 @@ class UserSession:
 
 class UserSessionManager:
 
-    def __init__(self, workload_config: WorkloadConfig):
+    def __init__(self, workload_config: WorkloadConfig, init_user_id=0):
         self.workload_config = workload_config
         self.sessions = []
 
@@ -297,7 +314,7 @@ class UserSessionManager:
             f"Gap between user reqs: {gap_between_requests_per_user} secs.\n"
             f"Expected length of user session: {session_alive_time} secs.")
 
-        self.user_id = 0
+        self.user_id = init_user_id
         self.last_user_join = 0
         self.session_summaries = []
         self.start_time = None
@@ -488,6 +505,14 @@ def parse_arguments() -> WorkloadConfig:
                         default="summary.csv",
                         help="The output file name (ended with csv or txt) "
                         "for the summary csv and txt")
+    parser.add_argument("--init-user-id",
+                        type=int,
+                        default=0,
+                        help="The initial user id to start with")
+    parser.add_argument(
+        "--request-with-user-id",
+        action="store_true",
+        help="Whether to enable user id in the request headers")
     parser.add_argument(
         "--log-interval",
         type=int,
@@ -543,9 +568,11 @@ def main():
         answer_len=args.answer_len,
         num_rounds=args.num_rounds,
         qps=args.qps,
-        model=args.model)
+        model=args.model,
+        enable_user_id=args.request_with_user_id)
 
-    manager = UserSessionManager(workload_config)
+    manager = UserSessionManager(workload_config,
+                                 init_user_id=args.init_user_id)
 
     num_steps = 0
     start_time = time.time()

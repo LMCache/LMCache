@@ -94,3 +94,20 @@ def test_inplace_modification(alloc_cls):
 
     data.tensor[1] = 2.0
     assert data.tensor[1] == 2.0
+
+
+@pytest.mark.parametrize("alloc_cls", [
+    HostMemoryAllocator,
+    PinMemoryAllocator,
+    GPUMemoryAllocator,
+])
+def test_boundary_alloc(alloc_cls):
+    total_size = 1 << 25
+    allocator = alloc_cls(total_size)
+    data1 = allocator.allocate([512, 10], torch.float)
+    allocator.allocate([512, 10], torch.float)
+    allocator.free(data1)
+
+    # `FreeBlock` with size 0 shouldn't exist in the allocator
+    allocator.allocate([512, 10], torch.float)
+    assert len(allocator.allocator.explicit_list) == 1

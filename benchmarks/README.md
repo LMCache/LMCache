@@ -53,6 +53,8 @@ vllm serve mistralai/Mistral-7B-Instruct-v0.2 --disable-log-requests
 - `--shared-system-prompt <int>`: Length of the system prompt shared across all users (in tokens).
 - `--user-history-prompt <int>`: Length of the user-specific context (simulating existing chat history) (in tokens).
 - `--answer-len <int>`: Length of the answer expected (in tokens).
+- `--init-user-id <int>`: The initial user ID to start the benchmark (default = 0). This is useful when you want to resume the benchmark from a specific user ID or avoid serving engine caching the request from previous runs
+- `--request-with-user-id`: If this option is present, the script will include the user ID in the request header.
 
 #### Configuring the serving engine connection
 - `--model <str>`: The model name (e.g., `mistralai/Mistral-7B-Instruct-v0.2`).

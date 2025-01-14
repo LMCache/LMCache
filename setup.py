@@ -28,6 +28,7 @@ setup(
     install_requires=[
         "torch >= 2.2.0",
         "numpy==1.26.4",
+        "aiofiles",
         "pyyaml",
         "redis",
         "nvtx",
