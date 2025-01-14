@@ -1,16 +1,16 @@
 import os
-from typing import Union
 
 from lmcache.logging import init_logger
 
-
 if os.getenv("LMCACHE_USE_EXPERIMENTAL") == "True":
-    from lmcache.experimental.config import LMCacheEngineConfig # type: ignore[assignment]
+    from lmcache.experimental.config import \
+        LMCacheEngineConfig  # type: ignore[assignment]
 else:
-    from lmcache.config import LMCacheEngineConfig # type: ignore[assignment]
+    from lmcache.config import LMCacheEngineConfig  # type: ignore[assignment]
 
 logger = init_logger(__name__)
 ENGINE_NAME = "vllm-instance"
+
 
 def lmcache_get_config() -> LMCacheEngineConfig:
     """Get the LMCache configuration from the environment variable
@@ -28,5 +28,5 @@ def lmcache_get_config() -> LMCacheEngineConfig:
         config_file = os.environ["LMCACHE_CONFIG_FILE"]
         logger.info(f"Loading LMCache config file {config_file}")
         config = LMCacheEngineConfig.from_file(config_file)
-    
+
     return config
