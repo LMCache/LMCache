@@ -808,5 +808,5 @@ def build_partial_prefill_input(
         is_prompt=model_input.is_prompt,
         async_callback=model_input.async_callback,
     )
-    
+
     return rebuilt_model_input
