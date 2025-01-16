@@ -808,6 +808,5 @@ def build_partial_prefill_input(
         is_prompt=model_input.is_prompt,
         async_callback=model_input.async_callback,
     )
-    import pdb
-    pdb.set_trace()
+    
     return rebuilt_model_input
