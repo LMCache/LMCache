@@ -583,15 +583,31 @@ def lmcache_retrieve_kv(
             # construct token mesk to indicate what tokens should be retrieved
             # from lmc. Tokens computed in vllm already should be skipped
             token_mask = torch.ones_like(full_token_tensor, dtype=torch.bool)
-            token_mask[:vllm_num_computed_tokens] = False
+            lmc_chunk_size = engine.config.chunk_size
+            vllm_num_computed_tokens_align = vllm_num_computed_tokens\
+                // lmc_chunk_size * lmc_chunk_size
+            token_mask[:vllm_num_computed_tokens_align] = False
+
+            # TODO(Jiayi): Please get rid of this in the future
+            # Please only pass the required slot_mapping to the engine
+            if vllm_num_computed_tokens > 0:
+                slot_mapping_req_full = torch.full((total_seq_len, ),
+                                                   -1,
+                                                   device=slot_mapping.device,
+                                                   dtype=slot_mapping.dtype)
+                slot_mapping_req_full[vllm_num_computed_tokens:] = \
+                    slot_mapping[start_pos:end_pos]
+            else:
+                slot_mapping_req_full = slot_mapping[start_pos:end_pos]
 
             # call lmcache retrieve
             ret_token_mask = engine.retrieve(
                 full_token_tensor,
                 token_mask,
                 kvcaches=kv_caches,
-                slot_mapping=slot_mapping[start_pos:end_pos])
-            lmc_num_computed_tokens = torch.sum(ret_token_mask).item()
+                slot_mapping=slot_mapping_req_full)
+            lmc_num_computed_tokens = torch.sum(ret_token_mask).item() - \
+                (vllm_num_computed_tokens - vllm_num_computed_tokens_align)
 
             assert isinstance(lmc_num_computed_tokens, int)
 
@@ -617,8 +633,6 @@ def lmcache_retrieve_kv(
             # No cache found, move on
             if lmc_num_computed_tokens == 0:
                 num_request_not_found += 1
-                idx += 1
-                continue
 
             # Inject the lmc retrieved kv cache
             logger.debug(f"Injected token number: {lmc_num_computed_tokens}")
@@ -673,6 +687,7 @@ def build_partial_prefill_input(
     assert isinstance(model_input.attn_metadata, FlashAttentionMetadata), \
         "Only FlashAttention backend is supported for now."
     assert model_input.attn_metadata.context_lens_tensor is not None
+    assert model_input.attn_metadata.block_tables is not None
     assert model_input.attn_metadata.query_start_loc is not None
     assert model_input.input_positions is not None
 
@@ -726,12 +741,15 @@ def build_partial_prefill_input(
         rebuilt_context_lens_tensor.append(num_computed_token)
 
         # recover `block_table`
-        # FIXME (Jiayi): might not be compatible with vllm prefix caching
-        slot_mapping_req = slot_mapping_flat[start_pos:end_slot_idx]
-        vllm_block_size = cache_config.block_size
-        rebuilt_block_table = slot_mapping_req[::16].to(torch.int32) \
-            // vllm_block_size
-        rebuilt_block_tables.append(rebuilt_block_table)
+        if len(model_input.attn_metadata.block_tables[idx]) > 0:
+            rebuilt_block_tables.append(
+                model_input.attn_metadata.block_tables[idx])
+        else:
+            slot_mapping_req = slot_mapping_flat[start_pos:end_slot_idx]
+            vllm_block_size = cache_config.block_size
+            rebuilt_block_table = slot_mapping_req[::16].to(torch.int32) \
+                // vllm_block_size
+            rebuilt_block_tables.append(rebuilt_block_table)
 
         # Sampling metadata related
         # seq_groups (use rebuilt query lens)
