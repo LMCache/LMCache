@@ -1,13 +1,14 @@
 import asyncio
-import logging
-import threading
-from logging import Logger
-import json
 import collections
-import string
+import json
+import logging
 import re
-from rouge_score import rouge_scorer
+import string
+import threading
 from enum import Enum
+from logging import Logger
+
+from rouge_score import rouge_scorer
 
 
 def build_format(color):
@@ -122,20 +123,24 @@ class AsyncLoopWrapper:
             cls.StartLoop()
         return cls._loop
 
+
 class PromptBuildMethodType(Enum):
     QA = 0
     FEW_SHOT = 1
-    
+
+
 def load_dataset(dataset_path):
     print("Loading dataset:", dataset_path)
     with open(dataset_path) as f:
         return json.load(f)
+
 
 def normalize_question(question):
     if not question.endswith("?"):
         question = question + "?"
 
     return question[0].lower() + question[1:]
+
 
 def parse_generation(s):
     s = s.lstrip('\n').split('\n')[0]
@@ -145,7 +150,9 @@ def parse_generation(s):
         s = "No"
     return s
 
+
 def normalize_answer(s):
+
     def remove_articles(text):
         return re.sub(r"\b(a|an|the)\b", " ", text)
 
@@ -161,28 +168,28 @@ def normalize_answer(s):
 
     return white_space_fix(remove_articles(remove_punc(lower(s))))
 
+
 def build_qa_prompt(example, query_prompt):
 
     q = normalize_question(example["question"])
-    doc_prompts = [f"{ctx['title']}\n\n{ctx['text']}\n\n" for ctx in example["ctxs"]]
-    #ex_prompt = f"{docs_text}\n\nBased on these texts, answer the question:\nQ: {q}\nA:"
-    #q_prompt = f"\n\nAnswer the question based on the given passages. Answer the question within 5 words. Do NOT repeat the question or output any other words. Question: {q}\nAnswer:"
+    doc_prompts = [
+        f"{ctx['title']}\n\n{ctx['text']}\n\n" for ctx in example["ctxs"]
+    ]
     q_prompt = f"{query_prompt}{q}\nAnswer:"
     return doc_prompts, q_prompt
 
+
 def build_fewshot_prompt(example):
-    q = "\n\n"+example["question"]
+    q = "\n\n" + example["question"]
     doc_prompts = [f"{ctx['text']}" for ctx in example["ctxs"]]
     q_prompt = f"{q}"
     return doc_prompts, q_prompt
+
 
 def compute_f1(a_pred, a_gold, tokenizer):
     a_pred = parse_generation(a_pred)
     gold_toks = tokenizer.encode(normalize_answer(a_gold))[1:]
     pred_toks = tokenizer.encode(normalize_answer(a_pred))[1:]
-    #gold_toks = tokenizer.encode_chat_completion(ChatCompletionRequest(messages=[UserMessage(content=normalize_answer(a_gold))])).tokens[4:-4]
-    #pred_toks = tokenizer.encode_chat_completion(ChatCompletionRequest(messages=[UserMessage(content=normalize_answer(a_pred))])).tokens[4:-4]
-    #pdb.set_trace()
     common = collections.Counter(gold_toks) & collections.Counter(pred_toks)
     num_same = sum(common.values())
     if len(gold_toks) == 0 or len(pred_toks) == 0:
@@ -195,12 +202,15 @@ def compute_f1(a_pred, a_gold, tokenizer):
     f1 = (2 * precision * recall) / (precision + recall)
     return f1
 
+
 def compute_rl(pred, gold):
     scorer = rouge_scorer.RougeScorer(['rougeL'], use_stemmer=True)
     rougeL = scorer.score(gold, pred)['rougeL'].fmeasure
     return rougeL
 
-def build_rag_prompt(system_prompt, example, query_prompt, separator: str, prompt_build_method: PromptBuildMethodType):
+
+def build_rag_prompt(system_prompt, example, query_prompt, separator: str,
+                     prompt_build_method: PromptBuildMethodType):
     doc_prompts = None
     q_prompt = None
     if prompt_build_method == PromptBuildMethodType.FEW_SHOT:

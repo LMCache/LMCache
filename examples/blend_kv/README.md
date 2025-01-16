@@ -5,8 +5,9 @@ The KV blending functionality is enabled by setting `enable_blending: True` in t
 
 In `blend_kv.py`, the following code will first calculate the KV cache of two text chunks.
 ```python
+offline_precompute = OfflineKVPreCompute(llm)
 for chunk in chunks:
-    precompute_kv(chunk, llm)
+    offline_precompute.precompute_kv(chunk)
 ```
 
 Then, the text chunks are concatenated together, prepended with a system prompt, and appended with a user's quest.
@@ -35,6 +36,3 @@ python3 online_kv.py 8000
 LMCACHE_CONFIG_FILE=example_blending.yaml CUDA_VISIBLE_DEVICES=0,1 VLLM_WORKER_MULTIPROC_METHOD=spawn python3 -m lmcache_vllm.vllm.entrypoints.openai.api_server --model mistralai/Mistral-7B-Instruct-v0.2 --gpu-memory-utilization 0.8 --port 8000 --tensor-parallel-size 2
 python3 online_kv.py 8000
 ```
-## TODO
-- [ ] Add configuration file
-- [ ] Add online example

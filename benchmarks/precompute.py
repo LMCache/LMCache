@@ -1,9 +1,11 @@
 import argparse
 from dataclasses import dataclass
 from typing import Tuple
-from utils import PromptBuildMethodType, load_dataset, build_fewshot_prompt, build_qa_prompt
-from transformers import AutoTokenizer, AutoConfig
+
 from lmcache_vllm.blend_adapter import OnlineKVPreCompute
+from transformers import AutoConfig, AutoTokenizer
+from utils import (PromptBuildMethodType, build_fewshot_prompt,
+                   build_qa_prompt, load_dataset)
 
 
 @dataclass
@@ -28,11 +30,14 @@ class PrecomputeConfig:
     base_url: str
     # KV cache precision.
     kv_precision: int
-    
+
 
 class KVSizeCalculator:
-    def __init__(self, num_key_value_heads: int, head_dim: int, num_layers: int, precision: int):
+
+    def __init__(self, num_key_value_heads: int, head_dim: int,
+                 num_layers: int, precision: int):
         self.ratio = num_key_value_heads * head_dim * num_layers * precision * 2
+
     def get_kv_size(self, token_cnt: int) -> int:
         return token_cnt * self.ratio
 
@@ -40,8 +45,10 @@ class KVSizeCalculator:
 def precompute_all_kv(config: PrecomputeConfig) -> Tuple[int, int, str]:
     tokenizer = AutoTokenizer.from_pretrained(config.model)
     model_config = AutoConfig.from_pretrained(config.model)
-    kv_size_calculator = KVSizeCalculator(model_config.num_key_value_heads, 
-                                          model_config.head_dim, model_config.num_hidden_layers, config.kv_precision)
+    kv_size_calculator = KVSizeCalculator(model_config.num_key_value_heads,
+                                          model_config.head_dim,
+                                          model_config.num_hidden_layers,
+                                          config.kv_precision)
     eval_dataset = load_dataset(config.dataset)
     start_idx = config.start_idx
     end_idx = config.end_idx
@@ -49,8 +56,11 @@ def precompute_all_kv(config: PrecomputeConfig) -> Tuple[int, int, str]:
         assert end_idx <= len(eval_dataset), \
             f"end_index {end_idx} > length of dataset {len(eval_dataset)}"
     assert start_idx >= 0, f"start_idx {start_idx} < 0"
-    assert start_idx < len(eval_dataset), f"start_idx {start_idx} >= length of dataset {len(eval_dataset)}"
-    precompute_kv = OnlineKVPreCompute(config.api_key, config.base_url, tokenizer)
+    assert start_idx < len(
+        eval_dataset
+    ), f"start_idx {start_idx} >= length of dataset {len(eval_dataset)}"
+    precompute_kv = OnlineKVPreCompute(config.api_key, config.base_url,
+                                       tokenizer)
     with_bos = precompute_kv._blend_add_special_in_precomp
     current_size_taken = 0
     size_upper_bound = config.kv_storage_size
@@ -64,7 +74,8 @@ def precompute_all_kv(config: PrecomputeConfig) -> Tuple[int, int, str]:
             if current_idx >= end_idx:
                 break
         else:
-            if current_size_taken >= size_upper_bound or current_idx >= len(eval_dataset):
+            if current_size_taken >= size_upper_bound or current_idx >= len(
+                    eval_dataset):
                 break
         example = eval_dataset[current_idx]
         doc_prompts = None
@@ -85,8 +96,10 @@ def precompute_all_kv(config: PrecomputeConfig) -> Tuple[int, int, str]:
             if not with_bos:
                 if input_comps[0] == tokenizer.bos_token_id:
                     temp_cnt -= 1
-            temp_doc_token_cnt += temp_cnt # Add doc token count before round up.
-            temp_cnt = ((temp_cnt + round_up_token_cnt - 1) // round_up_token_cnt) * round_up_token_cnt
+            temp_doc_token_cnt += temp_cnt
+            # Add doc token count before round up.
+            temp_cnt = ((temp_cnt + round_up_token_cnt - 1) //
+                        round_up_token_cnt) * round_up_token_cnt
             token_cnt += temp_cnt
         assert token_cnt > 0, f"token_cnt {token_cnt} <= 0"
         this_case_size = kv_size_calculator.get_kv_size(token_cnt)
@@ -97,18 +110,14 @@ def precompute_all_kv(config: PrecomputeConfig) -> Tuple[int, int, str]:
         current_idx += 1
         current_size_taken += this_case_size
         doc_token_cnt += temp_doc_token_cnt
-    
+
     return start_idx, current_idx, precompute_kv.model, doc_token_cnt
-        
-        
-    
+
+
 def parse_arguments():
     parser = argparse.ArgumentParser(
         description="Parse RAG precompute configurations.")
-    parser.add_argument("--model", 
-                        type=str, 
-                        required=True, 
-                        help="Model name")
+    parser.add_argument("--model", type=str, required=True, help="Model name")
     parser.add_argument("--dataset",
                         type=str,
                         required=True,
@@ -148,6 +157,7 @@ def parse_arguments():
     args = parser.parse_args()
     return args
 
+
 def parse_size(size: str) -> int:
     if len(size) == 0:
         return -1
@@ -166,7 +176,9 @@ def parse_size(size: str) -> int:
         else:
             raise ValueError(f"Invalid size unit {size}")
 
-def parse_prompt_build_method(prompt_build_method: str) -> PromptBuildMethodType:
+
+def parse_prompt_build_method(
+        prompt_build_method: str) -> PromptBuildMethodType:
     prompt_build_method = prompt_build_method.upper()
     if prompt_build_method == "QA":
         return PromptBuildMethodType.QA
@@ -174,18 +186,20 @@ def parse_prompt_build_method(prompt_build_method: str) -> PromptBuildMethodType
         return PromptBuildMethodType.FEW_SHOT
     else:
         raise ValueError(f"Invalid prompt build method {prompt_build_method}")
-    
+
+
 def run_precompute(args):
     kv_storage_size = parse_size(args.kv_storage_size)
     kv_storage_token_unit = args.kv_storage_token_unit
     print(f"kv_storage_token_unit: {kv_storage_token_unit}")
     prompt_build_method = parse_prompt_build_method(args.prompt_build_method)
     kv_precision_bit = args.kv_precision_bit
-    assert kv_precision_bit % 8 == 0, f"kv_precision_bit {kv_precision_bit} is not a multiple of 8"
+    assert kv_precision_bit % 8 == 0, \
+        f"kv_precision_bit {kv_precision_bit} is not a multiple of 8"
     kv_precision = kv_precision_bit // 8
-    config = PrecomputeConfig(model=args.model, 
+    config = PrecomputeConfig(model=args.model,
                               dataset=args.dataset,
-                              start_idx=args.start_index, 
+                              start_idx=args.start_index,
                               end_idx=args.end_index,
                               kv_storage_size=kv_storage_size,
                               kv_storage_token_unit=kv_storage_token_unit,
@@ -195,11 +209,12 @@ def run_precompute(args):
                               kv_precision=kv_precision)
     start_idx, end_idx, model_name, doc_token_cnt = precompute_all_kv(config)
     return start_idx, end_idx, model_name, doc_token_cnt
-    
+
 
 def main():
     args = parse_arguments()
     run_precompute(args)
+
 
 if __name__ == "__main__":
     main()
