@@ -105,10 +105,6 @@ class VLLMNestedTupleGPUConnector(GPUConnectorInterface):
             v[start:end].copy_(memory_obj.tensor[1, layer_id].reshape(
                 -1, *hidden_shape),
                                non_blocking=False)
-        # TODO(Jiayi): Currently, this is a blocking operation.
-        # We might be able to continue other decode jobs while
-        # waiting for the copy to finish.
-        #torch.cuda.default_stream().synchronize()
 
     @_lmcache_nvtx_annotate
     def from_gpu(self, memory_obj: MemoryObj, start: int, end: int, **kwargs):
@@ -229,6 +225,7 @@ class VLLMPagedMemGPUConnector(GPUConnectorInterface):
         if "offset" in kwargs:
             start = start - kwargs["offset"]
             end = end - kwargs["offset"]
+        assert start >= 0 and end >= start
 
         kvcaches: Tuple[Tuple[torch.Tensor, ...], ...] = kwargs["kvcaches"]
         slot_mapping: torch.Tensor = kwargs["slot_mapping"]

@@ -70,6 +70,7 @@ lmcache/experimental/tests
 /lmcache/experimental/examples
 
 # example output
+*/offline_inference_outputs.jsonl
 /examples/offline_inference/offline_inference_outputs.jsonl
 /examples/save_decode_cache/offline_inference_outputs.jsonl
 /examples/offline_inference/buggy_example.py

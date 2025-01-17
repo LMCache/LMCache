@@ -9,7 +9,6 @@ This repository contains benchmarking tools for evaluating the performance of la
 - **Multi-Round QA Benchmark**: Simulates a realistic multi-user, multi-turn question-answering session to evaluate key metrics such as token throughput, latency, and average response times.
 
 ### Upcoming feature
-- **ShareGPT** dataset support
 - **RAG** benchmark
 
 ## Setup
@@ -55,6 +54,9 @@ vllm serve mistralai/Mistral-7B-Instruct-v0.2 --disable-log-requests
 - `--answer-len <int>`: Length of the answer expected (in tokens).
 - `--init-user-id <int>`: The initial user ID to start the benchmark (default = 0). This is useful when you want to resume the benchmark from a specific user ID or avoid serving engine caching the request from previous runs
 - `--request-with-user-id`: If this option is present, the script will include the user ID in the request header.
+- `--sharegpt`: If this option is present, the script will use ShareGPT workload instead of dummy context.
+
+*Note:* If you use ShareGPT dataset, the length of the answer expected (in tokens) will be determined by the min value of the dataset response and  `--answer-len`. You also need to follow the instructions in **ShareGPT Datasets** first.
 
 #### Configuring the serving engine connection
 - `--model <str>`: The model name (e.g., `mistralai/Mistral-7B-Instruct-v0.2`).
@@ -90,3 +92,29 @@ The `multi-round-qa.py` script works by:
 - **Average Generation Throughput**: Tokens generated as part of the response per second.
 - **Average TTFT (Time to First Token)**: Average time taken for the model to generate the first token of a response.
 
+## ShareGPT Datasets
+
+1. Download and prepare the ShareGPT dataset 
+    You can specify the proportion of data to process by providing a number between 0 and 1 as an argument to the script.
+
+    ```bash
+    bash prepare_sharegpt_data.sh 1
+    ```
+
+    In this example, 1 indicates processing 100% of the dataset. You can adjust this value as needed.
+
+2. Run the benchmark
+    Example:
+
+    ```bash
+    python3 multi-round-qa.py \
+        --num-users 10 \
+        --num-rounds 5 \
+        --qps 0.3 \
+        --shared-system-prompt 1000 \
+        --user-history-prompt 2000 \
+        --answer-len 100 \
+        --model mistralai/Mistral-7B-Instruct-v0.2 \
+        --base-url http://localhost:8000/v1 \
+        --sharegpt
+    ```

@@ -59,7 +59,6 @@ class StorageManager:
             logger.error(
                 f"Exception captured from future in put_callback: {e}")
             raise e
-        size = memory_obj.get_size()
         self.put_tasks[backend_name].pop(key)
 
         # TODO: Might need to modify free such that it's `ref_count-1`
@@ -69,7 +68,7 @@ class StorageManager:
         if not self.use_hot:
             self.memory_allocator.free(memory_obj)
 
-        self.storage_backends[backend_name].insert_key(key, size)
+        self.storage_backends[backend_name].insert_key(key, memory_obj)
         self.manager_lock.release()
 
     def put(
@@ -106,8 +105,8 @@ class StorageManager:
 
             self.manager_lock.acquire()
             self.put_tasks[backend_name][key] = (put_task, memory_obj)
-            put_task.add_done_callback(lambda_callback)
             self.manager_lock.release()
+            put_task.add_done_callback(lambda_callback)
 
     def get(self, key: CacheEngineKey) -> Optional[BufferMemoryObj]:
         """
