@@ -5,6 +5,7 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 import cpuinfo
 import pkg_resources
@@ -61,15 +62,18 @@ class EngineMessage:
 
 class MetadataMessage:
 
-    def __init__(self, start_time, duruation):
+    def __init__(self, start_time, duration):
         self.start_time = start_time
-        self.duraion = duruation
+        self.duration = duration
 
 
 class Tracker:
 
-    def __init__(self, server_url, config: LMCacheEngineConfig,
-                 metadata: LMCacheEngineMetadata, local_log: str=None):
+    def __init__(self,
+                 server_url,
+                 config: LMCacheEngineConfig,
+                 metadata: LMCacheEngineMetadata,
+                 local_log: Optional[str] = None):
         logger.info("Tracker initialized")
         self.server_url = server_url
         self.config = config
