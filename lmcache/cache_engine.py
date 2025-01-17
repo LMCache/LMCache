@@ -1,11 +1,13 @@
 import hashlib
 import logging
-import time, os
+import os
+import time
 from typing import Dict, Iterable, List, Optional, Tuple, Union
 
 import torch
 
-from lmcache.config import LMCacheEngineConfig, LMCacheEngineMetadata, UsageConfig
+from lmcache.config import (LMCacheEngineConfig, LMCacheEngineMetadata,
+                            UsageConfig)
 from lmcache.logging import init_logger
 from lmcache.storage_backend import CreateStorageBackend
 from lmcache.usage_tracker import Tracker
@@ -18,6 +20,7 @@ if os.getenv("LMCACHE_TRACK_USAGE") == "false":
     UsageConfig.track = False
 else:
     logger.info("Reporting Usage of LMCache.")
+
 
 class LMCacheEngine:
 
@@ -45,9 +48,8 @@ class LMCacheEngine:
         logger.debug(f"Current storage backend type {type(self.engine_)}")
 
         if tracker:
-            # TODO: Two main hyperparameters read from the config:
-            # the server url and local log path
-            # If you want to write the log locally, set the local_log to the path you want
+            # TODO: To write the log locally,
+            # local_log path can be set
             self.url = UsageConfig.url
             self.tracker = Tracker(self.url, config, metadata, None)
 
