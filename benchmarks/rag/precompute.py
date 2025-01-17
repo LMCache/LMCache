@@ -191,7 +191,6 @@ def parse_prompt_build_method(
 def run_precompute(args):
     kv_storage_size = parse_size(args.kv_storage_size)
     kv_storage_token_unit = args.kv_storage_token_unit
-    print(f"kv_storage_token_unit: {kv_storage_token_unit}")
     prompt_build_method = parse_prompt_build_method(args.prompt_build_method)
     kv_precision_bit = args.kv_precision_bit
     assert kv_precision_bit % 8 == 0, \

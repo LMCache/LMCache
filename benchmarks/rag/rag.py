@@ -14,6 +14,25 @@ from utils import (AsyncLoopWrapper, PromptBuildMethodType, build_rag_prompt,
 logger = init_logger(__name__, logging.INFO)
 
 
+system_prompt_set  ={
+    PromptBuildMethodType.QA: 
+        "You will be asked a question after reading several passages. "
+        "Please directly answer the question based on the given passages. "
+        "Do NOT repeat the question. "
+        "The answer should be within 5 words..\nPassages:\n",
+    PromptBuildMethodType.FEW_SHOT:
+        "Summarize the dialogue into a few short sentences. "
+        "The following are some examples.\n\n"
+}
+query_prompt_set = {
+    PromptBuildMethodType.QA: 
+        "\n\nAnswer the question directly based on the given passages."
+        " Do NOT repeat the question. "
+        "The answer should be within 5 words. \nQuestion:",
+    PromptBuildMethodType.FEW_SHOT:
+        "",
+}
+
 @dataclass
 class WorkloadConfig:
     # Overall QPS
@@ -78,7 +97,7 @@ def parse_arguments():
                         help="Random shuffle")
     parser.add_argument("--system-prompt",
                         type=str,
-                        required=True,
+                        default="",
                         help="System prompt")
     parser.add_argument("--separator", type=str, default="", help="Separator")
     parser.add_argument("--query-prompt",
@@ -387,6 +406,19 @@ def run_rag(args):
 
 def main():
     args = parse_arguments()
+    build_prompt_method_str = args.prompt_build_method.upper()
+    build_prompt_method = None
+    if build_prompt_method_str == "QA":
+        build_prompt_method = PromptBuildMethodType.QA
+    elif build_prompt_method_str == "FEW_SHOT":
+        build_prompt_method = PromptBuildMethodType.FEW_SHOT
+    else:
+        raise ValueError(
+            f"Invalid prompt build method {build_prompt_method_str}")
+    if len(args.system_prompt) == 0:
+        args.system_prompt = system_prompt_set[build_prompt_method]
+    if len(args.query_prompt) == 0:
+        args.query_prompt = query_prompt_set[build_prompt_method]
     args.system_prompt = args.system_prompt.encode().decode('unicode_escape')
     args.query_prompt = args.query_prompt.encode().decode('unicode_escape')
     if args.verbose:
