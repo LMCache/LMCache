@@ -18,7 +18,7 @@ This repository contains benchmarking tools for evaluating the performance of la
 To run the RAG benchmark, use the following command:
 
 ```bash
-python3 rag.py --qps 3.5 --model mistralai/Mistral-7B-Instruct-v0.2 --dataset ~/CacheBlend/inputs/musique_s.json --system-prompt "You will be asked a question after reading several passages. Please directly answer the question based on the given passages. Do NOT repeat the question. The answer should be within 5 words..\nPassages:\n" --query-prompt "\n\nAnswer the question directly based on the given passages. Do NOT repeat the question. The answer should be within 5 words. \nQuestion:" --separator "" --prompt-build-method QA --base-url "http://localhost:8000/v1" --kv-storage-size 30GB --kv-storage-token-unit 256 --max-tokens 32 --output summary.csv
+python3 rag.py --qps 3.5 --model mistralai/Mistral-7B-Instruct-v0.2 --dataset ~/CacheBlend/inputs/musique_s.json --separator "" --prompt-build-method QA --base-url "http://localhost:8000/v1" --kv-storage-size 30GB --kv-storage-token-unit 256 --max-tokens 32
 ```
 
 Use ctrl-C to terminate the benchmark at any time, and the the script will write each request's detailed stats to `summary.csv`.
@@ -33,7 +33,7 @@ vllm serve mistralai/Mistral-7B-Instruct-v0.2 --disable-log-requests
 ## Running the RAG benchmark on LMCache
 For benchmarking LMCache with CacheBlend:  
 ```bash
-LMCACHE_CONFIG_FILE=example_blending.yaml python3 rag.py --qps 3.5 --model mistralai/Mistral-7B-Instruct-v0.2 --dataset ~/CacheBlend/inputs/musique_s.json --system-prompt "You will be asked a question after reading several passages. Please directly answer the question based on the given passages. Do NOT repeat the question. The answer should be within 5 words..\nPassages:\n" --query-prompt "\n\nAnswer the question directly based on the given passages. Do NOT repeat the question. The answer should be within 5 words. \nQuestion:" --separator "[BLEND_SEP]" --prompt-build-method QA --base-url "http://localhost:8000/v1" --kv-storage-size 30GB --kv-storage-token-unit 256 --max-tokens 32 --output summary.csv
+LMCACHE_CONFIG_FILE=example_blending.yaml python3 rag.py --qps 3.5 --model mistralai/Mistral-7B-Instruct-v0.2 --dataset ~/CacheBlend/inputs/musique_s.json --separator "[BLEND_SEP]" --prompt-build-method QA --base-url "http://localhost:8000/v1" --kv-storage-size 30GB --kv-storage-token-unit 256 --max-tokens 32
 ```
 Here's an example command to launch the serving engine with LMCache+CacheBlend:  
 
