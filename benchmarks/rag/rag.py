@@ -13,25 +13,25 @@ from utils import (AsyncLoopWrapper, PromptBuildMethodType, build_rag_prompt,
 
 logger = init_logger(__name__, logging.INFO)
 
-
-system_prompt_set  ={
-    PromptBuildMethodType.QA: 
-        "You will be asked a question after reading several passages. "
-        "Please directly answer the question based on the given passages. "
-        "Do NOT repeat the question. "
-        "The answer should be within 5 words..\nPassages:\n",
+system_prompt_set = {
+    PromptBuildMethodType.QA:
+    "You will be asked a question after reading several passages. "
+    "Please directly answer the question based on the given passages. "
+    "Do NOT repeat the question. "
+    "The answer should be within 5 words..\nPassages:\n",
     PromptBuildMethodType.FEW_SHOT:
-        "Summarize the dialogue into a few short sentences. "
-        "The following are some examples.\n\n"
+    "Summarize the dialogue into a few short sentences. "
+    "The following are some examples.\n\n"
 }
 query_prompt_set = {
-    PromptBuildMethodType.QA: 
-        "\n\nAnswer the question directly based on the given passages."
-        " Do NOT repeat the question. "
-        "The answer should be within 5 words. \nQuestion:",
+    PromptBuildMethodType.QA:
+    "\n\nAnswer the question directly based on the given passages."
+    " Do NOT repeat the question. "
+    "The answer should be within 5 words. \nQuestion:",
     PromptBuildMethodType.FEW_SHOT:
-        "",
+    "",
 }
+
 
 @dataclass
 class WorkloadConfig:
