@@ -244,6 +244,7 @@ class GlobalConfig:
     def is_debug(cls) -> bool:
         return cls.enable_debug
 
+
 @dataclass
 class UsageConfig:
     url: str = "http://34.236.19.149:8080/endpoint"
