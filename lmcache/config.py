@@ -246,5 +246,5 @@ class GlobalConfig:
 
 @dataclass
 class UsageConfig:
-    url: str = 'http://34.236.19.149:8080/endpoint'
+    url: str = "http://34.236.19.149:8080/endpoint"
     track: bool = True
