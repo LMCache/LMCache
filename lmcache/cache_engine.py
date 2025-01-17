@@ -13,11 +13,11 @@ from lmcache.utils import CacheEngineKey, KVCache, _lmcache_nvtx_annotate
 
 logger = init_logger(__name__)
 
-if os.getenv("TRACK_USAGE") == "false":
+if os.getenv("LMCACHE_TRACK_USAGE") == "false":
     logger.info("Usage tracking is disabled.")
     UsageConfig.track = False
 else:
-    logger.info("Usage tracking is enabled.")
+    logger.info("Reporting Usage of LMCache.")
 
 class LMCacheEngine:
 
