@@ -4,7 +4,6 @@ import threading
 from logging import Logger
 
 
-
 def build_format(color):
     reset = "\x1b[0m"
     underline = "\x1b[3m"
@@ -116,5 +115,3 @@ class AsyncLoopWrapper:
         if cls._loop is None:
             cls.StartLoop()
         return cls._loop
-
-
