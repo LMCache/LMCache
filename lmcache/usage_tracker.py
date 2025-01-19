@@ -24,7 +24,7 @@ class EnvMessage:
 
     def __init__(self, provider, num_cpu, cpu_type, cpu_family_model_stepping,
                  total_memory, architecture, platforms, gpu_count, gpu_type,
-                 gpu_memory_per_device, source):
+                 gpu_memory_per_device, source, ip4_address):
         self.provider = provider
         self.num_cpu = num_cpu
         self.cpu_type = cpu_type
@@ -36,6 +36,7 @@ class EnvMessage:
         self.gpu_type = gpu_type
         self.gpu_memory_per_device = gpu_memory_per_device
         self.source = source
+        self.ip4_address = ip4_address
 
 
 class EngineMessage:
@@ -144,10 +145,11 @@ class Tracker:
         platforms = platform.platform()
         gpu_count, gpu_type, gpu_memory_per_device = self._get_gpu_info()
         source = self._get_source()
+        ip4_address = self._get_ipv4_address()
         env_message = EnvMessage(provider, num_cpu, cpu_type,
                                  cpu_family_model_stepping, total_memory,
                                  architecture, platforms, gpu_count, gpu_type,
-                                 gpu_memory_per_device, source)
+                                 gpu_memory_per_device, source, ip4_address)
         return env_message
 
     def track_engine(self):
@@ -233,3 +235,9 @@ class Tracker:
             pass
 
         return 'UNKNOWN'
+
+    def _get_ipv4_address(self):
+        try:
+            return requests.get("https://api.ipify.org").text
+        except requests.exceptions.RequestException:
+            return 'UNKNOWN'
