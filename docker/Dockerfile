@@ -70,12 +70,6 @@ ENV NVCC_THREADS=$nvcc_threads
 RUN --mount=type=cache,target=/root/.cache/pip \
     python3 -m pip install -r requirements-build.txt
 
-# RUN git clone https://github.com/LMCache/torchac_cuda
-# WORKDIR /workspace/torchac_cuda
-# RUN --mount=type=cache,target=/root/.cache/ccache \
-#     --mount=type=cache,target=/root/.cache/pip \
-#     python3 setup.py bdist_wheel --dist-dir=dist_torchac_cuda
-
 ARG LMCACHE_COMMIT_ID=1
 
 RUN git clone https://github.com/LMCache/LMCache.git
@@ -96,9 +90,6 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
 #################### vLLM installation IMAGE ####################
 # Install torchac_cuda wheel into the vLLM image
 FROM vllm/vllm-openai:v0.6.6.post1 AS vllm-openai
-# RUN --mount=type=bind,from=build,src=/workspace/torchac_cuda/dist_torchac_cuda,target=/vllm-workspace/dist_torchac_cuda \
-# --mount=type=cache,target=/root/.cache/pip \
-# pip install dist_torchac_cuda/*.whl --verbose
 RUN --mount=type=bind,from=build,src=/workspace/LMCache/dist_lmcache,target=/vllm-workspace/dist_lmcache \
 --mount=type=cache,target=/root/.cache/pip \
 pip install dist_lmcache/*.whl --verbose
