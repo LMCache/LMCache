@@ -1,9 +1,9 @@
 from collections import OrderedDict
-from typing import Union, Tuple, List
+from typing import List, Tuple, Union
 
+from lmcache.experimental.storage_backend.evictor.base_evictor import (
+    BaseEvictor, PutStatus)
 from lmcache.logging import init_logger
-from lmcache.experimental.storage_backend.evictor.base_evictor import\
-    BaseEvictor, PutStatus
 from lmcache.utils import CacheEngineKey
 
 logger = init_logger(__name__)
@@ -27,15 +27,15 @@ class LRUEvictor(BaseEvictor):
         cache_dict.move_to_end(key)
 
     def update_on_put(
-        self, cache_dict: OrderedDict, cache_size: int
-    ) -> Tuple[List[CacheEngineKey], PutStatus]:
+            self, cache_dict: OrderedDict,
+            cache_size: int) -> Tuple[List[CacheEngineKey], PutStatus]:
         evict_keys = []
         iter_cache_dict = iter(cache_dict)
-        
+
         if cache_size > self.MAX_CACHE_SIZE:
             logger.warning("Put failed due to limited cache storage")
             return [], PutStatus.ILLEGAL
-        
+
         # evict cache until there's enough space
         while cache_size + self.current_cache_size > \
             self.MAX_CACHE_SIZE:

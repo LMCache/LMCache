@@ -1,20 +1,18 @@
 import abc
 from collections import OrderedDict
 from enum import Enum
-from typing import List, Tuple, Union
-
-import torch
+from typing import List, Tuple
 
 from lmcache.logging import init_logger
-from lmcache.storage_backend.mem_pool import KVObj
-from lmcache.utils import CacheEngineKey, DiskCacheMetadata
-from lmcache.experimental.memory_management import MemoryObj
+from lmcache.utils import CacheEngineKey
 
 logger = init_logger(__name__)
+
 
 class PutStatus(Enum):
     LEGAL = 1
     ILLEGAL = 2
+
 
 class BaseEvictor(metaclass=abc.ABCMeta):
     """
@@ -35,8 +33,8 @@ class BaseEvictor(metaclass=abc.ABCMeta):
 
     @abc.abstractmethod
     def update_on_put(
-            self, cache_dict: OrderedDict, cache_size: int
-    ) -> Tuple[List[CacheEngineKey], PutStatus]:
+            self, cache_dict: OrderedDict,
+            cache_size: int) -> Tuple[List[CacheEngineKey], PutStatus]:
         """
         Evict cache when a new cache comes and the storage is full
 
