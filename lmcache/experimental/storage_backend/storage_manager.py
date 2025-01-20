@@ -1,9 +1,10 @@
 import threading
+#from sortedcontainers import SortedDict
+from collections import OrderedDict
 from concurrent.futures import Future
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 
 import torch
-from sortedcontainers import SortedDict
 
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.experimental.config import LMCacheEngineConfig
@@ -13,6 +14,7 @@ from lmcache.experimental.memory_management import (BufferMemoryObj,
 from lmcache.experimental.storage_backend import CreateStorageBackends
 from lmcache.experimental.storage_backend.abstract_backend import \
     StorageBackendInterface
+from lmcache.experimental.storage_backend.evictor import LRUEvictor, PutStatus
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
 
@@ -29,7 +31,7 @@ class StorageManager:
                  metadata: LMCacheEngineMetadata,
                  allocator: MemoryAllocatorInterface):
         self.memory_allocator = allocator
-        self.hot_cache = SortedDict()
+        self.hot_cache: OrderedDict[CacheEngineKey, MemoryObj] = OrderedDict()
         self.use_hot = config.local_cpu
 
         #TODO: remove hardcode
@@ -44,6 +46,9 @@ class StorageManager:
             self.put_tasks[backend_name] = {}
 
         self.manager_lock = threading.Lock()
+
+        # Initialize evictor for `hot cache`
+        self.evictor = LRUEvictor(max_cache_size=config.max_local_cpu_size)
 
     def put_callback(self, future, backend_name, key):
         """
@@ -83,9 +88,26 @@ class StorageManager:
         """
         self.manager_lock.acquire()
 
+        # TODO(Jiayi): maybe we should move hot cache management
+        # to a separate backend
         if self.use_hot:
-            self.hot_cache[key] = memory_obj
+            evict_keys, put_status = self.evictor.update_on_put(
+                self.hot_cache, memory_obj.get_physical_size())
 
+            # evict memory objects from hot cache
+            for evict_key in evict_keys:
+                evict_mem_obj = self.hot_cache.pop(evict_key)
+                self.memory_allocator.free(evict_mem_obj)
+
+            # During overwrite, we need to free the old memory object
+            # to avoid memory leak
+            if key in self.hot_cache:
+                old_memory_obj = self.hot_cache.pop(key)
+                self.memory_allocator.free(old_memory_obj)
+            if put_status == PutStatus.LEGAL:
+                self.hot_cache[key] = memory_obj
+
+        # TODO (Jiayi): the following for loop should be reconsidered
         for backend_name in self.storage_backends:
             if key in self.put_tasks[backend_name]:
                 if not self.use_hot:
@@ -94,9 +116,14 @@ class StorageManager:
                 return
         self.manager_lock.release()
 
+        ever_put = False
         for backend_name, backend in self.storage_backends.items():
             put_task = backend.submit_put_task(key, memory_obj)
 
+            if put_task is None:
+                continue
+
+            ever_put = True
             # For debugging purpose
             #backend.put_blocking(key, memory_obj)
 
@@ -108,7 +135,15 @@ class StorageManager:
             self.manager_lock.release()
             put_task.add_done_callback(lambda_callback)
 
-    def get(self, key: CacheEngineKey) -> Optional[BufferMemoryObj]:
+        # TODO(Jiayi): this part looks messy
+        self.manager_lock.acquire()
+        if ever_put is False and key not in self.hot_cache:
+            self.memory_allocator.free(memory_obj)
+            logger.warning(f"Put failed for key {key}")
+        self.manager_lock.release()
+
+    def get(self, key: CacheEngineKey
+            ) -> Optional[Union[MemoryObj, BufferMemoryObj]]:
         """
         Blocking function to get the memory object from the storages.
         """
@@ -134,6 +169,7 @@ class StorageManager:
         self.manager_lock.acquire()
         memory_obj = self.hot_cache.get(key, None)
         if memory_obj is not None:
+            self.evictor.update_on_hit(key, self.hot_cache)
             self.manager_lock.release()
             return memory_obj
 
