@@ -92,7 +92,7 @@ class LMCacheEngine:
             num_tokens = end - start
             kv_shape = self.gpu_connector.get_shape(num_tokens)
             kv_dtype = self.metadata.kv_dtype
-            memory_obj = self.memory_allocator.allocate(kv_shape, kv_dtype)
+            memory_obj = self.storage_manager.allocate(kv_shape, kv_dtype)
             if memory_obj is None:
                 logger.warning("Failed to allocate memory for the KV cache.\n"
                                "The KV cache will not be stored.")

@@ -10,11 +10,11 @@ from lmcache.config import LMCacheEngineMetadata
 from lmcache.experimental.config import LMCacheEngineConfig
 from lmcache.experimental.memory_management import (BufferMemoryObj,
                                                     MemoryAllocatorInterface,
-                                                    MemoryFormat, MemoryObj)
+                                                    MemoryFormat, MemoryObj,
+                                                    PinMemoryAllocator)
 from lmcache.experimental.storage_backend import CreateStorageBackends
 from lmcache.experimental.storage_backend.abstract_backend import \
     StorageBackendInterface
-from lmcache.experimental.storage_backend.evictor import LRUEvictor, PutStatus
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
 
@@ -47,8 +47,43 @@ class StorageManager:
 
         self.manager_lock = threading.Lock()
 
-        # Initialize evictor for `hot cache`
-        self.evictor = LRUEvictor(max_cache_size=config.max_local_cpu_size)
+    def allocate(
+        self,
+        shape: torch.Size,
+        dtype: torch.dtype,
+        eviction=True,
+    ) -> Optional[MemoryObj]:
+        """
+        Allocate memory object with memory allocator.
+        Populate `hot_cache` if use_hot.
+        Use LRU evictor if eviction is enabled.
+        """
+        memory_obj = self.memory_allocator.allocate(shape, dtype)
+        if not eviction:
+            return memory_obj
+        
+        assert isinstance(self.memory_allocator, PinMemoryAllocator)
+        iter_hot_cache = iter(self.hot_cache)
+        evict_keys = []
+        while memory_obj is None:
+            evict_key = next(iter_hot_cache)
+            evict_keys.append(evict_key)
+            self.memory_allocator.free(self.hot_cache[evict_key])
+            memory_obj = self.memory_allocator.allocate(shape, dtype)
+            
+            if self.memory_allocator.allocator.num_active_allocations == 0:
+                break
+        for key in evict_keys:
+            self.hot_cache.pop(key)
+
+        # During overwrite, we need to free the old memory object
+        # to avoid memory leak
+        if key in self.hot_cache:
+            old_memory_obj = self.hot_cache.pop(key)
+            self.memory_allocator.free(old_memory_obj)
+        if self.use_hot and memory_obj is not None:
+            self.hot_cache[key] = memory_obj
+        return memory_obj
 
     def put_callback(self, future, backend_name, key):
         """
@@ -87,25 +122,6 @@ class StorageManager:
         storage manager) or has been stored (handled by storage backend).
         """
         self.manager_lock.acquire()
-
-        # TODO(Jiayi): maybe we should move hot cache management
-        # to a separate backend
-        if self.use_hot:
-            evict_keys, put_status = self.evictor.update_on_put(
-                self.hot_cache, memory_obj.get_physical_size())
-
-            # evict memory objects from hot cache
-            for evict_key in evict_keys:
-                evict_mem_obj = self.hot_cache.pop(evict_key)
-                self.memory_allocator.free(evict_mem_obj)
-
-            # During overwrite, we need to free the old memory object
-            # to avoid memory leak
-            if key in self.hot_cache:
-                old_memory_obj = self.hot_cache.pop(key)
-                self.memory_allocator.free(old_memory_obj)
-            if put_status == PutStatus.LEGAL:
-                self.hot_cache[key] = memory_obj
 
         # TODO (Jiayi): the following for loop should be reconsidered
         for backend_name in self.storage_backends:
@@ -169,7 +185,7 @@ class StorageManager:
         self.manager_lock.acquire()
         memory_obj = self.hot_cache.get(key, None)
         if memory_obj is not None:
-            self.evictor.update_on_hit(key, self.hot_cache)
+            self.hot_cache.move_to_end(key)
             self.manager_lock.release()
             return memory_obj
 
