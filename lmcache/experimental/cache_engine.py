@@ -96,8 +96,6 @@ class LMCacheEngine:
             if memory_obj is None:
                 logger.warning("Failed to allocate memory for the KV cache.\n"
                                "The KV cache will not be stored.")
-
-                # TODO: Need eviction here
                 break
 
             # Put the memory object to the storage backend

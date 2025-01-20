@@ -55,11 +55,12 @@ class StorageManager:
     ) -> Optional[MemoryObj]:
         """
         Allocate memory object with memory allocator.
-        Populate `hot_cache` if use_hot.
         Use LRU evictor if eviction is enabled.
         """
+        self.manager_lock.acquire()
         memory_obj = self.memory_allocator.allocate(shape, dtype)
         if not eviction:
+            self.manager_lock.release()
             return memory_obj
 
         assert isinstance(self.memory_allocator, PinMemoryAllocator)
@@ -70,19 +71,15 @@ class StorageManager:
             evict_keys.append(evict_key)
             self.memory_allocator.free(self.hot_cache[evict_key])
             memory_obj = self.memory_allocator.allocate(shape, dtype)
-
+            logger.debug("Evicting 1 chunk from hot cache")
+            # TODO(Jiayi): move this before the loop
+            # In this way, we don't need to do eviction for big objects
             if self.memory_allocator.allocator.num_active_allocations == 0:
                 break
-        for key in evict_keys:
-            self.hot_cache.pop(key)
+        for evict_key in evict_keys:
+            self.hot_cache.pop(evict_key)
 
-        # During overwrite, we need to free the old memory object
-        # to avoid memory leak
-        if key in self.hot_cache:
-            old_memory_obj = self.hot_cache.pop(key)
-            self.memory_allocator.free(old_memory_obj)
-        if self.use_hot and memory_obj is not None:
-            self.hot_cache[key] = memory_obj
+        self.manager_lock.release()
         return memory_obj
 
     def put_callback(self, future, backend_name, key):
@@ -122,6 +119,16 @@ class StorageManager:
         storage manager) or has been stored (handled by storage backend).
         """
         self.manager_lock.acquire()
+        if self.use_hot:
+            # During overwrite, we need to free the old memory object
+            # to avoid memory leak.
+            # NOTE(Jiayi): overwrite should not happen, at least for
+            # prefix caching
+            if key in self.hot_cache:
+                old_memory_obj = self.hot_cache.pop(key)
+                self.memory_allocator.free(old_memory_obj)
+
+            self.hot_cache[key] = memory_obj
 
         # TODO (Jiayi): the following for loop should be reconsidered
         for backend_name in self.storage_backends:
