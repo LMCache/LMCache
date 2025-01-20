@@ -4,6 +4,7 @@ from typing import Dict, List, Optional
 import torch
 
 from lmcache.config import LMCacheEngineMetadata
+from lmcache.usage_context import InitializeUsageContext
 from lmcache.experimental.config import LMCacheEngineConfig
 from lmcache.experimental.gpu_connector import GPUConnectorInterface
 from lmcache.experimental.memory_management import (MemoryAllocatorInterface,
@@ -57,6 +58,8 @@ class LMCacheEngine:
 
         self.storage_manager = StorageManager(config, metadata,
                                               self.memory_allocator)
+
+        InitializeUsageContext(config.to_original_config(), metadata)
 
     @_lmcache_nvtx_annotate
     @torch.inference_mode()
