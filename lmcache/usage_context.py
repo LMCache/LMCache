@@ -228,6 +228,7 @@ class UsageContext:
 
         return 'UNKNOWN'
 
+
 def InitializeUsageContext(config: LMCacheEngineConfig,
                            metadata: LMCacheEngineMetadata,
                            local_log: Optional[str] = None):
