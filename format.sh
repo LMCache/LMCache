@@ -193,7 +193,7 @@ if [[ "$1" == '--files' ]]; then
    # If `--all` is passed, then any further arguments are ignored and the
    # entire python directory is linted.
 elif [[ "$1" == '--all' ]]; then
-   lint lmcache tests
+   lint lmcache tests docker
 else
    # Format only the files that changed in last commit.
    lint_changed
