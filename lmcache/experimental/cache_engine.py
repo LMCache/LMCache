@@ -12,6 +12,7 @@ from lmcache.experimental.storage_backend.storage_manager import StorageManager
 from lmcache.experimental.token_database import (ChunkedTokenDatabase,
                                                  TokenDatabase)
 from lmcache.logging import init_logger
+from lmcache.usage_context import InitializeUsageContext
 from lmcache.utils import _lmcache_nvtx_annotate
 
 logger = init_logger(__name__)
@@ -57,6 +58,8 @@ class LMCacheEngine:
 
         self.storage_manager = StorageManager(config, metadata,
                                               self.memory_allocator)
+
+        InitializeUsageContext(config.to_original_config(), metadata)
 
     @_lmcache_nvtx_annotate
     @torch.inference_mode()

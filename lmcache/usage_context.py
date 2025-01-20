@@ -2,7 +2,6 @@ import os
 import platform
 import subprocess
 import threading
-import time
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -67,14 +66,14 @@ class MetadataMessage:
         self.duration = duration
 
 
-class Tracker:
+class UsageContext:
 
     def __init__(self,
-                 server_url,
+                 server_url: str,
                  config: LMCacheEngineConfig,
                  metadata: LMCacheEngineMetadata,
                  local_log: Optional[str] = None):
-        logger.info("Tracker initialized")
+        logger.info("Context initialized")
         self.server_url = server_url
         self.config = config
         self.metadata = metadata
@@ -85,11 +84,6 @@ class Tracker:
         self.send_engine_message()
         t = threading.Thread(target=self.send_metadata_message)
         t.start()
-
-    def dynamic_tracker(self):
-        while True:
-            time.sleep(120)
-            self.send_metadata_message()
 
     def send_message_server(self, msg, message_type):
         msg.message_type = message_type
@@ -233,3 +227,14 @@ class Tracker:
             pass
 
         return 'UNKNOWN'
+
+
+def InitializeUsageContext(config: LMCacheEngineConfig,
+                           metadata: LMCacheEngineMetadata,
+                           local_log: Optional[str] = None):
+    server_url = "http://34.236.19.149:8080/endpoint"
+    if os.getenv("LMCACHE_TRACK_USAGE") == "false":
+        return None
+    else:
+        logger.info("Initializing usage context .")
+        return UsageContext(server_url, config, metadata, local_log)
