@@ -6,15 +6,11 @@ The LMCacheConnector can (1) transfer KV caches between prefill vLLM worker
 (2) offload and share KV caches. Only (2) is supported for now.
 """
 
-from typing import TYPE_CHECKING, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, List, Tuple, Union
 
 import torch
-
-from vllm import _custom_ops as ops
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
-from vllm.distributed.kv_transfer.kv_lookup_buffer.simple_buffer import (
-    SimpleBuffer)
 from vllm.logger import init_logger
 from vllm.sequence import IntermediateTensors
 
@@ -36,18 +32,20 @@ class LMCacheConnector(KVConnectorBase):
         self.transfer_config = config.kv_transfer_config
         self.vllm_config = config
 
-        from lmcache.integration.vllm.vllm_adapter import (
-            init_lmcache_engine, lmcache_retrieve_kv, lmcache_store_kv,
-            StoreStatus, RetrieveStatus)
-        
-        logger.info(
-            "Initializing LMCacheConfig under kv_transfer_config %s",
-            self.transfer_config)
-        
+        from lmcache.integration.vllm.vllm_adapter import (RetrieveStatus,
+                                                           StoreStatus,
+                                                           init_lmcache_engine,
+                                                           lmcache_retrieve_kv,
+                                                           lmcache_store_kv)
+
+        logger.info("Initializing LMCacheConfig under kv_transfer_config %s",
+                    self.transfer_config)
+
         # TODO (Jiayi): Find model_config, parallel_config, and cache_config
-        self.engine = init_lmcache_engine(
-            config.model_config, config.parallel_config, config.cache_config)
-        
+        self.engine = init_lmcache_engine(config.model_config,
+                                          config.parallel_config,
+                                          config.cache_config)
+
         self.model_config = config.model_config
         self.parallel_config = config.parallel_config
         self.cache_config = config.cache_config
@@ -55,7 +53,6 @@ class LMCacheConnector(KVConnectorBase):
         self.lmcache_store_kv = lmcache_store_kv
         self.store_status = StoreStatus
         self.retrieve_status = RetrieveStatus
-        
 
     def recv_kv_caches_and_hidden_states(
         self, model_executable: torch.nn.Module,
@@ -66,13 +63,13 @@ class LMCacheConnector(KVConnectorBase):
 
         # TODO(Jiayi): This shouldn't be none for disagg prefill
         hidden_or_intermediate_states = None
-        
+
         # TODO (Jiayi): Only normal prefill is supported for now
         retrieve_status = [self.retrieve_status.PREFILL]
-        
+
         model_input, bypass_model_exec = self.lmcache_retrieve_kv(
-            model_executable, model_input,
-            self.cache_config, kv_caches, retrieve_status)
+            model_executable, model_input, self.cache_config, kv_caches,
+            retrieve_status)
 
         return hidden_or_intermediate_states, bypass_model_exec, model_input
 
@@ -91,17 +88,17 @@ class LMCacheConnector(KVConnectorBase):
             seq_ids = seq_group.seq_ids
             for seq_id in seq_ids:
                 num_reqs += 1
-        
+
         # TODO (Jiayi): Only normal prefill is supported for now
         store_status = [self.store_status.PREFILL] * num_reqs
         self.lmcache_store_kv(
-            self.model_config, 
+            self.model_config,
             self.parallel_config,
-            model_executable, model_input, 
+            model_executable,
+            model_input,
             kv_caches,
             store_status,
-            )
-        
+        )
 
     def close(self):
         self.engine.close()

@@ -11,9 +11,9 @@ class KVConnectorFactory:
     @staticmethod
     def create_connector(rank: int, local_rank: int,
                          config: "VllmConfig") -> KVConnectorBase:
-        supported_kv_connector = ["PyNcclConnector", 
-                                  "MooncakeConnector",
-                                  "LMCacheConnector"]
+        supported_kv_connector = [
+            "PyNcclConnector", "MooncakeConnector", "LMCacheConnector"
+        ]
         kv_connector = config.kv_transfer_config.kv_connector
         if kv_connector in supported_kv_connector:
             if kv_connector in ["PyNcclConnector", "MooncakeConnector"]:
