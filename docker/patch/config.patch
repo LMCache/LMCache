@@ -1,0 +1,13 @@
+--- original/config.py	2025-01-19 20:05:02.376220126 -0600
++++ config.py	2025-01-19 20:01:35.864391306 -0600
+@@ -2559,7 +2559,9 @@
+         return KVTransferConfig.model_validate_json(cli_value)
+ 
+     def model_post_init(self, __context: Any) -> None:
+-        supported_kv_connector = ["PyNcclConnector", "MooncakeConnector"]
++        supported_kv_connector = ["PyNcclConnector", 
++                                  "MooncakeConnector",
++                                  "LMCacheConnector"]
+         if all([
+                 self.kv_connector is not None, self.kv_connector
+                 not in supported_kv_connector
