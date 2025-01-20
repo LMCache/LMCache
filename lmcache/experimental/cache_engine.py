@@ -4,7 +4,6 @@ from typing import Dict, List, Optional
 import torch
 
 from lmcache.config import LMCacheEngineMetadata
-from lmcache.usage_context import InitializeUsageContext
 from lmcache.experimental.config import LMCacheEngineConfig
 from lmcache.experimental.gpu_connector import GPUConnectorInterface
 from lmcache.experimental.memory_management import (MemoryAllocatorInterface,
@@ -13,6 +12,7 @@ from lmcache.experimental.storage_backend.storage_manager import StorageManager
 from lmcache.experimental.token_database import (ChunkedTokenDatabase,
                                                  TokenDatabase)
 from lmcache.logging import init_logger
+from lmcache.usage_context import InitializeUsageContext
 from lmcache.utils import _lmcache_nvtx_annotate
 
 logger = init_logger(__name__)
