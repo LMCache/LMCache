@@ -61,7 +61,7 @@ class StorageManager:
         memory_obj = self.memory_allocator.allocate(shape, dtype)
         if not eviction:
             return memory_obj
-        
+
         assert isinstance(self.memory_allocator, PinMemoryAllocator)
         iter_hot_cache = iter(self.hot_cache)
         evict_keys = []
@@ -70,7 +70,7 @@ class StorageManager:
             evict_keys.append(evict_key)
             self.memory_allocator.free(self.hot_cache[evict_key])
             memory_obj = self.memory_allocator.allocate(shape, dtype)
-            
+
             if self.memory_allocator.allocator.num_active_allocations == 0:
                 break
         for key in evict_keys:
