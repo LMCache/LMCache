@@ -73,7 +73,6 @@ class UsageContext:
                  config: LMCacheEngineConfig,
                  metadata: LMCacheEngineMetadata,
                  local_log: Optional[str] = None):
-        logger.info("Context initialized")
         self.server_url = server_url
         self.config = config
         self.metadata = metadata
@@ -96,10 +95,10 @@ class UsageContext:
                 else:
                     data[key] = value
             if self.server_url is not None:
-                print('send messga to server url {}'.format(self.server_url))
+                logger.debug('context message updated')
                 global_http_client.post(self.server_url, json=data)
         except requests.exceptions.RequestException:
-            logger.debug("Failed to send usage data to server")
+            logger.debug("Unable to send lmcache context message")
 
     def send_message_local(self, msg, message_type):
         if self.local_log is None:
@@ -116,19 +115,16 @@ class UsageContext:
         env_message = self.track_env()
         self.send_message_server(env_message, 'EnvMessage')
         self.send_message_local(env_message, 'EnvMessage')
-        logger.info("Env message tracked")
 
     def send_engine_message(self):
         engine_message = self.track_engine()
         self.send_message_server(engine_message, 'EngineMessage')
         self.send_message_local(engine_message, 'EngineMessage')
-        logger.info("Engine message tracked")
 
     def send_metadata_message(self):
         metadata_message = self.track_metadata()
         self.send_message_server(metadata_message, 'MetadataMessage')
         self.send_message_local(metadata_message, 'MetadataMessage')
-        logger.info("Metadata message tracked")
 
     def track_env(self):
         provider = self._get_provider()
@@ -236,5 +232,5 @@ def InitializeUsageContext(config: LMCacheEngineConfig,
     if os.getenv("LMCACHE_TRACK_USAGE") == "false":
         return None
     else:
-        logger.info("Initializing usage context .")
+        logger.info("Initializing usage context.")
         return UsageContext(server_url, config, metadata, local_log)
