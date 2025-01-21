@@ -8,6 +8,7 @@ import torch
 from lmcache.config import LMCacheEngineConfig, LMCacheEngineMetadata
 from lmcache.logging import init_logger
 from lmcache.storage_backend import CreateStorageBackend
+from lmcache.usage_context import InitializeUsageContext
 from lmcache.utils import CacheEngineKey, KVCache, _lmcache_nvtx_annotate
 
 logger = init_logger(__name__)
@@ -36,6 +37,8 @@ class LMCacheEngine:
 
         self.engine_ = CreateStorageBackend(config, metadata)
         logger.debug(f"Current storage backend type {type(self.engine_)}")
+
+        InitializeUsageContext(config, metadata)
 
     def _make_key(self, chunk_hash: str, fmt: str) -> CacheEngineKey:
         return CacheEngineKey(

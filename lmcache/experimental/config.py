@@ -5,6 +5,8 @@ from typing import Any, Optional
 
 import yaml
 
+import lmcache.config as orig_config
+
 
 @dataclass
 class LMCacheEngineConfig:
@@ -29,7 +31,7 @@ class LMCacheEngineConfig:
     def from_defaults(
         chunk_size: int = 256,
         local_cpu: bool = True,
-        max_local_cpu_size: int = 5,
+        max_local_cpu_size: float = 5.0,
         local_disk: Optional[str] = None,
         max_local_disk_size: int = 0,
         remote_url: Optional[str] = "redis://localhost:6379",
@@ -161,7 +163,7 @@ class LMCacheEngineConfig:
             parse_env(get_env_name("chunk_size"), config.chunk_size))
         config.local_cpu = parse_env(get_env_name("local_cpu"),
                                      config.local_cpu)
-        config.max_local_cpu_size = int(
+        config.max_local_cpu_size = float(
             parse_env(get_env_name("max_local_cpu_size"),
                       config.max_local_cpu_size))
         config.local_disk = parse_env(get_env_name("local_disk"),
@@ -185,3 +187,20 @@ class LMCacheEngineConfig:
                       config.blend_min_tokens))
 
         return config
+
+    def to_original_config(self) -> orig_config.LMCacheEngineConfig:
+        # NOTE: This function is purely for UsageContext compatibility
+        return orig_config.LMCacheEngineConfig(
+            chunk_size=self.chunk_size,
+            local_device="cpu" if self.local_cpu else "cuda",
+            max_local_cache_size=int(self.max_local_cpu_size),
+            remote_url=None,
+            remote_serde=None,
+            pipelined_backend=False,
+            save_decode_cache=self.save_decode_cache,
+            enable_blending=self.enable_blending,
+            blend_recompute_ratio=self.blend_recompute_ratio,
+            blend_min_tokens=self.blend_min_tokens,
+            blend_separator="[BLEND_SEP]",
+            blend_add_special_in_precomp=False,
+        )

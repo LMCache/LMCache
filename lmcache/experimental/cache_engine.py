@@ -12,6 +12,7 @@ from lmcache.experimental.storage_backend.storage_manager import StorageManager
 from lmcache.experimental.token_database import (ChunkedTokenDatabase,
                                                  TokenDatabase)
 from lmcache.logging import init_logger
+from lmcache.usage_context import InitializeUsageContext
 from lmcache.utils import _lmcache_nvtx_annotate
 
 logger = init_logger(__name__)
@@ -58,6 +59,8 @@ class LMCacheEngine:
         self.storage_manager = StorageManager(config, metadata,
                                               self.memory_allocator)
 
+        InitializeUsageContext(config.to_original_config(), metadata)
+
     @_lmcache_nvtx_annotate
     @torch.inference_mode()
     def store(self,
@@ -89,12 +92,10 @@ class LMCacheEngine:
             num_tokens = end - start
             kv_shape = self.gpu_connector.get_shape(num_tokens)
             kv_dtype = self.metadata.kv_dtype
-            memory_obj = self.memory_allocator.allocate(kv_shape, kv_dtype)
+            memory_obj = self.storage_manager.allocate(kv_shape, kv_dtype)
             if memory_obj is None:
                 logger.warning("Failed to allocate memory for the KV cache.\n"
                                "The KV cache will not be stored.")
-
-                # TODO: Need eviction here
                 break
 
             # Put the memory object to the storage backend

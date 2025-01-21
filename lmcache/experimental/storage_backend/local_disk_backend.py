@@ -17,6 +17,7 @@ from lmcache.experimental.memory_management import (BufferMemoryObj,
                                                     MemoryFormat, MemoryObj)
 from lmcache.experimental.storage_backend.abstract_backend import \
     StorageBackendInterface
+from lmcache.experimental.storage_backend.evictor import LRUEvictor, PutStatus
 from lmcache.logging import init_logger
 from lmcache.utils import (CacheEngineKey, DiskCacheMetadata,
                            _lmcache_nvtx_annotate)
@@ -147,14 +148,11 @@ class LocalDiskBackend(StorageBackendInterface):
             os.makedirs(self.path)
             logger.info(f"Created local disk cache directory: {self.path}")
 
-        # TODO(Jiayi): Size and evictor should be configured
+        # Initialize the evictor
+        self.evictor = LRUEvictor(max_cache_size=config.max_local_disk_size)
 
     def __str__(self):
         return self.__class__.__name__
-
-    def contains(self, key: CacheEngineKey) -> bool:
-        with self.disk_lock:
-            return key in self.dict
 
     def _key_to_path(
         self,
@@ -162,20 +160,50 @@ class LocalDiskBackend(StorageBackendInterface):
     ) -> str:
         return self.path + key.to_string().replace("/", "-") + ".pt"
 
+    def contains(self, key: CacheEngineKey) -> bool:
+        with self.disk_lock:
+            return key in self.dict
+
+    def remove(
+        self,
+        key: CacheEngineKey,
+    ) -> None:
+        path = self.dict[key].path
+        self.dict.pop(key)
+        os.remove(path)
+
     def insert_key(self, key: CacheEngineKey, memory_obj: MemoryObj) -> None:
         path = self._key_to_path(key)
         size = memory_obj.get_size()
         shape = memory_obj.metadata.shape
         dtype = memory_obj.metadata.dtype
         with self.disk_lock:
+            # Need to do reinsert to update cache recency
+            if key in self.dict:
+                self.dict.pop(key)
+
             self.dict[key] = DiskCacheMetadata(path, size, shape, dtype)
 
     def submit_put_task(
         self,
         key: CacheEngineKey,
         memory_obj: MemoryObj,
-    ) -> Future:
+    ) -> Optional[Future]:
         assert memory_obj.tensor is not None
+
+        # Update cache recency
+        self.disk_lock.acquire()
+        evict_keys, put_status = self.evictor.update_on_put(
+            self.dict, memory_obj.get_physical_size())
+        if put_status == PutStatus.ILLEGAL:
+            self.disk_lock.release()
+            return None
+        # evict caches
+        for evict_key in evict_keys:
+            self.remove(evict_key)
+
+        self.disk_lock.release()
+
         path = self._key_to_path(key)
         if self.use_ipc:
             # TODO(Jiayi): Please get rid of this `clone()`
@@ -199,6 +227,10 @@ class LocalDiskBackend(StorageBackendInterface):
         if key not in self.dict:
             self.disk_lock.release()
             return None
+
+        # Update cache recency
+        self.evictor.update_on_hit(key, self.dict)
+
         path = self.dict[key].path
         dtype = self.dict[key].dtype
         shape = self.dict[key].shape
@@ -225,6 +257,10 @@ class LocalDiskBackend(StorageBackendInterface):
         if key not in self.dict:
             self.disk_lock.release()
             return None
+
+        # Update cache recency
+        self.evictor.update_on_hit(key, self.dict)
+
         path = self.dict[key].path
         dtype = self.dict[key].dtype
         shape = self.dict[key].shape

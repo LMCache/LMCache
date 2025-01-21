@@ -6,5 +6,7 @@ redis
 nvtx
 safetensors
 transformers
+psutil
+aiohttp
 torchac_cuda>=0.2.5
 sortedcontainers

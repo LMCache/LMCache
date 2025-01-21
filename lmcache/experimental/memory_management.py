@@ -80,6 +80,9 @@ class MemoryObj:
         size_in_bytes = num_elements * element_size
         return size_in_bytes
 
+    def get_physical_size(self) -> int:
+        return self.metadata.phy_size
+
     @property
     def tensor(self) -> Optional[torch.Tensor]:
         if not self.valid:

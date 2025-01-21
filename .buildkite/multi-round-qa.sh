@@ -16,7 +16,7 @@ pip install -r ./benchmarks/requirements.txt
 set +x
 
 # Start the server
-lmcache_vllm serve mistralai/Mistral-7B-Instruct-v0.2 --disable-log-requests > lmcache_vllm.log 2>&1 &
+LMCACHE_TRACK_USAGE="false" lmcache_vllm serve mistralai/Mistral-7B-Instruct-v0.2 --disable-log-requests > lmcache_vllm.log 2>&1 &
 echo "Waiting for service to start..."
 timeout=90  # Timeout duration in seconds
 elapsed=0   # Track elapsed time
