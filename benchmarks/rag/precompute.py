@@ -68,7 +68,6 @@ def precompute_all_kv(config: PrecomputeConfig) -> Tuple[int, int, str]:
     current_idx = start_idx
     round_up_token_cnt = config.kv_storage_token_unit
     assert round_up_token_cnt >= 1
-    doc_token_cnt = 0
     while True:
         if end_idx >= 0:
             if current_idx >= end_idx:
@@ -86,7 +85,6 @@ def precompute_all_kv(config: PrecomputeConfig) -> Tuple[int, int, str]:
             doc_prompts, _ = build_fewshot_prompt(example)
         # NOTE: Do not need chat template here.
         # It should only affect system prompt and query prompt.
-        temp_doc_token_cnt = 0
         token_cnt = 0
         for doc_prompt in doc_prompts:
             assert len(doc_prompt) > 0
@@ -96,7 +94,6 @@ def precompute_all_kv(config: PrecomputeConfig) -> Tuple[int, int, str]:
             if not with_bos:
                 if input_comps[0] == tokenizer.bos_token_id:
                     temp_cnt -= 1
-            temp_doc_token_cnt += temp_cnt
             # Add doc token count before round up.
             temp_cnt = ((temp_cnt + round_up_token_cnt - 1) //
                         round_up_token_cnt) * round_up_token_cnt
@@ -109,9 +106,8 @@ def precompute_all_kv(config: PrecomputeConfig) -> Tuple[int, int, str]:
             precompute_kv.precompute_kv(prompt)
         current_idx += 1
         current_size_taken += this_case_size
-        doc_token_cnt += temp_doc_token_cnt
 
-    return start_idx, current_idx, precompute_kv.model, doc_token_cnt
+    return start_idx, current_idx, precompute_kv.model
 
 
 def parse_arguments():
@@ -206,8 +202,8 @@ def run_precompute(args):
                               api_key=args.api_key,
                               base_url=args.base_url,
                               kv_precision=kv_precision)
-    start_idx, end_idx, model_name, doc_token_cnt = precompute_all_kv(config)
-    return start_idx, end_idx, model_name, doc_token_cnt
+    start_idx, end_idx, model_name = precompute_all_kv(config)
+    return start_idx, end_idx, model_name
 
 
 def main():

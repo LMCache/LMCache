@@ -59,8 +59,6 @@ class WorkloadConfig:
     max_tokens: int
     # Model name for openai API.
     model_api_name: str
-    # Document token count.
-    doc_token_cnt: int
 
 
 @dataclass
@@ -151,10 +149,6 @@ def parse_arguments():
                         type=str,
                         default="",
                         help="Model API name.")
-    parser.add_argument("--doc-token-cnt",
-                        type=int,
-                        default=-1,
-                        help="Document token count.")
     parser.add_argument("--step-interval",
                         type=float,
                         default=0.02,
@@ -250,7 +244,6 @@ class RAGManager:
         eval_dataset = eval_dataset[start_index:end_index]
         if workload_config.shuffle:
             random.shuffle(eval_dataset)
-        self._doc_token_cnt = workload_config.doc_token_cnt
         self._prompts = []
         self._answers = []
         self._build_method = workload_config.prompt_build_method
@@ -339,15 +332,11 @@ class RAGManager:
         })
         total_time = end_time - start_time
         thput = cnt / total_time
-        doc_token_ratio = None
-        if self._doc_token_cnt >= 0:
-            doc_token_ratio = self._doc_token_cnt / sum(self._prefill_tok_cnt)
         logger.info(
             f"Summary: {cnt} requests, average_ttft={avg_ttft} (second)\n"
             f" average_tpot={avg_tpot} (second)\n"
             f"throughput={thput} (req/s)\n"
-            f"average_quality={avg_quality}\n"
-            f"doc_token_ratio={doc_token_ratio}")
+            f"average_quality={avg_quality}\n")
         return df
 
 
@@ -372,8 +361,7 @@ def run_rag(args):
                                      query_prompt=args.query_prompt,
                                      prompt_build_method=build_prompt_method,
                                      max_tokens=args.max_tokens,
-                                     model_api_name=args.model_api_name,
-                                     doc_token_cnt=args.doc_token_cnt)
+                                     model_api_name=args.model_api_name)
     executor = RequestExecutor(base_url=args.base_url,
                                api_key=args.api_key,
                                prompt_build_method=build_prompt_method,
@@ -426,7 +414,7 @@ def main():
         logger = init_logger(__name__, level=logging.DEBUG)
     if not args.skip_precompute:
         from precompute import run_precompute
-        st_idx, ed_idx, model, doc_token_cnt = run_precompute(args)
+        st_idx, ed_idx, model = run_precompute(args)
         logger.info(f"Precompute finished, start index={st_idx}, "
                     f"end index={ed_idx}, model {model}")
         assert st_idx == args.start_index
@@ -434,8 +422,6 @@ def main():
             args.end_index = ed_idx
         if len(args.model_api_name) == 0:
             args.model_api_name = model
-        if args.doc_token_cnt < 0:
-            args.doc_token_cnt = doc_token_cnt
     else:
         if len(args.model_api_name) == 0:
             args.model_api_name = args.model
