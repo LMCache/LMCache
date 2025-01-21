@@ -44,7 +44,8 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
         raise NotImplementedError
 
     @abc.abstractmethod
-    def submit_put_task(self, key: CacheEngineKey, obj: MemoryObj) -> Future:
+    def submit_put_task(self, key: CacheEngineKey,
+                        obj: MemoryObj) -> Optional[Future]:
         """
         An async function to put the MemoryObj into the storage backend.
 

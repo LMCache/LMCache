@@ -31,7 +31,7 @@ class LMCacheEngineConfig:
     def from_defaults(
         chunk_size: int = 256,
         local_cpu: bool = True,
-        max_local_cpu_size: int = 5,
+        max_local_cpu_size: float = 5.0,
         local_disk: Optional[str] = None,
         max_local_disk_size: int = 0,
         remote_url: Optional[str] = "redis://localhost:6379",
@@ -163,7 +163,7 @@ class LMCacheEngineConfig:
             parse_env(get_env_name("chunk_size"), config.chunk_size))
         config.local_cpu = parse_env(get_env_name("local_cpu"),
                                      config.local_cpu)
-        config.max_local_cpu_size = int(
+        config.max_local_cpu_size = float(
             parse_env(get_env_name("max_local_cpu_size"),
                       config.max_local_cpu_size))
         config.local_disk = parse_env(get_env_name("local_disk"),

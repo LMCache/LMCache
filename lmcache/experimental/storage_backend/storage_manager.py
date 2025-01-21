@@ -1,15 +1,17 @@
 import threading
+#from sortedcontainers import SortedDict
+from collections import OrderedDict
 from concurrent.futures import Future
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 
 import torch
-from sortedcontainers import SortedDict
 
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.experimental.config import LMCacheEngineConfig
 from lmcache.experimental.memory_management import (BufferMemoryObj,
                                                     MemoryAllocatorInterface,
-                                                    MemoryFormat, MemoryObj)
+                                                    MemoryFormat, MemoryObj,
+                                                    PinMemoryAllocator)
 from lmcache.experimental.storage_backend import CreateStorageBackends
 from lmcache.experimental.storage_backend.abstract_backend import \
     StorageBackendInterface
@@ -29,7 +31,7 @@ class StorageManager:
                  metadata: LMCacheEngineMetadata,
                  allocator: MemoryAllocatorInterface):
         self.memory_allocator = allocator
-        self.hot_cache = SortedDict()
+        self.hot_cache: OrderedDict[CacheEngineKey, MemoryObj] = OrderedDict()
         self.use_hot = config.local_cpu
 
         #TODO: remove hardcode
@@ -44,6 +46,41 @@ class StorageManager:
             self.put_tasks[backend_name] = {}
 
         self.manager_lock = threading.Lock()
+
+    def allocate(
+        self,
+        shape: torch.Size,
+        dtype: torch.dtype,
+        eviction=True,
+    ) -> Optional[MemoryObj]:
+        """
+        Allocate memory object with memory allocator.
+        Use LRU evictor if eviction is enabled.
+        """
+        self.manager_lock.acquire()
+        memory_obj = self.memory_allocator.allocate(shape, dtype)
+        if not eviction:
+            self.manager_lock.release()
+            return memory_obj
+
+        assert isinstance(self.memory_allocator, PinMemoryAllocator)
+        iter_hot_cache = iter(self.hot_cache)
+        evict_keys = []
+        while memory_obj is None:
+            evict_key = next(iter_hot_cache)
+            evict_keys.append(evict_key)
+            self.memory_allocator.free(self.hot_cache[evict_key])
+            memory_obj = self.memory_allocator.allocate(shape, dtype)
+            logger.debug("Evicting 1 chunk from hot cache")
+            # TODO(Jiayi): move this before the loop
+            # In this way, we don't need to do eviction for big objects
+            if self.memory_allocator.allocator.num_active_allocations == 0:
+                break
+        for evict_key in evict_keys:
+            self.hot_cache.pop(evict_key)
+
+        self.manager_lock.release()
+        return memory_obj
 
     def put_callback(self, future, backend_name, key):
         """
@@ -82,10 +119,18 @@ class StorageManager:
         storage manager) or has been stored (handled by storage backend).
         """
         self.manager_lock.acquire()
-
         if self.use_hot:
+            # During overwrite, we need to free the old memory object
+            # to avoid memory leak.
+            # NOTE(Jiayi): overwrite should not happen, at least for
+            # prefix caching
+            if key in self.hot_cache:
+                old_memory_obj = self.hot_cache.pop(key)
+                self.memory_allocator.free(old_memory_obj)
+
             self.hot_cache[key] = memory_obj
 
+        # TODO (Jiayi): the following for loop should be reconsidered
         for backend_name in self.storage_backends:
             if key in self.put_tasks[backend_name]:
                 if not self.use_hot:
@@ -94,9 +139,14 @@ class StorageManager:
                 return
         self.manager_lock.release()
 
+        ever_put = False
         for backend_name, backend in self.storage_backends.items():
             put_task = backend.submit_put_task(key, memory_obj)
 
+            if put_task is None:
+                continue
+
+            ever_put = True
             # For debugging purpose
             #backend.put_blocking(key, memory_obj)
 
@@ -108,7 +158,15 @@ class StorageManager:
             self.manager_lock.release()
             put_task.add_done_callback(lambda_callback)
 
-    def get(self, key: CacheEngineKey) -> Optional[BufferMemoryObj]:
+        # TODO(Jiayi): this part looks messy
+        self.manager_lock.acquire()
+        if ever_put is False and key not in self.hot_cache:
+            self.memory_allocator.free(memory_obj)
+            logger.warning(f"Put failed for key {key}")
+        self.manager_lock.release()
+
+    def get(self, key: CacheEngineKey
+            ) -> Optional[Union[MemoryObj, BufferMemoryObj]]:
         """
         Blocking function to get the memory object from the storages.
         """
@@ -134,6 +192,7 @@ class StorageManager:
         self.manager_lock.acquire()
         memory_obj = self.hot_cache.get(key, None)
         if memory_obj is not None:
+            self.hot_cache.move_to_end(key)
             self.manager_lock.release()
             return memory_obj
 
