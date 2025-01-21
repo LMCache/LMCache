@@ -116,19 +116,16 @@ class UsageContext:
         env_message = self.track_env()
         self.send_message_server(env_message, 'EnvMessage')
         self.send_message_local(env_message, 'EnvMessage')
-        logger.info("Env message tracked")
 
     def send_engine_message(self):
         engine_message = self.track_engine()
         self.send_message_server(engine_message, 'EngineMessage')
         self.send_message_local(engine_message, 'EngineMessage')
-        logger.info("Engine message tracked")
 
     def send_metadata_message(self):
         metadata_message = self.track_metadata()
         self.send_message_server(metadata_message, 'MetadataMessage')
         self.send_message_local(metadata_message, 'MetadataMessage')
-        logger.info("Metadata message tracked")
 
     def track_env(self):
         provider = self._get_provider()

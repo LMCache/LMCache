@@ -32,11 +32,9 @@ class LMCacheConnector(KVConnectorBase):
         self.transfer_config = config.kv_transfer_config
         self.vllm_config = config
 
-        from lmcache.integration.vllm.vllm_adapter import (RetrieveStatus,
-                                                           StoreStatus,
-                                                           init_lmcache_engine,
-                                                           lmcache_retrieve_kv,
-                                                           lmcache_store_kv)
+        from lmcache.integration.vllm.vllm_adapter import (
+            RetrieveStatus, StoreStatus, init_lmcache_engine,
+            lmcache_retrieve_kv, lmcache_should_store, lmcache_store_kv)
 
         logger.info("Initializing LMCacheConfig under kv_transfer_config %s",
                     self.transfer_config)
@@ -51,6 +49,7 @@ class LMCacheConnector(KVConnectorBase):
         self.cache_config = config.cache_config
         self.lmcache_retrieve_kv = lmcache_retrieve_kv
         self.lmcache_store_kv = lmcache_store_kv
+        self.lmcache_should_store = lmcache_should_store
         self.store_status = StoreStatus
         self.retrieve_status = RetrieveStatus
 
@@ -90,10 +89,12 @@ class LMCacheConnector(KVConnectorBase):
                 num_reqs += 1
 
         # TODO (Jiayi): Only normal prefill is supported for now
-        store_status = [self.store_status.PREFILL] * num_reqs
+        #store_status = [self.store_status.PREFILL] * num_reqs
+        store_status = self.lmcache_should_store(model_input)
         self.lmcache_store_kv(
             self.model_config,
             self.parallel_config,
+            self.cache_config,
             model_executable,
             model_input,
             kv_caches,
