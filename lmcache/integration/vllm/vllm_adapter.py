@@ -280,15 +280,14 @@ def lmcache_should_retrieve(
 
 # FIXME(Jiayi): Need to modify this for lmcache_connector
 # This function is not used for now
-def lmcache_should_store(model_input: "ModelInputForGPUWithSamplingMetadata",
-                         kv_caches: List[torch.Tensor]) -> List[StoreStatus]:
+def lmcache_should_store(
+    model_input: "ModelInputForGPUWithSamplingMetadata",
+) -> List[StoreStatus]:
     """Check should we store KV into LMCache for the current model_input.
 
     :param model_input: The model input for the current request.
     :type model_input: ModelInputForGPUWithSamplingMetadata
 
-    :param kv_caches: The paged memory
-    :type kv_caches: List[torch.Tensor]
 
     :return: A list of StoreStatus.
              StoreStatus.PREFILL/DECODE/CHUNK_PREFILL if 
@@ -324,43 +323,29 @@ def lmcache_should_store(model_input: "ModelInputForGPUWithSamplingMetadata",
     if is_blend_effective(attn_meta):
         return store_status
 
-    # TODO (yihua): Current implementation is in GPUModelRunner, so we do
-    #               not need to check the type of model_runner
-    #from vllm.worker.model_runner import GPUModelRunnerBase
-    #if not isinstance(model_runner, GPUModelRunnerBase):
-    #    return False
-
-    # check if the current run is profiling
-    is_profile_run = (kv_caches is None) or (kv_caches[0] is None)
-
-    if is_profile_run:
-        return store_status
-
-    # FIXME(Jiayi): need to support chunked prefill (batch prefill and decode)
-    # check if the current run is prefill
     is_all_prefill_run = ((attn_meta.num_prefills == len(seq_lens))\
         and (prefill_meta is not None))
 
     if is_all_prefill_run:
-        assert model_input.seq_group_metadata_list is not None
         assert model_input.sampling_metadata is not None
+        seq_group_list = model_input.sampling_metadata.seq_groups
+        assert seq_group_list is not None
 
         selected_token_indices = \
             model_input.sampling_metadata.selected_token_indices
-        seq_group_metadata_list = model_input.seq_group_metadata_list
+
         seq_data_idx = 0
         selected_token_indices_idx = 0
-        for seq_group_idx, seq_group_metadata in enumerate(
-                seq_group_metadata_list):
+        for seq_group_idx, seq_group in enumerate(seq_group_list):
 
             # TODO(Jiayi): Figure out scenarios (other than chunk prefill)
             # where `do_sample`` is False
-            if not seq_group_metadata.do_sample:
+            if not seq_group.do_sample:
                 store_status[seq_data_idx] = StoreStatus.CHUNK_PREFILL
                 seq_data_idx += 1
                 continue
 
-            for seqid, seq_data in seq_group_metadata.seq_data.items():
+            for seqid, seq_data in seq_group.seq_data.items():
                 if seq_data.get_len(
                 ) - 1 != selected_token_indices[selected_token_indices_idx]:
                     # last chunk in chunk prefill
@@ -384,6 +369,7 @@ def lmcache_should_store(model_input: "ModelInputForGPUWithSamplingMetadata",
 def lmcache_store_kv(
     model_config: ModelConfig,
     parallel_config: ParallelConfig,
+    cache_config: CacheConfig,
     model_executable: torch.nn.Module,
     model_input: "ModelInputForGPUWithSamplingMetadata",
     kv_caches: List[torch.Tensor],
@@ -418,6 +404,8 @@ def lmcache_store_kv(
     query_start_loc = model_input.attn_metadata.query_start_loc
     assert query_start_loc is not None
 
+    block_tables = model_input.attn_metadata.block_tables
+
     # TODO (Jiayi): commenting the following out for now
     # as Turing architecture is not supported yet
     # For Turing GPU
@@ -432,7 +420,7 @@ def lmcache_store_kv(
 
     next_start_pos = 0
 
-    for seq_group in seq_group_list:
+    for seq_group_idx, seq_group in enumerate(seq_group_list):
         for seqid, seq_data in seq_group.seq_data.items():
             status = store_status[seq_data_idx]
             # TODO (Jiayi): can chunk prefill and vllm prefix
@@ -462,7 +450,37 @@ def lmcache_store_kv(
             end_pos = start_pos + vllm_num_required_tokens
             next_start_pos = end_pos
 
-            slot_mapping_seq = slot_mapping[start_pos:end_pos]
+            vllm_num_computed_tokens = seq_len - vllm_num_required_tokens
+            if vllm_num_computed_tokens > 0:
+                # TODO (Jiayi): what if vllm_num_computed > skip_leading_tokens
+                if skip_leading_tokens >= vllm_num_computed_tokens:
+                    slot_mapping_req_full = torch.full(
+                        (seq_len, ),
+                        -1,
+                        device=slot_mapping.device,
+                        dtype=slot_mapping.dtype)
+                    slot_mapping_req_full[vllm_num_computed_tokens:] = \
+                        slot_mapping[start_pos:end_pos]
+                else:
+                    # NOTE(Jiayi): the cache is stored even if it's in vllm
+                    # as long as it's not in lmc
+                    assert block_tables is not None
+                    block_table_full = block_tables[seq_group_idx]
+                    vllm_block_size = cache_config.block_size
+
+                    n_block = len(block_table_full)
+                    indices = torch.arange(
+                        vllm_block_size,
+                        device=slot_mapping.device,
+                        dtype=slot_mapping.dtype).repeat(n_block)
+                    slot_mapping_req_full = vllm_block_size \
+                        * block_table_full.repeat_interleave(vllm_block_size)\
+                        + indices
+                    slot_mapping_req_full = slot_mapping_req_full[:seq_len]
+
+            else:
+                slot_mapping_req_full = slot_mapping[start_pos:end_pos]
+
             if skip_leading_tokens < seq_len:
                 assert skip_leading_tokens % engine.config.chunk_size == 0
 
@@ -471,19 +489,18 @@ def lmcache_store_kv(
 
                 # TODO(Jiayi): prefix caching and chunk prefill
                 # might error here. `slot_mapping_seq` could be wrong
-                if len(slot_mapping) > 0:
 
-                    stored_token_num = seq_len - skip_leading_tokens
-                    skipped_token_num = skip_leading_tokens
-                    kv_tensors_mask = torch.ones_like(current_tokens,
-                                                      dtype=torch.bool)
-                    kv_tensors_mask[:skipped_token_num] = False
+                stored_token_num = seq_len - skip_leading_tokens
+                skipped_token_num = skip_leading_tokens
+                kv_tensors_mask = torch.ones_like(current_tokens,
+                                                  dtype=torch.bool)
+                kv_tensors_mask[:skipped_token_num] = False
 
-                    engine.store(current_tokens.cpu(),
-                                 kv_tensors_mask,
-                                 kvcaches=kv_caches,
-                                 slot_mapping=slot_mapping_seq,
-                                 offset=skipped_token_num)
+                engine.store(current_tokens.cpu(),
+                             kv_tensors_mask,
+                             kvcaches=kv_caches,
+                             slot_mapping=slot_mapping_req_full,
+                             offset=skipped_token_num)
             else:
                 stored_token_num = 0
                 skipped_token_num = seq_len
@@ -580,10 +597,19 @@ def lmcache_retrieve_kv(
             # (e.g., chunk prefill, prefix caching)
             vllm_num_computed_tokens = total_seq_len - vllm_num_required_tokens
 
+            # No need to retrieve from lmc if the number of tokens
+            # to be retrieved is small
+            lmc_chunk_size = engine.config.chunk_size
+            if vllm_num_required_tokens < lmc_chunk_size:
+                num_computed_tokens_list.append(vllm_num_computed_tokens)
+                lmc_num_computed_tokens_list.append(0)
+                idx += 1
+                num_request_not_found += 1
+                continue
+
             # construct token mesk to indicate what tokens should be retrieved
             # from lmc. Tokens computed in vllm already should be skipped
             token_mask = torch.ones_like(full_token_tensor, dtype=torch.bool)
-            lmc_chunk_size = engine.config.chunk_size
             vllm_num_computed_tokens_align = vllm_num_computed_tokens\
                 // lmc_chunk_size * lmc_chunk_size
             token_mask[:vllm_num_computed_tokens_align] = False
@@ -606,8 +632,11 @@ def lmcache_retrieve_kv(
                 token_mask,
                 kvcaches=kv_caches,
                 slot_mapping=slot_mapping_req_full)
-            lmc_num_computed_tokens = torch.sum(ret_token_mask).item() - \
-                (vllm_num_computed_tokens - vllm_num_computed_tokens_align)
+            lmc_num_computed_tokens = max(
+                    torch.sum(ret_token_mask).item() - \
+                    (vllm_num_computed_tokens - vllm_num_computed_tokens_align),
+                    0
+                )
 
             assert isinstance(lmc_num_computed_tokens, int)
 
