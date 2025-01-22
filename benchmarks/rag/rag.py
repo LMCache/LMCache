@@ -78,7 +78,9 @@ def parse_arguments():
         description="Parse RAG benchmark configurations.")
     parser.add_argument("--qps", type=float, required=True, help="Overall QPS")
     parser.add_argument("--model", type=str, required=True, help="Model name")
-    parser.add_argument("--tokenizer", type=str, default="", 
+    parser.add_argument("--tokenizer",
+                        type=str,
+                        default="",
                         help="Tokenizer name")
     parser.add_argument("--dataset",
                         type=str,
@@ -253,7 +255,8 @@ class RAGManager:
             self._generation_tok_cnt.append(None)
             self._ttft.append(None)
             self._tpot.append(None)
-        self._tokenizer = AutoTokenizer.from_pretrained(workload_config.tokenizer)
+        self._tokenizer = AutoTokenizer.from_pretrained(
+            workload_config.tokenizer)
         self._last_request_time = -1.0
         self._last_request_index = 0
         assert workload_config.qps > 0

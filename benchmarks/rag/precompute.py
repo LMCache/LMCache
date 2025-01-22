@@ -118,8 +118,10 @@ def parse_arguments():
     parser = argparse.ArgumentParser(
         description="Parse RAG precompute configurations.")
     parser.add_argument("--model", type=str, required=True, help="Model name")
-    parser.add_argument("--tokenizer", 
-                        type=str, default="", help="Tokenizer name")
+    parser.add_argument("--tokenizer",
+                        type=str,
+                        default="",
+                        help="Tokenizer name")
     parser.add_argument("--model-config",
                         type=str,
                         default="",
@@ -226,6 +228,7 @@ def main():
         args.model_config = args.model
     start_idx, end_idx, model_name = run_precompute(args)
     print(f"Precompute from {start_idx} to {end_idx} for model {model_name}")
+
 
 if __name__ == "__main__":
     main()
