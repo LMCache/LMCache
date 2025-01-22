@@ -39,6 +39,8 @@ class WorkloadConfig:
     qps: float
     # Model name
     model: str
+    # Tokenizer name
+    tokenizer: str
     # Dataset.
     dataset: str
     # Start index of the workload
@@ -57,8 +59,6 @@ class WorkloadConfig:
     prompt_build_method: PromptBuildMethodType
     # Max tokens for each generation.
     max_tokens: int
-    # Model name for openai API.
-    model_api_name: str
 
 
 @dataclass
@@ -78,6 +78,8 @@ def parse_arguments():
         description="Parse RAG benchmark configurations.")
     parser.add_argument("--qps", type=float, required=True, help="Overall QPS")
     parser.add_argument("--model", type=str, required=True, help="Model name")
+    parser.add_argument("--tokenizer", type=str, default="", 
+                        help="Tokenizer name")
     parser.add_argument("--dataset",
                         type=str,
                         required=True,
@@ -119,21 +121,9 @@ def parse_arguments():
                         default="summary.csv",
                         help="The output file name (ended with csv or txt) "
                         "for the summary csv and txt")
-    parser.add_argument("--skip-precompute",
+    parser.add_argument("--warmup",
                         action="store_true",
-                        help="Skip precompute")
-    parser.add_argument("--kv-storage-size",
-                        type=str,
-                        default="",
-                        help="KV storage size")
-    parser.add_argument("--kv-storage-token-unit",
-                        type=int,
-                        default=256,
-                        help="KV storage token unit")
-    parser.add_argument("--kv-precision-bit",
-                        type=int,
-                        default=16,
-                        help="KV cache precision bit")
+                        help="Whether to enable warmup")
     parser.add_argument("--time",
                         type=int,
                         default=None,
@@ -145,10 +135,6 @@ def parse_arguments():
                         type=int,
                         default=32,
                         help="Max tokens for each generation")
-    parser.add_argument("--model-api-name",
-                        type=str,
-                        default="",
-                        help="Model API name.")
     parser.add_argument("--step-interval",
                         type=float,
                         default=0.02,
@@ -227,9 +213,10 @@ def warmup_engine(executor: RequestExecutor):
     logger.info("Warming up the engine")
     for i in range(10):
         prompt = f"WARMUP: Hi, I'm user {i}. Here are some text: {'hi ' * 100}."
-        executor.launch_request(prompt, 100, lambda x: None)
+        executor.launch_request(-1, prompt, 100, lambda x: None)
 
     AsyncLoopWrapper.WaitLoop()
+    logger.info("Warm up finished.")
 
 
 class RAGManager:
@@ -266,7 +253,7 @@ class RAGManager:
             self._generation_tok_cnt.append(None)
             self._ttft.append(None)
             self._tpot.append(None)
-        self._tokenizer = AutoTokenizer.from_pretrained(workload_config.model)
+        self._tokenizer = AutoTokenizer.from_pretrained(workload_config.tokenizer)
         self._last_request_time = -1.0
         self._last_request_index = 0
         assert workload_config.qps > 0
@@ -352,6 +339,7 @@ def run_rag(args):
             f"Invalid prompt build method {build_prompt_method_str}")
     workload_config = WorkloadConfig(qps=args.qps,
                                      model=args.model,
+                                     tokenizer=args.tokenizer,
                                      dataset=args.dataset,
                                      start_index=args.start_index,
                                      end_index=args.end_index,
@@ -360,13 +348,12 @@ def run_rag(args):
                                      separator=args.separator,
                                      query_prompt=args.query_prompt,
                                      prompt_build_method=build_prompt_method,
-                                     max_tokens=args.max_tokens,
-                                     model_api_name=args.model_api_name)
+                                     max_tokens=args.max_tokens)
     executor = RequestExecutor(base_url=args.base_url,
                                api_key=args.api_key,
                                prompt_build_method=build_prompt_method,
-                               model=args.model_api_name)
-    if args.skip_precompute:
+                               model=args.model)
+    if args.warmup:
         warmup_engine(executor)
     manager = RAGManager(workload_config)
     step_interval = args.step_interval
@@ -407,24 +394,13 @@ def main():
         args.system_prompt = system_prompt_set[build_prompt_method]
     if len(args.query_prompt) == 0:
         args.query_prompt = query_prompt_set[build_prompt_method]
+    if len(args.tokenizer) == 0:
+        args.tokenizer = args.model
     args.system_prompt = args.system_prompt.encode().decode('unicode_escape')
     args.query_prompt = args.query_prompt.encode().decode('unicode_escape')
     if args.verbose:
         global logger
         logger = init_logger(__name__, level=logging.DEBUG)
-    if not args.skip_precompute:
-        from precompute import run_precompute
-        st_idx, ed_idx, model = run_precompute(args)
-        logger.info(f"Precompute finished, start index={st_idx}, "
-                    f"end index={ed_idx}, model {model}")
-        assert st_idx == args.start_index
-        if args.end_index < 0:
-            args.end_index = ed_idx
-        if len(args.model_api_name) == 0:
-            args.model_api_name = model
-    else:
-        if len(args.model_api_name) == 0:
-            args.model_api_name = args.model
     run_rag(args)
 
 

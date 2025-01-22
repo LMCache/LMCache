@@ -14,14 +14,20 @@ This repository contains benchmarking tools for evaluating the performance of la
    pip install -r requirements.txt
    ```
 ## Running the RAG Benchmark
+To run the RAG benchmark, use launch_lmcache.sh and launch_vllm.sh.  
 
-To run the RAG benchmark, use the following command:
+For launch_lmcache.sh:  
+Remember to match KV_STORAGE_SIZE with max_local_cache_size in lmcache config yaml.  
+Remember to match KV_CHUNK_SIZE with chunk_size in lmcache config yaml.  
 
-```bash
-python3 rag.py --qps 3.5 --model mistralai/Mistral-7B-Instruct-v0.2 --dataset ~/CacheBlend/inputs/musique_s.json --separator "" --prompt-build-method QA --base-url "http://localhost:8000/v1" --kv-storage-size 30GB --kv-storage-token-unit 256 --max-tokens 32
+For launch_vllm.sh:  
+Remember to change END_INDEX in launch_vllm.sh to the end_index printed by precompute.py in launch_lmcache.sh.  
+It should be 150 in the following line(the second number).  
+```
+"Precompute from 0 to 150 for model mistralai/Mistral-7B-Instruct-v0.2"
 ```
 
-Use ctrl-C to terminate the benchmark at any time, and the the script will write each request's detailed stats to `summary.csv`.
+Use ctrl-C to terminate the benchmark at any time, and the the script will write each request's detailed stats to the output file.  
 
 
 *Note:* the above command requires there is a serving engine with the `mistralai/Mistral-7B-Instruct-v0.2` model served locally at `http://localhost:8000/v1`. Here's an example command to launch the serving engine:
@@ -30,25 +36,15 @@ Use ctrl-C to terminate the benchmark at any time, and the the script will write
 vllm serve mistralai/Mistral-7B-Instruct-v0.2 --disable-log-requests
 ```
 
-## Running the RAG benchmark on LMCache
-For benchmarking LMCache with CacheBlend:  
-```bash
-LMCACHE_CONFIG_FILE=example_blending.yaml python3 rag.py --qps 3.5 --model mistralai/Mistral-7B-Instruct-v0.2 --dataset ~/CacheBlend/inputs/musique_s.json --separator "[BLEND_SEP]" --prompt-build-method QA --base-url "http://localhost:8000/v1" --kv-storage-size 30GB --kv-storage-token-unit 256 --max-tokens 32
-```
 Here's an example command to launch the serving engine with LMCache+CacheBlend:  
 
 ```bash
 LMCACHE_CONFIG_FILE=example_blending.yaml python3 -m lmcache_vllm.vllm.entrypoints.openai.api_server --model mistralai/Mistral-7B-Instruct-v0.2 --gpu-memory-utilization 0.7 --port 8000
 ```
 
-
-
-
 ### What does precompute.py do
---skip-precompute will skip the precomputation, while by default to will call precompute functions on documents.  
 If no --end-index provided, it will check kv-storage-size and try to precompute the documents that can be held in this size.  
-Later RAG benchmark will only run these requests.  
-
+Used for precomputing some KV cache into storage.  
 ### Arguments
 #### Configure the workload
 - `--dataset <str>` The path to the dataset. The format is described in `Dataset format` section.  
@@ -64,20 +60,19 @@ Later RAG benchmark will only run these requests.
 - `--max-tokens <int>` Maximum number of output tokens for every request.
 - `--qps <float>` Query per second. The rate to send requests.
 #### Configuring the serving engine connection
-- `--model-api-name <str>` The model name used by the endpoint. If not provided, by default the same as `--model`.
+- `--model <str>` The model name used by the endpoint.
 - `--base-url <str>` The URL endpoint for the language model server.
 - `--api-key <str>` API key for the language model server.
 #### Configure precompute
-To benchmark CacheBlend, we need to precompute the KV cache of documents.
-- `--model <str>` The model to precompute KV cache. We will load tokenizer and configurations from this.
-- `--skip-precompute` If specified, skip precompute. And should have --end-index in this case.
-- `--kv-storage-size <str>` The size used for KV cache. This will decide how many requests will be sent, because we only precompute KV cache within this limit.
-- `--kv-storage-token-unit <int>` The same as chunk_size in LMCache.
+To benchmark CacheBlend, we need to precompute the KV cache of documents.  
+- `--tokenizer <str>` The tokenizer name. If not provided, by default the same as `--model`.
+- `--model-config <str>` The model config name. If not provided, by default the same as `--model`.
+- `--kv-storage-size <str>` The size used for KV cache. This will decide how many requests will be sent, because we only precompute KV cache within this limit. The same as max_local_cache_size in LMCache config yaml.
+- `--kv-chunk-size <int>` The same as chunk_size in LMCache config yaml.
 - `--kv-precision-bit <int>` KV cache precision bit. By default 16 for FP16. Should be a multiple of 8.
 #### Configure output
 - `--output <str>` The csv file to dump the detailed stats for each query (default = summary.csv)
 - `--verbose` Enable verbose logging.
-- `--doc-token-cnt <int>` This is for calculating and printing document_tokens/total_tokens (doc_token_ratio). By default -1. If not 0 and has precompute, will be set automatically.
 
 ## Benchmark Metrics
 

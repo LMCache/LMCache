@@ -12,6 +12,10 @@ from utils import (PromptBuildMethodType, build_fewshot_prompt,
 class PrecomputeConfig:
     # Model name.
     model: str
+    # Tokenizer name.
+    tokenizer: str
+    # Model config path.
+    model_config: str
     # Dataset.
     dataset: str
     # Start index.
@@ -20,8 +24,8 @@ class PrecomputeConfig:
     end_idx: int
     # KV storage size.
     kv_storage_size: int
-    # KV storage token unit.
-    kv_storage_token_unit: int
+    # KV chunk size.
+    kv_chunk_size: int
     # Prompt build method.
     prompt_build_method: PromptBuildMethodType
     # API key
@@ -43,8 +47,8 @@ class KVSizeCalculator:
 
 
 def precompute_all_kv(config: PrecomputeConfig) -> Tuple[int, int, str]:
-    tokenizer = AutoTokenizer.from_pretrained(config.model)
-    model_config = AutoConfig.from_pretrained(config.model)
+    tokenizer = AutoTokenizer.from_pretrained(config.tokenizer)
+    model_config = AutoConfig.from_pretrained(config.model_config)
     kv_size_calculator = KVSizeCalculator(model_config.num_key_value_heads,
                                           model_config.head_dim,
                                           model_config.num_hidden_layers,
@@ -66,7 +70,7 @@ def precompute_all_kv(config: PrecomputeConfig) -> Tuple[int, int, str]:
     size_upper_bound = config.kv_storage_size
     assert size_upper_bound > 0, f"size_upper_bound {size_upper_bound} <= 0"
     current_idx = start_idx
-    round_up_token_cnt = config.kv_storage_token_unit
+    round_up_token_cnt = config.kv_chunk_size
     assert round_up_token_cnt >= 1
     while True:
         if end_idx >= 0:
@@ -114,6 +118,12 @@ def parse_arguments():
     parser = argparse.ArgumentParser(
         description="Parse RAG precompute configurations.")
     parser.add_argument("--model", type=str, required=True, help="Model name")
+    parser.add_argument("--tokenizer", 
+                        type=str, default="", help="Tokenizer name")
+    parser.add_argument("--model-config",
+                        type=str,
+                        default="",
+                        help="Model config path")
     parser.add_argument("--dataset",
                         type=str,
                         required=True,
@@ -134,10 +144,10 @@ def parse_arguments():
                         type=str,
                         default="",
                         help="KV storage size")
-    parser.add_argument("--kv-storage-token-unit",
+    parser.add_argument("--kv-chunk-size",
                         type=int,
                         default=256,
-                        help="KV storage token unit")
+                        help="KV storage chunk size")
     parser.add_argument("--kv-precision-bit",
                         type=int,
                         default=16,
@@ -186,18 +196,20 @@ def parse_prompt_build_method(
 
 def run_precompute(args):
     kv_storage_size = parse_size(args.kv_storage_size)
-    kv_storage_token_unit = args.kv_storage_token_unit
+    kv_chunk_size = args.kv_chunk_size
     prompt_build_method = parse_prompt_build_method(args.prompt_build_method)
     kv_precision_bit = args.kv_precision_bit
     assert kv_precision_bit % 8 == 0, \
         f"kv_precision_bit {kv_precision_bit} is not a multiple of 8"
     kv_precision = kv_precision_bit // 8
     config = PrecomputeConfig(model=args.model,
+                              tokenizer=args.tokenizer,
+                              model_config=args.model_config,
                               dataset=args.dataset,
                               start_idx=args.start_index,
                               end_idx=args.end_index,
                               kv_storage_size=kv_storage_size,
-                              kv_storage_token_unit=kv_storage_token_unit,
+                              kv_chunk_size=kv_chunk_size,
                               prompt_build_method=prompt_build_method,
                               api_key=args.api_key,
                               base_url=args.base_url,
@@ -208,8 +220,12 @@ def run_precompute(args):
 
 def main():
     args = parse_arguments()
-    run_precompute(args)
-
+    if len(args.tokenizer) == 0:
+        args.tokenizer = args.model
+    if len(args.model_config) == 0:
+        args.model_config = args.model
+    start_idx, end_idx, model_name = run_precompute(args)
+    print(f"Precompute from {start_idx} to {end_idx} for model {model_name}")
 
 if __name__ == "__main__":
     main()
