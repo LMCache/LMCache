@@ -68,7 +68,7 @@ You can install the latest code from the GitHub repository:
     $ pip install -e .
     $ cd ..
 
-Version Comapatibility Matrix
+Version Compatibility Matrix
 ------------------------------
 
 +--------------------+------------------------+---------------+
