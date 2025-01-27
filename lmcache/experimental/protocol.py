@@ -1,7 +1,9 @@
 import struct
-import torch
 from dataclasses import dataclass
-from lmcache.experimental.memory_management import (MemoryFormat)
+
+import torch
+
+from lmcache.experimental.memory_management import MemoryFormat
 from lmcache.utils import CacheEngineKey
 
 MAX_KEY_LENGTH = 150
@@ -15,6 +17,7 @@ class Constants:
 
     SERVER_SUCCESS = 200
     SERVER_FAIL = 400
+
 
 DTYPE_TO_INT = {
     torch.half: 1,
@@ -40,6 +43,7 @@ INT_TO_DTYPE = {
     8: torch.float8_e5m2,
 }
 
+
 @dataclass
 class ClientMetaMessage:
     """
@@ -58,13 +62,11 @@ class ClientMetaMessage:
         assert (
             len(key_str) <= MAX_KEY_LENGTH
         ), f"Key length {len(key_str)} exceeds maximum {MAX_KEY_LENGTH}"
-        
+
         # NOTE(Jiayi): 3 is the maximum dimension of memory object.
         # Pass in shape [x, 0, 0] if it is a bytes memory object
-        assert (
-            len(self.shape) == 3
-        ), "Shape dimension should be 3"
-        
+        assert (len(self.shape) == 3), "Shape dimension should be 3"
+
         packed_bytes = struct.pack(
             f"iiiiiii{MAX_KEY_LENGTH}s",
             self.command,
@@ -83,8 +85,8 @@ class ClientMetaMessage:
         command, length, fmt, dtype, shape0, shape1, shape2, key = \
             struct.unpack(f"iiiiii{MAX_KEY_LENGTH}s", s)
         return ClientMetaMessage(
-            command, CacheEngineKey.from_string(key.decode().strip()), length, fmt,
-            INT_TO_DTYPE[dtype], torch.Size([shape0, shape1, shape2]))
+            command, CacheEngineKey.from_string(key.decode().strip()), length,
+            fmt, INT_TO_DTYPE[dtype], torch.Size([shape0, shape1, shape2]))
 
     @staticmethod
     def packlength() -> int:
@@ -105,18 +107,17 @@ class ServerMetaMessage:
     shape: torch.Size
 
     def serialize(self) -> bytes:
-        assert (
-            len(self.shape) == 3
-        ), "Shape dimension should be 3"
+        assert (len(self.shape) == 3), "Shape dimension should be 3"
         packed_bytes = struct.pack(
-            "iiiiiii", 
-            self.code, 
+            "iiiiiii",
+            self.code,
             self.length,
-            int(self.fmt.value), 
-            self.dtype, 
+            int(self.fmt.value),
+            self.dtype,
             self.shape[0],
             self.shape[1],
-            self.shape[2],)
+            self.shape[2],
+        )
         return packed_bytes
 
     @staticmethod
@@ -127,6 +128,6 @@ class ServerMetaMessage:
     def deserialize(s: bytes) -> "ServerMetaMessage":
         code, length, dtype, fmt, shape0, shape1, shape2 =\
             struct.unpack("iiiiiii", s)
-        return ServerMetaMessage(
-            code, length, MemoryFormat(fmt),
-            INT_TO_DTYPE[dtype], torch.Size([shape0, shape1, shape2]))
+        return ServerMetaMessage(code, length, MemoryFormat(fmt),
+                                 INT_TO_DTYPE[dtype],
+                                 torch.Size([shape0, shape1, shape2]))

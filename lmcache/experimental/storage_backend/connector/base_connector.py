@@ -1,13 +1,9 @@
 import abc
-import time
-from enum import Enum
 from typing import List, Optional
 
-import torch
-
-from lmcache.logging import init_logger
-from lmcache.utils import CacheEngineKey, _lmcache_nvtx_annotate
 from lmcache.experimental.memory_management import MemoryObj
+from lmcache.logging import init_logger
+from lmcache.utils import CacheEngineKey
 
 logger = init_logger(__name__)
 
@@ -73,4 +69,3 @@ class RemoteConnector(metaclass=abc.ABCMeta):
 
         """
         raise NotImplementedError
-

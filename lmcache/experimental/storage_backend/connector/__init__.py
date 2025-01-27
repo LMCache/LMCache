@@ -1,14 +1,14 @@
-import re
 import asyncio
+import re
 from dataclasses import dataclass
 from typing import List, Optional
 
+from lmcache.experimental.memory_management import MemoryAllocatorInterface
 from lmcache.logging import init_logger
-from lmcache.storage_backend.experimental.connector.base_connector import (
-    RemoteConnector)
-from lmcache.storage_backend.experimental.connector.lm_connector import LMCServerConnector
-from lmcache.experimental.memory_management import (MemoryAllocatorInterface)
-
+from lmcache.storage_backend.experimental.connector.base_connector import \
+    RemoteConnector
+from lmcache.storage_backend.experimental.connector.lm_connector import \
+    LMCServerConnector
 
 logger = init_logger(__name__)
 
@@ -61,7 +61,7 @@ def CreateConnector(
     url: str,
     loop: asyncio.AbstractEventLoop,
     memory_allocator: MemoryAllocatorInterface,
-    ) -> RemoteConnector:
+) -> RemoteConnector:
     """
     Creates the corresponding remote connector from the given URL.
     """
@@ -77,15 +77,15 @@ def CreateConnector(
     match parsed_url.connector_type:
         case "redis":
             raise ValueError("Redis not supported yet")
-        
+
         case "redis-sentinel":
             raise ValueError("Redis-sentinel not supported yet")
-        
+
         case "lm":
             if num_hosts == 1:
                 host, port = parsed_url.hosts[0], parsed_url.ports[0]
-                connector = LMCServerConnector(
-                    host, port, loop, memory_allocator)
+                connector = LMCServerConnector(host, port, loop,
+                                               memory_allocator)
             else:
                 raise ValueError(
                     f"LM connector only supports a single host, but got url:"
