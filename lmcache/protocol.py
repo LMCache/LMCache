@@ -38,7 +38,7 @@ class ClientMetaMessage:
 
     @staticmethod
     def deserialize(s: bytes) -> "ClientMetaMessage":
-        command, length, key = struct.unpack(f"ii{MAX_KEY_LENGTH}s", s)
+        command, length, key = struct.unpack(f"iii{MAX_KEY_LENGTH}s", s)
         # print(f"Command: {command}, key: {key}, length: {length}")
         return ClientMetaMessage(command, key.decode().strip(), length)
 

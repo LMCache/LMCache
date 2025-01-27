@@ -1,5 +1,7 @@
 import abc
+import ctypes
 import threading
+from ctypes import Array, c_ubyte
 from dataclasses import dataclass
 from enum import Enum
 from typing import Optional, Tuple, Union
@@ -54,6 +56,9 @@ class MemoryObjMetadata:
     # The 'physical size' in bytes of the allocated memory
     phy_size: int
 
+    # Reference count
+    ref_count: int
+
     # The 'logical' format of the tensor
     fmt: MemoryFormat = MemoryFormat.UNDEFINED
 
@@ -80,6 +85,15 @@ class MemoryObj:
         size_in_bytes = num_elements * element_size
         return size_in_bytes
 
+    def get_shape(self) -> torch.Size:
+        return self.metadata.shape
+
+    def get_dtype(self) -> torch.dtype:
+        return self.metadata.dtype
+
+    def get_memory_format(self) -> MemoryFormat:
+        return self.metadata.fmt
+
     def get_physical_size(self) -> int:
         return self.metadata.phy_size
 
@@ -90,6 +104,17 @@ class MemoryObj:
             return None
         return self.raw_data.view(self.metadata.dtype)\
                             .view(self.metadata.shape)
+
+    @property
+    def byte_array(self) -> Array[c_ubyte]:
+        kv_chunk = self.tensor
+        assert kv_chunk is not None
+        num_bytes = kv_chunk.numel() * kv_chunk.element_size()
+        ptr = kv_chunk.data_ptr()
+        ubyte_ptr = ctypes.cast(ptr, ctypes.POINTER(ctypes.c_ubyte))
+        byte_array = (ctypes.c_ubyte * num_bytes).from_address(
+            ctypes.addressof(ubyte_ptr.contents))
+        return byte_array
 
 
 @dataclass
@@ -136,8 +161,37 @@ class MemoryAllocatorInterface(metaclass=abc.ABCMeta):
     def free(self, memory_obj: MemoryObj):
         """
         Frees the memory allocated for the given MemoryObj.
+        Note that this function shouldn't be explicitly called.
+        Instead, use `ref_count_down` to decrease ref count.
 
         :param MemoryObj memory_obj: The MemoryObj to free.
+        """
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    def ref_count_up(self, memory_obj: MemoryObj):
+        """
+        Increase ref count for the given MemoryObj.
+
+        :param MemoryObj memory_obj.
+        """
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    def ref_count_down(self, memory_obj: MemoryObj):
+        """
+        Decrease ref count for the given MemoryObj.
+
+        :param MemoryObj memory_obj.
+        """
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    def get_ref_count(self, memory_obj: MemoryObj):
+        """
+        Get ref count for the given MemoryObj.
+
+        :param MemoryObj memory_obj.
         """
         raise NotImplementedError
 
@@ -235,10 +289,10 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         self.num_active_allocations += 1
 
         # Allocate the block
-        return MemoryObj(raw_data=self.buffer[block.start:block.start +
-                                              raw_size],
-                         metadata=MemoryObjMetadata(shape, dtype, block.start,
-                                                    aligned_size))
+        return MemoryObj(
+            raw_data=self.buffer[block.start:block.start + raw_size],
+            metadata=MemoryObjMetadata(shape, dtype, block.start, aligned_size,
+                                       1))
 
     def free(self, memory_obj: MemoryObj):
         if not memory_obj.is_valid():
@@ -260,6 +314,17 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         # Update debug status
         self.total_allocated_size -= memory_obj.metadata.phy_size
         self.num_active_allocations = max(0, self.num_active_allocations - 1)
+
+    def ref_count_up(self, memory_obj: MemoryObj):
+        memory_obj.metadata.ref_count += 1
+
+    def ref_count_down(self, memory_obj: MemoryObj):
+        memory_obj.metadata.ref_count -= 1
+        if memory_obj.metadata.ref_count == 0:
+            self.free(memory_obj)
+
+    def get_ref_count(self, memory_obj: MemoryObj):
+        return memory_obj.metadata.ref_count
 
     def memcheck(self):
         """For debug purposes.
@@ -330,13 +395,7 @@ class PinMemoryAllocator(MemoryAllocatorInterface):
         :param int size: The size of the pinned memory in bytes.
         """
         buffer = torch.empty(size, dtype=torch.uint8, pin_memory=True)
-        # NOTE(Jiayi): Without `clone()`, IPC over a tensor
-        # (a view of a tensor) will have unexpected behaviors
-        # even though `buffer.is_shared()` returns True.
-        # Directly calling `share_memory_()` on the buffer will
-        # make the memory unpinned.
-        # TODO(Jiayi): need a way to share memory without cloning.
-        #buffer.share_memory_()
+
         self.allocator = TensorMemoryAllocator(buffer)
 
         self.host_mem_lock = threading.Lock()
@@ -349,6 +408,18 @@ class PinMemoryAllocator(MemoryAllocatorInterface):
     def free(self, memory_obj: MemoryObj):
         with self.host_mem_lock:
             self.allocator.free(memory_obj)
+
+    def ref_count_up(self, memory_obj: MemoryObj):
+        with self.host_mem_lock:
+            self.allocator.ref_count_up(memory_obj)
+
+    def ref_count_down(self, memory_obj: MemoryObj):
+        with self.host_mem_lock:
+            self.allocator.ref_count_down(memory_obj)
+
+    def get_ref_count(self, memory_obj: MemoryObj):
+        with self.host_mem_lock:
+            return self.allocator.get_ref_count(memory_obj)
 
     def memcheck(self):
         with self.host_mem_lock:
