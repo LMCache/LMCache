@@ -70,7 +70,6 @@ vllm serve mistralai/Mistral-7B-Instruct-v0.2 --disable-log-requests
 #### Processing previous outputs only (Optional)
 - `--process-summary <filename>`: if this option is present, the script will only process the existing output csv and print out the summary without running any experiment.
 
-
 ### Example Use Case
 
 The above command starts a benchmark with 10 users engaging in 5 rounds of interaction, with an expected QPS of 0.5. It assumes there is already a serving engine (vLLM or lmcache\_vllm) with the `mistralai/Mistral-7B-Instruct-v0.2` model served locally at `http://localhost:8000/v1`.
