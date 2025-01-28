@@ -57,6 +57,7 @@ class LMCacheEngineConfig:
         enable_blending: bool = False,
         blend_recompute_ratio: float = 0.15,
         blend_min_tokens: int = 256,
+        max_local_disk_size: float = 0.0,
     ) -> "LMCacheEngineConfig":
         if backend == "cpu":
             local_cpu = True

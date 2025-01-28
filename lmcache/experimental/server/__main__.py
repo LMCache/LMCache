@@ -38,6 +38,7 @@ class LMCacheServer:
                 if not header:
                     break
                 meta = ClientMetaMessage.deserialize(header)
+                print(f"Received header: {header}, meta: {meta}")
 
                 match meta.command:
                     case Constants.CLIENT_PUT:

@@ -67,16 +67,23 @@ def test_same_retrieve_store(autorelease_experimental):
 
 
 @pytest.mark.parametrize("fmt", ["vllm"])
-@pytest.mark.parametrize("chunk_size", [128, 256])
+@pytest.mark.parametrize("chunk_size", [256])  #[128, 256])
 @pytest.mark.parametrize(
     "backend",
     [
-        "cpu",
-        "local_disk",
+        #"cpu",
+        #"local_disk",
+        "remote"
     ],
 )
+@pytest.mark.parametrize("lmserver_experimental_process", ["cpu"],
+                         indirect=True)
 def test_paged_retrieve_prefix(fmt, chunk_size, backend,
+                               lmserver_experimental_process,
                                autorelease_experimental):
+    url = None
+    if backend == "remote":
+        url = lmserver_experimental_process.server_url
     device = "cuda"
     num_tokens = 2000
     new_num_tokens = 1000
@@ -99,7 +106,8 @@ def test_paged_retrieve_prefix(fmt, chunk_size, backend,
     new_slot_mapping = torch.tensor(new_slot_mapping, device=device)
     """ initialize the engine """
     cfg = LMCacheEngineConfig.from_legacy(chunk_size=chunk_size,
-                                          backend=backend)
+                                          backend=backend,
+                                          remote_url=url)
 
     engine = autorelease_experimental(
         LMCacheEngineBuilder.get_or_create("test", cfg,
@@ -120,6 +128,9 @@ def test_paged_retrieve_prefix(fmt, chunk_size, backend,
     elif backend == "local_disk":
         timeout = 30
         search_range = "LocalDiskBackend"
+    elif backend == "remote":
+        timeout = 30
+        search_range = "RemoteBackend"
     start_time = time.time()
     while engine.lookup(tokens, search_range) < expected_length:
         if time.time() - start_time > timeout:

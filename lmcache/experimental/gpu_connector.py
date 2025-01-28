@@ -183,7 +183,7 @@ class VLLMPagedMemGPUConnector(GPUConnectorInterface):
         if memory_obj.metadata.fmt != MemoryFormat.KV_BLOB:
             raise ValueError(
                 "The memory object should be in KV_BLOB format in"
-                " order to be processed by NestedTupleGPUConnector")
+                " order to be processed by VLLMPagedMemGPUConnector")
 
         if "kvcaches" not in kwargs:
             raise ValueError("'kvcaches' should be provided in kwargs.")

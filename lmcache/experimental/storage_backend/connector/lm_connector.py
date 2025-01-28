@@ -38,6 +38,7 @@ class LMCServerConnector(RemoteConnector):
         self.memory_allocator = memory_allocator
         self.loop = loop
         self.socket_lock = threading.Lock()
+        self.async_socket_lock = asyncio.Lock()
 
     # TODO(Jiayi): This should be an async function
     def receive_all(self, meta: ServerMetaMessage) -> Optional[MemoryObj]:
@@ -92,19 +93,21 @@ class LMCServerConnector(RemoteConnector):
         memory_obj: MemoryObj,
     ):
 
-        logger.debug("Async call to set()!")
+        logger.debug("Async call to put()!")
 
         kv_bytes = memory_obj.byte_array
         kv_shape = memory_obj.get_shape()
         kv_dtype = memory_obj.get_dtype()
         memory_format = memory_obj.get_memory_format()
 
+        self.socket_lock.acquire()
         await self.loop.sock_sendall(
             self.client_socket,
             ClientMetaMessage(Constants.CLIENT_PUT, key, len(kv_bytes),
                               memory_format, kv_dtype, kv_shape).serialize())
 
         await self.loop.sock_sendall(self.client_socket, kv_bytes)
+        self.socket_lock.release()
 
         self.memory_allocator.ref_count_down(memory_obj)
 
@@ -121,6 +124,7 @@ class LMCServerConnector(RemoteConnector):
                               torch.Size([0, 0, 0, 0])).serialize())
         data = self.client_socket.recv(ServerMetaMessage.packlength())
         self.socket_lock.release()
+
         meta = ServerMetaMessage.deserialize(data)
         if meta.code != Constants.SERVER_SUCCESS:
             return None

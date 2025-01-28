@@ -307,7 +307,7 @@ class StorageManager:
             self.loop.call_soon_threadsafe(self.loop.stop)
         if self.thread.is_alive():
             self.thread.join()
-        logger.info("Local disk backend closed.")
+        logger.info("Storage manager closed.")
 
     def __del__(self):
         self.close()

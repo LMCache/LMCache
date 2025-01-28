@@ -92,7 +92,7 @@ class ClientMetaMessage:
 
     @staticmethod
     def packlength() -> int:
-        # NOTE: 6 is the number of integers
+        # NOTE: 8 is the number of integers
         return 4 * 8 + MAX_KEY_LENGTH
 
 

@@ -143,12 +143,18 @@ class BufferMemoryObj:
 class MemoryAllocatorInterface(metaclass=abc.ABCMeta):
 
     @abc.abstractmethod
-    def allocate(self, shape: Union[torch.Size, Tuple[int, ...]],
-                 dtype: torch.dtype) -> Optional[MemoryObj]:
+    def allocate(
+        self,
+        shape: Union[torch.Size, Tuple[int, ...]],
+        dtype: torch.dtype,
+        fmt: MemoryFormat = MemoryFormat.UNDEFINED,
+    ) -> Optional[MemoryObj]:
         """
         Allocates the memory to hold a tensor of the given shape.
 
         :param torch.Size shape: The shape of the tensor to allocate.
+        :param torch.dtype dtype: The dtype of the tensor to allocate.
+        :param MemoryFormat fmt: The format of the memory to allocate.
         
         :return: A MemoryObj wrapping the allocated memory. Returns
             None if the allocation failed.
@@ -257,8 +263,12 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
 
         return merge_prev or merge_succ
 
-    def allocate(self, shape: Union[torch.Size, Tuple[int, ...]],
-                 dtype: torch.dtype) -> Optional[MemoryObj]:
+    def allocate(
+        self,
+        shape: Union[torch.Size, Tuple[int, ...]],
+        dtype: torch.dtype,
+        fmt: MemoryFormat = MemoryFormat.KV_BLOB,
+    ) -> Optional[MemoryObj]:
         if not isinstance(shape, torch.Size):
             shape = torch.Size(shape)
 
@@ -292,7 +302,7 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         return MemoryObj(
             raw_data=self.buffer[block.start:block.start + raw_size],
             metadata=MemoryObjMetadata(shape, dtype, block.start, aligned_size,
-                                       1))
+                                       1, fmt))
 
     def free(self, memory_obj: MemoryObj):
         if not memory_obj.is_valid():
@@ -372,10 +382,14 @@ class HostMemoryAllocator(MemoryAllocatorInterface):
 
         self.host_mem_lock = threading.Lock()
 
-    def allocate(self, shape: Union[torch.Size, Tuple[int, ...]],
-                 dtype: torch.dtype) -> Optional[MemoryObj]:
+    def allocate(
+        self,
+        shape: Union[torch.Size, Tuple[int, ...]],
+        dtype: torch.dtype,
+        fmt: MemoryFormat = MemoryFormat.KV_BLOB,
+    ) -> Optional[MemoryObj]:
         with self.host_mem_lock:
-            return self.allocator.allocate(shape, dtype)
+            return self.allocator.allocate(shape, dtype, fmt)
 
     def free(self, memory_obj: MemoryObj):
         with self.host_mem_lock:
@@ -384,6 +398,18 @@ class HostMemoryAllocator(MemoryAllocatorInterface):
     def memcheck(self):
         with self.host_mem_lock:
             return self.allocator.memcheck()
+
+    def ref_count_up(self, memory_obj: MemoryObj):
+        with self.host_mem_lock:
+            self.allocator.ref_count_up(memory_obj)
+
+    def ref_count_down(self, memory_obj: MemoryObj):
+        with self.host_mem_lock:
+            self.allocator.ref_count_down(memory_obj)
+
+    def get_ref_count(self, memory_obj: MemoryObj):
+        with self.host_mem_lock:
+            return self.allocator.get_ref_count(memory_obj)
 
 
 class PinMemoryAllocator(MemoryAllocatorInterface):
@@ -400,10 +426,14 @@ class PinMemoryAllocator(MemoryAllocatorInterface):
 
         self.host_mem_lock = threading.Lock()
 
-    def allocate(self, shape: Union[torch.Size, Tuple[int, ...]],
-                 dtype: torch.dtype) -> Optional[MemoryObj]:
+    def allocate(
+        self,
+        shape: Union[torch.Size, Tuple[int, ...]],
+        dtype: torch.dtype,
+        fmt: MemoryFormat = MemoryFormat.KV_BLOB,
+    ) -> Optional[MemoryObj]:
         with self.host_mem_lock:
-            return self.allocator.allocate(shape, dtype)
+            return self.allocator.allocate(shape, dtype, fmt)
 
     def free(self, memory_obj: MemoryObj):
         with self.host_mem_lock:
@@ -437,9 +467,13 @@ class GPUMemoryAllocator(MemoryAllocatorInterface):
         buffer = torch.empty(size, dtype=torch.uint8, device=device)
         self.allocator = TensorMemoryAllocator(buffer)
 
-    def allocate(self, shape: Union[torch.Size, Tuple[int, ...]],
-                 dtype: torch.dtype) -> Optional[MemoryObj]:
-        return self.allocator.allocate(shape, dtype)
+    def allocate(
+        self,
+        shape: Union[torch.Size, Tuple[int, ...]],
+        dtype: torch.dtype,
+        fmt: MemoryFormat = MemoryFormat.KV_BLOB,
+    ) -> Optional[MemoryObj]:
+        return self.allocator.allocate(shape, dtype, fmt)
 
     def free(self, memory_obj: MemoryObj):
         self.allocator.free(memory_obj)
