@@ -16,6 +16,9 @@ This repository contains benchmarking tools for evaluating the performance of la
 ## Running the RAG Benchmark
 To run the RAG benchmark, use launch_lmcache.sh and launch_vllm.sh.  
 
+How to launch:  
+After starting the serving engine, run ./launch_lmcache.sh or ./launch_vllm.sh to benchmark LMcache or vllm.  
+
 For launch_lmcache.sh:  
 Remember to match KV_STORAGE_SIZE with max_local_cache_size in lmcache config yaml.  
 Remember to match KV_CHUNK_SIZE with chunk_size in lmcache config yaml.  
