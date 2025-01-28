@@ -36,6 +36,7 @@ setup(
         "transformers",
         "torchac_cuda >= 0.2.5",
         "sortedcontainers",
+        "prometheus_client",
     ],
     ext_modules=ext_modules,
     cmdclass=cmdclass,
