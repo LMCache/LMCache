@@ -5,8 +5,8 @@ from lmcache.observability import LMCStatsMonitor
 
 @pytest.fixture(scope="function")
 def stats_monitor():
-    yield LMCStatsMonitor.GetOrCreate()
     LMCStatsMonitor.DestoryInstane()
+    return LMCStatsMonitor.GetOrCreate()
 
 
 def test_on_retrieve_request(stats_monitor):
