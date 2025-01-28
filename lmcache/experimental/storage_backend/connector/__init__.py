@@ -4,11 +4,11 @@ from dataclasses import dataclass
 from typing import List, Optional
 
 from lmcache.experimental.memory_management import MemoryAllocatorInterface
-from lmcache.logging import init_logger
-from lmcache.storage_backend.experimental.connector.base_connector import \
+from lmcache.experimental.storage_backend.connector.base_connector import \
     RemoteConnector
-from lmcache.storage_backend.experimental.connector.lm_connector import \
+from lmcache.experimental.storage_backend.connector.lm_connector import \
     LMCServerConnector
+from lmcache.logging import init_logger
 
 logger = init_logger(__name__)
 

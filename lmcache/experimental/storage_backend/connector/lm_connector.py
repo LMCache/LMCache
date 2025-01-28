@@ -79,7 +79,7 @@ class LMCServerConnector(RemoteConnector):
         self.client_socket.sendall(
             ClientMetaMessage(Constants.CLIENT_EXIST, key, 0,
                               MemoryFormat(1), torch.float16,
-                              torch.Size([0, 0, 0])).serialize())
+                              torch.Size([0, 0, 0, 0])).serialize())
         response = self.client_socket.recv(ServerMetaMessage.packlength())
         self.socket_lock.release()
 
@@ -101,9 +101,8 @@ class LMCServerConnector(RemoteConnector):
 
         await self.loop.sock_sendall(
             self.client_socket,
-            ClientMetaMessage(Constants.CLIENT_PUT, key.to_string(),
-                              len(kv_bytes), memory_format, kv_dtype,
-                              kv_shape).serialize())
+            ClientMetaMessage(Constants.CLIENT_PUT, key, len(kv_bytes),
+                              memory_format, kv_dtype, kv_shape).serialize())
 
         await self.loop.sock_sendall(self.client_socket, kv_bytes)
 
@@ -119,7 +118,7 @@ class LMCServerConnector(RemoteConnector):
         self.client_socket.sendall(
             ClientMetaMessage(Constants.CLIENT_GET, key, 0,
                               MemoryFormat(1), torch.float16,
-                              torch.Size([0, 0, 0])).serialize())
+                              torch.Size([0, 0, 0, 0])).serialize())
         data = self.client_socket.recv(ServerMetaMessage.packlength())
         self.socket_lock.release()
         meta = ServerMetaMessage.deserialize(data)

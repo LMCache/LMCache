@@ -1,13 +1,41 @@
+import asyncio
+import random
+import string
+import threading
+
 import torch
 
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.experimental.gpu_connector import (VLLMNestedTupleGPUConnector,
                                                 VLLMPagedMemGPUConnector)
+from lmcache.utils import CacheEngineKey
 
 
 def dumb_metadata(fmt="vllm", kv_shape=(32, 2, 256, 8, 128)):
     return LMCacheEngineMetadata("test_model", 3, 123, fmt, torch.bfloat16,
                                  kv_shape)
+
+
+def dumb_cache_engine_key():
+    return CacheEngineKey("vllm", "test_model", 3, 123, "hash")
+
+
+def random_string(N):
+    return "".join(random.choices(string.ascii_uppercase + string.digits, k=N))
+
+
+def init_asyncio_loop():
+    async_loop = asyncio.new_event_loop()
+    async_thread = threading.Thread(target=async_loop.run_forever)
+    async_thread.start()
+    return async_loop, async_thread
+
+
+def close_asyncio_loop(async_loop, async_thread):
+    if async_loop.is_running():
+        async_loop.call_soon_threadsafe(async_loop.stop)
+    if async_thread.is_alive():
+        async_thread.join()
 
 
 def generate_kv_cache(num_tokens, fmt, device):

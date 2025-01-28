@@ -7,8 +7,7 @@ import torch
 from lmcache.experimental.memory_management import MemoryFormat
 from lmcache.experimental.protocol import (ClientMetaMessage, Constants,
                                            ServerMetaMessage)
-from lmcache.experimental.server.server_storage_backend import \
-    CreateStorageBackend
+from lmcache.experimental.server.storage_backend import CreateStorageBackend
 
 
 class LMCacheServer:
@@ -76,8 +75,8 @@ class LMCacheServer:
                                 ServerMetaMessage(Constants.SERVER_FAIL, 0,
                                                   MemoryFormat(1),
                                                   torch.float16,
-                                                  torch.Size(
-                                                      (0, 0, 0))).serialize())
+                                                  torch.Size((0, 0, 0,
+                                                              0))).serialize())
 
                     case Constants.CLIENT_EXIST:
 
@@ -88,7 +87,7 @@ class LMCacheServer:
                             ServerMetaMessage(code, 0, MemoryFormat(1),
                                               torch.float16,
                                               torch.Size(
-                                                  (0, 0, 0))).serialize())
+                                                  (0, 0, 0, 0))).serialize())
 
                     # TODO(Jiayi): Implement List
                     # case Constants.CLIENT_LIST:

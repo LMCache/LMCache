@@ -1,5 +1,5 @@
 import asyncio
-from typing import Dict
+from collections import OrderedDict
 
 import torch
 
@@ -21,13 +21,14 @@ def CreateStorageBackends(
         metadata: LMCacheEngineMetadata,
         loop: asyncio.AbstractEventLoop,
         memory_allocator: MemoryAllocatorInterface,
-        dst_device: str = "cuda") -> Dict[str, StorageBackendInterface]:
+        dst_device: str = "cuda") -> OrderedDict[str, StorageBackendInterface]:
 
     # Replace 'cuda' with 'cuda:<device id>'
     if dst_device == "cuda":
         dst_device = f"cuda:{torch.cuda.current_device()}"
 
-    storage_backends: Dict[str, StorageBackendInterface] = {}
+    storage_backends: OrderedDict[str, StorageBackendInterface] =\
+        OrderedDict()
 
     # TODO(Jiayi): The hierarchy is fixed for now
     if config.local_disk and config.max_local_disk_size > 0:

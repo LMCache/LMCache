@@ -39,7 +39,7 @@ class StorageManager:
 
         #TODO: remove hardcode
         dst_device = "cuda"
-        self.storage_backends: Dict[str, StorageBackendInterface] =\
+        self.storage_backends: OrderedDict[str, StorageBackendInterface] =\
             CreateStorageBackends(
                 config, metadata, self.loop, allocator, dst_device)
         self.prefetch_tasks: Dict[CacheEngineKey, Future] = {}
@@ -91,35 +91,6 @@ class StorageManager:
 
         self.manager_lock.release()
         return memory_obj
-
-    # TODO (Jiayi): get rid of this callback as this
-    # callback is only needed for ipc
-    # def put_callback(self, future, backend_name, key):
-    #    """
-    #    Update metadata and free resources after put.
-
-    #     """
-    #     self.manager_lock.acquire()
-    #     future, memory_obj = self.put_tasks[backend_name][key]
-
-    #     # raises exception if put failed
-    #     try:
-    #         future.result()
-    #     except Exception as e:
-    #         logger.error(
-    #             f"Exception captured from future in put_callback: {e}")
-    #         raise e
-    #     self.put_tasks[backend_name].pop(key)
-
-    #     # TODO: Might need to modify free such that it's `ref_count-1`
-    #     # because there might be multiple references (backends)
-    #     # using the same memory_obj
-    #     # It won't error now for we only have disk backend
-    #     if not self.use_hot:
-    #         self.memory_allocator.free(memory_obj)
-
-    #     self.storage_backends[backend_name].insert_key(key, memory_obj)
-    #     self.manager_lock.release()
 
     def put(
         self,
@@ -208,6 +179,7 @@ class StorageManager:
         self.manager_lock.acquire()
         memory_obj = self.hot_cache.get(key, None)
         if memory_obj is not None:
+            self.memory_allocator.ref_count_up(memory_obj)
             self.hot_cache.move_to_end(key)
             self.manager_lock.release()
             return memory_obj
@@ -221,6 +193,9 @@ class StorageManager:
             # NOTE(Jiayi): bypass the allocator for now
             memory_obj = backend.get_blocking(key)
             if memory_obj is not None:
+                if self.use_hot:
+                    self.hot_cache[key] = memory_obj
+                    self.memory_allocator.ref_count_up(memory_obj)
                 self.manager_lock.release()
                 return memory_obj
 
