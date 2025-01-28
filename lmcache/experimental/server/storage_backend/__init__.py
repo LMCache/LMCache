@@ -1,7 +1,8 @@
-from lmcache.experimental.server.server_storage_backend.abstract_backend import \
+from lmcache.experimental.server.storage_backend.abstract_backend import \
     LMSBackendInterface
-from lmcache.experimental.server.server_storage_backend.local_backend import \
+from lmcache.experimental.server.storage_backend.local_backend import \
     LMSLocalBackend
+
 from lmcache.logging import init_logger
 
 logger = init_logger(__name__)
