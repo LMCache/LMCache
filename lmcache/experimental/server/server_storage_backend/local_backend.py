@@ -1,21 +1,18 @@
-import os
 import threading
 from collections import OrderedDict
 from typing import List, Optional
 
-from lmcache.logging import init_logger
-from lmcache.experiemental.server.server_storage_backend.abstract_backend import \
-    LMSBackendInterface
 from lmcache.experimental.protocol import ClientMetaMessage
-from lmcache.experiemental.server.utils import LMSMemoryObj
-
+from lmcache.experimental.server.server_storage_backend.abstract_backend import \
+    LMSBackendInterface
+from lmcache.experimental.server.utils import LMSMemoryObj
+from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey, _lmcache_nvtx_annotate
 
 logger = init_logger(__name__)
 
 
 class LMSLocalBackend(LMSBackendInterface):
-
 
     def __init__(self, ):
         self.dict: OrderedDict[CacheEngineKey, LMSMemoryObj] = OrderedDict()
@@ -31,7 +28,7 @@ class LMSLocalBackend(LMSBackendInterface):
 
     def contains(
         self,
-        key: str,
+        key: CacheEngineKey,
     ) -> bool:
 
         with self.lock:
@@ -54,12 +51,12 @@ class LMSLocalBackend(LMSBackendInterface):
 
         with self.lock:
             self.dict[client_meta.key] = LMSMemoryObj(
-                                    kv_chunk_bytes,
-                                    client_meta.length,
-                                    client_meta.fmt,
-                                    client_meta.dtype,
-                                    client_meta.shape,
-                                    )
+                kv_chunk_bytes,
+                client_meta.length,
+                client_meta.fmt,
+                client_meta.dtype,
+                client_meta.shape,
+            )
 
     @_lmcache_nvtx_annotate
     def get(
@@ -75,5 +72,5 @@ class LMSLocalBackend(LMSBackendInterface):
 
 
 # TODO(Jiayi): please implement the remote disk backend
-class LMSLocalDiskBackend(LMSBackendInterface):
-    pass
+#class LMSLocalDiskBackend(LMSBackendInterface):
+#    pass

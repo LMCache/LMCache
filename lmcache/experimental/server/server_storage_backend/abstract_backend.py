@@ -1,12 +1,10 @@
 import abc
 from typing import List, Optional
 
-import torch
-
 from lmcache.experimental.protocol import ClientMetaMessage
+from lmcache.experimental.server.utils import LMSMemoryObj
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
-from lmcache.experiemental.server.utils import LMSMemoryObj
 
 logger = init_logger(__name__)
 
