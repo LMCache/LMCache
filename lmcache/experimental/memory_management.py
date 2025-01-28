@@ -477,7 +477,7 @@ class GPUMemoryAllocator(MemoryAllocatorInterface):
 
     def free(self, memory_obj: MemoryObj):
         self.allocator.free(memory_obj)
-    
+
     def ref_count_up(self, memory_obj: MemoryObj):
         self.allocator.ref_count_up(memory_obj)
 

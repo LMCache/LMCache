@@ -67,14 +67,10 @@ def test_same_retrieve_store(autorelease_experimental):
 
 
 @pytest.mark.parametrize("fmt", ["vllm"])
-@pytest.mark.parametrize("chunk_size", [256])  #[128, 256])
+@pytest.mark.parametrize("chunk_size", [128, 256])
 @pytest.mark.parametrize(
     "backend",
-    [
-        #"cpu",
-        #"local_disk",
-        "remote"
-    ],
+    ["cpu", "local_disk", "remote"],
 )
 @pytest.mark.parametrize("lmserver_experimental_process", ["cpu"],
                          indirect=True)
