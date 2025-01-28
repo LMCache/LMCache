@@ -44,8 +44,9 @@ class RemoteBackend(StorageBackendInterface):
         return self.__class__.__name__
 
     def contains(self, key: CacheEngineKey) -> bool:
-
-        return self.connection.exists(key)
+        future = asyncio.run_coroutine_threadsafe(self.connection.exists(key),
+                                                  self.loop)
+        return future.result()
 
     def exists_in_put_tasks(self, key: CacheEngineKey) -> bool:
         with self.put_tasks_lock:
@@ -93,7 +94,9 @@ class RemoteBackend(StorageBackendInterface):
         Blocking get function.
         """
 
-        memory_obj = self.connection.get(key)
+        future = asyncio.run_coroutine_threadsafe(self.connection.get(key),
+                                                  self.loop)
+        memory_obj = future.result()
 
         return memory_obj
 

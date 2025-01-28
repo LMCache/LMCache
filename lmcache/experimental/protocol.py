@@ -63,8 +63,8 @@ class ClientMetaMessage:
             len(key_str) <= MAX_KEY_LENGTH
         ), f"Key length {len(key_str)} exceeds maximum {MAX_KEY_LENGTH}"
 
-        # NOTE(Jiayi): 3 is the maximum dimension of memory object.
-        # Pass in shape [x, 0, 0] if it is a bytes memory object
+        # NOTE(Jiayi): 4 is the maximum dimension of memory object.
+        # Pass in shape [x, 0, 0, 0] if it is a bytes memory object
         assert (len(self.shape) == 4), "Shape dimension should be 4"
 
         packed_bytes = struct.pack(

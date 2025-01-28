@@ -14,7 +14,7 @@ class RemoteConnector(metaclass=abc.ABCMeta):
     """
 
     @abc.abstractmethod
-    def exists(self, key: CacheEngineKey) -> bool:
+    async def exists(self, key: CacheEngineKey) -> bool:
         """
         Check if the remote server contains the key
 
@@ -27,7 +27,7 @@ class RemoteConnector(metaclass=abc.ABCMeta):
         raise NotImplementedError
 
     @abc.abstractmethod
-    def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
+    async def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         """
         Get the memory_obj of the corresponding key
 
@@ -53,7 +53,7 @@ class RemoteConnector(metaclass=abc.ABCMeta):
         raise NotImplementedError
 
     @abc.abstractmethod
-    def list(self) -> List[str]:
+    async def list(self) -> List[str]:
         """
         List all keys in the remote server
 

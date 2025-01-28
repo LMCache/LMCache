@@ -1,6 +1,5 @@
 import asyncio
 import socket
-import threading
 from typing import List, Optional, no_type_check
 
 import torch
@@ -37,7 +36,6 @@ class LMCServerConnector(RemoteConnector):
 
         self.memory_allocator = memory_allocator
         self.loop = loop
-        self.socket_lock = threading.Lock()
         self.async_socket_lock = asyncio.Lock()
 
     # TODO(Jiayi): This should be an async function
@@ -63,26 +61,25 @@ class LMCServerConnector(RemoteConnector):
         view = memoryview(buffer)
 
         while received < n:
-            self.socket_lock.acquire()
+
             num_bytes = self.client_socket.recv_into(view[received:],
                                                      n - received)
-            self.socket_lock.release()
             if num_bytes == 0:
                 return None
             received += num_bytes
 
         return memory_obj
 
-    def exists(self, key: CacheEngineKey) -> bool:
+    async def exists(self, key: CacheEngineKey) -> bool:
         logger.debug("Call to exists()!")
 
-        self.socket_lock.acquire()
-        self.client_socket.sendall(
-            ClientMetaMessage(Constants.CLIENT_EXIST, key, 0,
-                              MemoryFormat(1), torch.float16,
-                              torch.Size([0, 0, 0, 0])).serialize())
-        response = self.client_socket.recv(ServerMetaMessage.packlength())
-        self.socket_lock.release()
+        async with self.async_socket_lock:
+            self.client_socket.sendall(
+                ClientMetaMessage(Constants.CLIENT_EXIST, key, 0,
+                                  MemoryFormat(1), torch.float16,
+                                  torch.Size([0, 0, 0, 0])).serialize())
+
+            response = self.client_socket.recv(ServerMetaMessage.packlength())
 
         return (ServerMetaMessage.deserialize(response).code ==
                 Constants.SERVER_SUCCESS)
@@ -100,43 +97,47 @@ class LMCServerConnector(RemoteConnector):
         kv_dtype = memory_obj.get_dtype()
         memory_format = memory_obj.get_memory_format()
 
-        self.socket_lock.acquire()
-        await self.loop.sock_sendall(
-            self.client_socket,
-            ClientMetaMessage(Constants.CLIENT_PUT, key, len(kv_bytes),
-                              memory_format, kv_dtype, kv_shape).serialize())
+        async with self.async_socket_lock:
+            await self.loop.sock_sendall(
+                self.client_socket,
+                ClientMetaMessage(Constants.CLIENT_PUT, key, len(kv_bytes),
+                                  memory_format, kv_dtype,
+                                  kv_shape).serialize())
 
-        await self.loop.sock_sendall(self.client_socket, kv_bytes)
-        self.socket_lock.release()
+            await self.loop.sock_sendall(self.client_socket, kv_bytes)
 
         self.memory_allocator.ref_count_down(memory_obj)
 
     # TODO(Jiayi): This should be an async function
     @_lmcache_nvtx_annotate
-    def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
+    async def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
+        # NOTE(Jiayi): Not using any await in the following as
+        # we don't want to yield control to other tasks which could
+        # sacrifice the performance loading to trade the performance of
+        # saving
+        async with self.async_socket_lock:
+            self.client_socket.sendall(
+                ClientMetaMessage(Constants.CLIENT_GET, key, 0,
+                                  MemoryFormat(1), torch.float16,
+                                  torch.Size([0, 0, 0, 0])).serialize())
 
-        # TODO(Jiayi): the following send is a bit hacky
-        # Please consider using another message type
-        self.socket_lock.acquire()
-        self.client_socket.sendall(
-            ClientMetaMessage(Constants.CLIENT_GET, key, 0,
-                              MemoryFormat(1), torch.float16,
-                              torch.Size([0, 0, 0, 0])).serialize())
-        data = self.client_socket.recv(ServerMetaMessage.packlength())
-        self.socket_lock.release()
+            data = self.client_socket.recv(ServerMetaMessage.packlength())
 
         meta = ServerMetaMessage.deserialize(data)
         if meta.code != Constants.SERVER_SUCCESS:
             return None
 
-        memory_obj = self.receive_all(meta)
+        async with self.async_socket_lock:
+            memory_obj = self.receive_all(meta)
+
         return memory_obj
 
-    # TODO(Jiayi)
+    # TODO
     @no_type_check
-    def list(self) -> List[str]:
+    async def list(self) -> List[str]:
         pass
 
-    def close(self):
-        self.client_socket.close()
+    async def close(self):
+        async with self.async_socket_lock:
+            self.client_socket.close()
         logger.info("Closed the lmserver connection")
