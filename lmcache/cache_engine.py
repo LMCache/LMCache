@@ -7,6 +7,7 @@ import torch
 
 from lmcache.config import LMCacheEngineConfig, LMCacheEngineMetadata
 from lmcache.logging import init_logger
+from lmcache.observability import LMCacheStatsLogger, LMCStatsMonitor
 from lmcache.storage_backend import CreateStorageBackend
 from lmcache.usage_context import InitializeUsageContext
 from lmcache.utils import CacheEngineKey, KVCache, _lmcache_nvtx_annotate
@@ -39,6 +40,7 @@ class LMCacheEngine:
         logger.debug(f"Current storage backend type {type(self.engine_)}")
 
         InitializeUsageContext(config, metadata)
+        self.stats_monitor = LMCStatsMonitor.GetOrCreate()
 
     def _make_key(self, chunk_hash: str, fmt: str) -> CacheEngineKey:
         return CacheEngineKey(
@@ -278,6 +280,8 @@ class LMCacheEngine:
             The KV cache should NOT have the "batch" dimension.
         """
         start_time = time.perf_counter()
+        monitor_req_id = self.stats_monitor.on_store_request(
+            self._num_tokens_in_kv(kv_tensors_raw, self.metadata.fmt))
         fmt = self.metadata.fmt
         if kv_tensors_mask is None:
             kv_tensors_mask = torch.ones_like(tokens, dtype=torch.bool)
@@ -318,6 +322,7 @@ class LMCacheEngine:
         logger.info(f"Stored/updated {n_chunks} chunks, total time "
                     f"{end_time - start_time:.2f}s, make chunks time "
                     f"{end_make_chunks - start_time:.2f}s")
+        self.stats_monitor.on_store_finished(monitor_req_id)
 
     # prefix caching only needs a mask_len
     # but non-prefix might need an roi
@@ -361,6 +366,9 @@ class LMCacheEngine:
             num_skip_chunk = num_skip_tok // self.chunk_size
         ret_mask[:num_skip_tok] = False
 
+        monitor_req_id = self.stats_monitor.on_retrieve_request(
+            len(tokens) - num_skip_tok)
+
         st = time.perf_counter()
         fmt = self.metadata.fmt
         chunk_hashes = self._prefix_hash(self._chunk_tokens(tokens),
@@ -388,6 +396,7 @@ class LMCacheEngine:
             logging.info("Retrieved 0 chunks")
             self.miss_tokens_count += tokens.shape[0]
             ret_mask[:] = False
+            self.stats_monitor.on_retrieve_finished(monitor_req_id, 0)
             return (), ret_mask
 
         # drop extra tokens in the first chunk
@@ -413,6 +422,8 @@ class LMCacheEngine:
 
         ed = time.perf_counter()
         self.hit_tokens_count += retrieved_token_count
+        self.miss_tokens_count += (len(tokens) - num_skip_tok -
+                                   retrieved_token_count)
         self.hit_rate = self.hit_tokens_count / (self.miss_tokens_count +
                                                  self.hit_tokens_count)
         logger.info(f"Retrieved {len(retrieved_kv_chunks)} chunks "
@@ -422,6 +433,8 @@ class LMCacheEngine:
 
         ret_mask[num_skip_tok + retrieved_token_count:] = False
 
+        self.stats_monitor.on_retrieve_finished(monitor_req_id,
+                                                retrieved_token_count)
         return ret, ret_mask
 
     @_lmcache_nvtx_annotate
@@ -457,6 +470,7 @@ class LMCacheEngineBuilder:
     _instances: Dict[str, LMCacheEngine] = {}
     _cfgs: Dict[str, LMCacheEngineConfig] = {}
     _metadatas: Dict[str, LMCacheEngineMetadata] = {}
+    _stat_loggers: Dict[str, LMCacheStatsLogger] = {}
 
     @classmethod
     def get_or_create(
@@ -474,9 +488,12 @@ class LMCacheEngineBuilder:
         """
         if instance_id not in cls._instances:
             engine = LMCacheEngine(config, metadata)
+            # TODO(ApostaC): Remove the hard-coded log interval here
+            stat_logger = LMCacheStatsLogger(metadata, log_interval=10)
             cls._instances[instance_id] = engine
             cls._cfgs[instance_id] = config
             cls._metadatas[instance_id] = metadata
+            cls._stat_loggers[instance_id] = stat_logger
             return engine
         else:
             if (cls._cfgs[instance_id] != config
@@ -499,6 +516,9 @@ class LMCacheEngineBuilder:
         if instance_id in cls._instances:
             engine = cls._instances[instance_id]
             engine.close()
+            stat_logger = cls._stat_loggers[instance_id]
+            stat_logger.shutdown()
             cls._instances.pop(instance_id, None)
             cls._cfgs.pop(instance_id, None)
             cls._metadatas.pop(instance_id, None)
+            cls._stat_loggers.pop(instance_id, None)

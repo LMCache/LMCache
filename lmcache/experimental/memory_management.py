@@ -8,6 +8,7 @@ import sortedcontainers
 import torch
 
 from lmcache.logging import init_logger
+from lmcache.observability import LMCStatsMonitor
 
 logger = init_logger(__name__)
 
@@ -159,6 +160,8 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         self.num_active_allocations = 0
         self.total_allocated_size = 0
 
+        self.stats_monitor = LMCStatsMonitor.GetOrCreate()
+
     @staticmethod
     def _Compute_raw_size(shape: torch.Size, dtype: torch.dtype) -> int:
         return shape.numel() * dtype.itemsize
@@ -233,6 +236,7 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         # Update debug status
         self.total_allocated_size += aligned_size
         self.num_active_allocations += 1
+        self.stats_monitor.update_local_cache_usage(self.total_allocated_size)
 
         # Allocate the block
         return MemoryObj(raw_data=self.buffer[block.start:block.start +
@@ -260,6 +264,7 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         # Update debug status
         self.total_allocated_size -= memory_obj.metadata.phy_size
         self.num_active_allocations = max(0, self.num_active_allocations - 1)
+        self.stats_monitor.update_local_cache_usage(self.total_allocated_size)
 
     def memcheck(self):
         """For debug purposes.
