@@ -161,13 +161,6 @@ class LMCLocalBackend(LMCBackendInterface):
         if put_status == PutStatus.ILLEGAL:
             return
 
-        kv_obj = self.mpool.allocate(kv_chunk)
-
-        if kv_obj is None:
-            return
-
-        kv_obj.data.copy_(kv_chunk, non_blocking=False)
-
         # free old block to avoid mem leak
         if key in self.dict:
             self.remove(key)
@@ -175,6 +168,13 @@ class LMCLocalBackend(LMCBackendInterface):
         # Evict caches
         for evict_key in evict_keys:
             self.remove(evict_key)
+
+        kv_obj = self.mpool.allocate(kv_chunk)
+
+        if kv_obj is None:
+            return
+
+        kv_obj.data.copy_(kv_chunk, non_blocking=False)
 
         # Store new chunk
         self.dict[key] = kv_obj

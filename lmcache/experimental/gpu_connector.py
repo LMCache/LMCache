@@ -1,19 +1,17 @@
 import abc
-from typing import Tuple, Union
+from typing import Tuple
 
 import torch
 
 import lmcache.c_ops as lmc_ops
-from lmcache.experimental.memory_management import (BufferMemoryObj,
-                                                    MemoryFormat, MemoryObj)
+from lmcache.experimental.memory_management import MemoryFormat, MemoryObj
 from lmcache.utils import _lmcache_nvtx_annotate
 
 
 class GPUConnectorInterface(metaclass=abc.ABCMeta):
 
     @abc.abstractmethod
-    def to_gpu(self, memory_obj: Union[MemoryObj, BufferMemoryObj], start: int,
-               end: int, **kwargs):
+    def to_gpu(self, memory_obj: MemoryObj, start: int, end: int, **kwargs):
         # FIXME (Yihua): We shouldn't put start and end here since
         # it's not the responsibility of the GPUConnector to know
         # the token-sequence-related information.
@@ -76,8 +74,7 @@ class VLLMNestedTupleGPUConnector(GPUConnectorInterface):
 
     # TODO(Jiayi): fix the gpu memory
     @_lmcache_nvtx_annotate
-    def to_gpu(self, memory_obj: Union[MemoryObj, BufferMemoryObj], start: int,
-               end: int, **kwargs):
+    def to_gpu(self, memory_obj: MemoryObj, start: int, end: int, **kwargs):
         """Expect a kwarg 'kvcaches' which is a nested tuple of K and V tensors.
         The kvcaches should correspond to the "WHOLE token sequence".
 
@@ -169,8 +166,7 @@ class VLLMPagedMemGPUConnector(GPUConnectorInterface):
         self.num_layers = num_layers
 
     @_lmcache_nvtx_annotate
-    def to_gpu(self, memory_obj: Union[MemoryObj, BufferMemoryObj], start: int,
-               end: int, **kwargs):
+    def to_gpu(self, memory_obj: MemoryObj, start: int, end: int, **kwargs):
         """Expect a kwarg 'kvcaches' which is a nested tuple of K and V tensors.
         The kvcaches should correspond to the "WHOLE token sequence".
 
@@ -183,7 +179,7 @@ class VLLMPagedMemGPUConnector(GPUConnectorInterface):
         if memory_obj.metadata.fmt != MemoryFormat.KV_BLOB:
             raise ValueError(
                 "The memory object should be in KV_BLOB format in"
-                " order to be processed by NestedTupleGPUConnector")
+                " order to be processed by VLLMPagedMemGPUConnector")
 
         if "kvcaches" not in kwargs:
             raise ValueError("'kvcaches' should be provided in kwargs.")

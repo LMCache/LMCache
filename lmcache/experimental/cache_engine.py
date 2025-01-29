@@ -166,9 +166,8 @@ class LMCacheEngine:
             # For example, disk->gpu is faster than disk->cpu->gpu.
             # RDMA is another example.
 
-            # TODO(Jiayi): Move the memory object directly to
-            # paged memory to avoid data copies
             self.gpu_connector.to_gpu(memory_obj, start, end, **kwargs)
+            self.memory_allocator.ref_count_down(memory_obj)
 
         self.stats_monitor.on_retrieve_finished(monitor_req_id,
                                                 torch.sum(ret_mask))

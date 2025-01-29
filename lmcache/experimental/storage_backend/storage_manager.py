@@ -1,15 +1,14 @@
+import asyncio
 import threading
-#from sortedcontainers import SortedDict
 from collections import OrderedDict
 from concurrent.futures import Future
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple
 
 import torch
 
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.experimental.config import LMCacheEngineConfig
-from lmcache.experimental.memory_management import (BufferMemoryObj,
-                                                    MemoryAllocatorInterface,
+from lmcache.experimental.memory_management import (MemoryAllocatorInterface,
                                                     MemoryFormat, MemoryObj,
                                                     PinMemoryAllocator)
 from lmcache.experimental.storage_backend import CreateStorageBackends
@@ -34,10 +33,15 @@ class StorageManager:
         self.hot_cache: OrderedDict[CacheEngineKey, MemoryObj] = OrderedDict()
         self.use_hot = config.local_cpu
 
+        self.loop = asyncio.new_event_loop()
+        self.thread = threading.Thread(target=self.loop.run_forever)
+        self.thread.start()
+
         #TODO: remove hardcode
         dst_device = "cuda"
-        self.storage_backends: Dict[str, StorageBackendInterface] =\
-            CreateStorageBackends(config, metadata, dst_device)
+        self.storage_backends: OrderedDict[str, StorageBackendInterface] =\
+            CreateStorageBackends(
+                config, metadata, self.loop, allocator, dst_device)
         self.prefetch_tasks: Dict[CacheEngineKey, Future] = {}
         self.put_tasks: Dict[str, Dict[CacheEngineKey, Tuple[Future,
                                                              MemoryObj]]] = {}
@@ -68,8 +72,14 @@ class StorageManager:
         evict_keys = []
         while memory_obj is None:
             evict_key = next(iter_hot_cache)
+
+            # If the ref_count > 1, we cannot evict it as the hot cache
+            # might be used as buffers by other storage backends
+            if self.memory_allocator.get_ref_count(
+                    self.hot_cache[evict_key]) > 1:
+                continue
             evict_keys.append(evict_key)
-            self.memory_allocator.free(self.hot_cache[evict_key])
+            self.memory_allocator.ref_count_down(self.hot_cache[evict_key])
             memory_obj = self.memory_allocator.allocate(shape, dtype)
             logger.debug("Evicting 1 chunk from hot cache")
             # TODO(Jiayi): move this before the loop
@@ -81,32 +91,6 @@ class StorageManager:
 
         self.manager_lock.release()
         return memory_obj
-
-    def put_callback(self, future, backend_name, key):
-        """
-        Update metadata and free resources after put.
-        """
-        self.manager_lock.acquire()
-        future, memory_obj = self.put_tasks[backend_name][key]
-
-        # raises exception if put failed
-        try:
-            future.result()
-        except Exception as e:
-            logger.error(
-                f"Exception captured from future in put_callback: {e}")
-            raise e
-        self.put_tasks[backend_name].pop(key)
-
-        # TODO: Might need to modify free such that it's `ref_count-1`
-        # because there might be multiple references (backends)
-        # using the same memory_obj
-        # It won't error now for we only have disk backend
-        if not self.use_hot:
-            self.memory_allocator.free(memory_obj)
-
-        self.storage_backends[backend_name].insert_key(key, memory_obj)
-        self.manager_lock.release()
 
     def put(
         self,
@@ -126,47 +110,33 @@ class StorageManager:
             # prefix caching
             if key in self.hot_cache:
                 old_memory_obj = self.hot_cache.pop(key)
-                self.memory_allocator.free(old_memory_obj)
+                self.memory_allocator.ref_count_down(old_memory_obj)
 
             self.hot_cache[key] = memory_obj
+            self.memory_allocator.ref_count_up(memory_obj)
 
-        # TODO (Jiayi): the following for loop should be reconsidered
-        for backend_name in self.storage_backends:
-            if key in self.put_tasks[backend_name]:
-                if not self.use_hot:
-                    self.memory_allocator.free(memory_obj)
+        # TODO(Jiayi): currently, the entire put task will be cancelled
+        # if one of the backend is already storing this cache.
+        # This might not be ideal.
+        for storage_backend in self.storage_backends.values():
+            if storage_backend.exists_in_put_tasks(key):
+                self.memory_allocator.ref_count_down(memory_obj)
                 self.manager_lock.release()
                 return
         self.manager_lock.release()
 
-        ever_put = False
+        #ever_put = False
         for backend_name, backend in self.storage_backends.items():
             put_task = backend.submit_put_task(key, memory_obj)
 
             if put_task is None:
                 continue
 
-            ever_put = True
-            # For debugging purpose
-            #backend.put_blocking(key, memory_obj)
-
-            lambda_callback = lambda f, backend_name=backend_name: \
-                   self.put_callback(f, backend_name, key)
-
-            self.manager_lock.acquire()
-            self.put_tasks[backend_name][key] = (put_task, memory_obj)
-            self.manager_lock.release()
-            put_task.add_done_callback(lambda_callback)
-
-        # TODO(Jiayi): this part looks messy
         self.manager_lock.acquire()
-        if ever_put is False and key not in self.hot_cache:
-            self.memory_allocator.free(memory_obj)
-            logger.warning(f"Put failed for key {key}")
+        self.memory_allocator.ref_count_down(memory_obj)
         self.manager_lock.release()
 
-    def get(self, key: CacheEngineKey
-            ) -> Optional[Union[MemoryObj, BufferMemoryObj]]:
+    def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         """
         Blocking function to get the memory object from the storages.
         """
@@ -192,6 +162,7 @@ class StorageManager:
         self.manager_lock.acquire()
         memory_obj = self.hot_cache.get(key, None)
         if memory_obj is not None:
+            self.memory_allocator.ref_count_up(memory_obj)
             self.hot_cache.move_to_end(key)
             self.manager_lock.release()
             return memory_obj
@@ -199,17 +170,22 @@ class StorageManager:
         # Search all backends for blocking get
         for backend_name, backend in self.storage_backends.items():
             # Avoid read-write contention
-            if key in self.put_tasks[backend_name]:
-                continue
-            buffer_memory_obj = backend.get_blocking(key)
-            if buffer_memory_obj is not None:
-                # NOTE(Jiayi): bypass the allocator for now
+            #if key in self.put_tasks[backend_name]:
+            #    continue
+
+            # NOTE(Jiayi): bypass the allocator for now
+            memory_obj = backend.get_blocking(key)
+            if memory_obj is not None:
+                if self.use_hot and key not in self.hot_cache:
+                    self.hot_cache[key] = memory_obj
+                    self.memory_allocator.ref_count_up(memory_obj)
                 self.manager_lock.release()
-                return buffer_memory_obj
+                return memory_obj
 
         self.manager_lock.release()
         return None
 
+    # TODO(Jiayi): we need to consider eviction in prefetch
     def prefetch_callback(self, future, key):
         """
         Update metadata after prefetch.
@@ -242,6 +218,8 @@ class StorageManager:
         # TODO(Jiayi): please remove this hardcode
         memory_obj.metadata.fmt = MemoryFormat.KV_BLOB
 
+        # NOTE: no need to ref_count_up here because
+        # the memory_obj's ref_count is already 1
         self.manager_lock.acquire()
         self.hot_cache[key] = memory_obj
         self.manager_lock.release()
@@ -303,3 +281,16 @@ class StorageManager:
                     return True
 
             return False
+
+    def close(self):
+
+        # using threadsafe method here as stop modifies
+        # the internal state of the loop (in another thread)
+        if self.loop.is_running():
+            self.loop.call_soon_threadsafe(self.loop.stop)
+        if self.thread.is_alive():
+            self.thread.join()
+        logger.info("Storage manager closed.")
+
+    def __del__(self):
+        self.close()

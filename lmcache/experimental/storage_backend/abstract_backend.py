@@ -4,7 +4,7 @@ from typing import Optional
 
 import torch
 
-from lmcache.experimental.memory_management import BufferMemoryObj, MemoryObj
+from lmcache.experimental.memory_management import MemoryObj
 from lmcache.utils import CacheEngineKey
 
 
@@ -37,9 +37,9 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
         raise NotImplementedError
 
     @abc.abstractmethod
-    def insert_key(self, key: CacheEngineKey, memory_obj: MemoryObj) -> None:
+    def exists_in_put_tasks(self, key: CacheEngineKey) -> bool:
         """
-        Insert the key after data is put to storage backend.
+        Check whether key is in the ongoing put tasks. 
         """
         raise NotImplementedError
 
@@ -74,13 +74,13 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
     def get_blocking(
         self,
         key: CacheEngineKey,
-    ) -> Optional[BufferMemoryObj]:
+    ) -> Optional[MemoryObj]:
         """
         A blcocking function to get the kv cache from the storage backend.
         
         :param CacheEngineKey key: The key of the MemoryObj.
         
-        :return: BufferMemoryObj. None if the key does not exist.
+        :return: MemoryObj. None if the key does not exist.
         """
         raise NotImplementedError
 

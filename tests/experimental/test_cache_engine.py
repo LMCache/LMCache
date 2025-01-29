@@ -34,7 +34,8 @@ def test_same_retrieve_store(autorelease_experimental):
     with pytest.raises(AssertionError):
         check_kv_cache_equal(retrieved_cache, kv_cache, num_tokens, fmt)
     """ initialize the engine """
-    cfg = LMCacheEngineConfig.from_legacy(chunk_size=chunk_size)
+    cfg = LMCacheEngineConfig.from_legacy(chunk_size=chunk_size,
+                                          remote_url=None)
 
     engine = autorelease_experimental(
         LMCacheEngineBuilder.get_or_create("test", cfg,
@@ -67,15 +68,15 @@ def test_same_retrieve_store(autorelease_experimental):
 
 @pytest.mark.parametrize("fmt", ["vllm"])
 @pytest.mark.parametrize("chunk_size", [128, 256])
-@pytest.mark.parametrize(
-    "backend",
-    [
-        "cpu",
-        "local_disk",
-    ],
-)
+@pytest.mark.parametrize("backend", ["cpu", "local_disk", "remote"])
+@pytest.mark.parametrize("lmserver_experimental_process", ["cpu"],
+                         indirect=True)
 def test_paged_retrieve_prefix(fmt, chunk_size, backend,
+                               lmserver_experimental_process,
                                autorelease_experimental):
+    url = None
+    if backend == "remote":
+        url = lmserver_experimental_process.server_url
     device = "cuda"
     num_tokens = 2000
     new_num_tokens = 1000
@@ -98,7 +99,8 @@ def test_paged_retrieve_prefix(fmt, chunk_size, backend,
     new_slot_mapping = torch.tensor(new_slot_mapping, device=device)
     """ initialize the engine """
     cfg = LMCacheEngineConfig.from_legacy(chunk_size=chunk_size,
-                                          backend=backend)
+                                          backend=backend,
+                                          remote_url=url)
 
     engine = autorelease_experimental(
         LMCacheEngineBuilder.get_or_create("test", cfg,
@@ -119,6 +121,9 @@ def test_paged_retrieve_prefix(fmt, chunk_size, backend,
     elif backend == "local_disk":
         timeout = 30
         search_range = "LocalDiskBackend"
+    elif backend == "remote":
+        timeout = 30
+        search_range = "RemoteBackend"
     start_time = time.time()
     while engine.lookup(tokens, search_range) < expected_length:
         if time.time() - start_time > timeout:
@@ -152,10 +157,16 @@ def test_paged_retrieve_prefix(fmt, chunk_size, backend,
 @pytest.mark.parametrize("chunk_size", [256])
 @pytest.mark.parametrize(
     "backend",
-    ["cpu", "local_disk"],
+    ["cpu", "local_disk", "remote"],
 )
+@pytest.mark.parametrize("lmserver_experimental_process", ["cpu"],
+                         indirect=True)
 def test_paged_store_offset(fmt, chunk_size, backend,
+                            lmserver_experimental_process,
                             autorelease_experimental):
+    url = None
+    if backend == "remote":
+        url = lmserver_experimental_process.server_url
     device = "cuda"
     num_tokens = 2000
     num_suffix_tokens = 500
@@ -175,7 +186,8 @@ def test_paged_store_offset(fmt, chunk_size, backend,
     slot_mapping = torch.tensor(slot_mapping, device=device)
     """ initialize the engine """
     cfg = LMCacheEngineConfig.from_legacy(chunk_size=chunk_size,
-                                          backend=backend)
+                                          backend=backend,
+                                          remote_url=url)
 
     engine = autorelease_experimental(
         LMCacheEngineBuilder.get_or_create("test", cfg,
@@ -422,7 +434,7 @@ def test_store_kv_tensors_mask(fmt, autorelease_experimental):
 @pytest.mark.parametrize(
     "backend",
     [
-        "local_cpu_disk",
+        "local_cpu_disk_remote",
     ],
 )
 @pytest.mark.parametrize(
@@ -430,10 +442,17 @@ def test_store_kv_tensors_mask(fmt, autorelease_experimental):
     [
         "local_cpu",
         "local_disk",
+        "remote",
     ],
 )
+@pytest.mark.parametrize("lmserver_experimental_process", ["cpu"],
+                         indirect=True)
 def test_hierarchy_retrieve(fmt, chunk_size, backend, retrieve_from,
+                            lmserver_experimental_process,
                             autorelease_experimental):
+    url = None
+    if backend == "local_cpu_disk_remote":
+        url = lmserver_experimental_process.server_url
     device = "cuda"
     num_tokens = 2000
     new_num_tokens = 1000
@@ -447,7 +466,8 @@ def test_hierarchy_retrieve(fmt, chunk_size, backend, retrieve_from,
                                         device)
     """ initialize the engine """
     cfg = LMCacheEngineConfig.from_legacy(chunk_size=chunk_size,
-                                          backend=backend)
+                                          backend=backend,
+                                          remote_url=url)
 
     engine = autorelease_experimental(
         LMCacheEngineBuilder.get_or_create("test", cfg,
@@ -469,11 +489,23 @@ def test_hierarchy_retrieve(fmt, chunk_size, backend, retrieve_from,
             raise TimeoutError(f"Operation timed out after {timeout} seconds.")
         time.sleep(0.01)
     """ Wait until disk save is finished """
-    if retrieve_from == "local_disk":
+    if retrieve_from in ["local_disk", "remote"]:
         engine.storage_manager.hot_cache.clear()
         timeout = 30
         start_time = time.time()
-        while engine.lookup(tokens) < expected_length:
+        while engine.lookup(tokens, ["LocalDiskBackend"]) < expected_length:
+            if time.time() - start_time > timeout:
+                raise TimeoutError(
+                    f"Operation timed out after {timeout} seconds.")
+            time.sleep(0.01)
+    """ Wait until remote save is finished """
+    if retrieve_from == "remote":
+        engine.storage_manager.hot_cache.clear()
+        engine.storage_manager.storage_backends["LocalDiskBackend"].dict.clear(
+        )
+        timeout = 30
+        start_time = time.time()
+        while engine.lookup(tokens, ["RemoteBackend"]) < expected_length:
             if time.time() - start_time > timeout:
                 raise TimeoutError(
                     f"Operation timed out after {timeout} seconds.")
@@ -590,6 +622,87 @@ def test_prefetch_retrieve(backend, prefetch_from, autorelease_experimental):
     check_kv_cache_equal(retrieved_cache, kv_cache, expected_length, fmt)
 
     if backend in ["local_cpu_disk"]:
+        subprocess.run(shlex.split("rm -rf /local/disk_test/local_disk/"))
+    LMCacheEngineBuilder.destroy("test")
+
+
+@pytest.mark.parametrize("fmt", ["vllm"])
+@pytest.mark.parametrize("chunk_size", [128])
+@pytest.mark.parametrize(
+    "backend",
+    [
+        "cpu",
+        "local_disk",
+        "remote",
+        "local_disk_remote",
+        "local_cpu_disk_remote",
+    ],
+)
+@pytest.mark.parametrize("lmserver_experimental_process", ["cpu"],
+                         indirect=True)
+def test_mem_leak(fmt, chunk_size, backend, lmserver_experimental_process,
+                  autorelease_experimental):
+    url = None
+    if "remote" in backend:
+        url = lmserver_experimental_process.server_url
+
+    device = "cuda"
+    num_tokens = 2000
+    kv_shape = (32, 2, chunk_size, 8, 128)
+    num_blocks = 1000
+    block_size = 16
+    dtype = torch.bfloat16
+    connector = create_gpu_connector(1024, 32, paged=True)
+
+    tokens = generate_tokens(num_tokens, device)
+    kv_cache = generate_kv_cache_paged(num_blocks, device, block_size, dtype)
+    slot_mapping = random.sample(range(0, num_blocks * block_size), num_tokens)
+    slot_mapping = torch.tensor(slot_mapping, device=device)
+    """ initialize the engine """
+    cfg = LMCacheEngineConfig.from_legacy(chunk_size=chunk_size,
+                                          backend=backend,
+                                          remote_url=url)
+
+    engine = autorelease_experimental(
+        LMCacheEngineBuilder.get_or_create("test", cfg,
+                                           dumb_metadata(fmt, kv_shape),
+                                           connector))
+
+    engine.store(tokens, kvcaches=kv_cache, slot_mapping=slot_mapping)
+
+    expected_length = 2000
+    timeout = 30
+    '''Wait until cpu store finishes'''
+    if "cpu" in backend:
+        start_time = time.time()
+        while engine.lookup(tokens, ["Hot"]) < expected_length:
+            if time.time() - start_time > timeout:
+                raise TimeoutError(
+                    f"Operation timed out after {timeout} seconds.")
+            time.sleep(0.01)
+    '''Wait until disk store finishes'''
+    if "disk" in backend:
+        start_time = time.time()
+        while engine.lookup(tokens, ["LocalDiskBackend"]) < expected_length:
+            if time.time() - start_time > timeout:
+                raise TimeoutError(
+                    f"Operation timed out after {timeout} seconds.")
+            time.sleep(0.01)
+
+    if "remote" in backend:
+        start_time = time.time()
+        while engine.lookup(tokens, ["RemoteBackend"]) < expected_length:
+            if time.time() - start_time > timeout:
+                raise TimeoutError(
+                    f"Operation timed out after {timeout} seconds.")
+            time.sleep(0.01)
+    tensor_memory_allocator = engine.storage_manager.memory_allocator.allocator
+    if "cpu" not in backend:
+        assert tensor_memory_allocator.total_allocated_size == 0
+    else:
+        assert tensor_memory_allocator.total_allocated_size > 0
+
+    if "disk" in backend:
         subprocess.run(shlex.split("rm -rf /local/disk_test/local_disk/"))
     LMCacheEngineBuilder.destroy("test")
 
