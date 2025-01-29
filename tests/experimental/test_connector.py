@@ -28,7 +28,9 @@ def test_lm_connector(url, autorelease_experimental,
         CreateConnector(url, async_loop, memory_allocator))
 
     random_key = dumb_cache_engine_key()
-    assert not connector.exists(random_key)
+    future = asyncio.run_coroutine_threadsafe(connector.exists(random_key),
+                                              async_loop)
+    assert not future.result()
 
     num_tokens = 1000
     mem_obj_shape = [2, 32, num_tokens, 1024]
@@ -40,10 +42,14 @@ def test_lm_connector(url, autorelease_experimental,
         connector.put(random_key, memory_obj), async_loop)
     future.result()
 
-    assert connector.exists(random_key)
+    future = asyncio.run_coroutine_threadsafe(connector.exists(random_key),
+                                              async_loop)
+    assert future.result()
     assert memory_allocator.get_ref_count(memory_obj) == 1
 
-    retrieved_memory_obj = connector.get(random_key)
+    future = asyncio.run_coroutine_threadsafe(connector.get(random_key),
+                                              async_loop)
+    retrieved_memory_obj = future.result()
 
     check_mem_obj_equal(
         [retrieved_memory_obj],
