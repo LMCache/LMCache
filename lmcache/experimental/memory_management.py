@@ -117,29 +117,6 @@ class MemoryObj:
         return byte_array
 
 
-@dataclass
-class BufferMemoryObjMetadata:
-
-    # The 'logical' format of the tensor
-    fmt: MemoryFormat = MemoryFormat.UNDEFINED
-
-
-class BufferMemoryObj:
-    """
-    A naive on-gpu buffer memory
-    """
-
-    def __init__(self, kv_chunk: torch.Tensor,
-                 metadata: BufferMemoryObjMetadata):
-        self.metadata = metadata
-        self.kv_chunk = kv_chunk
-        self.valid = True
-
-    @property
-    def tensor(self) -> torch.Tensor:
-        return self.kv_chunk
-
-
 class MemoryAllocatorInterface(metaclass=abc.ABCMeta):
 
     @abc.abstractmethod
