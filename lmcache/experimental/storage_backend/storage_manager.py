@@ -132,7 +132,6 @@ class StorageManager:
             if put_task is None:
                 continue
 
-
         self.manager_lock.acquire()
         self.memory_allocator.ref_count_down(memory_obj)
         self.manager_lock.release()
