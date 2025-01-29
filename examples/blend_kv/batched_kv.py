@@ -1,12 +1,9 @@
 import time
 
 import lmcache_vllm
-import torch
 from lmcache_vllm.blend_adapter import (OfflineKVPreCompute,
                                         combine_input_prompt_chunks)
 from lmcache_vllm.vllm import LLM, SamplingParams
-
-torch.multiprocessing.set_start_method('spawn')
 
 context_files = ["chunk1.txt", "chunk2.txt"]
 chunks = []

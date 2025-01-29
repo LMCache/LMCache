@@ -245,7 +245,7 @@ class SPTBlendRetriever(BlendRetriever):
                     tokens,  # tokens
                     None,  # mask
                     False,  # return_tuple
-                ) for tokens in splitted_tokens if len(tokens) > 0
+                ) for tokens in splitted_tokens
             ]
 
         return SPTBlendRetrieverTask(token_segments=splitted_tokens,

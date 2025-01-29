@@ -8,8 +8,6 @@ This repository contains benchmarking tools for evaluating the performance of la
 
 - **Multi-Round QA Benchmark**: Simulates a realistic multi-user, multi-turn question-answering session to evaluate key metrics such as token throughput, latency, and average response times.
 
-### Upcoming feature
-- **RAG** benchmark
 
 ## Setup
 
@@ -117,3 +115,4 @@ The `multi-round-qa.py` script works by:
         --base-url http://localhost:8000/v1 \
         --sharegpt
     ```
+
