@@ -12,6 +12,7 @@ from lmcache.experimental.storage_backend.storage_manager import StorageManager
 from lmcache.experimental.token_database import (ChunkedTokenDatabase,
                                                  TokenDatabase)
 from lmcache.logging import init_logger
+from lmcache.observability import LMCStatsMonitor
 from lmcache.usage_context import InitializeUsageContext
 from lmcache.utils import _lmcache_nvtx_annotate
 
@@ -60,6 +61,7 @@ class LMCacheEngine:
                                               self.memory_allocator)
 
         InitializeUsageContext(config.to_original_config(), metadata)
+        self.stats_monitor = LMCStatsMonitor.GetOrCreate()
 
     @_lmcache_nvtx_annotate
     @torch.inference_mode()
@@ -84,6 +86,12 @@ class LMCacheEngine:
         :raises: ValueError if the number of Falses in the mask is not a 
             multiple of the chunk size.
         """
+        if mask is not None:
+            monitor_req_id = self.stats_monitor.on_store_request(
+                torch.sum(mask))
+        else:
+            monitor_req_id = self.stats_monitor.on_store_request(len(tokens))
+
         for start, end, key in self.token_database.process_tokens(
                 tokens, mask):
             if self.storage_manager.contains(key):
@@ -105,6 +113,7 @@ class LMCacheEngine:
 
             self.gpu_connector.from_gpu(memory_obj, start, end, **kwargs)
             self.storage_manager.put(key, memory_obj)
+        self.stats_monitor.on_store_finished(monitor_req_id)
 
     @_lmcache_nvtx_annotate
     @torch.inference_mode()
@@ -133,6 +142,13 @@ class LMCacheEngine:
         :raises: ValueError if the number of Falses in the mask is not a 
             multiple of the chunk size.
         """
+        if mask is not None:
+            monitor_req_id = self.stats_monitor.on_retrieve_request(
+                torch.sum(mask))
+        else:
+            monitor_req_id = self.stats_monitor.on_retrieve_request(
+                len(tokens))
+
         ret_mask = torch.zeros_like(tokens, dtype=torch.bool, device="cpu")
         for start, end, key in self.token_database.process_tokens(
                 tokens, mask):
@@ -154,6 +170,8 @@ class LMCacheEngine:
             # paged memory to avoid data copies
             self.gpu_connector.to_gpu(memory_obj, start, end, **kwargs)
 
+        self.stats_monitor.on_retrieve_finished(monitor_req_id,
+                                                torch.sum(ret_mask))
         return ret_mask
 
     def prefetch(

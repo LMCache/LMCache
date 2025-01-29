@@ -1,4 +1,5 @@
 import hashlib
+import threading
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
@@ -80,3 +81,14 @@ def _lmcache_nvtx_annotate(func, domain="lmcache"):
         color=_get_color_for_nvtx(func.__qualname__),
         domain=domain,
     )(func)
+
+
+##### Threading related #####
+def thread_safe(func):
+    lock = threading.Lock()
+
+    def wrapper(*args, **kwargs):
+        with lock:
+            return func(*args, **kwargs)
+
+    return wrapper
