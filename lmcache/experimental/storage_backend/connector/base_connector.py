@@ -44,7 +44,8 @@ class RemoteConnector(metaclass=abc.ABCMeta):
     async def put(self, key: CacheEngineKey, memory_obj: MemoryObj):
         """
         Send the memory_obj with the corresponding key directly
-        to the remote server
+        to the remote server. Will decrease the ref count after
+        send finishes.
 
         Input:
             key: the CacheEngine key

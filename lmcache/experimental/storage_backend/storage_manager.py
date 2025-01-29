@@ -132,22 +132,6 @@ class StorageManager:
             if put_task is None:
                 continue
 
-            #ever_put = True
-
-            #lambda_callback = lambda f, backend_name=backend_name: \
-            #       self.put_callback(f, backend_name, key)
-
-            #self.manager_lock.acquire()
-            #self.put_tasks[backend_name][key] = (put_task, memory_obj)
-            #self.manager_lock.release()
-            #put_task.add_done_callback(lambda_callback)
-
-        # TODO(Jiayi): this part looks messy
-        #self.manager_lock.acquire()
-        #if ever_put is False and key not in self.hot_cache:
-        #    self.memory_allocator.free(memory_obj)
-        #    logger.warning(f"Put failed for key {key}")
-        #self.manager_lock.release()
 
         self.manager_lock.acquire()
         self.memory_allocator.ref_count_down(memory_obj)
@@ -193,7 +177,7 @@ class StorageManager:
             # NOTE(Jiayi): bypass the allocator for now
             memory_obj = backend.get_blocking(key)
             if memory_obj is not None:
-                if self.use_hot:
+                if self.use_hot and key not in self.hot_cache:
                     self.hot_cache[key] = memory_obj
                     self.memory_allocator.ref_count_up(memory_obj)
                 self.manager_lock.release()
