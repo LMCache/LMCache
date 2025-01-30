@@ -1,6 +1,6 @@
 from lmcache.experimental.memory_management import MemoryObj
-from lmcache.experimental.storage_backend.naive_serde import (Deserializer,
-                                                              Serializer)
+from lmcache.experimental.storage_backend.naive_serde.serde import (
+    Deserializer, Serializer)
 
 
 class NaiveSerializer(Serializer):
