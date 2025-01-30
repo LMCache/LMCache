@@ -1,7 +1,4 @@
 import abc
-import time
-
-import torch
 
 from lmcache.experimental.memory_management import MemoryObj
 
