@@ -24,11 +24,10 @@ def CreateSerde(
         s, d = KIVISerializer(memory_allocator), \
             KIVIDeserializer(memory_allocator)
     else:
-        raise ValueError(f"Invalid serde type: {serde_type}")
+        raise ValueError(f"Invalid type: {serde_type}")
 
     return s, d
 
-# Fix buildkite
 
 __all__ = [
     "Serializer",
