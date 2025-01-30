@@ -9,6 +9,7 @@ from lmcache.experimental.memory_management import (MemoryAllocatorInterface,
 from lmcache.experimental.storage_backend.abstract_backend import \
     StorageBackendInterface
 from lmcache.experimental.storage_backend.connector import CreateConnector
+from lmcache.experimental.storage_backend.naive_serde import CreateSerde
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
 
@@ -36,6 +37,10 @@ class RemoteBackend(StorageBackendInterface):
         self.memory_allocator = memory_allocator
 
         self.loop = loop
+
+        assert config.remote_serde is not None
+        self.serializer, self.deserializer = CreateSerde(
+            config.remote_serde, memory_allocator, config)
 
         # TODO(Jiayi): If we want to have cache admission policies,
         # we must make decision (whether to send or not) at the local side
@@ -67,12 +72,15 @@ class RemoteBackend(StorageBackendInterface):
     ) -> Optional[Future]:
 
         self.memory_allocator.ref_count_up(memory_obj)
+
         self.put_tasks_lock.acquire()
         self.put_tasks.append(key)
         self.put_tasks_lock.release()
 
+        compressed_memory_obj = self.serializer.serialize(memory_obj)
+
         future = asyncio.run_coroutine_threadsafe(
-            self.connection.put(key, memory_obj), self.loop)
+            self.connection.put(key, compressed_memory_obj), self.loop)
 
         lambda_callback = lambda f: \
                 self.put_callback(f, key)
@@ -97,8 +105,10 @@ class RemoteBackend(StorageBackendInterface):
         future = asyncio.run_coroutine_threadsafe(self.connection.get(key),
                                                   self.loop)
         memory_obj = future.result()
-
-        return memory_obj
+        if memory_obj is None:
+            return None
+        decompressed_memory_obj = self.deserializer.deserialize(memory_obj)
+        return decompressed_memory_obj
 
     def close(self):
         self.connection.close()
