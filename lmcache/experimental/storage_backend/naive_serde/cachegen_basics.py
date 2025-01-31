@@ -79,6 +79,18 @@ class CacheGenConfig:
                     QuantizationSpec(start_layer=2, end_layer=40, bins=16),
                 ],
             )
+        elif model_name == "test_model":
+            return CacheGenConfig(
+                nlayers=32,
+                kspecs=[
+                    QuantizationSpec(start_layer=0, end_layer=10, bins=32),
+                    QuantizationSpec(start_layer=10, end_layer=32, bins=16),
+                ],
+                vspecs=[
+                    QuantizationSpec(start_layer=0, end_layer=2, bins=32),
+                    QuantizationSpec(start_layer=2, end_layer=32, bins=16),
+                ],
+            )
         else:
             try:
                 config = AutoConfig.from_pretrained(model_name)

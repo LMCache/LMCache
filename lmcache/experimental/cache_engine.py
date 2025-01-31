@@ -7,7 +7,7 @@ from lmcache.config import LMCacheEngineMetadata
 from lmcache.experimental.config import LMCacheEngineConfig
 from lmcache.experimental.gpu_connector import GPUConnectorInterface
 from lmcache.experimental.memory_management import (MemoryAllocatorInterface,
-                                                    PinMemoryAllocator)
+                                                    MixedMemoryAllocator)
 from lmcache.experimental.storage_backend.storage_manager import StorageManager
 from lmcache.experimental.token_database import (ChunkedTokenDatabase,
                                                  TokenDatabase)
@@ -227,7 +227,7 @@ class LMCacheEngineBuilder:
         metadata: LMCacheEngineMetadata,
     ) -> MemoryAllocatorInterface:
         max_local_cpu_size = config.max_local_cpu_size
-        return PinMemoryAllocator(int(max_local_cpu_size * 1024**3))
+        return MixedMemoryAllocator(int(max_local_cpu_size * 1024**3))
 
     @staticmethod
     def _Create_token_database(

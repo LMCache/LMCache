@@ -45,8 +45,6 @@ class LMCServerConnector(RemoteConnector):
 
         # TODO(Jiayi): Format will be used once we support
         # compressed memory format
-        #fmt = meta.fmt
-
         memory_obj = self.memory_allocator.allocate(
             meta.shape,
             meta.dtype,

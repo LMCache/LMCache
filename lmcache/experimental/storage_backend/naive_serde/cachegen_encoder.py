@@ -210,6 +210,8 @@ class CacheGenSerializer(Serializer):
         self.key_bins = self.make_key_bins(self.cachegen_config)
         self.value_bins = self.make_value_bins(self.cachegen_config)
 
+        self.kv_shape = metadata.kv_shape
+
         self.memory_allocator = memory_allocator
 
     def make_key_bins(self, config: CacheGenConfig) -> torch.Tensor:
@@ -251,6 +253,11 @@ class CacheGenSerializer(Serializer):
             self.key_bins = self.key_bins.to(tensor.device)
         if tensor.device != self.value_bins.device:
             self.value_bins = self.value_bins.to(tensor.device)
+
+        # tensor is [2, num_layers, num_tokens, hidden_size]
+        tensor = tensor.view(*tensor.shape[:-1], self.kv_shape[-2],
+                             self.kv_shape[-1])
+        tensor = tensor.permute([1, 0, 2, 3, 4])
 
         # TODO(Jiayi): remove hardcoded "2"
         """ expecting a tensor of shape 

@@ -219,7 +219,7 @@ class BytesBufferMemoryObj(MemoryObj):
                                           address=0,
                                           phy_size=0,
                                           ref_count=1,
-                                          fmt=MemoryFormat.BINARY)
+                                          fmt=MemoryFormat.BINARY_BUFFER)
         else:
             self.meta = metadata
         self.valid = True

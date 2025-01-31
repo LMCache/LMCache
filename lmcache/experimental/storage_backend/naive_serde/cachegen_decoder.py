@@ -114,9 +114,9 @@ def decode_function_gpu(
 class CacheGenDeserializer(Deserializer):
 
     def __init__(self, config: LMCacheEngineConfig,
-                 metadata: LMCacheEngineMetadata, dtype,
+                 metadata: LMCacheEngineMetadata,
                  memory_allocator: MemoryAllocatorInterface):
-        self.dtype = dtype
+        self.dtype = metadata.kv_dtype
         self.cachegen_config = CacheGenConfig.from_model_name(
             metadata.model_name)
         self.chunk_size = config.chunk_size
@@ -202,7 +202,8 @@ class CacheGenDeserializer(Deserializer):
         ))
         match self.fmt:
             case "vllm":
-                kv_chunk = blob.permute((1, 0, 2, 3, 4)).to(
+                hidden_dim = blob.shape[-1] * blob.shape[-2]
+                kv_chunk = blob.reshape(*blob.shape[:-2], hidden_dim).to(
                     self.dtype)  # [nlayers, 2, ntokens, num_heads, head_size]
             case _:
                 raise RuntimeError("Unknown format %s" % self.fmt)

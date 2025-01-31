@@ -64,7 +64,7 @@ class RemoteConnector(metaclass=abc.ABCMeta):
         raise NotImplementedError
 
     @abc.abstractmethod
-    def close(self) -> None:
+    async def close(self):
         """
         Close remote server
 
