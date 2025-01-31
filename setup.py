@@ -26,7 +26,7 @@ setup(
     long_description_content_type="text/markdown",
     packages=find_packages(exclude=("csrc")),
     install_requires=[
-        "torch == 2.4.0",
+        "torch == 2.5.1",
         "numpy==1.26.4",
         "aiofiles",
         "pyyaml",
