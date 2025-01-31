@@ -3,10 +3,11 @@ import json
 import os
 import time
 
-from vllm.config import KVTransferConfig
-from lmcache.integration.vllm.vllm_adapter import close_lmcache_engine
-from vllm import LLM, SamplingParams
 from transformers import AutoTokenizer
+from vllm import LLM, SamplingParams
+from vllm.config import KVTransferConfig
+
+from lmcache.integration.vllm.vllm_adapter import close_lmcache_engine
 
 model_name = "mistralai/Mistral-7B-Instruct-v0.2"
 context_file = os.path.join(os.pardir, 'ffmpeg.txt')
@@ -97,7 +98,7 @@ print(f"\n\nFirst request Time: {t2 - t1} seconds\n\n")
 append_outputs(output_file, first_outputs, context_length, t2 - t1)
 t3 = time.perf_counter()
 
-prompts[0] += "hello"*100
+prompts[0] += "hello" * 100
 second_outputs = llm.generate(prompts, sampling_params)
 t4 = time.perf_counter()
 print(f"\n\nSecond request Time: {t4 - t3} seconds\n\n")
