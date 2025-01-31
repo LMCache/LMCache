@@ -3,9 +3,8 @@ from typing import List
 
 from transformers import AutoConfig
 
-from lmcache.experimental.storage_backend.serde.cachegen_basics import \
-    QuantizationSpec
 from lmcache.logging import init_logger
+from lmcache.storage_backend.serde.cachegen_basics import QuantizationSpec
 
 logger = init_logger(__name__)
 

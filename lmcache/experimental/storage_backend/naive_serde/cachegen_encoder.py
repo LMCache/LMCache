@@ -8,8 +8,7 @@ from lmcache.experimental.memory_management import (BytesBufferMemoryObj,
 from lmcache.experimental.storage_backend.naive_serde.cachegen_basics import \
     CacheGenConfig
 from lmcache.experimental.storage_backend.naive_serde.serde import Serializer
-from lmcache.experimental.storage_backend.serde.cachegen_encoder import \
-    encode_function
+from lmcache.storage_backend.serde.cachegen_encoder import encode_function
 from lmcache.logging import init_logger
 from lmcache.utils import _lmcache_nvtx_annotate
 
