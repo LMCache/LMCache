@@ -191,8 +191,8 @@ def test_paged_store_offset(fmt, chunk_size, backend,
 
     tokens = generate_tokens(num_total_tokens, device)
     kv_cache = generate_kv_cache_paged(num_blocks, device, block_size, dtype)
-    retrieved_cache = generate_kv_cache_paged(
-        num_blocks, device, block_size, dtype)
+    retrieved_cache = generate_kv_cache_paged(num_blocks, device, block_size,
+                                              dtype)
     slot_mapping = random.sample(range(0, num_blocks * block_size),
                                  num_total_tokens)
     slot_mapping = torch.tensor(slot_mapping, device=device)
@@ -708,7 +708,8 @@ def test_mem_leak(fmt, chunk_size, backend, lmserver_experimental_process,
                 raise TimeoutError(
                     f"Operation timed out after {timeout} seconds.")
             time.sleep(0.01)
-    tensor_memory_allocator = engine.storage_manager.memory_allocator.pin_allocator
+    tensor_memory_allocator = \
+        engine.storage_manager.memory_allocator.pin_allocator
     if "cpu" not in backend:
         assert tensor_memory_allocator.total_allocated_size == 0
     else:
