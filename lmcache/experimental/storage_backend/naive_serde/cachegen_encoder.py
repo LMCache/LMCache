@@ -1,26 +1,21 @@
-from typing import Dict, Tuple
+from typing import Tuple
 
 import torch
-import lmcache.c_ops as lmc_ops
 
+import lmcache.c_ops as lmc_ops
 import lmcache.experimental.storage_backend.naive_serde.cachegen_basics as CGBasics
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.experimental.config import LMCacheEngineConfig
-
-from lmcache.logging import init_logger
+from lmcache.experimental.memory_management import (BytesBufferMemoryObj,
+                                                    MemoryAllocatorInterface,
+                                                    MemoryObj)
 from lmcache.experimental.storage_backend.naive_serde.cachegen_basics import (
     CacheGenConfig, CacheGenGPUBytestream, CacheGenGPUEncoderOutput)
-
+from lmcache.experimental.storage_backend.naive_serde.serde import Serializer
+from lmcache.logging import init_logger
 from lmcache.utils import _lmcache_nvtx_annotate
 
-from lmcache.experimental.memory_management import (MemoryAllocatorInterface,
-                                                    BytesBufferMemoryObj,
-                                                    MemoryObj)
-from lmcache.experimental.storage_backend.naive_serde.serde import (
-    Serializer)
-
 logger = init_logger(__name__)
-
 
 
 @_lmcache_nvtx_annotate
@@ -46,7 +41,6 @@ def torch_quant_vectorized(
         torch.int8)  # shape [nlayers, ntokens, nchannels]
 
     return xq, max1
-
 
 
 def _split_kv(tensor: torch.Tensor) -> Tuple[torch.Tensor, ...]:
@@ -102,8 +96,6 @@ def _convert_to_int_and_normalize(cdf_float, needs_normalization):
     return cdf
 
 
-
-
 @_lmcache_nvtx_annotate
 def collect_bytes(output_buffer, output_lengths) -> torch.Tensor:
     """
@@ -143,6 +135,7 @@ def encode_ntokens(cdf_int, encode_input, output_buffer,
     byte_tensor = collect_bytes(output_buffer, output_lengths)
     return byte_tensor
 
+
 @_lmcache_nvtx_annotate
 def encode_function(
     kv: torch.Tensor,
@@ -165,8 +158,7 @@ def encode_function(
                              dim=0).reshape(nlayers, chunk_size, nchannels)
 
     new_cdf_key = lmc_ops.calculate_cdf(new_key, int(key_bins.max()))
-    new_cdf_value = lmc_ops.calculate_cdf(new_value,
-                                               int(value_bins.max()))
+    new_cdf_value = lmc_ops.calculate_cdf(new_value, int(value_bins.max()))
     cdf_int = torch.cat([new_cdf_key, new_cdf_value])
 
     output_buffer = torch.zeros(
@@ -216,7 +208,7 @@ class CacheGenSerializer(Serializer):
         self.fmt = metadata.fmt
         self.key_bins = self.make_key_bins(self.cachegen_config)
         self.value_bins = self.make_value_bins(self.cachegen_config)
-        
+
         self.memory_allocator = memory_allocator
 
     def make_key_bins(self, config: CacheGenConfig) -> torch.Tensor:
@@ -243,12 +235,12 @@ class CacheGenSerializer(Serializer):
         Returns:
             MemoryObj: the serialized binary memory object.
         """
-        
+
         # TODO(Jiayi): please avoid this copy by directly performing
         # serialization inside gpu connector.
         assert memory_obj.tensor is not None
         tensor = memory_obj.tensor.cuda()
-        
+
         # Temporary fix for issue #83: encoder will have the default device 0
         # on all the ray workers. Need to set it to the correct device.
         # Also need to figure out why this happens.
@@ -270,5 +262,5 @@ class CacheGenSerializer(Serializer):
             self.value_bins,
             ntokens,
         )
-        
+
         return BytesBufferMemoryObj(output_dict.to_bytes())

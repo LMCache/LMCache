@@ -1,21 +1,19 @@
 from typing import List, Optional
 
 import torch
-import lmcache.c_ops as lmc_ops
 
+import lmcache.c_ops as lmc_ops
 import lmcache.experimental.storage_backend.naive_serde.cachegen_basics as CGBasics
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.experimental.config import LMCacheEngineConfig
-
-from lmcache.logging import init_logger
+from lmcache.experimental.memory_management import (BytesBufferMemoryObj,
+                                                    MemoryAllocatorInterface,
+                                                    MemoryFormat, MemoryObj)
 from lmcache.experimental.storage_backend.naive_serde.cachegen_basics import (
     CacheGenConfig, CacheGenGPUBytestream, CacheGenGPUEncoderOutput)
 from lmcache.experimental.storage_backend.naive_serde.serde import Deserializer
+from lmcache.logging import init_logger
 from lmcache.utils import _lmcache_nvtx_annotate
-from lmcache.experimental.memory_management import (MemoryAllocatorInterface,
-                                                    BytesBufferMemoryObj,
-                                                    MemoryObj,
-                                                    MemoryFormat)
 
 logger = init_logger(__name__)
 
@@ -69,7 +67,7 @@ def decode_chunk(
         data_chunk.bytestream_lengths.flatten().cumsum(0).reshape(
             data_chunk.bytestream_lengths.shape))
     lmc_ops.decode_fast_prefsum(cdf, bytes_tensor, length_prefsum,
-                                     target_buffer)
+                                target_buffer)
 
 
 @_lmcache_nvtx_annotate
@@ -115,8 +113,7 @@ def decode_function_gpu(
 class CacheGenDeserializer(Deserializer):
 
     def __init__(self, config: LMCacheEngineConfig,
-                 metadata: LMCacheEngineMetadata, 
-                 dtype,
+                 metadata: LMCacheEngineMetadata, dtype,
                  memory_allocator: MemoryAllocatorInterface):
         self.dtype = dtype
         self.cachegen_config = CacheGenConfig.from_model_name(
@@ -128,7 +125,7 @@ class CacheGenDeserializer(Deserializer):
         self.value_bins = self.make_value_bins(self.cachegen_config)
 
         self.memory_allocator = memory_allocator
-        
+
     def make_key_bins(self, config: CacheGenConfig) -> torch.Tensor:
         ret = torch.zeros(config.nlayers)
         for spec in config.kspecs:
@@ -152,11 +149,11 @@ class CacheGenDeserializer(Deserializer):
     # TODO(Jiayi): A lot of memory copies can be avoided in this function.
     @_lmcache_nvtx_annotate
     def deserialize(
-        self, buffer_memory_obj: BytesBufferMemoryObj
-    ) -> Optional[MemoryObj]:
+            self,
+            buffer_memory_obj: BytesBufferMemoryObj) -> Optional[MemoryObj]:
         encoder_output = CacheGenGPUEncoderOutput.from_bytes(
             buffer_memory_obj.byte_array)
-        
+
         encoder_output.max_tensors_key = encoder_output.max_tensors_key.cuda()
         encoder_output.max_tensors_value = (
             encoder_output.max_tensors_value.cuda())
@@ -208,18 +205,16 @@ class CacheGenDeserializer(Deserializer):
                     self.dtype)  # [nlayers, 2, ntokens, num_heads, head_size]
             case _:
                 raise RuntimeError("Unknown format %s" % self.fmt)
-        
-        memory_obj = self.memory_allocator.allocate(
-            kv_chunk.shape,
-            kv_chunk.dtype,
-            fmt=MemoryFormat.KV_BLOB)
-        
+
+        memory_obj = self.memory_allocator.allocate(kv_chunk.shape,
+                                                    kv_chunk.dtype,
+                                                    fmt=MemoryFormat.KV_BLOB)
+
         if memory_obj is None:
             logger.warning("Memory allocation failed in cachegen deserializer")
             return None
-        
+
         assert memory_obj.tensor is not None
         memory_obj.tensor.copy_(kv_chunk)
-        
+
         return memory_obj
-        
