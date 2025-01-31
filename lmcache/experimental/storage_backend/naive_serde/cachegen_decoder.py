@@ -1,114 +1,23 @@
-from typing import List, Optional
+from typing import Optional
 
 import torch
 
-import lmcache.c_ops as lmc_ops
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.experimental.config import LMCacheEngineConfig
 from lmcache.experimental.memory_management import (BytesBufferMemoryObj,
                                                     MemoryAllocatorInterface,
                                                     MemoryFormat, MemoryObj)
-from lmcache.experimental.storage_backend.naive_serde import \
-    cachegen_basics as CGBasics
-from lmcache.experimental.storage_backend.naive_serde.cachegen_basics import (
-    CacheGenConfig, CacheGenGPUBytestream, CacheGenGPUEncoderOutput)
+from lmcache.experimental.storage_backend.naive_serde.cachegen_basics import \
+    CacheGenConfig
 from lmcache.experimental.storage_backend.naive_serde.serde import Deserializer
+from lmcache.experimental.storage_backend.serde.cachegen_decoder import (
+    decode_function_gpu, do_dequantize)
 from lmcache.logging import init_logger
+from lmcache.storage_backend.serde.cachegen_basics import \
+    CacheGenGPUEncoderOutput
 from lmcache.utils import _lmcache_nvtx_annotate
 
 logger = init_logger(__name__)
-
-
-@_lmcache_nvtx_annotate
-def quant(bins: int, xq: torch.Tensor, max1: float):
-    C = bins // 2 - 1
-    x = xq / C * max1
-    return x
-
-
-def do_dequantize(t: torch.Tensor, bins: torch.Tensor,
-                  maxtensors: torch.Tensor):
-    """
-    t: [nlayers, ntokens, nchannels]
-    bins: [nlayers]
-    maxtensors: [nlayers, ntokens, 1]
-    """
-    C = (bins // 2 - 1)[:, None, None]
-    t = t - C
-    t = t / C
-    t = t * maxtensors
-    return t
-
-
-@_lmcache_nvtx_annotate
-def recombine_bytes(bytes_tensor, output_lengths) -> torch.Tensor:
-    output_buffer_size = CGBasics.CACHEGEN_GPU_MAX_TOKENS_PER_CHUNK
-    offsets = (output_lengths.flatten().cumsum(0).roll(1).reshape(
-        output_lengths.shape))
-    offsets[0][0] = 0
-    indexes = torch.arange(output_buffer_size, device=offsets.device).tile(
-        (output_lengths.shape[0], output_lengths.shape[1], 1))
-    final_indexes = (indexes +
-                     offsets[:, :, None]).clamp(max=len(bytes_tensor) - 1)
-    return bytes_tensor[final_indexes]
-
-
-@_lmcache_nvtx_annotate
-def decode_chunk(
-    cdf: torch.Tensor,
-    data_chunk: CacheGenGPUBytestream,
-    target_buffer: torch.Tensor,
-) -> None:
-    """
-    Write the decode output in target_buffer
-    Expected shape: [nlayers (kv in total), ntokens, nchannels]
-    """
-    bytes_tensor = data_chunk.bytestream
-    length_prefsum = (
-        data_chunk.bytestream_lengths.flatten().cumsum(0).reshape(
-            data_chunk.bytestream_lengths.shape))
-    lmc_ops.decode_fast_prefsum(cdf, bytes_tensor, length_prefsum,
-                                target_buffer)
-
-
-@_lmcache_nvtx_annotate
-def decode_function_gpu(
-    cdf: torch.Tensor,
-    data_chunks: List[CacheGenGPUBytestream],
-    layers_in_key: int,
-    chunk_size: int,
-    output: torch.Tensor,
-):
-    # TODO: dtype and shape -- still have 128 and 8
-    """
-    Given the path to the encoded KV bytestream, decode the KV cache
-
-    Inputs:
-        cdf: the cdf tensor, in shape [2 * nlayers, nchannels, bins + 1]
-        data_chunks: the data_chunks in the encoder's output
-        layers_in_key: number of layers in K (or V) 
-        (K/V should have the same number of layers)
-        chunk_size: the chunk_size
-        output: output buffer, in shape [ntokens, 2 * nlayers * nchannels]
-
-    Outputs:
-        key: the decoded key tensor in the shape of (layers, tokens, nchannels)
-        value: the decoded value tensor in the shape of 
-        (layers, tokens, nchannels)
-    """
-    nlayers, nchannels, _ = cdf.shape
-    output = output.reshape((nlayers, chunk_size, nchannels))
-
-    start = 0
-    for data_chunk in data_chunks:
-        end = start + data_chunk.ntokens
-        decode_chunk(cdf, data_chunk, output[:, start:end, :])
-        start = end
-
-    out = output.reshape((2, layers_in_key, chunk_size, nchannels))
-    key, value = out.float()
-
-    return key, value
 
 
 class CacheGenDeserializer(Deserializer):

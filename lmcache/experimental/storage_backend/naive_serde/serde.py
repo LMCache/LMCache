@@ -32,5 +32,6 @@ class Deserializer(metaclass=abc.ABCMeta):
 
         Returns:
             MemoryObj: the deserialized/decompressed memory object.
+            None: if the memory allocation fails.
         """
         raise NotImplementedError
