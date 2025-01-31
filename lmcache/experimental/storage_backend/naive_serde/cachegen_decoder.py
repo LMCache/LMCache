@@ -152,6 +152,7 @@ class CacheGenDeserializer(Deserializer):
     def deserialize(
             self,
             buffer_memory_obj: BytesBufferMemoryObj) -> Optional[MemoryObj]:
+        logger.debug("Calling CacheGen deserialize")
         encoder_output = CacheGenGPUEncoderOutput.from_bytes(
             buffer_memory_obj.byte_array)
 

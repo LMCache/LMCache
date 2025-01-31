@@ -67,11 +67,9 @@ def test_same_retrieve_store(autorelease_experimental):
 
 
 @pytest.mark.parametrize("fmt", ["vllm"])
-@pytest.mark.parametrize("chunk_size", [128])  #, 256])
-@pytest.mark.parametrize(
-    "backend",
-    #["cpu", "local_disk", "remote", "remote_cachegen"])
-    ["remote_cachegen"])
+@pytest.mark.parametrize("chunk_size", [128, 256])
+@pytest.mark.parametrize("backend",
+                         ["cpu", "local_disk", "remote", "remote_cachegen"])
 @pytest.mark.parametrize("lmserver_experimental_process", ["cpu"],
                          indirect=True)
 def test_paged_retrieve_prefix(fmt, chunk_size, backend,
@@ -79,11 +77,13 @@ def test_paged_retrieve_prefix(fmt, chunk_size, backend,
                                autorelease_experimental):
     url = None
     remote_serde = None
+    check_equality = True
     if "remote" in backend:
         url = lmserver_experimental_process.server_url
         if backend == "remote_cachegen":
             backend = "remote"
             remote_serde = "cachegen"
+            check_equality = False
         else:
             remote_serde = "naive"
     device = "cuda"
@@ -98,8 +98,8 @@ def test_paged_retrieve_prefix(fmt, chunk_size, backend,
     tokens = generate_tokens(num_tokens, device)
     kv_cache = generate_kv_cache_paged(num_blocks, device, block_size, dtype)
     new_tokens = generate_tokens(new_num_tokens, device)
-    retrieved_cache = kv_cache = generate_kv_cache_paged(
-        num_blocks, device, block_size, dtype)
+    retrieved_cache = generate_kv_cache_paged(num_blocks, device, block_size,
+                                              dtype)
     slot_mapping = random.sample(range(0, num_blocks * block_size), num_tokens)
     slot_mapping = torch.tensor(slot_mapping, device=device)
 
@@ -151,12 +151,14 @@ def test_paged_retrieve_prefix(fmt, chunk_size, backend,
     print(f"retrieve {length} takes {t5-t4}")
 
     assert length == expected_length
-    check_paged_kv_cache_equal(
-        kv_cache,
-        retrieved_cache,
-        num_tokens,
-        slot_mapping,
-    )
+
+    if check_equality:
+        check_paged_kv_cache_equal(
+            kv_cache,
+            retrieved_cache,
+            num_tokens,
+            slot_mapping,
+        )
 
     if backend in ["local_disk"]:
         subprocess.run(shlex.split("rm -rf /local/disk_test/local_disk/"))
