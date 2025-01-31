@@ -1,5 +1,6 @@
 import struct
 from dataclasses import dataclass
+from typing import Optional
 
 import torch
 
@@ -20,6 +21,7 @@ class Constants:
 
 
 DTYPE_TO_INT = {
+    None: 0,
     torch.half: 1,
     torch.float16: 2,
     torch.bfloat16: 3,
@@ -33,6 +35,7 @@ DTYPE_TO_INT = {
 }
 
 INT_TO_DTYPE = {
+    0: None,
     1: torch.half,
     2: torch.float16,
     3: torch.bfloat16,
@@ -45,6 +48,40 @@ INT_TO_DTYPE = {
 
 
 @dataclass
+class RedisMetadata:
+    length: int
+    shape: torch.Size
+    dtype: Optional[torch.dtype]
+    fmt: MemoryFormat
+
+    def serialize(self) -> bytes:
+
+        # NOTE(Jiayi): 4 is the maximum dimension of memory object.
+        # Pass in shape [x, 0, 0, 0] if it is a bytes memory object
+        assert (len(self.shape) == 4), "Shape dimension should be 4"
+
+        packed_bytes = struct.pack(
+            "iiiiiii",
+            self.length,
+            int(self.fmt.value),
+            DTYPE_TO_INT[self.dtype],
+            self.shape[0],
+            self.shape[1],
+            self.shape[2],
+            self.shape[3],
+        )
+        return packed_bytes
+
+    @staticmethod
+    def deserialize(s: bytes) -> "RedisMetadata":
+        length, fmt, dtype, shape0, shape1, shape2, shape3 = \
+            struct.unpack("iiiiiii", s)
+        return RedisMetadata(length,
+                             torch.Size([shape0, shape1, shape2, shape3]),
+                             INT_TO_DTYPE[dtype], MemoryFormat(fmt))
+
+
+@dataclass
 class ClientMetaMessage:
     """
     Control message from LMCServerConnector to LMCacheServer
@@ -54,7 +91,7 @@ class ClientMetaMessage:
     key: CacheEngineKey
     length: int
     fmt: MemoryFormat
-    dtype: torch.dtype
+    dtype: Optional[torch.dtype]
     shape: torch.Size
 
     def serialize(self) -> bytes:
@@ -105,7 +142,7 @@ class ServerMetaMessage:
     code: int
     length: int
     fmt: MemoryFormat
-    dtype: torch.dtype
+    dtype: Optional[torch.dtype]
     shape: torch.Size
 
     def serialize(self) -> bytes:

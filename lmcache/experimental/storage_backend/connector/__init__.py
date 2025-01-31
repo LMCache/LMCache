@@ -8,6 +8,8 @@ from lmcache.experimental.storage_backend.connector.base_connector import \
     RemoteConnector
 from lmcache.experimental.storage_backend.connector.lm_connector import \
     LMCServerConnector
+from lmcache.experimental.storage_backend.connector.redis_connector import (
+    RedisConnector, RedisSentinelConnector)
 from lmcache.logging import init_logger
 
 logger = init_logger(__name__)
@@ -76,10 +78,20 @@ def CreateConnector(
 
     match parsed_url.connector_type:
         case "redis":
-            raise ValueError("Redis not supported yet")
+            if num_hosts == 1:
+                host, port = parsed_url.hosts[0], parsed_url.ports[0]
+                connector = RedisConnector(host, port, loop, memory_allocator)
+            else:
+                raise ValueError(
+                    f"Redis connector only supports a single host, but got url:"
+                    f" {url}")
 
         case "redis-sentinel":
-            raise ValueError("Redis-sentinel not supported yet")
+            connector = RedisSentinelConnector(
+                list(zip(parsed_url.hosts, parsed_url.ports)),
+                loop,
+                memory_allocator,
+            )
 
         case "lm":
             if num_hosts == 1:

@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from typing import Optional
 
 import torch
 
@@ -12,5 +13,5 @@ class LMSMemoryObj:
     data: bytearray
     length: int
     fmt: MemoryFormat
-    dtype: torch.dtype
+    dtype: Optional[torch.dtype]
     shape: torch.Size
