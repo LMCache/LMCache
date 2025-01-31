@@ -3,6 +3,7 @@ import threading
 from concurrent.futures import Future
 from typing import List, Optional
 
+from lmcache.config import LMCacheEngineMetadata
 from lmcache.experimental.config import LMCacheEngineConfig
 from lmcache.experimental.memory_management import (MemoryAllocatorInterface,
                                                     MemoryObj)
@@ -20,6 +21,7 @@ class RemoteBackend(StorageBackendInterface):
 
     def __init__(self,
                  config: LMCacheEngineConfig,
+                 metadata: LMCacheEngineMetadata,
                  loop: asyncio.AbstractEventLoop,
                  memory_allocator: MemoryAllocatorInterface,
                  dst_device: str = "cuda"):
@@ -40,7 +42,7 @@ class RemoteBackend(StorageBackendInterface):
 
         assert config.remote_serde is not None
         self.serializer, self.deserializer = CreateSerde(
-            config.remote_serde, memory_allocator, config)
+            config.remote_serde, memory_allocator, metadata, config)
 
         # TODO(Jiayi): If we want to have cache admission policies,
         # we must make decision (whether to send or not) at the local side
@@ -111,4 +113,6 @@ class RemoteBackend(StorageBackendInterface):
         return decompressed_memory_obj
 
     def close(self):
-        self.connection.close()
+        future = asyncio.run_coroutine_threadsafe(self.connection.close(),
+                                                  self.loop)
+        future.result()

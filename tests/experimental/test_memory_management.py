@@ -1,10 +1,10 @@
 import pytest
 import torch
 
-from lmcache.experimental.memory_management import (GPUMemoryAllocator,
-                                                    HostMemoryAllocator,
-                                                    PinMemoryAllocator,
-                                                    TensorMemoryAllocator)
+from lmcache.experimental.memory_management import (  # noqa
+    BytesBufferMemoryObj, GPUMemoryAllocator, HostMemoryAllocator,
+    MemoryFormat, MixedMemoryAllocator, PinMemoryAllocator,
+    TensorMemoryAllocator)
 
 
 def check_allocator(allocator, max_size):
@@ -68,6 +68,7 @@ def test_tensor_allocator():
     HostMemoryAllocator,
     PinMemoryAllocator,
     GPUMemoryAllocator,
+    MixedMemoryAllocator,
 ])
 def test_device_allocators(alloc_cls):
     total_size = 1 << 25
@@ -79,6 +80,7 @@ def test_device_allocators(alloc_cls):
     HostMemoryAllocator,
     PinMemoryAllocator,
     GPUMemoryAllocator,
+    MixedMemoryAllocator,
 ])
 def test_inplace_modification(alloc_cls):
     total_size = 1024
@@ -100,6 +102,7 @@ def test_inplace_modification(alloc_cls):
     HostMemoryAllocator,
     PinMemoryAllocator,
     GPUMemoryAllocator,
+    MixedMemoryAllocator,
 ])
 def test_boundary_alloc(alloc_cls):
     total_size = 1 << 25
@@ -110,4 +113,25 @@ def test_boundary_alloc(alloc_cls):
 
     # `FreeBlock` with size 0 shouldn't exist in the allocator
     allocator.allocate([512, 10], torch.float)
-    assert len(allocator.allocator.explicit_list) == 1
+
+    if isinstance(allocator, MixedMemoryAllocator):
+        assert len(allocator.pin_allocator.explicit_list) == 1
+    else:
+        assert len(allocator.allocator.explicit_list) == 1
+
+
+@pytest.mark.parametrize("alloc_cls", [
+    MixedMemoryAllocator,
+])
+def test_mixed_alloc(alloc_cls):
+    total_size = 1 << 25
+    allocator = alloc_cls(total_size)
+    data1 = allocator.allocate([512, 0], None, MemoryFormat.BINARY_BUFFER)
+    allocator.allocate([512, 10], torch.float)
+    allocator.free(data1)
+
+    assert len(allocator.pin_allocator.explicit_list) == 1
+
+    assert isinstance(data1, BytesBufferMemoryObj)
+
+    assert len(data1.byte_array) == 512

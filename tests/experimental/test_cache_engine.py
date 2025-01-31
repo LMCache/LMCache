@@ -68,15 +68,24 @@ def test_same_retrieve_store(autorelease_experimental):
 
 @pytest.mark.parametrize("fmt", ["vllm"])
 @pytest.mark.parametrize("chunk_size", [128, 256])
-@pytest.mark.parametrize("backend", ["cpu", "local_disk", "remote"])
+@pytest.mark.parametrize("backend",
+                         ["cpu", "local_disk", "remote", "remote_cachegen"])
 @pytest.mark.parametrize("lmserver_experimental_process", ["cpu"],
                          indirect=True)
 def test_paged_retrieve_prefix(fmt, chunk_size, backend,
                                lmserver_experimental_process,
                                autorelease_experimental):
     url = None
-    if backend == "remote":
+    remote_serde = None
+    check_equality = True
+    if "remote" in backend:
         url = lmserver_experimental_process.server_url
+        if backend == "remote_cachegen":
+            backend = "remote"
+            remote_serde = "cachegen"
+            check_equality = False
+        else:
+            remote_serde = "naive"
     device = "cuda"
     num_tokens = 2000
     new_num_tokens = 1000
@@ -89,8 +98,8 @@ def test_paged_retrieve_prefix(fmt, chunk_size, backend,
     tokens = generate_tokens(num_tokens, device)
     kv_cache = generate_kv_cache_paged(num_blocks, device, block_size, dtype)
     new_tokens = generate_tokens(new_num_tokens, device)
-    retrieved_cache = kv_cache = generate_kv_cache_paged(
-        num_blocks, device, block_size, dtype)
+    retrieved_cache = generate_kv_cache_paged(num_blocks, device, block_size,
+                                              dtype)
     slot_mapping = random.sample(range(0, num_blocks * block_size), num_tokens)
     slot_mapping = torch.tensor(slot_mapping, device=device)
 
@@ -100,7 +109,8 @@ def test_paged_retrieve_prefix(fmt, chunk_size, backend,
     """ initialize the engine """
     cfg = LMCacheEngineConfig.from_legacy(chunk_size=chunk_size,
                                           backend=backend,
-                                          remote_url=url)
+                                          remote_url=url,
+                                          remote_serde=remote_serde)
 
     engine = autorelease_experimental(
         LMCacheEngineBuilder.get_or_create("test", cfg,
@@ -141,12 +151,14 @@ def test_paged_retrieve_prefix(fmt, chunk_size, backend,
     print(f"retrieve {length} takes {t5-t4}")
 
     assert length == expected_length
-    check_paged_kv_cache_equal(
-        kv_cache,
-        retrieved_cache,
-        num_tokens,
-        slot_mapping,
-    )
+
+    if check_equality:
+        check_paged_kv_cache_equal(
+            kv_cache,
+            retrieved_cache,
+            num_tokens,
+            torch.cat([slot_mapping, new_slot_mapping])[:expected_length],
+        )
 
     if backend in ["local_disk"]:
         subprocess.run(shlex.split("rm -rf /local/disk_test/local_disk/"))
@@ -179,8 +191,8 @@ def test_paged_store_offset(fmt, chunk_size, backend,
 
     tokens = generate_tokens(num_total_tokens, device)
     kv_cache = generate_kv_cache_paged(num_blocks, device, block_size, dtype)
-    retrieved_cache = kv_cache = generate_kv_cache_paged(
-        num_blocks, device, block_size, dtype)
+    retrieved_cache = generate_kv_cache_paged(num_blocks, device, block_size,
+                                              dtype)
     slot_mapping = random.sample(range(0, num_blocks * block_size),
                                  num_total_tokens)
     slot_mapping = torch.tensor(slot_mapping, device=device)
@@ -237,7 +249,7 @@ def test_paged_store_offset(fmt, chunk_size, backend,
         kv_cache,
         retrieved_cache,
         num_tokens,
-        slot_mapping,
+        slot_mapping[:expected_length],
     )
 
     if backend in ["local_disk"]:
@@ -696,7 +708,8 @@ def test_mem_leak(fmt, chunk_size, backend, lmserver_experimental_process,
                 raise TimeoutError(
                     f"Operation timed out after {timeout} seconds.")
             time.sleep(0.01)
-    tensor_memory_allocator = engine.storage_manager.memory_allocator.allocator
+    tensor_memory_allocator = \
+        engine.storage_manager.memory_allocator.pin_allocator
     if "cpu" not in backend:
         assert tensor_memory_allocator.total_allocated_size == 0
     else:

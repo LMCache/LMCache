@@ -1,4 +1,5 @@
 import abc
+from typing import Optional
 
 from lmcache.experimental.memory_management import MemoryObj
 
@@ -22,7 +23,7 @@ class Serializer(metaclass=abc.ABCMeta):
 class Deserializer(metaclass=abc.ABCMeta):
 
     @abc.abstractmethod
-    def deserialize(self, memory_obj: MemoryObj) -> MemoryObj:
+    def deserialize(self, memory_obj: MemoryObj) -> Optional[MemoryObj]:
         """
         Deserialize/decompress the memory object.
 
@@ -31,5 +32,6 @@ class Deserializer(metaclass=abc.ABCMeta):
 
         Returns:
             MemoryObj: the deserialized/decompressed memory object.
+            None: if the memory allocation fails.
         """
         raise NotImplementedError

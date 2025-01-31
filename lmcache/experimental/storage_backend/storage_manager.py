@@ -10,7 +10,7 @@ from lmcache.config import LMCacheEngineMetadata
 from lmcache.experimental.config import LMCacheEngineConfig
 from lmcache.experimental.memory_management import (MemoryAllocatorInterface,
                                                     MemoryFormat, MemoryObj,
-                                                    PinMemoryAllocator)
+                                                    MixedMemoryAllocator)
 from lmcache.experimental.storage_backend import CreateStorageBackends
 from lmcache.experimental.storage_backend.abstract_backend import \
     StorageBackendInterface
@@ -67,7 +67,7 @@ class StorageManager:
             self.manager_lock.release()
             return memory_obj
 
-        assert isinstance(self.memory_allocator, PinMemoryAllocator)
+        assert isinstance(self.memory_allocator, MixedMemoryAllocator)
         iter_hot_cache = iter(self.hot_cache)
         evict_keys = []
         while memory_obj is None:
@@ -82,9 +82,11 @@ class StorageManager:
             self.memory_allocator.ref_count_down(self.hot_cache[evict_key])
             memory_obj = self.memory_allocator.allocate(shape, dtype)
             logger.debug("Evicting 1 chunk from hot cache")
+
             # TODO(Jiayi): move this before the loop
             # In this way, we don't need to do eviction for big objects
-            if self.memory_allocator.allocator.num_active_allocations == 0:
+            # TODO(Jiayi): the following code is hacky, please refactor
+            if self.memory_allocator.pin_allocator.num_active_allocations == 0:
                 break
         for evict_key in evict_keys:
             self.hot_cache.pop(evict_key)

@@ -20,7 +20,7 @@ logger = init_logger(__name__)
 # for communication + deserialization
 class LMCServerConnector(RemoteConnector):
 
-    def __init__(self, host, port, loop: asyncio.AbstractEventLoop,
+    def __init__(self, host: str, port: int, loop: asyncio.AbstractEventLoop,
                  memory_allocator: MemoryAllocatorInterface):
         # NOTE(Jiayi): According to Python documentation:
         # https://docs.python.org/3/library/asyncio-eventloop.html
@@ -41,17 +41,14 @@ class LMCServerConnector(RemoteConnector):
     # TODO(Jiayi): This should be an async function
     def receive_all(self, meta: ServerMetaMessage) -> Optional[MemoryObj]:
         received = 0
-        shape = meta.shape
-        dtype = meta.dtype
         n = meta.length
 
         # TODO(Jiayi): Format will be used once we support
         # compressed memory format
-        #fmt = meta.fmt
-
         memory_obj = self.memory_allocator.allocate(
-            shape,
-            dtype,
+            meta.shape,
+            meta.dtype,
+            meta.fmt,
         )
         if memory_obj is None:
             logger.warning("Failed to allocate memory during remote receive")

@@ -1,7 +1,6 @@
 import abc
 import ctypes
 import threading
-from ctypes import Array, c_ubyte
 from dataclasses import dataclass
 from enum import Enum
 from typing import Optional, Tuple, Union
@@ -23,6 +22,8 @@ class MemoryFormat(Enum):
     """Compressed binary array format
     """
     BINARY = 2
+
+    BINARY_BUFFER = 3
 
     def token_dim(self) -> int:
         if self == MemoryFormat.KV_BLOB:
@@ -49,7 +50,7 @@ class MemoryObjMetadata:
     shape: torch.Size
 
     # The 'logical' dtype of the tensor
-    dtype: torch.dtype
+    dtype: Optional[torch.dtype]
 
     # The 'physical address' of the tensor
     address: int
@@ -64,14 +65,92 @@ class MemoryObjMetadata:
     fmt: MemoryFormat = MemoryFormat.UNDEFINED
 
 
-class MemoryObj:
+class MemoryObj(metaclass=abc.ABCMeta):
+    """
+    MemoryObj interface.
+    """
+
+    @abc.abstractmethod
+    def invalidate(self):
+        """
+        Invalidate the MemoryObj.
+        """
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    def is_valid(self):
+        """
+        Check if the MemoryObj is valid.
+        """
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    def get_size(self) -> int:
+        """
+        Get the size of the MemoryObj in bytes.
+        """
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    def get_shape(self) -> torch.Size:
+        """
+        Get the shape of the MemoryObj.
+        """
+        raise NotImplementedError
+
+    def get_dtype(self) -> Optional[torch.dtype]:
+        """
+        Get the dtype of the MemoryObj.
+        """
+        return None
+
+    @abc.abstractmethod
+    def get_memory_format(self) -> MemoryFormat:
+        """
+        Get the memory format of the MemoryObj.
+        """
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    def get_physical_size(self) -> int:
+        """
+        Get the physical size of the MemoryObj in bytes.
+        """
+        raise NotImplementedError
+
+    @property
+    @abc.abstractmethod
+    def metadata(self) -> MemoryObjMetadata:
+        """
+        Get the metada of the MemoryObj.
+        """
+        raise NotImplementedError
+
+    @property
+    @abc.abstractmethod
+    def tensor(self) -> Optional[torch.Tensor]:
+        """
+        Get the tensor from the MemoryObj.
+        """
+        raise NotImplementedError
+
+    @property
+    @abc.abstractmethod
+    def byte_array(self) -> bytes:
+        """
+        Get the byte array from the MemoryObj.
+        """
+        raise NotImplementedError
+
+
+class TensorMemoryObj(MemoryObj):
     """
     Wraps a raw flat tensor with some metadata
     """
 
     def __init__(self, raw_data: torch.Tensor, metadata: MemoryObjMetadata):
         self.raw_data = raw_data
-        self.metadata = metadata
+        self.meta = metadata
         self.valid = True
 
     def invalidate(self):
@@ -90,6 +169,7 @@ class MemoryObj:
         return self.metadata.shape
 
     def get_dtype(self) -> torch.dtype:
+        assert self.metadata.dtype is not None
         return self.metadata.dtype
 
     def get_memory_format(self) -> MemoryFormat:
@@ -99,15 +179,20 @@ class MemoryObj:
         return self.metadata.phy_size
 
     @property
+    def metadata(self) -> MemoryObjMetadata:
+        return self.meta
+
+    @property
     def tensor(self) -> Optional[torch.Tensor]:
         if not self.valid:
             logger.warning("Trying to access an invalidated MemoryObj")
             return None
+        assert self.metadata.dtype is not None
         return self.raw_data.view(self.metadata.dtype)\
                             .view(self.metadata.shape)
 
     @property
-    def byte_array(self) -> Array[c_ubyte]:
+    def byte_array(self) -> bytes:
         kv_chunk = self.tensor
         assert kv_chunk is not None
         num_bytes = kv_chunk.numel() * kv_chunk.element_size()
@@ -115,7 +200,65 @@ class MemoryObj:
         ubyte_ptr = ctypes.cast(ptr, ctypes.POINTER(ctypes.c_ubyte))
         byte_array = (ctypes.c_ubyte * num_bytes).from_address(
             ctypes.addressof(ubyte_ptr.contents))
-        return byte_array
+        return memoryview(byte_array)
+
+
+class BytesBufferMemoryObj(MemoryObj):
+    """
+    Wraps a raw flat tensor with some metadata
+    """
+
+    def __init__(self,
+                 raw_bytes: bytes,
+                 metadata: Optional[MemoryObjMetadata] = None):
+        self.raw_data = raw_bytes
+        if metadata is None:
+            bytes_shape = torch.Size([len(self.raw_data), 0, 0, 0])
+            self.meta = MemoryObjMetadata(shape=bytes_shape,
+                                          dtype=None,
+                                          address=0,
+                                          phy_size=0,
+                                          ref_count=1,
+                                          fmt=MemoryFormat.BINARY_BUFFER)
+        else:
+            self.meta = metadata
+        self.valid = True
+
+    def invalidate(self):
+        self.valid = False
+
+    def is_valid(self):
+        return self.valid
+
+    def get_size(self) -> int:
+        return len(self.raw_data)
+
+    def get_shape(self) -> torch.Size:
+        return torch.Size([len(self.raw_data), 0, 0, 0])
+
+    def get_dtype(self) -> Optional[torch.dtype]:
+        return None
+
+    def get_memory_format(self) -> MemoryFormat:
+        return self.metadata.fmt
+
+    def get_physical_size(self) -> int:
+        return self.metadata.phy_size
+
+    @property
+    def metadata(self) -> MemoryObjMetadata:
+        return self.meta
+
+    @property
+    def tensor(self) -> Optional[torch.Tensor]:
+        if not self.valid:
+            logger.warning("Trying to access an invalidated MemoryObj")
+            return None
+        return None
+
+    @property
+    def byte_array(self) -> bytes:
+        return self.raw_data
 
 
 class MemoryAllocatorInterface(metaclass=abc.ABCMeta):
@@ -124,7 +267,7 @@ class MemoryAllocatorInterface(metaclass=abc.ABCMeta):
     def allocate(
         self,
         shape: Union[torch.Size, Tuple[int, ...]],
-        dtype: torch.dtype,
+        dtype: Optional[torch.dtype],
         fmt: MemoryFormat = MemoryFormat.UNDEFINED,
     ) -> Optional[MemoryObj]:
         """
@@ -246,11 +389,13 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
     def allocate(
         self,
         shape: Union[torch.Size, Tuple[int, ...]],
-        dtype: torch.dtype,
+        dtype: Optional[torch.dtype],
         fmt: MemoryFormat = MemoryFormat.KV_BLOB,
-    ) -> Optional[MemoryObj]:
+    ) -> Optional[TensorMemoryObj]:
         if not isinstance(shape, torch.Size):
             shape = torch.Size(shape)
+
+        assert dtype is not None, "dtype must be specified"
 
         # Calculate the size of the tensor
         raw_size = TensorMemoryAllocator._Compute_raw_size(shape, dtype)
@@ -280,7 +425,7 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         self.stats_monitor.update_local_cache_usage(self.total_allocated_size)
 
         # Allocate the block
-        return MemoryObj(
+        return TensorMemoryObj(
             raw_data=self.buffer[block.start:block.start + raw_size],
             metadata=MemoryObjMetadata(shape, dtype, block.start, aligned_size,
                                        1, fmt))
@@ -351,6 +496,42 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         del self.buffer
 
 
+class BufferAllocator(MemoryAllocatorInterface):
+    """Allocates memory in the pre-allocated pinned memory.
+    """
+
+    def __init__(self, device="cpu"):
+        """
+        :param str device: The device of the buffer memory.
+        """
+        self.device = device
+
+    def allocate(
+        self,
+        shape: Union[torch.Size, Tuple[int, ...]],
+        dtype: Optional[torch.dtype],
+        fmt: MemoryFormat = MemoryFormat.BINARY_BUFFER,
+    ) -> BytesBufferMemoryObj:
+        n = shape[0]
+        byte_array = bytearray(n)
+        return BytesBufferMemoryObj(byte_array)
+
+    def free(self, memory_obj: MemoryObj):
+        return
+
+    def ref_count_up(self, memory_obj: MemoryObj):
+        pass
+
+    def ref_count_down(self, memory_obj: MemoryObj):
+        pass
+
+    def get_ref_count(self, memory_obj: MemoryObj):
+        pass
+
+    def memcheck(self):
+        return True
+
+
 class HostMemoryAllocator(MemoryAllocatorInterface):
     """Allocates memory in the pre-allocated Host memory.
     """
@@ -367,7 +548,7 @@ class HostMemoryAllocator(MemoryAllocatorInterface):
     def allocate(
         self,
         shape: Union[torch.Size, Tuple[int, ...]],
-        dtype: torch.dtype,
+        dtype: Optional[torch.dtype],
         fmt: MemoryFormat = MemoryFormat.KV_BLOB,
     ) -> Optional[MemoryObj]:
         with self.host_mem_lock:
@@ -411,7 +592,7 @@ class PinMemoryAllocator(MemoryAllocatorInterface):
     def allocate(
         self,
         shape: Union[torch.Size, Tuple[int, ...]],
-        dtype: torch.dtype,
+        dtype: Optional[torch.dtype],
         fmt: MemoryFormat = MemoryFormat.KV_BLOB,
     ) -> Optional[MemoryObj]:
         with self.host_mem_lock:
@@ -438,6 +619,82 @@ class PinMemoryAllocator(MemoryAllocatorInterface):
             return self.allocator.memcheck()
 
 
+class MixedMemoryAllocator(MemoryAllocatorInterface):
+    """
+    Allocates (1) memory in the pre-allocated pinned memory.
+              (2) byte_array buffer memory.
+    """
+
+    def __init__(self, size: int):
+        """
+        :param int size: The size of the pinned memory in bytes.
+        """
+        buffer = torch.empty(size, dtype=torch.uint8, pin_memory=True)
+
+        self.pin_allocator = TensorMemoryAllocator(buffer)
+        self.buffer_allocator = BufferAllocator("cpu")
+
+        self.host_mem_lock = threading.Lock()
+
+    def allocate(
+        self,
+        shape: Union[torch.Size, Tuple[int, ...]],
+        dtype: Optional[torch.dtype],
+        fmt: MemoryFormat = MemoryFormat.KV_BLOB,
+    ) -> Optional[MemoryObj]:
+        if fmt == MemoryFormat.BINARY_BUFFER:
+            return self.buffer_allocator.allocate(shape, dtype, fmt)
+        elif fmt == MemoryFormat.KV_BLOB:
+            with self.host_mem_lock:
+                return self.pin_allocator.allocate(shape, dtype, fmt)
+        else:
+            raise ValueError(f"Unsupported memory format: {fmt}")
+
+    def free(self, memory_obj: MemoryObj):
+        fmt = memory_obj.get_memory_format()
+        if fmt == MemoryFormat.BINARY_BUFFER:
+            self.buffer_allocator.free(memory_obj)
+        elif fmt == MemoryFormat.KV_BLOB:
+            with self.host_mem_lock:
+                self.pin_allocator.free(memory_obj)
+        else:
+            raise ValueError(f"Unsupported memory format: {fmt}")
+
+    def ref_count_up(self, memory_obj: MemoryObj):
+        fmt = memory_obj.get_memory_format()
+        if fmt == MemoryFormat.BINARY_BUFFER:
+            self.buffer_allocator.ref_count_up(memory_obj)
+        elif fmt == MemoryFormat.KV_BLOB:
+            with self.host_mem_lock:
+                self.pin_allocator.ref_count_up(memory_obj)
+        else:
+            raise ValueError(f"Unsupported memory format: {fmt}")
+
+    def ref_count_down(self, memory_obj: MemoryObj):
+        fmt = memory_obj.get_memory_format()
+        if fmt == MemoryFormat.BINARY_BUFFER:
+            self.buffer_allocator.ref_count_down(memory_obj)
+        elif fmt == MemoryFormat.KV_BLOB:
+            with self.host_mem_lock:
+                self.pin_allocator.ref_count_down(memory_obj)
+        else:
+            raise ValueError(f"Unsupported memory format: {fmt}")
+
+    def get_ref_count(self, memory_obj: MemoryObj):
+        fmt = memory_obj.get_memory_format()
+        if fmt == MemoryFormat.BINARY_BUFFER:
+            return self.buffer_allocator.get_ref_count(memory_obj)
+        elif fmt == MemoryFormat.KV_BLOB:
+            with self.host_mem_lock:
+                return self.pin_allocator.get_ref_count(memory_obj)
+        else:
+            raise ValueError(f"Unsupported memory format: {fmt}")
+
+    def memcheck(self):
+        with self.host_mem_lock:
+            return self.pin_allocator.memcheck()
+
+
 class GPUMemoryAllocator(MemoryAllocatorInterface):
     """Allocates memory in the pre-allocated Host memory.
     """
@@ -452,7 +709,7 @@ class GPUMemoryAllocator(MemoryAllocatorInterface):
     def allocate(
         self,
         shape: Union[torch.Size, Tuple[int, ...]],
-        dtype: torch.dtype,
+        dtype: Optional[torch.dtype],
         fmt: MemoryFormat = MemoryFormat.KV_BLOB,
     ) -> Optional[MemoryObj]:
         return self.allocator.allocate(shape, dtype, fmt)

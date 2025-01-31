@@ -96,7 +96,7 @@ class UsageContext:
                     data[key] = value
             if self.server_url is not None:
                 logger.debug('context message updated')
-                global_http_client.post(self.server_url, json=data)
+                global_http_client.post(self.server_url, json=data, timeout=5)
         except requests.exceptions.RequestException:
             logger.debug("Unable to send lmcache context message")
 

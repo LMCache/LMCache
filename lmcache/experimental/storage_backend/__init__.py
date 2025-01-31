@@ -38,8 +38,8 @@ def CreateStorageBackends(
         storage_backends[backend_name] = local_disk_backend
 
     if config.remote_url is not None:
-        remote_backend = RemoteBackend(config, loop, memory_allocator,
-                                       dst_device)
+        remote_backend = RemoteBackend(config, metadata, loop,
+                                       memory_allocator, dst_device)
         backend_name = str(remote_backend)
         storage_backends[backend_name] = remote_backend
 
