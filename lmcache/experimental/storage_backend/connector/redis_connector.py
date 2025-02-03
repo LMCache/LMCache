@@ -146,7 +146,7 @@ class RedisSentinelConnector(RemoteConnector):
         self.memory_allocator = memory_allocator
 
     async def exists(self, key: CacheEngineKey) -> bool:
-        return self.slave.exists(key.to_string()+"metadata")
+        return self.slave.exists(key.to_string() + "metadata")
 
     async def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         key_str = key.to_string()
