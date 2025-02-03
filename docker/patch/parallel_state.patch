@@ -1,11 +1,8 @@
---- original/parallel_state.py	2025-01-19 20:05:02.012220433 -0600
-+++ parallel_state.py	2025-01-19 20:07:24.844098884 -0600
-@@ -1075,9 +1075,9 @@
- 
-     if vllm_config.kv_transfer_config is None:
+--- parallel_state_old.py	2025-01-31 22:56:36.139245420 +0000
++++ parallel_state.py	2025-01-31 22:56:36.359245419 +0000
+@@ -1069,7 +1069,7 @@
          return
--
-+    
+ 
      if all([
 -            vllm_config.kv_transfer_config.need_kv_parallel_group,
 +            vllm_config.kv_transfer_config.is_kv_transfer_instance,
