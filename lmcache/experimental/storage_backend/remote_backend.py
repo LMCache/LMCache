@@ -1,5 +1,6 @@
 import asyncio
 import threading
+import time
 from concurrent.futures import Future
 from typing import List, Optional
 
@@ -12,7 +13,7 @@ from lmcache.experimental.storage_backend.abstract_backend import \
 from lmcache.experimental.storage_backend.connector import CreateConnector
 from lmcache.experimental.storage_backend.naive_serde import CreateSerde
 from lmcache.logging import init_logger
-from lmcache.utils import CacheEngineKey
+from lmcache.utils import CacheEngineKey, _lmcache_nvtx_annotate
 
 logger = init_logger(__name__)
 
@@ -96,6 +97,7 @@ class RemoteBackend(StorageBackendInterface):
     ) -> Optional[Future]:
         pass
 
+    @_lmcache_nvtx_annotate
     def get_blocking(
         self,
         key: CacheEngineKey,
@@ -103,13 +105,20 @@ class RemoteBackend(StorageBackendInterface):
         """
         Blocking get function.
         """
-
+        t1 = time.perf_counter()
         future = asyncio.run_coroutine_threadsafe(self.connection.get(key),
                                                   self.loop)
         memory_obj = future.result()
+
+        t2 = time.perf_counter()
         if memory_obj is None:
             return None
+        obj_size = memory_obj.get_size()
         decompressed_memory_obj = self.deserializer.deserialize(memory_obj)
+        t3 = time.perf_counter()
+        logger.debug(f"Get takes {(t2 - t1) * 1000:.6f} msec, "
+                     f"Bytes loaded: {obj_size / 1e6:.4f} MBytes, "
+                     f"deserialization takes {(t3 - t2) * 1000:.6f} msec")
         return decompressed_memory_obj
 
     def close(self):

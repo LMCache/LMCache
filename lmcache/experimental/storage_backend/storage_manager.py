@@ -15,7 +15,7 @@ from lmcache.experimental.storage_backend import CreateStorageBackends
 from lmcache.experimental.storage_backend.abstract_backend import \
     StorageBackendInterface
 from lmcache.logging import init_logger
-from lmcache.utils import CacheEngineKey
+from lmcache.utils import CacheEngineKey, _lmcache_nvtx_annotate
 
 logger = init_logger(__name__)
 
@@ -50,6 +50,8 @@ class StorageManager:
             self.put_tasks[backend_name] = {}
 
         self.manager_lock = threading.Lock()
+
+        self.stream = torch.cuda.Stream()
 
     def allocate(
         self,
@@ -138,6 +140,51 @@ class StorageManager:
         self.memory_allocator.ref_count_down(memory_obj)
         self.manager_lock.release()
 
+    @_lmcache_nvtx_annotate
+    def _update_hot_cache(self, key: CacheEngineKey, memory_obj: MemoryObj):
+        if memory_obj is None or not self.use_hot:
+            return
+
+        if memory_obj.tensor is not None and memory_obj.tensor.is_cuda:
+            self.manager_lock.acquire()
+            if key in self.hot_cache:
+                self.manager_lock.release()
+                return
+            self.manager_lock.release()
+
+            # Allocate a cpu memory object
+            cpu_memory_obj = self.memory_allocator.allocate(
+                memory_obj.get_shape(),
+                memory_obj.get_dtype(),
+                fmt=memory_obj.get_memory_format())
+
+            if cpu_memory_obj is None:
+                logger.warning(
+                    "Memory allocation failed in cachegen deserializer")
+                return None
+
+            # Copy the tensor to the cpu memory object
+            assert cpu_memory_obj.tensor is not None
+            self.stream.wait_stream(torch.cuda.default_stream())
+            with torch.cuda.stream(self.stream):
+                cpu_memory_obj.tensor.copy_(memory_obj.tensor,
+                                            non_blocking=True)
+            memory_obj.tensor.record_stream(self.stream)
+
+            # Update the hot cache
+            self.manager_lock.acquire()
+            self.hot_cache[key] = cpu_memory_obj
+            self.memory_allocator.ref_count_up(cpu_memory_obj)
+            self.manager_lock.release()
+            logger.debug("Updated hot cache!")
+            return
+        else:
+            self.manager_lock.acquire()
+            if self.use_hot and key not in self.hot_cache:
+                self.hot_cache[key] = memory_obj
+                self.memory_allocator.ref_count_up(memory_obj)
+            self.manager_lock.release()
+
     def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         """
         Blocking function to get the memory object from the storages.
@@ -169,6 +216,8 @@ class StorageManager:
             self.manager_lock.release()
             return memory_obj
 
+        self.manager_lock.release()
+
         # Search all backends for blocking get
         for backend_name, backend in self.storage_backends.items():
             # Avoid read-write contention
@@ -178,13 +227,9 @@ class StorageManager:
             # NOTE(Jiayi): bypass the allocator for now
             memory_obj = backend.get_blocking(key)
             if memory_obj is not None:
-                if self.use_hot and key not in self.hot_cache:
-                    self.hot_cache[key] = memory_obj
-                    self.memory_allocator.ref_count_up(memory_obj)
-                self.manager_lock.release()
+                self._update_hot_cache(key, memory_obj)
                 return memory_obj
 
-        self.manager_lock.release()
         return None
 
     # TODO(Jiayi): we need to consider eviction in prefetch
@@ -292,7 +337,7 @@ class StorageManager:
             self.loop.call_soon_threadsafe(self.loop.stop)
         if self.thread.is_alive():
             self.thread.join()
-        logger.info("Storage manager closed.")
+        #logger.info("Storage manager closed.")
 
     def __del__(self):
         self.close()

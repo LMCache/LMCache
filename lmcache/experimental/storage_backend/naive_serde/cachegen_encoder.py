@@ -56,8 +56,6 @@ class CacheGenSerializer(Serializer):
             MemoryObj: the serialized binary memory object.
         """
 
-        logger.debug("Calling CacheGen serialize")
-
         # TODO(Jiayi): please avoid this copy by directly performing
         # serialization inside gpu connector.
         assert memory_obj.tensor is not None
