@@ -11,12 +11,15 @@ from lmcache.utils import thread_safe
 
 @dataclass
 class LMCacheStats:
-    # Counter
+    # Counter (will accumulate over time)
     num_retrieve_requests: int
     num_store_requests: int
 
-    # Real time value measurements
-    total_cache_hit_rate: float
+    num_requested_tokens: int
+    num_hit_tokens: int
+
+    # Real time value measurements (will be reset after each log)
+    cache_hit_rate: float
 
     local_cache_usage_bytes: int  # Size of the used local cache in bytes
     remote_cache_usage_bytes: int  # Size of the used remote cache in bytes
@@ -68,11 +71,16 @@ class StoreRequestStats:
 class LMCStatsMonitor:
 
     def __init__(self):
+        # Accumulated stats over time
         self.num_retrieve_requests = 0
         self.num_store_requests = 0
 
-        self.total_retrieve_tokens = 0
-        self.total_hit_tokens = 0
+        self.num_requested_tokens = 0
+        self.num_hit_tokens = 0
+
+        # Interval metrics that will be reset after each log
+        self.interval_requested_tokens = 0
+        self.interval_hit_tokens = 0
 
         self.local_cache_usage_bytes = 0
         self.remote_cache_usage_bytes = 0
@@ -95,7 +103,8 @@ class LMCStatsMonitor:
                                               remote_hit_tokens=0,
                                               start_time=curr_time,
                                               end_time=0)
-        self.total_retrieve_tokens += num_tokens
+        self.interval_requested_tokens += num_tokens
+        self.num_requested_tokens += num_tokens
         self.num_retrieve_requests += 1
         self.retrieve_requests[self.retrieve_request_id] = retrieve_stats
         self.retrieve_request_id += 1
@@ -108,7 +117,8 @@ class LMCStatsMonitor:
         retrieve_stats = self.retrieve_requests[request_id]
         retrieve_stats.local_hit_tokens = retrieved_tokens
         retrieve_stats.end_time = curr_time
-        self.total_hit_tokens += retrieved_tokens
+        self.interval_hit_tokens += retrieved_tokens
+        self.num_hit_tokens += retrieved_tokens
 
     @thread_safe
     def on_store_request(self, num_tokens: int) -> int:
@@ -144,8 +154,8 @@ class LMCStatsMonitor:
         """
         Clear all the distribution stats 
         """
-        self.total_retrieve_tokens = 0
-        self.total_hit_tokens = 0
+        self.interval_requested_tokens = 0
+        self.interval_hit_tokens = 0
 
         new_retrieve_requests = {}
         for request_id, retrieve_stats in self.retrieve_requests.items():
@@ -167,8 +177,8 @@ class LMCStatsMonitor:
         The function will return the latest states between the current 
         call and the previous call.
         """
-        total_cache_hit_rate = 0 if self.total_retrieve_tokens == 0 else \
-                self.total_hit_tokens / self.total_retrieve_tokens
+        cache_hit_rate = 0 if self.interval_requested_tokens == 0 else \
+                self.interval_hit_tokens / self.interval_requested_tokens
 
         def filter_out_invalid(stats: List[float]):
             return [x for x in stats if x != 0]
@@ -192,7 +202,9 @@ class LMCStatsMonitor:
         ret = LMCacheStats(
             num_retrieve_requests=self.num_retrieve_requests,
             num_store_requests=self.num_store_requests,
-            total_cache_hit_rate=total_cache_hit_rate,
+            num_requested_tokens=self.num_requested_tokens,
+            num_hit_tokens=self.num_hit_tokens,
+            cache_hit_rate=cache_hit_rate,
             local_cache_usage_bytes=self.local_cache_usage_bytes,
             remote_cache_usage_bytes=self.remote_cache_usage_bytes,
             time_to_retrieve=time_to_retrieve,
@@ -229,19 +241,31 @@ class PrometheusLogger:
 
         self.counter_num_retrieve_requests = self._counter_cls(
             name="lmcache:num_retrieve_requests",
-            documentation="Number of retrieve requests sent to lmcache",
+            documentation="Total number of retrieve requests sent to lmcache",
             labelnames=labelnames,
         )
 
         self.counter_num_store_requests = self._counter_cls(
             name="lmcache:num_store_requests",
-            documentation="Number of store requests sent to lmcache",
+            documentation="Total number of store requests sent to lmcache",
+            labelnames=labelnames,
+        )
+
+        self.counter_num_requested_tokens = self._counter_cls(
+            name="lmcache:num_requested_tokens",
+            documentation="Total number of tokens requested from lmcache",
+            labelnames=labelnames,
+        )
+
+        self.counter_num_hit_tokens = self._counter_cls(
+            name="lmcache:num_hit_tokens",
+            documentation="Total number of tokens hit in lmcache",
             labelnames=labelnames,
         )
 
         self.gauge_cache_hit_rate = self._gauge_cls(
             name="lmcache:cache_hit_rate",
-            documentation="Cache hit rate of lmcache",
+            documentation="Cache hit rate of lmcache since last log",
             labelnames=labelnames,
             multiprocess_mode="livemostrecent")
 
@@ -324,7 +348,11 @@ class PrometheusLogger:
         self._log_counter(self.counter_num_store_requests,
                           stats.num_store_requests)
 
-        self._log_gauge(self.gauge_cache_hit_rate, stats.total_cache_hit_rate)
+        self._log_counter(self.counter_num_requested_tokens,
+                          stats.num_requested_tokens)
+        self._log_counter(self.counter_num_hit_tokens, stats.num_hit_tokens)
+
+        self._log_gauge(self.gauge_cache_hit_rate, stats.cache_hit_rate)
 
         self._log_gauge(self.gauge_local_cache_usage,
                         stats.local_cache_usage_bytes)

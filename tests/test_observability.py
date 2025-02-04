@@ -13,7 +13,7 @@ def test_on_retrieve_request(stats_monitor):
     stats_monitor.on_retrieve_request(num_tokens=100)
     stats = stats_monitor.get_stats_and_clear()
     assert stats.num_retrieve_requests == 1
-    assert stats.total_cache_hit_rate == 0
+    assert stats.cache_hit_rate == 0
     assert stats.local_cache_usage_bytes == 0
     assert stats.remote_cache_usage_bytes == 0
     assert len(stats.time_to_retrieve) == 0
@@ -27,7 +27,7 @@ def test_on_retrieve_finished(stats_monitor):
     )
     stats = stats_monitor.get_stats_and_clear()
     assert stats.num_retrieve_requests == 1
-    assert stats.total_cache_hit_rate == 1.0
+    assert stats.cache_hit_rate == 1.0
     assert len(stats.time_to_retrieve) == 1
 
 
@@ -67,7 +67,7 @@ def test_combined_operations(stats_monitor):
 
     assert stats.num_retrieve_requests == 1
     assert stats.num_store_requests == 1
-    assert stats.total_cache_hit_rate == 1.0
+    assert stats.cache_hit_rate == 1.0
     assert stats.local_cache_usage_bytes == 512
     assert stats.remote_cache_usage_bytes == 1024
     assert len(stats.time_to_retrieve) == 1
