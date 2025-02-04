@@ -6,7 +6,9 @@ from lmcache.config import LMCacheEngineMetadata
 from lmcache.experimental.config import LMCacheEngineConfig
 from lmcache.experimental.memory_management import (BytesBufferMemoryObj,
                                                     MemoryAllocatorInterface,
-                                                    MemoryFormat, MemoryObj)
+                                                    MemoryFormat, MemoryObj,
+                                                    MemoryObjMetadata,
+                                                    TensorMemoryObj)
 from lmcache.experimental.storage_backend.naive_serde.cachegen_basics import \
     CacheGenConfig
 from lmcache.experimental.storage_backend.naive_serde.serde import Deserializer
@@ -61,7 +63,6 @@ class CacheGenDeserializer(Deserializer):
     def deserialize(
             self,
             buffer_memory_obj: BytesBufferMemoryObj) -> Optional[MemoryObj]:
-        logger.debug("Calling CacheGen deserialize")
         encoder_output = CacheGenGPUEncoderOutput.from_bytes(
             buffer_memory_obj.byte_array)
 
@@ -118,15 +119,27 @@ class CacheGenDeserializer(Deserializer):
             case _:
                 raise RuntimeError("Unknown format %s" % self.fmt)
 
-        memory_obj = self.memory_allocator.allocate(kv_chunk.shape,
-                                                    kv_chunk.dtype,
-                                                    fmt=MemoryFormat.KV_BLOB)
-
-        if memory_obj is None:
-            logger.warning("Memory allocation failed in cachegen deserializer")
-            return None
-
-        assert memory_obj.tensor is not None
-        memory_obj.tensor.copy_(kv_chunk)
+        memory_obj = TensorMemoryObj(
+            raw_data=kv_chunk,
+            metadata=MemoryObjMetadata(
+                shape=kv_chunk.shape,
+                dtype=kv_chunk.dtype,
+                address=-1,
+                phy_size=kv_chunk.numel() * kv_chunk.element_size(),
+                ref_count=-1,  # Hack: avoid it being wrongly freed 
+                fmt=MemoryFormat.KV_BLOB))
 
         return memory_obj
+
+        #memory_obj = self.memory_allocator.allocate(kv_chunk.shape,
+        #                                            kv_chunk.dtype,
+        #                                            fmt=MemoryFormat.KV_BLOB)
+
+        #if memory_obj is None:
+        #    logger.warning("Memory allocation failed in cachegen deserializer")
+        #    return None
+
+        #assert memory_obj.tensor is not None
+        #memory_obj.tensor.copy_(kv_chunk)
+
+        #return memory_obj

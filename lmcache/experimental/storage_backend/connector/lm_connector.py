@@ -68,7 +68,7 @@ class LMCServerConnector(RemoteConnector):
         return memory_obj
 
     async def exists(self, key: CacheEngineKey) -> bool:
-        logger.debug("Call to exists()!")
+        #logger.debug("Call to exists()!")
 
         async with self.async_socket_lock:
             self.client_socket.sendall(
@@ -87,7 +87,7 @@ class LMCServerConnector(RemoteConnector):
         memory_obj: MemoryObj,
     ):
 
-        logger.debug("Async call to put()!")
+        #logger.debug("Async call to put()!")
 
         kv_bytes = memory_obj.byte_array
         kv_shape = memory_obj.get_shape()

@@ -213,6 +213,7 @@ class LMCacheEngine:
         for storage_backend in self.storage_manager.storage_backends.values():
             storage_backend.close()
 
+        self.storage_manager.close()
         logger.info("LMCacheEngine closed.")
 
 
