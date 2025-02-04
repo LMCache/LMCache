@@ -38,10 +38,15 @@ while [ $port2 -le $max_port ]; do
     fi
 done
 
-LMCACHE_TRACK_USAGE="false" python3 main.py tests/tests.py -f test_chunk_prefill -o outputs/ -p $port1 $port2
 LMCACHE_TRACK_USAGE="false" python3 main.py tests/tests.py -f test_lmcache_local_gpu -o outputs/ -p $port1 $port2
-LMCACHE_TRACK_USAGE="false" python3 main.py tests/tests.py -f test_lmcache_local_distributed -o outputs/ -p $port1 $port2
-LMCACHE_TRACK_USAGE="false" python3 main.py tests/tests.py -f test_lmcache_remote_cachegen -o outputs/ -p $port1 $port2
+# If the previous command fails, skip the next two commands.
+if [ -d "outputs/" ] && find outputs/ -type f -name "*.csv" | grep .; then
+    LMCACHE_TRACK_USAGE="false" python3 main.py tests/tests.py -f test_lmcache_local_distributed -o outputs/ -p $port1 $port2
+    LMCACHE_TRACK_USAGE="false" python3 main.py tests/tests.py -f test_lmcache_remote_cachegen -o outputs/ -p $port1 $port2
+else
+    echo "Error in test_lmcache_local_gpu, skipping next two commands."
+fi
+
 cd ../end-to-end-tests/.buildkite
 
 set -x

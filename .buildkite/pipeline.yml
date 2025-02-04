@@ -6,6 +6,7 @@ steps:
   - label: ":pytest: Run pytest"
     key: "pytest"
     depends_on: ["conda"]
+    timeout_in_minutes: 15
     command: |
       eval "$(conda shell.bash hook)"
       conda activate buildkite
