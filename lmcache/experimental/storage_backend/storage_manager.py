@@ -145,7 +145,7 @@ class StorageManager:
         if memory_obj is None or not self.use_hot:
             return
 
-        if memory_obj.tensor and memory_obj.tensor.is_cuda:
+        if memory_obj.tensor is not None and memory_obj.tensor.is_cuda:
             self.manager_lock.acquire()
             if key in self.hot_cache:
                 self.manager_lock.release()
@@ -230,7 +230,6 @@ class StorageManager:
                 self._update_hot_cache(key, memory_obj)
                 return memory_obj
 
-        self.manager_lock.release()
         return None
 
     # TODO(Jiayi): we need to consider eviction in prefetch
