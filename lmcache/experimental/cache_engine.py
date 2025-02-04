@@ -12,7 +12,7 @@ from lmcache.experimental.storage_backend.storage_manager import StorageManager
 from lmcache.experimental.token_database import (ChunkedTokenDatabase,
                                                  TokenDatabase)
 from lmcache.logging import init_logger
-from lmcache.observability import LMCStatsMonitor
+from lmcache.observability import LMCacheStatsLogger, LMCStatsMonitor
 from lmcache.usage_context import InitializeUsageContext
 from lmcache.utils import _lmcache_nvtx_annotate
 
@@ -221,6 +221,7 @@ class LMCacheEngineBuilder:
     _instances: Dict[str, LMCacheEngine] = {}
     _cfgs: Dict[str, LMCacheEngineConfig] = {}
     _metadatas: Dict[str, LMCacheEngineMetadata] = {}
+    _stat_loggers: Dict[str, LMCacheStatsLogger] = {}
 
     @staticmethod
     def _Create_memory_allocator(
@@ -257,11 +258,13 @@ class LMCacheEngineBuilder:
         if instance_id not in cls._instances:
             memory_allocator = cls._Create_memory_allocator(config, metadata)
             token_database = cls._Create_token_database(config, metadata)
+            stat_logger = LMCacheStatsLogger(metadata, log_interval=10)
             engine = LMCacheEngine(config, metadata, memory_allocator,
                                    token_database, gpu_connector)
             cls._instances[instance_id] = engine
             cls._cfgs[instance_id] = config
             cls._metadatas[instance_id] = metadata
+            cls._stat_loggers[instance_id] = stat_logger
             return engine
         else:
             if (cls._cfgs[instance_id] != config
@@ -282,8 +285,11 @@ class LMCacheEngineBuilder:
         """Close and delete the LMCacheEngine instance by the instance ID"""
         # TODO: unit test for this
         if instance_id in cls._instances:
+            stat_logger = cls._stat_loggers[instance_id]
+            stat_logger.shutdown()
             engine = cls._instances[instance_id]
             engine.close()
             cls._instances.pop(instance_id, None)
             cls._cfgs.pop(instance_id, None)
             cls._metadatas.pop(instance_id, None)
+            cls._stat_loggers.pop(instance_id, None)
