@@ -196,7 +196,8 @@ void multi_layer_kv_transfer(
                                // key/value must be on gpu/pinned cpu
 
     const torch::Tensor& key_value_ptrs, // [num_layers]
-    torch::Tensor& slot_mapping,  // [num_tokens],
+    const torch::Tensor& slot_mapping,  // [num_tokens],
+    const torch::Device& paged_memory_device, 
     const int page_buffer_size,
     const bool direction
 ) {
@@ -213,18 +214,18 @@ void multi_layer_kv_transfer(
     dim3 grid(key_value.size(2), key_value.size(1), 2);
     dim3 block(std::min(num_qwords, 128));
 
-    const at::cuda::OptionalCUDAGuard device_guard(device_of(key_value));
+    const at::cuda::OptionalCUDAGuard device_guard(paged_memory_device);
     const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
     if (not direction) {
         lmc::load_and_reshape_multi_layer_kernel<int64_t, false><<<grid, block, 0, stream>>>(
             key_value_ptr, page_buffer_ptrs, slot_mapping_ptr,
-            elements_per_qword, num_tokens, num_layers, page_buffer_size);
+            num_qwords, num_tokens, num_layers, page_buffer_size);
     }
     else {
         lmc::load_and_reshape_multi_layer_kernel<int64_t, true><<<grid, block, 0, stream>>>(
             key_value_ptr, page_buffer_ptrs, slot_mapping_ptr,
-            elements_per_qword, num_tokens, num_layers, page_buffer_size);
+            num_qwords, num_tokens, num_layers, page_buffer_size);
     }
 }
 
@@ -278,53 +279,6 @@ void load_and_reshape_flash(
       key_value_ptr, key_cache_ptr, value_cache_ptr, slot_mapping_ptr,
       block_stride_in_64bit, key_value_stride, num_heads, head_size_in_64bit, block_size,
       key_layer_offset, value_layer_offset);
-}
-
-/**
- * Quickly inject KV cache to vLLM paged memory from the offloading buffer
- * Processes all the layers at the same time
- *
- * Each layer in vLLM's KV buffer has a shape of
- * [2, PAGE_BUFFER_SIZE, num_heads*head_size]
- *
- * Each thread block processes the copy for a token 
- * The grid size should be (num_tokens, num_layers, 2) 
- *
- * Therefore:
- *  - k/v -- block.z
- *  - layer id -- block.y
- *  - token id -- block.x
- *  - offset within a token -- thread.x
- *
- * The function does:
- * slot_id = slot_mapping[block.x]
- * ptrs[block.y][block.z, slot_id, thread.x] = key_value[block.z, block.y, block.x, thread.x] 
- */
-void load_and_reshape_multi_layer(
-    const torch::Tensor& key_value,  // [2, num_layer, num_tokens, num_heads*head_size]
-    torch::Tensor& key_value_ptrs, // [num_layers]
-    torch::Tensor& slot_mapping,  // [num_tokens],
-    const int page_buffer_size
-) {
-    const int64_t *key_value_ptr = get_kernel_ptr<const int64_t, const torch::Tensor>(key_value);
-    int64_t **page_buffer_ptrs = get_kernel_ptr<int64_t*, const torch::Tensor>(key_value_ptrs);
-    const int64_t *slot_mapping_ptr = get_kernel_ptr<const int64_t, const torch::Tensor>(slot_mapping);
-
-    int num_layers = key_value.size(1);
-    int num_tokens = slot_mapping.size(0);
-    int num_origin_elements = key_value.size(3);
-    int elements_per_qword = 8 / key_value.element_size();
-    int num_qwords = num_origin_elements / elements_per_qword;
-
-    dim3 grid(key_value.size(2), key_value.size(1), 2);
-    dim3 block(std::min(num_qwords, 128));
-
-    const at::cuda::OptionalCUDAGuard device_guard(device_of(key_value));
-    const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-
-    //lmc::load_and_reshape_multi_layer_kernel<<<grid, block, 0, stream>>>(
-    //    key_value_ptr, page_buffer_ptrs, slot_mapping_ptr,
-    //    elements_per_qword, num_tokens, num_layers, page_buffer_size);
 }
 
 
