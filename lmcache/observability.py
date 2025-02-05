@@ -227,7 +227,7 @@ class LMCStatsMonitor:
         return LMCStatsMonitor._instance
 
     @staticmethod
-    def DestoryInstance():
+    def DestroyInstance():
         LMCStatsMonitor._instance = None
 
 
