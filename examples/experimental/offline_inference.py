@@ -3,9 +3,10 @@ import json
 import os
 import time
 
-import lmcache_vllm
-from lmcache_vllm.vllm import LLM, SamplingParams
 from transformers import AutoTokenizer
+#import lmcache_vllm
+#from lmcache_vllm.
+from vllm import LLM, SamplingParams
 
 model_name = "mistralai/Mistral-7B-Instruct-v0.2"
 context_file = os.path.join(os.pardir, 'ffmpeg.txt')
@@ -97,4 +98,4 @@ print(f"\n\nSecond request Time: {t4 - t3} seconds\n\n")
 append_outputs(output_file, second_outputs, context_length, t4 - t3)
 
 # Graceful exit
-lmcache_vllm.close_lmcache_engine()
+#lmcache_vllm.close_lmcache_engine()
