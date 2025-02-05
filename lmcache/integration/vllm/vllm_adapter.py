@@ -21,7 +21,7 @@ from vllm.utils import get_kv_cache_torch_dtype
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.experimental.cache_engine import (LMCacheEngine,
                                                LMCacheEngineBuilder)
-from lmcache.experimental.gpu_connector import VLLMPagedMemGPUConnector
+from lmcache.experimental.gpu_connector import VLLMPagedMemGPUConnectorV2
 from lmcache.integration.vllm.utils import ENGINE_NAME, lmcache_get_config
 from lmcache.logging import init_logger
 from lmcache.utils import _lmcache_nvtx_annotate
@@ -158,7 +158,7 @@ def init_lmcache_engine(
                                      parallel_config.rank, "vllm", kv_dtype,
                                      kv_shape)
     hidden_dim_size = num_kv_head * head_size
-    vllm_gpu_connector = VLLMPagedMemGPUConnector(hidden_dim_size, num_layer)
+    vllm_gpu_connector = VLLMPagedMemGPUConnectorV2(hidden_dim_size, num_layer)
     engine = LMCacheEngineBuilder.get_or_create(ENGINE_NAME, config, metadata,
                                                 vllm_gpu_connector)
 
