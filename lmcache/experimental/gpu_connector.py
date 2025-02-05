@@ -257,11 +257,14 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
                                              device='cpu',
                                              pin_memory=True)
         self.pointers_initialized = False
+        self.page_buffer_size = 0
 
     def _initialize_pointers(self, kv_caches: List[torch.Tensor]):
         for i in range(self.num_layers):
             self.kv_cache_pointers[i] = kv_caches[i].data_ptr()
         self.pointers_initialized = True
+        # kv_caches[0].shape: [2, num_pages, page_size, num_heads, head_size]
+        self.page_buffer_size = kv_caches[0].shape[1] * kv_caches[0].shape[2]
 
     @_lmcache_nvtx_annotate
     def to_gpu(self, memory_obj: MemoryObj, start: int, end: int, **kwargs):
@@ -294,7 +297,8 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
         lmc_ops.multi_layer_kv_transfer(memory_obj.tensor,
                                         self.kv_cache_pointers,
                                         slot_mapping[start:end],
-                                        kvcaches[0].device, end - start, False)
+                                        kvcaches[0].device,
+                                        self.page_buffer_size, False)
 
         # TODO(Jiayi): Currently, this is a blocking operation.
         # We might be able to continue other decode jobs while
