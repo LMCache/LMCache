@@ -6,7 +6,10 @@ from typing import Dict, List, Union
 import prometheus_client
 
 from lmcache.config import LMCacheEngineMetadata
+from lmcache.logging import init_logger
 from lmcache.utils import thread_safe
+
+logger = init_logger(__name__)
 
 
 @dataclass
@@ -224,7 +227,7 @@ class LMCStatsMonitor:
         return LMCStatsMonitor._instance
 
     @staticmethod
-    def DestoryInstane():
+    def DestroyInstance():
         LMCStatsMonitor._instance = None
 
 
@@ -383,8 +386,12 @@ class PrometheusLogger:
     def GetOrCreate(metadata: LMCacheEngineMetadata) -> "PrometheusLogger":
         if PrometheusLogger._instance is None:
             PrometheusLogger._instance = PrometheusLogger(metadata)
-        assert PrometheusLogger._instance.metadata == metadata, \
-            "PrometheusLogger instance already created with different metadata"
+        #assert PrometheusLogger._instance.metadata == metadata, \
+        #    "PrometheusLogger instance already created with different metadata"
+        if PrometheusLogger._instance.metadata != metadata:
+            logger.error("PrometheusLogger instance already created with"
+                         "different metadata. This should not happen except "
+                         "in test")
         return PrometheusLogger._instance
 
     @staticmethod

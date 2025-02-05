@@ -293,3 +293,4 @@ class LMCacheEngineBuilder:
             cls._cfgs.pop(instance_id, None)
             cls._metadatas.pop(instance_id, None)
             cls._stat_loggers.pop(instance_id, None)
+            LMCStatsMonitor.DestroyInstance()

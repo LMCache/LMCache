@@ -134,7 +134,7 @@ __global__ void load_and_reshape_multi_layer_kernel(
                 scalars_per_token, num_tokens, num_layers);
 
         const int64_t vllm_offset = page_buffer_offset(
-                k_or_v, token_id, i, 
+                k_or_v, slot_idx, i, 
                 scalars_per_token, page_buffer_size);
 
         if (DIRECTION) // 1 is paged buffer to LMCache

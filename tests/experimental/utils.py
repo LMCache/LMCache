@@ -73,6 +73,27 @@ def generate_kv_cache_paged(num_blocks,
     return tuple(ret)
 
 
+def generate_kv_cache_paged_list_tensors(num_blocks,
+                                         device,
+                                         block_size=16,
+                                         dtype=torch.bfloat16):
+    """
+    Instead of Tuple[Tuple[Tensor, Tensor]], return List[Tensor]
+    where KV are in the same tensor
+    """
+    ret = []
+    num_layers = 32
+    num_heads = 8
+    head_size = 128
+    shape = [2, num_blocks, block_size, num_heads, head_size]
+
+    for i in range(num_layers):
+        kv = torch.rand(shape, dtype=dtype, device=device)
+        ret.append(kv)
+
+    return ret
+
+
 def generate_tokens(num_tokens, device):
     return torch.randint(0, 10000, size=[num_tokens]).to(device)
 
@@ -135,6 +156,11 @@ def check_mem_obj_equal(left, right, offset=0):
         assert len(left_v.shape) == 3
         assert len(right_k.shape) == 3
         assert len(right_v.shape) == 3
+
+        if not (left_v[:, :, :] == right_v[:, :, :]).all():
+            print("left_k:", left_k[:, :, :])
+            print("right_k:", right_k[:, :, :])
+            breakpoint()
 
         assert (left_k[:, :, :] == right_k[:, :, :]).all()
         assert (left_v[:, :, :] == right_v[:, :, :]).all()

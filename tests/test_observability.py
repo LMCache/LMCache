@@ -5,7 +5,7 @@ from lmcache.observability import LMCStatsMonitor
 
 @pytest.fixture(scope="function")
 def stats_monitor():
-    LMCStatsMonitor.DestoryInstane()
+    LMCStatsMonitor.DestroyInstance()
     return LMCStatsMonitor.GetOrCreate()
 
 
