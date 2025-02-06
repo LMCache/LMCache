@@ -271,6 +271,15 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
         """Expect a kwarg 'kvcaches' which is a nested tuple of K and V tensors.
         The kvcaches should correspond to the "WHOLE token sequence".
 
+        Note: 
+          1. This function expectes the 'slot_mapping' is a "full slot mapping"
+             where it's length is the same as the whole token sequence.
+          2. In the case that there is prefix caching, slot_mapping will starts
+             with -1s until the end of the matched prefix. The start and end
+             should NEVER overlap with the prefix caching (which means the 
+             underlying CUDA kernel will never see -1 in slot_mapping)
+
+
         :raises ValueError: If 'kvcaches' is not provided in kwargs.
         :raises AssertionError: If the memory object does not have a tensor.
         :raises ValueError: If 'slot_mapping' is not provided in kwargs.
@@ -309,8 +318,17 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
         """Expect a kwarg 'kvcaches' which is a nested tuple of K and V tensors.
         The kvcaches should correspond to the "WHOLE token sequence".
 
-        :raises ValueError: If 'kvcaches' is not provided in kwargs, or the 
-            memory object is not in KV_BLOB format.
+        Will set the memory_obj.metadata.fmt to MemoryFormat.KV_BLOB.
+
+        Note: 
+          1. This function expectes the 'slot_mapping' is a "full slot mapping"
+             where it's length is the same as the whole token sequence.
+          2. In the case that there is prefix caching, slot_mapping will starts
+             with -1s until the end of the matched prefix. The start and end
+             should NEVER overlap with the prefix caching (which means the 
+             underlying CUDA kernel will never see -1 in slot_mapping)
+
+        :raises ValueError: If 'kvcaches' is not provided in kwargs,
         :raises AssertionError: If the memory object does not have a tensor.
         :raises ValueError: If 'slot_mapping' is not provided in kwargs.
         """
@@ -322,11 +340,6 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
         if "slot_mapping" not in kwargs:
             raise ValueError("'slot_mapping' should be provided in kwargs.")
 
-        if "offset" in kwargs:
-            start = start - kwargs["offset"]
-            end = end - kwargs["offset"]
-        assert start >= 0 and end >= start
-
         kvcaches: List[torch.Tensor] = kwargs["kvcaches"]
         slot_mapping: torch.Tensor = kwargs["slot_mapping"]
 
@@ -336,7 +349,7 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
         lmc_ops.multi_layer_kv_transfer(memory_obj.tensor,
                                         self.kv_cache_pointers,
                                         slot_mapping[start:end],
-                                        kvcaches[0].device, end - start, True)
+                                        kvcaches[0].device, self.page_buffer_size, True)
 
         torch.cuda.synchronize()
         memory_obj.metadata.fmt = MemoryFormat.KV_BLOB
