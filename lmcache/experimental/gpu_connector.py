@@ -272,7 +272,7 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
         The kvcaches should correspond to the "WHOLE token sequence".
 
         Note: 
-          1. This function expectes the 'slot_mapping' is a "full slot mapping"
+          1. This function expects the 'slot_mapping' is a "full slot mapping"
              where it's length is the same as the whole token sequence.
           2. In the case that there is prefix caching, slot_mapping will starts
              with -1s until the end of the matched prefix. The start and end
@@ -321,7 +321,7 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
         Will set the memory_obj.metadata.fmt to MemoryFormat.KV_BLOB.
 
         Note: 
-          1. This function expectes the 'slot_mapping' is a "full slot mapping"
+          1. This function expects the 'slot_mapping' is a "full slot mapping"
              where it's length is the same as the whole token sequence.
           2. In the case that there is prefix caching, slot_mapping will starts
              with -1s until the end of the matched prefix. The start and end
@@ -349,7 +349,8 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
         lmc_ops.multi_layer_kv_transfer(memory_obj.tensor,
                                         self.kv_cache_pointers,
                                         slot_mapping[start:end],
-                                        kvcaches[0].device, self.page_buffer_size, True)
+                                        kvcaches[0].device,
+                                        self.page_buffer_size, True)
 
         torch.cuda.synchronize()
         memory_obj.metadata.fmt = MemoryFormat.KV_BLOB
