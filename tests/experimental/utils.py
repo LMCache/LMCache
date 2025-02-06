@@ -157,11 +157,6 @@ def check_mem_obj_equal(left, right, offset=0):
         assert len(right_k.shape) == 3
         assert len(right_v.shape) == 3
 
-        if not (left_v[:, :, :] == right_v[:, :, :]).all():
-            print("left_k:", left_k[:, :, :])
-            print("right_k:", right_k[:, :, :])
-            breakpoint()
-
         assert (left_k[:, :, :] == right_k[:, :, :]).all()
         assert (left_v[:, :, :] == right_v[:, :, :]).all()
 
@@ -192,6 +187,9 @@ def check_paged_kv_cache_equal(left,
         assert right_k.shape[token_dim] >= num_tokens
         assert right_v.shape[token_dim] >= num_tokens
 
+        if not (left_k[slot_mapping, :, :]
+                == right_k[slot_mapping, :, :]).all():
+            breakpoint()
         assert (
             left_k[slot_mapping, :, :] == right_k[slot_mapping, :, :]).all()
         assert (
