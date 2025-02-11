@@ -214,6 +214,49 @@ def broadcast_seq_group_metadata(
         )
 
 
+# TODO(Jiayi): This function is not used for now
+def broadcast_seq_group_list(
+    model_input: "ModelInputForGPUWithSamplingMetadata",
+    is_driver_worker: bool,
+) -> "ModelInputForGPUWithSamplingMetadata":
+    """Broadcast the `model_input` from driver worker to non-driver workers.
+
+    :param model_input: The model input for the current request.
+    :type model_input: ModelInputForGPUWithSamplingMetadata
+
+    :param is_driver_worker: Whether the code is executed in driver worker. 
+    :type is_driver_worker: bool
+
+    : return: Original `model_input` if driver_worker.
+              Broadcasted `model_input` otherwise.
+    """
+
+    # broadcast len of `seq_group_metadata_list`
+    if is_driver_worker:
+        assert model_input.sampling_metadata is not None
+        assert model_input.sampling_metadata.seq_groups is not None
+        seq_group_len_list = [len(model_input.sampling_metadata.seq_groups)]
+    else:
+        seq_group_len_list = [0]
+    dist.broadcast_object_list(seq_group_len_list, src=0)
+    seq_group_len = seq_group_len_list[0]
+
+    # broadcast `seq_groups`
+    if is_driver_worker:
+        seq_groups = model_input.sampling_metadata.seq_groups  # type: ignore
+    else:
+        seq_groups = [None] * seq_group_len
+    dist.broadcast_object_list(seq_groups, src=0)
+
+    if is_driver_worker:
+        return model_input
+    else:
+        sampling_metadata = model_input.sampling_metadata
+        sampling_metadata.seq_groups = seq_groups  # type: ignore
+        return dataclasses.replace(model_input,
+                                   sampling_metadata=sampling_metadata)
+
+
 def close_lmcache_engine() -> None:
     """Close the LMCache engine if it is initialized.
     """
@@ -418,7 +461,19 @@ def lmcache_store_kv(
 
     seq_data_idx = 0
     assert model_input.sampling_metadata is not None
+
     seq_group_list = model_input.sampling_metadata.seq_groups
+
+    # FIXME(Jiayi): Use `seq_group_list` to determine driver worker
+    # Alternative 1, we can pass in a parameter `is_driver_worker`
+    # Alternative 2, make the broadcast in outside, so the `broadcast`
+    # doesn't need to be done twice in `lmcache_retrieve` and
+    # `lmcache_store`
+    # We use this dirty fix now as we don't want to modify the vllm
+    # connector interface for now
+    model_input = broadcast_seq_group_list(model_input, seq_group_list
+                                           is not None)
+
     assert seq_group_list is not None
 
     next_start_pos = 0
@@ -569,8 +624,20 @@ def lmcache_retrieve_kv(
 
     # idx is on a sequence, not a sequence group.
     idx = 0
+
     assert model_input.sampling_metadata is not None
     seq_group_list = model_input.sampling_metadata.seq_groups
+
+    # FIXME(Jiayi): Use `seq_group_list` to determine driver worker
+    # Alternative 1, we can pass in a parameter `is_driver_worker`
+    # Alternative 2, make the broadcast in outside, so the `broadcast`
+    # doesn't need to be done twice in `lmcache_retrieve` and
+    # `lmcache_store`
+    # We use this dirty fix now as we don't want to modify the vllm
+    # connector interface for now
+    model_input = broadcast_seq_group_list(model_input, seq_group_list
+                                           is not None)
+
     assert seq_group_list is not None
 
     for seq_group in seq_group_list:
