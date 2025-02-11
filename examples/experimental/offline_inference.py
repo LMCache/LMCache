@@ -76,7 +76,8 @@ prompts = gen_prompts(tokenizer, context_messages, user_inputs_batch)
 llm = LLM(model=model_name,
           gpu_memory_utilization=0.8,
           enable_chunked_prefill=False,
-          max_model_len=32768)
+          max_model_len=32768,
+          enforce_eager=True)
 
 # Clear output file.
 with open(output_file, "w") as f:

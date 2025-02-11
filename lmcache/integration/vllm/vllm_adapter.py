@@ -21,6 +21,7 @@ from vllm.utils import get_kv_cache_torch_dtype
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.experimental.cache_engine import (LMCacheEngine,
                                                LMCacheEngineBuilder)
+from lmcache.experimental.config import LMCacheEngineConfig
 from lmcache.experimental.gpu_connector import VLLMPagedMemGPUConnectorV2
 from lmcache.integration.vllm.utils import ENGINE_NAME, lmcache_get_config
 from lmcache.logging import init_logger
@@ -159,6 +160,8 @@ def init_lmcache_engine(
                                      kv_shape)
     hidden_dim_size = num_kv_head * head_size
     vllm_gpu_connector = VLLMPagedMemGPUConnectorV2(hidden_dim_size, num_layer)
+    assert isinstance(config, LMCacheEngineConfig), \
+        "LMCache experimental configuration is should be passed."
     engine = LMCacheEngineBuilder.get_or_create(ENGINE_NAME, config, metadata,
                                                 vllm_gpu_connector)
 
