@@ -30,14 +30,19 @@ async def send_request(openai_server, request, index):
     response = await openai_server.create_chat_completion(request)
     end_time = time.time()
     latency = end_time - start_time
-    print(f"Response {index + 1} (Latency: {latency:.4f}s): {response.choices[0].message.content}")
+    print(f"Response {index + 1} (Latency: {latency:.4f}s): "
+          f"{response.choices[0].message.content}")
 
 async def main():
-    """Initialize vLLM engine, send multiple requests, and print responses with latency and cache testing."""
+    """
+    Initialize vLLM engine, send multiple requests, and print responses
+    with latency and cache testing.
+    """
     engine_args = AsyncEngineArgs(model=MODEL_PATH)
     print(f"Initializing vLLM engine with args: {engine_args}")
 
-    async with build_async_engine_client_from_engine_args(engine_args) as engine:
+    async with (build_async_engine_client_from_engine_args(engine_args)
+                as engine):
         openai_server = OpenAIServingChat(
             engine,
             await engine.get_model_config(),
