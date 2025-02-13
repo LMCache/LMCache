@@ -3,7 +3,7 @@ import queue
 import threading
 import time
 from collections import OrderedDict
-from concurrent.futures import Future, ProcessPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Dict, Optional, Tuple, Union
 
 import torch
@@ -306,7 +306,7 @@ class LMCLocalDiskBackend(LMCBackendInterface):
         # TODO(Jiayi): share the buffer if both cpu and disk backend are enabled
         self.cpu_mbufferpool = LocalCPUBufferPool(metadata)
 
-        self.proc_pool_executor = ProcessPoolExecutor(max_workers=4)
+        self.proc_pool_executor = ThreadPoolExecutor(max_workers=4)
 
     def contains(
         self,
