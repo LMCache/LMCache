@@ -1,0 +1,6 @@
+chunk_size: 256
+local_device: "cpu"
+remote_serde: "cachegen"
+
+# Whether retrieve() is pipelined or not
+pipelined_backend: False
