@@ -65,7 +65,7 @@ class StorageManager:
         """
         self.manager_lock.acquire()
         memory_obj = self.memory_allocator.allocate(shape, dtype)
-        if not eviction:
+        if not eviction or memory_obj is not None:
             self.manager_lock.release()
             return memory_obj
 
