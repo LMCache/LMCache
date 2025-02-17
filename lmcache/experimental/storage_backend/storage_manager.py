@@ -70,11 +70,10 @@ class StorageManager:
             return memory_obj
 
         assert isinstance(self.memory_allocator, MixedMemoryAllocator)
-        iter_hot_cache = iter(self.hot_cache)
         evict_keys = []
-        while memory_obj is None:
-            evict_key = next(iter_hot_cache)
-
+        
+        for evict_key in self.hot_cache:
+            
             # If the ref_count > 1, we cannot evict it as the hot cache
             # might be used as buffers by other storage backends
             if self.memory_allocator.get_ref_count(
@@ -84,7 +83,8 @@ class StorageManager:
             self.memory_allocator.ref_count_down(self.hot_cache[evict_key])
             memory_obj = self.memory_allocator.allocate(shape, dtype)
             logger.debug("Evicting 1 chunk from hot cache")
-
+            if memory_obj is not None:
+                break
             # TODO(Jiayi): move this before the loop
             # In this way, we don't need to do eviction for big objects
             # TODO(Jiayi): the following code is hacky, please refactor
@@ -96,6 +96,7 @@ class StorageManager:
         self.manager_lock.release()
         return memory_obj
 
+    
     def put(
         self,
         key: CacheEngineKey,
