@@ -80,14 +80,6 @@ class LMCacheConnector(KVConnectorBase):
         hidden_or_intermediate_states: Union[torch.Tensor,
                                              IntermediateTensors],
     ) -> None:
-        num_reqs = 0
-        seq_group_list = model_input.sampling_metadata.seq_groups
-        assert seq_group_list is not None
-        for seq_group in seq_group_list:
-            seq_ids = seq_group.seq_ids
-            for seq_id in seq_ids:
-                num_reqs += 1
-
         # TODO (Jiayi): Only normal prefill is supported for now
         #store_status = [self.store_status.PREFILL] * num_reqs
         store_status = self.lmcache_should_store(model_input)

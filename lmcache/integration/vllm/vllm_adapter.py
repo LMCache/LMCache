@@ -375,6 +375,9 @@ def lmcache_should_store(
     if is_all_prefill_run:
         assert model_input.sampling_metadata is not None
         seq_group_list = model_input.sampling_metadata.seq_groups
+        model_input = broadcast_seq_group_list(model_input, seq_group_list
+                                               is not None)
+        seq_group_list = model_input.sampling_metadata.seq_groups
         assert seq_group_list is not None
 
         selected_token_indices = \
@@ -473,7 +476,7 @@ def lmcache_store_kv(
     # connector interface for now
     model_input = broadcast_seq_group_list(model_input, seq_group_list
                                            is not None)
-
+    seq_group_list = model_input.sampling_metadata.seq_groups
     assert seq_group_list is not None
 
     next_start_pos = 0
@@ -637,7 +640,7 @@ def lmcache_retrieve_kv(
     # connector interface for now
     model_input = broadcast_seq_group_list(model_input, seq_group_list
                                            is not None)
-
+    seq_group_list = model_input.sampling_metadata.seq_groups
     assert seq_group_list is not None
 
     for seq_group in seq_group_list:
