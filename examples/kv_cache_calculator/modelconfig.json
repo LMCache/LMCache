@@ -58,5 +58,17 @@
     "num_attention_heads": 32,
     "num_hidden_layers": 16,
     "num_key_value_heads": 8
+  },
+  "Qwen/Qwen2.5-7B-Instruct": {
+    "hidden_size": 3584,
+    "num_attention_heads": 28,
+    "num_hidden_layers": 28,
+    "num_key_value_heads": 4
+  },
+  "Qwen/Qwen2.5-3B-Instruct": {
+    "hidden_size": 2048,
+    "num_attention_heads": 16,
+    "num_hidden_layers": 36,
+    "num_key_value_heads": 2
   }
 }
