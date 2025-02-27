@@ -15,6 +15,9 @@ logger = init_logger(__name__)
 class RedisLookupServer(LookupServerInterface):
 
     def __init__(self, config: LMCacheEngineConfig):
+        self.distributed_url = config.distributed_url
+        assert self.distributed_url is not None
+        
         self.url = config.lookup_url
         assert self.url is not None
         host, port = self.url.split(":")
@@ -24,6 +27,7 @@ class RedisLookupServer(LookupServerInterface):
         self.connection = redis.Redis(
             host=host,
             port=port,
+            decode_responses=True
         )
         logger.info(f"Connected to Redis lookup server at {host}:{port}")
         #decode_responses=False)
@@ -32,7 +36,9 @@ class RedisLookupServer(LookupServerInterface):
         """
         Perform lookup in the lookup server.
         """
+        logger.debug("Call to lookup in lookup server")
         url = self.connection.get(key.to_string())
+        logger.debug(f"KV cache lives on {url}")
         assert not inspect.isawaitable(url)
         if url is None:
             return None
@@ -44,10 +50,12 @@ class RedisLookupServer(LookupServerInterface):
         Perform insert in the lookup server.
         """
         assert self.url is not None
-        self.connection.set(key.to_string(), self.url)
+        logger.debug("Call to insert in lookup server")
+        self.connection.set(key.to_string(), self.distributed_url)
 
     def remove(self, key: CacheEngineKey):
         """
         Perform remove in the lookup server.
         """
+        logger.debug("Call to remove in lookup server")
         self.connection.delete(key.to_string())

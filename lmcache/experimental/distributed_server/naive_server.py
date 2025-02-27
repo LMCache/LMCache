@@ -117,6 +117,7 @@ class NaiveDistributedServer(DistributedServerInterface):
         # (i.e., Too many open files).
         client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         client_socket.connect((host, port))
+        logger.debug(f"Peer connection created at {host}:{port}")
 
         async with self.async_socket_lock:
             client_socket.sendall(
@@ -152,7 +153,7 @@ class NaiveDistributedServer(DistributedServerInterface):
         logger.info(f"Connected by {addr}")
         try:
             while True:
-                header = self.receive_all_server(
+                header = await self.receive_all_server(
                     reader, ClientMetaMessage.packlength())
                 if not header:
                     break
