@@ -1,4 +1,5 @@
 import hashlib
+import os
 import threading
 from dataclasses import dataclass
 from typing import Optional, Tuple
@@ -92,3 +93,12 @@ def thread_safe(func):
             return func(*args, **kwargs)
 
     return wrapper
+
+
+##### Check if an environment variable set to 1/true/on/enable(d)
+def is_envvar_enabled(var: str) -> bool:
+    value = os.environ.get(var)
+    if not value:
+        return False
+    value = value.lower()
+    return value == "1" or value == "true" or value == "on" or value == "enable" or value == "enabled"
