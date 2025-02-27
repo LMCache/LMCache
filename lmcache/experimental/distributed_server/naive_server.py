@@ -113,6 +113,8 @@ class NaiveDistributedServer(DistributedServerInterface):
         host, port = host_and_port
 
         # TODO(Jiayi): Cache the hot client sockets if possible.
+        # For example, retrieving 100 chunks could create 100 the same
+        # connection for 100 times.
         # However, too many live sockets could cause file descriptor exhaustion
         # (i.e., Too many open files).
         client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
