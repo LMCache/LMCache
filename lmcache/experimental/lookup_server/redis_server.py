@@ -17,18 +17,16 @@ class RedisLookupServer(LookupServerInterface):
     def __init__(self, config: LMCacheEngineConfig):
         self.distributed_url = config.distributed_url
         assert self.distributed_url is not None
-        
+
         self.url = config.lookup_url
         assert self.url is not None
         host, port = self.url.split(":")
         self.host = host
         self.port = int(port)
 
-        self.connection = redis.Redis(
-            host=host,
-            port=port,
-            decode_responses=True
-        )
+        self.connection = redis.Redis(host=host,
+                                      port=port,
+                                      decode_responses=True)
         logger.info(f"Connected to Redis lookup server at {host}:{port}")
         #decode_responses=False)
 
@@ -49,7 +47,7 @@ class RedisLookupServer(LookupServerInterface):
         """
         Perform insert in the lookup server.
         """
-        assert self.url is not None
+        assert self.distributed_url is not None
         logger.debug("Call to insert in lookup server")
         self.connection.set(key.to_string(), self.distributed_url)
 
