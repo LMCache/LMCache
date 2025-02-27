@@ -3,17 +3,16 @@ from typing import Optional, Tuple
 
 from lmcache.utils import CacheEngineKey
 
+
 class LookupServerInterface(metaclass=abc.ABCMeta):
+
     @abc.abstractmethod
-    def lookup(
-        self,
-        key: CacheEngineKey
-    ) -> Optional[Tuple[str, int]]:
+    def lookup(self, key: CacheEngineKey) -> Optional[Tuple[str, int]]:
         """
         Perform lookup in the lookup server.
         """
         raise NotImplementedError
-    
+
     @abc.abstractmethod
     def insert(
         self,
@@ -23,7 +22,7 @@ class LookupServerInterface(metaclass=abc.ABCMeta):
         Perform insert in the lookup server.
         """
         raise NotImplementedError
-    
+
     @abc.abstractmethod
     def remove(
         self,

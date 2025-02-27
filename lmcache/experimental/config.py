@@ -144,6 +144,9 @@ class LMCacheEngineConfig:
         enable_p2p = config.get("enable_p2p", False)
         lookup_url = config.get("lookup_url", None)
         distributed_url = config.get("distributed_url", None)
+        if enable_p2p:
+            assert lookup_url is not None
+            assert distributed_url is not None
 
         match local_disk:
             case None:

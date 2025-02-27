@@ -1,22 +1,22 @@
-from typing import Optional, no_type_check
 import asyncio
+import socket
 import threading
 import time
-import torch
-import socket
+from typing import Optional
 
-from lmcache.experimental.distributed_server.abstract_server import DistributedServerInterface # noqa: E501
+import torch
+
+from lmcache.experimental.config import LMCacheEngineConfig
+from lmcache.experimental.distributed_server.abstract_server import \
+    DistributedServerInterface  # noqa: E501
 from lmcache.experimental.lookup_server import LookupServerInterface
-from lmcache.experimental.memory_management import MemoryObj
-from lmcache.experimental.storage_backend.storage_manager import StorageManager
-from lmcache.utils import CacheEngineKey
-from lmcache.logging import init_logger
+from lmcache.experimental.memory_management import (MemoryAllocatorInterface,
+                                                    MemoryFormat, MemoryObj)
 from lmcache.experimental.protocol import (ClientMetaMessage, Constants,
                                            ServerMetaMessage)
-from lmcache.experimental.memory_management import (MemoryAllocatorInterface,
-                                                    MemoryFormat, MemoryObj,
-                                                    MixedMemoryAllocator)
-from lmcache.experimental.config import LMCacheEngineConfig
+from lmcache.experimental.storage_backend.storage_manager import StorageManager
+from lmcache.logging import init_logger
+from lmcache.utils import CacheEngineKey
 
 logger = init_logger(__name__)
 
@@ -30,8 +30,9 @@ logger = init_logger(__name__)
 # TODO(Jiayi): Need to find a way to make the code more concise.
 # For example, consider reusing code from remote cache server?
 
+
 class NaiveDistributedServer(DistributedServerInterface):
-    
+
     def __init__(
         self,
         storage_manager: StorageManager,
@@ -40,26 +41,26 @@ class NaiveDistributedServer(DistributedServerInterface):
         loop: asyncio.AbstractEventLoop,
         config: LMCacheEngineConfig,
     ):
-        
+
         self.storage_manager = storage_manager
         self.lookup_server = lookup_server
         self.memory_allocator = memory_allocator
-        
+
         self.url = config.distributed_url
         assert self.url is not None
         host, port = self.url.split(":")
         self.host = host
         self.port = int(port)
-        
+
         self.loop = loop
         self.thread = threading.Thread(target=self.loop.run_forever)
         self.thread.start()
         asyncio.run_coroutine_threadsafe(self.start(), self.loop)
-        
+
         self.async_socket_lock = asyncio.Lock()
-        
+
     async def handle_get(
-        self, 
+        self,
         key: CacheEngineKey,
     ) -> Optional[MemoryObj]:
         """
@@ -68,9 +69,9 @@ class NaiveDistributedServer(DistributedServerInterface):
         """
         memory_obj = self.storage_manager.get(key)
         return memory_obj
-    
+
     def receive_all_client(
-        self, 
+        self,
         meta: ServerMetaMessage,
         client_socket: socket.socket,
     ) -> Optional[MemoryObj]:
@@ -93,18 +94,14 @@ class NaiveDistributedServer(DistributedServerInterface):
 
         while received < n:
 
-            num_bytes = client_socket.recv_into(view[received:],
-                                                     n - received)
+            num_bytes = client_socket.recv_into(view[received:], n - received)
             if num_bytes == 0:
                 return None
             received += num_bytes
 
         return memory_obj
-    
-    async def issue_get(
-        self, 
-        key: CacheEngineKey
-    ) -> Optional[MemoryObj]:
+
+    async def issue_get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         """
         Perform get from the peer.
         This function can be blocking for now.
@@ -114,18 +111,18 @@ class NaiveDistributedServer(DistributedServerInterface):
         if host_and_port is None:
             return None
         host, port = host_and_port
-        
+
         # TODO(Jiayi): Cache the hot client sockets if possible.
         # However, too many live sockets could cause file descriptor exhaustion
         # (i.e., Too many open files).
         client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         client_socket.connect((host, port))
-        
+
         async with self.async_socket_lock:
             client_socket.sendall(
                 ClientMetaMessage(Constants.CLIENT_GET, key, 0,
-                                    MemoryFormat(1), torch.float16,
-                                    torch.Size([0, 0, 0, 0])).serialize())
+                                  MemoryFormat(1), torch.float16,
+                                  torch.Size([0, 0, 0, 0])).serialize())
 
             data = client_socket.recv(ServerMetaMessage.packlength())
 
@@ -135,9 +132,9 @@ class NaiveDistributedServer(DistributedServerInterface):
 
         async with self.async_socket_lock:
             memory_obj = self.receive_all_client(meta, client_socket)
-        
+
         return memory_obj
-    
+
     async def receive_all_server(self, reader, n):
         data = bytearray()
         while len(data) < n:
@@ -146,7 +143,7 @@ class NaiveDistributedServer(DistributedServerInterface):
                 return None  # Client disconnected
             data.extend(packet)
         return data
-    
+
     async def handle_client(self, reader, writer):
         """
         Handle the client.
@@ -155,21 +152,22 @@ class NaiveDistributedServer(DistributedServerInterface):
         print(f"Connected by {addr}")
         try:
             while True:
-                header = self.receive_all_server(reader, ClientMetaMessage.packlength())
+                header = self.receive_all_server(
+                    reader, ClientMetaMessage.packlength())
                 if not header:
                     break
                 meta = ClientMetaMessage.deserialize(header)
 
                 match meta.command:
-                    
+
                     case Constants.CLIENT_GET:
-                        
+
                         t0 = time.perf_counter()
-                        
+
                         memory_obj = await self.handle_get(meta.key)
-                        
+
                         t1 = time.perf_counter()
-                        
+
                         if memory_obj is not None:
                             writer.write(
                                 ServerMetaMessage(
@@ -180,39 +178,41 @@ class NaiveDistributedServer(DistributedServerInterface):
                                     memory_obj.get_shape(),
                                 ).serialize())
                             await writer.drain()
-                            
+
                             t2 = time.perf_counter()
-                            
+
                             writer.write(memory_obj.byte_array)
                             await writer.drain()
                             self.memory_allocator.ref_count_down(memory_obj)
-                            
+
                             t3 = time.perf_counter()
-                            logger.info(
-                                f"Time to get data: {t1 - t0}, time to send meta: {t2 - t1}, time to send data: {t3 - t2}")
+                            logger.info(f"Time to get data: {t1 - t0}, "
+                                        f"time to send meta: {t2 - t1}, "
+                                        f"time to send data: {t3 - t2}")
                         else:
                             writer.write(
                                 ServerMetaMessage(Constants.SERVER_FAIL, 0,
                                                   MemoryFormat(1),
                                                   torch.float16,
-                                                  torch.Size((0, 0, 0, 0))).serialize())
+                                                  torch.Size((0, 0, 0,
+                                                              0))).serialize())
                             await writer.drain()
         finally:
             writer.close()
             await writer.wait_closed()
-    
+
     async def start(self):
         """
         Start the server.
         """
-        server = await asyncio.start_server(
-            self.handle_client, self.host, self.port)
+        server = await asyncio.start_server(self.handle_client, self.host,
+                                            self.port)
         addr = server.sockets[0].getsockname()
         print(f"Server started at {addr}")
 
         async with server:
             await server.serve_forever()
-    
+
     def close(self):
         """
         Close the server.
