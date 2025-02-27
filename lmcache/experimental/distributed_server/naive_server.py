@@ -149,7 +149,7 @@ class NaiveDistributedServer(DistributedServerInterface):
         Handle the client.
         """
         addr = writer.get_extra_info("peername")
-        print(f"Connected by {addr}")
+        logger.info(f"Connected by {addr}")
         try:
             while True:
                 header = self.receive_all_server(
@@ -208,7 +208,7 @@ class NaiveDistributedServer(DistributedServerInterface):
         server = await asyncio.start_server(self.handle_client, self.host,
                                             self.port)
         addr = server.sockets[0].getsockname()
-        print(f"Server started at {addr}")
+        logger.info(f"Server started at {addr}")
 
         async with server:
             await server.serve_forever()

@@ -6,7 +6,10 @@ import redis
 from lmcache.experimental.config import LMCacheEngineConfig
 from lmcache.experimental.lookup_server.abstract_server import \
     LookupServerInterface  # noqa: E501
+from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
+
+logger = init_logger(__name__)
 
 
 class RedisLookupServer(LookupServerInterface):
@@ -22,6 +25,7 @@ class RedisLookupServer(LookupServerInterface):
             host=host,
             port=port,
         )
+        logger.info(f"Connected to Redis lookup server at {host}:{port}")
         #decode_responses=False)
 
     def lookup(self, key: CacheEngineKey) -> Optional[Tuple[str, int]]:
