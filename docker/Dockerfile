@@ -89,7 +89,7 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
 
 #################### vLLM installation IMAGE ####################
 # Install torchac_cuda wheel into the vLLM image
-FROM vllm/vllm-openai:v0.7.0 AS vllm-openai
+FROM vllm/vllm-openai:v0.7.3 AS vllm-openai
 RUN --mount=type=bind,from=build,src=/workspace/LMCache/dist_lmcache,target=/vllm-workspace/dist_lmcache \
 --mount=type=cache,target=/root/.cache/pip \
 pip install dist_lmcache/*.whl --verbose
