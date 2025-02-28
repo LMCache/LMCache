@@ -14,6 +14,7 @@ docker run --name some-redis -d -p 8100:6379 redis
 ``` 
 
 2. Start two vllm engines:
+
 Start vllm engine 1 at port 8000:
 ```bash
 CUDA_VISIBLE_DEVICES=0 LMCACHE_USE_EXPERIMENTAL=True LMCACHE_CONFIG_FILE=example1.yaml vllm serve meta-llama/Meta-Llama-3.1-8B-Instruct --max-model-len 4096  --gpu-memory-utilization 0.8 --port 8000 --kv-transfer-config '{"kv_connector":"LMCacheConnector", "kv_role":"kv_both"}'
