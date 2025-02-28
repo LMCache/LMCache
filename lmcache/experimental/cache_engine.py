@@ -134,7 +134,8 @@ class LMCacheEngine:
             self.storage_manager.put(key, memory_obj)
 
             # Update lookup server
-            self.lookup_server.insert(key)
+            if self.enable_p2p:
+                self.lookup_server.insert(key)
 
         self.stats_monitor.on_store_finished(monitor_req_id)
 
