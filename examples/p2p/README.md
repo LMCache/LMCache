@@ -1,5 +1,5 @@
 # P2P KV Cache Sharing
-This is an example demonstrate P2P KV cache sharing.
+This is an example to demonstrate P2P KV cache sharing.
 ## Prerequisites
 Your server should have at least 2 GPUs.  
 
