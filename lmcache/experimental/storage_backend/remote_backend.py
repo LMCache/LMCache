@@ -45,6 +45,8 @@ class RemoteBackend(StorageBackendInterface):
         self.serializer, self.deserializer = CreateSerde(
             config.remote_serde, memory_allocator, metadata, config)
 
+        logger.info(f"Connected to remote storage at {config.remote_url}")
+
         # TODO(Jiayi): If we want to have cache admission policies,
         # we must make decision (whether to send or not) at the local side
 

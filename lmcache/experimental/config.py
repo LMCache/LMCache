@@ -23,9 +23,15 @@ class LMCacheEngineConfig:
 
     save_decode_cache: bool  # whether to store decode kv cache
 
+    # Blending related configurations
     enable_blending: bool  # whether to enable blending
     blend_recompute_ratio: float  # the ratio of blending recompute
     blend_min_tokens: int  # the minimum number of tokens for blending
+
+    # P2P related configurations
+    enable_p2p: bool  # whether to enable peer-to-peer sharing
+    lookup_url: Optional[str]  # the url of the lookup server
+    distributed_url: Optional[str]  # the url of the distributed server
 
     @staticmethod
     def from_defaults(
@@ -40,12 +46,16 @@ class LMCacheEngineConfig:
         enable_blending: bool = False,
         blend_recompute_ratio: float = 0.15,
         blend_min_tokens: int = 256,
+        enable_p2p: bool = False,
+        lookup_url: Optional[str] = None,
+        distributed_url: Optional[str] = None,
     ) -> "LMCacheEngineConfig":
         return LMCacheEngineConfig(chunk_size, local_cpu, max_local_cpu_size,
                                    local_disk, max_local_disk_size, remote_url,
                                    remote_serde, save_decode_cache,
                                    enable_blending, blend_recompute_ratio,
-                                   blend_min_tokens)
+                                   blend_min_tokens, enable_p2p, lookup_url,
+                                   distributed_url)
 
     @staticmethod
     def from_legacy(
@@ -58,6 +68,9 @@ class LMCacheEngineConfig:
         blend_recompute_ratio: float = 0.15,
         blend_min_tokens: int = 256,
         max_local_disk_size: float = 0.0,
+        enable_p2p: bool = False,
+        lookup_url: Optional[str] = None,
+        distributed_url: Optional[str] = None,
     ) -> "LMCacheEngineConfig":
         if backend == "cpu":
             local_cpu = True
@@ -101,7 +114,8 @@ class LMCacheEngineConfig:
                                    local_disk, max_local_disk_size, remote_url,
                                    remote_serde, save_decode_cache,
                                    enable_blending, blend_recompute_ratio,
-                                   blend_min_tokens)
+                                   blend_min_tokens, enable_p2p, lookup_url,
+                                   distributed_url)
 
     @staticmethod
     def from_file(file_path: str) -> "LMCacheEngineConfig":
@@ -126,6 +140,13 @@ class LMCacheEngineConfig:
         enable_blending = config.get("enable_blending", False)
         blend_recompute_ratio = config.get("blend_recompute_ratio", 0.15)
         blend_min_tokens = config.get("blend_min_tokens", 256)
+
+        enable_p2p = config.get("enable_p2p", False)
+        lookup_url = config.get("lookup_url", None)
+        distributed_url = config.get("distributed_url", None)
+        if enable_p2p:
+            assert lookup_url is not None
+            assert distributed_url is not None
 
         match local_disk:
             case None:
@@ -154,6 +175,9 @@ class LMCacheEngineConfig:
             enable_blending,
             blend_recompute_ratio,
             blend_min_tokens,
+            enable_p2p,
+            lookup_url,
+            distributed_url,
         )
 
     @staticmethod
@@ -219,6 +243,14 @@ class LMCacheEngineConfig:
         config.blend_min_tokens = to_int(
             parse_env(get_env_name("blend_min_tokens"),
                       config.blend_min_tokens))
+
+        config.enable_p2p = to_bool(
+            parse_env(get_env_name("enable_p2p"), config.enable_p2p))
+        config.lookup_url = parse_env(get_env_name("lookup_url"),
+                                      config.lookup_url)
+        config.distributed_url = parse_env(get_env_name("distributed_url"),
+                                           config.distributed_url)
+
         return config
 
     def to_original_config(self) -> orig_config.LMCacheEngineConfig:

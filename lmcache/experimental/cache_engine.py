@@ -1,3 +1,4 @@
+import asyncio
 import multiprocessing
 from typing import Dict, List, Optional
 
@@ -5,7 +6,11 @@ import torch
 
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.experimental.config import LMCacheEngineConfig
+from lmcache.experimental.distributed_server import (
+    DistributedServerInterface, NaiveDistributedServer)
 from lmcache.experimental.gpu_connector import GPUConnectorInterface
+from lmcache.experimental.lookup_server import (LookupServerInterface,
+                                                RedisLookupServer)
 from lmcache.experimental.memory_management import (MemoryAllocatorInterface,
                                                     MixedMemoryAllocator)
 from lmcache.experimental.storage_backend.storage_manager import StorageManager
@@ -60,6 +65,20 @@ class LMCacheEngine:
         self.storage_manager = StorageManager(config, metadata,
                                               self.memory_allocator)
 
+        # TODO(Jiayi): hard-coded for now
+        if config.enable_p2p:
+            self.lookup_server: LookupServerInterface = RedisLookupServer(
+                config)
+            self.distributed_loop = asyncio.get_event_loop()
+
+            self.distributed_server: DistributedServerInterface = \
+                NaiveDistributedServer(self.storage_manager,
+                                       self.lookup_server,
+                                       self.memory_allocator,
+                                       self.distributed_loop,
+                                       config)
+        self.enable_p2p = config.enable_p2p
+
         InitializeUsageContext(config.to_original_config(), metadata)
         self.stats_monitor = LMCStatsMonitor.GetOrCreate()
 
@@ -113,6 +132,11 @@ class LMCacheEngine:
 
             self.gpu_connector.from_gpu(memory_obj, start, end, **kwargs)
             self.storage_manager.put(key, memory_obj)
+
+            # Update lookup server
+            if self.enable_p2p:
+                self.lookup_server.insert(key)
+
         self.stats_monitor.on_store_finished(monitor_req_id)
 
     @_lmcache_nvtx_annotate
@@ -157,7 +181,13 @@ class LMCacheEngine:
             memory_obj = self.storage_manager.get(key)
 
             if memory_obj is None:
-                break
+                if self.enable_p2p:
+                    future_memory_obj = asyncio.run_coroutine_threadsafe(
+                        self.distributed_server.issue_get(key),
+                        self.distributed_loop)
+                    memory_obj = future_memory_obj.result()
+                if memory_obj is None:
+                    break
 
             ret_mask[start:end] = True
 
@@ -212,6 +242,8 @@ class LMCacheEngine:
         """Close the cache engine and free all the resources"""
         for storage_backend in self.storage_manager.storage_backends.values():
             storage_backend.close()
+        if self.enable_p2p:
+            self.distributed_server.close(),
 
         self.storage_manager.close()
         logger.info("LMCacheEngine closed.")

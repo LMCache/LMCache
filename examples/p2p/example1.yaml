@@ -1,0 +1,8 @@
+chunk_size: 256
+local_cpu: True
+max_local_cpu_size: 5
+
+# P2P configuration
+enable_p2p: True
+lookup_url: "localhost:8100"
+distributed_url: "localhost:8200"
