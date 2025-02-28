@@ -12,6 +12,8 @@ from lmcache.experimental.storage_backend.connector.redis_connector import (
     RedisConnector, RedisSentinelConnector)
 from lmcache.logging import init_logger
 
+from .infinistore_connector import InfinistoreConnector
+
 logger = init_logger(__name__)
 
 
@@ -102,7 +104,10 @@ def CreateConnector(
                 raise ValueError(
                     f"LM connector only supports a single host, but got url:"
                     f" {url}")
-
+        case "infinistore":
+            host, port = parsed_url.hosts[0], parsed_url.ports[0]
+            connector = InfinistoreConnector(host, port, "mlx5_0", loop,
+                                             memory_allocator)
         case _:
             raise ValueError(
                 f"Unknown connector type {parsed_url.connector_type} "
