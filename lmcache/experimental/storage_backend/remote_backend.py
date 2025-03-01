@@ -38,7 +38,7 @@ class RemoteBackend(StorageBackendInterface):
         # Initialize connection
         self.connection = CreateConnector(config.remote_url, loop,
                                           memory_allocator)
-        
+
         self.remote_url = config.remote_url
 
         self.memory_allocator = memory_allocator
