@@ -242,10 +242,9 @@ class LMCacheEngine:
 
     def close(self) -> None:
         """Close the cache engine and free all the resources"""
-        for storage_backend in self.storage_manager.storage_backends.values():
-            storage_backend.close()
+
         if self.enable_p2p:
-            self.distributed_server.close(),
+            self.distributed_server.close()
 
         self.storage_manager.close()
         logger.info("LMCacheEngine closed.")

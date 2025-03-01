@@ -339,19 +339,18 @@ class StorageManager:
 
     def close(self):
 
-        # using threadsafe method here as stop modifies
-        # the internal state of the loop (in another thread)
-        if self.loop.is_running():
-            self.loop.call_soon_threadsafe(self.loop.stop)
-        if self.thread.is_alive():
-            self.thread.join()
         if self.lookup_server is not None:
             self.manager_lock.acquire()
             self.lookup_server.batched_remove(list(self.hot_cache.keys()))
             self.manager_lock.release()
         for backend in self.storage_backends.values():
             backend.close()
-        logger.info("Storage manager closed.")
 
-    def __del__(self):
-        self.close()
+        # using threadsafe method here as stop modifies
+        # the internal state of the loop (in another thread)
+        if self.loop.is_running():
+            self.loop.call_soon_threadsafe(self.loop.stop)
+        if self.thread.is_alive():
+            self.thread.join()
+
+        logger.info("Storage manager closed.")

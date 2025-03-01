@@ -131,3 +131,4 @@ class RemoteBackend(StorageBackendInterface):
         future = asyncio.run_coroutine_threadsafe(self.connection.close(),
                                                   self.loop)
         future.result()
+        logger.info("Remote backend closed.")
