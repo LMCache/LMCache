@@ -28,7 +28,7 @@ Note that the two distributed cache servers will start at port 8200 and 8201.
 
 3. Send request to vllm engine 1:  
 ```bash
-curl -X POST http://localhost:8000/v1/completions \ 
+curl -X POST http://localhost:8000/v1/completions \
   -H "Content-Type: application/json" \
   -d '{
     "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
@@ -39,7 +39,7 @@ curl -X POST http://localhost:8000/v1/completions \
 
 4. Send request to vllm engine 2:  
 ```bash
-curl -X POST http://localhost:8000/v1/completions \ 
+curl -X POST http://localhost:8001/v1/completions \
   -H "Content-Type: application/json" \
   -d '{
     "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
