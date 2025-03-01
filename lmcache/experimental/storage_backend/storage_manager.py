@@ -98,6 +98,8 @@ class StorageManager:
                 break
         for evict_key in evict_keys:
             self.hot_cache.pop(evict_key)
+        if self.lookup_server is not None:
+            self.lookup_server.batched_remove(evict_keys)
 
         self.manager_lock.release()
         return memory_obj

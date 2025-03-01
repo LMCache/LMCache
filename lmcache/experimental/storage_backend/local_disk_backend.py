@@ -107,6 +107,8 @@ class LocalDiskBackend(StorageBackendInterface):
         # evict caches
         for evict_key in evict_keys:
             self.remove(evict_key)
+        if self.lookup_server is not None:
+            self.lookup_server.batched_remove(evict_keys)
 
         self.memory_allocator.ref_count_up(memory_obj)
 
