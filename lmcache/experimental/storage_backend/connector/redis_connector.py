@@ -122,8 +122,8 @@ class RedisSentinelConnector(RemoteConnector):
             case None:
                 logger.warning(
                     f"Environment variable {self.ENV_REDIS_SERVICE_NAME} is not"
-                    f"found, using default value 'mymaster'")
-                service_name = "mymaster"
+                    f"found, using default value 'redismaster'")
+                service_name = "redismaster"
             case value:
                 service_name = value
 

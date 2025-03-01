@@ -1,10 +1,12 @@
 import asyncio
 from collections import OrderedDict
+from typing import Optional
 
 import torch
 
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.experimental.config import LMCacheEngineConfig
+from lmcache.experimental.lookup_server import LookupServerInterface
 from lmcache.experimental.memory_management import MemoryAllocatorInterface
 from lmcache.experimental.storage_backend.abstract_backend import \
     StorageBackendInterface
@@ -17,11 +19,13 @@ logger = init_logger(__name__)
 
 
 def CreateStorageBackends(
-        config: LMCacheEngineConfig,
-        metadata: LMCacheEngineMetadata,
-        loop: asyncio.AbstractEventLoop,
-        memory_allocator: MemoryAllocatorInterface,
-        dst_device: str = "cuda") -> OrderedDict[str, StorageBackendInterface]:
+    config: LMCacheEngineConfig,
+    metadata: LMCacheEngineMetadata,
+    loop: asyncio.AbstractEventLoop,
+    memory_allocator: MemoryAllocatorInterface,
+    dst_device: str = "cuda",
+    lookup_server: Optional[LookupServerInterface] = None,
+) -> OrderedDict[str, StorageBackendInterface]:
 
     # Replace 'cuda' with 'cuda:<device id>'
     if dst_device == "cuda":
@@ -33,13 +37,14 @@ def CreateStorageBackends(
     # TODO(Jiayi): The hierarchy is fixed for now
     if config.local_disk and config.max_local_disk_size > 0:
         local_disk_backend = LocalDiskBackend(config, loop, memory_allocator,
-                                              dst_device)
+                                              dst_device, lookup_server)
         backend_name = str(local_disk_backend)
         storage_backends[backend_name] = local_disk_backend
 
     if config.remote_url is not None:
         remote_backend = RemoteBackend(config, metadata, loop,
-                                       memory_allocator, dst_device)
+                                       memory_allocator, dst_device,
+                                       lookup_server)
         backend_name = str(remote_backend)
         storage_backends[backend_name] = remote_backend
 

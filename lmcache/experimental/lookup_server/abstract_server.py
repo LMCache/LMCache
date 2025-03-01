@@ -1,5 +1,5 @@
 import abc
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 from lmcache.utils import CacheEngineKey
 
@@ -30,5 +30,15 @@ class LookupServerInterface(metaclass=abc.ABCMeta):
     ):
         """
         Perform remove in the lookup server.
+        """
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    def batched_remove(
+        self,
+        keys: List[CacheEngineKey],
+    ):
+        """
+        Perform batched remove in the lookup server.
         """
         raise NotImplementedError

@@ -1,5 +1,5 @@
 import inspect
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 import redis
 
@@ -12,6 +12,7 @@ from lmcache.utils import CacheEngineKey
 logger = init_logger(__name__)
 
 
+# TODO (Jiayi): Batching is needed for Redis lookup server.
 class RedisLookupServer(LookupServerInterface):
 
     def __init__(self, config: LMCacheEngineConfig):
@@ -57,3 +58,12 @@ class RedisLookupServer(LookupServerInterface):
         """
         logger.debug("Call to remove in lookup server")
         self.connection.delete(key.to_string())
+
+    def batched_remove(self, keys: List[CacheEngineKey]):
+        """
+        Perform batched remove in the lookup server.
+        """
+        logger.debug("Call to batched remove in lookup server")
+        # TODO(Jiayi): We might need to cache the `str_keys` for performance.
+        str_keys = [key.to_string() for key in keys]
+        self.connection.delete(*str_keys)
