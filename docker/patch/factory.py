@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 import importlib
 from typing import TYPE_CHECKING, Callable, Dict, Type
+
 from .base import KVConnectorBase
+
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 

@@ -10,7 +10,6 @@ The LMCacheConnector can (1) transfer KV caches between prefill vLLM worker
 from typing import TYPE_CHECKING, List, Tuple, Union
 
 import torch
-
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
 from vllm.logger import init_logger
