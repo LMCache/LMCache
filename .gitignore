@@ -69,6 +69,7 @@ lmcache/experimental/tests
 /examples/openai_chat_completion_client_local.py
 /lmcache/experimental/examples
 /examples/debug
+/examples/p2p/bash.sh
 
 # example output
 */offline_inference_outputs.jsonl

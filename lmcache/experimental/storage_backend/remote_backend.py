@@ -6,6 +6,7 @@ from typing import List, Optional
 
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.experimental.config import LMCacheEngineConfig
+from lmcache.experimental.lookup_server import LookupServerInterface
 from lmcache.experimental.memory_management import (MemoryAllocatorInterface,
                                                     MemoryObj)
 from lmcache.experimental.storage_backend.abstract_backend import \
@@ -20,12 +21,15 @@ logger = init_logger(__name__)
 
 class RemoteBackend(StorageBackendInterface):
 
-    def __init__(self,
-                 config: LMCacheEngineConfig,
-                 metadata: LMCacheEngineMetadata,
-                 loop: asyncio.AbstractEventLoop,
-                 memory_allocator: MemoryAllocatorInterface,
-                 dst_device: str = "cuda"):
+    def __init__(
+        self,
+        config: LMCacheEngineConfig,
+        metadata: LMCacheEngineMetadata,
+        loop: asyncio.AbstractEventLoop,
+        memory_allocator: MemoryAllocatorInterface,
+        dst_device: str = "cuda",
+        lookup_server: Optional[LookupServerInterface] = None,
+    ):
 
         self.put_tasks: List[CacheEngineKey] = []
         self.put_tasks_lock = threading.Lock()
@@ -127,3 +131,4 @@ class RemoteBackend(StorageBackendInterface):
         future = asyncio.run_coroutine_threadsafe(self.connection.close(),
                                                   self.loop)
         future.result()
+        logger.info("Remote backend closed.")

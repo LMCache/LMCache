@@ -32,6 +32,7 @@ context_messages = [
         "content": "I've got your document"
     },
 ]
+
 user_inputs_batch = [
     "Give me a concise description for the format"
     " of ffmpeg command in one line.",

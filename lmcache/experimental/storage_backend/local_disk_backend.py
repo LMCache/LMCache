@@ -9,6 +9,7 @@ import aiofiles
 import torch
 
 from lmcache.experimental.config import LMCacheEngineConfig
+from lmcache.experimental.lookup_server import LookupServerInterface
 from lmcache.experimental.memory_management import (MemoryAllocatorInterface,
                                                     MemoryObj)
 from lmcache.experimental.storage_backend.abstract_backend import \
@@ -23,11 +24,14 @@ logger = init_logger(__name__)
 
 class LocalDiskBackend(StorageBackendInterface):
 
-    def __init__(self,
-                 config: LMCacheEngineConfig,
-                 loop: asyncio.AbstractEventLoop,
-                 memory_allocator: MemoryAllocatorInterface,
-                 dst_device: str = "cuda"):
+    def __init__(
+        self,
+        config: LMCacheEngineConfig,
+        loop: asyncio.AbstractEventLoop,
+        memory_allocator: MemoryAllocatorInterface,
+        dst_device: str = "cuda",
+        lookup_server: Optional[LookupServerInterface] = None,
+    ):
         self.dict: OrderedDict[CacheEngineKey,
                                DiskCacheMetadata] = OrderedDict()
         self.dst_device = dst_device
@@ -38,6 +42,8 @@ class LocalDiskBackend(StorageBackendInterface):
         if not os.path.exists(self.path):
             os.makedirs(self.path)
             logger.info(f"Created local disk cache directory: {self.path}")
+
+        self.lookup_server = lookup_server
 
         # Initialize the evictor
         self.evictor = LRUEvictor(max_cache_size=config.max_local_disk_size)
@@ -101,6 +107,8 @@ class LocalDiskBackend(StorageBackendInterface):
         # evict caches
         for evict_key in evict_keys:
             self.remove(evict_key)
+        if self.lookup_server is not None:
+            self.lookup_server.batched_remove(evict_keys)
 
         self.memory_allocator.ref_count_up(memory_obj)
 
@@ -248,4 +256,7 @@ class LocalDiskBackend(StorageBackendInterface):
         return memory_obj
 
     def close(self) -> None:
-        pass
+        if self.lookup_server is not None:
+            self.disk_lock.acquire()
+            self.lookup_server.batched_remove(list(self.dict.keys()))
+            self.disk_lock.release()

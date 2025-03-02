@@ -59,26 +59,28 @@ class LMCacheEngine:
         self.token_database = token_database
         self.gpu_connector = gpu_connector
 
+        self.enable_p2p = config.enable_p2p
+
         # NOTE: Unix systems use fork by default
         multiprocessing.set_start_method('spawn', force=True)
 
-        self.storage_manager = StorageManager(config, metadata,
-                                              self.memory_allocator)
-
+        self.lookup_server: Optional[LookupServerInterface] = None
         # TODO(Jiayi): hard-coded for now
-        if config.enable_p2p:
-            self.lookup_server: LookupServerInterface = RedisLookupServer(
-                config)
-            self.distributed_loop = asyncio.get_event_loop()
+        if self.enable_p2p:
+            self.lookup_server = RedisLookupServer(config)
 
+        self.storage_manager = StorageManager(config, metadata,
+                                              self.memory_allocator,
+                                              self.lookup_server)
+        if self.enable_p2p:
+            self.distributed_loop = asyncio.get_event_loop()
+            assert self.lookup_server is not None
             self.distributed_server: DistributedServerInterface = \
                 NaiveDistributedServer(self.storage_manager,
                                        self.lookup_server,
                                        self.memory_allocator,
                                        self.distributed_loop,
                                        config)
-        self.enable_p2p = config.enable_p2p
-
         InitializeUsageContext(config.to_original_config(), metadata)
         self.stats_monitor = LMCStatsMonitor.GetOrCreate()
 
@@ -134,7 +136,7 @@ class LMCacheEngine:
             self.storage_manager.put(key, memory_obj)
 
             # Update lookup server
-            if self.enable_p2p:
+            if self.lookup_server is not None:
                 self.lookup_server.insert(key)
 
         self.stats_monitor.on_store_finished(monitor_req_id)
@@ -240,10 +242,9 @@ class LMCacheEngine:
 
     def close(self) -> None:
         """Close the cache engine and free all the resources"""
-        for storage_backend in self.storage_manager.storage_backends.values():
-            storage_backend.close()
+
         if self.enable_p2p:
-            self.distributed_server.close(),
+            self.distributed_server.close()
 
         self.storage_manager.close()
         logger.info("LMCacheEngine closed.")

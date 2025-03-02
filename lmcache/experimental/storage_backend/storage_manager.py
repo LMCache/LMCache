@@ -8,6 +8,7 @@ import torch
 
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.experimental.config import LMCacheEngineConfig
+from lmcache.experimental.lookup_server import LookupServerInterface
 from lmcache.experimental.memory_management import (MemoryAllocatorInterface,
                                                     MemoryFormat, MemoryObj,
                                                     MixedMemoryAllocator)
@@ -26,9 +27,11 @@ class StorageManager:
     The StorageManager is responsible for managing the storage backends.
     """
 
-    def __init__(self, config: LMCacheEngineConfig,
+    def __init__(self,
+                 config: LMCacheEngineConfig,
                  metadata: LMCacheEngineMetadata,
-                 allocator: MemoryAllocatorInterface):
+                 allocator: MemoryAllocatorInterface,
+                 lookup_server: Optional[LookupServerInterface] = None):
         self.memory_allocator = allocator
         self.hot_cache: OrderedDict[CacheEngineKey, MemoryObj] = OrderedDict()
         self.use_hot = config.local_cpu
@@ -41,7 +44,8 @@ class StorageManager:
         dst_device = "cuda"
         self.storage_backends: OrderedDict[str, StorageBackendInterface] =\
             CreateStorageBackends(
-                config, metadata, self.loop, allocator, dst_device)
+                config, metadata,
+                self.loop, allocator, dst_device, lookup_server)
         self.prefetch_tasks: Dict[CacheEngineKey, Future] = {}
         self.put_tasks: Dict[str, Dict[CacheEngineKey, Tuple[Future,
                                                              MemoryObj]]] = {}
@@ -50,6 +54,8 @@ class StorageManager:
             self.put_tasks[backend_name] = {}
 
         self.manager_lock = threading.Lock()
+
+        self.lookup_server = lookup_server
 
         self.stream = torch.cuda.Stream()
 
@@ -92,6 +98,8 @@ class StorageManager:
                 break
         for evict_key in evict_keys:
             self.hot_cache.pop(evict_key)
+        if self.lookup_server is not None:
+            self.lookup_server.batched_remove(evict_keys)
 
         self.manager_lock.release()
         return memory_obj
@@ -331,13 +339,18 @@ class StorageManager:
 
     def close(self):
 
+        if self.lookup_server is not None:
+            self.manager_lock.acquire()
+            self.lookup_server.batched_remove(list(self.hot_cache.keys()))
+            self.manager_lock.release()
+        for backend in self.storage_backends.values():
+            backend.close()
+
         # using threadsafe method here as stop modifies
         # the internal state of the loop (in another thread)
         if self.loop.is_running():
             self.loop.call_soon_threadsafe(self.loop.stop)
         if self.thread.is_alive():
             self.thread.join()
-        #logger.info("Storage manager closed.")
 
-    def __del__(self):
-        self.close()
+        logger.info("Storage manager closed.")
