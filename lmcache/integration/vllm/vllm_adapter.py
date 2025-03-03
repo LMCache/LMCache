@@ -387,6 +387,8 @@ def lmcache_should_store(
         selected_token_indices_idx = 0
         for seq_group_idx, seq_group in enumerate(seq_group_list):
 
+            logger.debug(f"{seq_group}")
+            logger.debug(f"{type(seq_group)}")
             # TODO(Jiayi): Maybe it's cleaner to handle all logic for
             # `lmcache_model_request` inside `cache_engine`
             # Check whether user has specified to not store the cache
@@ -395,6 +397,8 @@ def lmcache_should_store(
                 if lmcache_model_request is not None:
                     user_should_store = lmcache_model_request.store_cache
                     if not user_should_store:
+                        logger.debug(
+                            "User has specified not to store the cache")
                         seq_data_idx += len(seq_group.seq_data)
                         continue
 
