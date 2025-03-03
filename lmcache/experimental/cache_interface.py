@@ -3,7 +3,10 @@ from typing import Optional
 import msgspec
 
 
-class LMCacheModelRequest(msgspec.Struct, array_like=True, omit_defaults=True):
+class LMCacheModelRequest(
+        msgspec.Struct,
+        array_like=True,  # type: ignore[call-arg]
+        omit_defaults=True):  # type: ignore[call-arg]
     """
     User-provided information to control the cache behavior.
     """
