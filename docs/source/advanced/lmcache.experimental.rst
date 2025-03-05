@@ -1,4 +1,4 @@
-lmcache.experimental package
+LMCache Experimental
 ============================
 
 Subpackages

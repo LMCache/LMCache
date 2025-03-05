@@ -13,8 +13,8 @@ Requirements
 * Python: 3.10 or higher
 * CUDA: 12.1
 
-Install released versions
---------------------------
+Install pip released versions (v0)
+-----------------------------------
 
 You can install LMCache using pip:
 
@@ -34,7 +34,8 @@ You can install LMCache using pip:
 
 .. note::
 
-    The latest LMCache (0.1.4) provides the integration to the vLLM==0.6.2
+    pip install for LMCache v1 is not available yet (will be released soon). 
+    Please install LMCache v1 from source for now.
 
 .. note::
     LMCache requires CUDA 12.1. You can check ``nvcc --version`` to see if you loaded CUDA 12. Following, please add the following to your ``~/.bashrc`` file:
@@ -46,7 +47,24 @@ You can install LMCache using pip:
     export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
     export PATH=$CUDA_HOME/bin:$PATH
 
-Install the latest code
+
+
+Install from source (v1)
+----------------------------
+
+You can install the latest code from the GitHub repository:
+
+.. code-block:: console
+
+    # vLLM version: 0.7.4.dev160+g28943d36
+    # NOTE: Run the below script in a virtual environment to avoid mess up the default env
+    $ pip install vllm --pre --extra-index-url https://wheels.vllm.ai/nightly
+    $ git clone https://github.com/LMCache/LMCache.git
+    $ cd LMCache 
+    $ pip install -e .
+
+
+Install from source (v0)
 ----------------------------
 
 You can install the latest code from the GitHub repository:
@@ -74,13 +92,21 @@ Version Compatibility Matrix
 +--------------------+------------------------+---------------+
 | LMCache            | LMCache_vLLM           | vLLM          |
 +--------------------+------------------------+---------------+
-| 0.1.4              | 0.6.2.3                | 0.6.2         |
+| v1                 |     N/A                | 0.7.3         |
 +--------------------+------------------------+---------------+
-| 0.1.3              | 0.6.2.2                | 0.6.1.post2   |
+| 0.1.4 (v0)         | 0.6.2.3                | 0.6.2         |
++--------------------+------------------------+---------------+
+| 0.1.3 (v0)         | 0.6.2.2                | 0.6.1.post2   |
 +--------------------+------------------------+---------------+
 
 Quickstart
 ----------
+
+.. note::
+    For LMCache v1, please refer to the examples in the :ref: `examples/v1/_v1_index` section. 
+    LMCache v1 can be direcly run with the ``vllm serve`` command.
+
+For LMCache v0, you can start the LMCache server with the following command:
 
 LMCache has the same interface as vLLM (both online serving and offline inference). 
 To use the online serving, you can start an OpenAI API-compatible vLLM server with LMCache via:
@@ -101,6 +127,8 @@ To use vLLM's offline inference with LMCache, just simply add ``lmcache_vllm`` b
 
     # Use the model
     model.generate("Hello, my name is", max_length=100)
+
+
 
 
 

@@ -58,15 +58,12 @@ Documentation
    getting_started/docker
 
 .. toctree::
-   :maxdepth: 1
+   :maxdepth: 2
    :caption: Detailed Examples
 
-   examples/launching
-   examples/save_decode
-   examples/kv_blending
-   examples/backend
-   examples/measuring_improvements
-
+   examples/v1/index
+   examples/v0/index
+   
 .. toctree::
    :maxdepth: 1
    :caption: Models
@@ -74,10 +71,11 @@ Documentation
    models/models
 
 .. toctree::
-   :maxdepth: 1
+   :maxdepth: 2
    :caption: Configuration
 
-   configuration/config
+   configuration/v1/index
+   configuration/v0/index
 
 .. toctree::
    :maxdepth: 1
@@ -95,3 +93,5 @@ Documentation
    advanced/lmcache.blend
    advanced/lmcache.server
    advanced/lmcache.storage_backend
+   advanced/lmcache.experimental
+   advanced/lmcache.integration
