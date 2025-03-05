@@ -72,7 +72,7 @@ Documentation
 
 .. toctree::
    :maxdepth: 2
-   :caption: Configuration
+   :caption: Configure LMCache
 
    configuration/v1/index
    configuration/v0/index

@@ -3,13 +3,18 @@
 Docker Installation
 =========================
 
-LMCache offers an official Docker image for deployment. 
-The image is available on Docker Hub at `lmcache/lmcache_vllm <https://hub.docker.com/r/lmcache/lmcache_vllm>`_ .
+LMCache offers an official Docker image for deployment (for LMCache v1). 
+The image is available on Docker Hub at `lmcache/vllm-openai <https://hub.docker.com/r/lmcache/vllm-openai>`_ .
 
 
 .. note::
 
     Make sure you have Docker installed on your machine. You can install Docker from `here <https://docs.docker.com/get-docker/>`_.
+
+.. note::
+
+    The Docker image `lmcache/lmcache_vllm <https://hub.docker.com/r/lmcache/lmcache_vllm>`_ 
+    for LMCache v0 is no longer maintained.
 
 Pulling the Docker Image:
 ----------------------------
@@ -18,83 +23,38 @@ To get started, pull the official Docker image with the following command:
 
 .. code-block:: bash
 
-    docker pull lmcache/lmcache_vllm:lmcache-0.1.4
+    docker pull lmcache/vllm-openai
 
 Running the Docker Container
 ---------------------------------------
 
-To run the Docker container with your specified model, follow these steps:
 
-1. Define the Model:
-
-.. code-block:: bash
-
-    # define the model here
-    export model=meta-llama/Llama-3.2-1B
-
-2. Create Configuration and Chat Template Files
-
-Save the following YAML code to a file, such as ``example.yaml``, in the LMCache repository:
-
-.. code-block:: yaml
-    
-    chunk_size: 256
-    local_device: "cpu"
-
-    # Whether retrieve() is pipelined or not
-    pipelined_backend: False
-
-.. note::
-    Some models may require a chat template, if you're using a non-instruct model 
-    (for instruct models such as ``llama-3.1-70b-instruct`` you don't need it). In needed,
-    save the chat template code below to a file, ``chat-template.txt``, in the LMCache repository:
-
-.. code-block:: text
-
-    {%- if messages[0]['role'] == 'system' -%}  
-        {%- set system_message = messages[0]['content'] -%}    
-        {%- set messages = messages[1:] -%}
-    {%- else -%}    
-        {% set system_message = '' -%}{%- endif -%}
-    {{ bos_token + system_message }}
-    {%- for message in messages -%}
-        {%- if (message['role'] == 'user') != (loop.index0 % 2 == 0) -%}
-            {{ raise_exception('Conversation roles must alternate user/assistant/user/assistant/...') }}
-        {%- endif -%}    
-        {%- if message['role'] == 'user' -%}        
-            {{ 'USER: ' + message['content'] + '\n' }}    
-        {%- elif message['role'] == 'assistant' -%}        
-            {{ 'ASSISTANT: ' + message['content'] + eos_token + '\n' }}    
-        {%- endif -%}
-    {%- endfor -%}
-    {%- if add_generation_prompt -%}   
-        {{ 'ASSISTANT:' }} 
-    {% endif %}
-
-3. Run the Docker Command:
+1. Run the Docker Command:
 
 .. code-block:: bash
 
+    IMAGE=<IMAGE_NAME>:<TAG>
     docker run --runtime nvidia --gpus all \
-    -v ~/.cache/huggingface:/root/.cache/huggingface \
-    -v <Path to LMCache>:/etc/lmcache \
-    -p 8000:8000 \
-    --env "HUGGING_FACE_HUB_TOKEN=<Your Huggingface Token>" \
-    --env "LMCACHE_CONFIG_FILE=/etc/lmcache/example.yaml"\
-    --env "VLLM_WORKER_MULTIPROC_METHOD=spawn"\
-    --ipc=host \
-    --network=host \
-    lmcache/lmcache_vllm:lmcache-0.1.4 \
-    $model --gpu-memory-utilization 0.7 --port 8000 \
+        --env "HF_TOKEN=<YOUR_HUGGINGFACE_TOKEN>" \
+        --env "LMCACHE_USE_EXPERIMENTAL=True" \
+        --env "chunk_size=256" \
+        --env "local_cpu=True" \
+        --env "max_local_cpu_size=5" \
+        -v ~/.cache/huggingface:/root/.cache/huggingface \
+        --network host \
+        --entrypoint "/usr/local/bin/vllm" \
+        $IMAGE \
+        serve mistralai/Mistral-7B-Instruct-v0.2 --kv-transfer-config \
+        '{"kv_connector":"LMCacheConnector","kv_role":"kv_both"}' \
+        --enable-chunked-prefill false
 
-.. note::
-    If using a model that requires a chat template, make sure to include 
-    the ``--chat_template``  flag in the command. If the chat template file
-    is named ``chat-template.txt``, add to the ``run`` command:
+Save the above command in a file named ``run.sh`` and run the following command:
 
-    .. code-block:: bash
+.. code-block:: bash
 
-        --chat_template /etc/lmcache/chat-template.txt
+    chmod +x run.sh
+    ./run.sh
+
 
 Testing the Docker Container
 --------------------------------
@@ -123,6 +83,6 @@ Building Docker from Source
 .. note::
 
     This section is for users who want to build the Docker image from source.
-    For this please visit the link here `lmcache-vllm <https://github.com/LMCache/lmcache-vllm/tree/dev/docker>`_.
+    For this please visit the link here `LMCache docker <https://github.com/LMCache/LMCache/tree/dev/docker>`_.
 
     

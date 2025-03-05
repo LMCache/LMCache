@@ -103,7 +103,7 @@ Quickstart
 ----------
 
 .. note::
-    For LMCache v1, please refer to the examples in the :ref: `examples/v1/_v1_index` section. 
+    For LMCache v1, please refer to the examples in the :ref:`v1_index` section. 
     LMCache v1 can be direcly run with the ``vllm serve`` command.
 
 For LMCache v0, you can start the LMCache server with the following command:

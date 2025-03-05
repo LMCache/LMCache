@@ -3,7 +3,7 @@
 Configuring LMCache v1
 ======================
 
-In addition to the configurations in v0, LMCache v1 has additional configurations.
+In addition to the configurations in v0, LMCache v1 needs also newer ones.
 For the overlapping v0 configuration, please refer to :ref:`v0_config`.
 
 .. note::

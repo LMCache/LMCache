@@ -9,3 +9,4 @@ LMCache v1
 
    cpu_offload
    disagg
+   p2p
