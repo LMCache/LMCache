@@ -100,4 +100,12 @@ COPY patch/factory.py \
 COPY patch/lmcache_connector.py \
     /usr/local/lib/python3.12/dist-packages/vllm/distributed/kv_transfer/kv_connector/
 
+# Use diff if file is too large
+COPY patch/parallel_state.patch \
+    /usr/local/lib/python3.12/dist-packages/vllm/distributed/
+
+RUN patch /usr/local/lib/python3.12/dist-packages/vllm/distributed/parallel_state.py \
+    /usr/local/lib/python3.12/dist-packages/vllm/distributed/parallel_state.patch
+
+
 ENTRYPOINT ["vllm", "serve"]
