@@ -101,7 +101,7 @@ Version Compatibility Matrix
 
 .. note::
     For LMCache v1, please refer to the examples in the :ref:`v1_index` section. 
-    LMCache v1 can be direcly run with the ``vllm serve`` command.
+    LMCache v1 can be directly run with the ``vllm serve`` command.
 
 .. note::
     For LMCache v1, LMCACHE_USE_EXPERIMENTAL=True is required to use the experimental features.
