@@ -99,12 +99,24 @@ Version Compatibility Matrix
 | 0.1.3 (v0)         | 0.6.2.2                | 0.6.1.post2   |
 +--------------------+------------------------+---------------+
 
-Quickstart
-----------
-
 .. note::
     For LMCache v1, please refer to the examples in the :ref:`v1_index` section. 
     LMCache v1 can be direcly run with the ``vllm serve`` command.
+
+.. note::
+    For LMCache v1, LMCACHE_USE_EXPERIMENTAL=True is required to use the experimental features.
+
+Quickstart (v1)
+---------------
+
+For LMCache v1, you can start the LMCache server with the following command:
+
+.. code-block:: console
+
+    $  LMCACHE_CONFIG_FILE=./lmcache_config.yaml LMCACHE_USE_EXPERIMENTAL=True vllm serve <args>
+
+Quickstart (v0)
+---------------
 
 For LMCache v0, you can start the LMCache server with the following command:
 

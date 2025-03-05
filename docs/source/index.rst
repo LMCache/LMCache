@@ -59,6 +59,13 @@ Documentation
 
 .. toctree::
    :maxdepth: 2
+   :caption: Configure LMCache
+
+   configuration/v1/index
+   configuration/v0/index
+
+.. toctree::
+   :maxdepth: 2
    :caption: Detailed Examples
 
    examples/v1/index
@@ -69,13 +76,6 @@ Documentation
    :caption: Models
 
    models/models
-
-.. toctree::
-   :maxdepth: 2
-   :caption: Configure LMCache
-
-   configuration/v1/index
-   configuration/v0/index
 
 .. toctree::
    :maxdepth: 1
