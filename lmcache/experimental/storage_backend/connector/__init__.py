@@ -1,7 +1,7 @@
 import asyncio
 import re
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List, Optional, Dict
 
 from lmcache.experimental.memory_management import MemoryAllocatorInterface
 from lmcache.experimental.storage_backend.connector.base_connector import \
@@ -11,7 +11,6 @@ from lmcache.experimental.storage_backend.connector.lm_connector import \
 from lmcache.experimental.storage_backend.connector.redis_connector import (
     RedisConnector, RedisSentinelConnector)
 from lmcache.logging import init_logger
-
 from .infinistore_connector import InfinistoreConnector
 
 logger = init_logger(__name__)
@@ -21,17 +20,22 @@ logger = init_logger(__name__)
 class ParsedRemoteURL:
     """
     The parsed URL of the format:
-    <connector_type>://<host>:<port>,<host2>:<port2>,...
+    <connector_type>://<host>:<port>[/path][?query],<host2>:<port2>[/path2][?query2],...
     """
 
     connector_type: str
     hosts: List[str]
     ports: List[int]
+    paths: List[str]
+    query_params: List[Dict[str, str]]
 
 
 def parse_remote_url(url: str) -> ParsedRemoteURL:
     """
-    Parses the remote URL into its constituent parts.
+    Parses the remote URL into its constituent parts with support for:
+    - Multiple hosts (comma-separated)
+    - Path and query parameters in each host definition
+    - Forward compatibility with legacy format
 
     Raises:
         ValueError: If the URL is invalid.
@@ -42,23 +46,55 @@ def parse_remote_url(url: str) -> ParsedRemoteURL:
         logger.error(f"Cannot parse remote_url {url} in the config")
         raise ValueError(f"Invalid remote url {url}")
 
-    connector_type, hosts_and_ports = m.group(1), m.group(2)
+    connector_type, hosts_section = pattern.groups()
 
     hosts = []
     ports = []
-    for body in hosts_and_ports.split(","):
-        m = re.match(r"(.+):(\d+)", body)
-        if m is None:
-            logger.error(
-                f"Cannot parse url body {body} from remote_url {url} in the "
-                f"config")
-            raise ValueError(f"Invalid remote url {url}")
+    paths = []
+    query_params = []
 
-        host, port = m.group(1), int(m.group(2))
+    for host_def in hosts_section.split(","):
+        host_pattern = r"""
+                ^
+                ([^:]+)        # hostname
+                :              # :
+                (\d+)          # port
+                (/?[^?]*)      # path（optional, start with /）
+                (?:\?(.*))?    # query（optional，? content after ?）
+                $
+            """
+        match = re.match(host_pattern, host_def, re.VERBOSE)
+
+        if not match:
+            raise ValueError(f"Invalid host definition: {host_def} in URL: {url}")
+
+        host = match.group(1)
+        port = int(match.group(2))
+        path = match.group(3).lstrip('/')
+        path = path.lstrip('/')
+        query_str = match.group(4) or ""
+
+        params_dict = {}
+        if query_str:
+            for param in query_str.split('&'):
+                if '=' in param:
+                    key, value = param.split('=', 1)
+                    params_dict[key] = value
+                elif param:
+                    params_dict[param] = ""
+
         hosts.append(host)
         ports.append(port)
+        paths.append(path)
+        query_params.append(params_dict)
 
-    return ParsedRemoteURL(connector_type, hosts, ports)
+    return ParsedRemoteURL(
+        connector_type=connector_type,
+        hosts=hosts,
+        ports=ports,
+        paths=paths,
+        query_params=query_params
+    )
 
 
 def CreateConnector(
@@ -106,7 +142,9 @@ def CreateConnector(
                     f" {url}")
         case "infinistore":
             host, port = parsed_url.hosts[0], parsed_url.ports[0]
-            connector = InfinistoreConnector(host, port, "mlx5_0", loop,
+            device_name = parsed_url.query_params[0].get("device", "xxx") \
+                if parsed_url.query_params else "mlx5_0"
+            connector = InfinistoreConnector(host, port, device_name, loop,
                                              memory_allocator)
         case _:
             raise ValueError(
