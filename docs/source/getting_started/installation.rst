@@ -111,9 +111,12 @@ Quickstart (v1)
 
 For LMCache v1, you can start the LMCache server with the following command:
 
-.. code-block:: console
+.. code-block:: bash
 
-    $  LMCACHE_CONFIG_FILE=./lmcache_config.yaml LMCACHE_USE_EXPERIMENTAL=True vllm serve <args>
+    LMCACHE_CONFIG_FILE=./lmcache_config.yaml \
+    LMCACHE_USE_EXPERIMENTAL=True meta-llama/Meta-Llama-3.1-8B-Instruct \
+    --max-model-len 4096  --gpu-memory-utilization 0.8 --port 8000 \
+    --kv-transfer-config '{"kv_connector":"LMCacheConnector", "kv_role":"kv_both"}'
 
 Quickstart (v0)
 ---------------
