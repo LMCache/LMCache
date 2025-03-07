@@ -387,11 +387,24 @@ def lmcache_should_store(
         selected_token_indices_idx = 0
         for seq_group_idx, seq_group in enumerate(seq_group_list):
 
+            # TODO(Jiayi): Maybe it's cleaner to handle all logic for
+            # `lmcache_model_request` inside `cache_engine`
+            # Check whether user has specified to not store the cache
+            if hasattr(seq_group, "lmcache_model_request"):
+                lmcache_model_request = seq_group.lmcache_model_request
+                if lmcache_model_request is not None:
+                    user_should_store = lmcache_model_request.store_cache
+                    if not user_should_store:
+                        logger.debug(
+                            "User has specified not to store the cache")
+                        seq_data_idx += len(seq_group.seq_data)
+                        continue
+
             # TODO(Jiayi): Figure out scenarios (other than chunk prefill)
             # where `do_sample`` is False
             if not seq_group.do_sample:
                 store_status[seq_data_idx] = StoreStatus.CHUNK_PREFILL
-                seq_data_idx += 1
+                seq_data_idx += len(seq_group.seq_data)
                 continue
 
             for seqid, seq_data in seq_group.seq_data.items():
