@@ -28,6 +28,7 @@ jobs:
         pip install mypy==1.11.2
         pip install -r requirements-lint.txt
         pip install redis
+        pip install pkg_resources
     - name: Mypy
       run: |
         mypy
