@@ -30,8 +30,9 @@ extensions = [
     "sphinx.ext.napoleon",
 ]
 
-copybutton_exclude = '.linenos, .gp, .go'  # Prevents stripping of important characters
-copybutton_prompt_text = r"^[^a-zA-Z0-9]"  # Adjust if needed
+# Prevents stripping of important characters
+copybutton_exclude = '.linenos, .gp, .go'  
+copybutton_prompt_text = r"^[^a-zA-Z0-9]"
 copybutton_remove_prompts = False
 
 class MockedClassDocumenter(autodoc.ClassDocumenter):
