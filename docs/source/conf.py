@@ -30,12 +30,6 @@ extensions = [
     "sphinx.ext.napoleon",
 ]
 
-# Prevents stripping of important characters
-
-copybutton_exclude = ".linenos, .gp, .go"  
-copybutton_prompt_text = r"^[^a-zA-Z0-9]"
-copybutton_remove_prompts = False
-
 
 class MockedClassDocumenter(autodoc.ClassDocumenter):
     """Remove note about base class when a class is 
