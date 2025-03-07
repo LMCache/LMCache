@@ -28,6 +28,8 @@ jobs:
         pip install mypy==1.11.2
         pip install -r requirements-lint.txt
         pip install redis
+        pip install setuptools
+        pip install --no-cache-dir --force-reinstall types-setuptools
     - name: Mypy
       run: |
         mypy

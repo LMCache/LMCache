@@ -28,7 +28,7 @@ setup(
     install_requires=[
         "torch == 2.5.1", "numpy==1.26.4", "aiofiles", "pyyaml", "redis",
         "nvtx", "safetensors", "transformers", "torchac_cuda >= 0.2.5",
-        "sortedcontainers", "prometheus_client", "infinistore"
+        "sortedcontainers", "prometheus_client", "infinistore", "msgspec"
     ],
     ext_modules=ext_modules,
     cmdclass=cmdclass,
