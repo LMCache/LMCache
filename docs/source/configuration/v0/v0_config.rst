@@ -1,7 +1,7 @@
-.. _config:
+.. _v0_config:
 
-Configuring LMCache
-====================
+Configuring LMCache v0
+======================
 
 There are two possible ways to configure LMCache:
    * Using a YAML configuration file

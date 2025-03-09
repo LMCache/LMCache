@@ -1,4 +1,4 @@
-lmcache.integration package
+LMCache Integration
 ===========================
 
 Subpackages

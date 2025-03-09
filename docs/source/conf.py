@@ -103,6 +103,19 @@ theme_options = ThemeOptions(# Add your theme options.
 
 html_theme_options = asdict(theme_options)
 
+# more_options = {
+#     # navigation and sidebar
+#     'show_toc_level': 2,
+#     'announcement': None,
+#     'secondary_sidebar_items': [
+#         'page-toc',
+#     ],
+#     'navigation_depth': 3,
+#     'primary_sidebar_end': [],
+# }
+
+# html_theme_options.update(more_options)
+
 intersphinx_mapping = {
     "python": ("https://docs.python.org/3", None),
     "typing_extensions":
