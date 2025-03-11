@@ -213,11 +213,11 @@ class BytesBufferMemoryObj(MemoryObj):
                  metadata: Optional[MemoryObjMetadata] = None):
         self.raw_data = raw_bytes
         if metadata is None:
-            bytes_shape = torch.Size([len(self.raw_data), 0, 0, 0])
+            bytes_shape = torch.Size([len(self.raw_data), 1, 1, 1])
             self.meta = MemoryObjMetadata(shape=bytes_shape,
                                           dtype=None,
                                           address=0,
-                                          phy_size=0,
+                                          phy_size=len(self.raw_data),
                                           ref_count=1,
                                           fmt=MemoryFormat.BINARY_BUFFER)
         else:
@@ -234,7 +234,7 @@ class BytesBufferMemoryObj(MemoryObj):
         return len(self.raw_data)
 
     def get_shape(self) -> torch.Size:
-        return torch.Size([len(self.raw_data), 0, 0, 0])
+        return torch.Size([len(self.raw_data), 1, 1, 1])
 
     def get_dtype(self) -> Optional[torch.dtype]:
         return None

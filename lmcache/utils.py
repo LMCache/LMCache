@@ -1,7 +1,7 @@
 import hashlib
 import threading
-from dataclasses import dataclass
-from typing import Optional, Tuple
+from dataclasses import dataclass, field
+from typing import Optional, Tuple, List
 
 import torch
 from nvtx import annotate  # type: ignore
@@ -31,6 +31,13 @@ TORCH_DTYPE_TO_STR_DTYPE = {
     torch.float8_e5m2: "fp8_e5m2",
 }
 
+@dataclass
+class CacheManagerMetadata:
+    context_id: List[str]
+    method: str
+    rate: float
+    length: float # whole context's KV in bytes
+    score_table: List[List[Tuple[float, float]]] # a list of score tables for each context, each table is a list of (rate, score) pairs
 
 @dataclass(order=True)
 class CacheEngineKey:
@@ -39,6 +46,7 @@ class CacheEngineKey:
     world_size: int
     worker_id: int
     chunk_hash: str
+    metadata: CacheManagerMetadata
 
     def __hash__(self):
         return hash((
@@ -48,6 +56,17 @@ class CacheEngineKey:
             self.worker_id,
             self.chunk_hash,
         ))
+    
+    def __eq__(self, other):
+        if not isinstance(other, CacheEngineKey):
+            return False
+        return (
+            self.fmt == other.fmt and
+            self.model_name == other.model_name and
+            self.world_size == other.world_size and
+            self.worker_id == other.worker_id and
+            self.chunk_hash == other.chunk_hash
+        )
 
     def to_string(self):
         return f"{self.fmt}@{self.model_name}@{self.world_size}"\
@@ -59,7 +78,7 @@ class CacheEngineKey:
         if len(parts) != 5:
             raise ValueError(f"Invalid key string: {s}")
         return CacheEngineKey(parts[0], parts[1], int(parts[2]), int(parts[3]),
-                              parts[4])
+                              parts[4], CacheManagerMetadata([], "", 0.0, 0.0, []))
 
 
 ##### NVTX annotation #####

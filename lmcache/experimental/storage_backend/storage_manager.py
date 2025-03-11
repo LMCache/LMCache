@@ -10,15 +10,33 @@ from lmcache.config import LMCacheEngineMetadata
 from lmcache.experimental.config import LMCacheEngineConfig
 from lmcache.experimental.memory_management import (MemoryAllocatorInterface,
                                                     MemoryFormat, MemoryObj,
-                                                    MixedMemoryAllocator)
+                                                    MixedMemoryAllocator, BytesBufferMemoryObj)
 from lmcache.experimental.storage_backend import CreateStorageBackends
 from lmcache.experimental.storage_backend.abstract_backend import \
     StorageBackendInterface
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey, _lmcache_nvtx_annotate
 
+from dataclasses import dataclass
+
+from lmcache.experimental.storage_backend.naive_serde.kivi_serde import (
+    KIVIDeserializer, KIVISerializer)
+
 logger = init_logger(__name__)
 
+@dataclass
+class KVDecision:
+    device: str
+    compression_method: str
+    compression_rate: float
+
+class KVCacheManager:
+    def __init__(self):
+        self.method = "baseline_KIVI" # NOTE(Shaoting): policy define here
+
+    def inform_new(self, size, quality_table):
+        # TODO(Shaoting): add real manager logics
+        return KVDecision("cpu", "kivi", 1), []
 
 # TODO: extend this class to implement caching policies and eviction policies
 class StorageManager:
@@ -30,6 +48,8 @@ class StorageManager:
                  metadata: LMCacheEngineMetadata,
                  allocator: MemoryAllocatorInterface):
         self.memory_allocator = allocator
+        self.kivi_ser = KIVISerializer(self.memory_allocator)
+        self.kivi_de = KIVIDeserializer(self.memory_allocator)
         self.hot_cache: OrderedDict[CacheEngineKey, MemoryObj] = OrderedDict()
         self.use_hot = config.local_cpu
 
@@ -53,6 +73,8 @@ class StorageManager:
 
         self.stream = torch.cuda.Stream()
 
+        self.manager = KVCacheManager()
+
     def allocate(
         self,
         shape: torch.Size,
@@ -72,6 +94,7 @@ class StorageManager:
         assert isinstance(self.memory_allocator, MixedMemoryAllocator)
         evict_keys = []
 
+        # TODO(Shaoting): modify the evictor of cpu
         for evict_key in self.hot_cache:
 
             # If the ref_count > 1, we cannot evict it as the hot cache
@@ -106,8 +129,40 @@ class StorageManager:
         Do not store if the same object is being stored (handled here by 
         storage manager) or has been stored (handled by storage backend).
         """
+        size_in_bytes = memory_obj.get_size()
+        key.metadata.length = size_in_bytes
+
         self.manager_lock.acquire()
-        if self.use_hot:
+
+        current_kv_decision, update_decision = self.manager.inform_new(key, memory_obj)
+        
+        # TODO(Shaoting): update_decision yet to handle
+
+        # TODO(Shaoting): compress memory_obj
+        # TODO(Shaoting): reallocate memory_obj if compressed
+        if current_kv_decision.compression_method == "cachegen":
+            pass
+        elif current_kv_decision.compression_method == "kivi":
+            # Update memory obj
+            compressed_memory_obj = self.kivi_ser.serialize(memory_obj)
+            self.memory_allocator.ref_count_down(memory_obj)
+            blank_memory_obj = self.memory_allocator.allocate(
+                compressed_memory_obj.get_shape(),
+                torch.int8,
+                fmt=MemoryFormat.KV_BLOB)
+            blank_memory_obj.raw_data = compressed_memory_obj.raw_data
+            self.memory_allocator.ref_count_down(compressed_memory_obj)
+            self.memory_allocator.ref_count_up(blank_memory_obj)
+            memory_obj = blank_memory_obj
+
+            # Update key
+            key.metadata.method = "kivi"
+            key.metadata.rate = current_kv_decision.compression_rate
+            key.metadata.length = memory_obj.get_physical_size()
+        elif current_kv_decision.compression_method == "streamingllm":
+            pass
+
+        if self.use_hot and current_kv_decision.device == "cpu":
             # During overwrite, we need to free the old memory object
             # to avoid memory leak.
             # NOTE(Jiayi): overwrite should not happen, at least for
@@ -129,12 +184,19 @@ class StorageManager:
                 return
         self.manager_lock.release()
 
-        #ever_put = False
-        for backend_name, backend in self.storage_backends.items():
-            put_task = backend.submit_put_task(key, memory_obj)
+        # TODO(Shaoting): add third tier storage (remote ssd)
+        if current_kv_decision.device == "disk":
+            #ever_put = False
+            for backend_name, backend in self.storage_backends.items():
+                # TODO(Shaoting): disk will have following error message:
+                # File "/home/ubuntu/shaotingf/LMCache/lmcache/experimental/memory_management.py", line 191, in tensor
+                # [rank0]:     return self.raw_data.view(self.metadata.dtype)\
+                # [rank0]:            ^^^^^^^^^^^^^^^^^^
+                # [rank0]: AttributeError: 'bytes' object has no attribute 'view'
+                put_task = backend.submit_put_task(key, memory_obj)
 
-            if put_task is None:
-                continue
+                if put_task is None:
+                    continue
 
         self.manager_lock.acquire()
         self.memory_allocator.ref_count_down(memory_obj)
@@ -209,11 +271,31 @@ class StorageManager:
 
         # Search in hot_cache
         self.manager_lock.acquire()
-        memory_obj = self.hot_cache.get(key, None)
+
+        # Customed get function
+        memory_obj = None
+        for old_key, value in self.hot_cache.items():
+            if old_key == key:
+                memory_obj = value
+                break
+
         if memory_obj is not None:
             self.memory_allocator.ref_count_up(memory_obj)
-            self.hot_cache.move_to_end(key)
+
+            # Update key
+            old_key.metadata.context_id.append(key.metadata.context_id[0])
+            old_key.metadata.score_table.append(key.metadata.score_table[0])
+            self.hot_cache[old_key] = self.hot_cache.pop(key)
+
             self.manager_lock.release()
+
+            # De-compress memory_obj
+            if old_key.metadata.method == "kivi":  
+                bytes_obj = BytesBufferMemoryObj(memory_obj.raw_data)
+                self.memory_allocator.ref_count_down(memory_obj)
+                memory_obj = self.kivi_de.deserialize(bytes_obj)
+                self.memory_allocator.ref_count_up(memory_obj)
+
             return memory_obj
 
         self.manager_lock.release()
