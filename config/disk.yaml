@@ -1,0 +1,3 @@
+chunk_size: 256
+local_disk: "file:///local/end-to-end-tests/local/"
+max_local_disk_size: 5

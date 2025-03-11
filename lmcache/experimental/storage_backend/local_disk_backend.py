@@ -218,6 +218,7 @@ class LocalDiskBackend(StorageBackendInterface):
         """
         Load bytearray from disk.
         """
+        # TODO(Shaoting): Use another memory allocator to not affect cpu storage
         memory_obj = self.memory_allocator.allocate(shape, dtype)
         if memory_obj is None:
             logger.debug("Memory allocation failed during async disk load.")

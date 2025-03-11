@@ -6,7 +6,7 @@ import torch
 
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.experimental.config import LMCacheEngineConfig
-from lmcache.utils import CacheEngineKey
+from lmcache.utils import CacheEngineKey, CacheManagerMetadata
 
 
 class TokenDatabase(metaclass=abc.ABCMeta):
@@ -41,7 +41,9 @@ class TokenDatabase(metaclass=abc.ABCMeta):
         """
 
         raise NotImplementedError
-
+    
+def hash_all_tokens(tokens: torch.Tensor) -> str:
+    return hashlib.sha256(tokens.cpu().numpy().tobytes()).hexdigest()
 
 class ChunkedTokenDatabase(TokenDatabase):
 
@@ -50,10 +52,12 @@ class ChunkedTokenDatabase(TokenDatabase):
         self.chunk_size = config.chunk_size
         self.metadata = metadata
 
-    def _make_key_by_hash(self, chunk_hash: str):
+    # TODO(Shaoting): Add real score table
+    def _make_key_by_hash(self, chunk_hash: str, total_hashes: str, token_len: int) -> CacheEngineKey:
         return CacheEngineKey(self.metadata.fmt, self.metadata.model_name,
                               self.metadata.world_size,
-                              self.metadata.worker_id, chunk_hash)
+                              self.metadata.worker_id, chunk_hash,
+                              CacheManagerMetadata([total_hashes], "none", 1, token_len, [[(1,1), (0.8, 0.8), (0.6, 0.6), (0.4, 0.4), (0.2, 0.2), (0, 0)]]))
 
     def _get_init_hash(self) -> str:
         return ""
@@ -128,6 +132,8 @@ class ChunkedTokenDatabase(TokenDatabase):
         token_chunks = self._chunk_tokens(tokens)
         prefix_hashes = self._prefix_hash(token_chunks)
 
+        total_hashes = hash_all_tokens(tokens)
+
         start_idx = 0
         for chunk_id, hash_val in enumerate(prefix_hashes):
             start_idx = chunk_id * self.chunk_size
@@ -135,4 +141,4 @@ class ChunkedTokenDatabase(TokenDatabase):
             if start_idx < num_falses:
                 continue
             else:
-                yield start_idx, end_idx, self._make_key_by_hash(hash_val)
+                yield start_idx, end_idx, self._make_key_by_hash(hash_val, total_hashes, total_len)
