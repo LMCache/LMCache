@@ -36,7 +36,7 @@ class KVCacheManager:
 
     def inform_new(self, size, quality_table):
         # TODO(Shaoting): add real manager logics
-        return KVDecision("cpu", "kivi", 1), []
+        return KVDecision("disk", "kivi", 1), []
 
 # TODO: extend this class to implement caching policies and eviction policies
 class StorageManager:
@@ -138,8 +138,7 @@ class StorageManager:
         
         # TODO(Shaoting): update_decision yet to handle
 
-        # TODO(Shaoting): compress memory_obj
-        # TODO(Shaoting): reallocate memory_obj if compressed
+        # TODO(Shaoting): compress memory_obj with cachegen and streamingllm
         if current_kv_decision.compression_method == "cachegen":
             pass
         elif current_kv_decision.compression_method == "kivi":
@@ -151,6 +150,7 @@ class StorageManager:
                 torch.int8,
                 fmt=MemoryFormat.KV_BLOB)
             blank_memory_obj.raw_data = compressed_memory_obj.raw_data
+            blank_memory_obj.valid = False
             self.memory_allocator.ref_count_down(compressed_memory_obj)
             self.memory_allocator.ref_count_up(blank_memory_obj)
             memory_obj = blank_memory_obj
@@ -188,11 +188,6 @@ class StorageManager:
         if current_kv_decision.device == "disk":
             #ever_put = False
             for backend_name, backend in self.storage_backends.items():
-                # TODO(Shaoting): disk will have following error message:
-                # File "/home/ubuntu/shaotingf/LMCache/lmcache/experimental/memory_management.py", line 191, in tensor
-                # [rank0]:     return self.raw_data.view(self.metadata.dtype)\
-                # [rank0]:            ^^^^^^^^^^^^^^^^^^
-                # [rank0]: AttributeError: 'bytes' object has no attribute 'view'
                 put_task = backend.submit_put_task(key, memory_obj)
 
                 if put_task is None:
@@ -307,9 +302,17 @@ class StorageManager:
             #    continue
 
             # NOTE(Jiayi): bypass the allocator for now
-            memory_obj = backend.get_blocking(key)
+            memory_obj, new_key = backend.get_blocking(key)
             if memory_obj is not None:
-                self._update_hot_cache(key, memory_obj)
+                self._update_hot_cache(new_key, memory_obj)
+
+                # De-compress memory_obj
+                if new_key.metadata.method == "kivi":  
+                    bytes_obj = BytesBufferMemoryObj(memory_obj.raw_data)
+                    self.memory_allocator.ref_count_down(memory_obj)
+                    memory_obj = self.kivi_de.deserialize(bytes_obj)
+                    self.memory_allocator.ref_count_up(memory_obj)                
+
                 return memory_obj
 
         return None

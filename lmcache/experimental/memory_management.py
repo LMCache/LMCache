@@ -185,7 +185,7 @@ class TensorMemoryObj(MemoryObj):
     @property
     def tensor(self) -> Optional[torch.Tensor]:
         if not self.valid:
-            logger.warning("Trying to access an invalidated MemoryObj")
+            # logger.warning("Trying to access an invalidated MemoryObj")
             return None
         assert self.metadata.dtype is not None
         return self.raw_data.view(self.metadata.dtype)\

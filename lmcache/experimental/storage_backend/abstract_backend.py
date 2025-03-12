@@ -1,6 +1,6 @@
 import abc
 from concurrent.futures import Future
-from typing import Optional
+from typing import Optional, Tuple
 
 import torch
 
@@ -74,13 +74,15 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
     def get_blocking(
         self,
         key: CacheEngineKey,
-    ) -> Optional[MemoryObj]:
+    ) -> Tuple[Optional[MemoryObj], CacheEngineKey]:
         """
         A blcocking function to get the kv cache from the storage backend.
         
         :param CacheEngineKey key: The key of the MemoryObj.
         
         :return: MemoryObj. None if the key does not exist.
+
+        Also return the updated key.
         """
         raise NotImplementedError
 
