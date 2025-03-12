@@ -1,13 +1,10 @@
 import dataclasses
 from copy import deepcopy
-from dataclasses import dataclass
 from enum import Enum
-from types import SimpleNamespace
-from typing import TYPE_CHECKING, List, Optional, Sequence, Tuple
+from typing import TYPE_CHECKING, List, Optional, Tuple, Union
 
 import torch
 import torch.distributed as dist
-from torch import nn
 from torch.nn.utils.rnn import pad_sequence
 
 if TYPE_CHECKING:
@@ -15,7 +12,7 @@ if TYPE_CHECKING:
 
 from vllm.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.config import CacheConfig, ModelConfig, ParallelConfig
-from vllm.sequence import SequenceGroupMetadata
+from vllm.sequence import IntermediateTensors
 from vllm.utils import get_kv_cache_torch_dtype
 
 from lmcache.config import LMCacheEngineMetadata
@@ -44,76 +41,11 @@ class StoreStatus(Enum):
 
 
 class RetrieveStatus(Enum):
-    PREFILL = 1
+    PREFILL = 1  # include (1) normal_prefill
+    # (2) chunk_prefill_last
+    # (3) prefix_prefill
     CHUNK_PREFILL = 2  # not last chunk
-    CHUNK_PREFILL_LAST = 3
     NONE = 4
-
-
-SUPPORTED_MODELS = SimpleNamespace(
-    llama_family=["meta-llama/Llama-3.1-8B-Instruct"],
-    longchat_family=["lmsys/longchat-7b-16k"],
-    mistral_family=["mistralai/Mistral-7B-Instruct-v0.2"],
-    glm_family=["THUDM/glm-4-9b-chat"],
-    qwen_family=["Qwen/Qwen-7B"],
-)
-
-
-@dataclass
-class ModelInputSubset:
-    model_layers: List[nn.Module]
-    attn_layers: List[nn.Module]
-    start_layer: int
-    end_layer: int
-
-
-def create_model_input_subset(
-    model_name: str,
-    model_executable: torch.nn.Module,
-) -> ModelInputSubset:
-    if model_name in SUPPORTED_MODELS.llama_family or \
-        model_name in SUPPORTED_MODELS.mistral_family:
-        model = model_executable.model
-        model_layers = model.layers
-        attn_layers = [layer.self_attn for layer in model_layers]
-    elif model_name in SUPPORTED_MODELS.glm_family:
-        model = model_executable.transformer
-        model_layers = model.encoder.layers
-        attn_layers = [layer.self_attention for layer in model_layers]
-    else:
-        # FIXME(Jiayi): `else` is the default setting, which could be wrong
-        model = model_executable.model
-        model_layers = model.layers
-        attn_layers = [layer.self_attn for layer in model_layers]
-
-    # FIXME(Jiayi): ChatGLM does not have `model` or `start_layer`
-    # How does PP work in this case?
-    if hasattr(model, "start_layer"):
-        start_layer = model.start_layer
-    else:
-        start_layer = 0
-
-    if hasattr(model, "end_layer"):
-        end_layer = model.end_layer
-    else:
-        end_layer = len(model_layers)
-
-    model_input_subset = ModelInputSubset(model_layers=model_layers,
-                                          attn_layers=attn_layers,
-                                          start_layer=start_layer,
-                                          end_layer=end_layer)
-
-    return model_input_subset
-
-
-# FIXME(Jiayi): temporarily comment this out
-#def lmcache_remove_request_id_indices(request_id):
-#    engine = LMCacheEngineBuilder.get(ENGINE_NAME)
-#    if engine is None:
-#        return
-#    if not engine.config.enable_blending:
-#        return
-#    remove_request_id_indices(request_id)
 
 
 def init_lmcache_engine(
@@ -168,53 +100,6 @@ def init_lmcache_engine(
     return engine
 
 
-# TODO(Jiayi): This function is not used for now
-def broadcast_seq_group_metadata(
-    model_input: "ModelInputForGPUWithSamplingMetadata",
-    is_driver_worker: bool,
-) -> "ModelInputForGPUWithSamplingMetadata":
-    """Broadcast the `model_input` from driver worker to non-driver workers.
-
-    :param model_input: The model input for the current request.
-    :type model_input: ModelInputForGPUWithSamplingMetadata
-
-    :param is_driver_worker: Whether the code is executed in driver worker. 
-    :type is_driver_worker: bool
-
-    : return: Original `model_input` if driver_worker.
-              Broadcasted `model_input` otherwise.
-    """
-
-    # broadcast len of `seq_group_metadata_list`
-    if is_driver_worker:
-        assert model_input.seq_group_metadata_list is not None
-        seq_group_len_list = [len(model_input.seq_group_metadata_list)]
-    else:
-        seq_group_len_list = [0]
-    dist.broadcast_object_list(seq_group_len_list, src=0)
-    seq_group_len = seq_group_len_list[0]
-
-    # broadcast `seq_group_metadata_list`
-    seq_group_metadata_list: Sequence[Optional[SequenceGroupMetadata]]
-    if is_driver_worker:
-        assert model_input.seq_group_metadata_list is not None
-        seq_group_metadata_list = model_input.seq_group_metadata_list
-    else:
-        seq_group_metadata_list = [None] * seq_group_len
-    dist.broadcast_object_list(seq_group_metadata_list, src=0)
-
-    if is_driver_worker:
-        return model_input
-    else:
-        return dataclasses.replace(
-            model_input,
-            seq_group_metadata_list=\
-                seq_group_metadata_list # type: ignore[arg-type]
-
-        )
-
-
-# TODO(Jiayi): This function is not used for now
 def broadcast_seq_group_list(
     model_input: "ModelInputForGPUWithSamplingMetadata",
     is_driver_worker: bool,
@@ -264,11 +149,10 @@ def close_lmcache_engine() -> None:
     LMCacheEngineBuilder.destroy(ENGINE_NAME)
 
 
-# FIXME(Jiayi): Need to modify this for lmcache_connector
 # This function is not used for now
 def lmcache_should_retrieve(
-        model_input: "ModelInputForGPUWithSamplingMetadata",
-        kv_caches: List[torch.Tensor]) -> RetrieveStatus:
+    model_input: "ModelInputForGPUWithSamplingMetadata",
+) -> List[RetrieveStatus]:
     """Check should we retrieve KV from LMCache for the current model_input.
 
     :param model_input: The model input for the current request.
@@ -287,45 +171,49 @@ def lmcache_should_retrieve(
     # but attn_metadata does
     seq_lens = model_input.attn_metadata.seq_lens
     assert seq_lens is not None
-
+    num_seqs = len(seq_lens)
+    retrieve_status = [RetrieveStatus.NONE] * num_seqs
     has_engine = LMCacheEngineBuilder.get(ENGINE_NAME) is not None
-    if not has_engine or kv_caches is None:
-        return RetrieveStatus.NONE
+    if not has_engine:
+        return retrieve_status
 
     attn_meta = model_input.attn_metadata
-    prefill_meta = attn_meta.prefill_metadata
 
-    # check if the current run is profiling
-    is_profile_run = (kv_caches is None) or (kv_caches[0] is None)
-    if is_profile_run:
-        return RetrieveStatus.NONE
+    prefill_exist = (attn_meta.num_prefills > 0)
+    if not prefill_exist:
+        return retrieve_status
+    assert model_input.sampling_metadata is not None
+    seq_group_list = model_input.sampling_metadata.seq_groups
+    model_input = broadcast_seq_group_list(model_input, seq_group_list
+                                           is not None)
+    seq_group_list = model_input.sampling_metadata.seq_groups
+    assert seq_group_list is not None
 
-    # check if the current run is prefill
-    # TODO (Jiayi): chunked prefill + prefix caching in a single batch
-    # is not and should not be supported here
-    # what about multiple chunk prefills in a single batch??
+    seq_data_idx = 0
+    #selected_token_indices_idx = 0
+    for seq_group_idx, seq_group in enumerate(seq_group_list):
+        num_seqs_in_seq_group = len(seq_group.seq_data)
+        seq_data_idx_end = seq_data_idx + num_seqs_in_seq_group
 
-    # Assume all chunks are prefills
-    is_all_prefill_run = ((attn_meta.num_prefills == len(seq_lens))\
-        and prefill_meta is not None)
-    if is_all_prefill_run:
-        assert model_input.sampling_metadata is not None
-        selected_token_indices = \
-            model_input.sampling_metadata.selected_token_indices
-        if len(selected_token_indices) == 0:
-            # There should only be 1 chunk in chunked prefill
-            assert len(seq_lens) == 1
-            return RetrieveStatus.CHUNK_PREFILL
+        # DECODE
+        if not seq_group.is_prompt:
+            seq_data_idx = seq_data_idx_end
+            continue
 
-        # `<` means chunked prefill is batched with decode
-        if len(selected_token_indices) == len(seq_lens):
-            return RetrieveStatus.PREFILL
+        # CHUNK_PREFILL
+        if not seq_group.do_sample:
+            retrieve_status[seq_data_idx:seq_data_idx_end] =\
+                [RetrieveStatus.CHUNK_PREFILL] * num_seqs_in_seq_group
+            seq_data_idx = seq_data_idx_end
+        # LAST_CHUNK_PREFILL or NORMAL_PREFILL
+        else:
+            retrieve_status[seq_data_idx:seq_data_idx_end] =\
+                [RetrieveStatus.PREFILL] * num_seqs_in_seq_group
+            seq_data_idx = seq_data_idx_end
 
-    return RetrieveStatus.NONE
+    return retrieve_status
 
 
-# FIXME(Jiayi): Need to modify this for lmcache_connector
-# This function is not used for now
 def lmcache_should_store(
     model_input: "ModelInputForGPUWithSamplingMetadata",
 ) -> List[StoreStatus]:
@@ -363,67 +251,75 @@ def lmcache_should_store(
     assert engine is not None
 
     attn_meta = model_input.attn_metadata
-    prefill_meta = attn_meta.prefill_metadata
 
     # Don't store if this request is processed by cacheblend
     if is_blend_effective(attn_meta):
         return store_status
 
-    is_all_prefill_run = ((attn_meta.num_prefills == len(seq_lens))\
-        and (prefill_meta is not None))
+    assert model_input.sampling_metadata is not None
+    seq_group_list = model_input.sampling_metadata.seq_groups
+    # FIXME(Jiayi): Use `seq_group_list` to determine driver worker
+    # Alternative 1, we can pass in a parameter `is_driver_worker`
+    # Alternative 2, make the broadcast in outside, so the `broadcast`
+    # doesn't need to be done twice in `lmcache_retrieve` and
+    # `lmcache_store`
+    # We use this dirty fix now as we don't want to modify the vllm
+    # connector interface for now
+    model_input = broadcast_seq_group_list(model_input, seq_group_list
+                                           is not None)
+    seq_group_list = model_input.sampling_metadata.seq_groups
+    assert seq_group_list is not None
 
-    if is_all_prefill_run:
-        assert model_input.sampling_metadata is not None
-        seq_group_list = model_input.sampling_metadata.seq_groups
-        model_input = broadcast_seq_group_list(model_input, seq_group_list
-                                               is not None)
-        seq_group_list = model_input.sampling_metadata.seq_groups
-        assert seq_group_list is not None
+    selected_token_indices = \
+        model_input.sampling_metadata.selected_token_indices
 
-        selected_token_indices = \
-            model_input.sampling_metadata.selected_token_indices
+    seq_data_idx = 0
+    selected_token_indices_idx = 0
+    for seq_group_idx, seq_group in enumerate(seq_group_list):
+        num_seqs_in_seq_group = len(seq_group.seq_data)
+        seq_data_idx_end = seq_data_idx + num_seqs_in_seq_group
 
-        seq_data_idx = 0
-        selected_token_indices_idx = 0
-        for seq_group_idx, seq_group in enumerate(seq_group_list):
+        # DECODE
+        if not seq_group.is_prompt:
+            # Determine whether to save decoded KV cache
+            if not engine.config.save_decode_cache:
+                for idx in range(seq_data_idx, seq_data_idx_end):
+                    if seq_lens[idx] % engine.config.chunk_size == 0:
+                        store_status[idx] = StoreStatus.DECODE
+            seq_data_idx = seq_data_idx_end
+            selected_token_indices_idx += num_seqs_in_seq_group
+            continue
 
-            # TODO(Jiayi): Maybe it's cleaner to handle all logic for
-            # `lmcache_model_request` inside `cache_engine`
-            # Check whether user has specified to not store the cache
-            if hasattr(seq_group, "lmcache_model_request"):
-                lmcache_model_request = seq_group.lmcache_model_request
-                if lmcache_model_request is not None:
-                    user_should_store = lmcache_model_request.store_cache
-                    if not user_should_store:
-                        logger.debug(
-                            "User has specified not to store the cache")
-                        seq_data_idx += len(seq_group.seq_data)
-                        continue
+        # TODO(Jiayi): Maybe it's cleaner to handle all logic for
+        # `lmcache_model_request` inside `cache_engine`
+        # Check whether user has specified to not store the cache
+        if hasattr(seq_group, "lmcache_model_request"):
+            lmcache_model_request = seq_group.lmcache_model_request
+            if lmcache_model_request is not None:
+                user_should_store = lmcache_model_request.store_cache
+                if not user_should_store:
+                    logger.debug("User has specified not to store the cache")
+                    seq_data_idx += len(seq_group.seq_data)
+                    continue
 
-            # TODO(Jiayi): Figure out scenarios (other than chunk prefill)
-            # where `do_sample`` is False
-            if not seq_group.do_sample:
-                store_status[seq_data_idx] = StoreStatus.CHUNK_PREFILL
-                seq_data_idx += len(seq_group.seq_data)
-                continue
+        # CHUNK_PREFILL
+        if not seq_group.do_sample:
+            store_status[seq_data_idx:seq_data_idx_end] = \
+                [StoreStatus.CHUNK_PREFILL] * num_seqs_in_seq_group
+            seq_data_idx = seq_data_idx_end
+            continue
 
-            for seqid, seq_data in seq_group.seq_data.items():
-                if seq_data.get_len(
-                ) - 1 != selected_token_indices[selected_token_indices_idx]:
-                    # last chunk in chunk prefill
-                    # or prefix already hit in retrieve
-                    store_status[seq_data_idx] = StoreStatus.SUFFIX_PREFILL
-                else:
-                    store_status[seq_data_idx] = StoreStatus.PREFILL
-                seq_data_idx += 1
-                selected_token_indices_idx += 1
-        return store_status
-
-    # Determine whether to save decoded KV cache
-    if engine.config.save_decode_cache:
-        for idx, seq_len in enumerate(seq_lens):
-            if seq_len % engine.config.chunk_size == 0:
-                store_status[idx] = StoreStatus.DECODE
+        # LAST_CHUNK_PREFILL or NORMAL_PREFILL
+        for seqid, seq_data in seq_group.seq_data.items():
+            if seq_data.get_len(
+            ) - 1 != selected_token_indices[selected_token_indices_idx]:
+                # last chunk in chunk prefill
+                # or prefix already hit in retrieve
+                store_status[seq_data_idx] = StoreStatus.SUFFIX_PREFILL
+            else:
+                store_status[seq_data_idx] = StoreStatus.PREFILL
+            seq_data_idx += 1
+            selected_token_indices_idx += 1
     return store_status
 
 
@@ -480,20 +376,10 @@ def lmcache_store_kv(
 
     seq_group_list = model_input.sampling_metadata.seq_groups
 
-    # FIXME(Jiayi): Use `seq_group_list` to determine driver worker
-    # Alternative 1, we can pass in a parameter `is_driver_worker`
-    # Alternative 2, make the broadcast in outside, so the `broadcast`
-    # doesn't need to be done twice in `lmcache_retrieve` and
-    # `lmcache_store`
-    # We use this dirty fix now as we don't want to modify the vllm
-    # connector interface for now
-    model_input = broadcast_seq_group_list(model_input, seq_group_list
-                                           is not None)
     seq_group_list = model_input.sampling_metadata.seq_groups
     assert seq_group_list is not None
 
     next_start_pos = 0
-
     for seq_group_idx, seq_group in enumerate(seq_group_list):
         for seqid, seq_data in seq_group.seq_data.items():
             status = store_status[seq_data_idx]
@@ -526,7 +412,6 @@ def lmcache_store_kv(
 
             vllm_num_computed_tokens = seq_len - vllm_num_required_tokens
             if vllm_num_computed_tokens > 0:
-                # TODO (Jiayi): what if vllm_num_computed > skip_leading_tokens
                 if skip_leading_tokens >= vllm_num_computed_tokens:
                     slot_mapping_req_full = torch.full(
                         (seq_len, ),
@@ -565,20 +450,19 @@ def lmcache_store_kv(
                 # might error here. `slot_mapping_seq` could be wrong
 
                 stored_token_num = seq_len - skip_leading_tokens
-                skipped_token_num = skip_leading_tokens
                 kv_tensors_mask = torch.ones_like(current_tokens,
                                                   dtype=torch.bool)
-                kv_tensors_mask[:skipped_token_num] = False
+                kv_tensors_mask[:skip_leading_tokens] = False
 
                 engine.store(current_tokens.cpu(),
                              kv_tensors_mask,
                              kvcaches=kv_caches,
                              slot_mapping=slot_mapping_req_full,
-                             offset=skipped_token_num)
+                             offset=skip_leading_tokens)
             else:
                 stored_token_num = 0
-                skipped_token_num = seq_len
-            logger.debug(f"Store skips {skipped_token_num} tokens "\
+                skip_leading_tokens = seq_len
+            logger.debug(f"Store skips {skip_leading_tokens} tokens "\
                     f"and then stores {stored_token_num} tokens")
             seq_data_idx += 1
 
@@ -589,8 +473,9 @@ def lmcache_retrieve_kv(
     model_input: "ModelInputForGPUWithSamplingMetadata",
     cache_config: CacheConfig,
     kv_caches: List[torch.Tensor],
-    retrieve_status: RetrieveStatus,
-) -> Tuple["ModelInputForGPUWithSamplingMetadata", bool]:
+    retrieve_status: List[RetrieveStatus],
+) -> Tuple["ModelInputForGPUWithSamplingMetadata", bool, Union[
+        torch.Tensor, IntermediateTensors]]:
     """Retrieve the KV caches from LMCache for the current model_input. And 
     rebuild the model_input to reflect the changes in KV if necessary.
 
@@ -611,11 +496,12 @@ def lmcache_retrieve_kv(
     :return: The boolean value to indicate whether the 
              entire execute_model should be skipped
     """
+
     engine = LMCacheEngineBuilder.get(ENGINE_NAME)
     assert engine is not None, "LMCache engine is not initialized."
 
     if engine.config.enable_blending:
-        return model_input, False
+        return model_input, False, None
 
     assert isinstance(model_input.attn_metadata, FlashAttentionMetadata), \
         "Only FlashAttention backend is supported for now."
@@ -635,6 +521,8 @@ def lmcache_retrieve_kv(
     start_pos_list = []
     is_prefill_list = []
 
+    do_sample_list = []
+
     next_start_pos = 0
     num_request_not_found = 0
 
@@ -644,27 +532,21 @@ def lmcache_retrieve_kv(
     assert model_input.sampling_metadata is not None
     seq_group_list = model_input.sampling_metadata.seq_groups
 
-    # FIXME(Jiayi): Use `seq_group_list` to determine driver worker
-    # Alternative 1, we can pass in a parameter `is_driver_worker`
-    # Alternative 2, make the broadcast in outside, so the `broadcast`
-    # doesn't need to be done twice in `lmcache_retrieve` and
-    # `lmcache_store`
-    # We use this dirty fix now as we don't want to modify the vllm
-    # connector interface for now
-    model_input = broadcast_seq_group_list(model_input, seq_group_list
-                                           is not None)
     seq_group_list = model_input.sampling_metadata.seq_groups
     assert seq_group_list is not None
 
+    chunk_prefill_full_hit = True
     for seq_group in seq_group_list:
         seq_ids = seq_group.seq_ids
         for seq_id in seq_ids:
             seq_data = seq_group.seq_data[seq_id]
             is_prefill_list.append(seq_group.is_prompt)
-            if retrieve_status == RetrieveStatus.CHUNK_PREFILL:
+            if retrieve_status[idx] == RetrieveStatus.CHUNK_PREFILL:
                 total_seq_len = seq_lens[idx]
+                do_sample_list.append(False)
             else:
                 total_seq_len = seq_data.get_len()
+                do_sample_list.append(True)
 
             full_token_tensor = torch.tensor(
                 seq_data.get_token_ids()[:total_seq_len], device="cpu")
@@ -683,7 +565,19 @@ def lmcache_retrieve_kv(
             # (e.g., chunk prefill, prefix caching)
             vllm_num_computed_tokens = total_seq_len - vllm_num_required_tokens
 
-            # No need to retrieve from lmc if the number of tokens
+            # NOTE: No need to retrieve from lmc if the current sequence is
+            # in DECODE stage
+            if retrieve_status[idx] == RetrieveStatus.NONE:
+                assert vllm_num_required_tokens == 1
+                total_seq_len = seq_lens[idx]
+                num_computed_tokens_list.append(vllm_num_computed_tokens)
+                lmc_num_computed_tokens_list.append(0)
+                num_request_not_found += 1
+                idx += 1
+                logger.debug("Injected token number: 0. This is DECODE")
+                continue
+
+            # NOTE: No need to retrieve from lmc if the number of tokens
             # to be retrieved is small
             lmc_chunk_size = engine.config.chunk_size
             if vllm_num_required_tokens < lmc_chunk_size:
@@ -732,9 +626,12 @@ def lmcache_retrieve_kv(
 
             # TODO(Jiayi): currently we do not skip anything if chunked prefill
             # is batched with any decode or other chunked prefills.
-            if retrieve_status == RetrieveStatus.CHUNK_PREFILL:
+            if retrieve_status[idx] == RetrieveStatus.CHUNK_PREFILL:
                 if num_computed_tokens != total_seq_len:
-                    return model_input, False
+                    chunk_prefill_full_hit = False
+                else:
+                    lmc_num_computed_tokens -= 1
+                    num_computed_tokens -= 1
             else:
                 # Avoid error when prefix is exactly the same as the retrieved
                 # However, the entire prefill should be skipped in chunk prefill
@@ -759,13 +656,23 @@ def lmcache_retrieve_kv(
     assert len(lmc_num_computed_tokens_list) == seq_cnt
     assert len(num_computed_tokens_list) == seq_cnt
 
-    if retrieve_status == RetrieveStatus.CHUNK_PREFILL and \
-        num_request_not_found == 0:
-        return model_input, True
+    is_all_chunk_prefill = all(
+        [status == RetrieveStatus.CHUNK_PREFILL for status in retrieve_status])
 
-    # Some of the request can be skipped for a bit
-    # TODO(Jiayi): need e2e test full prefill and partial prefill
-    # in a single batch
+    # NOTE: We can only skip model forward if all requests are chunk prefill
+
+    if is_all_chunk_prefill and chunk_prefill_full_hit:
+        num_tok = len(model_input.input_tokens)
+        num_dim = model_executable.model.embed_tokens.embedding_dim
+        dtype = model_executable.model.embed_tokens.weight.dtype
+        device = model_input.input_tokens.device
+        hidden_or_intermediate_states = torch.zeros(num_tok,
+                                                    num_dim,
+                                                    device=device,
+                                                    dtype=dtype)
+        logger.debug("Skip the entire model forward!")
+        return model_input, True, hidden_or_intermediate_states
+
     if num_request_not_found < seq_cnt:
         rebuilt_model_input = build_partial_prefill_input(
             model_input,
@@ -775,14 +682,15 @@ def lmcache_retrieve_kv(
             slot_mapping,
             lmc_num_computed_tokens_list,
             is_prefill_list,
+            do_sample_list,
             kv_caches[0][0].device,
             cache_config,
         )
         logger.debug("Rebuilt the input!")
-        return rebuilt_model_input, False
+        return rebuilt_model_input, False, None
 
     logger.debug("Returning the original input!")
-    return model_input, False
+    return model_input, False, None
 
 
 def build_partial_prefill_input(
@@ -793,6 +701,7 @@ def build_partial_prefill_input(
     slot_mapping_flat: torch.Tensor,
     lmc_num_computed_tokens_list: List[int],
     is_prefill_list: List[bool],
+    do_sample_list: List[bool],
     device: torch.device,
     cache_config: CacheConfig,
 ) -> "ModelInputForGPUWithSamplingMetadata":
@@ -868,7 +777,8 @@ def build_partial_prefill_input(
 
         # Sampling metadata related
         # seq_groups (use rebuilt query lens)
-        rebuilt_selected_token_indices.append(last_query_start_loc - 1)
+        if do_sample_list[idx]:
+            rebuilt_selected_token_indices.append(last_query_start_loc - 1)
 
     # rebuilt attn_metadata
     rebuilt_attn_metadata = deepcopy(model_input.attn_metadata)
