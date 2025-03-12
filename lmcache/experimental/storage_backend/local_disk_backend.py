@@ -10,7 +10,7 @@ import torch
 
 from lmcache.experimental.config import LMCacheEngineConfig
 from lmcache.experimental.memory_management import (MemoryAllocatorInterface,
-                                                    MemoryObj)
+                                                    MemoryObj, MemoryFormat)
 from lmcache.experimental.storage_backend.abstract_backend import \
     StorageBackendInterface
 from lmcache.experimental.storage_backend.evictor import LRUEvictor, PutStatus
@@ -76,7 +76,7 @@ class LocalDiskBackend(StorageBackendInterface):
 
     def insert_key(self, key: CacheEngineKey, memory_obj: MemoryObj) -> None:
         path = self._key_to_path(key)
-        size = memory_obj.get_size()
+        size = memory_obj.get_physical_size()
         shape = memory_obj.metadata.shape
         dtype = memory_obj.metadata.dtype
         with self.disk_lock:
@@ -91,7 +91,7 @@ class LocalDiskBackend(StorageBackendInterface):
         key: CacheEngineKey,
         memory_obj: MemoryObj,
     ) -> Optional[Future]:
-        assert memory_obj.tensor is not None
+        # assert memory_obj.tensor is not None
 
         # Update cache recency
         evict_keys, put_status = self.evictor.update_on_put(
@@ -145,21 +145,31 @@ class LocalDiskBackend(StorageBackendInterface):
         Blocking get function.
         """
         self.disk_lock.acquire()
-        if key not in self.dict:
+        found = False
+        for old_key in self.dict.keys():
+            if old_key == key:
+                found = True
+                break
+        if not found:
             self.disk_lock.release()
-            return None
+            return None, key
+        
+        # Update key
+        old_key.metadata.context_id.append(key.metadata.context_id[0])
+        old_key.metadata.score_table.append(key.metadata.score_table[0])
+        self.dict[old_key] = self.dict.pop(key)
 
-        # Update cache recency
-        self.evictor.update_on_hit(key, self.dict)
+        # # Update cache recency
+        # self.evictor.update_on_hit(key, self.dict)
 
-        path = self.dict[key].path
-        dtype = self.dict[key].dtype
-        shape = self.dict[key].shape
+        path = self.dict[old_key].path
+        dtype = self.dict[old_key].dtype
+        shape = self.dict[old_key].shape
         assert dtype is not None
         assert shape is not None
         memory_obj = self.load_bytes_from_disk(path, dtype=dtype, shape=shape)
         self.disk_lock.release()
-        return memory_obj
+        return memory_obj, old_key
 
     @_lmcache_nvtx_annotate
     @torch.inference_mode()
@@ -172,12 +182,15 @@ class LocalDiskBackend(StorageBackendInterface):
         Convert KV to bytes and async store bytes to disk.
         """
         kv_chunk = memory_obj.tensor
-        assert kv_chunk is not None
-        byte_array = memory_obj.byte_array
         path = self._key_to_path(key)
+        if kv_chunk is not None:
+            byte_array = memory_obj.byte_array
 
-        async with aiofiles.open(path, 'wb') as f:
-            await f.write(byte_array)
+            async with aiofiles.open(path, 'wb') as f:
+                await f.write(byte_array)
+        else:
+            async with aiofiles.open(path, 'wb') as f:
+                await f.write(memory_obj.raw_data)
 
         self.insert_key(key, memory_obj)
         self.memory_allocator.ref_count_down(memory_obj)
@@ -218,14 +231,24 @@ class LocalDiskBackend(StorageBackendInterface):
         """
         Load bytearray from disk.
         """
-        # TODO(Shaoting): Use another memory allocator to not affect cpu storage
-        memory_obj = self.memory_allocator.allocate(shape, dtype)
-        if memory_obj is None:
-            logger.debug("Memory allocation failed during async disk load.")
-            return None
-        buffer = memory_obj.byte_array
-        with open(path, 'rb') as f:
-            f.readinto(buffer)
+        if dtype == torch.int8:
+            memory_obj = self.memory_allocator.allocate(
+                shape,
+                torch.int8,
+                fmt=MemoryFormat.KV_BLOB)
+            with open(path, 'rb') as f:
+                buffer = bytearray(f.read())
+            memory_obj.raw_data = buffer
+            memory_obj.valid = False
+        else:
+            # TODO(Shaoting): Use another memory allocator to not affect cpu storage
+            memory_obj = self.memory_allocator.allocate(shape, dtype)
+            if memory_obj is None:
+                logger.debug("Memory allocation failed during async disk load.")
+                return None
+            buffer = memory_obj.byte_array
+            with open(path, 'rb') as f:
+                f.readinto(buffer)
         return memory_obj
 
     @_lmcache_nvtx_annotate
