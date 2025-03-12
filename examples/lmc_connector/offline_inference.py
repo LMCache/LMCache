@@ -7,6 +7,9 @@ from transformers import AutoTokenizer
 from vllm import LLM, SamplingParams
 from vllm.config import KVTransferConfig
 
+from lmcache.experimental.cache_engine import LMCacheEngineBuilder
+from lmcache.integration.vllm.utils import ENGINE_NAME
+
 model_name = "mistralai/Mistral-7B-Instruct-v0.2"
 context_file = os.path.join(os.pardir, 'ffmpeg.txt')
 output_file = "offline_inference_outputs.jsonl"
@@ -102,3 +105,5 @@ second_outputs = llm.generate(prompts, sampling_params)
 t4 = time.perf_counter()
 print(f"\n\nSecond request Time: {t4 - t3} seconds\n\n")
 append_outputs(output_file, second_outputs, context_length, t4 - t3)
+
+LMCacheEngineBuilder.destroy(ENGINE_NAME)

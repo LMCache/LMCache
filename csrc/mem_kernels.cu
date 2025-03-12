@@ -127,6 +127,10 @@ __global__ void load_and_reshape_multi_layer_kernel(
     const int64_t slot_idx = slot_mapping[token_id];
     int64_t *paged_buffer_ptr = paged_buffer_ptrs[layer_id];
 
+    if (slot_idx < 0) {
+        return;
+    }
+    
     /** Copy the data from page buffer to key_value **/
     for (int i = tid; i < scalars_per_token; i += num_threads) {
         const int64_t lmcache_offset = key_value_offset(
