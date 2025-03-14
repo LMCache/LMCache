@@ -9,6 +9,7 @@ from lmcache.experimental.config import LMCacheEngineConfig
 from lmcache.experimental.distributed_server import (
     DistributedServerInterface, NaiveDistributedServer)
 from lmcache.experimental.gpu_connector import GPUConnectorInterface
+from lmcache.experimental.dram_connector import DramConnectorInterface
 from lmcache.experimental.lookup_server import (LookupServerInterface,
                                                 RedisLookupServer)
 from lmcache.experimental.memory_management import (MemoryAllocatorInterface,
@@ -52,12 +53,16 @@ class LMCacheEngine:
         memory_allocator: MemoryAllocatorInterface,
         token_database: TokenDatabase,
         gpu_connector: GPUConnectorInterface,
+        dram_connector: DramConnectorInterface,
     ):
         self.config = config
         self.metadata = metadata
         self.memory_allocator = memory_allocator
         self.token_database = token_database
         self.gpu_connector = gpu_connector
+        self.dram_connector = dram_connector
+        
+        self.connection = 'gpu' if self.gpu_connector else 'dram'
 
         self.enable_p2p = config.enable_p2p
 
@@ -73,6 +78,8 @@ class LMCacheEngine:
                                               self.memory_allocator,
                                               self.lookup_server)
         if self.enable_p2p:
+            if self.connection == 'dram':
+                raise ValueError("P2P is not supported for DRAM connection.")
             self.distributed_loop = asyncio.get_event_loop()
             assert self.lookup_server is not None
             self.distributed_server: DistributedServerInterface = \
@@ -131,8 +138,10 @@ class LMCacheEngine:
             # Disabling put_queue for now, as it's not necessary
             # and bringing big overhead
             # self.put_queue.put((key, memory_obj, start, end, kwargs))
-
-            self.gpu_connector.from_gpu(memory_obj, start, end, **kwargs)
+            if self.connection == 'gpu':
+                self.gpu_connector.from_gpu(memory_obj, start, end, **kwargs)
+            else:
+                self.dram_connector.from_dram(memory_obj, start, end, **kwargs)
             self.storage_manager.put(key, memory_obj)
 
             # Update lookup server
@@ -197,8 +206,10 @@ class LMCacheEngine:
             # cpu tensor for the sake of performance.
             # For example, disk->gpu is faster than disk->cpu->gpu.
             # RDMA is another example.
-
-            self.gpu_connector.to_gpu(memory_obj, start, end, **kwargs)
+            if self.connection == 'gpu':
+                self.gpu_connector.to_gpu(memory_obj, start, end, **kwargs)
+            else:
+                self.dram_connector.to_dram(memory_obj, start, end, **kwargs)
             self.memory_allocator.ref_count_down(memory_obj)
 
         self.stats_monitor.on_retrieve_finished(monitor_req_id,
@@ -277,8 +288,8 @@ class LMCacheEngineBuilder:
             instance_id: str,
             config: LMCacheEngineConfig,
             metadata: LMCacheEngineMetadata,
-            gpu_connector:
-        GPUConnectorInterface,  # gpu connectors is from outside
+            gpu_connector: Optional[GPUConnectorInterface] = None, # gpu connectors is from outside
+            dram_connector: Optional[DramConnectorInterface] = None, # dram connectors is from outside
     ) -> LMCacheEngine:
         """
         Builds a new LMCacheEngine instance if it doesn't already exist for the
@@ -293,7 +304,7 @@ class LMCacheEngineBuilder:
             token_database = cls._Create_token_database(config, metadata)
             stat_logger = LMCacheStatsLogger(metadata, log_interval=10)
             engine = LMCacheEngine(config, metadata, memory_allocator,
-                                   token_database, gpu_connector)
+                                   token_database, gpu_connector, dram_connector)
             cls._instances[instance_id] = engine
             cls._cfgs[instance_id] = config
             cls._metadatas[instance_id] = metadata

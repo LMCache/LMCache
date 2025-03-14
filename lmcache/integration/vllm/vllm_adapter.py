@@ -95,7 +95,7 @@ def init_lmcache_engine(
     assert isinstance(config, LMCacheEngineConfig), \
         "LMCache experimental configuration is should be passed."
     engine = LMCacheEngineBuilder.get_or_create(ENGINE_NAME, config, metadata,
-                                                vllm_gpu_connector)
+                                                gpu_connector=vllm_gpu_connector)
 
     return engine
 
