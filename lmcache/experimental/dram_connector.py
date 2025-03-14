@@ -42,8 +42,10 @@ class DramConnectorInterface(abc.ABC):
         """Get the shape of the data given the number of tokens.
         """
         raise NotImplementedError
-    
+
+
 class SGLangDramNestedConnector(DramConnectorInterface):
+
     def __init__(self, hidden_dim_size: int, num_layers: int):
         self.hidden_dim_size = hidden_dim_size
         self.num_layers = num_layers
@@ -68,7 +70,6 @@ class SGLangDramNestedConnector(DramConnectorInterface):
             v[start:end].copy_(memory_obj.tensor[1, layer_id].reshape(
                 -1, *hidden_shape))
 
-
     def from_dram(self, memory_obj: MemoryObj, start: int, end: int, **kwargs):
         assert memory_obj.tensor is not None
 
@@ -79,9 +80,11 @@ class SGLangDramNestedConnector(DramConnectorInterface):
         for layer_id, layer in enumerate(kvcaches):
             k, v = layer
             hidden_shape = k.shape[1:]
-            memory_obj.tensor[0, layer_id].reshape(-1, *hidden_shape).copy_(k[start:end])
-            memory_obj.tensor[1, layer_id].reshape(-1, *hidden_shape).copy_(v[start:end])
-        
+            memory_obj.tensor[0, layer_id].reshape(-1, *hidden_shape).copy_(
+                k[start:end])
+            memory_obj.tensor[1, layer_id].reshape(-1, *hidden_shape).copy_(
+                v[start:end])
 
     def get_shape(self, num_tokens: int) -> torch.Size:
-        return torch.Size([2, self.num_layers, num_tokens, self.hidden_dim_size])
+        return torch.Size(
+            [2, self.num_layers, num_tokens, self.hidden_dim_size])

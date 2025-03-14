@@ -61,7 +61,7 @@ class LMCacheEngine:
         self.token_database = token_database
         self.gpu_connector = gpu_connector
         self.dram_connector = dram_connector
-        
+
         self.connection = 'gpu' if self.gpu_connector else 'dram'
 
         self.enable_p2p = config.enable_p2p
@@ -288,8 +288,11 @@ class LMCacheEngineBuilder:
             instance_id: str,
             config: LMCacheEngineConfig,
             metadata: LMCacheEngineMetadata,
-            gpu_connector: Optional[GPUConnectorInterface] = None, # gpu connectors is from outside
-            dram_connector: Optional[DramConnectorInterface] = None, # dram connectors is from outside
+            gpu_connector: Optional[
+                GPUConnectorInterface] = None,  # gpu connectors is from outside
+            dram_connector:
+        Optional[
+            DramConnectorInterface] = None,  # dram connectors is from outside
     ) -> LMCacheEngine:
         """
         Builds a new LMCacheEngine instance if it doesn't already exist for the
@@ -304,7 +307,8 @@ class LMCacheEngineBuilder:
             token_database = cls._Create_token_database(config, metadata)
             stat_logger = LMCacheStatsLogger(metadata, log_interval=10)
             engine = LMCacheEngine(config, metadata, memory_allocator,
-                                   token_database, gpu_connector, dram_connector)
+                                   token_database, gpu_connector,
+                                   dram_connector)
             cls._instances[instance_id] = engine
             cls._cfgs[instance_id] = config
             cls._metadatas[instance_id] = metadata
