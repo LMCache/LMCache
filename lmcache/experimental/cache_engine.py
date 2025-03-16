@@ -7,7 +7,7 @@ from lmcache.config import LMCacheEngineMetadata
 from lmcache.experimental.config import LMCacheEngineConfig
 from lmcache.experimental.gpu_connector import GPUConnectorInterface
 from lmcache.experimental.memory_management import (MemoryAllocatorInterface,
-                                                    MixedMemoryAllocator)
+                                                    MixedMemoryAllocator, MemoryFormat)
 from lmcache.experimental.storage_backend.storage_manager import StorageManager
 from lmcache.experimental.token_database import (ChunkedTokenDatabase,
                                                  TokenDatabase)
@@ -100,7 +100,7 @@ class LMCacheEngine:
             num_tokens = end - start
             kv_shape = self.gpu_connector.get_shape(num_tokens)
             kv_dtype = self.metadata.kv_dtype
-            memory_obj = self.storage_manager.allocate(kv_shape, kv_dtype)
+            memory_obj = self.storage_manager.memory_allocator.allocate(kv_shape, kv_dtype, MemoryFormat.KV_BLOB2)
             if memory_obj is None:
                 logger.warning("Failed to allocate memory for the KV cache.\n"
                                "The KV cache will not be stored.")

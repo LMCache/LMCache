@@ -25,6 +25,8 @@ class MemoryFormat(Enum):
 
     BINARY_BUFFER = 3
 
+    KV_BLOB2 = 4
+
     def token_dim(self) -> int:
         if self == MemoryFormat.KV_BLOB:
             return 2
@@ -431,8 +433,8 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
                                        1, fmt))
 
     def free(self, memory_obj: MemoryObj):
-        if not memory_obj.is_valid():
-            return
+        # if not memory_obj.is_valid():
+        #     return
 
         new_free_block = FreeBlock(start=memory_obj.metadata.address,
                                    size=memory_obj.metadata.phy_size)
@@ -630,8 +632,10 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
         :param int size: The size of the pinned memory in bytes.
         """
         buffer = torch.empty(size, dtype=torch.uint8, pin_memory=True)
+        buffer2 = torch.empty(5368709120, dtype=torch.uint8, pin_memory=True)
 
         self.pin_allocator = TensorMemoryAllocator(buffer)
+        self.pin_allocator2 = TensorMemoryAllocator(buffer2)
         self.buffer_allocator = BufferAllocator("cpu")
 
         self.host_mem_lock = threading.Lock()
@@ -647,6 +651,9 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
         elif fmt == MemoryFormat.KV_BLOB:
             with self.host_mem_lock:
                 return self.pin_allocator.allocate(shape, dtype, fmt)
+        elif fmt == MemoryFormat.KV_BLOB2:
+            with self.host_mem_lock:
+                return self.pin_allocator2.allocate(shape, dtype, fmt)
         else:
             raise ValueError(f"Unsupported memory format: {fmt}")
 
@@ -657,6 +664,9 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
         elif fmt == MemoryFormat.KV_BLOB:
             with self.host_mem_lock:
                 self.pin_allocator.free(memory_obj)
+        elif fmt == MemoryFormat.KV_BLOB2:
+            with self.host_mem_lock:
+                self.pin_allocator2.free(memory_obj)
         else:
             raise ValueError(f"Unsupported memory format: {fmt}")
 
@@ -667,6 +677,9 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
         elif fmt == MemoryFormat.KV_BLOB:
             with self.host_mem_lock:
                 self.pin_allocator.ref_count_up(memory_obj)
+        elif fmt == MemoryFormat.KV_BLOB2:
+            with self.host_mem_lock:
+                self.pin_allocator2.ref_count_up(memory_obj)
         else:
             raise ValueError(f"Unsupported memory format: {fmt}")
 
@@ -677,6 +690,9 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
         elif fmt == MemoryFormat.KV_BLOB:
             with self.host_mem_lock:
                 self.pin_allocator.ref_count_down(memory_obj)
+        elif fmt == MemoryFormat.KV_BLOB2:
+            with self.host_mem_lock:
+                self.pin_allocator2.ref_count_down(memory_obj)
         else:
             raise ValueError(f"Unsupported memory format: {fmt}")
 
@@ -687,6 +703,9 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
         elif fmt == MemoryFormat.KV_BLOB:
             with self.host_mem_lock:
                 return self.pin_allocator.get_ref_count(memory_obj)
+        elif fmt == MemoryFormat.KV_BLOB2:
+            with self.host_mem_lock:
+                return self.pin_allocator2.get_ref_count(memory_obj)
         else:
             raise ValueError(f"Unsupported memory format: {fmt}")
 

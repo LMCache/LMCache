@@ -30,6 +30,7 @@ class KVDecision:
     compression_method: str
     compression_rate: float
 
+# TODO(Shaoting): add freqency estimator
 class KVCacheManager:
     def __init__(self):
         self.method = "baseline_KIVI" # NOTE(Shaoting): policy define here
@@ -142,17 +143,17 @@ class StorageManager:
         if current_kv_decision.compression_method == "cachegen":
             pass
         elif current_kv_decision.compression_method == "kivi":
+            # TODO(Shaoting): KV Cache that's less than 256 tokens will get larger
             # Update memory obj
             compressed_memory_obj = self.kivi_ser.serialize(memory_obj)
             self.memory_allocator.ref_count_down(memory_obj)
             blank_memory_obj = self.memory_allocator.allocate(
                 compressed_memory_obj.get_shape(),
                 torch.int8,
-                fmt=MemoryFormat.KV_BLOB)
+                fmt=MemoryFormat.KV_BLOB2)
             blank_memory_obj.raw_data = compressed_memory_obj.raw_data
             blank_memory_obj.valid = False
             self.memory_allocator.ref_count_down(compressed_memory_obj)
-            self.memory_allocator.ref_count_up(blank_memory_obj)
             memory_obj = blank_memory_obj
 
             # Update key
@@ -170,6 +171,17 @@ class StorageManager:
             if key in self.hot_cache:
                 old_memory_obj = self.hot_cache.pop(key)
                 self.memory_allocator.ref_count_down(old_memory_obj)
+
+            # Move memory obj from tmp buffer to real location
+            self.manager_lock.release()
+            blank_memory_obj = self.allocate(
+                memory_obj.get_shape(),
+                memory_obj.get_dtype())
+            self.manager_lock.acquire()
+            blank_memory_obj.raw_data = memory_obj.raw_data
+            blank_memory_obj.valid = memory_obj.valid
+            self.memory_allocator.ref_count_down(memory_obj)
+            memory_obj = blank_memory_obj
 
             self.hot_cache[key] = memory_obj
             self.memory_allocator.ref_count_up(memory_obj)
@@ -238,6 +250,18 @@ class StorageManager:
         else:
             self.manager_lock.acquire()
             if self.use_hot and key not in self.hot_cache:
+    
+                # Move memory obj from tmp buffer to real location
+                self.manager_lock.release()
+                blank_memory_obj = self.allocate(
+                    memory_obj.get_shape(),
+                    memory_obj.get_dtype())
+                self.manager_lock.acquire()
+                blank_memory_obj.raw_data = memory_obj.raw_data
+                blank_memory_obj.valid = memory_obj.valid
+                self.memory_allocator.ref_count_down(memory_obj)
+                memory_obj = blank_memory_obj
+
                 self.hot_cache[key] = memory_obj
                 self.memory_allocator.ref_count_up(memory_obj)
             self.manager_lock.release()
@@ -289,7 +313,6 @@ class StorageManager:
                 bytes_obj = BytesBufferMemoryObj(memory_obj.raw_data)
                 self.memory_allocator.ref_count_down(memory_obj)
                 memory_obj = self.kivi_de.deserialize(bytes_obj)
-                self.memory_allocator.ref_count_up(memory_obj)
 
             return memory_obj
 
@@ -304,14 +327,13 @@ class StorageManager:
             # NOTE(Jiayi): bypass the allocator for now
             memory_obj, new_key = backend.get_blocking(key)
             if memory_obj is not None:
-                self._update_hot_cache(new_key, memory_obj)
+                # self._update_hot_cache(new_key, memory_obj)
 
                 # De-compress memory_obj
                 if new_key.metadata.method == "kivi":  
                     bytes_obj = BytesBufferMemoryObj(memory_obj.raw_data)
                     self.memory_allocator.ref_count_down(memory_obj)
-                    memory_obj = self.kivi_de.deserialize(bytes_obj)
-                    self.memory_allocator.ref_count_up(memory_obj)                
+                    memory_obj = self.kivi_de.deserialize(bytes_obj)               
 
                 return memory_obj
 
