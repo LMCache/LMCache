@@ -166,7 +166,7 @@ class KIVIDeserializer(Deserializer):
         kv_chunk = blob.reshape(*blob.shape[:-2], hidden_dim)  # [nlayers, 2, ntokens, num_heads, head_size]
         memory_obj = self.memory_allocator.allocate(kv_chunk.shape,
                                                     kv_chunk.dtype,
-                                                    fmt=MemoryFormat.KV_BLOB)
+                                                    fmt=MemoryFormat.KV_BLOB2)
         if memory_obj is None:
             logger.warning("Memory allocation failed in cachegen deserializer")
             return None

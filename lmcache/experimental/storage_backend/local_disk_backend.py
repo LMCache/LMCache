@@ -210,7 +210,7 @@ class LocalDiskBackend(StorageBackendInterface):
         """
         Async load bytearray from disk.
         """
-        memory_obj = self.memory_allocator.allocate(shape, dtype)
+        memory_obj = self.memory_allocator.allocate(shape, dtype, fmt=MemoryFormat.KV_BLOB2)
         if memory_obj is None:
             logger.debug("Memory allocation failed during async disk load.")
             return None
@@ -235,14 +235,13 @@ class LocalDiskBackend(StorageBackendInterface):
             memory_obj = self.memory_allocator.allocate(
                 shape,
                 torch.int8,
-                fmt=MemoryFormat.KV_BLOB)
+                fmt=MemoryFormat.KV_BLOB2)
             with open(path, 'rb') as f:
                 buffer = bytearray(f.read())
             memory_obj.raw_data = buffer
             memory_obj.valid = False
         else:
-            # TODO(Shaoting): Use another memory allocator to not affect cpu storage
-            memory_obj = self.memory_allocator.allocate(shape, dtype)
+            memory_obj = self.memory_allocator.allocate(shape, dtype, MemoryFormat.KV_BLOB2)
             if memory_obj is None:
                 logger.debug("Memory allocation failed during async disk load.")
                 return None

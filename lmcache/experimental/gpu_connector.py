@@ -309,7 +309,7 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
         """
         assert memory_obj.tensor is not None
 
-        if memory_obj.metadata.fmt != MemoryFormat.KV_BLOB:
+        if memory_obj.metadata.fmt != MemoryFormat.KV_BLOB and memory_obj.metadata.fmt != MemoryFormat.KV_BLOB2:
             raise ValueError(
                 "The memory object should be in KV_BLOB format in"
                 " order to be processed by VLLMPagedMemGPUConnector")
@@ -406,7 +406,7 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
             memory_obj.tensor.copy_(tmp_gpu_buffer, non_blocking=True)
 
         torch.cuda.synchronize()
-        memory_obj.metadata.fmt = MemoryFormat.KV_BLOB
+        # memory_obj.metadata.fmt = MemoryFormat.KV_BLOB
 
     def get_shape(self, num_tokens: int) -> torch.Size:
         return torch.Size(
