@@ -61,8 +61,9 @@ class SGLangDramNestedConnector(DramConnectorInterface):
         if "kvcaches" not in kwargs:
             raise ValueError("'kvcaches' should be provided in kwargs.")
 
-        kvcaches: Tuple[Tuple[torch.Tensor, ...], ...] = kwargs["kvcaches"]
-        for layer_id, layer in enumerate(kvcaches):
+        kvcaches = kwargs["kvcaches"]
+        keys, values = kvcaches
+        for layer_id, layer in enumerate(zip(keys, values)):
             k, v = layer
             hidden_shape = k.shape[1:]
             k[start:end].copy_(memory_obj.tensor[0, layer_id].reshape(
@@ -76,8 +77,9 @@ class SGLangDramNestedConnector(DramConnectorInterface):
         if "kvcaches" not in kwargs:
             raise ValueError("'kvcaches' should be provided in kwargs.")
 
-        kvcaches: Tuple[Tuple[torch.Tensor, ...], ...] = kwargs["kvcaches"]
-        for layer_id, layer in enumerate(kvcaches):
+        kvcaches = kwargs["kvcaches"]
+        keys, values = kvcaches
+        for layer_id, layer in enumerate(zip(keys, values)):
             k, v = layer
             hidden_shape = k.shape[1:]
             memory_obj.tensor[0, layer_id].reshape(-1, *hidden_shape).copy_(

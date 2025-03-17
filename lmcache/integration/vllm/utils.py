@@ -31,5 +31,7 @@ def lmcache_get_config() -> Union[Config, ExperimentalConfig]:
         config_file = os.environ["LMCACHE_CONFIG_FILE"]
         logger.info(f"Loading LMCache config file {config_file}")
         config = LMCacheEngineConfig.from_file(config_file)
+        
+    logger.info(f"Config: {config}")
 
     return config

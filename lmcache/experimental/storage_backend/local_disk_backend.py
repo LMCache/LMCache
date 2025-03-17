@@ -4,6 +4,7 @@ import threading
 from collections import OrderedDict
 from concurrent.futures import Future
 from typing import List, Optional
+import pickle
 
 import aiofiles
 import torch
@@ -42,6 +43,10 @@ class LocalDiskBackend(StorageBackendInterface):
         if not os.path.exists(self.path):
             os.makedirs(self.path)
             logger.info(f"Created local disk cache directory: {self.path}")
+        elif 'metadata_dict.pkl' in os.listdir(self.path):
+            with open(os.path.join(self.path, 'metadata_dict.pkl'), 'rb') as f:
+                self.dict = pickle.load(f)
+            logger.info(f"Loaded existing metadata dictionary from: {self.path}")
 
         self.lookup_server = lookup_server
 
@@ -152,6 +157,7 @@ class LocalDiskBackend(StorageBackendInterface):
         """
         Blocking get function.
         """
+        logger.debug(f"Loading {key} from disk.")
         self.disk_lock.acquire()
         if key not in self.dict:
             self.disk_lock.release()
@@ -183,7 +189,6 @@ class LocalDiskBackend(StorageBackendInterface):
         assert kv_chunk is not None
         byte_array = memory_obj.byte_array
         path = self._key_to_path(key)
-
         async with aiofiles.open(path, 'wb') as f:
             await f.write(byte_array)
 
@@ -260,3 +265,8 @@ class LocalDiskBackend(StorageBackendInterface):
             self.disk_lock.acquire()
             self.lookup_server.batched_remove(list(self.dict.keys()))
             self.disk_lock.release()
+            
+        # store the self.dict to disk
+        logger.debug("Closing LocalDiskBackend and storing the self.dict to disk.")
+        with open(os.path.join(self.path, 'metadata_dict.pkl'), 'wb') as f:
+            pickle.dump(self.dict, f)

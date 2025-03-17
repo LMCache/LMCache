@@ -20,7 +20,7 @@ from lmcache.experimental.token_database import (ChunkedTokenDatabase,
 from lmcache.logging import init_logger
 from lmcache.observability import LMCacheStatsLogger, LMCStatsMonitor
 from lmcache.usage_context import InitializeUsageContext
-from lmcache.utils import _lmcache_nvtx_annotate
+from lmcache.utils import _lmcache_nvtx_annotate, CacheEngineKey
 
 logger = init_logger(__name__)
 
@@ -126,7 +126,10 @@ class LMCacheEngine:
                 continue
             # Allocate the memory object
             num_tokens = end - start
-            kv_shape = self.gpu_connector.get_shape(num_tokens)
+            if self.connection == 'gpu':
+                kv_shape = self.gpu_connector.get_shape(num_tokens)
+            else:
+                kv_shape = self.dram_connector.get_shape(num_tokens)
             kv_dtype = self.metadata.kv_dtype
             memory_obj = self.storage_manager.allocate(kv_shape, kv_dtype)
             if memory_obj is None:
@@ -215,6 +218,41 @@ class LMCacheEngine:
         self.stats_monitor.on_retrieve_finished(monitor_req_id,
                                                 torch.sum(ret_mask))
         return ret_mask
+    
+    # @_lmcache_nvtx_annotate
+    # @torch.inference_mode()
+    # def store(self,
+    #              keys: List[str],
+    #              **kwargs) -> None:
+    #     """
+    #     TODO: ADD MORE DOCS
+    #     """
+        
+    #     pass
+    
+    @_lmcache_nvtx_annotate
+    @torch.inference_mode()
+    def hash_retrieve(self,
+                 keys: List[CacheEngineKey],
+                 **kwargs) -> torch.Tensor:
+        """
+        TODO: ADD MORE DOCS
+        """
+        if self.connection == 'gpu':
+            raise ValueError("hash_retrieve is not supported for GPU connection.")
+        ret_mask = torch.zeros(len(keys), dtype=torch.bool, device="cpu")
+        chunk_size = self.config.chunk_size
+        start = 0
+        for i, key in enumerate(keys):
+            memory_obj = self.storage_manager.get(key)
+            if memory_obj is None:
+                break
+            ret_mask[i] = True
+            self.dram_connector.to_dram(memory_obj, start, start + chunk_size, **kwargs)
+            start += chunk_size
+            self.memory_allocator.ref_count_down(memory_obj)
+        
+        return ret_mask
 
     def prefetch(
         self,
@@ -250,6 +288,16 @@ class LMCacheEngine:
             if not self.storage_manager.contains(key, search_range):
                 return start
         return end
+    
+    def get_hash(
+        self,
+        tokens: torch.Tensor,
+        mask: Optional[torch.Tensor] = None,
+    ) -> List[str]:
+        ret = []
+        for start, end, key in self.token_database.process_tokens(tokens, mask):
+            ret.append(key)
+        return ret
 
     def close(self) -> None:
         """Close the cache engine and free all the resources"""
