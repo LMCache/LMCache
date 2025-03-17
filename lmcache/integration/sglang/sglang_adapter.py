@@ -16,12 +16,10 @@ from lmcache.utils import _lmcache_nvtx_annotate
 logger = init_logger(__name__)
 
 class StoreStatus(Enum):
-    SUCCESS = 1
-    FAILURE = 2
+    PREFILLING = 0
 
 class RetrieveStatus(Enum):
-    SUCCESS = 1
-    FAILURE = 2
+    PREFILLING = 0
 
 def init_lmcache_engine(
     model_config: ModelConfig,
@@ -61,9 +59,9 @@ def init_lmcache_engine(
 
     return engine
 
-def get_hash(engine: LMCacheEngine, token_ids: torch.Tensor) -> str:
+def get_hash(engine: LMCacheEngine, token_ids: torch.Tensor, mask: Optional[torch.Tensor] = None) -> str:
     """Get the hash for the given token ids."""
-    return engine.get_hash(token_ids)
+    return engine.get_hash(token_ids, mask=mask)
 
 @_lmcache_nvtx_annotate
 def lmcache_store_kv(

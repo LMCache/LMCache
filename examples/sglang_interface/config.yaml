@@ -1,0 +1,14 @@
+# The size of the chunk as an integer
+# (set to 256 by default)
+chunk_size: 256
+
+# The local KV cache device to use (set to "cuda" by default)
+# Possible values: "cpu", "cuda", "file://local_disk/"
+local_disk: file:///data/user_data/yuweia/integration/
+
+# The maximum size of the local KV cache as an integer (GB)
+# Set to 5 by default
+max_local_disk_size: 5
+
+# experimental features in LMCache
+use_experimental: True

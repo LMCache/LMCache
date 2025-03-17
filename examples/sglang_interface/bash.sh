@@ -1,0 +1,1 @@
+LMCACHE_CONFIG_FILE=./config.yaml python sglang_adapter.py
