@@ -9,8 +9,7 @@ import aiofiles
 import torch
 
 from lmcache.experimental.config import LMCacheEngineConfig
-from lmcache.experimental.memory_management import (MemoryAllocatorInterface,
-                                                    MemoryObj, MemoryFormat)
+from lmcache.experimental.memory_management import (MemoryAllocatorInterface, MemoryObj, MemoryFormat)
 from lmcache.experimental.storage_backend.abstract_backend import \
     StorageBackendInterface
 from lmcache.experimental.storage_backend.evictor import LRUEvictor, PutStatus

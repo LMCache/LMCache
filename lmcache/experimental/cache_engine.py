@@ -6,8 +6,7 @@ import torch
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.experimental.config import LMCacheEngineConfig
 from lmcache.experimental.gpu_connector import GPUConnectorInterface
-from lmcache.experimental.memory_management import (MemoryAllocatorInterface,
-                                                    MixedMemoryAllocator, MemoryFormat)
+from lmcache.experimental.memory_management import (MemoryAllocatorInterface, MixedMemoryAllocator, MemoryFormat)
 from lmcache.experimental.storage_backend.storage_manager import StorageManager
 from lmcache.experimental.token_database import (ChunkedTokenDatabase,
                                                  TokenDatabase)
@@ -113,6 +112,7 @@ class LMCacheEngine:
 
             self.gpu_connector.from_gpu(memory_obj, start, end, **kwargs)
             self.storage_manager.put(key, memory_obj)
+        print(self.storage_manager.hot_cache)
         self.stats_monitor.on_store_finished(monitor_req_id)
 
     @_lmcache_nvtx_annotate
