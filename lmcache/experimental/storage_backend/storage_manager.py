@@ -24,6 +24,8 @@ from lmcache.experimental.storage_backend.naive_serde.kivi_serde import (
 
 logger = init_logger(__name__)
 
+BITS = 2
+
 @dataclass
 class KVDecision:
     device: str
@@ -32,12 +34,25 @@ class KVDecision:
 
 # TODO(Shaoting): add freqency estimator
 class KVCacheManager:
-    def __init__(self):
-        self.method = "baseline_KIVI" # NOTE(Shaoting): policy define here
+    def __init__(self, hot_cache: OrderedDict[CacheEngineKey, MemoryObj]):
+        # NOTE(Shaoting): policy related variables define here
+        self.method = "baseline_KIVI" 
+        self.rate = 1
+        self.cpu_size = 5368709120 * 2
 
-    def inform_new(self, size, quality_table):
-        # TODO(Shaoting): add real manager logics
-        return KVDecision("disk", "kivi", 1), []
+        self.hot_cache = hot_cache
+
+    def inform_new(self, key: CacheEngineKey):
+        size = key.metadata.length
+        # TODO(Shaoting): add other manager logics
+        if self.method == "baseline_KIVI":
+            size_kv_cpu = sum(key.metadata.rate * key.metadata.length for key in self.hot_cache.keys())
+            if size_kv_cpu + size > self.cpu_size:
+                return KVDecision("disk", "none", self.rate), []
+            else:
+                return KVDecision("cpu", "none", self.rate), []
+
+        return KVDecision("cpu", "kivi", 1), []
 
 # TODO: extend this class to implement caching policies and eviction policies
 class StorageManager:
@@ -74,7 +89,7 @@ class StorageManager:
 
         self.stream = torch.cuda.Stream()
 
-        self.manager = KVCacheManager()
+        self.manager = KVCacheManager(self.hot_cache)
 
     def allocate(
         self,
@@ -135,17 +150,18 @@ class StorageManager:
 
         self.manager_lock.acquire()
 
-        current_kv_decision, update_decision = self.manager.inform_new(key, memory_obj)
+        current_kv_decision, update_decision = self.manager.inform_new(key)
         
         # TODO(Shaoting): update_decision yet to handle
+        # should be in a separate thread: thread 1, decode; thread 2, update and store
 
         # TODO(Shaoting): compress memory_obj with cachegen and streamingllm
         if current_kv_decision.compression_method == "cachegen":
             pass
         elif current_kv_decision.compression_method == "kivi":
-            # TODO(Shaoting): KV Cache that's less than 256 tokens will get larger
+            # NOTE(Shaoting): KV Cache that's less than 256 tokens will have no compression
             # Update memory obj
-            compressed_memory_obj = self.kivi_ser.serialize(memory_obj)
+            compressed_memory_obj = self.kivi_ser.serialize(memory_obj, BITS)
             self.memory_allocator.ref_count_down(memory_obj)
             blank_memory_obj = self.memory_allocator.allocate(
                 compressed_memory_obj.get_shape(),
@@ -312,7 +328,7 @@ class StorageManager:
             if old_key.metadata.method == "kivi":  
                 bytes_obj = BytesBufferMemoryObj(memory_obj.raw_data)
                 self.memory_allocator.ref_count_down(memory_obj)
-                memory_obj = self.kivi_de.deserialize(bytes_obj)
+                memory_obj = self.kivi_de.deserialize(bytes_obj, BITS)
 
             return memory_obj
 
@@ -333,7 +349,7 @@ class StorageManager:
                 if new_key.metadata.method == "kivi":  
                     bytes_obj = BytesBufferMemoryObj(memory_obj.raw_data)
                     self.memory_allocator.ref_count_down(memory_obj)
-                    memory_obj = self.kivi_de.deserialize(bytes_obj)               
+                    memory_obj = self.kivi_de.deserialize(bytes_obj, BITS)               
 
                 return memory_obj
 

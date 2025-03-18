@@ -72,8 +72,7 @@ class KIVISerializer(Serializer):
         self.num_heads = 8
         self.head_size = 128
         self.group_size = 32
-        self.bits = 4
-    def serialize(self, memory_obj: MemoryObj) -> MemoryObj:
+    def serialize(self, memory_obj: MemoryObj, bits: int = 4) -> MemoryObj:
         assert memory_obj.tensor is not None
         # NOTE(Shaoting): KIVI compression needs cuda
         t = memory_obj.tensor.cuda()
@@ -85,8 +84,8 @@ class KIVISerializer(Serializer):
             if rounded_len > 0:
                 rounded_k = k[..., :rounded_len, :]
                 rounded_v = v[..., :rounded_len, :]
-                quant_k_triton, k_scale_triton, k_min_triton = triton_quantize_and_pack_along_last_dim(rounded_k.transpose(2, 3).contiguous(), self.group_size, self.bits)
-                quant_v_triton, v_scale_triton, v_min_triton = triton_quantize_and_pack_along_last_dim(rounded_v.contiguous(), self.group_size, self.bits)
+                quant_k_triton, k_scale_triton, k_min_triton = triton_quantize_and_pack_along_last_dim(rounded_k.transpose(2, 3).contiguous(), self.group_size, bits)
+                quant_v_triton, v_scale_triton, v_min_triton = triton_quantize_and_pack_along_last_dim(rounded_v.contiguous(), self.group_size, bits)
                 
                 quant_k = quant_k_triton.permute(0, 1, 3, 2)
                 k_scale  = k_scale_triton.permute(0, 1, 3, 2).reshape((k_scale_triton.shape[0], k_scale_triton.shape[1], k_scale_triton.shape[-1], 1, k_scale_triton.shape[2])) 
@@ -126,10 +125,9 @@ class KIVIDeserializer(Deserializer):
         self.memory_allocator = memory_allocator
         self.residual = 128
         self.group_size = 32
-        self.bits = 4
     @_lmcache_nvtx_annotate
-    def deserialize(self, memory_obj: MemoryObj) -> MemoryObj:
-        # TODO(Yuhan)
+    def deserialize(self, memory_obj: MemoryObj, bits: int = 4) -> MemoryObj:
+        # TODO(Shaoting): Definitely need to speed up
         with io.BytesIO(memory_obj.byte_array) as f:
             compressed_dict = torch.load(f)
         ks = []
@@ -145,8 +143,8 @@ class KIVIDeserializer(Deserializer):
             residual_k = compressed_dict[layer]["residual_k"]
             residual_v = compressed_dict[layer]["residual_v"]
             if quant_k is not None:
-                dequant_k = unpack_and_dequant_kcache(quant_k, k_scale, k_min, self.group_size, self.bits)
-                dequant_v = unpack_and_dequant_vcache(quant_v, v_scale, v_min, self.group_size, self.bits)
+                dequant_k = unpack_and_dequant_kcache(quant_k, k_scale, k_min, self.group_size, bits)
+                dequant_v = unpack_and_dequant_vcache(quant_v, v_scale, v_min, self.group_size, bits)
                 
                 if residual_k is not None:
                     dequant_k = torch.cat((dequant_k, residual_k), dim=-2)

@@ -45,6 +45,8 @@ class TokenDatabase(metaclass=abc.ABCMeta):
 def hash_all_tokens(tokens: torch.Tensor) -> str:
     return hashlib.sha256(tokens.cpu().numpy().tobytes()).hexdigest()
 
+SCORE_TABLE = [(1,1), (0.6, 0.95), (0.3, 0.9), (0.2, 0.85), (0, 0)]
+
 class ChunkedTokenDatabase(TokenDatabase):
 
     def __init__(self, config: LMCacheEngineConfig,
@@ -53,11 +55,12 @@ class ChunkedTokenDatabase(TokenDatabase):
         self.metadata = metadata
 
     # TODO(Shaoting): Add real score table
+    # NOTE(Shaoting): For 7006 tokens, TTFT: prefill (1.511s), cpu (0.0876s), disk (0.2814s)
     def _make_key_by_hash(self, chunk_hash: str, total_hashes: str, token_len: int) -> CacheEngineKey:
         return CacheEngineKey(self.metadata.fmt, self.metadata.model_name,
                               self.metadata.world_size,
                               self.metadata.worker_id, chunk_hash,
-                              CacheManagerMetadata([total_hashes], "none", 1, token_len, [[(1,1), (0.8, 0.8), (0.6, 0.6), (0.4, 0.4), (0.2, 0.2), (0, 0)]]))
+                              CacheManagerMetadata([total_hashes], "none", 1, token_len, [SCORE_TABLE]))
 
     def _get_init_hash(self) -> str:
         return ""
