@@ -34,9 +34,10 @@ TORCH_DTYPE_TO_STR_DTYPE = {
 @dataclass
 class CacheManagerMetadata:
     context_id: List[str]
-    method: str
+    method: List[str] # NOTE(Shaoting): If one chunk have different method, choose the first one. Method here is pre-chosen by offline profiling.
     rate: float
     length: float # whole context's KV in bytes
+    # TODO(Shaoting): "length" in token_database.py is the number of all tokens in a context; "length" in the system is the chunk bytes size
     score_table: List[List[Tuple[float, float]]] # a list of score tables for each context, each table is a list of (rate, score) pairs
 
 @dataclass(order=True)
@@ -78,7 +79,7 @@ class CacheEngineKey:
         if len(parts) != 5:
             raise ValueError(f"Invalid key string: {s}")
         return CacheEngineKey(parts[0], parts[1], int(parts[2]), int(parts[3]),
-                              parts[4], CacheManagerMetadata([], "", 0.0, 0.0, []))
+                              parts[4], CacheManagerMetadata([], [], 0.0, 0.0, []))
 
 
 ##### NVTX annotation #####

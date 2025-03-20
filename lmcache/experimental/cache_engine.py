@@ -112,7 +112,6 @@ class LMCacheEngine:
 
             self.gpu_connector.from_gpu(memory_obj, start, end, **kwargs)
             self.storage_manager.put(key, memory_obj)
-        print(self.storage_manager.hot_cache)
         self.stats_monitor.on_store_finished(monitor_req_id)
 
     @_lmcache_nvtx_annotate
