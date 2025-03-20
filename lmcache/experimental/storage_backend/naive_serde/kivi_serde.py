@@ -127,7 +127,7 @@ class KIVIDeserializer(Deserializer):
         self.group_size = 32
     @_lmcache_nvtx_annotate
     def deserialize(self, memory_obj: MemoryObj, bits: int = 4) -> MemoryObj:
-        # TODO(Shaoting): Definitely need to speed up
+        # TODO(Shaoting): potential to speed up
         with io.BytesIO(memory_obj.byte_array) as f:
             compressed_dict = torch.load(f)
         ks = []
