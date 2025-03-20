@@ -88,13 +88,16 @@ class StorageManager:
             evict_keys.append(evict_key)
             self.memory_allocator.ref_count_down(self.hot_cache[evict_key])
             memory_obj = self.memory_allocator.allocate(shape, dtype)
-            logger.debug("Evicting 1 chunk from hot cache")
+            # logger.debug("Evicting 1 chunk from hot cache")
             if memory_obj is not None:
                 break
             # TODO(Jiayi): move this before the loop
             # In this way, we don't need to do eviction for big objects
             # TODO(Jiayi): the following code is hacky, please refactor
             if self.memory_allocator.pin_allocator.num_active_allocations == 0:
+                logger.debug(
+                    "No active allocations in pin allocator, "
+                    "skip eviction for hot cache")
                 break
         for evict_key in evict_keys:
             self.hot_cache.pop(evict_key)

@@ -406,9 +406,9 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
             if block.size >= aligned_size:
                 break
         else:
-            logger.warning(f"Failed to allocate memory for "
-                           f"tensor({shape}, {dtype}) because "
-                           "no memory is available")
+            # logger.warning(f"Failed to allocate memory for "
+            #                f"tensor({shape}, {dtype}) because "
+            #                "no memory is available")
             return None
 
         # Do not add the block back if `block.size == aligned_size`
@@ -425,6 +425,10 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         self.stats_monitor.update_local_cache_usage(self.total_allocated_size)
 
         # Allocate the block
+        # logger.debug("Successfully allocated memory for "
+        #             f"tensor({shape}, {dtype}) at "
+        #             f"address {block.start} with size "
+        #             f"{aligned_size} bytes")
         return TensorMemoryObj(
             raw_data=self.buffer[block.start:block.start + raw_size],
             metadata=MemoryObjMetadata(shape, dtype, block.start, aligned_size,
