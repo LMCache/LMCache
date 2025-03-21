@@ -52,8 +52,8 @@ class LMCacheEngine:
         metadata: LMCacheEngineMetadata,
         memory_allocator: MemoryAllocatorInterface,
         token_database: TokenDatabase,
-        gpu_connector: GPUConnectorInterface,
-        dram_connector: DramConnectorInterface,
+        gpu_connector: Optional[GPUConnectorInterface],
+        dram_connector: Optional[DramConnectorInterface],
     ):
         self.config = config
         self.metadata = metadata
@@ -96,7 +96,7 @@ class LMCacheEngine:
     def store(self,
               tokens: torch.Tensor,
               mask: Optional[torch.Tensor] = None,
-              **kwargs) -> List[str]:
+              **kwargs) -> List[CacheEngineKey]:
         """Store the tokens and mask into the cache engine.
 
         :param torch.Tensor tokens: The tokens of the corresponding KV caches.
@@ -119,7 +119,7 @@ class LMCacheEngine:
                 torch.sum(mask))
         else:
             monitor_req_id = self.stats_monitor.on_store_request(len(tokens))
-            
+
         prefix_hash = kwargs.get('prefix_hash', None)
         hash_keys = list()
 
@@ -129,9 +129,9 @@ class LMCacheEngine:
                 continue
             # Allocate the memory object
             num_tokens = end - start
-            if self.connection == 'gpu':
+            if self.gpu_connector is not None:
                 kv_shape = self.gpu_connector.get_shape(num_tokens)
-            else:
+            elif self.dram_connector is not None:
                 kv_shape = self.dram_connector.get_shape(num_tokens)
             kv_dtype = self.metadata.kv_dtype
             memory_obj = self.storage_manager.allocate(kv_shape, kv_dtype)
@@ -144,16 +144,16 @@ class LMCacheEngine:
             # Disabling put_queue for now, as it's not necessary
             # and bringing big overhead
             # self.put_queue.put((key, memory_obj, start, end, kwargs))
-            if self.connection == 'gpu':
+            if self.gpu_connector is not None:
                 self.gpu_connector.from_gpu(memory_obj, start, end, **kwargs)
-            else:
+            elif self.dram_connector is not None:
                 self.dram_connector.from_dram(memory_obj, start, end, **kwargs)
             self.storage_manager.put(key, memory_obj)
 
             # Update lookup server
             if self.lookup_server is not None:
                 self.lookup_server.insert(key)
-            
+
             hash_keys.append(key)
 
         self.stats_monitor.on_store_finished(monitor_req_id)
@@ -216,29 +216,25 @@ class LMCacheEngine:
             # cpu tensor for the sake of performance.
             # For example, disk->gpu is faster than disk->cpu->gpu.
             # RDMA is another example.
-            if self.connection == 'gpu':
+            if self.gpu_connector is not None:
                 self.gpu_connector.to_gpu(memory_obj, start, end, **kwargs)
-            else:
+            elif self.dram_connector is not None:
                 self.dram_connector.to_dram(memory_obj, start, end, **kwargs)
             self.memory_allocator.ref_count_down(memory_obj)
 
         self.stats_monitor.on_retrieve_finished(monitor_req_id,
                                                 torch.sum(ret_mask))
         return ret_mask
-    
+
     @_lmcache_nvtx_annotate
     @torch.inference_mode()
-    def hash_store(self,
-                 keys: List[CacheEngineKey],
-                 **kwargs) -> List[str]:
+    def hash_store(self, keys: List[CacheEngineKey],
+                   **kwargs) -> List[CacheEngineKey]:
         """
         TODO:ADD MORE DOCS
         """
-        if mask is not None:
-            monitor_req_id = self.stats_monitor.on_store_request(
-                torch.sum(mask))
-        else:
-            monitor_req_id = self.stats_monitor.on_store_request(len(tokens))
+        monitor_req_id = self.stats_monitor.on_store_request(
+            len(keys) * self.config.chunk_size)
         if self.connection == 'gpu':
             raise ValueError("hash_store is not supported for GPU connection.")
         chunk_size = self.config.chunk_size
@@ -246,6 +242,9 @@ class LMCacheEngine:
         for i, key in enumerate(keys):
             if self.storage_manager.contains(key):
                 continue
+            if self.dram_connector is None:
+                raise ValueError(
+                    "hash_store is only supported for DRAM connection.")
             kv_shape = self.dram_connector.get_shape(chunk_size)
             kv_dtype = self.metadata.kv_dtype
             memory_obj = self.storage_manager.allocate(kv_shape, kv_dtype)
@@ -253,23 +252,26 @@ class LMCacheEngine:
                 logger.warning("Failed to allocate memory for the KV cache.\n"
                                "The KV cache will not be stored.")
                 break
-            self.dram_connector.from_dram(memory_obj, start, start + chunk_size, **kwargs)
+            self.dram_connector.from_dram(memory_obj, start,
+                                          start + chunk_size, **kwargs)
             self.storage_manager.put(key, memory_obj)
-            self.memory_allocator.ref_count_down(memory_obj)
-            
+            start += chunk_size
+
         self.stats_monitor.on_store_finished(monitor_req_id)
         return keys
-                 
+
     @_lmcache_nvtx_annotate
     @torch.inference_mode()
-    def hash_retrieve(self,
-                 keys: List[CacheEngineKey],
-                 **kwargs) -> torch.Tensor:
+    def hash_retrieve(self, keys: List[CacheEngineKey],
+                      **kwargs) -> torch.Tensor:
         """
         TODO: ADD MORE DOCS
         """
+        monitor_req_id = self.stats_monitor.on_retrieve_request(
+            len(keys) * self.config.chunk_size)
         if self.connection == 'gpu':
-            raise ValueError("hash_retrieve is not supported for GPU connection.")
+            raise ValueError(
+                "hash_retrieve is not supported for GPU connection.")
         ret_mask = torch.zeros(len(keys), dtype=torch.bool, device="cpu")
         chunk_size = self.config.chunk_size
         start = 0
@@ -278,10 +280,14 @@ class LMCacheEngine:
             if memory_obj is None:
                 break
             ret_mask[i] = True
-            self.dram_connector.to_dram(memory_obj, start, start + chunk_size, **kwargs)
+            if self.dram_connector is None:
+                raise ValueError(
+                    "hash_retrieve is only supported for DRAM connection.")
+            self.dram_connector.to_dram(memory_obj, start, start + chunk_size,
+                                        **kwargs)
             start += chunk_size
             self.memory_allocator.ref_count_down(memory_obj)
-        
+
         return ret_mask
 
     def prefetch(
@@ -318,15 +324,16 @@ class LMCacheEngine:
             if not self.storage_manager.contains(key, search_range):
                 return start
         return end
-    
+
     def get_hash(
         self,
         tokens: torch.Tensor,
         mask: Optional[torch.Tensor] = None,
         prefix_hash: Optional[str] = None,
-    ) -> List[str]:
+    ) -> List[CacheEngineKey]:
         ret = []
-        for start, end, key in self.token_database.process_tokens(tokens, mask, prefix_hash):
+        for start, end, key in self.token_database.process_tokens(
+                tokens, mask, prefix_hash):
             ret.append(key)
         return ret
 

@@ -61,9 +61,11 @@ class SGLangDramNestedConnector(DramConnectorInterface):
 
         if "kvcaches" not in kwargs:
             raise ValueError("'kvcaches' should be provided in kwargs.")
-        
+
         if "retrieve_status" not in kwargs:
-            raise ValueError("'retrieve_status' should be provided in kwargs for sglang support")
+            raise ValueError(
+                "'retrieve_status' should be provided in kwargs for sglang support"
+            )
 
         kvcaches = kwargs["kvcaches"]
         retrieve_status = kwargs["retrieve_status"]
@@ -75,18 +77,19 @@ class SGLangDramNestedConnector(DramConnectorInterface):
                 -1, *hidden_shape))
             v[start:end].copy_(memory_obj.tensor[1, layer_id].reshape(
                 -1, *hidden_shape))
-        
+
         retrieve_status[start // self.chunk_size] = 0
-        
 
     def from_dram(self, memory_obj: MemoryObj, start: int, end: int, **kwargs):
         assert memory_obj.tensor is not None
 
         if "kvcaches" not in kwargs:
             raise ValueError("'kvcaches' should be provided in kwargs.")
-        
+
         if "store_status" not in kwargs:
-            raise ValueError("'store_status' should be provided in kwargs for sglang support")
+            raise ValueError(
+                "'store_status' should be provided in kwargs for sglang support"
+            )
 
         kvcaches = kwargs["kvcaches"]
         store_status = kwargs["store_status"]
@@ -98,7 +101,7 @@ class SGLangDramNestedConnector(DramConnectorInterface):
                 k[start:end])
             memory_obj.tensor[1, layer_id].reshape(-1, *hidden_shape).copy_(
                 v[start:end])
-            
+
         store_status[start // self.chunk_size] = 0
 
     def get_shape(self, num_tokens: int) -> torch.Size:

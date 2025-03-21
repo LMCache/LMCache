@@ -95,9 +95,8 @@ class StorageManager:
             # In this way, we don't need to do eviction for big objects
             # TODO(Jiayi): the following code is hacky, please refactor
             if self.memory_allocator.pin_allocator.num_active_allocations == 0:
-                logger.debug(
-                    "No active allocations in pin allocator, "
-                    "skip eviction for hot cache")
+                logger.debug("No active allocations in pin allocator, "
+                             "skip eviction for hot cache")
                 break
         for evict_key in evict_keys:
             self.hot_cache.pop(evict_key)

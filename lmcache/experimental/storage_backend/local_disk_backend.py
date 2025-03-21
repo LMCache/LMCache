@@ -46,7 +46,8 @@ class LocalDiskBackend(StorageBackendInterface):
         elif 'metadata_dict.pkl' in os.listdir(self.path):
             with open(os.path.join(self.path, 'metadata_dict.pkl'), 'rb') as f:
                 self.dict = pickle.load(f)
-            logger.info(f"Loaded existing metadata dictionary from: {self.path}")
+            logger.info(
+                f"Loaded existing metadata dictionary from: {self.path}")
 
         self.lookup_server = lookup_server
 
@@ -265,8 +266,9 @@ class LocalDiskBackend(StorageBackendInterface):
             self.disk_lock.acquire()
             self.lookup_server.batched_remove(list(self.dict.keys()))
             self.disk_lock.release()
-            
+
         # store the self.dict to disk
-        logger.debug("Closing LocalDiskBackend and storing the self.dict to disk.")
+        logger.debug(
+            "Closing LocalDiskBackend and storing the self.dict to disk.")
         with open(os.path.join(self.path, 'metadata_dict.pkl'), 'wb') as f:
             pickle.dump(self.dict, f)

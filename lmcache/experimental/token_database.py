@@ -24,6 +24,7 @@ class TokenDatabase(metaclass=abc.ABCMeta):
         self,
         tokens: torch.Tensor,
         mask: Optional[torch.Tensor] = None,
+        prefix_hash: Optional[str] = None,
     ) -> Iterable[Tuple[int, int, CacheEngineKey]]:
         """Process the tokens and return the corresponding cache engine keys.
 
