@@ -28,8 +28,11 @@ extensions = [
     "sphinx.ext.githubpages",
     "sphinx.ext.viewcode",
     "sphinx.ext.napoleon",
+    "sphinx_copybutton",
 ]
 
+copybutton_prompt_text = r"^(\$ |>>> |\# )"
+copybutton_prompt_is_regexp = True
 
 class MockedClassDocumenter(autodoc.ClassDocumenter):
     """Remove note about base class when a class is 

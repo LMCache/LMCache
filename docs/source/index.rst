@@ -9,11 +9,18 @@
 Welcome to LMCache!
 =====================
 
-.. figure:: https://people.cs.uchicago.edu/~junchenj/docs/lmcache-logo.png
+.. figure:: ./assets/lmcache-logo_crop.png
   :width: 60%
   :align: center
   :alt: LMCache
   :class: no-scaled-link
+
+.. raw:: html
+
+   <p style="text-align:center; font-size:24px;">
+   <strong> Redis for LLMs. </strong>
+   </p>
+
 
 .. raw:: html
 
