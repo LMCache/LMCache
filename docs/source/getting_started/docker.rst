@@ -35,6 +35,7 @@ Running the Docker Container
 
     IMAGE=<IMAGE_NAME>:<TAG>
     docker run --runtime nvidia --gpus all \
+        --privileged=true \
         --env "HF_TOKEN=<YOUR_HUGGINGFACE_TOKEN>" \
         --env "LMCACHE_USE_EXPERIMENTAL=True" \
         --env "chunk_size=256" \
