@@ -46,9 +46,10 @@ class DramConnectorInterface(abc.ABC):
 
 class SGLangDramNestedConnector(DramConnectorInterface):
 
-    def __init__(self, hidden_dim_size: int, num_layers: int):
+    def __init__(self, hidden_dim_size: int, num_layers: int, chunk_size: int):
         self.hidden_dim_size = hidden_dim_size
         self.num_layers = num_layers
+        self.chunk_size = chunk_size
 
     def to_dram(self, memory_obj: MemoryObj, start: int, end: int, **kwargs):
         assert memory_obj.tensor is not None
@@ -60,8 +61,12 @@ class SGLangDramNestedConnector(DramConnectorInterface):
 
         if "kvcaches" not in kwargs:
             raise ValueError("'kvcaches' should be provided in kwargs.")
+        
+        if "retrieve_status" not in kwargs:
+            raise ValueError("'retrieve_status' should be provided in kwargs for sglang support")
 
         kvcaches = kwargs["kvcaches"]
+        retrieve_status = kwargs["retrieve_status"]
         keys, values = kvcaches
         for layer_id, layer in enumerate(zip(keys, values)):
             k, v = layer
@@ -70,14 +75,21 @@ class SGLangDramNestedConnector(DramConnectorInterface):
                 -1, *hidden_shape))
             v[start:end].copy_(memory_obj.tensor[1, layer_id].reshape(
                 -1, *hidden_shape))
+        
+        retrieve_status[start // self.chunk_size] = 0
+        
 
     def from_dram(self, memory_obj: MemoryObj, start: int, end: int, **kwargs):
         assert memory_obj.tensor is not None
 
         if "kvcaches" not in kwargs:
             raise ValueError("'kvcaches' should be provided in kwargs.")
+        
+        if "store_status" not in kwargs:
+            raise ValueError("'store_status' should be provided in kwargs for sglang support")
 
         kvcaches = kwargs["kvcaches"]
+        store_status = kwargs["store_status"]
         keys, values = kvcaches
         for layer_id, layer in enumerate(zip(keys, values)):
             k, v = layer
@@ -86,6 +98,8 @@ class SGLangDramNestedConnector(DramConnectorInterface):
                 k[start:end])
             memory_obj.tensor[1, layer_id].reshape(-1, *hidden_shape).copy_(
                 v[start:end])
+            
+        store_status[start // self.chunk_size] = 0
 
     def get_shape(self, num_tokens: int) -> torch.Size:
         return torch.Size(

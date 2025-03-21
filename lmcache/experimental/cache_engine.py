@@ -96,7 +96,7 @@ class LMCacheEngine:
     def store(self,
               tokens: torch.Tensor,
               mask: Optional[torch.Tensor] = None,
-              **kwargs) -> None:
+              **kwargs) -> List[str]:
         """Store the tokens and mask into the cache engine.
 
         :param torch.Tensor tokens: The tokens of the corresponding KV caches.
@@ -119,9 +119,12 @@ class LMCacheEngine:
                 torch.sum(mask))
         else:
             monitor_req_id = self.stats_monitor.on_store_request(len(tokens))
+            
+        prefix_hash = kwargs.get('prefix_hash', None)
+        hash_keys = list()
 
         for start, end, key in self.token_database.process_tokens(
-                tokens, mask):
+                tokens, mask, prefix_hash):
             if self.storage_manager.contains(key):
                 continue
             # Allocate the memory object
@@ -150,8 +153,11 @@ class LMCacheEngine:
             # Update lookup server
             if self.lookup_server is not None:
                 self.lookup_server.insert(key)
+            
+            hash_keys.append(key)
 
         self.stats_monitor.on_store_finished(monitor_req_id)
+        return hash_keys
 
     @_lmcache_nvtx_annotate
     @torch.inference_mode()
@@ -188,8 +194,9 @@ class LMCacheEngine:
                 len(tokens))
 
         ret_mask = torch.zeros_like(tokens, dtype=torch.bool, device="cpu")
+        prefix_hash = kwargs.get('prefix_hash', None)
         for start, end, key in self.token_database.process_tokens(
-                tokens, mask):
+                tokens, mask, prefix_hash):
 
             # Get the memory object from the storage backend
             memory_obj = self.storage_manager.get(key)
@@ -219,17 +226,40 @@ class LMCacheEngine:
                                                 torch.sum(ret_mask))
         return ret_mask
     
-    # @_lmcache_nvtx_annotate
-    # @torch.inference_mode()
-    # def store(self,
-    #              keys: List[str],
-    #              **kwargs) -> None:
-    #     """
-    #     TODO: ADD MORE DOCS
-    #     """
-        
-    #     pass
-    
+    @_lmcache_nvtx_annotate
+    @torch.inference_mode()
+    def hash_store(self,
+                 keys: List[CacheEngineKey],
+                 **kwargs) -> List[str]:
+        """
+        TODO:ADD MORE DOCS
+        """
+        if mask is not None:
+            monitor_req_id = self.stats_monitor.on_store_request(
+                torch.sum(mask))
+        else:
+            monitor_req_id = self.stats_monitor.on_store_request(len(tokens))
+        if self.connection == 'gpu':
+            raise ValueError("hash_store is not supported for GPU connection.")
+        chunk_size = self.config.chunk_size
+        start = 0
+        for i, key in enumerate(keys):
+            if self.storage_manager.contains(key):
+                continue
+            kv_shape = self.dram_connector.get_shape(chunk_size)
+            kv_dtype = self.metadata.kv_dtype
+            memory_obj = self.storage_manager.allocate(kv_shape, kv_dtype)
+            if memory_obj is None:
+                logger.warning("Failed to allocate memory for the KV cache.\n"
+                               "The KV cache will not be stored.")
+                break
+            self.dram_connector.from_dram(memory_obj, start, start + chunk_size, **kwargs)
+            self.storage_manager.put(key, memory_obj)
+            self.memory_allocator.ref_count_down(memory_obj)
+            
+        self.stats_monitor.on_store_finished(monitor_req_id)
+        return keys
+                 
     @_lmcache_nvtx_annotate
     @torch.inference_mode()
     def hash_retrieve(self,
@@ -293,9 +323,10 @@ class LMCacheEngine:
         self,
         tokens: torch.Tensor,
         mask: Optional[torch.Tensor] = None,
+        prefix_hash: Optional[str] = None,
     ) -> List[str]:
         ret = []
-        for start, end, key in self.token_database.process_tokens(tokens, mask):
+        for start, end, key in self.token_database.process_tokens(tokens, mask, prefix_hash):
             ret.append(key)
         return ret
 

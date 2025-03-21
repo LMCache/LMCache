@@ -87,8 +87,10 @@ class ChunkedTokenDatabase(TokenDatabase):
     def _prefix_hash(
         self,
         token_chunks: Iterable[torch.Tensor],
+        prefix_hash: Optional[str] = None,
     ) -> Iterable[str]:
-        prefix_hash = self._get_init_hash()
+        if prefix_hash is None:
+            prefix_hash = self._get_init_hash()
         for token_chunk in token_chunks:
             prefix_hash = self._hash(token_chunk, prefix_hash)
             yield prefix_hash
@@ -97,6 +99,7 @@ class ChunkedTokenDatabase(TokenDatabase):
         self,
         tokens: torch.Tensor,
         mask: Optional[torch.Tensor] = None,
+        prefix_hash: Optional[str] = None,
     ) -> Iterable[Tuple[int, int, CacheEngineKey]]:
         """Process the tokens and return the corresponding cache engine keys.
 
@@ -106,6 +109,9 @@ class ChunkedTokenDatabase(TokenDatabase):
             have the same length as tokens. And the mask should ALWAYS be like
             FFFFFTTTTTTT, where True means the tokens needs to be matched, 
             and the Falses will ALWAYS be at the PREFIX of the tensor.
+            
+        :param Optional[str] prefix_hash: The prefix hash for the tokens. If
+            None, the prefix hash will be empty string.
 
         :returns: A iterable of tuples with three elements. The first element
             is the start index of the tokens for the key. The second element
@@ -126,7 +132,7 @@ class ChunkedTokenDatabase(TokenDatabase):
         total_len = len(tokens)
 
         token_chunks = self._chunk_tokens(tokens)
-        prefix_hashes = self._prefix_hash(token_chunks)
+        prefix_hashes = self._prefix_hash(token_chunks, prefix_hash)
 
         start_idx = 0
         for chunk_id, hash_val in enumerate(prefix_hashes):
