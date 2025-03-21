@@ -1,14 +1,15 @@
-import os
-import torch
 import argparse
+import os
 import time
 
-from lmcache.integration.sglang.utils import ENGINE_NAME
-from lmcache.integration.sglang.sglang_adapter import (
-    init_lmcache_engine, lmcache_store_kv, lmcache_retrieve_kv, get_hash,
-    lmcache_retrieve_kv_hash)
-from lmcache.experimental.cache_engine import LMCacheEngineBuilder
+import torch
 from sglang.srt.configs.model_config import ModelConfig
+
+from lmcache.experimental.cache_engine import LMCacheEngineBuilder
+from lmcache.integration.sglang.sglang_adapter import (
+    get_hash, init_lmcache_engine, lmcache_retrieve_kv,
+    lmcache_retrieve_kv_hash, lmcache_store_kv)
+from lmcache.integration.sglang.utils import ENGINE_NAME
 
 os.environ["LMCACHE_USE_EXPERIMENTAL"] = "True"
 
@@ -21,7 +22,8 @@ def benchmark(args):
     engine = init_lmcache_engine(model_config, args.rank, args.world_size,
                                  args.tensor_parallel_size)
 
-    assert args.seq_len % args.chunk_size == 0, "seq_len should be divisible by chunk_size"
+    assert args.seq_len % args.chunk_size == 0, \
+        "seq_len should be divisible by chunk_size"
 
     # Generate random tokens
     token_pool = [
@@ -55,9 +57,8 @@ def benchmark(args):
         lmcache_store_kv(engine, token_pool[i], kv_cache[:, :, indices[i]],
                          load_status[i])
     store_latency = (time.time() - start_time) * 1000
-    print(
-        f"KV-cache storage latency: {store_latency / args.seq_num:.3f} ms per sequence"
-    )
+    print(f"KV-cache storage latency:  \
+        {store_latency / args.seq_num:.3f} ms per sequence")
     time.sleep(2)
 
     # -----------------------------------------------
@@ -69,9 +70,8 @@ def benchmark(args):
         lmcache_retrieve_kv(engine, token_pool[i], kv_cache[:, :, indices[i]],
                             retrieve_status[i])
     retrieve_latency = (time.time() - start_time) * 1000
-    print(
-        f"KV-cache retrieval latency: {retrieve_latency / args.seq_num:.3f} ms per sequence"
-    )
+    print(f"KV-cache retrieval latency: \
+        {retrieve_latency / args.seq_num:.3f} ms per sequence")
 
     # -----------------------------------------------
     # Measure Retrieval Latency Using Hash
@@ -84,9 +84,8 @@ def benchmark(args):
                                                                 indices[i]],
                                  retrieve_status[i])
     retrieve_latency_hash = (time.time() - start_time) * 1000
-    print(
-        f"KV-cache retrieval latency (hash-based): {retrieve_latency_hash / args.seq_num:.3f} ms per sequence"
-    )
+    print(f"KV-cache retrieval latency (hash-based): \
+        {retrieve_latency_hash / args.seq_num:.3f} ms per sequence")
 
     # -----------------------------------------------
     # Compute Throughput
@@ -95,9 +94,8 @@ def benchmark(args):
     throughput_hash = args.seq_num / (retrieve_latency_hash / 1000)
 
     print(f"KV-cache retrieval throughput: {throughput:.2f} sequences/s")
-    print(
-        f"KV-cache retrieval throughput (hash-based): {throughput_hash:.2f} sequences/s"
-    )
+    print(f"KV-cache retrieval throughput (hash-based): \
+        {throughput_hash:.2f} sequences/s")
 
     # Clean up
     LMCacheEngineBuilder.destroy(ENGINE_NAME)

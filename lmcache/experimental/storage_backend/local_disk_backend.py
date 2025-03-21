@@ -1,10 +1,10 @@
 import asyncio
 import os
+import pickle
 import threading
 from collections import OrderedDict
 from concurrent.futures import Future
 from typing import List, Optional
-import pickle
 
 import aiofiles
 import torch

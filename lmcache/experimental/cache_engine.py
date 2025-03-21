@@ -8,8 +8,8 @@ from lmcache.config import LMCacheEngineMetadata
 from lmcache.experimental.config import LMCacheEngineConfig
 from lmcache.experimental.distributed_server import (
     DistributedServerInterface, NaiveDistributedServer)
-from lmcache.experimental.gpu_connector import GPUConnectorInterface
 from lmcache.experimental.dram_connector import DramConnectorInterface
+from lmcache.experimental.gpu_connector import GPUConnectorInterface
 from lmcache.experimental.lookup_server import (LookupServerInterface,
                                                 RedisLookupServer)
 from lmcache.experimental.memory_management import (MemoryAllocatorInterface,
@@ -20,7 +20,7 @@ from lmcache.experimental.token_database import (ChunkedTokenDatabase,
 from lmcache.logging import init_logger
 from lmcache.observability import LMCacheStatsLogger, LMCStatsMonitor
 from lmcache.usage_context import InitializeUsageContext
-from lmcache.utils import _lmcache_nvtx_annotate, CacheEngineKey
+from lmcache.utils import CacheEngineKey, _lmcache_nvtx_annotate
 
 logger = init_logger(__name__)
 
@@ -287,7 +287,7 @@ class LMCacheEngine:
                                         **kwargs)
             start += chunk_size
             self.memory_allocator.ref_count_down(memory_obj)
-
+        self.stats_monitor.on_store_finished(monitor_req_id)
         return ret_mask
 
     def prefetch(
