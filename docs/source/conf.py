@@ -34,6 +34,7 @@ extensions = [
 copybutton_prompt_text = r"^(\$ |>>> |\# )"
 copybutton_prompt_is_regexp = True
 
+
 class MockedClassDocumenter(autodoc.ClassDocumenter):
     """Remove note about base class when a class is 
     derived from object."""
