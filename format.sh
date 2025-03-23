@@ -108,7 +108,7 @@ else
 fi
 echo 'lmcache yapf: Done'
 
-# Run mypy
+Run mypy
 echo 'lmcache mypy:'
 mypy
 mypy lmcache --follow-imports skip
