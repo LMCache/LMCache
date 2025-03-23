@@ -279,7 +279,7 @@ class LMCacheEngine:
             memory_obj = self.storage_manager.get(key)
             if memory_obj is None:
                 break
-            ret_mask[i] = True
+            ret_mask[i * chunk_size:(i + 1) * chunk_size] = True
             if self.dram_connector is None:
                 raise ValueError(
                     "hash_retrieve is only supported for DRAM connection.")
@@ -287,7 +287,8 @@ class LMCacheEngine:
                                         **kwargs)
             start += chunk_size
             self.memory_allocator.ref_count_down(memory_obj)
-        self.stats_monitor.on_store_finished(monitor_req_id)
+        self.stats_monitor.on_retrieve_finished(monitor_req_id,
+                                                torch.sum(ret_mask))
         return ret_mask
 
     def prefetch(

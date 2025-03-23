@@ -85,6 +85,8 @@ def get_hash(
     """
     if prefix_hash is not None:
         prefix_chunk_hash = prefix_hash.chunk_hash
+    else:
+        prefix_chunk_hash = None
     return engine.get_hash(token_ids, mask=mask, prefix_hash=prefix_chunk_hash)
 
 
@@ -110,6 +112,8 @@ def lmcache_store_kv(
                         ] * (len(token_ids) // engine.config.chunk_size)
     if prefix_hash is not None:
         prefix_chunk_hash = prefix_hash.chunk_hash
+    else:
+        prefix_chunk_hash = None
     return engine.store(token_ids,
                         mask=None,
                         kvcaches=kv_caches,
@@ -139,6 +143,8 @@ def lmcache_retrieve_kv(
                            ] * (len(token_ids) // engine.config.chunk_size)
     if prefix_hash is not None:
         prefix_chunk_hash = prefix_hash.chunk_hash
+    else:
+        prefix_chunk_hash = None
     engine.retrieve(token_ids,
                     mask=None,
                     kvcaches=kv_caches,
