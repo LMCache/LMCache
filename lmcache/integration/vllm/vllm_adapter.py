@@ -566,6 +566,10 @@ def lmcache_store_kv(
                     f"and then stores {stored_token_num} tokens")
             seq_data_idx += 1
 
+def lmcache_update_kv() -> None:
+    engine = LMCacheEngineBuilder.get(ENGINE_NAME)
+    engine.update()
+
 
 @_lmcache_nvtx_annotate
 def lmcache_retrieve_kv(

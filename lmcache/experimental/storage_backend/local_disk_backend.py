@@ -154,10 +154,11 @@ class LocalDiskBackend(StorageBackendInterface):
             return None, key
         
         # Update key
-        old_key.metadata.context_id.append(key.metadata.context_id[0])
-        old_key.metadata.method.append(key.metadata.method[0])
-        old_key.metadata.score_table.append(key.metadata.score_table[0])
-        self.dict[old_key] = self.dict.pop(key)
+        if key.metadata.context_id[0] not in old_key.metadata.context_id: 
+            old_key.metadata.context_id.append(key.metadata.context_id[0])
+            old_key.metadata.method.append(key.metadata.method[0])
+            old_key.metadata.score_table.append(key.metadata.score_table[0])
+            self.dict[old_key] = self.dict.pop(key)
 
         # # Update cache recency
         # self.evictor.update_on_hit(key, self.dict)

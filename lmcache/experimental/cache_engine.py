@@ -111,8 +111,11 @@ class LMCacheEngine:
             # self.put_queue.put((key, memory_obj, start, end, kwargs))
 
             self.gpu_connector.from_gpu(memory_obj, start, end, **kwargs)
-            self.storage_manager.put(key, memory_obj)
+            self.storage_manager.put_in_queue(key, memory_obj)
         self.stats_monitor.on_store_finished(monitor_req_id)
+
+    def update(self) -> None:
+        self.storage_manager.update()
 
     @_lmcache_nvtx_annotate
     @torch.inference_mode()

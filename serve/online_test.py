@@ -12,13 +12,14 @@ from typing import Tuple
 import openai
 import pandas as pd
 
-NUM_QUERY = 100
-MODEL = "mistralai/Mistral-7B-Instruct-v0.2"
+NUM_QUERY = 2
+MODEL = "meta-llama/Llama-3.1-8B-Instruct"
 PORT = 8000
 FILES = [
     '/home/ubuntu/shaotingf/LMCache/serve/dataset/qmsum.csv'
 ]
-DEBUG = False
+FILE_TYPE = "sum" # or "qa"
+PREFILL_ONLY = True
 
 dataset_entries = 0
 
@@ -28,6 +29,8 @@ def generate_workload_trace(trace_files, num_query):
     for file_path in trace_files:
         # Read CSV file
         df = pd.read_csv(file_path)
+
+        df = df.head(3)
 
         global dataset_entries
         dataset_entries += len(df)
@@ -45,11 +48,7 @@ def generate_workload_trace(trace_files, num_query):
     
     # Generate the workload trace by sampling with replacement
     run_workload_trace = df_all.sample(n=num_query, replace=True, random_state=42)
-
-    if not DEBUG:
-        workload_trace = pd.concat([df_all, run_workload_trace]).reset_index(drop=True)
-    else:
-        workload_trace = pd.concat([run_workload_trace, run_workload_trace]).reset_index(drop=True)
+    workload_trace = pd.concat([df_all, run_workload_trace]).reset_index(drop=True)
 
     return workload_trace
 
@@ -61,18 +60,34 @@ def execute_openai_request_with_output(row, model: str, client: openai.Client) -
     """
 
     # Build the prompt using your template
-    prompt = (
-        "Answer the question based on the given passages. Only give me the answer and do not output any other words. "
-        "\n\nThe following are given passages."
-        f"{row.context}"
-    )
+
+    if FILE_TYPE == "qa":
+        prompt = (
+            "Answer the question based on the given passages. Only give me the answer and do not output any other words. Answer within 10 words."
+            "\n\nThe following are given passages."
+            f"{row.context}"
+        )
+    elif FILE_TYPE == "sum":
+        prompt = (
+            "Answer the question based on the given passages. Only give me the answer and do not output any other words."
+            "\n\nThe following are given passages."
+            f"{row.context}"
+        )
+
     # If there's a question column and it is non-empty, append the question prompt
     if hasattr(row, 'question') and row.question.strip():
-        prompt += (
-            "\n\nAnswer the question based on the given passages. "
-            "Answer the question precisely. Do NOT repeat the question or output any other words. "
-            f"Question: {row.question.strip()}\nAnswer:"
-        )
+        if FILE_TYPE == "qa":
+            prompt += (
+                "\n\nAnswer the question based on the given passages. "
+                "Answer the question precisely. Answer within 10 words. Do NOT repeat the question or output any other words. "
+                f"Question: {row.question.strip()}\nAnswer:"
+            )
+        elif FILE_TYPE == "sum":
+            prompt += (
+                "\n\nAnswer the question based on the given passages. "
+                "Answer the question precisely. Do NOT repeat the question or output any other words. "
+                f"Question: {row.question.strip()}\nAnswer:"
+            )
     
     messages = [
         {
@@ -162,7 +177,8 @@ def main():
     workload_trace["throughput"] = throughputs
 
     # Delete the rows from workload_trace where ttft was -1
-    rows_to_drop = list(set(rows_to_drop) | set(range(dataset_entries)))
+    if not PREFILL_ONLY:
+        rows_to_drop = list(set(rows_to_drop) | set(range(dataset_entries)))
     workload_trace = workload_trace.drop(index=rows_to_drop)
 
     # Save the results

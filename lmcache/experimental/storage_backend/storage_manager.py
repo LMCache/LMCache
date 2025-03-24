@@ -34,9 +34,9 @@ class KVDecision:
 class KVCacheManager:
     def __init__(self, hot_cache: OrderedDict[CacheEngineKey, MemoryObj]):
         # NOTE(Shaoting): policy related variables define here
-        self.method = "ours" 
+        self.method = "disk" 
         self.rate = 1
-        self.cpu_size = 5368709120 / 20 # 10 GB
+        self.cpu_size = 5368709120 * 2 # 10 GB
 
         self.hot_cache = hot_cache
 
@@ -116,7 +116,7 @@ class KVCacheManager:
                 # TODO(Shaoting): check disk
             return KVDecision("cpu", key.metadata.method[0], new_kv_rate), final_drop_list
         else:
-            return KVDecision("cpu", "none", 1), {}
+            return KVDecision("disk", "kivi", 1), {}
 
 # TODO: extend this class to implement caching policies and eviction policies
 class StorageManager:
@@ -154,6 +154,8 @@ class StorageManager:
         self.stream = torch.cuda.Stream()
 
         self.manager = KVCacheManager(self.hot_cache)
+
+        self.update_queue: OrderedDict[CacheEngineKey, MemoryObj] = OrderedDict()
 
     def allocate(
         self,
@@ -198,6 +200,24 @@ class StorageManager:
 
         self.manager_lock.release()
         return memory_obj
+    
+    def put_in_queue(
+        self,
+        key: CacheEngineKey,
+        memory_obj: MemoryObj,
+    ) -> None:
+        """
+        Put the memory object into the queue.
+        """
+        self.update_queue[key] = memory_obj
+
+    def update(self) -> None:  
+        """
+        Update the hot cache and storage backends.
+        """
+        for key, memory_obj in self.update_queue.items():
+            self.put(key, memory_obj)
+        self.update_queue.clear()
 
     def put(
         self,
@@ -442,15 +462,16 @@ class StorageManager:
 
             # NOTE(Shaoting): didn't think about partial prefill. This may cause calculate unit quality drop to be wrong. Maybe not.
             # Update key
-            old_key.metadata.context_id.append(key.metadata.context_id[0])
-            old_key.metadata.method.append(key.metadata.method[0])
-            old_key.metadata.score_table.append(key.metadata.score_table[0])
-            self.hot_cache[old_key] = self.hot_cache.pop(key)
+            if key.metadata.context_id[0] not in old_key.metadata.context_id:
+                old_key.metadata.context_id.append(key.metadata.context_id[0])
+                old_key.metadata.method.append(key.metadata.method[0])
+                old_key.metadata.score_table.append(key.metadata.score_table[0])
+                self.hot_cache[old_key] = self.hot_cache.pop(key)
 
             self.manager_lock.release()
 
             # De-compress memory_obj
-            if old_key.metadata.method[0] == "kivi":  
+            if old_key.metadata.method[0] == "kivi" and old_key.metadata.rate != 1:  
                 bytes_obj = BytesBufferMemoryObj(memory_obj.raw_data)
                 self.memory_allocator.ref_count_down(memory_obj)
 
@@ -480,7 +501,7 @@ class StorageManager:
                 # self._update_hot_cache(new_key, memory_obj)
 
                 # De-compress memory_obj
-                if new_key.metadata.method[0] == "kivi":  
+                if new_key.metadata.method[0] == "kivi" and new_key.metadata.rate != 1:  
                     bytes_obj = BytesBufferMemoryObj(memory_obj.raw_data)
                     self.memory_allocator.ref_count_down(memory_obj)
 
