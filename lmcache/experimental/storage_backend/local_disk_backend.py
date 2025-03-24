@@ -270,5 +270,9 @@ class LocalDiskBackend(StorageBackendInterface):
         # store the self.dict to disk
         logger.debug(
             "Closing LocalDiskBackend and storing the self.dict to disk.")
-        with open(os.path.join(self.path, 'metadata_dict.pkl'), 'wb') as f:
-            pickle.dump(self.dict, f)
+        metadata_file_path = os.path.join(self.path, 'metadata_dict.pkl')
+        try:
+            with open(metadata_file_path, 'wb') as f:
+                pickle.dump(self.dict, f)
+        except Exception as e:
+            logger.debug("Failed to store metadata dictionary to disk.")
