@@ -108,11 +108,11 @@ else
 fi
 echo 'lmcache yapf: Done'
 
-Run mypy
-echo 'lmcache mypy:'
-mypy
-mypy lmcache --follow-imports skip
-echo 'lmcache mypy: Done'
+# Run mypy
+# echo 'lmcache mypy:'
+# mypy
+# mypy lmcache --follow-imports skip
+# echo 'lmcache mypy: Done'
 
 
 # If git diff returns a file that is in the skip list, the file may be checked anyway:

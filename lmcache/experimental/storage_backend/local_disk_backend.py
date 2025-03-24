@@ -276,3 +276,4 @@ class LocalDiskBackend(StorageBackendInterface):
                 pickle.dump(self.dict, f)
         except Exception as e:
             logger.debug("Failed to store metadata dictionary to disk.")
+            logger.debug(e)
