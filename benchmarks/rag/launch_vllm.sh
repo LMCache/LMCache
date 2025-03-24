@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-MODEL_NAME="mistralai/Mistral-7B-Instruct-v0.2"
-DATASET_PATH=~/CacheBlend/inputs/musique_s.json
+MODEL_NAME="casperhansen/llama-3-70b-instruct-awq"
+DATASET_PATH=input.json
 PROMPT_BUILD_METHOD=QA
 QPS=3.5
 END_INDEX=32
