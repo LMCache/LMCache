@@ -47,7 +47,7 @@ def parse_remote_url(url: str) -> ParsedRemoteURL:
         logger.error(f"Cannot parse remote_url {url} in the config")
         raise ValueError(f"Invalid remote url {url}")
 
-    connector_type, hosts_section = pattern.groups()
+    connector_type, hosts_section = m.groups()
 
     hosts = []
     ports = []
@@ -67,7 +67,8 @@ def parse_remote_url(url: str) -> ParsedRemoteURL:
         match = re.match(host_pattern, host_def, re.VERBOSE)
 
         if not match:
-            raise ValueError(f"Invalid host definition: {host_def} in URL: {url}")
+            raise ValueError(
+                f"Invalid host definition: {host_def} in URL: {url}")
 
         host = match.group(1)
         port = int(match.group(2))
@@ -89,13 +90,11 @@ def parse_remote_url(url: str) -> ParsedRemoteURL:
         paths.append(path)
         query_params.append(params_dict)
 
-    return ParsedRemoteURL(
-        connector_type=connector_type,
-        hosts=hosts,
-        ports=ports,
-        paths=paths,
-        query_params=query_params
-    )
+    return ParsedRemoteURL(connector_type=connector_type,
+                           hosts=hosts,
+                           ports=ports,
+                           paths=paths,
+                           query_params=query_params)
 
 
 def CreateConnector(
