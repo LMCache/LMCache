@@ -142,8 +142,7 @@ def CreateConnector(
                     f" {url}")
         case "infinistore":
             host, port = parsed_url.hosts[0], parsed_url.ports[0]
-            device_name = parsed_url.query_params[0].get("device", "xxx") \
-                if parsed_url.query_params else "mlx5_0"
+            device_name = parsed_url.query_params[0].get("device", "mlx5_0")
             connector = InfinistoreConnector(host, port, device_name, loop,
                                              memory_allocator)
         case _:
