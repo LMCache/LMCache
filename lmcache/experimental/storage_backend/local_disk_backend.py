@@ -3,13 +3,13 @@ import os
 import threading
 from collections import OrderedDict
 from concurrent.futures import Future
-from typing import List, Optional
+from typing import List, Optional, Tuple, Union
 
 import aiofiles
 import torch
 
 from lmcache.experimental.config import LMCacheEngineConfig
-from lmcache.experimental.memory_management import (MemoryAllocatorInterface, MemoryObj, MemoryFormat)
+from lmcache.experimental.memory_management import (MemoryAllocatorInterface, MemoryObj, MemoryFormat, BytesBufferMemoryObj)
 from lmcache.experimental.storage_backend.abstract_backend import \
     StorageBackendInterface
 from lmcache.experimental.storage_backend.evictor import LRUEvictor, PutStatus
@@ -139,7 +139,7 @@ class LocalDiskBackend(StorageBackendInterface):
     def get_blocking(
         self,
         key: CacheEngineKey,
-    ) -> Optional[MemoryObj]:
+    ) -> Tuple[Union[MemoryObj, str], CacheEngineKey]:
         """
         Blocking get function.
         """
@@ -233,14 +233,15 @@ class LocalDiskBackend(StorageBackendInterface):
         Load bytearray from disk.
         """
         if dtype == torch.int8:
-            memory_obj = self.memory_allocator.allocate(
-                shape,
-                torch.int8,
-                fmt=MemoryFormat.KV_BLOB2)
-            with open(path, 'rb') as f:
-                buffer = bytearray(f.read())
-            memory_obj.raw_data = buffer
-            memory_obj.valid = False
+
+            # file_size = os.path.getsize(path)
+            # buffer = bytearray(file_size)
+            # with open(path, 'rb') as f:
+            #     f.readinto(buffer)
+            # memory_obj = BytesBufferMemoryObj(buffer)
+            # return memory_obj
+
+            return path
         else:
             memory_obj = self.memory_allocator.allocate(shape, dtype, MemoryFormat.KV_BLOB2)
             if memory_obj is None:
@@ -249,7 +250,7 @@ class LocalDiskBackend(StorageBackendInterface):
             buffer = memory_obj.byte_array
             with open(path, 'rb') as f:
                 f.readinto(buffer)
-        return memory_obj
+            return memory_obj
 
     @_lmcache_nvtx_annotate
     @torch.inference_mode()

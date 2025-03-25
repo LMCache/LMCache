@@ -1,5 +1,6 @@
 import abc
-from typing import Optional
+from typing import Optional, Union
+from torch import Tensor
 
 from lmcache.experimental.memory_management import MemoryObj
 
@@ -23,7 +24,7 @@ class Serializer(metaclass=abc.ABCMeta):
 class Deserializer(metaclass=abc.ABCMeta):
 
     @abc.abstractmethod
-    def deserialize(self, memory_obj: MemoryObj) -> Optional[MemoryObj]:
+    def deserialize(self, memory_obj: Union[MemoryObj, str]) -> Optional[Union[MemoryObj, Tensor]]:
         """
         Deserialize/decompress the memory object.
 

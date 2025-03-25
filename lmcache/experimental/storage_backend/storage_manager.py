@@ -2,7 +2,8 @@ import asyncio
 import threading
 from collections import OrderedDict
 from concurrent.futures import Future
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
+from torch import Tensor
 
 import torch
 
@@ -116,7 +117,7 @@ class KVCacheManager:
                 # TODO(Shaoting): check disk
             return KVDecision("cpu", key.metadata.method[0], new_kv_rate), final_drop_list
         else:
-            return KVDecision("disk", "kivi", 1), {}
+            return KVDecision("cpu", "kivi", 0.3), {}
 
 # TODO: extend this class to implement caching policies and eviction policies
 class StorageManager:
@@ -425,7 +426,7 @@ class StorageManager:
                 self.memory_allocator.ref_count_up(memory_obj)
             self.manager_lock.release()
 
-    def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
+    def get(self, key: CacheEngineKey) -> Optional[Union[MemoryObj, Tensor]]:
         """
         Blocking function to get the memory object from the storages.
         """
@@ -498,12 +499,9 @@ class StorageManager:
             # NOTE(Jiayi): bypass the allocator for now
             memory_obj, new_key = backend.get_blocking(key)
             if memory_obj is not None:
-                # self._update_hot_cache(new_key, memory_obj)
 
                 # De-compress memory_obj
                 if new_key.metadata.method[0] == "kivi" and new_key.metadata.rate != 1:  
-                    bytes_obj = BytesBufferMemoryObj(memory_obj.raw_data)
-                    self.memory_allocator.ref_count_down(memory_obj)
 
                     # KIVI mapping defined here
                     if new_key.metadata.rate == 0.6:
@@ -513,7 +511,7 @@ class StorageManager:
                     elif new_key.metadata.rate == 0.2:
                         BITS = 2
 
-                    memory_obj = self.kivi_de.deserialize(bytes_obj, BITS)               
+                    memory_obj = self.kivi_de.deserialize(memory_obj, BITS)            
 
                 return memory_obj
 

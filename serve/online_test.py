@@ -12,7 +12,7 @@ from typing import Tuple
 import openai
 import pandas as pd
 
-NUM_QUERY = 2
+NUM_QUERY = 5
 MODEL = "meta-llama/Llama-3.1-8B-Instruct"
 PORT = 8000
 FILES = [
@@ -30,7 +30,7 @@ def generate_workload_trace(trace_files, num_query):
         # Read CSV file
         df = pd.read_csv(file_path)
 
-        df = df.head(3)
+        df = df.head(5)
 
         global dataset_entries
         dataset_entries += len(df)
@@ -46,9 +46,11 @@ def generate_workload_trace(trace_files, num_query):
     # Concatenate all DataFrames
     df_all = pd.concat(df_list)
     
-    # Generate the workload trace by sampling with replacement
-    run_workload_trace = df_all.sample(n=num_query, replace=True, random_state=42)
-    workload_trace = pd.concat([df_all, run_workload_trace]).reset_index(drop=True)
+    # # Generate the workload trace by sampling with replacement
+    # run_workload_trace = df_all.sample(n=num_query, replace=True, random_state=42)
+    # workload_trace = pd.concat([df_all, run_workload_trace]).reset_index(drop=True)
+
+    workload_trace = pd.concat([df_all, df_all]).reset_index(drop=True)
 
     return workload_trace
 

@@ -8,6 +8,10 @@ import io
 import torch
 import time
 from lmcache.utils import _lmcache_nvtx_annotate
+from lmcache.logging import init_logger
+from typing import Union
+
+logger = init_logger(__name__)
 
 def unpack_tensor(v_code: torch.FloatTensor, 
 				  bits: int, 
@@ -126,10 +130,14 @@ class KIVIDeserializer(Deserializer):
         self.residual = 128
         self.group_size = 32
     @_lmcache_nvtx_annotate
-    def deserialize(self, memory_obj: MemoryObj, bits: int = 4) -> MemoryObj:
-        # TODO(Shaoting): potential to speed up
-        with io.BytesIO(memory_obj.byte_array) as f:
-            compressed_dict = torch.load(f)
+    def deserialize(self, memory_obj: Union[MemoryObj, str], bits: int = 4) -> MemoryObj:
+        if isinstance(memory_obj, str):
+            with open(memory_obj, 'rb') as f:
+                compressed_dict = torch.load(f)
+        else:
+            with io.BytesIO(memory_obj.byte_array) as f:
+                compressed_dict = torch.load(f)
+
         ks = []
         vs = []
         
@@ -162,14 +170,5 @@ class KIVIDeserializer(Deserializer):
         blob = torch.cat((ks, vs), dim=0).to(torch.bfloat16)
         hidden_dim = blob.shape[-1] * blob.shape[-2]
         kv_chunk = blob.reshape(*blob.shape[:-2], hidden_dim)  # [nlayers, 2, ntokens, num_heads, head_size]
-        memory_obj = self.memory_allocator.allocate(kv_chunk.shape,
-                                                    kv_chunk.dtype,
-                                                    fmt=MemoryFormat.KV_BLOB2)
-        if memory_obj is None:
-            logger.warning("Memory allocation failed in cachegen deserializer")
-            return None
 
-        assert memory_obj.tensor is not None
-        memory_obj.tensor.copy_(kv_chunk)
-
-        return memory_obj
+        return kv_chunk

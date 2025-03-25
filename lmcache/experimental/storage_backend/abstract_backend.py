@@ -1,6 +1,6 @@
 import abc
 from concurrent.futures import Future
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Union
 
 import torch
 
@@ -74,7 +74,7 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
     def get_blocking(
         self,
         key: CacheEngineKey,
-    ) -> Tuple[Optional[MemoryObj], CacheEngineKey]:
+    ) -> Tuple[Union[MemoryObj, str], CacheEngineKey]:
         """
         A blcocking function to get the kv cache from the storage backend.
         
