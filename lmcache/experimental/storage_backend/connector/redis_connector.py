@@ -67,6 +67,8 @@ class RedisConnector(RemoteConnector):
         if kv_bytes is None:
             # TODO (Jiayi): We might need a way to better handle
             # consistency issues.
+            # TODO (Jiayi): A better way is to aggregate metadata
+            # and kv cache in one key.
             logger.warning("Key exists but KV cache does not exist."
                            "Might happen when the cache is evicted by redis.")
             self.connection.delete(key_str + "metadata")
