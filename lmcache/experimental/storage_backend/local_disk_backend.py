@@ -116,7 +116,6 @@ class LocalDiskBackend(StorageBackendInterface):
         self.put_tasks.append(key)
         self.disk_lock.release()
 
-        #kv_chunk = memory_obj.tensor
         future = asyncio.run_coroutine_threadsafe(
             self.async_save_bytes_to_disk(key, memory_obj), self.loop)
         return future

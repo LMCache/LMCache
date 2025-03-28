@@ -33,6 +33,10 @@ class LMCacheEngineConfig:
     lookup_url: Optional[str]  # the url of the lookup server
     distributed_url: Optional[str]  # the url of the distributed server
 
+    # Error handling related configurations
+    error_handling: bool  # whether to enable error handling with
+    # full recompute
+
     @staticmethod
     def from_defaults(
         chunk_size: int = 256,
@@ -49,13 +53,14 @@ class LMCacheEngineConfig:
         enable_p2p: bool = False,
         lookup_url: Optional[str] = None,
         distributed_url: Optional[str] = None,
+        error_handling: bool = False,
     ) -> "LMCacheEngineConfig":
         return LMCacheEngineConfig(chunk_size, local_cpu, max_local_cpu_size,
                                    local_disk, max_local_disk_size, remote_url,
                                    remote_serde, save_decode_cache,
                                    enable_blending, blend_recompute_ratio,
                                    blend_min_tokens, enable_p2p, lookup_url,
-                                   distributed_url)
+                                   distributed_url, error_handling)
 
     @staticmethod
     def from_legacy(
@@ -71,6 +76,7 @@ class LMCacheEngineConfig:
         enable_p2p: bool = False,
         lookup_url: Optional[str] = None,
         distributed_url: Optional[str] = None,
+        error_handling: bool = False,
     ) -> "LMCacheEngineConfig":
         if backend == "cpu":
             local_cpu = True
@@ -115,7 +121,7 @@ class LMCacheEngineConfig:
                                    remote_serde, save_decode_cache,
                                    enable_blending, blend_recompute_ratio,
                                    blend_min_tokens, enable_p2p, lookup_url,
-                                   distributed_url)
+                                   distributed_url, error_handling)
 
     @staticmethod
     def from_file(file_path: str) -> "LMCacheEngineConfig":
@@ -144,6 +150,8 @@ class LMCacheEngineConfig:
         enable_p2p = config.get("enable_p2p", False)
         lookup_url = config.get("lookup_url", None)
         distributed_url = config.get("distributed_url", None)
+
+        error_handling = config.get("error_handling", False)
         if enable_p2p:
             assert lookup_url is not None
             assert distributed_url is not None
@@ -178,6 +186,7 @@ class LMCacheEngineConfig:
             enable_p2p,
             lookup_url,
             distributed_url,
+            error_handling,
         )
 
     @staticmethod
@@ -250,6 +259,9 @@ class LMCacheEngineConfig:
                                       config.lookup_url)
         config.distributed_url = parse_env(get_env_name("distributed_url"),
                                            config.distributed_url)
+
+        config.error_handling = to_bool(
+            parse_env(get_env_name("error_handling"), config.error_handling))
 
         return config
 
