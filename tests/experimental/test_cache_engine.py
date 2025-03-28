@@ -68,8 +68,8 @@ def test_same_retrieve_store(autorelease_experimental):
 
 @pytest.mark.parametrize("fmt", ["vllm"])
 @pytest.mark.parametrize("chunk_size", [128, 256])
-@pytest.mark.parametrize("backend", ["remote"])
-#["cpu", "local_disk", "remote", "remote_cachegen"])
+@pytest.mark.parametrize("backend", 
+                         ["cpu", "local_disk", "remote", "remote_cachegen"])
 @pytest.mark.parametrize("lmserver_experimental_process", ["cpu"],
                          indirect=True)
 def test_paged_retrieve_prefix(fmt, chunk_size, backend,
