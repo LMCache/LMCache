@@ -91,6 +91,8 @@ class RemoteBackend(StorageBackendInterface):
         future = asyncio.run_coroutine_threadsafe(
             self.connection.put(key, compressed_memory_obj), self.loop)
 
+        self.memory_allocator.ref_count_down(memory_obj)
+
         lambda_callback = lambda f: \
                 self.put_callback(f, key)
         future.add_done_callback(lambda_callback)
