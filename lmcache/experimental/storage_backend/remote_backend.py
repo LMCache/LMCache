@@ -88,6 +88,8 @@ class RemoteBackend(StorageBackendInterface):
 
         compressed_memory_obj = self.serializer.serialize(memory_obj)
 
+        memory_obj.ref_count_down()
+        
         future = asyncio.run_coroutine_threadsafe(
             self.connection.put(key, compressed_memory_obj), self.loop)
 
