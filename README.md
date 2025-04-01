@@ -13,79 +13,51 @@ LMCache is a **LLM** serving engine extension to **reduce TTFT** and **increase 
 
 By combining LMCache with vLLM, LMCaches achieves 3-10x delay savings and GPU cycle reduction in many LLM use cases, including multi-round QA and RAG.
 
-Try LMCache with pre-built vllm docker images [here](https://github.com/LMCache/demo).
+Try LMCache with pre-built vllm docker images [here](https://docs.lmcache.ai/getting_started/docker.html).
 
 # 🚀 Performance snapshot
 ![image](https://github.com/user-attachments/assets/7db9510f-0104-4fb3-9976-8ad5d7fafe26)
 
-# 💻 Quickstart
+# 💻 Installation and Quickstart
 
-LMCache provides the integration to the latest vLLM (0.6.2). To install LMCache, use the following command:
-```bash
-# requires python >= 3.10 and nvcc >= 12.1
-pip install lmcache lmcache_vllm
-```
-
-LMCache has the same interface as vLLM (both online serving and offline inference).
-To use the online serving, you can start an OpenAI API-compatible vLLM server with LMCache via:
-```bash
-lmcache_vllm serve lmsys/longchat-7b-16k --gpu-memory-utilization 0.8
-```
-
-To use vLLM's offline inference with LMCache, just simply add `lmcache_vllm` before the import to vLLM components. For example
-```python
-import lmcache_vllm.vllm as vllm
-from lmcache_vllm.vllm import LLM 
-```
-
-More detailed documentation will be available soon.
-
-## - Sharing KV cache across multiple vLLM instances
-
-LMCache supports sharing KV across different vLLM instances by the `lmcache.server` module. Here is a quick guide:
-
-```bash
-# Start lmcache server
-lmcache_server localhost 65432
-```
-
-Then, start two vLLM instances with the LMCache config file
-```bash
-wget https://raw.githubusercontent.com/LMCache/LMCache/refs/heads/dev/examples/example.yaml
-
-# start the first vLLM instance
-LMCACHE_CONFIG_FILE=example.yaml CUDA_VISIBLE_DEVICES=0 lmcache_vllm serve lmsys/longchat-7b-16k --gpu-memory-utilization 0.8 --port 8000
-
-# start the second vLLM instance
-LMCACHE_CONFIG_FILE=example.yaml CUDA_VISIBLE_DEVICES=1 lmcache_vllm serve lmsys/longchat-7b-16k --gpu-memory-utilization 0.8 --port 8001
-```
-
-
-# - What's next
-We also provide multiple docker-based demos at [🔗LMCache-demos repo](https://github.com/LMCache/demo). The demos cover the following use cases:
-- Share KV caches across multiple serving engines [(🔗link)](https://github.com/LMCache/demo/tree/master/demo2-multi-node-sharing)
-- Loading non-prefix KV caches for RAG [(🔗link)](https://github.com/LMCache/demo/tree/master/demo3-KV-blending)
+Please refer to our detailed documentation for [LMCache V1](https://docs.lmcache.ai/getting_started/installation.html#install-from-source-v1) and [LMCache V0](https://docs.lmcache.ai/getting_started/installation.html#install-from-source-v0)
 
 # Interested in Connecting?
 Fill out the interest form and our team will reach out to you!
 https://forms.gle/mQfQDUXbKfp2St1z7
 
-# 🛣️ Incoming Milestones
+# 🛣️ News and Milestones
 
-- [x] First release of LMCache 
+- [x] LMCache V1 with vLLM integration with following features is live 🔥
+  * High performance CPU KVCache offloading
+  * Disaggregated prefill
+  * P2P KVCache sharing
+- [x] LMCache is supported in the [vLLM production stack ecosystem](https://github.com/vllm-project/production-stack/tree/main) 
+- [x] User and developer documentation
+- [x] Stable support for non-prefix KV caches
 - [x] Support installation through pip install and integrate with latest vLLM
-- [ ] Stable support for non-prefix KV caches
-- [ ] User and developer documentation
+- [x] First release of LMCache 
+
 
 # 📖 Blogs and documentations
 
-Our [blog posts](https://lmcache.github.io) and [documentations](https://docs.lmcache.ai/) are available online
+Our latest [blog posts](https://lmcache.github.io) and the [documentation](https://docs.lmcache.ai/) pages are available online
 
 # Community meeting
 
-- :link: Meeting link - https://uchicago.zoom.us/j/91454186439?pwd=Qu3IMJH7c83Qbg9hHsXZ3BxzLaEFoF.1
-- :page_facing_up: Community Meeting Document - https://docs.google.com/document/d/1SnCKnB2UFBUyPhIpL9zzdZsn_hGp50spoZue-2SoxJY/edit?usp=sharing
-- 🗓️ Calendar - https://calendar.app.google/rsu7Xgq4y4y5YuDj7
+The community meeting for LMCache is co-hosted with the community meeting for the [vLLM production stack project](https://github.com/vllm-project/production-stack/tree/main). 
+
+Meeting Details:
+
+- Tuesdays at 4:00 PM PT – [Add to Calendar](https://drive.usercontent.google.com/u/0/uc?id=1j1gO2PcFQLBi98fq4djEEiqOK_oHgq9j&export=download)
+
+- Tuesdays at 8:00 AM PT – [Add to Calendar](https://drive.usercontent.google.com/u/0/uc?id=1xdkxpg-OpxkuLqjegHQhihwBM9koFvSh&export=download)
+
+Meetings alternate weekly between the two times. All are welcome to join!
+
+## Contributing
+
+We welcome and value any contributions and collaborations.  Please check out [CONTRIBUTING.md](CONTRIBUTING.md) for how to get involved.
 
 
 ## Citation
@@ -114,4 +86,8 @@ If you use LMCache for your research, please cite our papers:
   year={2024}
 }
 ```
+
+## License
+
+This project is licensed under Apache License 2.0. See the [LICENSE](LICENSE) file for details.
 
