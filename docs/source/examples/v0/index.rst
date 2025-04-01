@@ -11,4 +11,4 @@ LMCache v0
    launching
    save_decode
    kv_blending
-   measuring_improvements
+   .. measuring_improvements

@@ -63,6 +63,7 @@ Documentation
    getting_started/speedup
    getting_started/installation   
    getting_started/docker
+   getting_started/quickstart
 
 .. toctree::
    :maxdepth: 2
