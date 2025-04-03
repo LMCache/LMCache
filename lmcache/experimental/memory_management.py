@@ -632,6 +632,7 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
         :param int size: The size of the pinned memory in bytes.
         """
         buffer = torch.empty(size, dtype=torch.uint8, pin_memory=True)
+        # NOTE(Shaoting): The size of the buffer is 5GB. For 8B model, max-length context (143K characters, 29903 tokens) is 3.66GB.
         buffer2 = torch.empty(5368709120, dtype=torch.uint8, pin_memory=True)
 
         self.pin_allocator = TensorMemoryAllocator(buffer)
