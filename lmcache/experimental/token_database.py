@@ -45,7 +45,7 @@ class TokenDatabase(metaclass=abc.ABCMeta):
 def hash_all_tokens(tokens: torch.Tensor) -> str:
     return hashlib.sha256(tokens.cpu().numpy().tobytes()).hexdigest()
 
-SCORE_TABLE = [(1,1), (0.6, 0.95), (0.3, 0.9), (0.2, 0.85), (0, 0)]
+SCORE_TABLE = [(1, 3.44162), (0.6, 3.22693), (0.3, 3.20457), (0.2, 3.11167), (0, 0.97446)]
 
 class ChunkedTokenDatabase(TokenDatabase):
 

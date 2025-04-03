@@ -11,15 +11,16 @@ import time
 from typing import Tuple
 import openai
 import pandas as pd
+import traceback
 
-NUM_QUERY = 5
+NUM_QUERY = 50
 MODEL = "meta-llama/Llama-3.1-8B-Instruct"
 PORT = 8000
 FILES = [
     '/home/ubuntu/shaotingf/LMCache/serve/dataset/qmsum.csv'
 ]
 FILE_TYPE = "sum" # or "qa"
-PREFILL_ONLY = True
+PREFILL_ONLY = False
 
 dataset_entries = 0
 
@@ -29,8 +30,6 @@ def generate_workload_trace(trace_files, num_query):
     for file_path in trace_files:
         # Read CSV file
         df = pd.read_csv(file_path)
-
-        df = df.head(5)
 
         global dataset_entries
         dataset_entries += len(df)
@@ -46,11 +45,9 @@ def generate_workload_trace(trace_files, num_query):
     # Concatenate all DataFrames
     df_all = pd.concat(df_list)
     
-    # # Generate the workload trace by sampling with replacement
-    # run_workload_trace = df_all.sample(n=num_query, replace=True, random_state=42)
-    # workload_trace = pd.concat([df_all, run_workload_trace]).reset_index(drop=True)
-
-    workload_trace = pd.concat([df_all, df_all]).reset_index(drop=True)
+    # Generate the workload trace by sampling with replacement
+    run_workload_trace = df_all.sample(n=num_query, replace=True, random_state=42)
+    workload_trace = pd.concat([df_all, run_workload_trace]).reset_index(drop=True)
 
     return workload_trace
 
@@ -124,6 +121,7 @@ def execute_openai_request_with_output(row, model: str, client: openai.Client) -
         finish_time = end_time - start_time
         throughput = ntokens / (end_time - first_token_time)
     except Exception as e:
+        traceback.print_exc()
         print(f"OpenAI request failed: {e}")
         return -1, -1, -1, "ERROR"
 

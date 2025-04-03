@@ -329,28 +329,6 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
         if not self.pointers_initialized:
             self._initialize_pointers(kvcaches)
 
-        # NOTE(ApostaC): By default, detour from a GPU buffer is slower
-        # than directly copying from the CPU.
-        # So disabling it for now and use direct copy from CPU to GPU.
-
-        #if self.gpu_buffer is None or \
-        #        end - start != self.gpu_buffer.shape[2]:
-        #    lmc_ops.multi_layer_kv_transfer(memory_obj.tensor,
-        #                                    self.kv_cache_pointers,
-        #                                    slot_mapping[start:end],
-        #                                    kvcaches[0].device,
-        #                                    self.page_buffer_size, False)
-        #else:
-        #    # Memobj -> gpu_buffer -> kvcaches
-        #    assert self.gpu_buffer.device == kvcaches[0].device
-        #    tmp_gpu_buffer = self.gpu_buffer[:, :, :end-start, :]
-        #    tmp_gpu_buffer.copy_(memory_obj.tensor, non_blocking=True)
-        #    lmc_ops.multi_layer_kv_transfer(
-        #        tmp_gpu_buffer,
-        #        self.kv_cache_pointers,
-        #        slot_mapping[start:end],
-        #        kvcaches[0].device, self.page_buffer_size, False)
-
         lmc_ops.multi_layer_kv_transfer(memory_obj.tensor,
                                         self.kv_cache_pointers,
                                         slot_mapping[start:end],
