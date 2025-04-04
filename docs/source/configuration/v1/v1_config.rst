@@ -3,8 +3,9 @@
 Configuring LMCache v1
 ======================
 
-In addition to the configurations in v0, LMCache v1 needs also newer ones.
-For the overlapping v0 configuration, please refer to :ref:`v0_config`.
+In addition to the some configurations in v0, LMCache v1 needs also newer ones.
+Please use this list of configurations to set up LMCache v1.
+For V0, please refer to :ref:`v0_config`.
 
 .. note::
       KV Blending is not supported in LMCache v1 yet and will be added in future releases.
@@ -25,13 +26,12 @@ Configurations are set in the format of a YAML file.
       # (set to 256 by default)
       chunk_size: int
 
-      # The local KV cache device to use (set to "cuda" by default)
-      # Possible values: "cpu", "cuda", "file://local_disk/"
-      local_device: Optional[str]
+      # The local KV disk path
+      local_disk: Optional[str]
 
       # The maximum size of the local KV cache as an integer (GB)
-      # Set to 5 by default
-      max_local_cache_size: int
+      # Set to 0 by default
+      max_local_disk_size: int
 
       # Remote URL for the storage backend (can be redis or redis-sentinel)
       # Should have the format url://<host>:<port>
