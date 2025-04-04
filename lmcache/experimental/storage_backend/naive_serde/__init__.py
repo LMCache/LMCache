@@ -25,7 +25,8 @@ def CreateSerde(
     d: Optional[Deserializer] = None
 
     if serde_type == "naive":
-        s, d = NaiveSerializer(), NaiveDeserializer()
+        s, d = NaiveSerializer(memory_allocator), \
+            NaiveDeserializer()
     elif serde_type == "kivi":
         s, d = KIVISerializer(memory_allocator), \
             KIVIDeserializer(memory_allocator)
