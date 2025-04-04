@@ -63,7 +63,16 @@ class RedisConnector(RemoteConnector):
         kv_bytes = self.connection.get(key_str + "kv_bytes")
 
         assert not inspect.isawaitable(kv_bytes)
-        assert kv_bytes is not None
+
+        if kv_bytes is None:
+            # TODO (Jiayi): We might need a way to better handle
+            # consistency issues.
+            # TODO (Jiayi): A better way is to aggregate metadata
+            # and kv cache in one key.
+            logger.warning("Key exists but KV cache does not exist."
+                           "Might happen when the cache is evicted by redis.")
+            self.connection.delete(key_str + "metadata")
+            return None
 
         view = memoryview(memory_obj.byte_array)
         view[:redis_metadata.length] = kv_bytes
@@ -172,7 +181,16 @@ class RedisSentinelConnector(RemoteConnector):
         kv_bytes = self.slave.get(key_str + "kv_bytes")
 
         assert not inspect.isawaitable(kv_bytes)
-        assert kv_bytes is not None
+
+        if kv_bytes is None:
+            # TODO (Jiayi): We might need a way to better handle
+            # consistency issues.
+            # TODO (Jiayi): A background sweeper might be better
+            # for the sake of performance.
+            logger.warning("Key exists but KV cache does not exist."
+                           "Might happen when the cache is evicted by redis.")
+            self.master.delete(key_str + "metadata")
+            return None
 
         view = memoryview(memory_obj.byte_array)
         view[0:redis_metadata.length] = kv_bytes
