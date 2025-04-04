@@ -353,5 +353,6 @@ class StorageManager:
             self.loop.call_soon_threadsafe(self.loop.stop)
         if self.thread.is_alive():
             self.thread.join()
+        self.memory_allocator.close()
 
         logger.info("Storage manager closed.")

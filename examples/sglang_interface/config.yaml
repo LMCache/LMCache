@@ -4,7 +4,7 @@ chunk_size: 256
 
 # The local KV cache device to use (set to "cuda" by default)
 # Possible values: "cpu", "cuda", "file://local_disk/"
-local_disk: file:///data/user_data/yuweia/integration/
+local_disk: file:///local_disk/
 
 # The maximum size of the local KV cache as an integer (GB)
 # Set to 5 by default

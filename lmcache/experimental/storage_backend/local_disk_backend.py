@@ -143,7 +143,6 @@ class LocalDiskBackend(StorageBackendInterface):
         dtype = self.dict[key].dtype
         shape = self.dict[key].shape
         self.disk_lock.release()
-        logger.info(f"Prefetching {key} from disk.")
 
         assert dtype is not None
         assert shape is not None
@@ -158,7 +157,6 @@ class LocalDiskBackend(StorageBackendInterface):
         """
         Blocking get function.
         """
-        logger.debug(f"Loading {key} from disk.")
         self.disk_lock.acquire()
         if key not in self.dict:
             self.disk_lock.release()
@@ -267,9 +265,6 @@ class LocalDiskBackend(StorageBackendInterface):
             self.lookup_server.batched_remove(list(self.dict.keys()))
             self.disk_lock.release()
 
-        # store the self.dict to disk
-        logger.debug(
-            "Closing LocalDiskBackend and storing the self.dict to disk.")
         metadata_file_path = os.path.join(self.path, 'metadata_dict.pkl')
         try:
             with open(metadata_file_path, 'wb') as f:

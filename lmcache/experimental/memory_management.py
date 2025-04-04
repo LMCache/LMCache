@@ -4,6 +4,7 @@ import threading
 from dataclasses import dataclass
 from enum import Enum
 from typing import Optional, Tuple, Union
+import gc
 
 import sortedcontainers
 import torch
@@ -498,7 +499,7 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
 
     def __del__(self):
         del self.buffer
-
+        
 
 class BufferAllocator(MemoryAllocatorInterface):
     """Allocates memory in the pre-allocated pinned memory.
@@ -697,6 +698,11 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
     def memcheck(self):
         with self.host_mem_lock:
             return self.pin_allocator.memcheck()
+        
+    def close(self) -> None:
+        del self.pin_allocator
+        del self.buffer_allocator
+        gc.collect()
 
 
 class GPUMemoryAllocator(MemoryAllocatorInterface):
