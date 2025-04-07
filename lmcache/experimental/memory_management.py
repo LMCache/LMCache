@@ -64,6 +64,19 @@ class MemoryObjMetadata:
     # The 'logical' format of the tensor
     fmt: MemoryFormat = MemoryFormat.UNDEFINED
 
+    def get_size(self):
+        """
+        Calculate the size of the memory object in bytes based on the shape and dtype.
+        """
+        if self.shape.numel() == 0:
+            return 0
+        if self.dtype is None:
+            return 0
+        num_elements = self.shape.numel()
+        element_size = self.dtype.itemsize
+        size_in_bytes = num_elements * element_size
+        return size_in_bytes
+        
 
 class MemoryObj(metaclass=abc.ABCMeta):
     """
@@ -728,3 +741,56 @@ class GPUMemoryAllocator(MemoryAllocatorInterface):
 
     def memcheck(self):
         return self.allocator.memcheck()
+
+class AdHocMemoryAllocator(MemoryAllocatorInterface):
+    """
+    AdHocMemoryAllocator is a simple allocator that does not actually allocate memory.
+    It is used for testing purposes only.
+    """
+    def __init__(self, device: str = "cpu"):
+        """
+        :param str device: The device of the ad hoc memory allocator.
+        """
+        self.device = device
+
+    def allocate(
+        self,
+        shape: Union[torch.Size, Tuple[int, ...]],
+        dtype: Optional[torch.dtype],
+        fmt: MemoryFormat = MemoryFormat.KV_BLOB,
+    ) -> Optional[MemoryObj]:
+        """
+        Returns a dummy MemoryObj for testing purposes.
+        """
+        if not isinstance(shape, torch.Size):
+            shape = torch.Size(shape)
+
+        assert dtype is not None, "dtype must be specified"
+
+        # Return a dummy object with no actual memory allocation
+        return TensorMemoryObj(
+            raw_data=torch.empty(shape, dtype=dtype, device = self.device),
+            metadata=MemoryObjMetadata(
+                shape=shape,
+                dtype=dtype,
+                address=0,
+                phy_size=0,
+                ref_count=1,
+                fmt=fmt
+            )
+        )
+
+    def free(self, memory_obj: MemoryObj):
+        pass
+
+    def ref_count_up(self, memory_obj: MemoryObj):
+        pass
+
+    def ref_count_down(self, memory_obj: MemoryObj):
+        pass
+
+    def get_ref_count(self, memory_obj: MemoryObj):
+        return 0
+
+    def memcheck(self):
+        return True
