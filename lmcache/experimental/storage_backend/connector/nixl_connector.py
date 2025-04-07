@@ -10,6 +10,8 @@ from typing import Dict, Optional, List, Union
 from dataclasses import dataclass
 from nixl._api import nixl_agent
 
+from lmcache.experimental.config import LMCacheEngineConfig
+from lmcache.config import LMCacheEngineMetadata
 from lmcache.experimental.memory_management import (MemoryObj, HostMemoryAllocator, MemoryFormat, 
                                                     TensorMemoryObj, AdHocMemoryAllocator, MemoryObjMetadata)
 from lmcache.utils import CacheEngineKey
@@ -31,6 +33,28 @@ class NixlConfig:
     peer_port: int
     buffer_size: int
     buffer_device: str
+
+    @staticmethod
+    def from_cache_engine_config(
+            config: LMCacheEngineConfig,
+            metadata: LMCacheEngineMetadata) -> "NixlConfig":
+        """Convert the LMCacheEngineConfig to NixlConfig
+        """
+        worker_id = metadata.worker_id
+        assert config.enable_nixl is True, \
+            "NIXL is not enabled in the LMCacheEngineConfig"
+
+        assert config.role in [NixlRole.SENDER, NixlRole.RECEIVER], \
+                f"Invalid role: {config.role}, must be either "\
+                f"{NixlRole.SENDER} or {NixlRole.RECEIVER}"
+
+        return NixlConfig(
+            role=config.role,
+            peer_host_name=config.nixl_peer_host,
+            peer_port=config.nixl_peer_port + worker_id,
+            buffer_size=config.nixl_buffer_size,
+            buffer_device=config.nixl_buffer_device
+        )
 
 @dataclass
 class NixlRequest:

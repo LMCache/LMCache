@@ -11,8 +11,9 @@ from lmcache.experimental.config import LMCacheEngineConfig
 from lmcache.experimental.lookup_server import LookupServerInterface
 from lmcache.experimental.memory_management import (MemoryAllocatorInterface,
                                                     MemoryFormat, MemoryObj,
-                                                    MixedMemoryAllocator)
+                                                    MixedMemoryAllocator, AdHocMemoryAllocator)
 from lmcache.experimental.storage_backend import CreateStorageBackends
+from lmcache.experimental.storage_backend.nixl_backend import NixlBackend
 from lmcache.experimental.storage_backend.abstract_backend import \
     StorageBackendInterface
 from lmcache.logging import init_logger
@@ -147,6 +148,21 @@ class StorageManager:
         self.manager_lock.acquire()
         self.memory_allocator.ref_count_down(memory_obj)
         self.manager_lock.release()
+
+    def batched_put(
+            self,
+            keys: List[CacheEngineKey],
+            memory_objs: List[MemoryObj],
+        ) -> None:
+        """
+        Non-blocking function to put the memory objects into the storages.
+        Do not store if the same object is being stored (handled here by
+        storage manager) or has been stored (handled by storage backend).
+
+        A default implementation using "put"
+        """
+        for key, obj in zip(keys, memory_objs):
+            self.put(key, obj)
 
     @_lmcache_nvtx_annotate
     def _update_hot_cache(self, key: CacheEngineKey, memory_obj: MemoryObj):
@@ -354,3 +370,70 @@ class StorageManager:
             self.thread.join()
 
         logger.info("Storage manager closed.")
+
+class DistributedStroageManager:
+    """
+    The storage manager for P-D disaggregation setting
+
+    Key primitives:
+    - allocate(): allocate the memory object when 'store'
+    - put(): put the memory object into the storage backend
+    - batched_put(): put multiple memory objects into the storage backend
+    - get(): get the memory object from the storage backend
+    - prefetch(): NotImplemented (TODO)
+    - contains(): check if the key exists in the storage backend
+    - close(): close the storage manager
+    """
+    def __init__(
+            self, 
+            config: LMCacheEngineConfig,
+            metadata: LMCacheEngineMetadata,
+        ):
+        # TODO (ApostaC): remove hard coded usage of NixlBackend
+        self.storage_backend = NixlBackend.CreateNixlBackend(
+            config, metadata)
+        self.allocator = AdHocMemoryAllocator(config.nixl_buffer_device)
+
+    def allocate(
+            self,
+            shape: torch.Size,
+            dtype: torch.dtype,
+            eviction=True,
+        ) -> Optional[MemoryObj]:
+        """
+        Allocate memory object with memory allocator.
+        Use LRU evictor if eviction is enabled.
+        """
+        return self.allocator.allocate(shape, dtype)
+
+    def put(
+        self,
+        key: CacheEngineKey,
+        memory_obj: MemoryObj,
+    ) -> None:
+        self.storage_backend.submit_put_task(key, memory_obj)
+
+    def batched_put(
+        self,
+        keys: List[CacheEngineKey],
+        memory_objs: List[MemoryObj],
+    ) -> None:
+        self.storage_backend.submit_put_tasks(keys, memory_objs)
+
+    def get(
+        self,
+        key: CacheEngineKey,
+    ) -> Optional[MemoryObj]:
+        return self.storage_backend.get_blocking(key)
+
+    def prefetch(self, key: CacheEngineKey) -> None:
+        raise NotImplementedError("Prefetch is not implemented for "
+                                  "distributed storage manager.")
+    def contains(
+        self,
+        key: CacheEngineKey,
+    ) -> bool:
+        return self.storage_backend.contains(key)
+
+    def close(self):
+        self.storage_backend.close()

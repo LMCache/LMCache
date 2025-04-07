@@ -27,7 +27,8 @@ from lmcache.experimental.lookup_server import (LookupServerInterface,
                                                 RedisLookupServer)
 from lmcache.experimental.memory_management import (MemoryAllocatorInterface,
                                                     MixedMemoryAllocator)
-from lmcache.experimental.storage_backend.storage_manager import StorageManager
+from lmcache.experimental.storage_backend.storage_manager import (
+        StorageManager, DistributedStroageManager)
 from lmcache.experimental.token_database import (ChunkedTokenDatabase,
                                                  TokenDatabase)
 from lmcache.logging import init_logger
@@ -83,7 +84,10 @@ class LMCacheEngine:
         if self.enable_p2p:
             self.lookup_server = RedisLookupServer(config)
 
-        self.storage_manager = StorageManager(config, metadata,
+        if config.enable_nixl:
+            self.storage_manager = DistributedStroageManager(config, metadata)
+        else:
+            self.storage_manager = StorageManager(config, metadata,
                                               self.memory_allocator,
                                               self.lookup_server)
         if self.enable_p2p:
@@ -127,6 +131,8 @@ class LMCacheEngine:
         else:
             monitor_req_id = self.stats_monitor.on_store_request(len(tokens))
 
+        key_list = []
+        obj_list = []
         for start, end, key in self.token_database.process_tokens(
                 tokens, mask):
             if self.storage_manager.contains(key):
@@ -141,14 +147,15 @@ class LMCacheEngine:
                                "The KV cache will not be stored.")
                 break
 
-            # Put the memory object to the storage backend
-            # Disabling put_queue for now, as it's not necessary
-            # and bringing big overhead
-            # self.put_queue.put((key, memory_obj, start, end, kwargs))
-
             self.gpu_connector.from_gpu(memory_obj, start, end, **kwargs)
-            self.storage_manager.put(key, memory_obj)
+            #self.storage_manager.put(key, memory_obj)
+            key_list.append(key)
+            obj_list.append(memory_obj)
 
+        
+        self.storage_manager.batched_put(key_list, obj_list)
+
+        for key in key_list:
             # Update lookup server
             if self.lookup_server is not None:
                 self.lookup_server.insert(key)

@@ -13,6 +13,8 @@ from lmcache.experimental.storage_backend.abstract_backend import StorageBackend
 from lmcache.experimental.memory_management import MemoryObj, HostMemoryAllocator, MemoryObjMetadata, TensorMemoryObj
 from lmcache.experimental.storage_backend.connector.nixl_connector import NixlChannel, NixlConfig, NixlRole, NixlObserverInterface
 from lmcache.utils import CacheEngineKey
+from lmcache.config import LMCacheEngineMetadata
+from lmcache.experimental.config import LMCacheEngineConfig
 
 from lmcache.logging import init_logger
 
@@ -115,7 +117,8 @@ class NixlBackend(StorageBackendInterface):
 
     def submit_put_task(self, key: CacheEngineKey, obj: MemoryObj) -> Optional[Future]:
         """
-        An async function to put the MemoryObj into the storage backend.
+        Put the MemoryObj into the storage backend and send it to the receiver
+        in a blocking way.
 
         :param key: The key of the MemoryObj.
         :param obj: The MemoryObj to be stored.
@@ -126,6 +129,15 @@ class NixlBackend(StorageBackendInterface):
         return None
 
     def submit_put_tasks(self, keys: list[CacheEngineKey], objs: list[MemoryObj]) -> Optional[Future]:
+        """
+        Put the MemoryObj into the storage backend and send it to the receiver
+        in a blocking way.
+
+        :param keys: The keys of the MemoryObj.
+        :param objs: The MemoryObj to be stored.
+
+        :return: a future object
+        """
         self._nixl_channel.send(keys, objs)
         return None
 
@@ -163,3 +175,22 @@ class NixlBackend(StorageBackendInterface):
         """
         self._nixl_channel.close()
 
+    @staticmethod
+    def CreateNixlBackend(
+            config: LMCacheEngineConfig,
+            metadata: LMCacheEngineMetadata
+        ) -> "NixlBackend":
+        """
+        Create a Nixl backend with the given configuration.
+
+        :param nixl_config: The Nixl configuration.
+        :param dst_device: The device where the data is stored.
+        
+        :return: A NixlBackend instance.
+        """
+        # Create the Nixl config
+        nixl_config = NixlConfig.from_cache_engine_config(
+                config, metadata)
+        # Create the Nixl backend
+        backend = NixlBackend(nixl_config)
+        return backend
