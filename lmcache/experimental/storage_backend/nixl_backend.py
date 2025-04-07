@@ -48,6 +48,7 @@ class BasicNixlObserver(NixlObserverInterface):
             (i.e., whether it will be overwrite by next transfer)
         """
         with self.target_dict_lock:
+            logger.debug(f"Received {len(keys)} keys and {len(objs)} objects.")
             for key, value in zip(keys, objs):
                 if key in self.target_dict:
                     continue

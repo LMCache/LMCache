@@ -53,6 +53,10 @@ class TestObserver(NixlObserverInterface):
         self.received_keys = []
         self.received_objs = []
         self.received_event = threading.Event()
+        self.expected_count = None
+        
+    def set_expected_count(self, count: int):
+        self.expected_count = count
         
     def __call__(self, keys, objs, is_view=True):
         logger.info(f"Observer received {len(keys)} keys and {len(objs)} objects")
@@ -62,16 +66,15 @@ class TestObserver(NixlObserverInterface):
         if is_view:
             copied_objs = []
             for obj in objs:
-                # Create a copy of the tensor
                 copied_tensor = obj.tensor.clone()
-                # Create a new memory object with the copied tensor
                 copied_obj = TensorMemoryObj(copied_tensor, obj.metadata)
                 copied_objs.append(copied_obj)
             self.received_objs.extend(copied_objs)
         else:
             self.received_objs.extend(objs)
             
-        self.received_event.set()
+        if self.expected_count and len(self.received_objs) >= self.expected_count:
+            self.received_event.set()
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Test NixlChannel with sender/receiver roles')
@@ -120,12 +123,23 @@ if __name__ == "__main__":
     else:  # receiver
         # Create and register an observer
         observer = TestObserver()
+        observer.set_expected_count(len(keys))
         channel.register_receive_observer(observer)
         
-        # Wait for data to be received
+        # Wait for all data to be received
         logger.info("Waiting to receive data...")
-        if observer.received_event.wait(timeout=60):
-            logger.info(f"Received {len(observer.received_keys)} keys and {len(observer.received_objs)} objects")
+        timeout = 60
+        start_time = time.time()
+        
+        while len(observer.received_objs) < len(keys):
+            if time.time() - start_time > timeout:
+                logger.error("Timed out waiting for data")
+                break
+            logger.info(f"Received {len(observer.received_objs)}/{len(keys)} objects so far...")
+            time.sleep(1)
+        
+        if len(observer.received_objs) == len(keys):
+            logger.info(f"Received all {len(observer.received_keys)} keys and {len(observer.received_objs)} objects")
             
             # Verify the received data
             if len(observer.received_keys) != len(keys):
@@ -137,10 +151,16 @@ if __name__ == "__main__":
                     logger.error(f"Data mismatch at index {i}: received {received_obj.tensor.mean()} "
                                 f"but expected {original_obj.tensor.mean()}")
                     break
+
+            for i, (received_keys, original_keys) in enumerate(zip(observer.received_keys, keys)):
+                if received_keys != original_keys:
+                    logger.error(f"Key mismatch at index {i}: received {received_keys} "
+                                f"but expected {original_keys}")
+                    break
             else:
                 logger.info("All data verified successfully!")
         else:
-            logger.error("Timed out waiting for data")
+            logger.error(f"Only received {len(observer.received_objs)}/{len(keys)} objects before timeout")
     
     # Wait a bit before closing
     time.sleep(2)

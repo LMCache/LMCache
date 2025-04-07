@@ -40,7 +40,7 @@ def generate_test_data(
         ))
         obj = allocator.allocate(shape, dtype, 
             fmt=MemoryFormat.KV_BLOB)
-        obj.tensor.fill_(i+1)  # Fill with some test data, e.g., the index
+        obj.tensor.fill_((i+1) / num_objs) # Fill with some test data, e.g., the index
         objs.append(obj)
     return keys, objs
 
@@ -132,7 +132,7 @@ if __name__ == "__main__":
                     break
                     
                 # Check if the received object matches the original object
-                expected_value = i + 1  # We filled with i+1 in generate_test_data
+                expected_value = (i + 1) / args.num_objs  # We filled with i+1 in generate_test_data
                 actual_mean = received_obj.tensor.mean().item()
                 
                 # For bfloat16, we need some tolerance in the comparison

@@ -359,16 +359,23 @@ class NixlChannel:
             objs_read = self._pipe.read_buffer(metadatas[offset:])
 
             # Notify the observers
+            start = time.perf_counter()
             for observer in self._observers:
                 observer(
                     keys=keys[offset:offset + len(objs_read)],
                     objs=objs_read,
                     is_view=True # indicate these are views 
                 )
+            end = time.perf_counter()
+            logger.debug("Observers processing in %.4f ms", 1000 * (end - start))
+
 
             # Acknowledge the remote side that the transfer was processed
             curr_uuid = uuid.uuid4().hex
             self._pipe.ack_receive(curr_uuid)
+
+            # Update the offset
+            offset += len(objs_read)
 
 
     def _receiver_loop(self):
