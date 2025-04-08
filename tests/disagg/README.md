@@ -84,3 +84,16 @@ Initialized NIXL agent: NixlRole.RECEIVER
 ```
 
 **Measured performance:** 132.75 GB/s
+
+## CacheEngine
+
+```bash
+# Terminal 1 (Sender)
+UCX_TLS=cuda_ipc,cuda_copy,tcp CUDA_VISIBLE_DEVICES=0 python3 test_nixl_cache_engine.py --role sender --num-chunks 500 --num-rounds 5
+
+# Terminal 2 (Receiver)
+UCX_TLS=cuda_ipc,cuda_copy,tcp CUDA_VISIBLE_DEVICES=1 python3 test_nixl_cache_engine.py --role receiver --num-chunks 500 --num-rounds 5
+```
+
+Measured performance: 70.97 ± 7.66 GB/s 
+
