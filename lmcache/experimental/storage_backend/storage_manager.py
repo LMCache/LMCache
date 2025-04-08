@@ -1,4 +1,5 @@
 import asyncio
+import time
 import threading
 from collections import OrderedDict
 from concurrent.futures import Future
@@ -10,7 +11,7 @@ from lmcache.config import LMCacheEngineMetadata
 from lmcache.experimental.config import LMCacheEngineConfig
 from lmcache.experimental.lookup_server import LookupServerInterface
 from lmcache.experimental.memory_management import (MemoryAllocatorInterface,
-                                                    MemoryFormat, MemoryObj,
+                                                    MemoryFormat, MemoryObj, MemoryObjMetadata,
                                                     MixedMemoryAllocator, AdHocMemoryAllocator)
 from lmcache.experimental.storage_backend import CreateStorageBackends
 from lmcache.experimental.storage_backend.nixl_backend import NixlBackend
@@ -104,6 +105,18 @@ class StorageManager:
 
         self.manager_lock.release()
         return memory_obj
+
+    def dry_allocate(
+        self,
+        shape: torch.Size,
+        dtype: torch.dtype,
+        eviction=True,
+    ) -> Optional[MemoryObj]:
+        """
+        Allocate memory object with memory allocator.
+        Use LRU evictor if eviction is enabled.
+        """
+        return self.memory_allocator.dry_allocate(shape, dtype)
 
     def put(
         self,
@@ -406,6 +419,25 @@ class DistributedStroageManager:
         """
         return self.allocator.allocate(shape, dtype)
 
+    def dry_allocate(
+            self,
+            shape: torch.Size,
+            dtype: torch.dtype,
+            eviction=True,
+        ) -> Optional[MemoryObj]:
+        """
+        Allocate memory object with memory allocator.
+        Use LRU evictor if eviction is enabled.
+        """
+        return self.allocator.dry_allocate(shape, dtype)
+
+    def prepare_put(
+        self,
+        keys: list[CacheEngineKey],
+        metadatas: list[MemoryObjMetadata],
+    ) -> None:
+        self.storage_backend.register_put_tasks(keys, metadatas)
+
     def put(
         self,
         key: CacheEngineKey,
@@ -413,18 +445,29 @@ class DistributedStroageManager:
     ) -> None:
         self.storage_backend.submit_put_task(key, memory_obj)
 
+    def commit_put(self):
+        self.storage_backend.flush_put_tasks()
+
     def batched_put(
         self,
         keys: List[CacheEngineKey],
         memory_objs: List[MemoryObj],
     ) -> None:
+        start = time.perf_counter()
         self.storage_backend.submit_put_tasks(keys, memory_objs)
+        end = time.perf_counter()
+        logger.debug(f"Batched put took {(end - start) * 1000:.4f} msec")
 
     def get(
         self,
         key: CacheEngineKey,
     ) -> Optional[MemoryObj]:
-        return self.storage_backend.get_blocking(key)
+        obj = self.storage_backend.get_blocking(key)
+        # NOTE (ApostaC): This is only for the current implementation: 
+        # When the object is retrieved back to vLLM, the storage backend
+        # will immediately remove the object from itself
+        self.storage_backend.remove(key)
+        return obj
 
     def prefetch(self, key: CacheEngineKey) -> None:
         raise NotImplementedError("Prefetch is not implemented for "
@@ -432,6 +475,7 @@ class DistributedStroageManager:
     def contains(
         self,
         key: CacheEngineKey,
+        search_range: Optional[List[str]] = None,
     ) -> bool:
         return self.storage_backend.contains(key)
 

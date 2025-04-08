@@ -71,6 +71,12 @@ class LMCacheEngineConfig:
         lookup_url: Optional[str] = None,
         distributed_url: Optional[str] = None,
         error_handling: bool = False,
+        enable_nixl: Optional[bool] = False,
+        nixl_role: Optional[str] = None,
+        nixl_peer_host: Optional[str] = None,
+        nixl_peer_port: Optional[int] = None,
+        nixl_buffer_size: Optional[int] = None,
+        nixl_buffer_device: Optional[str] = None,
     ) -> "LMCacheEngineConfig":
         # TODO (ApostaC): Add nixl config
         return LMCacheEngineConfig(chunk_size, local_cpu, max_local_cpu_size,
@@ -78,7 +84,10 @@ class LMCacheEngineConfig:
                                    remote_serde, save_decode_cache,
                                    enable_blending, blend_recompute_ratio,
                                    blend_min_tokens, enable_p2p, lookup_url,
-                                   distributed_url, error_handling).validate()
+                                   distributed_url, error_handling, enable_nixl,
+                                   nixl_role, nixl_peer_host, nixl_peer_port,
+                                   nixl_buffer_size, nixl_buffer_device
+                                   ).validate()
 
     @staticmethod
     def from_legacy(

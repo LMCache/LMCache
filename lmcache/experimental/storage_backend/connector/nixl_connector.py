@@ -44,12 +44,15 @@ class NixlConfig:
         assert config.enable_nixl is True, \
             "NIXL is not enabled in the LMCacheEngineConfig"
 
-        assert config.role in [NixlRole.SENDER, NixlRole.RECEIVER], \
-                f"Invalid role: {config.role}, must be either "\
+        if isinstance(config.nixl_role, str):
+            config.nixl_role = NixlRole(config.nixl_role)
+
+        assert config.nixl_role in [NixlRole.SENDER, NixlRole.RECEIVER], \
+                f"Invalid role: {config.nixl_role}, must be either "\
                 f"{NixlRole.SENDER} or {NixlRole.RECEIVER}"
 
         return NixlConfig(
-            role=config.role,
+            role=config.nixl_role,
             peer_host_name=config.nixl_peer_host,
             peer_port=config.nixl_peer_port + worker_id,
             buffer_size=config.nixl_buffer_size,
@@ -139,7 +142,7 @@ class NixlPipe:
             logger.info("Sent local transfer descriptors to sender")
 
 
-    def write_buffer(self, objs: list[MemoryObj]) -> tuple[int, int]:
+    def write_buffer(self, objs: list[MemoryObj], offset = 0) -> tuple[int, int]:
         """Try to write (copy) the data to NIXL transfer buffer (sender side).
         If the data is larger than the underlying buffer, it will return the 
         number of memory objects as well as the total bytes that has been 
@@ -147,12 +150,12 @@ class NixlPipe:
       
         Args:
             objs: list of MemoryObj
+            offset: the offset to start writing the data to the buffer
         
         Returns:
             a tuple of: (number of memory objects, total bytes written) to 
             the buffer
         """
-        offset = 0
         total_objs = 0
         for obj in objs:
             obj_size = obj.get_size()
@@ -360,6 +363,17 @@ class NixlChannel:
             self._receiver_thread.start()
         else:
             self._receiver_thread = None
+
+        # Send state tracker
+        self._during_send = False
+        # How may objects are prepared to send
+        self._prepared_count = 0
+        # How many objects are added to the payload
+        self._added_payload_count = 0
+        # How many bytes are added to the payload
+        self._payload_offset = 0
+        # Current uuid used in the send transaction
+        self._curr_uuid = None
     
     def _process_receive_transaction(
             self, 
@@ -399,6 +413,7 @@ class NixlChannel:
             self._pipe.ack_receive(curr_uuid)
 
             # Update the offset
+            num_received_object += len(objs_read)
             offset += len(objs_read)
 
 
@@ -413,6 +428,7 @@ class NixlChannel:
                 # Wait for a request from the side channel with shorter timeout
                 evts = poller.poll(timeout=POLL_TIMEOUT_MS)
                 if not evts:
+                    logger.debug("No events received on the side channel, continuing...")
                     continue
                 
                 logger.debug("Received event on the side channel, processing message...")
@@ -442,9 +458,83 @@ class NixlChannel:
                 if self._running:  # Only sleep if we're still meant to be running
                     time.sleep(0.01)
 
+    def prepare_send(self, keys: list[CacheEngineKey], metadatas: list[MemoryObjMetadata]):
+        """Prepare a send transaction by sending the request using the side channel.
+        """
+        if self._during_send:
+            logger.error("Cannot prepare a new send transaction while another is in progress")
+            raise RuntimeError("Another send transaction is already in progress")
+        if self._payload_offset != 0:
+            logger.warning("Payload offset is not 0, the buffer may not be flushed correctly")
+
+        # Initialize connection using side channel
+        init_uuid = uuid.uuid4().hex
+        request = NixlRequest(
+            keys=keys,
+            metadatas=metadatas,
+            init_uuid=init_uuid
+        )
+
+        self._side_channel.send(request.serialize())  
+        logger.debug(f"Sent the request with {len(keys)} keys and UUID: {init_uuid}")
+
+        self._during_send = True
+        self._prepared_count = len(keys)
+        self._added_payload_count = 0
+        self._curr_uuid = init_uuid
+        self._payload_offset = 0
+
+    def add_payload(self, payload: MemoryObj):
+        """Add a payload after the send transaction is prepared
+        """
+        if not self._during_send:
+            logger.error("Cannot add payload to a send transaction that is not prepared")
+            raise RuntimeError("No send transaction is prepared")
+        if self._added_payload_count >= self._prepared_count:
+            logger.error("Cannot add more payloads than prepared objects")
+            raise RuntimeError("Cannot add more payloads than prepared objects")
+
+        # Add the payload to the transfer buffer
+        num_objs, self._payload_offset = self._pipe.write_buffer(
+                [payload], self._payload_offset)
+        if num_objs == 0:
+            # write buffer full, flushing
+            self._flush_send()
+            num_objs, self._payload_offset = self._pipe.write_buffer(
+                    [payload], self._payload_offset)
+        self._added_payload_count += num_objs
+
+    def finish_send(self):
+        self._flush_send()
+        assert self._payload_offset == 0, \
+            "Send buffer offset is not 0, the buffer may not be flushed correctly"
+
+        self._during_send = False
+        self._prepared_count = 0
+        self._added_payload_count = 0
+        self._curr_uuid = None
+
+    def _flush_send(self):
+        """Flush the send transaction
+        """
+        if not self._during_send:
+            logger.error("No send transaction is prepared")
+            raise RuntimeError("No send transaction is prepared")
+        if self._payload_offset == 0:
+            logger.error("Send buffer offset is 0!")
+            raise RuntimeError("Send buffer offset is 0!")
+
+        self._curr_uuid = self._pipe.commit_write(self._payload_offset, self._curr_uuid)
+        self._payload_offset = 0
+
     def send(self, keys: list[CacheEngineKey], objs: list[MemoryObj]):
         """A blocking function that ensures the objects are sent to the receiver side
         Should raise exception if the transmission is not successful
+
+        This function is equivalent to calling the following 3 functions:
+        - prepare_send
+        - add_payload
+        - finish_send
 
         Args:
             keys: the list of CacheEngineKey for the objects being sent
@@ -454,36 +544,44 @@ class NixlChannel:
             RuntimeError: if the underlying NixlPipe transmission fails or failed to
                 write to the transfer buffer
         """
-        # Initialize connection using side channel
-        init_uuid = uuid.uuid4().hex
-        request = NixlRequest(
-            keys=keys,
-            metadatas=[obj.metadata for obj in objs],
-            init_uuid=init_uuid
-        )
+        self.prepare_send(keys, [obj.metadata for obj in objs])
 
-        self._side_channel.send(request.serialize())  
+        for obj in objs:
+            self.add_payload(obj)
 
-        # now transfering data
-        num_objs_sent = 0
-        curr_uuid = init_uuid
-        while num_objs_sent < len(objs):
-            # Write the objects to the transfer buffer
-            num_written, bytes_written = self._pipe.write_buffer(
-                    objs[num_objs_sent:])
-            if num_written == 0:
-                logger.error("Failed to write any objects to the transfer buffer")
-                raise RuntimeError(
-                    "Failed to write objects to the transfer buffer"
-                )
-            num_objs_sent += num_written
+        self.finish_send()
 
-            try:
-                # Commit the write to the remote peer
-                curr_uuid = self._pipe.commit_write(bytes_written, curr_uuid)
-            except RuntimeError as e:
-                logger.error("Failed to commit write: %s", str(e))
-                raise
+        ## Initialize connection using side channel
+        #init_uuid = uuid.uuid4().hex
+        #request = NixlRequest(
+        #    keys=keys,
+        #    metadatas=[obj.metadata for obj in objs],
+        #    init_uuid=init_uuid
+        #)
+
+        #self._side_channel.send(request.serialize())  
+        #logger.debug(f"Sent the request with {len(keys)} keys and UUID: {init_uuid}")
+
+        ## now transfering data
+        #num_objs_sent = 0
+        #curr_uuid = init_uuid
+        #while num_objs_sent < len(objs):
+        #    # Write the objects to the transfer buffer
+        #    num_written, bytes_written = self._pipe.write_buffer(
+        #            objs[num_objs_sent:])
+        #    if num_written == 0:
+        #        logger.error("Failed to write any objects to the transfer buffer")
+        #        raise RuntimeError(
+        #            "Failed to write objects to the transfer buffer"
+        #        )
+        #    num_objs_sent += num_written
+
+        #    try:
+        #        # Commit the write to the remote peer
+        #        curr_uuid = self._pipe.commit_write(bytes_written, curr_uuid)
+        #    except RuntimeError as e:
+        #        logger.error("Failed to commit write: %s", str(e))
+        #        raise
       
     def register_receive_observer(self, observer: NixlObserverInterface):
         """Register a new receive observer

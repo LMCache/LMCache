@@ -96,6 +96,10 @@ class NixlBackend(StorageBackendInterface):
             observer=self._nixl_observer
         )
 
+        self._registered_keys: list[CacheEngineKey] = []
+        self._registered_metadatas: list[MemoryObjMetadata] = []
+        self._num_payload_added = 0
+
 
     def contains(self, key: CacheEngineKey) -> bool:
         """
@@ -115,6 +119,25 @@ class NixlBackend(StorageBackendInterface):
         """
         return False
 
+    def register_put_tasks(
+            self,
+            keys: list[CacheEngineKey],
+            metadatas: list[MemoryObjMetadata],
+        ) -> None:
+        """
+        Register the put tasks to the backend.
+        """
+        if len(self._registered_keys) > 0:
+            raise RuntimeError("The backend has already registered put tasks.")
+
+        self._registered_keys = keys
+        self._registered_metadatas = metadatas
+        self._nixl_channel.prepare_send(
+            keys=keys,
+            metadatas=metadatas
+        )
+
+
     def submit_put_task(self, key: CacheEngineKey, obj: MemoryObj) -> Optional[Future]:
         """
         Put the MemoryObj into the storage backend and send it to the receiver
@@ -124,9 +147,39 @@ class NixlBackend(StorageBackendInterface):
         :param obj: The MemoryObj to be stored.
         
         :return: a future object
+
+        :note: Right now, the 'key' is not used and it assumes that the memory object
+        has the same order as the keys passed in `register_put_tasks`.
         """
-        self._nixl_channel.send([key], [obj])
+        if len(self._registered_keys) == 0:
+            raise RuntimeError("The backend has not registered put tasks.")
+
+        assert self._registered_keys[self._num_payload_added] == key, \
+            f"The key {key} is not the same as the registered key "\
+            f"{self._registered_keys[self._num_payload_added]}."
+
+        assert self._registered_metadatas[self._num_payload_added] == obj.metadata, \
+            f"The metadata {obj.metadata} is not the same as the registered metadata "\
+            f"{self._registered_metadatas[self._num_payload_added]}."
+
+        #self._nixl_channel.send([key], [obj])
+        self._nixl_channel.add_payload(obj)
+        self._num_payload_added += 1
         return None
+
+    def flush_put_tasks(self) -> None:
+        """
+        Flush the registered tasks 
+        """
+        assert len(self._registered_keys) > 0, \
+            "The backend has not registered put tasks."
+        assert self._num_payload_added == len(self._registered_keys), \
+            "The number of payloads added is not equal to the number of registered keys."
+
+        self._nixl_channel.finish_send()
+        self._registered_keys = []
+        self._registered_metadatas = []
+        self._num_payload_added = 0
 
     def submit_put_tasks(self, keys: list[CacheEngineKey], objs: list[MemoryObj]) -> Optional[Future]:
         """
@@ -168,6 +221,18 @@ class NixlBackend(StorageBackendInterface):
                 # Key does not exist in the storage
                 logger.warning(f"Key {key} not found in Nixl backend.")
                 return None
+
+    def remove(self, key: CacheEngineKey) -> None:
+        """
+        Remove the key from the storage backend.
+
+        :param key: The key to remove.
+        """
+        with self._data_lock:
+            if key in self._data:
+                del self._data[key]
+            else:
+                logger.warning(f"Key {key} not found in Nixl backend.")
 
     def close(self) -> None:
         """

@@ -15,6 +15,7 @@
 import asyncio
 import multiprocessing
 from typing import Dict, List, Optional
+import time
 
 import torch
 
@@ -104,6 +105,66 @@ class LMCacheEngine:
 
     @_lmcache_nvtx_annotate
     @torch.inference_mode()
+    def store_distributed(
+            self,
+            tokens: torch.Tensor,
+            mask: Optional[torch.Tensor] = None,
+            **kwargs) -> None:
+        """Store the tokens and mask into the cache engine.
+        
+        This function is only for distributed storage manager.
+
+        This function will be refactored in the future.
+        """
+        st = time.perf_counter()
+        if mask is not None:
+            monitor_req_id = self.stats_monitor.on_store_request(
+                torch.sum(mask))
+        else:
+            monitor_req_id = self.stats_monitor.on_store_request(len(tokens))
+
+        # Register the put request 
+        keys = []
+        metadatas = []
+        steds = []
+        for start, end, key in self.token_database.process_tokens(
+                tokens, mask):
+            # Allocate the memory object
+            num_tokens = end - start
+            kv_shape = self.gpu_connector.get_shape(num_tokens)
+            kv_dtype = self.metadata.kv_dtype
+            memobj_meta = self.storage_manager.dry_allocate(kv_shape, kv_dtype)
+
+            keys.append(key)
+            metadatas.append(memobj_meta)
+            steds.append((start, end))
+
+        self.storage_manager.prepare_put(keys, metadatas)
+
+        
+        # Offload the KV cache and write to remote
+        for key, memobj_meta, (start, end) in zip(keys, metadatas, steds):
+
+            kv_shape = memobj_meta.shape
+            kv_dtype = memobj_meta.dtype
+            memory_obj = self.storage_manager.allocate(kv_shape, kv_dtype)
+            if memory_obj is None:
+                logger.warning("Failed to allocate memory for the KV cache.\n"
+                               "The KV cache will not be stored.")
+                break
+
+            self.gpu_connector.from_gpu(memory_obj, start, end, **kwargs)
+            self.storage_manager.put(key, memory_obj)
+
+        # Flush
+        self.storage_manager.commit_put()
+
+        ed = time.perf_counter()
+        self.stats_monitor.on_store_finished(monitor_req_id)
+
+    
+    @_lmcache_nvtx_annotate
+    @torch.inference_mode()
     def store(self,
               tokens: torch.Tensor,
               mask: Optional[torch.Tensor] = None,
@@ -125,14 +186,17 @@ class LMCacheEngine:
         :raises: ValueError if the number of Falses in the mask is not a 
             multiple of the chunk size.
         """
+        # FIXME(ApostaC): A HACK for distributed storage manager
+        if isinstance(self.storage_manager, DistributedStroageManager):
+            self.store_distributed(tokens, mask, **kwargs)
+            return
+
         if mask is not None:
             monitor_req_id = self.stats_monitor.on_store_request(
                 torch.sum(mask))
         else:
             monitor_req_id = self.stats_monitor.on_store_request(len(tokens))
 
-        key_list = []
-        obj_list = []
         for start, end, key in self.token_database.process_tokens(
                 tokens, mask):
             if self.storage_manager.contains(key):
@@ -148,14 +212,8 @@ class LMCacheEngine:
                 break
 
             self.gpu_connector.from_gpu(memory_obj, start, end, **kwargs)
-            #self.storage_manager.put(key, memory_obj)
-            key_list.append(key)
-            obj_list.append(memory_obj)
+            self.storage_manager.put(key, memory_obj)
 
-        
-        self.storage_manager.batched_put(key_list, obj_list)
-
-        for key in key_list:
             # Update lookup server
             if self.lookup_server is not None:
                 self.lookup_server.insert(key)
@@ -283,6 +341,8 @@ class LMCacheEngineBuilder:
         metadata: LMCacheEngineMetadata,
     ) -> MemoryAllocatorInterface:
         max_local_cpu_size = config.max_local_cpu_size
+        if max_local_cpu_size == 0:
+            max_local_cpu_size = 1
         return MixedMemoryAllocator(int(max_local_cpu_size * 1024**3))
 
     @staticmethod

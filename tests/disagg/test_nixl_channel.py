@@ -50,31 +50,138 @@ def calculate_throughput(total_bytes: int, elapsed_time: float) -> float:
 
 class TestObserver(NixlObserverInterface):
     def __init__(self):
-        self.received_keys = []
-        self.received_objs = []
-        self.received_event = threading.Event()
-        self.expected_count = None
+        self.reset()
         
     def set_expected_count(self, count: int):
         self.expected_count = count
         
     def __call__(self, keys, objs, is_view=True):
         logger.info(f"Observer received {len(keys)} keys and {len(objs)} objects")
+        
+        # Clear previous data if we're starting a new batch
+        if len(self.received_keys) == 0:
+            self.reset()
+        
         self.received_keys.extend(keys)
         
         # If these are views, we need to make copies
         if is_view:
             copied_objs = []
             for obj in objs:
-                copied_tensor = obj.tensor.clone()
-                copied_obj = TensorMemoryObj(copied_tensor, obj.metadata)
-                copied_objs.append(copied_obj)
-            self.received_objs.extend(copied_objs)
+                copied_tensor = obj.tensor.clone().detach()  # Detach to ensure no gradient history
+                self.received_tensors.append(copied_tensor)
+                #copied_obj = TensorMemoryObj(copied_tensor, obj.metadata)
+                #copied_objs.append(copied_obj)
+            #self.received_objs.extend(copied_objs)
         else:
             self.received_objs.extend(objs)
             
         if self.expected_count and len(self.received_objs) >= self.expected_count:
             self.received_event.set()
+
+    def summarize(self):
+        logger.info(f"Received {len(self.received_keys)} keys and {len(self.received_tensors)} tensors")
+
+    def reset(self):
+        # Explicitly free any existing tensors
+        if hasattr(self, 'received_objs'):
+            for obj in self.received_objs:
+                del obj.raw_data
+            del self.received_objs
+        
+        if hasattr(self, 'received_keys'):
+            del self.received_keys
+
+        if hasattr(self, 'received_tensors'):
+            del self.received_tensors
+            
+        self.received_keys = []
+        self.received_tensors = []
+        self.received_event = threading.Event()
+        self.expected_count = None
+        torch.cuda.empty_cache()  # Force CUDA memory cleanup
+
+def send_and_measure_throughput(channel: NixlChannel, keys: List[CacheEngineKey], 
+                              objs: List[MemoryObj], total_size: int) -> float:
+    """Send data through the channel and measure throughput.
+    
+    Args:
+        channel: The NixlChannel to send data through
+        keys: List of cache engine keys
+        objs: List of memory objects to send
+        total_size: Total size of objects in bytes
+    
+    Returns:
+        float: Throughput in GB/s
+    """
+    # Wait a bit for the receiver to set up
+    time.sleep(2)
+    
+    # Send the data
+    logger.info(f"Sending {len(objs)} objects...")
+    start_time = time.time()
+    channel.send(keys, objs)
+    end_time = time.time()
+    
+    elapsed_time = end_time - start_time
+    logger.info(f"Sent {len(objs)} objects in {elapsed_time:.6f} seconds")
+    throughput = calculate_throughput(total_size, elapsed_time)
+    logger.info(f"Throughput: {throughput:.2f} GB/s")
+    return throughput
+
+def receive_and_verify_data(observer: TestObserver, channel: NixlChannel, expected_keys: List[CacheEngineKey], 
+                          expected_objs: List[MemoryObj], timeout: int = 60) -> bool:
+    """Receive data through the channel and verify it matches expected data.
+    
+    Args:
+        channel: The NixlChannel to receive data through
+        expected_keys: List of expected cache engine keys
+        expected_objs: List of expected memory objects
+        timeout: Maximum time to wait for data in seconds
+    
+    Returns:
+        bool: True if all data was received and verified successfully
+    """
+    # Create and register an observer
+    
+    try:
+        # Wait for all data to be received
+        logger.info("Waiting to receive data...")
+        start_time = time.time()
+        
+        while len(observer.received_tensors) < len(expected_keys):
+            if time.time() - start_time > timeout:
+                logger.error("Timed out waiting for data")
+                return False
+            logger.info(f"Received {len(observer.received_tensors)}/{len(expected_keys)} tensors so far...")
+            time.sleep(1)
+        
+        if len(observer.received_tensors) == len(expected_keys):
+            logger.info(f"Received all {len(observer.received_keys)} keys and {len(observer.received_tensors)} tensors")
+            
+            # Verify the received data
+            success = True
+            for i, (received_tensor, original_tensor) in enumerate(zip(observer.received_tensors, expected_objs)):
+                if not torch.allclose(received_tensor, original_tensor.tensor):
+                    logger.error(f"Data mismatch at index {i}")
+                    success = False
+                    break
+
+            for i, (received_key, original_key) in enumerate(zip(observer.received_keys, expected_keys)):
+                if received_key != original_key:
+                    logger.error(f"Key mismatch at index {i}")
+                    success = False
+                    break
+            
+            return success
+        else:
+            logger.error(f"Only received {len(observer.received_objs)}/{len(expected_keys)} objects before timeout")
+            return False
+    finally:
+        # Always cleanup, even if verification fails
+        observer.summarize()
+        observer.reset()
+        torch.cuda.empty_cache()
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Test NixlChannel with sender/receiver roles')
@@ -86,6 +193,8 @@ if __name__ == "__main__":
                        help='Port number for connection')
     parser.add_argument('--num-objs', type=int, default=100,
                        help='Number of objects to send')
+    parser.add_argument('--num-rounds', type=int, default=1,
+                       help='Number of rounds to run the experiment')
     args = parser.parse_args()
 
     # Generate test data
@@ -106,61 +215,20 @@ if __name__ == "__main__":
     channel = NixlChannel(config)
     
     if args.role == "sender":
-        # Wait a bit for the receiver to set up
-        time.sleep(2)
-        
-        # Send the data
-        logger.info(f"Sending {len(objs)} objects...")
-        start_time = time.time()
-        channel.send(keys, objs)
-        end_time = time.time()
-        
-        elapsed_time = end_time - start_time
-        logger.info(f"Sent {len(objs)} objects in {elapsed_time:.6f} seconds")
-        throughput = calculate_throughput(total_size, elapsed_time)
-        logger.info(f"Throughput: {throughput:.2f} GB/s")
-        
+        throughputs = []
+        for i in range(args.num_rounds):
+            logger.info(f"Round {i+1}/{args.num_rounds}")
+            throughput = send_and_measure_throughput(channel, keys, objs, total_size)
+            throughputs.append(throughput)
+        avg_throughput = sum(throughputs) / len(throughputs)
+        logger.info(f"Average throughput: {avg_throughput:.2f} GB/s")
     else:  # receiver
-        # Create and register an observer
         observer = TestObserver()
         observer.set_expected_count(len(keys))
         channel.register_receive_observer(observer)
-        
-        # Wait for all data to be received
-        logger.info("Waiting to receive data...")
-        timeout = 60
-        start_time = time.time()
-        
-        while len(observer.received_objs) < len(keys):
-            if time.time() - start_time > timeout:
-                logger.error("Timed out waiting for data")
-                break
-            logger.info(f"Received {len(observer.received_objs)}/{len(keys)} objects so far...")
-            time.sleep(1)
-        
-        if len(observer.received_objs) == len(keys):
-            logger.info(f"Received all {len(observer.received_keys)} keys and {len(observer.received_objs)} objects")
-            
-            # Verify the received data
-            if len(observer.received_keys) != len(keys):
-                logger.error(f"Expected {len(keys)} keys but received {len(observer.received_keys)}")
-            
-            # Check if the received objects match the original objects
-            for i, (received_obj, original_obj) in enumerate(zip(observer.received_objs, objs)):
-                if not torch.allclose(received_obj.tensor, original_obj.tensor):
-                    logger.error(f"Data mismatch at index {i}: received {received_obj.tensor.mean()} "
-                                f"but expected {original_obj.tensor.mean()}")
-                    break
-
-            for i, (received_keys, original_keys) in enumerate(zip(observer.received_keys, keys)):
-                if received_keys != original_keys:
-                    logger.error(f"Key mismatch at index {i}: received {received_keys} "
-                                f"but expected {original_keys}")
-                    break
-            else:
-                logger.info("All data verified successfully!")
-        else:
-            logger.error(f"Only received {len(observer.received_objs)}/{len(keys)} objects before timeout")
+        for i in range(args.num_rounds):
+            logger.info(f"Round {i+1}/{args.num_rounds}")
+            success = receive_and_verify_data(observer, channel, keys, objs)
     
     # Wait a bit before closing
     time.sleep(2)
