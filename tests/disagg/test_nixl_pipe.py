@@ -80,8 +80,8 @@ if __name__ == "__main__":
         buffer_device='cuda',
     )
 
-    context = zmq.Context()
-    side_channel = context.socket(zmq.PAIR)
+    context = zmq.Context() # type: ignore
+    side_channel = context.socket(zmq.PAIR) # type: ignore
     if args.role == "sender":
         side_channel.bind(f"tcp://{args.host}:{args.port}")
     else:
@@ -90,8 +90,8 @@ if __name__ == "__main__":
     # Test the NIXLPipe
     pipe = NixlPipe(config, side_channel)
 
-    total_commit_time = 0
-    total_wait_time = 0
+    total_commit_time = 0.0
+    total_wait_time = 0.0
     total_bytes_transferred = 0
 
     for round_num in range(args.num_rounds):

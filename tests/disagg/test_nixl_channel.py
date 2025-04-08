@@ -49,6 +49,10 @@ def calculate_throughput(total_bytes: int, elapsed_time: float) -> float:
 class TestObserver(NixlObserverInterface):
 
     def __init__(self):
+        self.received_keys = []
+        self.received_tensors = []
+        self.received_event = threading.Event()
+        self.expected_count = None
         self.reset()
 
     def set_expected_count(self, count: int):
