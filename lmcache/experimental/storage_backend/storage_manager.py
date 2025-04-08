@@ -387,7 +387,7 @@ class StorageManager:
         logger.info("Storage manager closed.")
 
 
-class DistributedStroageManager:
+class DistributedStorageManager:
     """
     The storage manager for P-D disaggregation setting
 

@@ -28,7 +28,7 @@ from lmcache.experimental.lookup_server import (LookupServerInterface,
 from lmcache.experimental.memory_management import (MemoryAllocatorInterface,
                                                     MixedMemoryAllocator)
 from lmcache.experimental.storage_backend.storage_manager import (
-    DistributedStroageManager, StorageManager)
+    DistributedStorageManager, StorageManager)
 from lmcache.experimental.token_database import (ChunkedTokenDatabase,
                                                  TokenDatabase)
 from lmcache.logging import init_logger
@@ -84,9 +84,9 @@ class LMCacheEngine:
         if self.enable_p2p:
             self.lookup_server = RedisLookupServer(config)
 
-        self.storage_manager: Union[StorageManager, DistributedStroageManager]
+        self.storage_manager: Union[StorageManager, DistributedStorageManager]
         if config.enable_nixl:
-            self.storage_manager = DistributedStroageManager(config, metadata)
+            self.storage_manager = DistributedStorageManager(config, metadata)
         else:
             self.storage_manager = StorageManager(config, metadata,
                                                   self.memory_allocator,
@@ -122,7 +122,7 @@ class LMCacheEngine:
         else:
             monitor_req_id = self.stats_monitor.on_store_request(len(tokens))
 
-        assert isinstance(self.storage_manager, DistributedStroageManager)
+        assert isinstance(self.storage_manager, DistributedStorageManager)
 
         # Register the put request
         keys = []
@@ -186,7 +186,7 @@ class LMCacheEngine:
             multiple of the chunk size.
         """
         # FIXME(ApostaC): A HACK for distributed storage manager
-        if isinstance(self.storage_manager, DistributedStroageManager):
+        if isinstance(self.storage_manager, DistributedStorageManager):
             self.store_distributed(tokens, mask, **kwargs)
             return
 
