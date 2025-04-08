@@ -14,4 +14,4 @@ prometheus_client
 infinistore
 msgspec
 nixl
-zmq
+pyzmq
