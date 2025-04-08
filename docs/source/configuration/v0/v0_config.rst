@@ -73,60 +73,60 @@ The following are the list of environment variables that can be set for LMCache.
 
       # The size of the chunk as an integer 
       # (set to 256 by default)
-      LM_CACHE_CHUNK_SIZE: int
+      LMCACHE_CHUNK_SIZE: int
 
       # The local KV cache device to use (set to "cuda" by default)
       # Possible values: "cpu", "cuda", "file://local_disk/"
-      LM_CACHE_LOCAL_DEVICE: Optional[str]
+      LMCACHE_LOCAL_DEVICE: Optional[str]
 
       # The maximum size of the local KV cache as an integer (GB)
       # Set to 5 by default
-      LM_CACHE_MAX_LOCAL_CACHE_SIZE: int
+      LMCACHE_MAX_LOCAL_CACHE_SIZE: int
 
       # Remote URL for the storage backend (can be redis or redis-sentinel)
       # Should have the format url://<host>:<port>
       # E.g. redis://localhost:65432
       # E.g. redis-sentinel://localhost:26379 
-      LM_CACHE_REMOTE_URL: Optional[str]
+      LMCACHE_REMOTE_URL: Optional[str]
 
       # The remote serde for the backend
       # Can be "cachegen", "torch", "safetensor", "fast"
-      LM_CACHE_REMOTE_SERDE: Optional[str]
+      LMCACHE_REMOTE_SERDE: Optional[str]
 
       # Whether retrieve() is pipelined or not
       # Set to False by default
-      LM_CACHE_PIPELINED_BACKEND: bool
+      LMCACHE_PIPELINED_BACKEND: bool
 
       # Whether to save the decode cache
       # Set to False by default
-      LM_CACHE_SAVE_DECODE_CACHE: bool 
+      LMCACHE_SAVE_DECODE_CACHE: bool 
 
       # Whether to enable KV cache blending
       # Set to False by default
-      LM_CACHE_ENABLE_BLENDING: bool  
+      LMCACHE_ENABLE_BLENDING: bool  
 
       # The recompute ratio if KV cache blending is enabled
       # Set to 0.5 by default 
-      LM_CACHE_BLEND_RECOMPUTE_RATIO: float
+      LMCACHE_BLEND_RECOMPUTE_RATIO: float
 
       # The minimum number of tokens for blending
       # Set to 256 by default
-      LM_CACHE_BLEND_MIN_TOKENS: int
+      LMCACHE_BLEND_MIN_TOKENS: int
 
 To run LMCache with the environment variables, you can do the following:
 
 .. code-block:: bash
 
-      export LM_CACHE_CHUNK_SIZE=256
-      export LM_CACHE_LOCAL_DEVICE="cuda"
-      export LM_CACHE_MAX_LOCAL_CACHE_SIZE=5
-      export LM_CACHE_REMOTE_URL="redis://localhost:65432"
-      export LM_CACHE_REMOTE_SERDE="cachegen"
-      export LM_CACHE_PIPELINED_BACKEND=False
-      export LM_CACHE_SAVE_DECODE_CACHE=False
-      export LM_CACHE_ENABLE_BLENDING=False
-      export LM_CACHE_BLEND_RECOMPUTE_RATIO=0.5
-      export LM_CACHE_BLEND_MIN_TOKENS=256
+      export LMCACHE_CHUNK_SIZE=256
+      export LMCACHE_LOCAL_DEVICE="cuda"
+      export LMCACHE_MAX_LOCAL_CACHE_SIZE=5
+      export LMCACHE_REMOTE_URL="redis://localhost:65432"
+      export LMCACHE_REMOTE_SERDE="cachegen"
+      export LMCACHE_PIPELINED_BACKEND=False
+      export LMCACHE_SAVE_DECODE_CACHE=False
+      export LMCACHE_ENABLE_BLENDING=False
+      export LMCACHE_BLEND_RECOMPUTE_RATIO=0.5
+      export LMCACHE_BLEND_MIN_TOKENS=256
 
       lmcache_vllm serve <args>
 
