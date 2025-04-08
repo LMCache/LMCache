@@ -80,8 +80,8 @@ if __name__ == "__main__":
         buffer_device='cuda',
     )
 
-    context = zmq.Context() # type: ignore
-    side_channel = context.socket(zmq.PAIR) # type: ignore
+    context = zmq.Context()  # type: ignore
+    side_channel = context.socket(zmq.PAIR)  # type: ignore
     if args.role == "sender":
         side_channel.bind(f"tcp://{args.host}:{args.port}")
     else:
