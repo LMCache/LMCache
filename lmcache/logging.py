@@ -1,4 +1,5 @@
 import logging
+import os
 from logging import Logger
 
 def build_format(color):
@@ -28,6 +29,23 @@ class CustomFormatter(logging.Formatter):
         formatter = logging.Formatter(log_fmt)
         return formatter.format(record)
 
+def get_log_level() -> int:
+    """
+    Try to read LMCACHE_LOG_LEVEL from environment variables.
+    Could be: 
+    - DEBUG
+    - INFO
+    - WARNING
+    - ERROR
+    - CRITICAL
+
+    If not found, defaults to INFO.
+    """
+    log_level = os.getenv("LMCACHE_LOG_LEVEL", "INFO").upper()
+    return getattr(logging, log_level, logging.INFO)
+
+
+
 def init_logger(name: str) -> Logger:
     # Get the logger
     logger = logging.getLogger(name)
@@ -40,11 +58,11 @@ def init_logger(name: str) -> Logger:
     
     # Add our custom handler
     ch = logging.StreamHandler()
-    ch.setLevel(logging.DEBUG)
+    ch.setLevel(logging.INFO)
     ch.setFormatter(CustomFormatter())
     logger.addHandler(ch)
     
-    logger.setLevel(logging.DEBUG)
+    logger.setLevel(logging.INFO)
     return logger
 
 if __name__ == "__main__":
