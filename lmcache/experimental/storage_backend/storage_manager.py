@@ -1,6 +1,6 @@
 import asyncio
-import time
 import threading
+import time
 from collections import OrderedDict
 from concurrent.futures import Future
 from typing import Dict, List, Optional, Tuple
@@ -10,13 +10,15 @@ import torch
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.experimental.config import LMCacheEngineConfig
 from lmcache.experimental.lookup_server import LookupServerInterface
-from lmcache.experimental.memory_management import (MemoryAllocatorInterface,
-                                                    MemoryFormat, MemoryObj, MemoryObjMetadata,
-                                                    MixedMemoryAllocator, AdHocMemoryAllocator)
+from lmcache.experimental.memory_management import (AdHocMemoryAllocator,
+                                                    MemoryAllocatorInterface,
+                                                    MemoryFormat, MemoryObj,
+                                                    MemoryObjMetadata,
+                                                    MixedMemoryAllocator)
 from lmcache.experimental.storage_backend import CreateStorageBackends
-from lmcache.experimental.storage_backend.nixl_backend import NixlBackend
 from lmcache.experimental.storage_backend.abstract_backend import \
     StorageBackendInterface
+from lmcache.experimental.storage_backend.nixl_backend import NixlBackend
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey, _lmcache_nvtx_annotate
 
@@ -111,7 +113,7 @@ class StorageManager:
         shape: torch.Size,
         dtype: torch.dtype,
         eviction=True,
-    ) -> Optional[MemoryObj]:
+    ) -> Optional[MemoryObjMetadata]:
         """
         Allocate memory object with memory allocator.
         Use LRU evictor if eviction is enabled.
@@ -163,10 +165,10 @@ class StorageManager:
         self.manager_lock.release()
 
     def batched_put(
-            self,
-            keys: List[CacheEngineKey],
-            memory_objs: List[MemoryObj],
-        ) -> None:
+        self,
+        keys: List[CacheEngineKey],
+        memory_objs: List[MemoryObj],
+    ) -> None:
         """
         Non-blocking function to put the memory objects into the storages.
         Do not store if the same object is being stored (handled here by
@@ -384,6 +386,7 @@ class StorageManager:
 
         logger.info("Storage manager closed.")
 
+
 class DistributedStroageManager:
     """
     The storage manager for P-D disaggregation setting
@@ -397,22 +400,23 @@ class DistributedStroageManager:
     - contains(): check if the key exists in the storage backend
     - close(): close the storage manager
     """
+
     def __init__(
-            self, 
-            config: LMCacheEngineConfig,
-            metadata: LMCacheEngineMetadata,
-        ):
+        self,
+        config: LMCacheEngineConfig,
+        metadata: LMCacheEngineMetadata,
+    ):
         # TODO (ApostaC): remove hard coded usage of NixlBackend
-        self.storage_backend = NixlBackend.CreateNixlBackend(
-            config, metadata)
+        self.storage_backend = NixlBackend.CreateNixlBackend(config, metadata)
+        assert config.nixl_buffer_device is not None
         self.allocator = AdHocMemoryAllocator(config.nixl_buffer_device)
 
     def allocate(
-            self,
-            shape: torch.Size,
-            dtype: torch.dtype,
-            eviction=True,
-        ) -> Optional[MemoryObj]:
+        self,
+        shape: torch.Size,
+        dtype: torch.dtype,
+        eviction=True,
+    ) -> Optional[MemoryObj]:
         """
         Allocate memory object with memory allocator.
         Use LRU evictor if eviction is enabled.
@@ -420,11 +424,11 @@ class DistributedStroageManager:
         return self.allocator.allocate(shape, dtype)
 
     def dry_allocate(
-            self,
-            shape: torch.Size,
-            dtype: torch.dtype,
-            eviction=True,
-        ) -> Optional[MemoryObj]:
+        self,
+        shape: torch.Size,
+        dtype: torch.dtype,
+        eviction=True,
+    ) -> Optional[MemoryObjMetadata]:
         """
         Allocate memory object with memory allocator.
         Use LRU evictor if eviction is enabled.
@@ -463,7 +467,7 @@ class DistributedStroageManager:
         key: CacheEngineKey,
     ) -> Optional[MemoryObj]:
         obj = self.storage_backend.get_blocking(key)
-        # NOTE (ApostaC): This is only for the current implementation: 
+        # NOTE (ApostaC): This is only for the current implementation:
         # When the object is retrieved back to vLLM, the storage backend
         # will immediately remove the object from itself
         self.storage_backend.remove(key)
@@ -472,6 +476,7 @@ class DistributedStroageManager:
     def prefetch(self, key: CacheEngineKey) -> None:
         raise NotImplementedError("Prefetch is not implemented for "
                                   "distributed storage manager.")
+
     def contains(
         self,
         key: CacheEngineKey,

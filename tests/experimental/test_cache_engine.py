@@ -74,8 +74,7 @@ def test_same_retrieve_store(autorelease_experimental):
                          indirect=True)
 @pytest.mark.parametrize("use_list", [True, False])
 def test_paged_retrieve_prefix(fmt, chunk_size, backend,
-                               lmserver_experimental_process,
-                               use_list,
+                               lmserver_experimental_process, use_list,
                                autorelease_experimental):
     url = None
     remote_serde = None
@@ -98,10 +97,17 @@ def test_paged_retrieve_prefix(fmt, chunk_size, backend,
     connector = create_gpu_connector(1024, 32, paged=True, use_list=use_list)
 
     tokens = generate_tokens(num_tokens, device)
-    kv_cache = generate_kv_cache_paged(num_blocks, device, block_size, dtype, use_list=use_list)
+    kv_cache = generate_kv_cache_paged(num_blocks,
+                                       device,
+                                       block_size,
+                                       dtype,
+                                       use_list=use_list)
     new_tokens = generate_tokens(new_num_tokens, device)
-    retrieved_cache = generate_kv_cache_paged(num_blocks, device, block_size,
-                                              dtype, use_list = True)
+    retrieved_cache = generate_kv_cache_paged(num_blocks,
+                                              device,
+                                              block_size,
+                                              dtype,
+                                              use_list=True)
     slot_mapping = random.sample(range(0, num_blocks * block_size), num_tokens)
     slot_mapping = torch.tensor(slot_mapping, device=device)
 

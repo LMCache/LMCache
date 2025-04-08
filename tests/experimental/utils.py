@@ -7,8 +7,8 @@ import torch
 
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.experimental.gpu_connector import (VLLMNestedTupleGPUConnector,
-                                                VLLMPagedMemGPUConnectorV2,
-                                                VLLMPagedMemGPUConnector)
+                                                VLLMPagedMemGPUConnector,
+                                                VLLMPagedMemGPUConnectorV2)
 from lmcache.utils import CacheEngineKey
 
 

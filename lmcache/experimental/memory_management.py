@@ -66,7 +66,7 @@ class MemoryObjMetadata:
 
     def get_size(self):
         """
-        Calculate the size of the memory object in bytes based on the shape and dtype.
+        Calculate the size of the memory object in bytes 
         """
         if self.shape.numel() == 0:
             return 0
@@ -76,7 +76,7 @@ class MemoryObjMetadata:
         element_size = self.dtype.itemsize
         size_in_bytes = num_elements * element_size
         return size_in_bytes
-        
+
 
 class MemoryObj(metaclass=abc.ABCMeta):
     """
@@ -298,11 +298,8 @@ class MemoryAllocatorInterface(metaclass=abc.ABCMeta):
         raise NotImplementedError
 
     @abc.abstractmethod
-    def dry_allocate(
-            self, 
-            shape: torch.Size, 
-            dtype: Optional[torch.dtype]
-        ) -> MemoryObjMetadata:
+    def dry_allocate(self, shape: torch.Size,
+                     dtype: Optional[torch.dtype]) -> MemoryObjMetadata:
         """
         A 'dry run' allocation that returns the metadata of the
         allocated memory without actually allocating it.
@@ -349,7 +346,6 @@ class MemoryAllocatorInterface(metaclass=abc.ABCMeta):
         :param MemoryObj memory_obj.
         """
         raise NotImplementedError
-
 
 
 class TensorMemoryAllocator(MemoryAllocatorInterface):
@@ -458,6 +454,7 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
             raw_data=self.buffer[block.start:block.start + raw_size],
             metadata=MemoryObjMetadata(shape, dtype, block.start, aligned_size,
                                        1, fmt))
+
     def dry_allocate(
         self,
         shape: Union[torch.Size, Tuple[int, ...]],
@@ -469,7 +466,6 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         allocated memory without actually allocating it.
         """
         raise NotImplementedError
-
 
     def free(self, memory_obj: MemoryObj):
         if not memory_obj.is_valid():
@@ -570,7 +566,6 @@ class BufferAllocator(MemoryAllocatorInterface):
                                  phy_size=0,
                                  ref_count=1,
                                  fmt=MemoryFormat.BINARY_BUFFER)
-
 
     def free(self, memory_obj: MemoryObj):
         return
@@ -707,11 +702,11 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
             raise ValueError(f"Unsupported memory format: {fmt}")
 
     def dry_allocate(
-            self,
-            shape: Union[torch.Size, Tuple[int, ...]],
-            dtype: Optional[torch.dtype],
-            fmt: MemoryFormat = MemoryFormat.KV_BLOB,
-        ) -> MemoryObjMetadata:
+        self,
+        shape: Union[torch.Size, Tuple[int, ...]],
+        dtype: Optional[torch.dtype],
+        fmt: MemoryFormat = MemoryFormat.KV_BLOB,
+    ) -> MemoryObjMetadata:
         raise NotImplementedError
 
     def free(self, memory_obj: MemoryObj):
@@ -793,11 +788,13 @@ class GPUMemoryAllocator(MemoryAllocatorInterface):
     def memcheck(self):
         return self.allocator.memcheck()
 
+
 class AdHocMemoryAllocator(MemoryAllocatorInterface):
     """
-    AdHocMemoryAllocator is a simple allocator that does not actually allocate memory.
-    It is used for testing purposes only.
+    AdHocMemoryAllocator is a simple allocator that does not actually 
+    allocate memory. It is used for testing purposes only.
     """
+
     def __init__(self, device: str = "cpu"):
         """
         :param str device: The device of the ad hoc memory allocator.
@@ -819,17 +816,15 @@ class AdHocMemoryAllocator(MemoryAllocatorInterface):
         assert dtype is not None, "dtype must be specified"
 
         # Return a dummy object with no actual memory allocation
-        return TensorMemoryObj(
-            raw_data=torch.empty(shape, dtype=dtype, device = self.device),
-            metadata=MemoryObjMetadata(
-                shape=shape,
-                dtype=dtype,
-                address=0,
-                phy_size=0,
-                ref_count=1,
-                fmt=fmt
-            )
-        )
+        return TensorMemoryObj(raw_data=torch.empty(shape,
+                                                    dtype=dtype,
+                                                    device=self.device),
+                               metadata=MemoryObjMetadata(shape=shape,
+                                                          dtype=dtype,
+                                                          address=0,
+                                                          phy_size=0,
+                                                          ref_count=1,
+                                                          fmt=fmt))
 
     def dry_allocate(
         self,
@@ -845,14 +840,12 @@ class AdHocMemoryAllocator(MemoryAllocatorInterface):
 
         assert dtype is not None, "dtype must be specified"
 
-        return MemoryObjMetadata(
-            shape=shape,
-            dtype=dtype,
-            address=0,
-            phy_size=0,
-            ref_count=1,
-            fmt=fmt
-        )
+        return MemoryObjMetadata(shape=shape,
+                                 dtype=dtype,
+                                 address=0,
+                                 phy_size=0,
+                                 ref_count=1,
+                                 fmt=fmt)
 
     def free(self, memory_obj: MemoryObj):
         pass

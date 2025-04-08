@@ -14,8 +14,7 @@
 
 import asyncio
 import multiprocessing
-from typing import Dict, List, Optional
-import time
+from typing import Dict, List, Optional, Union
 
 import torch
 
@@ -29,7 +28,7 @@ from lmcache.experimental.lookup_server import (LookupServerInterface,
 from lmcache.experimental.memory_management import (MemoryAllocatorInterface,
                                                     MixedMemoryAllocator)
 from lmcache.experimental.storage_backend.storage_manager import (
-        StorageManager, DistributedStroageManager)
+    DistributedStroageManager, StorageManager)
 from lmcache.experimental.token_database import (ChunkedTokenDatabase,
                                                  TokenDatabase)
 from lmcache.logging import init_logger
@@ -85,15 +84,17 @@ class LMCacheEngine:
         if self.enable_p2p:
             self.lookup_server = RedisLookupServer(config)
 
+        self.storage_manager: Union[StorageManager, DistributedStroageManager]
         if config.enable_nixl:
             self.storage_manager = DistributedStroageManager(config, metadata)
         else:
             self.storage_manager = StorageManager(config, metadata,
-                                              self.memory_allocator,
-                                              self.lookup_server)
+                                                  self.memory_allocator,
+                                                  self.lookup_server)
         if self.enable_p2p:
             self.distributed_loop = asyncio.get_event_loop()
             assert self.lookup_server is not None
+            assert isinstance(self.storage_manager, StorageManager)
             self.distributed_server: DistributedServerInterface = \
                 NaiveDistributedServer(self.storage_manager,
                                        self.lookup_server,
@@ -105,25 +106,25 @@ class LMCacheEngine:
 
     @_lmcache_nvtx_annotate
     @torch.inference_mode()
-    def store_distributed(
-            self,
-            tokens: torch.Tensor,
-            mask: Optional[torch.Tensor] = None,
-            **kwargs) -> None:
+    def store_distributed(self,
+                          tokens: torch.Tensor,
+                          mask: Optional[torch.Tensor] = None,
+                          **kwargs) -> None:
         """Store the tokens and mask into the cache engine.
         
         This function is only for distributed storage manager.
 
         This function will be refactored in the future.
         """
-        st = time.perf_counter()
         if mask is not None:
             monitor_req_id = self.stats_monitor.on_store_request(
                 torch.sum(mask))
         else:
             monitor_req_id = self.stats_monitor.on_store_request(len(tokens))
 
-        # Register the put request 
+        assert isinstance(self.storage_manager, DistributedStroageManager)
+
+        # Register the put request
         keys = []
         metadatas = []
         steds = []
@@ -134,6 +135,7 @@ class LMCacheEngine:
             kv_shape = self.gpu_connector.get_shape(num_tokens)
             kv_dtype = self.metadata.kv_dtype
             memobj_meta = self.storage_manager.dry_allocate(kv_shape, kv_dtype)
+            assert memobj_meta is not None
 
             keys.append(key)
             metadatas.append(memobj_meta)
@@ -141,10 +143,9 @@ class LMCacheEngine:
 
         self.storage_manager.prepare_put(keys, metadatas)
 
-        
         # Offload the KV cache and write to remote
         for key, memobj_meta, (start, end) in zip(keys, metadatas, steds):
-
+            assert memobj_meta.dtype is not None
             kv_shape = memobj_meta.shape
             kv_dtype = memobj_meta.dtype
             memory_obj = self.storage_manager.allocate(kv_shape, kv_dtype)
@@ -159,10 +160,8 @@ class LMCacheEngine:
         # Flush
         self.storage_manager.commit_put()
 
-        ed = time.perf_counter()
         self.stats_monitor.on_store_finished(monitor_req_id)
 
-    
     @_lmcache_nvtx_annotate
     @torch.inference_mode()
     def store(self,

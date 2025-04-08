@@ -39,20 +39,17 @@ class LMCacheEngineConfig:
 
     # (Optional) Nixl configurations
     # whether to enable Nixl
-    enable_nixl: Optional[bool] = False  
+    enable_nixl: Optional[bool] = False
     # Role: sender or receiver
-    nixl_role: Optional[str] = None  
+    nixl_role: Optional[str] = None
     # The url of the nixl peer
-    nixl_peer_host: Optional[str] = None  
+    nixl_peer_host: Optional[str] = None
     # The BASE port of the nixl peer, real port is nixl_peer_port + WORKER_RANK
-    nixl_peer_port: Optional[int] = None  
+    nixl_peer_port: Optional[int] = None
     # The transport buffer size of nixl in bytes
-    nixl_buffer_size: Optional[int] = None  
+    nixl_buffer_size: Optional[int] = None
     # The device that nixl uses
-    nixl_buffer_device: Optional[str] = None  
-
-
-
+    nixl_buffer_device: Optional[str] = None
 
     @staticmethod
     def from_defaults(
@@ -79,15 +76,13 @@ class LMCacheEngineConfig:
         nixl_buffer_device: Optional[str] = None,
     ) -> "LMCacheEngineConfig":
         # TODO (ApostaC): Add nixl config
-        return LMCacheEngineConfig(chunk_size, local_cpu, max_local_cpu_size,
-                                   local_disk, max_local_disk_size, remote_url,
-                                   remote_serde, save_decode_cache,
-                                   enable_blending, blend_recompute_ratio,
-                                   blend_min_tokens, enable_p2p, lookup_url,
-                                   distributed_url, error_handling, enable_nixl,
-                                   nixl_role, nixl_peer_host, nixl_peer_port,
-                                   nixl_buffer_size, nixl_buffer_device
-                                   ).validate()
+        return LMCacheEngineConfig(
+            chunk_size, local_cpu, max_local_cpu_size, local_disk,
+            max_local_disk_size, remote_url, remote_serde, save_decode_cache,
+            enable_blending, blend_recompute_ratio, blend_min_tokens,
+            enable_p2p, lookup_url, distributed_url, error_handling,
+            enable_nixl, nixl_role, nixl_peer_host, nixl_peer_port,
+            nixl_buffer_size, nixl_buffer_device).validate()
 
     @staticmethod
     def from_legacy(
@@ -304,17 +299,16 @@ class LMCacheEngineConfig:
         config.enable_nixl = to_bool(
             parse_env(get_env_name("enable_nixl"), config.enable_nixl))
         config.nixl_role = parse_env(get_env_name("nixl_role"),
-                                      config.nixl_role)
-        config.nixl_peer_host = parse_env(
-                get_env_name("nixl_peer_host"), config.nixl_peer_host)
+                                     config.nixl_role)
+        config.nixl_peer_host = parse_env(get_env_name("nixl_peer_host"),
+                                          config.nixl_peer_host)
         config.nixl_peer_port = to_int(
-                parse_env(get_env_name("nixl_peer_port"), 
-                          config.nixl_peer_port))
+            parse_env(get_env_name("nixl_peer_port"), config.nixl_peer_port))
         config.nixl_buffer_size = to_int(
-                parse_env(get_env_name("nixl_buffer_size"),
-                          config.nixl_buffer_size))
+            parse_env(get_env_name("nixl_buffer_size"),
+                      config.nixl_buffer_size))
         config.nixl_buffer_device = parse_env(
-                get_env_name("nixl_buffer_device"), config.nixl_buffer_device)
+            get_env_name("nixl_buffer_device"), config.nixl_buffer_device)
         return config.validate()
 
     def to_original_config(self) -> orig_config.LMCacheEngineConfig:
@@ -348,16 +342,24 @@ class LMCacheEngineConfig:
             assert self.nixl_buffer_size is not None
             assert self.nixl_buffer_device is not None
 
-            assert self.local_cpu is False, "Nixl only supports local_cpu=False"
-            assert self.max_local_cpu_size == 0, "Nixl only supports max_local_cpu_size=0"
+            assert self.local_cpu is False, \
+                    "Nixl only supports local_cpu=False"
+            assert self.max_local_cpu_size == 0, \
+                    "Nixl only supports max_local_cpu_size=0"
 
-            assert self.local_disk is None, "Nixl only supports local_disk=None"
-            assert self.max_local_disk_size == 0, "Nixl only supports max_local_disk_size=0"
+            assert self.local_disk is None, \
+                    "Nixl only supports local_disk=None"
+            assert self.max_local_disk_size == 0, \
+                    "Nixl only supports max_local_disk_size=0"
 
-            assert self.remote_url is None, "Nixl only supports remote_url=None"
-            assert self.remote_serde is None, "Nixl only supports remote_serde=None"
+            assert self.remote_url is None, \
+                    "Nixl only supports remote_url=None"
+            assert self.remote_serde is None, \
+                    "Nixl only supports remote_serde=None"
 
-            assert self.save_decode_cache is False, "Nixl only supports save_decode_cache=False"
-            assert self.enable_p2p is False, "Nixl only supports enable_p2p=False"
+            assert self.save_decode_cache is False, \
+                    "Nixl only supports save_decode_cache=False"
+            assert self.enable_p2p is False, \
+                    "Nixl only supports enable_p2p=False"
 
         return self

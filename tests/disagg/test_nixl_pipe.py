@@ -1,20 +1,19 @@
-import torch
-import zmq
-import time
 import argparse
-import sys
+import time
 from typing import List, Tuple
 
+import torch
+import zmq
+
+from lmcache.experimental.memory_management import (AdHocMemoryAllocator,
+                                                    MemoryFormat, MemoryObj)
 from lmcache.experimental.storage_backend.connector.nixl_connector import (
-    NixlConfig, NixlPipe, NixlRole, uuid_to_message, message_to_uuid
-)
-from lmcache.experimental.memory_management import (
-    MemoryObj, TensorMemoryObj, AdHocMemoryAllocator, MemoryFormat
-)
-from lmcache.utils import CacheEngineKey
+    NixlConfig, NixlPipe, NixlRole)
 from lmcache.logging import init_logger
+from lmcache.utils import CacheEngineKey
 
 logger = init_logger(__name__)
+
 
 def generate_test_data(
     num_objs: int,
@@ -27,18 +26,17 @@ def generate_test_data(
         device='cuda',  # Assuming we are using CUDA for the test
     )
     for i in range(num_objs):
-        keys.append(CacheEngineKey(
-            fmt="test",
-            model_name="test_model",
-            world_size=1,
-            worker_id=0,
-            chunk_hash=f"test_{i}"
-        ))
-        obj = allocator.allocate(shape, dtype, 
-            fmt=MemoryFormat.KV_BLOB)
-        obj.tensor.fill_(i+1)  # Fill with some test data, e.g., the index
+        keys.append(
+            CacheEngineKey(fmt="test",
+                           model_name="test_model",
+                           world_size=1,
+                           worker_id=0,
+                           chunk_hash=f"test_{i}"))
+        obj = allocator.allocate(shape, dtype, fmt=MemoryFormat.KV_BLOB)
+        obj.tensor.fill_(i + 1)  # Fill with some test data, e.g., the index
         objs.append(obj)
     return keys, objs
+
 
 def calculate_throughput(total_bytes: int, elapsed_time: float) -> float:
     """Calculate throughput in GB/s"""
@@ -47,17 +45,28 @@ def calculate_throughput(total_bytes: int, elapsed_time: float) -> float:
     gb = total_bytes / (1024 * 1024 * 1024)
     return gb / elapsed_time
 
+
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='Test NixlChannel with sender/receiver roles')
-    parser.add_argument('--role', type=str, required=True, choices=['sender', 'receiver'],
-                       help='Role of this instance (sender or receiver)')
-    parser.add_argument('--host', type=str, default='localhost',
-                       help='Host name/IP for connection')
-    parser.add_argument('--port', type=int, default=5555,
-                       help='Port number for connection')
-    parser.add_argument('--num-rounds', type=int, default=1,
-                       help='Number of rounds to run the experiment')
-    
+    parser = argparse.ArgumentParser(
+        description='Test NixlChannel with sender/receiver roles')
+    parser.add_argument('--role',
+                        type=str,
+                        required=True,
+                        choices=['sender', 'receiver'],
+                        help='Role of this instance (sender or receiver)')
+    parser.add_argument('--host',
+                        type=str,
+                        default='localhost',
+                        help='Host name/IP for connection')
+    parser.add_argument('--port',
+                        type=int,
+                        default=5555,
+                        help='Port number for connection')
+    parser.add_argument('--num-rounds',
+                        type=int,
+                        default=1,
+                        help='Number of rounds to run the experiment')
+
     args = parser.parse_args()
 
     keys, objs = generate_test_data(100, torch.Size([32, 2, 256, 1024]))
@@ -70,7 +79,7 @@ if __name__ == "__main__":
         buffer_size=2**32,  # 4GB
         buffer_device='cuda',
     )
-    
+
     context = zmq.Context()
     side_channel = context.socket(zmq.PAIR)
     if args.role == "sender":
@@ -80,36 +89,36 @@ if __name__ == "__main__":
 
     # Test the NIXLPipe
     pipe = NixlPipe(config, side_channel)
-    
+
     total_commit_time = 0
     total_wait_time = 0
     total_bytes_transferred = 0
-    
+
     for round_num in range(args.num_rounds):
         logger.info(f"Starting round {round_num+1}/{args.num_rounds}")
-        
+
         initial_uuid = f"test_{round_num}"
         next_uuid = f"new_test_{round_num}"
-        
+
         if args.role == "sender":
             # Write data to buffer (not timed)
             num_objs, total_size = pipe.write_buffer(objs)
             logger.info(f"Wrote {num_objs} objects to the buffer")
-            
+
             # Measure commit time (actual transfer)
             commit_start = time.time()
             new_uuid = pipe.commit_write(total_size, initial_uuid)
             commit_end = time.time()
             commit_time = commit_end - commit_start
-            
+
             total_commit_time += commit_time
             total_bytes_transferred += total_size
-            
+
             logger.info(f"New UUID: {new_uuid}")
             logger.info(f"Transfer time: {commit_time:.6f} seconds")
             transfer_throughput = calculate_throughput(total_size, commit_time)
             logger.info(f"Transfer throughput: {transfer_throughput:.2f} GB/s")
-            
+
             assert new_uuid == next_uuid, \
                 f"Expected new UUID '{next_uuid}', but got '{new_uuid}'"
         else:
@@ -118,31 +127,32 @@ if __name__ == "__main__":
             pipe.wait_read(initial_uuid)
             wait_end = time.time()
             wait_time = wait_end - wait_start
-            
+
             total_wait_time += wait_time
-            
+
             logger.info(f"Transfer wait time: {wait_time:.6f} seconds")
-            
+
             # Read data from buffer (not timed)
             metadatas = [obj.metadata for obj in objs]
             received_objs = pipe.read_buffer(metadatas)
             total_size = sum(obj.get_size() for obj in received_objs)
-            
+
             total_bytes_transferred += total_size
-            
+
             logger.info(f"Received {len(received_objs)} objects")
             transfer_throughput = calculate_throughput(total_size, wait_time)
             logger.info(f"Transfer throughput: {transfer_throughput:.2f} GB/s")
-            
+
             # Check if the received objects are the same as the original objects
             for received_obj, original_obj in zip(received_objs, objs):
-                assert torch.allclose(received_obj.tensor, original_obj.tensor), \
-                        f"Data mismatch: received {received_obj.tensor.mean()} "\
-                        f"but expected {original_obj.tensor.mean()}"
-            
+                assert torch.allclose(received_obj.tensor,
+                                      original_obj.tensor), \
+                        f"Data mismatch: received {received_obj.tensor.mean()}"\
+                        f" but expected {original_obj.tensor.mean()}"
+
             # Send acknowledgment
             pipe.ack_receive(next_uuid)
-    
+
     # Print aggregate statistics
     if args.num_rounds > 1:
         if args.role == "sender":
@@ -151,14 +161,14 @@ if __name__ == "__main__":
         else:
             avg_time = total_wait_time / args.num_rounds
             logger.info(f"Average wait time: {avg_time:.6f} seconds")
-        
+
         avg_throughput = calculate_throughput(
-            total_bytes_transferred, 
-            total_commit_time if args.role == "sender" else total_wait_time
-        )
-        logger.info(f"Average throughput over {args.num_rounds} rounds: {avg_throughput:.2f} GB/s")
+            total_bytes_transferred,
+            total_commit_time if args.role == "sender" else total_wait_time)
+        logger.info(f"Average throughput over {args.num_rounds} rounds: "
+                    f"{avg_throughput:.2f} GB/s")
 
     # Wait a bit before closing
     time.sleep(2)
     pipe.close()
-    logger.info("Test completed successfully") 
+    logger.info("Test completed successfully")
