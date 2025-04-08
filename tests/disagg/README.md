@@ -20,7 +20,7 @@ UCX_TLS=cuda_ipc,cuda_copy,tcp CUDA_VISIBLE_DEVICES=0 python3 test_nixl_channel.
 UCX_TLS=cuda_ipc,cuda_copy,tcp CUDA_VISIBLE_DEVICES=1 python3 test_nixl_channel.py --role receiver --num-objs 500
 ```
 
-NOTE: why 500 objects? -- Becase we the pipe only has 4GB buffer, but 500 objects are 16GB in total. This is to test when the data to transfer is larger than the buffer size, how the sender/receiver behaves.
+NOTE: why 500 objects? -- Because we the pipe only has 4GB buffer, but 500 objects are 16GB in total. This is to test when the data to transfer is larger than the buffer size, how the sender/receiver behaves.
 
 ## NIXL Backend
 
