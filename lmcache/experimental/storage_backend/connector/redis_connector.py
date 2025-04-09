@@ -236,3 +236,97 @@ class RedisSentinelConnector(RemoteConnector):
     async def close(self):
         self.master.close()
         self.slave.close()
+
+from redis.cluster import RedisCluster, ClusterNode
+
+class RedisClusterConnector(RemoteConnector):
+    """
+    Uses redis.Cluster to connect to a Redis cluster.
+    The hosts are specified in the config file, started with "redis-cluster://" 
+    and separated by commas.
+    
+    Example:
+        remote_url: "redis-cluster://localhost:26379,localhost:26380,localhost:26381"
+    """
+
+    def __init__(self, hosts_and_ports: List[Tuple[str, Union[str, int]]],
+                 loop: asyncio.AbstractEventLoop,
+                 memory_allocator: MemoryAllocatorInterface):
+        
+        logger.info(f"Host and ports: {hosts_and_ports}")
+
+        cluster_nodes = [ClusterNode(n[0], n[1]) for n in hosts_and_ports]
+        self.connection = RedisCluster(
+            startup_nodes=cluster_nodes,
+            decode_responses=False
+        )
+
+        self.memory_allocator = memory_allocator
+
+    async def exists(self, key: CacheEngineKey) -> bool:
+        return self.connection.exists(key.to_string() + "metadata")
+
+    async def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
+        key_str = key.to_string()
+        redis_metadata_bytes = self.connection.get(key_str + "metadata")
+
+        if redis_metadata_bytes is None:
+            return None
+
+        assert not inspect.isawaitable(redis_metadata_bytes)
+
+        redis_metadata = RedisMetadata.deserialize(redis_metadata_bytes)
+
+        memory_obj = self.memory_allocator.allocate(
+            redis_metadata.shape,
+            redis_metadata.dtype,
+            redis_metadata.fmt,
+        )
+        if memory_obj is None:
+            logger.warning("Failed to allocate memory during remote receive")
+            return None
+
+        # TODO(Jiayi): Find a way to do `get` inplace
+        kv_bytes = self.connection.get(key_str + "kv_bytes")
+
+        assert not inspect.isawaitable(kv_bytes)
+
+        if kv_bytes is None:
+            # TODO (Jiayi): We might need a way to better handle
+            # consistency issues.
+            # TODO (Jiayi): A background sweeper might be better
+            # for the sake of performance.
+            logger.warning("Key exists but KV cache does not exist."
+                           "Might happen when the cache is evicted by redis.")
+            self.connection.delete(key_str + "metadata")
+            return None
+
+        view = memoryview(memory_obj.byte_array)
+        view[0:redis_metadata.length] = kv_bytes
+
+        return memory_obj
+
+    async def put(self, key: CacheEngineKey, memory_obj: MemoryObj):
+        # TODO(Jiayi): The following code is ugly.
+        # Please use a function like `memory_obj.to_meta()`.
+        kv_bytes = memory_obj.byte_array
+        kv_shape = memory_obj.get_shape()
+        kv_dtype = memory_obj.get_dtype()
+        memory_format = memory_obj.get_memory_format()
+
+        redis_metadata_bytes = RedisMetadata(len(kv_bytes), kv_shape, kv_dtype,
+                                             memory_format).serialize()
+
+        key_str = key.to_string()
+        self.connection.set(key_str + "metadata", redis_metadata_bytes)
+        self.connection.set(key_str + "kv_bytes", kv_bytes)
+
+        self.memory_allocator.ref_count_down(memory_obj)
+
+    # TODO
+    @no_type_check
+    async def list(self) -> List[str]:
+        self.connection.keys("*", target_nodes=RedisCluster.ALL_NODES)
+
+    async def close(self):
+        self.connection.close()

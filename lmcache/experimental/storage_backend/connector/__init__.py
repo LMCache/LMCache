@@ -23,7 +23,7 @@ from lmcache.experimental.storage_backend.connector.base_connector import \
 from lmcache.experimental.storage_backend.connector.lm_connector import \
     LMCServerConnector
 from lmcache.experimental.storage_backend.connector.redis_connector import (
-    RedisConnector, RedisSentinelConnector)
+    RedisConnector, RedisSentinelConnector, RedisClusterConnector)
 from lmcache.logging import init_logger
 
 from .infinistore_connector import InfinistoreConnector
@@ -140,6 +140,13 @@ def CreateConnector(
 
         case "redis-sentinel":
             connector = RedisSentinelConnector(
+                list(zip(parsed_url.hosts, parsed_url.ports)),
+                loop,
+                memory_allocator,
+            )
+
+        case "redis-cluster":
+            connector = RedisClusterConnector(
                 list(zip(parsed_url.hosts, parsed_url.ports)),
                 loop,
                 memory_allocator,
