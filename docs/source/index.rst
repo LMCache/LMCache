@@ -92,6 +92,7 @@ Documentation
    developer_tutorial/overview
    developer_tutorial/LLM_Engine
    developer_tutorial/LMCache_Engine
+   developer_tutorial/LMCache_Engine_Examples
    developer_tutorial/LMCache_Backend
 
 .. toctree::
