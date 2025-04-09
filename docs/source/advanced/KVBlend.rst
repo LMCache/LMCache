@@ -4,7 +4,7 @@ KV Blending
 -----------
 
 .. note::
-    Currenlty, the KV blending is only supported in the v0.
+    Currently, the KV blending is only supported in the v0.
    
 
 .. autoclass:: lmcache.blend.executor.CacheBlendImpl
