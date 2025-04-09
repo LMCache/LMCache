@@ -90,16 +90,18 @@ Documentation
    :caption: Developer Documentation
 
    developer_tutorial/overview
-   developer_tutorial/LLM_Engine
-   developer_tutorial/LMCache_Engine
-   developer_tutorial/LMCache_Backend
+   developer_tutorial/EngineInterface
+   developer_tutorial/GPUConnectorInterface
+   developer_tutorial/MemoryObject
+   developer_tutorial/MemoryInterface
+   developer_tutorial/BackendInterface
+
 
 .. toctree::
    :maxdepth: 1
    :caption: Advanced
 
-   advanced/lmcache.blend
-   advanced/lmcache.server
-   advanced/lmcache.storage_backend
-   advanced/lmcache.experimental
-   advanced/lmcache.integration
+   advanced/KVBlend
+   advanced/KVEvictor
+   advanced/vLLMIntegration
+
