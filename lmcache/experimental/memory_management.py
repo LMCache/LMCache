@@ -167,6 +167,7 @@ class TensorMemoryObj(MemoryObj):
         self.valid = True
 
     def invalidate(self):
+        logger.error("HERE, INVALIDATE THE MEMORY OBJ, SHOULD NOT HAPPEN!")
         self.valid = False
 
     def is_valid(self):

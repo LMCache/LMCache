@@ -26,7 +26,8 @@ from lmcache.experimental.gpu_connector import GPUConnectorInterface
 from lmcache.experimental.lookup_server import (LookupServerInterface,
                                                 RedisLookupServer)
 from lmcache.experimental.memory_management import (MemoryAllocatorInterface,
-                                                    MixedMemoryAllocator)
+                                                    MixedMemoryAllocator, 
+                                                    AdHocMemoryAllocator)
 from lmcache.experimental.storage_backend.storage_manager import (
     DistributedStorageManager, StorageManager)
 from lmcache.experimental.token_database import (ChunkedTokenDatabase,
@@ -86,7 +87,8 @@ class LMCacheEngine:
 
         self.storage_manager: Union[StorageManager, DistributedStorageManager]
         if config.enable_nixl:
-            self.storage_manager = DistributedStorageManager(config, metadata)
+            self.storage_manager = DistributedStorageManager(
+                    config, metadata, self.memory_allocator)
         else:
             self.storage_manager = StorageManager(config, metadata,
                                                   self.memory_allocator,
@@ -338,9 +340,10 @@ class LMCacheEngineBuilder:
         config: LMCacheEngineConfig,
         metadata: LMCacheEngineMetadata,
     ) -> MemoryAllocatorInterface:
+        if config.enable_nixl:
+            return AdHocMemoryAllocator(config.nixl_buffer_device)
+
         max_local_cpu_size = config.max_local_cpu_size
-        if max_local_cpu_size == 0:
-            max_local_cpu_size = 1
         return MixedMemoryAllocator(int(max_local_cpu_size * 1024**3))
 
     @staticmethod

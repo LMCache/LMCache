@@ -31,21 +31,55 @@ from lmcache.utils import CacheEngineKey
 logger = init_logger(__name__)
 
 
+class RecvObjPool:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self._data: dict[CacheEngineKey, MemoryObj] = {}
+        self._cnt: dict[CacheEngineKey, MemoryObj] = {}
+
+    def add(self, key: CacheEngineKey, obj: MemoryObj):
+        with self.lock:
+            if key in self._data:
+                self._cnt[key] += 1
+            else:
+                self._data[key] = obj
+                self._cnt[key] = 1
+
+    def remove(self, key: CacheEngineKey):
+        with self.lock:
+            if key in self._cnt:
+                self._cnt[key] -= 1
+                if self._cnt[key] == 0:
+                    self._data.pop(key)
+                    self._cnt.pop(key)
+
+    def contains(self, key: CacheEngineKey) -> bool:
+        with self.lock:
+            #return key in self._data
+            if key in self._cnt:
+                return True
+            else:
+                return False
+
+    def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
+        with self.lock:
+            #return self._data.get(key, None)
+            if key in self._data:
+                return self._data[key]
+            else:
+                return None
+
 class BasicNixlObserver(NixlObserverInterface):
     """
     Basic implementation of the NixlObserverInterface to handle 
     events from NixlChannel.
     """
 
-    def __init__(self, target_dict: dict[CacheEngineKey, MemoryObj],
-                 target_dict_lock: threading.Lock):
+    def __init__(self, obj_pool: RecvObjPool):
         """
-        Initialize the observer with the backend reference.
-        
-        :param backend: The NixlBackend instance to interact with.
+        Initialize the BasicNixlObserver.
         """
-        self.target_dict = target_dict
-        self.target_dict_lock = target_dict_lock
+        self.obj_pool = obj_pool
 
     def __call__(self,
                  keys: list[CacheEngineKey],
@@ -60,21 +94,15 @@ class BasicNixlObserver(NixlObserverInterface):
             transfer buffer  (i.e., whether it will be overwrite by next 
             transfer)
         """
-        with self.target_dict_lock:
-            logger.debug(f"Received {len(keys)} keys and {len(objs)} objects.")
-            for key, value in zip(keys, objs):
-                assert value.tensor is not None, \
+        for key, value in zip(keys, objs):
+            assert value.tensor is not None, \
                     "The tensor in the MemoryObj is None."
-                if key in self.target_dict:
-                    continue
-                if is_view:
-                    copied_obj = TensorMemoryObj(value.tensor.clone(),
-                                                 value.metadata)
-                    self.target_dict[key] = copied_obj
-                else:
-                    # if not a view, we can store the original object directly
-                    self.target_dict[key] = value
-
+            if is_view:
+                copied_obj = TensorMemoryObj(value.tensor.clone(),
+                                             value.metadata)
+                self.obj_pool.add(key, copied_obj)
+            else:
+                self.obj_pool.add(key, value)
 
 class NixlBackend(StorageBackendInterface):
     """
@@ -95,13 +123,13 @@ class NixlBackend(StorageBackendInterface):
             could be either "cpu", "cuda", or "cuda:0", "cuda:1", etc.
         """
         super().__init__(dst_device=nixl_config.buffer_device)
-        self._data: dict[CacheEngineKey, MemoryObj] = {}
-        self._data_lock = threading.Lock()
+        self._obj_pool = RecvObjPool()
+        #self._data: dict[CacheEngineKey, MemoryObj] = {}
+        #self._data_lock = threading.Lock()
 
         self._nixl_channel = NixlChannel(nixl_config)
 
-        self._nixl_observer = BasicNixlObserver(
-            target_dict=self._data, target_dict_lock=self._data_lock)
+        self._nixl_observer = BasicNixlObserver(self._obj_pool)
 
         self._nixl_channel.register_receive_observer(
             observer=self._nixl_observer)
@@ -117,7 +145,7 @@ class NixlBackend(StorageBackendInterface):
         :param key: The key to check
         :return: True if the key exists, False otherwise
         """
-        return key in self._data
+        return self._obj_pool.contains(key)
 
     def exists_in_put_tasks(self, key: CacheEngineKey) -> bool:
         """
@@ -222,12 +250,7 @@ class NixlBackend(StorageBackendInterface):
         
         :return: MemoryObj. None if the key does not exist.
         """
-        with self._data_lock:
-            if key in self._data:
-                return self._data[key]
-            else:
-                # Key does not exist in the storage
-                return None
+        return self._obj_pool.get(key)
 
     def remove(self, key: CacheEngineKey) -> None:
         """
@@ -235,11 +258,7 @@ class NixlBackend(StorageBackendInterface):
 
         :param key: The key to remove.
         """
-        with self._data_lock:
-            if key in self._data:
-                del self._data[key]
-            else:
-                logger.debug(f"Key {key} not found in Nixl backend.")
+        return self._obj_pool.remove(key)
 
     def close(self) -> None:
         """

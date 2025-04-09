@@ -419,11 +419,13 @@ class DistributedStorageManager:
         self,
         config: LMCacheEngineConfig,
         metadata: LMCacheEngineMetadata,
+        allocator: MemoryAllocatorInterface,
     ):
         # TODO (ApostaC): remove hard coded usage of NixlBackend
         self.storage_backend = NixlBackend.CreateNixlBackend(config, metadata)
         assert config.nixl_buffer_device is not None
-        self.allocator = AdHocMemoryAllocator(config.nixl_buffer_device)
+        self.allocator = allocator
+        #self.allocator = AdHocMemoryAllocator(config.nixl_buffer_device)
 
     def allocate(
         self,
@@ -484,7 +486,13 @@ class DistributedStorageManager:
         # NOTE (ApostaC): This is only for the current implementation:
         # When the object is retrieved back to vLLM, the storage backend
         # will immediately remove the object from itself
+        if obj is not None:
+            assert obj.tensor is not None, "None before remove!"\
+                    f" key is {key.chunk_hash}"
         self.storage_backend.remove(key)
+        if obj is not None:
+            assert obj.tensor is not None, "None after remove!"\
+                    f" key is {key.chunk_hash}"
         return obj
 
     def prefetch(self, key: CacheEngineKey) -> None:
