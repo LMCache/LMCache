@@ -227,7 +227,6 @@ class NixlBackend(StorageBackendInterface):
                 return self._data[key]
             else:
                 # Key does not exist in the storage
-                logger.warning(f"Key {key} not found in Nixl backend.")
                 return None
 
     def remove(self, key: CacheEngineKey) -> None:
@@ -240,7 +239,7 @@ class NixlBackend(StorageBackendInterface):
             if key in self._data:
                 del self._data[key]
             else:
-                logger.warning(f"Key {key} not found in Nixl backend.")
+                logger.debug(f"Key {key} not found in Nixl backend.")
 
     def close(self) -> None:
         """

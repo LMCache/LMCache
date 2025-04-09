@@ -349,13 +349,9 @@ class LMCacheEngineConfig:
 
             assert self.local_disk is None, \
                     "Nixl only supports local_disk=None"
-            assert self.max_local_disk_size == 0, \
-                    "Nixl only supports max_local_disk_size=0"
 
             assert self.remote_url is None, \
                     "Nixl only supports remote_url=None"
-            assert self.remote_serde is None, \
-                    "Nixl only supports remote_serde=None"
 
             assert self.save_decode_cache is False, \
                     "Nixl only supports save_decode_cache=False"

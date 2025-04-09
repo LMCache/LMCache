@@ -312,7 +312,6 @@ class LMCacheEngine:
 
         :return: An int indicating how many prefix tokens are cached.
         """
-
         for start, end, key in self.token_database.process_tokens(tokens):
             if not self.storage_manager.contains(key, search_range):
                 return start
