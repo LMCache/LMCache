@@ -13,3 +13,5 @@ sortedcontainers
 prometheus_client
 infinistore
 msgspec
+nixl
+pyzmq

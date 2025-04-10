@@ -14,7 +14,8 @@
 
 import asyncio
 import multiprocessing
-from typing import Dict, List, Optional
+import time
+from typing import Dict, List, Optional, Union
 
 import torch
 
@@ -25,9 +26,11 @@ from lmcache.experimental.distributed_server import (
 from lmcache.experimental.gpu_connector import GPUConnectorInterface
 from lmcache.experimental.lookup_server import (LookupServerInterface,
                                                 RedisLookupServer)
-from lmcache.experimental.memory_management import (MemoryAllocatorInterface,
+from lmcache.experimental.memory_management import (AdHocMemoryAllocator,
+                                                    MemoryAllocatorInterface,
                                                     MixedMemoryAllocator)
-from lmcache.experimental.storage_backend.storage_manager import StorageManager
+from lmcache.experimental.storage_backend.storage_manager import (
+    DistributedStorageManager, StorageManager)
 from lmcache.experimental.token_database import (ChunkedTokenDatabase,
                                                  TokenDatabase)
 from lmcache.logging import init_logger
@@ -83,12 +86,18 @@ class LMCacheEngine:
         if self.enable_p2p:
             self.lookup_server = RedisLookupServer(config)
 
-        self.storage_manager = StorageManager(config, metadata,
-                                              self.memory_allocator,
-                                              self.lookup_server)
+        self.storage_manager: Union[StorageManager, DistributedStorageManager]
+        if config.enable_nixl:
+            self.storage_manager = DistributedStorageManager(
+                config, metadata, self.memory_allocator)
+        else:
+            self.storage_manager = StorageManager(config, metadata,
+                                                  self.memory_allocator,
+                                                  self.lookup_server)
         if self.enable_p2p:
             self.distributed_loop = asyncio.get_event_loop()
             assert self.lookup_server is not None
+            assert isinstance(self.storage_manager, StorageManager)
             self.distributed_server: DistributedServerInterface = \
                 NaiveDistributedServer(self.storage_manager,
                                        self.lookup_server,
@@ -97,6 +106,76 @@ class LMCacheEngine:
                                        config)
         InitializeUsageContext(config.to_original_config(), metadata)
         self.stats_monitor = LMCStatsMonitor.GetOrCreate()
+
+    @_lmcache_nvtx_annotate
+    @torch.inference_mode()
+    def store_distributed(self,
+                          tokens: torch.Tensor,
+                          mask: Optional[torch.Tensor] = None,
+                          **kwargs) -> None:
+        """Store the tokens and mask into the cache engine.
+        
+        This function is only for distributed storage manager.
+
+        This function will be refactored in the future.
+        """
+        st = time.perf_counter()
+        if mask is not None:
+            monitor_req_id = self.stats_monitor.on_store_request(
+                torch.sum(mask))
+        else:
+            monitor_req_id = self.stats_monitor.on_store_request(len(tokens))
+
+        assert isinstance(self.storage_manager, DistributedStorageManager)
+
+        # Register the put request
+        keys = []
+        metadatas = []
+        steds = []
+        for start, end, key in self.token_database.process_tokens(
+                tokens, mask):
+            # Allocate the memory object
+            num_tokens = end - start
+            kv_shape = self.gpu_connector.get_shape(num_tokens)
+            kv_dtype = self.metadata.kv_dtype
+            memobj_meta = self.storage_manager.dry_allocate(kv_shape, kv_dtype)
+            assert memobj_meta is not None
+
+            keys.append(key)
+            metadatas.append(memobj_meta)
+            steds.append((start, end))
+
+        self.storage_manager.prepare_put(keys, metadatas)
+
+        offload_time = 0.
+        tot_kv_size = 0
+        # Offload the KV cache and write to remote
+        for key, memobj_meta, (start, end) in zip(keys, metadatas, steds):
+            assert memobj_meta.dtype is not None
+            kv_shape = memobj_meta.shape
+            kv_dtype = memobj_meta.dtype
+            memory_obj = self.storage_manager.allocate(kv_shape, kv_dtype)
+            if memory_obj is None:
+                logger.warning("Failed to allocate memory for the KV cache.\n"
+                               "The KV cache will not be stored.")
+                break
+
+            t = time.perf_counter()
+            self.gpu_connector.from_gpu(memory_obj, start, end, **kwargs)
+            offload_time += time.perf_counter() - t
+            self.storage_manager.put(key, memory_obj)
+            tot_kv_size += memory_obj.get_size()
+
+        # Flush
+        self.storage_manager.commit_put()
+
+        ed = time.perf_counter()
+        logger.info(
+            "Store time: %.4f ms, throughput: %.4f GB/s; offload_time: %.4f ms",
+            (ed - st) * 1000, tot_kv_size / (ed - st) / 1024**3,
+            offload_time * 1000)
+
+        self.stats_monitor.on_store_finished(monitor_req_id)
 
     @_lmcache_nvtx_annotate
     @torch.inference_mode()
@@ -121,6 +200,11 @@ class LMCacheEngine:
         :raises: ValueError if the number of Falses in the mask is not a 
             multiple of the chunk size.
         """
+        # FIXME(ApostaC): A HACK for distributed storage manager
+        if isinstance(self.storage_manager, DistributedStorageManager):
+            self.store_distributed(tokens, mask, **kwargs)
+            return
+
         if mask is not None:
             monitor_req_id = self.stats_monitor.on_store_request(
                 torch.sum(mask))
@@ -140,11 +224,6 @@ class LMCacheEngine:
                 logger.warning("Failed to allocate memory for the KV cache.\n"
                                "The KV cache will not be stored.")
                 break
-
-            # Put the memory object to the storage backend
-            # Disabling put_queue for now, as it's not necessary
-            # and bringing big overhead
-            # self.put_queue.put((key, memory_obj, start, end, kwargs))
 
             self.gpu_connector.from_gpu(memory_obj, start, end, **kwargs)
             self.storage_manager.put(key, memory_obj)
@@ -214,6 +293,8 @@ class LMCacheEngine:
 
             self.gpu_connector.to_gpu(memory_obj, start, end, **kwargs)
             self.memory_allocator.ref_count_down(memory_obj)
+            if isinstance(self.storage_manager, DistributedStorageManager):
+                self.storage_manager.remove(key)
 
         self.stats_monitor.on_retrieve_finished(monitor_req_id,
                                                 torch.sum(ret_mask))
@@ -248,7 +329,6 @@ class LMCacheEngine:
 
         :return: An int indicating how many prefix tokens are cached.
         """
-
         for start, end, key in self.token_database.process_tokens(tokens):
             if not self.storage_manager.contains(key, search_range):
                 return start
@@ -275,6 +355,10 @@ class LMCacheEngineBuilder:
         config: LMCacheEngineConfig,
         metadata: LMCacheEngineMetadata,
     ) -> MemoryAllocatorInterface:
+        if config.enable_nixl:
+            assert config.nixl_buffer_device is not None
+            return AdHocMemoryAllocator(config.nixl_buffer_device)
+
         max_local_cpu_size = config.max_local_cpu_size
         return MixedMemoryAllocator(int(max_local_cpu_size * 1024**3))
 

@@ -99,7 +99,8 @@ def test_vllm_paged_connector_v2():
                                slot_mapping, num_heads, head_size)
 
 
-def test_vllm_paged_connector_v2_with_gpu():
+@pytest.mark.parametrize("use_gpu", [True, False])
+def test_vllm_paged_connector_v2_with_gpu(use_gpu):
     num_blocks = 100
     block_size = 16
     num_layers = 32
@@ -127,13 +128,13 @@ def test_vllm_paged_connector_v2_with_gpu():
 
     connector = VLLMPagedMemGPUConnectorV2(hidden_dim,
                                            num_layers,
-                                           use_gpu=True,
+                                           use_gpu=use_gpu,
                                            chunk_size=chunk_size,
                                            dtype=gpu_kv_src[0].dtype,
                                            device=device)
     connector2 = VLLMPagedMemGPUConnectorV2(hidden_dim,
                                             num_layers,
-                                            use_gpu=True,
+                                            use_gpu=use_gpu,
                                             chunk_size=chunk_size,
                                             dtype=gpu_kv_src[0].dtype,
                                             device=device)

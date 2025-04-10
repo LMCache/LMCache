@@ -64,6 +64,19 @@ class MemoryObjMetadata:
     # The 'logical' format of the tensor
     fmt: MemoryFormat = MemoryFormat.UNDEFINED
 
+    def get_size(self):
+        """
+        Calculate the size of the memory object in bytes 
+        """
+        if self.shape.numel() == 0:
+            return 0
+        if self.dtype is None:
+            return 0
+        num_elements = self.shape.numel()
+        element_size = self.dtype.itemsize
+        size_in_bytes = num_elements * element_size
+        return size_in_bytes
+
 
 class MemoryObj(metaclass=abc.ABCMeta):
     """
@@ -285,6 +298,18 @@ class MemoryAllocatorInterface(metaclass=abc.ABCMeta):
         raise NotImplementedError
 
     @abc.abstractmethod
+    def dry_allocate(self, shape: torch.Size,
+                     dtype: Optional[torch.dtype]) -> MemoryObjMetadata:
+        """
+        A 'dry run' allocation that returns the metadata of the
+        allocated memory without actually allocating it.
+
+        :param torch.Size shape: The shape of the tensor to allocate.
+        :param torch.dtype dtype: The dtype of the tensor to allocate.
+        """
+        raise NotImplementedError
+
+    @abc.abstractmethod
     def free(self, memory_obj: MemoryObj):
         """
         Frees the memory allocated for the given MemoryObj.
@@ -430,6 +455,18 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
             metadata=MemoryObjMetadata(shape, dtype, block.start, aligned_size,
                                        1, fmt))
 
+    def dry_allocate(
+        self,
+        shape: Union[torch.Size, Tuple[int, ...]],
+        dtype: Optional[torch.dtype],
+        fmt: MemoryFormat = MemoryFormat.KV_BLOB,
+    ) -> MemoryObjMetadata:
+        """
+        A 'dry run' allocation that returns the metadata of the
+        allocated memory without actually allocating it.
+        """
+        raise NotImplementedError
+
     def free(self, memory_obj: MemoryObj):
         if not memory_obj.is_valid():
             return
@@ -515,6 +552,20 @@ class BufferAllocator(MemoryAllocatorInterface):
         n = shape[0]
         byte_array = bytearray(n)
         return BytesBufferMemoryObj(byte_array)
+
+    def dry_allocate(
+        self,
+        shape: Union[torch.Size, Tuple[int, ...]],
+        dtype: Optional[torch.dtype],
+        fmt: MemoryFormat = MemoryFormat.BINARY_BUFFER,
+    ) -> MemoryObjMetadata:
+        n = shape[0]
+        return MemoryObjMetadata(shape=torch.Size([n, 0, 0, 0]),
+                                 dtype=None,
+                                 address=0,
+                                 phy_size=0,
+                                 ref_count=1,
+                                 fmt=MemoryFormat.BINARY_BUFFER)
 
     def free(self, memory_obj: MemoryObj):
         return
@@ -650,6 +701,14 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
         else:
             raise ValueError(f"Unsupported memory format: {fmt}")
 
+    def dry_allocate(
+        self,
+        shape: Union[torch.Size, Tuple[int, ...]],
+        dtype: Optional[torch.dtype],
+        fmt: MemoryFormat = MemoryFormat.KV_BLOB,
+    ) -> MemoryObjMetadata:
+        raise NotImplementedError
+
     def free(self, memory_obj: MemoryObj):
         fmt = memory_obj.get_memory_format()
         if fmt == MemoryFormat.BINARY_BUFFER:
@@ -728,3 +787,85 @@ class GPUMemoryAllocator(MemoryAllocatorInterface):
 
     def memcheck(self):
         return self.allocator.memcheck()
+
+    def dry_allocate(
+        self,
+        shape: Union[torch.Size, Tuple[int, ...]],
+        dtype: Optional[torch.dtype],
+        fmt: MemoryFormat = MemoryFormat.KV_BLOB,
+    ) -> MemoryObjMetadata:
+        return self.allocator.dry_allocate(shape, dtype, fmt)
+
+
+class AdHocMemoryAllocator(MemoryAllocatorInterface):
+    """
+    AdHocMemoryAllocator is a simple allocator that does not actually 
+    allocate memory. It is used for testing purposes only.
+    """
+
+    def __init__(self, device: str = "cpu"):
+        """
+        :param str device: The device of the ad hoc memory allocator.
+        """
+        self.device = device
+
+    def allocate(
+        self,
+        shape: Union[torch.Size, Tuple[int, ...]],
+        dtype: Optional[torch.dtype],
+        fmt: MemoryFormat = MemoryFormat.KV_BLOB,
+    ) -> Optional[MemoryObj]:
+        """
+        Returns a dummy MemoryObj for testing purposes.
+        """
+        if not isinstance(shape, torch.Size):
+            shape = torch.Size(shape)
+
+        assert dtype is not None, "dtype must be specified"
+
+        # Return a dummy object with no actual memory allocation
+        return TensorMemoryObj(raw_data=torch.empty(shape,
+                                                    dtype=dtype,
+                                                    device=self.device),
+                               metadata=MemoryObjMetadata(shape=shape,
+                                                          dtype=dtype,
+                                                          address=0,
+                                                          phy_size=0,
+                                                          ref_count=1,
+                                                          fmt=fmt))
+
+    def dry_allocate(
+        self,
+        shape: Union[torch.Size, Tuple[int, ...]],
+        dtype: Optional[torch.dtype],
+        fmt: MemoryFormat = MemoryFormat.KV_BLOB,
+    ) -> MemoryObjMetadata:
+        """
+        Returns a dummy MemoryObjMetadata for testing purposes.
+        """
+        if not isinstance(shape, torch.Size):
+            shape = torch.Size(shape)
+
+        assert dtype is not None, "dtype must be specified"
+
+        return MemoryObjMetadata(shape=shape,
+                                 dtype=dtype,
+                                 address=0,
+                                 phy_size=0,
+                                 ref_count=1,
+                                 fmt=fmt)
+
+    def free(self, memory_obj: MemoryObj):
+        pass
+
+    def ref_count_up(self, memory_obj: MemoryObj):
+        pass
+
+    def ref_count_down(self, memory_obj: MemoryObj):
+        pass
+
+    def get_ref_count(self, memory_obj: MemoryObj):
+        return 0
+
+    def memcheck(self):
+        return True

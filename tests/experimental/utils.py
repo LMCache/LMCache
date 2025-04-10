@@ -7,7 +7,8 @@ import torch
 
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.experimental.gpu_connector import (VLLMNestedTupleGPUConnector,
-                                                VLLMPagedMemGPUConnector)
+                                                VLLMPagedMemGPUConnector,
+                                                VLLMPagedMemGPUConnectorV2)
 from lmcache.utils import CacheEngineKey
 
 
@@ -58,7 +59,11 @@ def generate_kv_cache(num_tokens, fmt, device):
 def generate_kv_cache_paged(num_blocks,
                             device,
                             block_size=16,
-                            dtype=torch.bfloat16):
+                            dtype=torch.bfloat16,
+                            use_list=False):
+    if use_list:
+        return generate_kv_cache_paged_list_tensors(num_blocks, device,
+                                                    block_size, dtype)
     ret = []
     num_layers = 32
     num_heads = 8
@@ -203,8 +208,10 @@ def check_kv_cache_device(kvs, device):
         assert v.device == torch.device(device)
 
 
-def create_gpu_connector(hidden_dim, num_layers, paged=False):
+def create_gpu_connector(hidden_dim, num_layers, paged=False, use_list=False):
     if paged:
+        if use_list:
+            return VLLMPagedMemGPUConnectorV2(hidden_dim, num_layers)
         return VLLMPagedMemGPUConnector(hidden_dim, num_layers)
     else:
         return VLLMNestedTupleGPUConnector(hidden_dim, num_layers)
