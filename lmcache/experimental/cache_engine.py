@@ -293,6 +293,8 @@ class LMCacheEngine:
 
             self.gpu_connector.to_gpu(memory_obj, start, end, **kwargs)
             self.memory_allocator.ref_count_down(memory_obj)
+            if isinstance(self.storage_manager, DistributedStorageManager):
+                self.storage_manager.remove(key)
 
         self.stats_monitor.on_retrieve_finished(monitor_req_id,
                                                 torch.sum(ret_mask))

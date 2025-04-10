@@ -488,11 +488,17 @@ class DistributedStorageManager:
         if obj is not None:
             assert obj.tensor is not None, "None before remove!"\
                     f" key is {key.chunk_hash}"
-        self.storage_backend.remove(key)
+        #self.storage_backend.remove(key)
         if obj is not None:
             assert obj.tensor is not None, "None after remove!"\
                     f" key is {key.chunk_hash}"
         return obj
+
+    def remove(
+        self,
+        key: CacheEngineKey,
+    ) -> None:
+        self.storage_backend.remove(key)
 
     def prefetch(self, key: CacheEngineKey) -> None:
         raise NotImplementedError("Prefetch is not implemented for "

@@ -51,6 +51,7 @@ class NixlConfig:
     peer_port: int
     buffer_size: int
     buffer_device: str
+    enable_gc: bool
 
     @staticmethod
     def from_cache_engine_config(
@@ -76,12 +77,14 @@ class NixlConfig:
         assert config.nixl_peer_port is not None
         assert config.nixl_buffer_size is not None
         assert config.nixl_buffer_device is not None
+        assert config.nixl_enable_gc is not None
 
         return NixlConfig(role=nixl_role,
                           peer_host_name=config.nixl_peer_host,
                           peer_port=config.nixl_peer_port + worker_id,
                           buffer_size=config.nixl_buffer_size,
-                          buffer_device=config.nixl_buffer_device)
+                          buffer_device=config.nixl_buffer_device,
+                          enable_gc=config.nixl_enable_gc)
 
 
 @dataclass
@@ -121,9 +124,6 @@ class NixlPipe:
         self._buffer = torch.empty(nixl_config.buffer_size,
                                    device=nixl_config.buffer_device,
                                    dtype=torch.uint8)
-
-        reg_size = nixl_config.buffer_size // NixlPipe.TRANSFER_BUFFER_SIZE
-        self._reg_size = reg_size
 
         self._transfer_buffers = torch.split(self._buffer,
                                              NixlPipe.TRANSFER_BUFFER_SIZE,
@@ -167,10 +167,13 @@ class NixlPipe:
 
     def write_buffer(self, objs: list[MemoryObj], offset=0) -> tuple[int, int]:
         """Try to write (copy) the data to NIXL transfer buffer (sender side).
-        If the data is larger than the underlying buffer, it will return the 
-        number of memory objects as well as the total bytes that has been 
-        successfully wrote into the buffer.
-      
+
+        If the data is larger than the underlying buffer, it only send the 
+        first N objects that fit in the NIXL buffer.
+
+        Returns the number of memory objects as well as the total bytes that 
+        have been successfully wrote into the buffer.
+
         Args:
             objs: list of MemoryObj
             offset: the offset to start writing the data to the buffer

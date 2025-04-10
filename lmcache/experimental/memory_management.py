@@ -167,7 +167,6 @@ class TensorMemoryObj(MemoryObj):
         self.valid = True
 
     def invalidate(self):
-        logger.error("HERE, INVALIDATE THE MEMORY OBJ, SHOULD NOT HAPPEN!")
         self.valid = False
 
     def is_valid(self):
@@ -788,6 +787,14 @@ class GPUMemoryAllocator(MemoryAllocatorInterface):
 
     def memcheck(self):
         return self.allocator.memcheck()
+
+    def dry_allocate(
+        self,
+        shape: Union[torch.Size, Tuple[int, ...]],
+        dtype: Optional[torch.dtype],
+        fmt: MemoryFormat = MemoryFormat.KV_BLOB,
+    ) -> MemoryObjMetadata:
+        return self.allocator.dry_allocate(shape, dtype, fmt)
 
 
 class AdHocMemoryAllocator(MemoryAllocatorInterface):

@@ -50,6 +50,8 @@ class LMCacheEngineConfig:
     nixl_buffer_size: Optional[int] = None
     # The device that nixl uses
     nixl_buffer_device: Optional[str] = None
+    # HACK: explicit option to enable/disable nixl GC before it's mature enough
+    nixl_enable_gc: Optional[bool] = False
 
     @staticmethod
     def from_defaults(
@@ -74,6 +76,7 @@ class LMCacheEngineConfig:
         nixl_peer_port: Optional[int] = None,
         nixl_buffer_size: Optional[int] = None,
         nixl_buffer_device: Optional[str] = None,
+        nixl_enable_gc: Optional[bool] = False,
     ) -> "LMCacheEngineConfig":
         # TODO (ApostaC): Add nixl config
         return LMCacheEngineConfig(
@@ -82,7 +85,7 @@ class LMCacheEngineConfig:
             enable_blending, blend_recompute_ratio, blend_min_tokens,
             enable_p2p, lookup_url, distributed_url, error_handling,
             enable_nixl, nixl_role, nixl_peer_host, nixl_peer_port,
-            nixl_buffer_size, nixl_buffer_device).validate()
+            nixl_buffer_size, nixl_buffer_device, nixl_enable_gc).validate()
 
     @staticmethod
     def from_legacy(
@@ -182,6 +185,7 @@ class LMCacheEngineConfig:
         nixl_peer_port = config.get("nixl_peer_port", None)
         nixl_buffer_size = config.get("nixl_buffer_size", None)
         nixl_buffer_device = config.get("nixl_buffer_device", None)
+        nixl_enable_gc = config.get("nixl_enable_gc", False)
 
         match local_disk:
             case None:
@@ -220,6 +224,7 @@ class LMCacheEngineConfig:
             nixl_peer_port,
             nixl_buffer_size,
             nixl_buffer_device,
+            nixl_enable_gc,
         ).validate()
 
     @staticmethod
@@ -309,6 +314,8 @@ class LMCacheEngineConfig:
                       config.nixl_buffer_size))
         config.nixl_buffer_device = parse_env(
             get_env_name("nixl_buffer_device"), config.nixl_buffer_device)
+        config.nixl_enable_gc = to_bool(
+            parse_env(get_env_name("nixl_enable_gc"), config.nixl_enable_gc))
         return config.validate()
 
     def to_original_config(self) -> orig_config.LMCacheEngineConfig:
@@ -341,6 +348,7 @@ class LMCacheEngineConfig:
             assert self.nixl_peer_port is not None
             assert self.nixl_buffer_size is not None
             assert self.nixl_buffer_device is not None
+            assert self.nixl_enable_gc is not None
 
             assert self.local_cpu is False, \
                     "Nixl only supports local_cpu=False"

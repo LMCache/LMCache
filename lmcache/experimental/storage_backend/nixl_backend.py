@@ -34,18 +34,25 @@ logger = init_logger(__name__)
 
 class RecvObjPool:
 
-    def __init__(self):
+    def __init__(self, enable_gc: bool):
         self.lock = threading.Lock()
         self._data: dict[CacheEngineKey, MemoryObj] = {}
         self._cnt: dict[CacheEngineKey, int] = {}
 
         # TODO: Remove the hard-code
         # HACK: have a recycle threshold to avoid the memory leak
-        self._recent_added_keys = []
+        self._recent_added_keys: list[CacheEngineKey] = []
         self._recent_add_threshold = 50  # Keep recent 20 keys
         self._recycle_threshold = 200
 
+        self._enable_gc = enable_gc
+        if not self._enable_gc:
+            logger.warning("GC for receiver is disabled, may lead to memory "
+                           "leak in non-testing environment")
+
     def _gc(self):
+        if not self._enable_gc:
+            return
         logger.warning("In GC!")
         st = time.perf_counter()
         freed_size = 0
@@ -159,7 +166,7 @@ class NixlBackend(StorageBackendInterface):
             could be either "cpu", "cuda", or "cuda:0", "cuda:1", etc.
         """
         super().__init__(dst_device=nixl_config.buffer_device)
-        self._obj_pool = RecvObjPool()
+        self._obj_pool = RecvObjPool(nixl_config.enable_gc)
         #self._data: dict[CacheEngineKey, MemoryObj] = {}
         #self._data_lock = threading.Lock()
 
