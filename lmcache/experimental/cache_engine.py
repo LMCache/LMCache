@@ -14,8 +14,8 @@
 
 import asyncio
 import multiprocessing
-from typing import Dict, List, Optional, Union
 import time
+from typing import Dict, List, Optional, Union
 
 import torch
 
@@ -26,9 +26,9 @@ from lmcache.experimental.distributed_server import (
 from lmcache.experimental.gpu_connector import GPUConnectorInterface
 from lmcache.experimental.lookup_server import (LookupServerInterface,
                                                 RedisLookupServer)
-from lmcache.experimental.memory_management import (MemoryAllocatorInterface,
-                                                    MixedMemoryAllocator, 
-                                                    AdHocMemoryAllocator)
+from lmcache.experimental.memory_management import (AdHocMemoryAllocator,
+                                                    MemoryAllocatorInterface,
+                                                    MixedMemoryAllocator)
 from lmcache.experimental.storage_backend.storage_manager import (
     DistributedStorageManager, StorageManager)
 from lmcache.experimental.token_database import (ChunkedTokenDatabase,
@@ -89,7 +89,7 @@ class LMCacheEngine:
         self.storage_manager: Union[StorageManager, DistributedStorageManager]
         if config.enable_nixl:
             self.storage_manager = DistributedStorageManager(
-                    config, metadata, self.memory_allocator)
+                config, metadata, self.memory_allocator)
         else:
             self.storage_manager = StorageManager(config, metadata,
                                                   self.memory_allocator,
@@ -147,7 +147,7 @@ class LMCacheEngine:
 
         self.storage_manager.prepare_put(keys, metadatas)
 
-        offload_time = 0
+        offload_time = 0.
         tot_kv_size = 0
         # Offload the KV cache and write to remote
         for key, memobj_meta, (start, end) in zip(keys, metadatas, steds):
@@ -170,10 +170,10 @@ class LMCacheEngine:
         self.storage_manager.commit_put()
 
         ed = time.perf_counter()
-        logger.info("Store time: %.4f ms, throughput: %.4f GB/s; offload_time: %.4f ms",
-                    (ed - st) * 1000,
-                    tot_kv_size / (ed - st) / 1024**3,
-                    offload_time * 1000)
+        logger.info(
+            "Store time: %.4f ms, throughput: %.4f GB/s; offload_time: %.4f ms",
+            (ed - st) * 1000, tot_kv_size / (ed - st) / 1024**3,
+            offload_time * 1000)
 
         self.stats_monitor.on_store_finished(monitor_req_id)
 
@@ -354,6 +354,7 @@ class LMCacheEngineBuilder:
         metadata: LMCacheEngineMetadata,
     ) -> MemoryAllocatorInterface:
         if config.enable_nixl:
+            assert config.nixl_buffer_device is not None
             return AdHocMemoryAllocator(config.nixl_buffer_device)
 
         max_local_cpu_size = config.max_local_cpu_size

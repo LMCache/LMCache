@@ -24,8 +24,7 @@ import torch
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.experimental.config import LMCacheEngineConfig
 from lmcache.experimental.lookup_server import LookupServerInterface
-from lmcache.experimental.memory_management import (AdHocMemoryAllocator,
-                                                    MemoryAllocatorInterface,
+from lmcache.experimental.memory_management import (MemoryAllocatorInterface,
                                                     MemoryFormat, MemoryObj,
                                                     MemoryObjMetadata,
                                                     MixedMemoryAllocator)

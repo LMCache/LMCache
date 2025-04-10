@@ -13,9 +13,9 @@
 # limitations under the License.
 
 import threading
+import time
 from concurrent.futures import Future
 from typing import Optional
-import time
 
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.experimental.config import LMCacheEngineConfig
@@ -33,15 +33,16 @@ logger = init_logger(__name__)
 
 
 class RecvObjPool:
+
     def __init__(self):
         self.lock = threading.Lock()
         self._data: dict[CacheEngineKey, MemoryObj] = {}
-        self._cnt: dict[CacheEngineKey, MemoryObj] = {}
+        self._cnt: dict[CacheEngineKey, int] = {}
 
         # TODO: Remove the hard-code
         # HACK: have a recycle threshold to avoid the memory leak
         self._recent_added_keys = []
-        self._recent_add_threshold = 50 # Keep recent 20 keys
+        self._recent_add_threshold = 50  # Keep recent 20 keys
         self._recycle_threshold = 200
 
     def _gc(self):
@@ -56,9 +57,8 @@ class RecvObjPool:
             self._data.pop(key)
             self._cnt.pop(key)
         ed = time.perf_counter()
-        logger.warning("GC in %.4f msec, released %.2f GB memory", 
-                       (ed - st) * 1000, 
-                       freed_size / 1024 / 1024 / 1024)
+        logger.warning("GC in %.4f msec, released %.2f GB memory",
+                       (ed - st) * 1000, freed_size / 1024 / 1024 / 1024)
 
     def add(self, key: CacheEngineKey, obj: MemoryObj):
         with self.lock:
@@ -92,6 +92,7 @@ class RecvObjPool:
         with self.lock:
             return self._data.get(key, None)
 
+
 class BasicNixlObserver(NixlObserverInterface):
     """
     Basic implementation of the NixlObserverInterface to handle 
@@ -117,8 +118,8 @@ class BasicNixlObserver(NixlObserverInterface):
             transfer buffer  (i.e., whether it will be overwrite by next 
             transfer)
         """
-        clone_time = 0
-        add_time = 0
+        clone_time = 0.0
+        add_time = 0.0
         for key, value in zip(keys, objs):
             assert value.tensor is not None, \
                     "The tensor in the MemoryObj is None."
@@ -133,8 +134,11 @@ class BasicNixlObserver(NixlObserverInterface):
                 add_time += (ed2 - ed) * 1000
             else:
                 self.obj_pool.add(key, value)
-        logger.debug("Nixl Observer: clone time: %.4f msec, Add time: %.4f msec for %d objects",
-                     clone_time, add_time, len(keys))
+        logger.debug(
+            "Nixl Observer: clone time: %.4f msec, "
+            "Add time: %.4f msec for %d objects", clone_time, add_time,
+            len(keys))
+
 
 class NixlBackend(StorageBackendInterface):
     """
