@@ -105,7 +105,7 @@ class NixlRequest:
 class NixlPipe:
     """An one-directional pipe to send the data from the sender to the receiver.
     """
-    TRANSFER_BUFFER_SIZE = 32 * 1024 * 1024  # 32 MB
+    TRANSFER_BUFFER_SIZE = 128 * 1024 * 1024  # 32 MB
 
     def __init__(self, nixl_config: NixlConfig,
                  side_channel: zmq.Socket):  # type: ignore
@@ -294,7 +294,7 @@ class NixlPipe:
         while True:
             if self._agent.check_remote_xfer_done(self.peer_name,
                                                   message.encode("utf-8")):
-                logger.info(
+                logger.debug(
                     "Transfer for UUID '%s' completed on the remote side (%s)",
                     uid, self.peer_name)
                 break
@@ -441,14 +441,14 @@ class NixlChannel:
                 # Wait for a request from the side channel with shorter timeout
                 evts = poller.poll(timeout=POLL_TIMEOUT_MS)
                 if not evts:
-                    logger.debug(
-                        "No events received on the side channel, continuing..."
-                    )
+                    #logger.debug(
+                    #    "No events received on the side channel, continuing..."
+                    #)
                     continue
 
-                logger.debug(
-                    "Received event on the side channel, processing message..."
-                )
+                #logger.debug(
+                #    "Received event on the side channel, processing message..."
+                #)
 
                 msg = self._side_channel.recv()
                 if not msg:

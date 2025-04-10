@@ -61,11 +61,11 @@ def init_logger(name: str) -> Logger:
 
     # Add our custom handler
     ch = logging.StreamHandler()
-    ch.setLevel(logging.INFO)
+    ch.setLevel(get_log_level())
     ch.setFormatter(CustomFormatter())
     logger.addHandler(ch)
 
-    logger.setLevel(logging.INFO)
+    logger.setLevel(get_log_level())
     return logger
 
 

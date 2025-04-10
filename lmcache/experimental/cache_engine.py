@@ -15,6 +15,7 @@
 import asyncio
 import multiprocessing
 from typing import Dict, List, Optional, Union
+import time
 
 import torch
 
@@ -118,6 +119,7 @@ class LMCacheEngine:
 
         This function will be refactored in the future.
         """
+        st = time.perf_counter()
         if mask is not None:
             monitor_req_id = self.stats_monitor.on_store_request(
                 torch.sum(mask))
@@ -145,6 +147,8 @@ class LMCacheEngine:
 
         self.storage_manager.prepare_put(keys, metadatas)
 
+        offload_time = 0
+        tot_kv_size = 0
         # Offload the KV cache and write to remote
         for key, memobj_meta, (start, end) in zip(keys, metadatas, steds):
             assert memobj_meta.dtype is not None
@@ -156,11 +160,20 @@ class LMCacheEngine:
                                "The KV cache will not be stored.")
                 break
 
+            t = time.perf_counter()
             self.gpu_connector.from_gpu(memory_obj, start, end, **kwargs)
+            offload_time += time.perf_counter() - t
             self.storage_manager.put(key, memory_obj)
+            tot_kv_size += memory_obj.get_size()
 
         # Flush
         self.storage_manager.commit_put()
+
+        ed = time.perf_counter()
+        logger.info("Store time: %.4f ms, throughput: %.4f GB/s; offload_time: %.4f ms",
+                    (ed - st) * 1000,
+                    tot_kv_size / (ed - st) / 1024**3,
+                    offload_time * 1000)
 
         self.stats_monitor.on_store_finished(monitor_req_id)
 

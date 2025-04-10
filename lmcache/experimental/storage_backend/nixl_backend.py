@@ -15,6 +15,7 @@
 import threading
 from concurrent.futures import Future
 from typing import Optional
+import time
 
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.experimental.config import LMCacheEngineConfig
@@ -37,8 +38,35 @@ class RecvObjPool:
         self._data: dict[CacheEngineKey, MemoryObj] = {}
         self._cnt: dict[CacheEngineKey, MemoryObj] = {}
 
+        # TODO: Remove the hard-code
+        # HACK: have a recycle threshold to avoid the memory leak
+        self._recent_added_keys = []
+        self._recent_add_threshold = 50 # Keep recent 20 keys
+        self._recycle_threshold = 200
+
+    def _gc(self):
+        logger.warning("In GC!")
+        st = time.perf_counter()
+        freed_size = 0
+        current_keys = set(self._data.keys())
+        recent_keys = set(self._recent_added_keys)
+        keys_to_evict = current_keys - recent_keys
+        for key in keys_to_evict:
+            freed_size += self._data[key].get_size()
+            self._data.pop(key)
+            self._cnt.pop(key)
+        ed = time.perf_counter()
+        logger.warning("GC in %.4f msec, released %.2f GB memory", 
+                       (ed - st) * 1000, 
+                       freed_size / 1024 / 1024 / 1024)
+
     def add(self, key: CacheEngineKey, obj: MemoryObj):
         with self.lock:
+            # TODO: Get rid of this
+            self._recent_added_keys.append(key)
+            self._recent_added_keys = \
+                    self._recent_added_keys[-self._recent_add_threshold:]
+
             if key in self._data:
                 self._cnt[key] += 1
             else:
@@ -55,19 +83,14 @@ class RecvObjPool:
 
     def contains(self, key: CacheEngineKey) -> bool:
         with self.lock:
-            #return key in self._data
-            if key in self._cnt:
-                return True
-            else:
-                return False
+            if len(self._data) >= self._recycle_threshold:
+                self._gc()
+
+            return key in self._data
 
     def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         with self.lock:
-            #return self._data.get(key, None)
-            if key in self._data:
-                return self._data[key]
-            else:
-                return None
+            return self._data.get(key, None)
 
 class BasicNixlObserver(NixlObserverInterface):
     """
@@ -94,15 +117,24 @@ class BasicNixlObserver(NixlObserverInterface):
             transfer buffer  (i.e., whether it will be overwrite by next 
             transfer)
         """
+        clone_time = 0
+        add_time = 0
         for key, value in zip(keys, objs):
             assert value.tensor is not None, \
                     "The tensor in the MemoryObj is None."
             if is_view:
+                st = time.perf_counter()
                 copied_obj = TensorMemoryObj(value.tensor.clone(),
                                              value.metadata)
+                ed = time.perf_counter()
                 self.obj_pool.add(key, copied_obj)
+                ed2 = time.perf_counter()
+                clone_time += (ed - st) * 1000
+                add_time += (ed2 - ed) * 1000
             else:
                 self.obj_pool.add(key, value)
+        logger.debug("Nixl Observer: clone time: %.4f msec, Add time: %.4f msec for %d objects",
+                     clone_time, add_time, len(keys))
 
 class NixlBackend(StorageBackendInterface):
     """
