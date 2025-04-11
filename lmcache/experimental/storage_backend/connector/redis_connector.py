@@ -238,7 +238,7 @@ class RedisSentinelConnector(RemoteConnector):
         self.slave.close()
 
 
-from redis.asyncio.cluster import RedisCluster, ClusterNode
+from redis.cluster import RedisCluster, ClusterNode
 
 class RedisClusterConnector(RemoteConnector):
     """
@@ -268,7 +268,7 @@ class RedisClusterConnector(RemoteConnector):
 
     async def exists(self, key: CacheEngineKey) -> bool:
         key_str = key.to_string() + "metadata"
-        count = await self.connection.exists(key_str)
+        count = self.connection.exists(key_str)
         return count > 0
 
     async def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
@@ -277,15 +277,17 @@ class RedisClusterConnector(RemoteConnector):
         kv_key = key_str + "kv_bytes"
 
         # Fetch metadata
-        redis_metadata_bytes = await self.connection.get(metadata_key)
+        redis_metadata_bytes = self.connection.get(metadata_key)
         if redis_metadata_bytes is None:
             return None
+        
+        assert not inspect.isawaitable(redis_metadata_bytes)
 
         try:
             redis_metadata = RedisMetadata.deserialize(redis_metadata_bytes)
         except Exception as e:
             logger.error(f"Metadata deserialization failed: {e}")
-            await self.connection.delete(metadata_key)
+            self.connection.delete(metadata_key)
             return None
 
         # Allocate memory
@@ -299,16 +301,17 @@ class RedisClusterConnector(RemoteConnector):
             return None
 
         # Fetch KV data
-        kv_bytes = await self.connection.get(kv_key)
+        kv_bytes = self.connection.get(kv_key)
+        assert not inspect.isawaitable(kv_bytes)
         if kv_bytes is None:
             logger.warning("KV data missing, deleting metadata")
-            await self.connection.delete(metadata_key)
+            self.connection.delete(metadata_key)
             return None
 
         # Validate length
         if len(kv_bytes) != redis_metadata.length:
             logger.warning("KV data length mismatch, deleting metadata")
-            await self.connection.delete(metadata_key)
+            self.connection.delete(metadata_key)
             return None
 
         # Copy data into memory object
@@ -341,18 +344,15 @@ class RedisClusterConnector(RemoteConnector):
             logger.error(f"Metadata serialization failed: {e}")
             return
 
-        # Atomic write using pipeline
-        async with self.connection.pipeline(transaction=True) as pipe:
-            await pipe.set(metadata_key, redis_metadata_bytes)\
-                     .set(kv_key, kv_bytes)\
-                     .execute()
+        self.connection.set(metadata_key, redis_metadata_bytes)
+        self.connection.set(kv_key, kv_bytes)
 
         self.memory_allocator.ref_count_down(memory_obj)
 
     @no_type_check
     async def list(self) -> List[str]:
-        metadata_keys = await self.connection.keys("*metadata")
+        metadata_keys = self.connection.keys("*metadata")
         return [key.decode().removesuffix("metadata") for key in metadata_keys]
 
     async def close(self):
-        await self.connection.close()
+        self.connection.close()
