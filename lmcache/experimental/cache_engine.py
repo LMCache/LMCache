@@ -20,7 +20,6 @@ from typing import Dict, List, Optional, Union
 import torch
 
 from lmcache.config import LMCacheEngineMetadata
-from lmcache.experimental.cache_controller import LMCacheWorker
 from lmcache.experimental.config import LMCacheEngineConfig
 from lmcache.experimental.distributed_server import (
     DistributedServerInterface, NaiveDistributedServer)
@@ -31,7 +30,7 @@ from lmcache.experimental.memory_management import (AdHocMemoryAllocator,
                                                     MemoryAllocatorInterface,
                                                     MixedMemoryAllocator)
 from lmcache.experimental.storage_backend.storage_manager import (
-    DistributedStorageManager, StorageManager)
+    StorageManager)
 from lmcache.experimental.token_database import (ChunkedTokenDatabase,
                                                  TokenDatabase)
 from lmcache.logging import init_logger
@@ -71,6 +70,7 @@ class LMCacheEngine:
         token_database: TokenDatabase,
         gpu_connector: GPUConnectorInterface,
     ):
+        logger.info(f"Creating LMCacheEngine with config: {config}")
         self.config = config
         self.metadata = metadata
         self.memory_allocator = memory_allocator
@@ -87,14 +87,18 @@ class LMCacheEngine:
         if self.enable_p2p:
             self.lookup_server = RedisLookupServer(config)
 
-        self.storage_manager: Union[StorageManager, DistributedStorageManager]
+        self.use_distributed_storage_manager = False
         if config.enable_nixl:
+            # lazy import because nixl cannot be installed on some machines
+            from lmcache.experimental.storage_backend.storage_manager import (
+                DistributedStorageManager)
+            self.use_distributed_storage_manager = True
             self.storage_manager = DistributedStorageManager(
                 config, metadata, self.memory_allocator)
         else:
-            self.storage_manager = StorageManager(config, metadata,
-                                                  self.memory_allocator,
-                                                  self.lookup_server)
+            self.storage_manager = StorageManager(
+                config, metadata, self.memory_allocator,
+                self.lookup_server)  # type: ignore[assignment]
         if self.enable_p2p:
             self.distributed_loop = asyncio.get_event_loop()
             assert self.lookup_server is not None
@@ -107,6 +111,8 @@ class LMCacheEngine:
                                        config)
 
         if self.config.enable_controller:
+            # avoid circular import
+            from lmcache.experimental.cache_controller import LMCacheWorker
             self.controller = LMCacheWorker(config, metadata, self)
 
         InitializeUsageContext(config.to_original_config(), metadata)
@@ -130,8 +136,6 @@ class LMCacheEngine:
                 torch.sum(mask))
         else:
             monitor_req_id = self.stats_monitor.on_store_request(len(tokens))
-
-        assert isinstance(self.storage_manager, DistributedStorageManager)
 
         # Register the put request
         keys = []
@@ -206,7 +210,7 @@ class LMCacheEngine:
             multiple of the chunk size.
         """
         # FIXME(ApostaC): A HACK for distributed storage manager
-        if isinstance(self.storage_manager, DistributedStorageManager):
+        if self.use_distributed_storage_manager:
             self.store_distributed(tokens, mask, **kwargs)
             return
 
@@ -298,7 +302,7 @@ class LMCacheEngine:
 
             self.gpu_connector.to_gpu(memory_obj, start, end, **kwargs)
             self.memory_allocator.ref_count_down(memory_obj)
-            if isinstance(self.storage_manager, DistributedStorageManager):
+            if self.use_distributed_storage_manager:
                 self.storage_manager.remove(key)
 
         self.stats_monitor.on_retrieve_finished(monitor_req_id,
@@ -344,6 +348,9 @@ class LMCacheEngine:
 
         if self.enable_p2p:
             self.distributed_server.close()
+
+        if self.config.enable_controller:
+            self.controller.close()
 
         self.storage_manager.close()
         logger.info("LMCacheEngine closed.")

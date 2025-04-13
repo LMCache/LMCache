@@ -66,7 +66,7 @@ class ChunkedTokenDatabase(TokenDatabase):
     ) -> str:
         # TODO: change it to a more efficient hash function
         if isinstance(tokens, torch.Tensor):
-            tokens_bytes = tokens.cpu().numpy().tobytes()
+            tokens_bytes = tokens.cpu().to(torch.uint32).numpy().tobytes()
         elif isinstance(tokens, list):
             tokens_bytes = array.array('I', tokens).tobytes()
         return hashlib.sha256(prefix_hash.encode("ascii") +

@@ -419,6 +419,10 @@ class DistributedStorageManager:
         metadata: LMCacheEngineMetadata,
         allocator: MemoryAllocatorInterface,
     ):
+        # lazy import because nixl cannot be installed on some machines
+        from lmcache.experimental.storage_backend.nixl_backend import \
+            NixlBackend
+
         # TODO (ApostaC): remove hard coded usage of NixlBackend
         from lmcache.experimental.storage_backend.nixl_backend import \
             NixlBackend
