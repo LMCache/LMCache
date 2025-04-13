@@ -20,6 +20,7 @@ from typing import Dict, List, Optional, Union
 import torch
 
 from lmcache.config import LMCacheEngineMetadata
+from lmcache.experimental.cache_controller import LMCacheWorker
 from lmcache.experimental.config import LMCacheEngineConfig
 from lmcache.experimental.distributed_server import (
     DistributedServerInterface, NaiveDistributedServer)
@@ -104,6 +105,10 @@ class LMCacheEngine:
                                        self.memory_allocator,
                                        self.distributed_loop,
                                        config)
+
+        if self.config.enable_controller:
+            self.controller = LMCacheWorker(config, metadata, self)
+
         InitializeUsageContext(config.to_original_config(), metadata)
         self.stats_monitor = LMCStatsMonitor.GetOrCreate()
 
@@ -315,7 +320,7 @@ class LMCacheEngine:
     # TODO(Jiayi): Currently, search_range is only used for testing.
     def lookup(
         self,
-        tokens: torch.Tensor,
+        tokens: Union[torch.Tensor, List[int]],
         search_range: Optional[List[str]] = None,
     ) -> int:
         """
