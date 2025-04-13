@@ -1,6 +1,7 @@
-import zmq.asyncio
 import os
 from typing import List
+
+import zmq.asyncio
 
 
 def get_zmq_context():
