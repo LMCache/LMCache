@@ -13,27 +13,24 @@
 # limitations under the License.
 
 import abc
-import enum
 import pickle
 import threading
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Optional, Union
+from typing import Optional
 
 import torch
 import zmq
 from nixl._api import nixl_agent
 
-from lmcache.config import LMCacheEngineMetadata
-from lmcache.experimental.config import LMCacheEngineConfig
 from lmcache.experimental.memory_management import (MemoryObj,
                                                     MemoryObjMetadata,
                                                     TensorMemoryObj)
+from lmcache.experimental.storage_backend.connector.nixl_utils import (
+    NixlConfig, NixlRole)
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
-from lmcache.experimental.storage_backend.connector.nixl_utils import (
-        NixlRole, NixlConfig)
 
 logger = init_logger(__name__)
 

@@ -17,17 +17,20 @@ import time
 from concurrent.futures import Future
 from typing import Optional
 
+import torch
+
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.experimental.config import LMCacheEngineConfig
-from lmcache.experimental.memory_management import (MemoryObj,
+from lmcache.experimental.memory_management import (MemoryAllocatorInterface,
+                                                    MemoryFormat, MemoryObj,
                                                     MemoryObjMetadata,
                                                     TensorMemoryObj)
 from lmcache.experimental.storage_backend.abstract_backend import \
     StorageBackendInterface
-from lmcache.experimental.storage_backend.connector.nixl_utils import (
-        NixlConfig)
-from lmcache.experimental.storage_backend.connector.nixl_connector import (
+from lmcache.experimental.storage_backend.connector.nixl_connector_v2 import (
     NixlChannel, NixlObserverInterface)
+from lmcache.experimental.storage_backend.connector.nixl_utils import \
+    NixlConfig
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
 
@@ -217,37 +220,39 @@ class NixlBackend(StorageBackendInterface):
         self._registered_metadatas = metadatas
         self._nixl_channel.prepare_send(keys=keys, metadatas=metadatas)
 
-    def submit_put_task(self, key: CacheEngineKey,
-                        obj: MemoryObj) -> Optional[Future]:
+    def allocate_zero_copy_write_object(
+        self,
+        shape: torch.Size,
+        dtype: Optional[torch.dtype],
+        fmt: MemoryFormat = MemoryFormat.KV_BLOB,
+    ) -> MemoryObj:
         """
-        Put the MemoryObj into the storage backend and send it to the receiver
-        in a blocking way.
+        Allocate a zero-copy write object for the given shape and dtype.
 
-        :param key: The key of the MemoryObj.
-        :param obj: The MemoryObj to be stored.
-        
-        :return: a future object
-
-        :note: Right now, the 'key' is not used and it assumes that the memory 
-        object has the same order as the keys passed in `register_put_tasks`.
+        This will be seen as "adding a new payload" to the backend.
         """
-        if len(self._registered_keys) == 0:
-            raise RuntimeError("The backend has not registered put tasks.")
+        assert self._registered_metadatas[self._num_payload_added].shape \
+            == shape, \
+            "The shape of the allocated object is not equal to the shape of " \
+            "the registered metadata."
 
-        assert self._registered_keys[self._num_payload_added] == key, \
-            f"The key {key} is not the same as the registered key "\
-            f"{self._registered_keys[self._num_payload_added]}."
+        assert self._registered_metadatas[self._num_payload_added].dtype \
+            == dtype, \
+            "The dtype of the allocated object is not equal to the dtype of " \
+            "the registered metadata."
 
-        assert \
-            self._registered_metadatas[self._num_payload_added] \
-            == obj.metadata, \
-            f"The {obj.metadata} is not the same as the registered metadata "\
-            f"{self._registered_metadatas[self._num_payload_added]}."
+        assert self._registered_metadatas[self._num_payload_added].fmt == fmt, \
+            "The fmt of the allocated object is not equal to the fmt of " \
+            "the registered metadata."
 
-        #self._nixl_channel.send([key], [obj])
-        self._nixl_channel.add_payload(obj)
         self._num_payload_added += 1
-        return None
+
+        ret = self._nixl_channel.allocate_for_send(shape=shape,
+                                                   dtype=dtype,
+                                                   fmt=fmt)
+        assert ret is not None, \
+            "Failed to allocate zero-copy buffer from nixl_channel"
+        return ret
 
     def flush_put_tasks(self) -> None:
         """
@@ -264,19 +269,21 @@ class NixlBackend(StorageBackendInterface):
         self._registered_metadatas = []
         self._num_payload_added = 0
 
-    def submit_put_tasks(self, keys: list[CacheEngineKey],
-                         objs: list[MemoryObj]) -> Optional[Future]:
+    def submit_put_task(self, key: CacheEngineKey,
+                        obj: MemoryObj) -> Optional[Future]:
         """
-        Put the MemoryObj into the storage backend and send it to the 
-        receiver in a blocking way.
+        Put the MemoryObj into the storage backend and send it to the receiver
+        in a blocking way.
 
-        :param keys: The keys of the MemoryObj.
-        :param objs: The MemoryObj to be stored.
-
+        :param key: The key of the MemoryObj.
+        :param obj: The MemoryObj to be stored.
+        
         :return: a future object
+
+        :note: Right now, the 'key' is not used and it assumes that the memory 
+        object has the same order as the keys passed in `register_put_tasks`.
         """
-        self._nixl_channel.send(keys, objs)
-        return None
+        raise NotImplementedError
 
     def submit_prefetch_task(self, key: CacheEngineKey) -> Optional[Future]:
         """
@@ -311,6 +318,12 @@ class NixlBackend(StorageBackendInterface):
         Close the storage backend.
         """
         self._nixl_channel.close()
+
+    def get_underlying_allocator(self) -> MemoryAllocatorInterface:
+        """
+        Get the underlying allocator from Nixl channel.
+        """
+        return self._nixl_channel.get_allocator()
 
     @staticmethod
     def CreateNixlBackend(config: LMCacheEngineConfig,

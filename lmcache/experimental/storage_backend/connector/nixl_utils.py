@@ -5,6 +5,7 @@ from typing import Union
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.experimental.config import LMCacheEngineConfig
 
+
 class NixlRole(enum.Enum):
     """
     Enum to represent the role of the Nixl connection.
@@ -54,4 +55,3 @@ class NixlConfig:
                           buffer_size=config.nixl_buffer_size,
                           buffer_device=config.nixl_buffer_device,
                           enable_gc=config.nixl_enable_gc)
-

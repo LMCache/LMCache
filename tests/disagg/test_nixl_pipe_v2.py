@@ -6,10 +6,10 @@ import torch
 import zmq
 
 from lmcache.experimental.memory_management import (AdHocMemoryAllocator,
-                                                    TensorMemoryObj,
-                                                    MemoryFormat, MemoryObj)
+                                                    MemoryFormat, MemoryObj,
+                                                    TensorMemoryObj)
 from lmcache.experimental.storage_backend.connector.nixl_connector_v2 import (
-    NixlConfig, NixlPipe, NixlRole, uuid_to_message, message_to_uuid)
+    NixlConfig, NixlPipe, NixlRole)
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
 
@@ -77,7 +77,8 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    keys, objs = generate_test_data(args.num_objs, torch.Size([32, 2, 256, 1024]))
+    keys, objs = generate_test_data(args.num_objs,
+                                    torch.Size([32, 2, 256, 1024]))
 
     # Common configuration
     config = NixlConfig(
@@ -108,16 +109,18 @@ if __name__ == "__main__":
         if args.role == "sender":
             # Sender side
             total_size = 0
-            
+
             # Allocate and write data to buffer
             transfer_time = 0
             for idx, obj in enumerate(objs):
                 if args.simulate_work and idx % 10 == 0:
-                    time.sleep(0.05) # Simulate some work
-            
+                    time.sleep(0.05)  # Simulate some work
+
                 # Use the new allocate_for_write method
                 transfer_start = time.time()
-                new_obj = pipe.allocate_for_write(obj.tensor.shape, obj.tensor.dtype, obj.metadata.fmt)
+                new_obj = pipe.allocate_for_write(obj.tensor.shape,
+                                                  obj.tensor.dtype,
+                                                  obj.metadata.fmt)
                 if new_obj is not None:
                     # Copy data from original object to the new one
                     new_obj.tensor.copy_(obj.tensor)
@@ -125,17 +128,18 @@ if __name__ == "__main__":
                 transfer_time += time.time() - transfer_start
             # Measure transfer time
             flush_start = time.time()
-            pipe.flush()  # This will wait for receiver's ack 
+            pipe.flush()  # This will wait for receiver's ack
             flush_end = time.time()
             transfer_time += flush_end - flush_start
-            
+
             total_transfer_time += transfer_time
             total_bytes_transferred += total_size
-            
+
             logger.info(f"Transfer time: {transfer_time:.6f} seconds")
-            transfer_throughput = calculate_throughput(total_size, transfer_time)
+            transfer_throughput = calculate_throughput(total_size,
+                                                       transfer_time)
             logger.info(f"Transfer throughput: {transfer_throughput:.2f} GB/s")
-            
+
         else:
             # Receiver side
             # Read data from buffer
@@ -148,9 +152,10 @@ if __name__ == "__main__":
                 nobj_before = len(received_objs)
                 for idx, obj in enumerate(new_objs):
                     cloned_tensor = obj.tensor.detach().clone()
-                    received_objs.append(TensorMemoryObj(cloned_tensor, obj.metadata))
+                    received_objs.append(
+                        TensorMemoryObj(cloned_tensor, obj.metadata))
 
-                    # Simulate some work: 20ms per 10 objects 
+                    # Simulate some work: 20ms per 10 objects
                     if args.simulate_work and len(received_objs) % 10 == 0:
                         time.sleep(0.02)
 
@@ -158,30 +163,35 @@ if __name__ == "__main__":
             transfer_end = time.time()
             transfer_time = transfer_end - transfer_start
             total_size = sum(obj.get_size() for obj in received_objs)
-            
+
             total_bytes_transferred += total_size
             total_transfer_time += transfer_time
-            
+
             logger.info(f"Received {len(received_objs)} objects")
-            transfer_throughput = calculate_throughput(total_size, transfer_time)
+            transfer_throughput = calculate_throughput(total_size,
+                                                       transfer_time)
             logger.info(f"Transfer throughput: {transfer_throughput:.2f} GB/s")
-            
+
             # Check if the received objects are the same as the original objects
             assert len(received_objs) == len(objs), \
-                "Number of received objects does not match the number of original objects"
-            for i, (received_obj, original_obj) in enumerate(zip(received_objs, objs)):
-                assert torch.allclose(received_obj.tensor, original_obj.tensor), \
-                    f"Data mismatch at index {i}: received {received_obj.tensor.mean()} " \
+                "Number of received objects does not match the number of " \
+                "original objects"
+            for i, (received_obj,
+                    original_obj) in enumerate(zip(received_objs, objs)):
+                assert torch.allclose(received_obj.tensor,
+                                      original_obj.tensor), \
+                    f"Data mismatch at index {i}: received " \
+                    f"{received_obj.tensor.mean()} " \
                     f"but expected {original_obj.tensor.mean()}"
             logger.info("Round passed")
-            
+
     # Print aggregate statistics
     if args.num_rounds > 1:
         avg_time = total_transfer_time / args.num_rounds
         logger.info(f"Average transfer time: {avg_time:.6f} seconds")
-        
-        avg_throughput = calculate_throughput(
-            total_bytes_transferred, total_transfer_time)
+
+        avg_throughput = calculate_throughput(total_bytes_transferred,
+                                              total_transfer_time)
         logger.info(f"Total bytes transferred: {total_bytes_transferred}")
         logger.info(f"Average throughput over {args.num_rounds} rounds: "
                     f"{avg_throughput:.2f} GB/s")
@@ -189,4 +199,4 @@ if __name__ == "__main__":
     # Wait a bit before closing
     time.sleep(5)
     pipe.close()
-    logger.info("Test completed successfully") 
+    logger.info("Test completed successfully")

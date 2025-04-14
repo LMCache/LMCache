@@ -107,11 +107,11 @@ class TestObserver(NixlObserverInterface):
 
 
 def send_and_measure_throughput_v2(channel: NixlChannel,
-                                keys: List[CacheEngineKey],
-                                objs: List[MemoryObj],
-                                total_size: int,
-                                batch_size: int = None,
-                                simulate_workload: bool = False) -> float:
+                                   keys: List[CacheEngineKey],
+                                   objs: List[MemoryObj],
+                                   total_size: int,
+                                   batch_size: int = None,
+                                   simulate_workload: bool = False) -> float:
     """Send data through the channel and measure throughput using V2 API.
     
     Args:
@@ -125,10 +125,11 @@ def send_and_measure_throughput_v2(channel: NixlChannel,
     Returns:
         float: Throughput in GB/s
     """
-    logger.info(f"Sending {len(objs)} objects using zero_copy_send_with_callback...")
-    
-    elapsed_time = 0 
-    
+    logger.info(f"Sending {len(objs)} objects using "
+                "zero_copy_send_with_callback...")
+
+    elapsed_time = 0
+
     if batch_size is None:
         # Original behavior - send all at once
         start_time = time.time()
@@ -136,7 +137,8 @@ def send_and_measure_throughput_v2(channel: NixlChannel,
         channel.zero_copy_send_with_callback(
             keys=keys,
             metadatas=metadatas,
-            callback=lambda dest_obj, idx=0: dest_obj.tensor.copy_(objs[idx].tensor)
+            callback=lambda dest_obj, idx=0: \
+                dest_obj.tensor.copy_(objs[idx].tensor)
         )
         elapsed_time = time.time() - start_time
     else:
@@ -147,20 +149,23 @@ def send_and_measure_throughput_v2(channel: NixlChannel,
             batch_keys = keys[i:i + batch_size]
             batch_objs = objs[i:i + batch_size]
             batch_metadatas = [obj.metadata for obj in batch_objs]
-            
-            channel.zero_copy_send_with_callback(
-                keys=batch_keys,
-                metadatas=batch_metadatas,
-                callback=lambda dest_obj, idx=i: dest_obj.tensor.copy_(batch_objs[idx].tensor)
-            )
+
+            def callback(dest_obj, idx, batch_objs=batch_objs):
+                dest_obj.tensor.copy_(batch_objs[idx].tensor)
+
+            channel.zero_copy_send_with_callback(keys=batch_keys,
+                                                 metadatas=batch_metadatas,
+                                                 callback=callback)
             this_round = time.time() - start_time
             elapsed_times.append(this_round)
-            logger.info(f"Sent batch {i//batch_size + 1}/{len(objs)//batch_size} in {this_round:.6f} seconds")
+            logger.info(f"Sent batch {i//batch_size + 1}"
+                        f"/{len(objs)//batch_size}"
+                        f" in {this_round:.6f} seconds")
             if simulate_workload:
                 time.sleep(0.05)  # Sleep 50ms between batches
         elapsed_time = sum(elapsed_times)
         logger.info(f"Elapsed times: {elapsed_times}")
-    
+
     logger.info(f"Sent {len(objs)} objects in {elapsed_time:.6f} seconds")
     throughput = calculate_throughput(total_size, elapsed_time)
     logger.info(f"Throughput: {throughput:.2f} GB/s")
@@ -228,34 +233,34 @@ def receive_and_verify_data(observer: TestObserver,
         torch.cuda.empty_cache()
 
 
-def test_allocate_for_send(channel: NixlChannel, shape: torch.Size, dtype: torch.dtype):
+def test_allocate_for_send(channel: NixlChannel, shape: torch.Size,
+                           dtype: torch.dtype) -> None:
     """Test the allocate_for_send API"""
     logger.info("Testing allocate_for_send API...")
-    
+
     # Create test keys
     keys = [
         CacheEngineKey(fmt="test",
                        model_name="test_model",
                        world_size=1,
                        worker_id=0,
-                       chunk_hash=f"test_alloc_{i}")
-        for i in range(3)
+                       chunk_hash=f"test_alloc_{i}") for i in range(3)
     ]
-    
+
     # Create test metadatas
     allocator = AdHocMemoryAllocator(device='cuda')
     temp_objs = [allocator.allocate(shape, dtype) for _ in range(3)]
     metadatas = [obj.metadata for obj in temp_objs]
-    
+
     # Prepare send
     channel.prepare_send(keys, metadatas)
-    
+
     # Allocate and fill objects
     for i in range(3):
         obj = channel.allocate_for_send(shape, dtype)
         assert obj is not None, "Failed to allocate memory for send"
         obj.tensor.fill_(i + 10)  # Fill with test data
-    
+
     # Finish send
     channel.finish_send()
     logger.info("allocate_for_send test completed")
@@ -281,12 +286,14 @@ def main():
                         type=int,
                         default=100,
                         help='Number of objects to send')
-    parser.add_argument('--batch-size',
-                        type=int,
-                        help='Size of batches to send (default: send all at once)')
-    parser.add_argument('--simulate-workload',
-                        action='store_true',
-                        help='Simulate workload by sleeping 50ms between batches')
+    parser.add_argument(
+        '--batch-size',
+        type=int,
+        help='Size of batches to send (default: send all at once)')
+    parser.add_argument(
+        '--simulate-workload',
+        action='store_true',
+        help='Simulate workload by sleeping 50ms between batches')
     args = parser.parse_args()
 
     # Generate test data
@@ -311,10 +318,12 @@ def main():
 
     if args.role == "sender":
         throughput = send_and_measure_throughput_v2(
-            channel, keys, objs, total_size,
+            channel,
+            keys,
+            objs,
+            total_size,
             batch_size=args.batch_size,
-            simulate_workload=args.simulate_workload
-        )
+            simulate_workload=args.simulate_workload)
         logger.info(f"Throughput: {throughput:.2f} GB/s")
     else:  # receiver
         observer = TestObserver()
@@ -331,4 +340,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main() 
+    main()
