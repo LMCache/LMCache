@@ -56,7 +56,7 @@ You can install the latest code from the GitHub repository:
 .. code-block:: console
 
     # Install vLLM version
-    $ pip install vllm==0.6.2.3
+    $ pip install vllm==0.6.2
 
     # Clone and install LMCache
     $ git clone git@github.com:LMCache/LMCache.git
