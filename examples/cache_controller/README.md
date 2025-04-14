@@ -37,8 +37,7 @@ curl -X POST http://localhost:8001/lookup \
   -H "Content-Type: application/json" \
   -d '{
     "instance_id": "lmcache_default_instance",
-    "tokens": [128000, 849, 21435, 279, 26431, 315, 85748, 6636, 304, 4221, 4211, 13],
-    "worker_ids": [0]
+    "tokens": [128000, 849, 21435, 279, 26431, 315, 85748, 6636, 304, 4221, 4211, 13]
   }'
 ```
 The above request queries how many tokens have been stored in LMCache. Note that we only support using `tokens` as input for now.

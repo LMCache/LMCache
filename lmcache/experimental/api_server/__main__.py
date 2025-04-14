@@ -1,7 +1,7 @@
 import argparse
 import asyncio
 from contextlib import asynccontextmanager
-from typing import List
+from typing import List, Optional
 
 import uvicorn
 from fastapi import FastAPI, HTTPException
@@ -37,7 +37,7 @@ def create_app(lmcache_instance_ids: List[str]) -> FastAPI:
     class LookupRequest(BaseModel):
         instance_id: str
         tokens: List[int]
-        worker_ids: List[int] = []
+        worker_ids: Optional[List[int]] = []
 
     @app.post("/lookup")
     async def lookup(req: LookupRequest):
@@ -45,6 +45,20 @@ def create_app(lmcache_instance_ids: List[str]) -> FastAPI:
             kwargs = {"tokens": req.tokens, "worker_ids": req.worker_ids}
             return await lmcache_cluster_executor.execute(
                 req.instance_id, "lookup", **kwargs)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e)) from e
+
+    class ClearCacheRequest(BaseModel):
+        instance_id: str
+        tokens: Optional[List[int]] = []
+        worker_ids: Optional[List[int]] = []
+
+    @app.post("/clear")
+    async def clear(req: ClearCacheRequest):
+        try:
+            kwargs = {"tokens": req.tokens, "worker_ids": req.worker_ids}
+            return await lmcache_cluster_executor.execute(
+                req.instance_id, "clear", **kwargs)
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e)) from e
 

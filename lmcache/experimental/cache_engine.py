@@ -342,6 +342,24 @@ class LMCacheEngine:
                 return start
         return end
 
+    def clear(
+        self,
+        tokens: Optional[torch.Tensor] = None,
+        locations: Optional[List[str]] = None,
+    ) -> int:
+        assert isinstance(self.storage_manager, StorageManager)
+        # Clear all caches if tokens is None
+        if tokens is None:
+            num_cleared = self.storage_manager.clear(locations)
+            return num_cleared
+
+        num_removed = 0
+        # Only remove the caches for the given tokens
+        for start, end, key in self.token_database.process_tokens(tokens):
+            removed = self.storage_manager.remove(key, locations)
+            num_removed += removed
+        return num_removed
+
     def close(self) -> None:
         """Close the cache engine and free all the resources"""
 
