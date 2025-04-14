@@ -344,12 +344,12 @@ class LMCacheEngine:
 
     def clear(
         self,
-        tokens: Optional[torch.Tensor] = None,
+        tokens: Optional[Union[torch.Tensor, List[int]]] = None,
         locations: Optional[List[str]] = None,
     ) -> int:
         assert isinstance(self.storage_manager, StorageManager)
         # Clear all caches if tokens is None
-        if tokens is None:
+        if tokens is None or len(tokens) == 0:
             num_cleared = self.storage_manager.clear(locations)
             return num_cleared
 

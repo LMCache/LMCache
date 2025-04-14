@@ -49,3 +49,11 @@ You should be able to see a return message:
 ```
 
 `12` indicates 12 tokens are stored in LMCache.
+
+
+
+curl -X POST http://localhost:8001/clear \
+  -H "Content-Type: application/json" \
+  -d '{
+    "instance_id": "lmcache_default_instance"
+  }'

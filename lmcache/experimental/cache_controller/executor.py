@@ -131,15 +131,15 @@ class LMCacheInstanceExecutor:
         :return: The result of the lookup operation.
         """
 
-        if "worker_ids" in kwargs:
-            worker_ids = kwargs["worker_ids"]
-        else:
-            # Only queries the first worker if worker_ids is not specified
+        assert "worker_ids" in kwargs
+        worker_ids = kwargs["worker_ids"]
+        # Only queries the first worker if worker_ids is not specified
+        if len(worker_ids) == 0:
             worker_ids = [0]
 
         if "tokens" not in kwargs:
             raise ValueError("tokens is required in lookup")
-
+        print(f"worker_ids: {worker_ids}")
         res = await self.execute_worker("lookup",
                                         worker_ids,
                                         tokens=kwargs["tokens"])
@@ -155,10 +155,10 @@ class LMCacheInstanceExecutor:
         :return: The number of cleared requests.
         """
 
-        if "worker_ids" in kwargs:
-            worker_ids = kwargs["worker_ids"]
-        else:
-            # Only queries the first worker if worker_ids is not specified
+        assert "worker_ids" in kwargs
+        worker_ids = kwargs["worker_ids"]
+        # Queries all workers if worker_ids is not specified
+        if len(worker_ids) == 0:
             worker_ids = self.worker_ids
 
         if "tokens" not in kwargs:
@@ -183,12 +183,12 @@ class LMCacheInstanceExecutor:
         tasks = []
         for worker_id in worker_ids:
 
-            async def send_and_receive(s, worker_id):
+            async def send_and_receive(s):
                 await s.send_json({"operation": operation, "data": kwargs})
                 return await s.recv_json()
 
             socket = self.sockets[worker_id]
-            tasks.append(send_and_receive(socket, worker_id))
+            tasks.append(send_and_receive(socket))
 
         results = await asyncio.gather(*tasks)
         return {
