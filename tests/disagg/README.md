@@ -97,3 +97,26 @@ UCX_TLS=cuda_ipc,cuda_copy,tcp CUDA_VISIBLE_DEVICES=1 python3 test_nixl_cache_en
 
 Measured performance: 70.97 ± 7.66 GB/s 
 
+## NIXL Pipe V2
+
+Added new `--simulate-work` flag to simulate the LLM work on both sender and receiver sides. On sender side: 50ms per 10 objects, and on receiver side: 20ms per 10 objects.
+
+```bash
+# Terminal 1 (Sender)
+UCX_TLS=cuda_ipc,cuda_copy,tcp CUDA_VISIBLE_DEVICES=0 python3 test_nixl_pipe_v2.py --role sender --num-rounds 5 --num-objs 500 --simulate-work
+
+# Terminal 2 (Receiver)
+UCX_TLS=cuda_ipc,cuda_copy,tcp CUDA_VISIBLE_DEVICES=1 python3 test_nixl_pipe_v2.py --role receiver --num-rounds 5 --num-objs 500 --simulate-work
+```
+
+## NIXL Channel v2 testing
+
+Introduced a new option: `--batch-size` to control the number of objects in each batch when calling send. 
+
+```bash
+# Terminal 1 (Sender)
+UCX_TLS=cuda_ipc,cuda_copy,tcp CUDA_VISIBLE_DEVICES=0 python3 test_nixl_channel_v2.py --role sender --num-objs 1000 --batch-size 30 --simulate-workload
+
+# Terminal 2 (Receiver)
+UCX_TLS=cuda_ipc,cuda_copy,tcp CUDA_VISIBLE_DEVICES=1 python3 test_nixl_channel_v2.py --role receiver --num-objs 1000 --batch-size 30 --simulate-workload
+```

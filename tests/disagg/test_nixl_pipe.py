@@ -78,6 +78,7 @@ if __name__ == "__main__":
         peer_port=args.port,
         buffer_size=2**32,  # 4GB
         buffer_device='cuda',
+        enable_gc=False,
     )
 
     context = zmq.Context()  # type: ignore

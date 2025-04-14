@@ -24,8 +24,10 @@ from lmcache.experimental.memory_management import (MemoryObj,
                                                     TensorMemoryObj)
 from lmcache.experimental.storage_backend.abstract_backend import \
     StorageBackendInterface
+from lmcache.experimental.storage_backend.connector.nixl_utils import (
+        NixlConfig)
 from lmcache.experimental.storage_backend.connector.nixl_connector import (
-    NixlChannel, NixlConfig, NixlObserverInterface)
+    NixlChannel, NixlObserverInterface)
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
 
@@ -131,6 +133,7 @@ class BasicNixlObserver(NixlObserverInterface):
             assert value.tensor is not None, \
                     "The tensor in the MemoryObj is None."
             if is_view:
+                #self.obj_pool.add(key, value)
                 st = time.perf_counter()
                 copied_obj = TensorMemoryObj(value.tensor.clone(),
                                              value.metadata)
