@@ -101,3 +101,9 @@ lmcache/experimental/tests
 
 # reference kernels
 /csrc/temp.cu
+
+# PyCharm
+.idea/
+
+# VSCode
+.vscode/
