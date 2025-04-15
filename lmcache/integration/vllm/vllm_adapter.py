@@ -376,7 +376,6 @@ def lmcache_store_kv(
 
     seq_group_list = model_input.sampling_metadata.seq_groups
 
-    seq_group_list = model_input.sampling_metadata.seq_groups
     assert seq_group_list is not None
 
     next_start_pos = 0
@@ -532,7 +531,6 @@ def lmcache_retrieve_kv(
     assert model_input.sampling_metadata is not None
     seq_group_list = model_input.sampling_metadata.seq_groups
 
-    seq_group_list = model_input.sampling_metadata.seq_groups
     assert seq_group_list is not None
 
     chunk_prefill_full_hit = True
