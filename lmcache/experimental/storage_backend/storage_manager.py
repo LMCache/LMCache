@@ -31,7 +31,6 @@ from lmcache.experimental.memory_management import (MemoryAllocatorInterface,
 from lmcache.experimental.storage_backend import CreateStorageBackends
 from lmcache.experimental.storage_backend.abstract_backend import \
     StorageBackendInterface
-from lmcache.experimental.storage_backend.nixl_backend import NixlBackend
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey, _lmcache_nvtx_annotate
 
@@ -421,6 +420,8 @@ class DistributedStorageManager:
         allocator: MemoryAllocatorInterface,
     ):
         # TODO (ApostaC): remove hard coded usage of NixlBackend
+        from lmcache.experimental.storage_backend.nixl_backend import \
+            NixlBackend
         self.storage_backend = NixlBackend.CreateNixlBackend(config, metadata)
         assert config.nixl_buffer_device is not None
         self.allocator = allocator
