@@ -635,6 +635,13 @@ class HostMemoryAllocator(MemoryAllocatorInterface):
         with self.host_mem_lock:
             return self.allocator.get_ref_count(memory_obj)
 
+    def dry_allocate(
+        self, shape: Union[torch.Size, Tuple[int, ...]],
+        dtype: Optional[torch.dtype],
+        fmt: MemoryFormat = MemoryFormat.KV_BLOB,
+    ) -> MemoryObjMetadata:
+        with self.host_mem_lock:
+            return self.allocator.dry_allocate(shape, dtype, fmt)
 
 class PinMemoryAllocator(MemoryAllocatorInterface):
     """Allocates memory in the pre-allocated pinned memory.
@@ -678,6 +685,14 @@ class PinMemoryAllocator(MemoryAllocatorInterface):
     def memcheck(self):
         with self.host_mem_lock:
             return self.allocator.memcheck()
+
+    def dry_allocate(
+        self, shape: Union[torch.Size, Tuple[int, ...]],
+        dtype: Optional[torch.dtype],
+        fmt: MemoryFormat = MemoryFormat.KV_BLOB,
+    ) -> MemoryObjMetadata:
+        with self.host_mem_lock:
+            return self.allocator.dry_allocate(shape, dtype, fmt)
 
 
 class MixedMemoryAllocator(MemoryAllocatorInterface):
