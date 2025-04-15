@@ -1,13 +1,14 @@
 import abc
 import hashlib
 from typing import Iterable, Optional, Tuple
-
+import csv
 import torch
-
+from lmcache.logging import init_logger
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.experimental.config import LMCacheEngineConfig
 from lmcache.utils import CacheEngineKey, CacheManagerMetadata
 
+logger = init_logger(__name__)
 
 class TokenDatabase(metaclass=abc.ABCMeta):
     """TokenDatabase is used to convert input tokens into list of
@@ -45,7 +46,16 @@ class TokenDatabase(metaclass=abc.ABCMeta):
 def hash_all_tokens(tokens: torch.Tensor) -> str:
     return hashlib.sha256(tokens.cpu().numpy().tobytes()).hexdigest()
 
-SCORE_TABLE = [(1, 3.44162), (0.6, 3.22693), (0.3, 3.20457), (0.2, 3.11167), (0, 0.97446)]
+def load_linear_coefficients(csv_path: str) -> dict:
+    """
+    Reads the CSV file and returns a dictionary mapping each filename to its (a, b) coefficients.
+    """
+    coefficients = {}
+    with open(csv_path, "r") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            coefficients[row["filename"]] = (float(row["a"]), float(row["b"]))
+    return coefficients
 
 class ChunkedTokenDatabase(TokenDatabase):
 
@@ -53,14 +63,46 @@ class ChunkedTokenDatabase(TokenDatabase):
                  metadata: LMCacheEngineMetadata):
         self.chunk_size = config.chunk_size
         self.metadata = metadata
+        # Load the coefficients once during initialization.
+        self.coefficients = load_linear_coefficients("linear_coefficients.csv")
 
     # TODO(Shaoting): Add real score table
     # NOTE(Shaoting): For 7006 tokens, TTFT: prefill (1.511s), cpu (0.0876s), disk (0.2814s)
     def _make_key_by_hash(self, chunk_hash: str, total_hashes: str, token_len: int) -> CacheEngineKey:
+        # Mapping of thresholds to the corresponding score file paths.
+        threshold_file_mapping = [
+            (1,   "/home/ubuntu/shaotingf/LMCache/serve/results/Apr_1/test/test_ttft_10_1.csv"),
+            (0.728571429, "/home/ubuntu/shaotingf/LMCache/serve/results/Apr_1/test/test_ttft_10_06.csv"),
+            (0.485714286, "/home/ubuntu/shaotingf/LMCache/serve/results/Apr_1/test/test_ttft_10_03.csv"),
+            (0.371428571, "/home/ubuntu/shaotingf/LMCache/serve/results/Apr_1/test/test_ttft_10_02.csv"),
+            (0,   "/home/ubuntu/shaotingf/LMCache/serve/results/Apr_1/test/test_ttft_10_0.csv")
+        ]
+
+        score_mapping = [
+            (1, 0),
+            (0.728571429, 0.0439),
+            (0.485714286, 0.0772),
+            (0.371428571, 0.1633),
+            (0, 0.02554)
+        ]
+        score_dict = dict(score_mapping)
+
+        score_table = []
+        for threshold, filename in threshold_file_mapping:
+            # Retrieve coefficients for the given file.
+            a, b = self.coefficients[filename]
+            # Compute the score using a * token_len + b.
+            computed_value = a * token_len + b
+            # Score value
+            score_value = score_dict[threshold]
+            # NOTE(Shaoting): alpha=1 defined here
+            computed_value = 1 - computed_value * 1 - score_value
+            score_table.append((threshold, computed_value))
+
         return CacheEngineKey(self.metadata.fmt, self.metadata.model_name,
                               self.metadata.world_size,
                               self.metadata.worker_id, chunk_hash,
-                              CacheManagerMetadata([total_hashes], ["kivi"], 1, token_len, [SCORE_TABLE]))
+                              CacheManagerMetadata([total_hashes], ["kivi"], 1, token_len, [score_table]))
 
     def _get_init_hash(self) -> str:
         return ""

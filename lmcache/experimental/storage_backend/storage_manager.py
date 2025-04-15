@@ -36,8 +36,8 @@ class KVCacheManager:
     def __init__(self, hot_cache: OrderedDict[CacheEngineKey, MemoryObj]):
         # NOTE(Shaoting): policy related variables define here
         self.method = "ours"
-        self.rate = 0
-        self.cpu_size = 5368709120 * 6 # 30 GB
+        self.rate = 1
+        self.cpu_size = 5368709120 * 12 # 60 GB
 
         self.hot_cache = hot_cache
 
@@ -64,22 +64,26 @@ class KVCacheManager:
             while size_kv_cpu > self.cpu_size: 
 
                 drop_list = {}
-                min_quality_drop = 0
+                min_quality_drop = float('inf')
                 
                 # First calculate unit quality drop of the new cache
                 if new_kv_rate != 0:
+                    new_kv_quality_drop = 0
                     for i in range(len(key.metadata.context_id)):
                         for ii, (rate, score) in enumerate(key.metadata.score_table[i]):
                             # NOTE(Shaoting): ">=" is used here to handle "one chunk multiple method" scenario
                             if new_kv_rate >= rate:
                                 next_rate, next_score = key.metadata.score_table[i][ii + 1]
-                                min_quality_drop += (score - next_score) / (key.metadata.length / key.metadata.rate * (key.metadata.rate - next_rate)) * (10**9)
+                                new_kv_quality_drop += (score - next_score) / (key.metadata.length / key.metadata.rate * (key.metadata.rate - next_rate)) * (10**9)
                                 # If is the first score_table
                                 if i == 0:
                                     chosen_rate = next_rate
                                 break
+
                     # -1 represents the new cache
-                    drop_list[-1] = chosen_rate
+                    if new_kv_quality_drop < min_quality_drop:
+                        drop_list[-1] = chosen_rate
+                        min_quality_drop = new_kv_quality_drop
 
                 # Then calculate the unit quality drop of each cache in the hot cache
                 for hot_cache_key in self.hot_cache.keys():
@@ -124,7 +128,7 @@ class KVCacheManager:
                 # TODO(Shaoting): check disk
             return KVDecision("cpu", key.metadata.method[0], new_kv_rate), final_drop_list
         else:
-            return KVDecision("cpu", "kivi", 0.6), {}
+            return KVDecision("cpu", "kivi", 0.728571429), {}
 
 # TODO: extend this class to implement caching policies and eviction policies
 class StorageManager:
@@ -262,21 +266,21 @@ class StorageManager:
                 continue
 
             # KIVI mapping defined here
-            if update_rate == 0.6:
+            if update_rate == 0.728571429:
                 BITS = 8
-            elif update_rate == 0.3:
+            elif update_rate == 0.485714286:
                 BITS = 4
-            elif update_rate == 0.2:
+            elif update_rate == 0.371428571:
                 BITS = 2
 
             # Need to deserialize first
             if update_key.metadata.rate != 1:
                 # KIVI mapping defined here
-                if update_key.metadata.rate == 0.6:
+                if update_key.metadata.rate == 0.728571429:
                     DE_BITS = 8
-                elif update_key.metadata.rate == 0.3:
+                elif update_key.metadata.rate == 0.485714286:
                     DE_BITS = 4
-                elif update_key.metadata.rate == 0.2:
+                elif update_key.metadata.rate == 0.371428571:
                     DE_BITS = 2
                 update_memory_kv_cache = self.kivi_de.deserialize(update_memory_obj, DE_BITS, self.kivi_cache[update_key][0], self.kivi_cache[update_key][1], self.kivi_cache[update_key][2], self.kivi_cache[update_key][3], self.kivi_cache[update_key][4])
                 self.memory_allocator.ref_count_down(update_memory_obj)
@@ -310,11 +314,11 @@ class StorageManager:
         elif current_kv_decision.compression_method == "kivi" and current_kv_decision.compression_rate != 1 and current_kv_decision.compression_rate != 0:
 
             # KIVI mapping defined here
-            if current_kv_decision.compression_rate == 0.6:
+            if current_kv_decision.compression_rate == 0.728571429:
                 BITS = 8
-            elif current_kv_decision.compression_rate == 0.3:
+            elif current_kv_decision.compression_rate == 0.485714286:
                 BITS = 4
-            elif current_kv_decision.compression_rate == 0.2:
+            elif current_kv_decision.compression_rate == 0.371428571:
                 BITS = 2
         
             # NOTE(Shaoting): KV Cache that's less than 256 tokens will have no compression
@@ -483,11 +487,11 @@ class StorageManager:
             if old_key.metadata.method[0] == "kivi" and old_key.metadata.rate != 1:  
 
                 # KIVI mapping defined here
-                if old_key.metadata.rate == 0.6:
+                if old_key.metadata.rate == 0.728571429:
                     BITS = 8
-                elif old_key.metadata.rate == 0.3:
+                elif old_key.metadata.rate == 0.485714286:
                     BITS = 4
-                elif old_key.metadata.rate == 0.2:
+                elif old_key.metadata.rate == 0.371428571:
                     BITS = 2
 
                 memory_obj = self.kivi_de.deserialize(memory_obj, BITS, self.kivi_cache[old_key][0], self.kivi_cache[old_key][1], self.kivi_cache[old_key][2], self.kivi_cache[old_key][3], self.kivi_cache[old_key][4]) 
@@ -510,11 +514,11 @@ class StorageManager:
                 if new_key.metadata.method[0] == "kivi" and new_key.metadata.rate != 1:  
 
                     # KIVI mapping defined here
-                    if new_key.metadata.rate == 0.6:
+                    if new_key.metadata.rate == 0.728571429:
                         BITS = 8
-                    elif new_key.metadata.rate == 0.3:
+                    elif new_key.metadata.rate == 0.485714286:
                         BITS = 4
-                    elif new_key.metadata.rate == 0.2:
+                    elif new_key.metadata.rate == 0.371428571:
                         BITS = 2
 
                     memory_obj = self.kivi_de.deserialize(memory_obj, BITS)            

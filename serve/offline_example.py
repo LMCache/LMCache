@@ -20,9 +20,9 @@ os.environ["LMCACHE_USE_EXPERIMENTAL"] = "True"
 os.environ["LMCACHE_CONFIG_FILE"] = "/home/ubuntu/shaotingf/LMCache/config/qmsum.yaml"
 
 # This example script runs two requests with a shared prefix.
-shared_prompt = "Hello, how are you?" * 3000
-shared_prompt2 = "You are dead." * 3000
-shared_prompt3 = "I like to eat." * 3000
+shared_prompt = "Hello, how are you?" * 1000
+shared_prompt2 = "You are dead." * 1000
+shared_prompt3 = "I like to eat." * 1000
 first_prompt = [
     shared_prompt + "Hello, my name is",
 ]

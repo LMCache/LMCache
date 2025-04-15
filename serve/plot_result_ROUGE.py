@@ -2,13 +2,12 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 # List of file paths for baseline and ours
-file_paths = ['results/Apr_1/baseline_kivi/1_processed.csv', 
-              'results/Apr_1/baseline_kivi/02_processed.csv',
-              'results/Apr_1/baseline_kivi/03_processed.csv',
-              'results/Apr_1/baseline_kivi/06_processed.csv',
-              'results/Apr_1/baseline_kivi/0_processed.csv']
+file_paths = ['results/Apr_14/baseline_kivi/1_processed.csv', 
+              'results/Apr_14/baseline_kivi/02_processed.csv',
+              'results/Apr_14/baseline_kivi/03_processed.csv',
+              'results/Apr_14/baseline_kivi/06_processed.csv']
 
-file_paths_ours = ['results/Apr_1/ours/1_processed.csv']
+file_paths_ours = ['results/Apr_14/ours/001_processed.csv']
 
 # Lists to store computed values for baseline
 ttft_values = []
@@ -62,6 +61,12 @@ for file_path in file_paths_ours:
     print(f"  Average ttft: {average_ttft}")
     print(f"  Average f1_score: {average_f1_score}")
 
+# Sort "ours" data based on ttft values (optional, if you want to connect in a logical order)
+sorted_indices_ours = sorted(range(len(ttft_values_ours)), key=lambda i: ttft_values_ours[i])
+ttft_values_ours_sorted = [ttft_values_ours[i] for i in sorted_indices_ours]
+f1_scores_ours_sorted = [f1_scores_ours[i] for i in sorted_indices_ours]
+file_labels_ours_sorted = [file_labels_ours[i] for i in sorted_indices_ours]
+
 # Plot the results
 plt.figure(figsize=(8, 6))
 
@@ -71,20 +76,19 @@ plt.plot(ttft_values_sorted, f1_scores_sorted, color='b', marker='o', linestyle=
 for i, label in enumerate(file_labels_sorted):
     plt.annotate(label, (ttft_values_sorted[i], f1_scores_sorted[i]), fontsize=10, xytext=(5,5), textcoords='offset points')
 
-# Plot ours points in green (单独散点，不连接)
-plt.scatter(ttft_values_ours, f1_scores_ours, color='g', marker='o', label='Ours')
-# Annotate ours points with file names
-for i, label in enumerate(file_labels_ours):
-    plt.annotate(label, (ttft_values_ours[i], f1_scores_ours[i]), fontsize=10, xytext=(5,5), textcoords='offset points')
+# Plot "ours" points and connect them with a line
+plt.plot(ttft_values_ours_sorted, f1_scores_ours_sorted, color='g', marker='o', linestyle='-', label='Ours')
+for i, label in enumerate(file_labels_ours_sorted):
+    plt.annotate(label, (ttft_values_ours_sorted[i], f1_scores_ours_sorted[i]), fontsize=10, xytext=(5,5), textcoords='offset points')
 
 # Labels and title
 plt.xlabel("Average ttft")
-plt.ylabel("Average f1_similarity")
-plt.title("Average f1_similarity vs. Average ttft")
+plt.ylabel("Average ROUGE_similarity")
+plt.title("Average ROUGE_similarity vs. Average ttft")
 plt.grid(True)
 plt.legend()
 
 # Save the plot instead of showing it
-plot_filename = "ttft_vs_f1_similarity.png"
+plot_filename = "ttft_vs_ROUGE_similarity.png"
 plt.savefig(plot_filename, dpi=300, bbox_inches="tight")
 print(f"Plot saved as {plot_filename}")
