@@ -420,7 +420,8 @@ class DistributedStorageManager:
         allocator: MemoryAllocatorInterface,
     ):
         # TODO (ApostaC): remove hard coded usage of NixlBackend
-        from lmcache.experimental.storage_backend.nixl_backend import NixlBackend
+        from lmcache.experimental.storage_backend.nixl_backend import \
+            NixlBackend
         self.storage_backend = NixlBackend.CreateNixlBackend(config, metadata)
         assert config.nixl_buffer_device is not None
         self.allocator = allocator
