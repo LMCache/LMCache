@@ -13,12 +13,11 @@
 # limitations under the License.
 
 import asyncio
-import ctypes
 import inspect
 import json
 import os
 from dataclasses import dataclass
-from typing import List, Optional, Union, no_type_check
+from typing import List, Optional, no_type_check
 
 from lmcache.experimental.memory_management import (MemoryAllocatorInterface,
                                                     MemoryObj)
@@ -32,10 +31,6 @@ from lmcache.utils import CacheEngineKey
 logger = init_logger(__name__)
 
 METADATA_BYTES_LEN = 28
-
-
-def _get_ptr(mv: Union[bytearray, memoryview]) -> int:
-    return ctypes.addressof(ctypes.c_char.from_buffer(mv))
 
 
 @dataclass
@@ -114,9 +109,6 @@ class MooncakestoreConnector(RemoteConnector):
         self.memory_allocator = memory_allocator
         self.loop = loop
 
-        # allocate 4KB buffer for RDMA read
-        self.buffer_size = 4 << 10
-        self.buffer = bytearray(self.buffer_size)
 
     async def exists(self, key: CacheEngineKey) -> bool:
         return self.store.isExist(key.to_string() + "metadata")
@@ -178,4 +170,4 @@ class MooncakestoreConnector(RemoteConnector):
 
     async def close(self):
         self.store.close()
-        logger.info("Closed the mooncakestore connection")
+        logger.info("Closed the mooncake store connection")
