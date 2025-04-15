@@ -109,7 +109,6 @@ class MooncakestoreConnector(RemoteConnector):
         self.memory_allocator = memory_allocator
         self.loop = loop
 
-
     async def exists(self, key: CacheEngineKey) -> bool:
         return self.store.isExist(key.to_string() + "metadata")
 
