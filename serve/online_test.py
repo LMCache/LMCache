@@ -13,7 +13,7 @@ import openai
 import pandas as pd
 import traceback
 
-NUM_QUERY = 50
+NUM_QUERY = 200
 MODEL = "meta-llama/Llama-3.1-8B-Instruct"
 PORT = 8000
 FILES = [
@@ -47,7 +47,8 @@ def generate_workload_trace(trace_files, num_query):
     
     # Generate the workload trace by sampling with replacement
     run_workload_trace = df_all.sample(n=num_query, replace=True, random_state=42)
-    workload_trace = pd.concat([df_all, run_workload_trace]).reset_index(drop=True)
+    # workload_trace = pd.concat([df_all, run_workload_trace]).reset_index(drop=True)
+    workload_trace = pd.concat([df_all, df_all]).reset_index(drop=True)
 
     return workload_trace
 
@@ -60,14 +61,16 @@ def execute_openai_request_with_output(row, model: str, client: openai.Client) -
 
     # Build the prompt using your template
 
+    prompt = f"This is user {row.index_in_dataset} in {row.dataset}."
+
     if FILE_TYPE == "qa":
-        prompt = (
+        prompt += (
             "Answer the question based on the given passages. Only give me the answer and do not output any other words. Answer within 10 words."
             "\n\nThe following are given passages."
             f"{row.context}"
         )
     elif FILE_TYPE == "sum":
-        prompt = (
+        prompt += (
             "Answer the question based on the given passages. Only give me the answer and do not output any other words."
             "\n\nThe following are given passages."
             f"{row.context}"
