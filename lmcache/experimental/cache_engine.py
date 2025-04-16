@@ -212,11 +212,10 @@ class LMCacheEngine:
             return
 
         if mask is not None:
-            num_stored_tokens = torch.sum(mask)
+            num_stored_tokens = torch.sum(mask).item()
         else:
             num_stored_tokens = len(tokens)
-        monitor_req_id = self.stats_monitor.on_store_request(
-            num_stored_tokens)
+        monitor_req_id = self.stats_monitor.on_store_request(num_stored_tokens)
 
         for start, end, key in self.token_database.process_tokens(
                 tokens, mask):
@@ -240,7 +239,7 @@ class LMCacheEngine:
                 self.lookup_server.insert(key)
 
         self.stats_monitor.on_store_finished(monitor_req_id)
-        
+
         logger.debug(f"Stored {num_stored_tokens} "
                      f"out of total {len(tokens)} tokens")
 
@@ -272,7 +271,7 @@ class LMCacheEngine:
             multiple of the chunk size.
         """
         if mask is not None:
-            num_required_tokens = torch.sum(mask)
+            num_required_tokens = torch.sum(mask).item()
         else:
             num_required_tokens = len(tokens)
         monitor_req_id = self.stats_monitor.on_retrieve_request(
@@ -309,8 +308,8 @@ class LMCacheEngine:
         retrieved_tokens = torch.sum(ret_mask)
         self.stats_monitor.on_retrieve_finished(monitor_req_id,
                                                 torch.sum(ret_mask))
-        logger.debug(f"Retreived {retrieved_tokens} "
-                     f"out of {num_required_tokens} " 
+        logger.debug(f"Retrieved {retrieved_tokens} "
+                     f"out of {num_required_tokens} "
                      f"out of total {len(tokens)} tokens")
         return ret_mask
 
