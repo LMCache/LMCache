@@ -29,7 +29,8 @@ from lmcache.experimental.lookup_server import (LookupServerInterface,
 from lmcache.experimental.memory_management import (AdHocMemoryAllocator,
                                                     MemoryAllocatorInterface,
                                                     MixedMemoryAllocator)
-from lmcache.experimental.storage_backend.storage_manager import StorageManager
+from lmcache.experimental.storage_backend.storage_manager import (
+    DistributedStorageManager, StorageManager)
 from lmcache.experimental.token_database import (ChunkedTokenDatabase,
                                                  TokenDatabase)
 from lmcache.logging import init_logger
@@ -88,9 +89,6 @@ class LMCacheEngine:
 
         self.use_distributed_storage_manager = False
         if config.enable_nixl:
-            # lazy import because nixl cannot be installed on some machines
-            from lmcache.experimental.storage_backend.storage_manager import \
-                DistributedStorageManager
             self.use_distributed_storage_manager = True
             self.storage_manager = DistributedStorageManager(
                 config, metadata, self.memory_allocator)
