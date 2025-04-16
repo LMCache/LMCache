@@ -497,7 +497,7 @@ class DistributedStorageManager:
         # lazy import because nixl cannot be installed on some machines
         from lmcache.experimental.storage_backend.nixl_backend import \
             NixlBackend
-        
+
         self.storage_backend = NixlBackend.CreateNixlBackend(config, metadata)
         assert config.nixl_buffer_device is not None
         self.allocator = allocator

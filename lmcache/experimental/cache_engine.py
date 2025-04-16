@@ -212,10 +212,11 @@ class LMCacheEngine:
             return
 
         if mask is not None:
-            monitor_req_id = self.stats_monitor.on_store_request(
-                torch.sum(mask))
+            num_stored_tokens = torch.sum(mask)
         else:
-            monitor_req_id = self.stats_monitor.on_store_request(len(tokens))
+            num_stored_tokens = len(tokens)
+        monitor_req_id = self.stats_monitor.on_store_request(
+            num_stored_tokens)
 
         for start, end, key in self.token_database.process_tokens(
                 tokens, mask):
@@ -239,6 +240,9 @@ class LMCacheEngine:
                 self.lookup_server.insert(key)
 
         self.stats_monitor.on_store_finished(monitor_req_id)
+        
+        logger.debug(f"Stored {num_stored_tokens} "
+                     f"out of total {len(tokens)} tokens")
 
     @_lmcache_nvtx_annotate
     @torch.inference_mode()
@@ -268,11 +272,11 @@ class LMCacheEngine:
             multiple of the chunk size.
         """
         if mask is not None:
-            monitor_req_id = self.stats_monitor.on_retrieve_request(
-                torch.sum(mask))
+            num_required_tokens = torch.sum(mask)
         else:
-            monitor_req_id = self.stats_monitor.on_retrieve_request(
-                len(tokens))
+            num_required_tokens = len(tokens)
+        monitor_req_id = self.stats_monitor.on_retrieve_request(
+            num_required_tokens)
 
         ret_mask = torch.zeros_like(tokens, dtype=torch.bool, device="cpu")
         for start, end, key in self.token_database.process_tokens(
@@ -302,8 +306,12 @@ class LMCacheEngine:
             if self.use_distributed_storage_manager:
                 self.storage_manager.remove(key)
 
+        retrieved_tokens = torch.sum(ret_mask)
         self.stats_monitor.on_retrieve_finished(monitor_req_id,
                                                 torch.sum(ret_mask))
+        logger.debug(f"Retreived {retrieved_tokens} "
+                     f"out of {num_required_tokens} " 
+                     f"out of total {len(tokens)} tokens")
         return ret_mask
 
     def prefetch(
