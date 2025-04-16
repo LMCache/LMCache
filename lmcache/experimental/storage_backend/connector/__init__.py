@@ -146,6 +146,17 @@ def CreateConnector(
                 memory_allocator,
             )
 
+        case "valkey":
+            if num_hosts == 1:
+                host, port = parsed_url.hosts[0], parsed_url.ports[0]
+                # lasy import to avoid missing dependency
+                from .valkey_connector import ValkeyConnector
+                connector = ValkeyConnector(host, port, loop, memory_allocator)
+            else:
+                raise ValueError(
+                    f"Valkey connector only supports a single host, but got"
+                    f" url: {url}")
+
         case "lm":
             if num_hosts == 1:
                 host, port = parsed_url.hosts[0], parsed_url.ports[0]
