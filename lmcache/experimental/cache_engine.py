@@ -70,6 +70,7 @@ class LMCacheEngine:
         token_database: TokenDatabase,
         gpu_connector: GPUConnectorInterface,
     ):
+        logger.info(f"Creating LMCacheEngine with config: {config}")
         self.config = config
         self.metadata = metadata
         self.memory_allocator = memory_allocator
@@ -86,14 +87,15 @@ class LMCacheEngine:
         if self.enable_p2p:
             self.lookup_server = RedisLookupServer(config)
 
-        self.storage_manager: Union[StorageManager, DistributedStorageManager]
+        self.use_distributed_storage_manager = False
         if config.enable_nixl:
+            self.use_distributed_storage_manager = True
             self.storage_manager = DistributedStorageManager(
                 config, metadata, self.memory_allocator)
         else:
-            self.storage_manager = StorageManager(config, metadata,
-                                                  self.memory_allocator,
-                                                  self.lookup_server)
+            self.storage_manager = StorageManager(
+                config, metadata, self.memory_allocator,
+                self.lookup_server)  # type: ignore[assignment]
         if self.enable_p2p:
             self.distributed_loop = asyncio.get_event_loop()
             assert self.lookup_server is not None
@@ -104,6 +106,12 @@ class LMCacheEngine:
                                        self.memory_allocator,
                                        self.distributed_loop,
                                        config)
+
+        if self.config.enable_controller:
+            # avoid circular import
+            from lmcache.experimental.cache_controller import LMCacheWorker
+            self.controller = LMCacheWorker(config, metadata, self)
+
         InitializeUsageContext(config.to_original_config(), metadata)
         self.stats_monitor = LMCStatsMonitor.GetOrCreate()
 
@@ -125,8 +133,6 @@ class LMCacheEngine:
                 torch.sum(mask))
         else:
             monitor_req_id = self.stats_monitor.on_store_request(len(tokens))
-
-        assert isinstance(self.storage_manager, DistributedStorageManager)
 
         # Register the put request
         keys = []
@@ -201,15 +207,15 @@ class LMCacheEngine:
             multiple of the chunk size.
         """
         # FIXME(ApostaC): A HACK for distributed storage manager
-        if isinstance(self.storage_manager, DistributedStorageManager):
+        if self.use_distributed_storage_manager:
             self.store_distributed(tokens, mask, **kwargs)
             return
 
         if mask is not None:
-            monitor_req_id = self.stats_monitor.on_store_request(
-                torch.sum(mask))
+            num_stored_tokens = torch.sum(mask).item()
         else:
-            monitor_req_id = self.stats_monitor.on_store_request(len(tokens))
+            num_stored_tokens = len(tokens)
+        monitor_req_id = self.stats_monitor.on_store_request(num_stored_tokens)
 
         for start, end, key in self.token_database.process_tokens(
                 tokens, mask):
@@ -233,6 +239,9 @@ class LMCacheEngine:
                 self.lookup_server.insert(key)
 
         self.stats_monitor.on_store_finished(monitor_req_id)
+
+        logger.debug(f"Stored {num_stored_tokens} "
+                     f"out of total {len(tokens)} tokens")
 
     @_lmcache_nvtx_annotate
     @torch.inference_mode()
@@ -262,11 +271,11 @@ class LMCacheEngine:
             multiple of the chunk size.
         """
         if mask is not None:
-            monitor_req_id = self.stats_monitor.on_retrieve_request(
-                torch.sum(mask))
+            num_required_tokens = torch.sum(mask).item()
         else:
-            monitor_req_id = self.stats_monitor.on_retrieve_request(
-                len(tokens))
+            num_required_tokens = len(tokens)
+        monitor_req_id = self.stats_monitor.on_retrieve_request(
+            num_required_tokens)
 
         ret_mask = torch.zeros_like(tokens, dtype=torch.bool, device="cpu")
         for start, end, key in self.token_database.process_tokens(
@@ -293,11 +302,15 @@ class LMCacheEngine:
 
             self.gpu_connector.to_gpu(memory_obj, start, end, **kwargs)
             self.memory_allocator.ref_count_down(memory_obj)
-            if isinstance(self.storage_manager, DistributedStorageManager):
+            if self.use_distributed_storage_manager:
                 self.storage_manager.remove(key)
 
+        retrieved_tokens = torch.sum(ret_mask)
         self.stats_monitor.on_retrieve_finished(monitor_req_id,
                                                 torch.sum(ret_mask))
+        logger.debug(f"Retrieved {retrieved_tokens} "
+                     f"out of {num_required_tokens} "
+                     f"out of total {len(tokens)} tokens")
         return ret_mask
 
     def prefetch(
@@ -315,7 +328,7 @@ class LMCacheEngine:
     # TODO(Jiayi): Currently, search_range is only used for testing.
     def lookup(
         self,
-        tokens: torch.Tensor,
+        tokens: Union[torch.Tensor, List[int]],
         search_range: Optional[List[str]] = None,
     ) -> int:
         """
@@ -334,11 +347,32 @@ class LMCacheEngine:
                 return start
         return end
 
+    def clear(
+        self,
+        tokens: Optional[Union[torch.Tensor, List[int]]] = None,
+        locations: Optional[List[str]] = None,
+    ) -> int:
+        assert isinstance(self.storage_manager, StorageManager)
+        # Clear all caches if tokens is None
+        if tokens is None or len(tokens) == 0:
+            num_cleared = self.storage_manager.clear(locations)
+            return num_cleared
+
+        num_removed = 0
+        # Only remove the caches for the given tokens
+        for start, end, key in self.token_database.process_tokens(tokens):
+            removed = self.storage_manager.remove(key, locations)
+            num_removed += removed
+        return num_removed
+
     def close(self) -> None:
         """Close the cache engine and free all the resources"""
 
         if self.enable_p2p:
             self.distributed_server.close()
+
+        if self.config.enable_controller:
+            self.controller.close()
 
         self.storage_manager.close()
         logger.info("LMCacheEngine closed.")

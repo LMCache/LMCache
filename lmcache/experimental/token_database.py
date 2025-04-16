@@ -1,6 +1,7 @@
 import abc
+import array
 import hashlib
-from typing import Iterable, Optional, Tuple
+from typing import Iterable, List, Optional, Tuple, Union
 
 import torch
 
@@ -22,12 +23,12 @@ class TokenDatabase(metaclass=abc.ABCMeta):
     @abc.abstractmethod
     def process_tokens(
         self,
-        tokens: torch.Tensor,
+        tokens: Union[torch.Tensor, List[int]],
         mask: Optional[torch.Tensor] = None,
     ) -> Iterable[Tuple[int, int, CacheEngineKey]]:
         """Process the tokens and return the corresponding cache engine keys.
 
-        :param torch.Tensor tokens: The tokens to process, in 1-D CPU tensor.
+        :param Union[torch.Tensor, List[int]] tokens: The tokens to process.
 
         :param Optional[torch.Tensor] mask: The mask for the tokens. Should 
             have the same length as tokens. And the mask should ALWAYS be like
@@ -60,18 +61,21 @@ class ChunkedTokenDatabase(TokenDatabase):
 
     def _hash(
         self,
-        tokens: torch.Tensor,
+        tokens: Union[torch.Tensor, List[int]],
         prefix_hash: str,
     ) -> str:
         # TODO: change it to a more efficient hash function
-        return hashlib.sha256(
-            prefix_hash.encode("ascii") +
-            tokens.cpu().numpy().tobytes()).hexdigest()
+        if isinstance(tokens, torch.Tensor):
+            tokens_bytes = tokens.cpu().to(torch.uint32).numpy().tobytes()
+        elif isinstance(tokens, list):
+            tokens_bytes = array.array('I', tokens).tobytes()
+        return hashlib.sha256(prefix_hash.encode("ascii") +
+                              tokens_bytes).hexdigest()
 
     def _chunk_tokens(
         self,
-        tokens: torch.Tensor,
-    ) -> Iterable[torch.Tensor]:
+        tokens: Union[torch.Tensor, List[int]],
+    ) -> Iterable[Union[torch.Tensor, List[int]]]:
         """
         Chunk the tokens into chunks of size self.chunk_size.
 
@@ -86,7 +90,7 @@ class ChunkedTokenDatabase(TokenDatabase):
 
     def _prefix_hash(
         self,
-        token_chunks: Iterable[torch.Tensor],
+        token_chunks: Iterable[Union[torch.Tensor, List[int]]],
     ) -> Iterable[str]:
         prefix_hash = self._get_init_hash()
         for token_chunk in token_chunks:
@@ -95,12 +99,12 @@ class ChunkedTokenDatabase(TokenDatabase):
 
     def process_tokens(
         self,
-        tokens: torch.Tensor,
+        tokens: Union[torch.Tensor, List[int]],
         mask: Optional[torch.Tensor] = None,
     ) -> Iterable[Tuple[int, int, CacheEngineKey]]:
         """Process the tokens and return the corresponding cache engine keys.
 
-        :param torch.Tensor tokens: The tokens to process, in 1-D CPU tensor.
+        :param Union[torch.Tensor, List[int]] tokens: The tokens to process.
 
         :param Optional[torch.Tensor] mask: The mask for the tokens. Should 
             have the same length as tokens. And the mask should ALWAYS be like
