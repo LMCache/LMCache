@@ -13,6 +13,20 @@ This repository contains benchmarking tools for evaluating the performance of la
    ```bash
    pip install -r requirements.txt
    ```
+
+2. Install `_infinistore.so` because the Python package `infinistore` depends on a C/C++ compiled shared library that requires it:
+
+```bash
+sudo apt update
+sudo apt install libibverbs1 libibverbs-dev
+```
+
+> **Note:** Some systems may also require installing `rdma-core`:
+
+```bash
+sudo apt install rdma-core
+```
+
 ## Running the RAG Benchmark
 To run the RAG benchmark, use launch_lmcache.sh and launch_vllm.sh.  
 
