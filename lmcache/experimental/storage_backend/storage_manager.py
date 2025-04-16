@@ -380,6 +380,81 @@ class StorageManager:
 
             return False
 
+    def remove(
+        self,
+        key: CacheEngineKey,
+        locations: Optional[List[str]] = None,
+    ) -> int:
+        """
+        Remove the key and the corresponding cache in the specified
+        locations.
+        
+        :param CacheEngineKey key: The key to remove.
+        
+        :param Optional[List[str]] locations: The range of storage backends
+        to perform `remove` in. 
+        Should be a subset of ["Hot", "LocalDiskBackend"] for now.
+        If None, perform `remove` in all backends.
+        
+        return: Total number of removed caches in the specified 
+        storage backends.
+        """
+
+        num_removed = 0
+        with self.manager_lock:
+            if locations is None or "Hot" in locations:
+                if self.use_hot and key in self.hot_cache:
+                    memory_obj = self.hot_cache[key]
+                    # NOTE(Jiayi): do not remove if other jobs are using
+                    # this `memory_obj`
+                    if self.memory_allocator.get_ref_count(memory_obj) == 1:
+                        self.memory_allocator.ref_count_down(memory_obj)
+                        num_removed += 1
+
+        # TODO(Jiayi): need to handle remove in non-cpu backends
+
+        return num_removed
+
+    def clear(
+        self,
+        locations: Optional[List[str]] = None,
+    ) -> int:
+        """
+        Clear all caches in the specified locations.
+        
+        :param Optional[List[str]] locations: The range of storage backends
+        to perform `clear` in. 
+        Should be a subset of ["Hot", "LocalDiskBackend"] for now.
+        If None, perform `clear` in all backends.
+        
+        return: Total number of cleared caches in the specified
+        storage backends.
+        """
+
+        num_cleared = 0
+
+        clear_keys = []
+        self.manager_lock.acquire()
+        if locations is None or "Hot" in locations and self.use_hot:
+            for clear_key in self.hot_cache:
+                memory_obj = self.hot_cache[clear_key]
+                # NOTE(Jiayi): do not remove if other jobs are using
+                # this `memory_obj`
+                if self.memory_allocator.get_ref_count(memory_obj) > 1:
+                    continue
+                self.memory_allocator.ref_count_down(memory_obj)
+                clear_keys.append(clear_key)
+            for clear_key in clear_keys:
+                self.hot_cache.pop(clear_key)
+            if self.lookup_server is not None:
+                self.lookup_server.batched_remove(clear_keys)
+            num_cleared += len(clear_keys)
+        self.manager_lock.release()
+
+        # TODO(Jiayi): need to handle clear in non-cpu backends
+
+        return num_cleared
+
     def close(self):
 
         if self.lookup_server is not None:
@@ -419,9 +494,10 @@ class DistributedStorageManager:
         metadata: LMCacheEngineMetadata,
         allocator: MemoryAllocatorInterface,
     ):
-        # TODO (ApostaC): remove hard coded usage of NixlBackend
+        # lazy import because nixl cannot be installed on some machines
         from lmcache.experimental.storage_backend.nixl_backend import \
             NixlBackend
+
         self.storage_backend = NixlBackend.CreateNixlBackend(config, metadata)
         assert config.nixl_buffer_device is not None
         self.allocator = allocator
