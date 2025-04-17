@@ -31,6 +31,8 @@ from lmcache.experimental.memory_management import (MemoryAllocatorInterface,
 from lmcache.experimental.storage_backend import CreateStorageBackends
 from lmcache.experimental.storage_backend.abstract_backend import \
     StorageBackendInterface
+from lmcache.experimental.storage_backend.local_cpu_backend import \
+    LocalCPUBackend
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey, _lmcache_nvtx_annotate
 
@@ -49,7 +51,6 @@ class StorageManager:
                  allocator: MemoryAllocatorInterface,
                  lookup_server: Optional[LookupServerInterface] = None):
         self.memory_allocator = allocator
-        self.hot_cache: OrderedDict[CacheEngineKey, MemoryObj] = OrderedDict()
         self.use_hot = config.local_cpu
 
         self.loop = asyncio.new_event_loop()
@@ -62,6 +63,13 @@ class StorageManager:
             CreateStorageBackends(
                 config, metadata,
                 self.loop, allocator, dst_device, lookup_server)
+        self.hot_cache = None
+        if self.use_hot:
+            for backend in self.storage_backends.values():
+                if isinstance(backend, LocalCPUBackend):
+                    self.hot_cache = backend.dict
+                    break
+
         self.prefetch_tasks: Dict[CacheEngineKey, Future] = {}
         self.put_tasks: Dict[str, Dict[CacheEngineKey, Tuple[Future,
                                                              MemoryObj]]] = {}
