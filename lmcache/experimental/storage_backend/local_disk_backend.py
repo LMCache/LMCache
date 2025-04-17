@@ -16,6 +16,7 @@ from lmcache.experimental.storage_backend.abstract_backend import \
     StorageBackendInterface
 from lmcache.experimental.storage_backend.evictor import LRUEvictor, PutStatus
 from lmcache.logging import init_logger
+from lmcache.observability import LMCStatsMonitor
 from lmcache.utils import (CacheEngineKey, DiskCacheMetadata,
                            _lmcache_nvtx_annotate)
 
@@ -53,6 +54,9 @@ class LocalDiskBackend(StorageBackendInterface):
 
         self.memory_allocator = memory_allocator
 
+        self.stats_monitor = LMCStatsMonitor.GetOrCreate()
+        self.usage = 0
+
     def __str__(self):
         return self.__class__.__name__
 
@@ -78,6 +82,9 @@ class LocalDiskBackend(StorageBackendInterface):
         self.disk_lock.acquire()
         self.dict.pop(key)
         self.disk_lock.release()
+        size = os.path.getsize(path)
+        self.usage -= size
+        self.stats_monitor.update_local_storage_usage(self.usage)
         os.remove(path)
 
     def insert_key(self, key: CacheEngineKey, memory_obj: MemoryObj) -> None:
@@ -182,6 +189,10 @@ class LocalDiskBackend(StorageBackendInterface):
         assert kv_chunk is not None
         byte_array = memory_obj.byte_array
         path = self._key_to_path(key)
+
+        size = len(byte_array)
+        self.usage += size
+        self.stats_monitor.update_local_storage_usage(self.usage)
 
         async with aiofiles.open(path, 'wb') as f:
             await f.write(byte_array)
