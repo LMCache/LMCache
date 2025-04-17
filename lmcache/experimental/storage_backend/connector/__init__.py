@@ -157,6 +157,15 @@ def CreateConnector(
                     f"Valkey connector only supports a single host, but got"
                     f" url: {url}")
 
+        case "valkey-sentinel":
+            # lasy import to avoid missing dependency
+            from .valkey_connector import ValkeySentinelConnector
+            connector = ValkeySentinelConnector(
+                list(zip(parsed_url.hosts, parsed_url.ports)),
+                loop,
+                memory_allocator,
+            )
+
         case "lm":
             if num_hosts == 1:
                 host, port = parsed_url.hosts[0], parsed_url.ports[0]
