@@ -19,14 +19,38 @@ from lmcache.utils import CacheEngineKey, _lmcache_nvtx_annotate
 logger = init_logger(__name__)
 
 class LocalCPUBackend(StorageBackendInterface):
-    def __init__(self):
-        pass
+    def __init__(self,
+        config: LMCacheEngineConfig,
+        loop: asyncio.AbstractEventLoop,
+        memory_allocator: MemoryAllocatorInterface,
+        dst_device: str = "cpu",
+        lookup_server: LookupServerInterface = None,
+    ):
+        self.dict: OrderedDict[CacheEngineKey, CacheEngineKey] = OrderedDict()
+        self.dst_device = dst_device
+
+        self.cpu_lock = threading.Lock()
+        assert config.local_cpu is not None
+
+        self.lookup_server = lookup_server
+
+        self.evictor = LRUEvictor(max_cache_size=config.max_local_cpu_size)
+
+        self.loop = loop
+        self.put_tasks: List[CacheEngineKey] = []
+
+        self.memory_allocator = memory_allocator
+
+    def __str__(self):
+        return self.__class__.__name__
 
     def contains(self, key: CacheEngineKey) -> bool:
-        pass
+        with self.cpu_lock:
+            return key in self.dict
 
     def exists_in_put_tasks(self, key: CacheEngineKey) -> bool:
-        pass
+        with self.cpu_lock:
+            return key in self.put_tasks
 
     def submit_put_task(self, key: CacheEngineKey,
                         obj: MemoryObj) -> Optional[Future]:
