@@ -313,6 +313,7 @@ class LMCacheConnectorV1Impl:
                 vllm_config.cache_config)
             # NOTE: Only create the KV lookup API server on worker rank 0
             # when there are multiple workers
+            assert self.lmcache_engine is not None
             if vllm_config.parallel_config.rank == 0:
                 self.lookup_server = LMCacheLookupServer(
                     self.lmcache_engine, role, is_tp, vllm_config)
@@ -383,6 +384,7 @@ class LMCacheConnectorV1Impl:
             return
 
         # HACK: getting chunk size to correctly calculate retrieve mask
+        assert self.lmcache_engine is not None
         lmcache_chunk_size = self.lmcache_engine.config.chunk_size
 
         for request in metadata.requests:
@@ -456,6 +458,7 @@ class LMCacheConnectorV1Impl:
         kvcaches = list(self.kv_caches.values())
 
         # HACK: getting chunk size to correctly calculate store mask
+        assert self.lmcache_engine is not None
         lmcache_chunk_size = self.lmcache_engine.config.chunk_size
 
         for request in connector_metadata.requests:
