@@ -47,18 +47,56 @@ class RecvObjPool:
         # TODO: Remove the hard-code
         # HACK: have a recycle threshold to avoid the memory leak
         self._recent_added_keys: list[CacheEngineKey] = []
-        self._recent_add_threshold = 50  # Keep recent 20 keys
-        self._recycle_threshold = 200
+        self._recent_add_threshold = 80  # Keep recent 90 keys
+        self._recycle_threshold = 160
 
         self._enable_gc = enable_gc
         if not self._enable_gc:
             logger.warning("GC for receiver is disabled, may lead to memory "
                            "leak in non-testing environment")
 
+        # Debug information
+        self._dbg_shallow_add = 0
+        self._dbg_deep_add = 0
+        self._dbg_shallow_remove = 0
+        self._dbg_deep_remove = 0
+        self._dbg_num_get = 0
+        self._dbg_num_success_get = 0
+        self._dbg_num_contains = 0
+        self._dbg_num_success_contains = 0
+        self._dbg_num_gc = 0
+        self._dbg_last_report_time = time.time()
+
+    def dbg_report(self):
+        curr_time = time.time()
+        if curr_time - self._dbg_last_report_time < 5:
+            return
+        self._dbg_last_report_time = curr_time
+
+        logger.warning("RecvObjPool Debug Info:")
+        logger.warning("  - New add: %d", self._dbg_deep_add)
+        logger.warning("  - Redundant add: %d", self._dbg_shallow_add)
+        logger.warning("  - Shallow remove: %d", self._dbg_shallow_remove)
+        logger.warning("  - Deep remove: %d", self._dbg_deep_remove)
+        logger.warning("  - Num get: %d", self._dbg_num_get)
+        logger.warning("  - Num success get: %d",
+                       self._dbg_num_success_get)
+        logger.warning("  - Num contains: %d", self._dbg_num_contains)
+        logger.warning("  - Num success contains: %d",
+                       self._dbg_num_success_contains)
+        logger.warning("  - Current num_objs: %d", len(self._data))
+        tot_size = sum([self._data[key].get_size() for key in self._data])
+        logger.warning("  - Total size: %.2f GB", tot_size / 1024 / 1024 / 1024)
+        logger.warning("  - Number of GC: %d", self._dbg_num_gc)
+        return
+
+
     def _gc(self):
         if not self._enable_gc:
             return
+
         logger.warning("In GC!")
+        self._dbg_num_gc += 1
         st = time.perf_counter()
         freed_size = 0
         current_keys = set(self._data.keys())
@@ -81,9 +119,19 @@ class RecvObjPool:
 
             if key in self._data:
                 self._cnt[key] += 1
+
+                # DEBUG
+                self._dbg_shallow_add += 1
             else:
                 self._data[key] = obj
                 self._cnt[key] = 1
+
+                # DEBUG
+                self._dbg_deep_add += 1
+
+            # DEBUG
+            self.dbg_report()
+
 
     def remove(self, key: CacheEngineKey):
         with self.lock:
@@ -93,15 +141,35 @@ class RecvObjPool:
                     self._data.pop(key)
                     self._cnt.pop(key)
 
+                    # DEBUG
+                    self._dbg_deep_remove += 1
+                else:
+                    # DEBUG
+                    self._dbg_shallow_remove += 1
+
+            self.dbg_report()
+
     def contains(self, key: CacheEngineKey) -> bool:
         with self.lock:
             if len(self._data) >= self._recycle_threshold:
                 self._gc()
 
+            # DEBUG
+            self._dbg_num_contains += 1
+            if key in self._data:
+                self._dbg_num_success_contains += 1
+            self.dbg_report()
+
             return key in self._data
 
     def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         with self.lock:
+            # DEBUG
+            self._dbg_num_get += 1
+            if key in self._data:
+                self._dbg_num_success_get += 1
+            self.dbg_report()
+
             return self._data.get(key, None)
 
 
