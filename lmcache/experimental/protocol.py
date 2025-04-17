@@ -8,6 +8,7 @@ from lmcache.experimental.memory_management import MemoryFormat
 from lmcache.utils import CacheEngineKey
 
 MAX_KEY_LENGTH = 150
+METADATA_BYTES_LEN = 28
 
 
 class Constants:
