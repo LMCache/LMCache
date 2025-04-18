@@ -231,10 +231,9 @@ class StorageManager:
 
         # Search in hot_cache
         self.manager_lock.acquire()
-        memory_obj = self.hot_cache.get(key, None)
+        # hot_cache.get(key) does ref_count_up() for the caller (us here)
+        memory_obj = self.hot_cache.get(key)
         if memory_obj is not None:
-            self.memory_allocator.ref_count_up(memory_obj)
-            self.hot_cache.move_to_end(key)
             self.manager_lock.release()
             return memory_obj
 

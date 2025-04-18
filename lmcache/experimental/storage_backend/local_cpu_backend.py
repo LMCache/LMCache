@@ -83,6 +83,7 @@ class LocalCPUBackend(StorageBackendInterface):
             self.hot_cache_lock.release()
             return None
         memory_obj = self.hot_cache_[key]
+        # ref count up for the caller
         self.memory_allocator.ref_count_up(memory_obj)
         self.hot_cache_.move_to_end(key)
         self.hot_cache_lock.release()
