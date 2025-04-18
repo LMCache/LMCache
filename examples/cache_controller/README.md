@@ -13,10 +13,10 @@ This will use port 8000 for 1 vllm and port 8001 for LMCache controller.
 CUDA_VISIBLE_DEVICES=0 LMCACHE_USE_EXPERIMENTAL=True LMCACHE_CONFIG_FILE=example.yaml vllm serve meta-llama/Meta-Llama-3.1-8B-Instruct --max-model-len 4096  --gpu-memory-utilization 0.8 --port 8000 --kv-transfer-config '{"kv_connector":"LMCacheConnector", "kv_role":"kv_both"}'
 ```
 
-2. Start the cache controller at port 8001:
+2. Start the lmcache controller at port 9000 and the monitor at port 9001:
 
 ```bash
-lmcache_controller localhost 8001
+lmcache_controller --host localhost --port 9000 --monitor-port 9001
 ```
 
 3. Send a request to vllm engine:  
@@ -33,7 +33,7 @@ curl -X POST http://localhost:8000/v1/completions \
 
 4. Send a lookup request to lmcache controller:  
 ```bash
-curl -X POST http://localhost:8001/lookup \
+curl -X POST http://localhost:9000/lookup \
   -H "Content-Type: application/json" \
   -d '{
     "tokens": [128000, 849, 21435, 279, 26431, 315, 85748, 6636, 304, 4221, 4211, 13]
@@ -44,7 +44,7 @@ The above request returns the instance with most KV cache hit.
 You should be able to see a return message:
 
 ```plaintext
-{"0":{"res": "lmcache_default_instance"}}
+{"res": "lmcache_default_instance"}
 ```
 
 `lmcache_default_instance` indicates the best `instance_id`.

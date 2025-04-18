@@ -1,6 +1,7 @@
 import asyncio
 import re
 import threading
+from typing import TYPE_CHECKING
 
 import msgspec
 import zmq
@@ -15,9 +16,11 @@ from lmcache.experimental.cache_controller.message import (ClearWorkerMsg,
 from lmcache.experimental.cache_controller.rpc_utils import (close_zmq_socket,
                                                              get_zmq_context,
                                                              get_zmq_socket)
-from lmcache.experimental.cache_engine import LMCacheEngine
 from lmcache.experimental.config import LMCacheEngineConfig
 from lmcache.logging import init_logger
+
+if TYPE_CHECKING:
+    from lmcache.experimental.cache_engine import LMCacheEngine
 
 logger = init_logger(__name__)
 
@@ -34,7 +37,7 @@ class LMCacheWorker:
         self,
         config: LMCacheEngineConfig,
         metadata: LMCacheEngineMetadata,
-        lmcache_engine: LMCacheEngine,
+        lmcache_engine: "LMCacheEngine",
     ):
         self.lmcache_instance_id = config.lmcache_instance_id
         assert self.lmcache_instance_id is not None
@@ -87,6 +90,8 @@ class LMCacheWorker:
         Register the lmcache worker with the controller.
         """
         assert self.lmcache_instance_id is not None
+        logger.info("Registering lmcache instance-worker: "
+                    f"{(self.lmcache_instance_id, self.worker_id)}")
         self.put_msg(
             RegisterMsg(
                 instance_id=self.lmcache_instance_id,
@@ -116,7 +121,15 @@ class LMCacheWorker:
         Get a batch of messages from the message queue.
         """
         batch = []
-        for _ in range(max_bsz):
+
+        # use blocking get for the first msg
+        try:
+            item = await self.msg_queue.get()
+            batch.append(item)
+        except asyncio.CancelledError:
+            return batch  # shutdown path
+
+        for _ in range(max_bsz - 1):
             try:
                 item = self.msg_queue.get_nowait()
                 batch.append(item)

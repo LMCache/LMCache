@@ -1,5 +1,4 @@
 import asyncio
-import threading
 from typing import Optional, Union
 
 import msgspec
@@ -69,11 +68,11 @@ class LMCacheControllerManager:
         self.reg_controller.post_init(kv_controller=self.kv_controller,
                                       cluster_executor=self.cluster_executor)
 
-        self.loop = asyncio.new_event_loop()
-        self.thread = threading.Thread(target=self.loop.run_forever,
-                                       daemon=True)
-        self.thread.start()
-        asyncio.run_coroutine_threadsafe(self.start_all(), self.loop)
+        #self.loop = asyncio.new_event_loop()
+        #self.thread = threading.Thread(target=self.loop.run_forever,
+        #                               daemon=True)
+        #self.thread.start()
+        #asyncio.run_coroutine_threadsafe(self.start_all(), self.loop)
 
     # FIXME(Jiayi): the input and return type are weird
     async def issue_control_message(

@@ -37,7 +37,7 @@ class RegistrationController:
         socket = self.socket_mapping.get((instance_id, worker_id))
         if socket is None:
             logger.warning(f"Instance-worker {(instance_id, worker_id)}"
-                           "not registered")
+                           " not registered")
         return socket
 
     def get_workers(self, instance_id: str) -> list[int]:
@@ -62,7 +62,7 @@ class RegistrationController:
             self.worker_mapping[instance_id] = []
         self.worker_mapping[instance_id].append(worker_id)
         logger.info(f"Registered instance-worker {(instance_id, worker_id)}"
-                    f"with URL {url}")
+                    f" with URL {url}")
 
     async def deregister(self, msg: DeRegisterMsg) -> None:
         """
