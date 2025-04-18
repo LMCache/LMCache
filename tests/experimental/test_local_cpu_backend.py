@@ -4,70 +4,92 @@ import threading
 import time
 import random
 from concurrent.futures import ThreadPoolExecutor
+from unittest.mock import patch
+from collections import OrderedDict
 
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.experimental.config import LMCacheEngineConfig
-from lmcache.experimental.memory_management import MemoryObj
+from lmcache.experimental.memory_management import (MemoryObj, MemoryObjMetadata,
+                                                   MemoryFormat, TensorMemoryObj)
 from lmcache.experimental.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.experimental.storage_backend.storage_manager import StorageManager
 from lmcache.utils import CacheEngineKey
 
-# test utilities
+# for the storage manager
+from concurrent.futures import Future
+import asyncio
+
+class MemoryObjFactory:
+    def __init__(self):
+        self.counter = 0
+
+    def create_memory_obj(self):
+        self.counter += 1
+        tensor = torch.ones(10, 10) * self.counter
+        metadata = MemoryObjMetadata(
+            shape=tensor.shape,
+            dtype=tensor.dtype,
+            address=self.counter,  # address is used for key generation
+            phy_size=tensor.numel() * tensor.element_size(),
+            ref_count=1,
+            fmt=MemoryFormat.KV_BLOB
+        )
+        memory_obj = TensorMemoryObj(tensor, metadata)
+        return memory_obj
+
+# usually the key and memory object are generated together but for testing
+# we generate the memory object first and then the key
+def generate_key(memory_obj: MemoryObj):
+    return CacheEngineKey("vllm", "test_model", 1, 0, f"chunk_{memory_obj.metadata.address}")
+
+# fragile mock memory allocator that doesn't actually grab or distribute memory
 class MockMemoryAllocator:
     def __init__(self, max_allocations=None):
         self.ref_counts = {}
         self.max_allocations = max_allocations
-        self.allocation_count = 0
+        self.memory_obj_factory = MemoryObjFactory()
         self.pin_allocator = type('MockPinAllocator', (), {'num_active_allocations': 0})()
 
     def ref_count_up(self, memory_obj):
-        if memory_obj not in self.ref_counts:
-            self.ref_counts[memory_obj] = 1
-        else:
-            self.ref_counts[memory_obj] += 1
+        assert memory_obj in self.ref_counts, \
+            "can not ref_count_up on either a non-existent memory object" \
+            "or one that has already been freed (ref_count_down'ed to 0)"
+        self.ref_counts[memory_obj] += 1
 
     def ref_count_down(self, memory_obj):
         if memory_obj in self.ref_counts:
             self.ref_counts[memory_obj] -= 1
-            if self.ref_counts[memory_obj] <= 0:
+            if self.ref_counts[memory_obj] == 0:
                 del self.ref_counts[memory_obj]
+                self.pin_allocator.num_active_allocations -= 1
 
     def get_ref_count(self, memory_obj):
         return self.ref_counts.get(memory_obj, 0)
 
+    # the sizes passed to allocate are not used
     def allocate(self, shape, dtype):
-        if self.max_allocations is not None and self.allocation_count >= self.max_allocations:
+        if self.max_allocations is not None and \
+            self.pin_allocator.num_active_allocations >= self.max_allocations:
             return None
-        self.allocation_count += 1
-        memory_obj = create_memory_obj()
+        self.pin_allocator.num_active_allocations += 1
+        memory_obj = self.memory_obj_factory.create_memory_obj()
         self.ref_counts[memory_obj] = 1
         return memory_obj
 
     def keys(self):
         return list(self.ref_counts.keys())
 
-def generate_random_key():
-    return CacheEngineKey("vllm", "test_model", 1, 0, f"chunk_{torch.randint(0, 1000, (1,)).item()}")
-
-def create_memory_obj():
-    tensor = torch.randn(10, 10)
-    memory_obj = MemoryObj(tensor)
-    return memory_obj
-
-def create_memory_allocator():
-    return MockMemoryAllocator()
-
 def test_local_cpu_backend_basic_operations():
     # setup with no lookup server
     memory_allocator = MockMemoryAllocator()
     backend = LocalCPUBackend(memory_allocator)
+    memory_obj = memory_allocator.allocate(torch.Size([10, 10]), torch.float32)
+    key = generate_key(memory_obj)
 
     # test contains on empty backend
-    key = generate_random_key()
     assert not backend.contains(key)
 
     # test put and contains
-    memory_obj = create_memory_obj()
     backend.put(key, memory_obj)
     assert backend.contains(key)
 
@@ -78,16 +100,21 @@ def test_local_cpu_backend_basic_operations():
 
     # test touch (lru ordering)
     old_key = key
-    new_key = generate_random_key()
-    new_obj = create_memory_obj()
+    new_obj = memory_allocator.allocate(torch.Size([10, 10]), torch.float32)
+    new_key = generate_key(new_obj)
     backend.put(new_key, new_obj)
     backend.touch(old_key)  # move to end
+    # bad practice to peek directly in but for test
+    assert list(backend.hot_cache_.keys()) == [new_key, old_key]
 
-    # test remove
+    # test remove (first release our references)
+    memory_allocator.ref_count_down(retrieved)
+    memory_allocator.ref_count_down(memory_obj)
     assert backend.remove(old_key)
     assert not backend.contains(old_key)
 
-    # test clear
+    # test clear (first release our references)
+    memory_allocator.ref_count_down(new_obj)
     num_cleared = backend.clear()
     assert num_cleared == 1  # should be just new_key left
     assert not backend.contains(new_key)
@@ -95,15 +122,15 @@ def test_local_cpu_backend_basic_operations():
 def test_local_cpu_backend_ref_counting():
     memory_allocator = MockMemoryAllocator()
     backend = LocalCPUBackend(memory_allocator)
-
-    key = generate_random_key()
-    memory_obj = create_memory_obj()
+    memory_obj = memory_allocator.allocate(torch.Size([10, 10]), torch.float32)
+    key = generate_key(memory_obj)
 
     # initial ref count should be 1
     assert memory_allocator.get_ref_count(memory_obj) == 1
 
     # after put, ref count should be 2 (one for caller, one for hot cache)
     backend.put(key, memory_obj)
+    assert backend.contains(key)
     assert memory_allocator.get_ref_count(memory_obj) == 2
 
     # after get, ref count should be 3 (added for the caller of get)
@@ -114,9 +141,18 @@ def test_local_cpu_backend_ref_counting():
     memory_allocator.ref_count_down(retrieved)
     assert memory_allocator.get_ref_count(memory_obj) == 2
 
-    # after remove, ref count should be 1 (just the original)
-    backend.remove(key)
+    # after remove, ref count should still be 2 because the hot cache refuses to
+    # evict objects with ref count > 1 (and we are sitll holding it)
+    assert not backend.remove(key)
+    assert memory_allocator.get_ref_count(memory_obj) == 2
+
+    # let's release the original reference
+    memory_allocator.ref_count_down(memory_obj)
     assert memory_allocator.get_ref_count(memory_obj) == 1
+
+    # now the hot cache should be able to evict the object
+    assert backend.remove(key)
+    assert memory_allocator.get_ref_count(memory_obj) == 0
 
 def test_local_cpu_backend_allocation_eviction():
     memory_allocator = MockMemoryAllocator(max_allocations=5)
@@ -125,10 +161,16 @@ def test_local_cpu_backend_allocation_eviction():
     # fill the cache to capacity
     keys = []
     for i in range(5):
-        key = generate_random_key()
-        memory_obj = create_memory_obj()
+        memory_obj = memory_allocator.allocate(torch.Size([10, 10]), torch.float32)
+        key = generate_key(memory_obj)
         backend.put(key, memory_obj)
         keys.append(key)
+        # release the reference so that the memory object can be evicted later
+        memory_allocator.ref_count_down(memory_obj)
+
+    # double check that the next allocation will fail
+    failed_memory_obj = memory_allocator.allocate(torch.Size([10, 10]), torch.float32)
+    assert failed_memory_obj is None
 
     # try to allocate a new object - should trigger eviction
     shape = torch.Size([10, 10])
@@ -143,8 +185,8 @@ def test_local_cpu_backend_allocation_eviction():
 def test_local_cpu_backend_not_implemented_methods():
     memory_allocator = MockMemoryAllocator()
     backend = LocalCPUBackend(memory_allocator)
-    key = generate_random_key()
-    memory_obj = create_memory_obj()
+    memory_obj = memory_allocator.allocate(torch.Size([10, 10]), torch.float32)
+    key = generate_key(memory_obj)
 
     with pytest.raises(NotImplementedError):
         backend.exists_in_put_tasks(key)
@@ -158,28 +200,44 @@ def test_local_cpu_backend_not_implemented_methods():
     with pytest.raises(NotImplementedError):
         backend.get_blocking(key)
 
-def test_storage_manager_with_local_cpu_backend():
-    config = LMCacheEngineConfig.from_defaults(local_cpu=True)
+def test_storage_manager_no_local_cpu_backend():
+    # Set remote_url to None to avoid creating a remote backend
+    config = LMCacheEngineConfig.from_defaults(local_cpu=False, \
+                                                local_disk=False, remote_url=None, \
+                                                lookup_url=None, distributed_url=None)
     metadata = LMCacheEngineMetadata(
         model_name="test_model",
         world_size=1,
         worker_id=0,
-        format="vllm",
-        dtype=torch.float32,
+        fmt="vllm",
+        kv_dtype=torch.float32,
         kv_shape=(32, 2, 256, 8, 128)
     )
-    allocator = create_memory_allocator()
+    allocator = MockMemoryAllocator()
 
-    # mock the CreateStorageBackends function
-    original_create_backends = None
-    try:
-        import lmcache.experimental.storage_backend
-        original_create_backends = lmcache.experimental.storage_backend.CreateStorageBackends
+    manager = StorageManager(config, metadata, allocator)
+    assert manager.hot_cache is None
+    assert len(manager.storage_backends) == 0
 
-        # create a mock that returns an empty OrderedDict
-        from collections import OrderedDict
-        lmcache.experimental.storage_backend.CreateStorageBackends = lambda *args, **kwargs: OrderedDict()
+def test_storage_manager_with_local_cpu_backend():
+    # Set remote_url to None to avoid creating a remote backend
+    config = LMCacheEngineConfig.from_defaults(local_cpu=True, max_local_cpu_size=5, \
+                                                local_disk=False, remote_url=None, \
+                                                lookup_url=None, distributed_url=None)
+    metadata = LMCacheEngineMetadata(
+        model_name="test_model",
+        world_size=1,
+        worker_id=0,
+        fmt="vllm",
+        kv_dtype=torch.float32,
+        kv_shape=(32, 2, 256, 8, 128)
+    )
+    allocator = MockMemoryAllocator()
 
+    # mock the CreateStorageBackends function as an empty OrderedDict so that we
+    # can test just the storage manager with a hot cache
+    with patch("lmcache.experimental.storage_backend.CreateStorageBackends",
+                return_value=OrderedDict()):
         # create the StorageManager
         manager = StorageManager(config, metadata, allocator)
 
@@ -187,14 +245,14 @@ def test_storage_manager_with_local_cpu_backend():
         assert isinstance(manager.hot_cache, LocalCPUBackend)
 
         # test operations through manager
-        key = generate_random_key()
-        memory_obj = create_memory_obj()
+        memory_obj = manager.allocate(torch.Size([10, 10]), torch.float32)
+        key = generate_key(memory_obj)
 
         # verify hot cache is empty
         assert not manager.contains(key, ["Hot"])
 
         # put the object in the manager
-        manager.hot_cache.put(key, memory_obj)
+        manager.put(key, memory_obj)
 
         # verify it's now in the hot cache
         assert manager.contains(key, ["Hot"])
@@ -202,19 +260,69 @@ def test_storage_manager_with_local_cpu_backend():
         # get the object and verify it's the same
         retrieved = manager.get(key)
         assert retrieved is not None
-        assert memory_allocator.get_ref_count(retrieved) > 1
+        assert allocator.get_ref_count(retrieved) == 2
 
-        # clean up
+        # put the same object again
+        manager.put(key, memory_obj)
+        # make sure the ref count is still 2
+        assert allocator.get_ref_count(memory_obj) == 2
+
+        # clean up (so we can remove from hot cache)
         allocator.ref_count_down(retrieved)
 
-        # remove the object
+        # remove the object (only remove location is hot cache)
         assert manager.remove(key, ["Hot"]) == 1
         assert not manager.contains(key, ["Hot"])
 
-    finally:
-        # restore the original function
-        if original_create_backends:
-            lmcache.experimental.storage_backend.CreateStorageBackends = original_create_backends
+
+def test_storage_manager_with_local_cpu_backend_with_disk():
+    # Set remote_url to None to avoid creating a remote backend
+    config = LMCacheEngineConfig.from_defaults(local_cpu=True, max_local_cpu_size=5, \
+                                                local_disk="/tmp/test_disk", max_local_disk_size=5, \
+                                                remote_url=None, lookup_url=None, \
+                                                distributed_url=None)
+    metadata = LMCacheEngineMetadata(
+        model_name="test_model",
+        world_size=1,
+        worker_id=0,
+        fmt="vllm",
+        kv_dtype=torch.float32,
+        kv_shape=(32, 2, 256, 8, 128)
+    )
+    allocator = MockMemoryAllocator()
+
+    # don't mock CreateStorageBackends because we want to test the disk backend
+    # with the hot cache
+    manager = StorageManager(config, metadata, allocator)
+
+    # verify manager.hot_cache is LocalCPUBackend
+    assert isinstance(manager.hot_cache, LocalCPUBackend)
+    assert len(manager.storage_backends) == 1
+
+    # test operations through manager
+    memory_obj = manager.allocate(torch.Size([10, 10]), torch.float32)
+    key = generate_key(memory_obj)
+
+    # verify hot cache is empty
+    assert not manager.contains(key, ["Hot"])
+
+    # put the object in the manager
+    manager.put(key, memory_obj)
+
+    # verify it's now in the hot cache
+    assert manager.contains(key, ["Hot"])
+
+    # get the object and verify it's the same
+    retrieved = manager.get(key)
+    assert retrieved is not None
+    assert allocator.get_ref_count(retrieved) > 1
+
+    # clean up (so we can remove from hot cache)
+    allocator.ref_count_down(retrieved)
+
+    # remove the object (only remove location is hot cache)
+    assert manager.remove(key, ["Hot"]) == 1
+    assert not manager.contains(key, ["Hot"])
 
 def test_local_cpu_backend_thread_safety():
     """test concurrent operations on LocalCPUBackend to verify thread safety."""
@@ -230,7 +338,7 @@ def test_local_cpu_backend_thread_safety():
     initial_keys = []
     for i in range(10):
         key = generate_random_key()
-        memory_obj = create_memory_obj()
+        memory_obj = memory_allocator.allocate(torch.Size([10, 10]), torch.float32)
         backend.put(key, memory_obj)
         initial_keys.append(key)
 
@@ -259,7 +367,7 @@ def test_local_cpu_backend_thread_safety():
                     backend.touch(key)
             else:  # put
                 key = generate_random_key()
-                memory_obj = create_memory_obj()
+                memory_obj = memory_allocator.allocate(torch.Size([10, 10]), torch.float32)
                 backend.put(key, memory_obj)
 
             # small sleep to increase chance of thread interleaving
@@ -275,7 +383,7 @@ def test_local_cpu_backend_thread_safety():
 
     # verify backend still works after concurrent access
     test_key = generate_random_key()
-    test_obj = create_memory_obj()
+    test_obj = memory_allocator.allocate(torch.Size([10, 10]), torch.float32)
     backend.put(test_key, test_obj)
 
     retrieved = backend.get(test_key)
@@ -294,7 +402,7 @@ def test_local_cpu_backend_put_from_callback():
 
     # create a key and memory object
     key = generate_random_key()
-    memory_obj = create_memory_obj()
+    memory_obj = memory_allocator.allocate(torch.Size([10, 10]), torch.float32)
 
     # initial ref count should be 1
     assert memory_allocator.get_ref_count(memory_obj) == 1
@@ -308,7 +416,7 @@ def test_local_cpu_backend_put_from_callback():
 
     # create another object for comparison with default behavior
     key2 = generate_random_key()
-    memory_obj2 = create_memory_obj()
+    memory_obj2 = memory_allocator.allocate(torch.Size([10, 10]), torch.float32)
 
     # initial ref count should be 1
     assert memory_allocator.get_ref_count(memory_obj2) == 1
@@ -329,7 +437,7 @@ def test_local_cpu_backend_put_from_callback():
     memory_allocator.ref_count_down(retrieved2)
 
     # test overwriting an existing key
-    new_obj = create_memory_obj()
+    new_obj = memory_allocator.allocate(torch.Size([10, 10]), torch.float32)
     backend.put(key, new_obj, from_callback=True)
 
     # should have removed the old object and not incremented new_obj's ref count
