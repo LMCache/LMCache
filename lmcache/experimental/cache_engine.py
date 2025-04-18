@@ -309,7 +309,6 @@ class LMCacheEngine:
             # cpu tensor for the sake of performance.
             # For example, disk->gpu is faster than disk->cpu->gpu.
             # RDMA is another example.
-
             self.gpu_connector.to_gpu(memory_obj, start, end, **kwargs)
             self.memory_allocator.ref_count_down(memory_obj)
 

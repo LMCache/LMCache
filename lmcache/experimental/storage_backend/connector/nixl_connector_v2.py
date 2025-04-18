@@ -162,7 +162,7 @@ class NixlRequest:
 class NixlPipe:
     """An one-directional pipe to send the data from the sender to the receiver.
     """
-    TRANSFER_BUFFER_SIZE = 512 * 1024 * 1024
+    TRANSFER_BUFFER_SIZE = 128 * 1024 * 1024
 
     def __init__(self, nixl_config: NixlConfig,
                  side_channel: zmq.Socket):  # type: ignore
@@ -267,7 +267,7 @@ class NixlPipe:
         # Send the data to the remote peer
         num_transfers = (write_size - 1) // NixlPipe.TRANSFER_BUFFER_SIZE + 1
         desc_indexes = list(range(num_transfers))
-        logger.debug(f"Committing write with {num_transfers} transfers")
+        logger.debug(f"Committing write of {write_size / 1024 / 1024} MB with {num_transfers} transfers")
 
         t1 = time.perf_counter()
         handle = self._agent.make_prepped_xfer("WRITE",
