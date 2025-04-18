@@ -15,6 +15,7 @@ from lmcache.utils import CacheEngineKey, _lmcache_nvtx_annotate
 
 logger = init_logger(__name__)
 
+
 class LocalCPUBackend(StorageBackendInterface):
     """
     The local CPU backend is primarily used for hot cache, thinly wrapping
@@ -30,7 +31,9 @@ class LocalCPUBackend(StorageBackendInterface):
     QUESTION(sam): four methods raise NotImplementedError. Is this the best
     implementation and/or inheritance structure?
     """
-    def __init__(self,
+
+    def __init__(
+        self,
         memory_allocator: MemoryAllocatorInterface,
         lookup_server: Optional[LookupServerInterface] = None,
     ):
@@ -142,7 +145,9 @@ class LocalCPUBackend(StorageBackendInterface):
             self.hot_cache_.move_to_end(key)
         self.hot_cache_lock.release()
 
-    def put(self, key: CacheEngineKey, memory_obj: MemoryObj,
+    def put(self,
+            key: CacheEngineKey,
+            memory_obj: MemoryObj,
             from_callback: bool = False) -> None:
         """
         Put a key, memory object pair in the hot cache.
@@ -173,7 +178,7 @@ class LocalCPUBackend(StorageBackendInterface):
         self.hot_cache_lock.release()
 
     def allocate(self, shape: torch.Size,
-                    dtype: torch.dtype) -> Optional[MemoryObj]:
+                 dtype: torch.dtype) -> Optional[MemoryObj]:
         """
         allocate a memory object in the cpu backend by evicting LRU policy
         from hot cache
@@ -234,5 +239,3 @@ class LocalCPUBackend(StorageBackendInterface):
 
     def close(self) -> None:
         self.hot_cache_.clear()
-
-

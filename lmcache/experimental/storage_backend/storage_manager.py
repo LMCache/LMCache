@@ -171,7 +171,8 @@ class StorageManager:
 
     @_lmcache_nvtx_annotate
     def _update_hot_cache(self, key: CacheEngineKey, memory_obj: MemoryObj):
-        if memory_obj is None or not self.use_hot or self.hot_cache.contains(key):
+        if memory_obj is None or not self.use_hot or self.hot_cache.contains(
+                key):
             return
 
         if memory_obj.tensor is not None and memory_obj.tensor.is_cuda:
