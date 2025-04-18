@@ -3,7 +3,7 @@ from typing import Optional, Union
 import msgspec
 
 
-class MsgBase(msgspec.Struct, frozen=True, tag=True):  # type: ignore
+class MsgBase(msgspec.Struct, tag=True):  # type: ignore
     """Base class for all messages"""
 
     def describe(self) -> str:
@@ -18,14 +18,14 @@ class MsgBase(msgspec.Struct, frozen=True, tag=True):  # type: ignore
 """Message from LMCache to Controller"""
 
 
-class WorkerMsg(MsgBase, frozen=True):
+class WorkerMsg(MsgBase):
     """Message between LMCache and Controller"""
 
     def describe(self) -> str:
         return ""
 
 
-class RegisterMsg(WorkerMsg, frozen=True):
+class RegisterMsg(WorkerMsg):
     """Message for Registration"""
     # TODO(Jiayi): instance_id can be replaced with url
     instance_id: str
@@ -36,7 +36,7 @@ class RegisterMsg(WorkerMsg, frozen=True):
         return f"Registering instance {self.instance_id}"
 
 
-class DeRegisterMsg(WorkerMsg, frozen=True):
+class DeRegisterMsg(WorkerMsg):
     """Message for Deregistration"""
     # TODO(Jiayi): instance_id can be replaced with url
     instance_id: str
@@ -46,7 +46,7 @@ class DeRegisterMsg(WorkerMsg, frozen=True):
         return f"Deregistering instance {self.instance_id}"
 
 
-class KVAdmitMsg(WorkerMsg, frozen=True):
+class KVAdmitMsg(WorkerMsg):
     """Message for KV chunk admission"""
     # TODO(Jiayi): instance_id can be replaced with url
     instance_id: str
@@ -58,7 +58,7 @@ class KVAdmitMsg(WorkerMsg, frozen=True):
         return f"kv_admit {self.key} to {self.instance_id}"
 
 
-class KVEvictMsg(WorkerMsg, frozen=True):
+class KVEvictMsg(WorkerMsg):
     """Message for KV chunk eviction"""
     # TODO(Jiayi): instance_id can be replaced with url
     instance_id: str
@@ -73,14 +73,14 @@ class KVEvictMsg(WorkerMsg, frozen=True):
 """Control Message from Controller to LMCache"""
 
 
-class ControlMsg(MsgBase, frozen=True):
+class ControlMsg(MsgBase):
     """Message from Controller to LMCache"""
 
     def describe(self) -> str:
         return ""
 
 
-class ClearWorkerMsg(ControlMsg, frozen=True):
+class ClearWorkerMsg(ControlMsg):
     """Clear message for a single lmcache worker"""
     tokens: Optional[list[int]] = None
 
@@ -88,14 +88,14 @@ class ClearWorkerMsg(ControlMsg, frozen=True):
         return f"Clear tokens {self.tokens}"
 
 
-class ControlRetMsg(MsgBase, frozen=True):
+class ControlRetMsg(MsgBase):
     """Return message from LMCache to Controller"""
 
     def describe(self) -> str:
         return ""
 
 
-class ClearWorkerRetMsg(ControlRetMsg, frozen=True):
+class ClearWorkerRetMsg(ControlRetMsg):
     """Return message for a ClearWorkerMsg"""
     success: bool
 
@@ -106,14 +106,14 @@ class ClearWorkerRetMsg(ControlRetMsg, frozen=True):
 """Orchestration Message from Ochestrator to LMCache"""
 
 
-class OrchMsg(MsgBase, frozen=True):
+class OrchMsg(MsgBase):
     """Message from Ochestrator to Controller"""
 
     def describe(self) -> str:
         return ""
 
 
-class LookupMsg(OrchMsg, frozen=True):
+class LookupMsg(OrchMsg):
     """Lookup message"""
     tokens: list[int]
 
@@ -121,7 +121,7 @@ class LookupMsg(OrchMsg, frozen=True):
         return f"Lookup tokens {self.tokens}"
 
 
-class ClearMsg(OrchMsg, frozen=True):
+class ClearMsg(OrchMsg):
     """Clear message"""
     instance_id: str
     worker_ids: Optional[list[int]] = None
@@ -132,14 +132,14 @@ class ClearMsg(OrchMsg, frozen=True):
                 f"{self.instance_id} on workers {self.worker_ids}")
 
 
-class OrchRetMsg(MsgBase, frozen=True):
+class OrchRetMsg(MsgBase):
     """Return message from  Controller to Ochestrator"""
 
     def describe(self) -> str:
         return ""
 
 
-class LookupRetMsg(OrchRetMsg, frozen=True):
+class LookupRetMsg(OrchRetMsg):
     """Lookup message"""
     best_instance_id: Optional[str]
 
@@ -147,7 +147,7 @@ class LookupRetMsg(OrchRetMsg, frozen=True):
         return f"The best instance is {self.best_instance_id}"
 
 
-class ClearRetMsg(OrchRetMsg, frozen=True):
+class ClearRetMsg(OrchRetMsg):
     """Clear message"""
     success: bool
 
@@ -155,7 +155,7 @@ class ClearRetMsg(OrchRetMsg, frozen=True):
         return f"Clear success: {self.success}"
 
 
-class ErrorMsg(MsgBase, frozen=True):
+class ErrorMsg(MsgBase):
     """Control Error Message"""
     error: str
 
