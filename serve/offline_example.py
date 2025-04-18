@@ -17,7 +17,7 @@ from vllm.config import KVTransferConfig
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 os.environ["LMCACHE_USE_EXPERIMENTAL"] = "True"
-os.environ["LMCACHE_CONFIG_FILE"] = "/home/ubuntu/shaotingf/LMCache/config/qmsum.yaml"
+os.environ["LMCACHE_CONFIG_FILE"] = "/home/ubuntu/ShaotingFS2/LMCache/config/qmsum.yaml"
 
 # This example script runs two requests with a shared prefix.
 shared_prompt = "Hello, how are you?" * 1000

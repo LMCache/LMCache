@@ -25,6 +25,56 @@ from lmcache.experimental.storage_backend.naive_serde.kivi_serde import (
 
 logger = init_logger(__name__)
 
+def compute_best_rate_and_drop(score_tables, orig_rate, length, full_rate):
+    """
+    Given:
+      - score_tables: list of lists [(rate, score), …] for each context
+      - orig_rate: the current rate to degrade from
+      - length, full_rate: metadata.length and metadata.rate
+    Returns:
+      (best_rate, min_total_drop)
+    """
+    if orig_rate == 0:
+        return 0, float('inf')
+
+    # 1) collect all candidate rates < orig_rate
+    candidate_rates = {
+        r for table in score_tables for r, _ in table
+        if r < orig_rate
+    }
+    best_rate = None
+    min_total_drop = float('inf')
+
+    for r_cand in candidate_rates:
+        total_drop = 0.0
+
+        for table in score_tables:
+            # pick the largest r_sel < r_cand, else the table’s min rate
+            elig = [(r, s) for r, s in table if r < r_cand]
+            if elig:
+                r_sel, s_sel = max(elig, key=lambda x: x[0])
+            else:
+                r_sel, s_sel = min(table, key=lambda x: x[0])
+
+            # baseline = the smallest rate ≥ orig_rate, else the table’s max rate
+            baseline = [(r, s) for r, s in table if r >= orig_rate]
+            if baseline:
+                baseline_rate, baseline_score = min(baseline, key=lambda x: x[0])
+            else:
+                baseline_rate, baseline_score = max(table, key=lambda x: x[0])
+
+            # accumulate drop
+            total_drop += (
+                (baseline_score - s_sel) /
+                ((length / full_rate) * (baseline_rate - r_sel))
+            ) * 1e9
+
+        if total_drop < min_total_drop:
+            min_total_drop = total_drop
+            best_rate = r_cand
+
+    return best_rate, min_total_drop
+
 @dataclass
 class KVDecision:
     device: str
@@ -52,7 +102,6 @@ class KVCacheManager:
                 return KVDecision("cpu", "kivi", self.rate), {}
             
         elif self.method == "ours":
-
             # TODO(Shaoting): save unit quality drop to speed up decisions. Also need to update the storage when retrieval.
             size_kv_cpu = sum(key.metadata.length for key in self.hot_cache.keys())
             size_kv_cpu += size
@@ -61,71 +110,48 @@ class KVCacheManager:
             new_kv_rate = key.metadata.rate
 
             # If cpu is full
-            while size_kv_cpu > self.cpu_size: 
-
+            while size_kv_cpu > self.cpu_size:
                 drop_list = {}
                 min_quality_drop = float('inf')
-                
-                # First calculate unit quality drop of the new cache
-                if new_kv_rate != 0:
-                    new_kv_quality_drop = 0
-                    for i in range(len(key.metadata.context_id)):
-                        for ii, (rate, score) in enumerate(key.metadata.score_table[i]):
-                            # NOTE(Shaoting): ">=" is used here to handle "one chunk multiple method" scenario
-                            if new_kv_rate >= rate:
-                                next_rate, next_score = key.metadata.score_table[i][ii + 1]
-                                new_kv_quality_drop += (score - next_score) / (key.metadata.length / key.metadata.rate * (key.metadata.rate - next_rate)) * (10**9)
-                                # If is the first score_table
-                                if i == 0:
-                                    chosen_rate = next_rate
-                                break
 
-                    # -1 represents the new cache
-                    if new_kv_quality_drop < min_quality_drop:
-                        drop_list[-1] = chosen_rate
-                        min_quality_drop = new_kv_quality_drop
+                # 1) Process the *new* key exactly the same way
+                new_best, new_drop = compute_best_rate_and_drop(
+                    key.metadata.score_table,
+                    new_kv_rate,
+                    key.metadata.length,
+                    key.metadata.rate
+                )
+                if new_drop < min_quality_drop:
+                    min_quality_drop = new_drop
+                    drop_list[-1] = new_best
 
-                # Then calculate the unit quality drop of each cache in the hot cache
-                for hot_cache_key in self.hot_cache.keys():
+                # 2) Now do the *hot‑cache* entries with the same helper
+                for hot_key, stored in list(self.hot_cache.items()):
+                    # choose its current rate (possibly already dropped earlier)
+                    curr_rate = final_drop_list.get(hot_key, hot_key.metadata.rate)
 
-                    unit_quality_drop = 0
-                    
-                    if hot_cache_key in final_drop_list:
-                        current_rate = final_drop_list[hot_cache_key]
-                    else:
-                        current_rate = hot_cache_key.metadata.rate
-                    if current_rate == 0:
-                        continue
+                    best_r, drop_r = compute_best_rate_and_drop(
+                        hot_key.metadata.score_table,
+                        curr_rate,
+                        hot_key.metadata.length,
+                        hot_key.metadata.rate
+                    )
+                    # compare against the running minimum
+                    if drop_r < min_quality_drop:
+                        min_quality_drop = drop_r
+                        drop_list = {hot_key: best_r}
+                    elif drop_r == min_quality_drop:
+                        drop_list[hot_key] = best_r
 
-                    for i in range(len(hot_cache_key.metadata.context_id)):
-                        for ii, (rate, score) in enumerate(hot_cache_key.metadata.score_table[i]):
-                            # NOTE(Shaoting): ">=" is used here to handle "one chunk multiple method" scenario
-                            if current_rate >= rate:
-                                next_rate, next_score = hot_cache_key.metadata.score_table[i][ii + 1]
-                                unit_quality_drop += (score - next_score) / (hot_cache_key.metadata.length / hot_cache_key.metadata.rate * (hot_cache_key.metadata.rate - next_rate)) * (10**9)
-                                # If is the first score_table
-                                if i == 0:
-                                    chosen_rate = next_rate
-                                break
-
-                    # Update the drop list
-                    if unit_quality_drop < min_quality_drop:
-                        min_quality_drop = unit_quality_drop
-                        drop_list = {}
-                        drop_list[hot_cache_key] = chosen_rate
-                    elif unit_quality_drop == min_quality_drop:
-                        drop_list[hot_cache_key] = chosen_rate
-
-                # Handle the drop_list
-                for idx in drop_list:
+                # 3) apply whichever entry(s) we’ve decided to drop/rate‐reduce
+                for idx, chosen_r in drop_list.items():
                     if idx == -1:
-                        size_kv_cpu = size_kv_cpu - key.metadata.length / key.metadata.rate * (1 - drop_list[idx])
-                        new_kv_rate = drop_list[idx]
+                        size_kv_cpu -= key.metadata.length / key.metadata.rate * (1 - chosen_r)
+                        new_kv_rate = chosen_r
                     else:
-                        size_kv_cpu = size_kv_cpu - idx.metadata.length / idx.metadata.rate * (1 - drop_list[idx])
-                        final_drop_list[idx] = drop_list[idx]
+                        size_kv_cpu -= idx.metadata.length / idx.metadata.rate * (1 - chosen_r)
+                        final_drop_list[idx] = chosen_r
 
-                # TODO(Shaoting): check disk
             return KVDecision("cpu", key.metadata.method[0], new_kv_rate), final_drop_list
         else:
             return KVDecision("cpu", "kivi", 0.728571429), {}

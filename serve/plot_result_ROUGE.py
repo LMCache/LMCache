@@ -7,7 +7,7 @@ file_paths = ['results/Apr_14/baseline_kivi/1_processed.csv',
               'results/Apr_14/baseline_kivi/03_processed.csv',
               'results/Apr_14/baseline_kivi/06_processed.csv']
 
-file_paths_ours = ['results/Apr_14/ours/001_processed.csv']
+file_paths_ours = ['results/Apr_14/new/1_processed.csv', 'results/Apr_14/new/01_processed.csv', 'results/Apr_14/new/10_processed.csv']
 
 # Lists to store computed values for baseline
 ttft_values = []

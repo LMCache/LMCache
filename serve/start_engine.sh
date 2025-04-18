@@ -2,7 +2,7 @@
 
 PORT=8000
 MODEL_NAME=meta-llama/Llama-3.1-8B-Instruct
-CONFIG_FILE=/home/ubuntu/shaotingf/LMCache/config/qmsum.yaml
+CONFIG_FILE=/home/ubuntu/ShaotingFS2/LMCache/config/qmsum.yaml
 
 export TOKENIZERS_PARALLELISM=false
 export LMCACHE_USE_EXPERIMENTAL=True
