@@ -123,7 +123,7 @@ class StorageManager:
         """
         self.manager_lock.acquire()
         if self.use_hot:
-            self.hot_cache.touch(key, memory_obj)
+            self.hot_cache.put(key, memory_obj)
 
         # TODO(Jiayi): currently, the entire put task will be cancelled
         # if one of the backend is already storing this cache.

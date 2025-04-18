@@ -1,5 +1,6 @@
 from collections import OrderedDict
 from concurrent.futures import Future
+import threading
 from typing import List, Optional, Tuple
 
 import torch
@@ -29,9 +30,12 @@ class LocalCPUBackend(StorageBackendInterface):
         memory_allocator: MemoryAllocatorInterface,
         lookup_server: Optional[LookupServerInterface] = None,
     ):
+        # rely completely on ordered dict to manage LRU
         self.hot_cache_: OrderedDict[CacheEngineKey, MemoryObj] = OrderedDict()
         self.lookup_server = lookup_server
         self.memory_allocator = memory_allocator
+        # multiple threads can access the hot cache
+        self.hot_cache_lock = threading.Lock()
 
     def exists_in_put_tasks(self, key: CacheEngineKey) -> bool:
         """
@@ -52,39 +56,83 @@ class LocalCPUBackend(StorageBackendInterface):
         """
         raise NotImplementedError
 
+    def get_blocking(self, key: CacheEngineKey) -> Optional[MemoryObj]:
+        """
+        please use regular get() to avoid possible confusion about async
+        """
+        raise NotImplementedError
+
     def contains(self, key: CacheEngineKey) -> bool:
         """
         Check if the key is in the hot cache.
         """
-        return key in self.hot_cache_
+        self.hot_cache_lock.acquire()
+        contains_key = key in self.hot_cache_
+        self.hot_cache_lock.release()
+        return contains_key
 
-    def get_blocking(self, key: CacheEngineKey) -> Optional[MemoryObj]:
+    def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         """
         Get a memory object from the cpu backend.
 
         The caller is responsible for ref_count_down() when they're
         done with the memory object.
         """
-        if not self.contains(key):
+        self.hot_cache_lock.acquire()
+        if key not in self.hot_cache_:
+            self.hot_cache_lock.release()
             return None
         memory_obj = self.hot_cache_[key]
         self.memory_allocator.ref_count_up(memory_obj)
+        self.hot_cache_.move_to_end(key)
+        self.hot_cache_lock.release()
         return memory_obj
 
-    def pop_blocking(self, key: CacheEngineKey) -> Optional[MemoryObj]:
+    def pop(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         """
         Pop a memory object from the cpu backend.
 
         The caller is responsible for ref_count_down() when they're
         done with the memory object.
         """
-        if not self.contains(key):
+        self.hot_cache_lock.acquire()
+        if key not in self.hot_cache_:
+            self.hot_cache_lock.release()
             return None
         memory_obj = self.hot_cache_.pop(key)
         # we ref up here for the caller but we also ref down
         # because the hot cache is no longer referencing the object
-        # these cancel and we do nothing
+        # these two operations cancel so we do nothing
+        self.hot_cache_lock.release()
         return memory_obj
+
+    def touch(self, key: CacheEngineKey) -> None:
+        """
+        Touch a key in the hot cache (maximize recency)
+        """
+        self.hot_cache_lock.acquire()
+        if key in self.hot_cache_:
+            self.hot_cache_.move_to_end(key)
+        self.hot_cache_lock.release()
+
+    def put(self, key: CacheEngineKey, memory_obj: MemoryObj) -> None:
+        """
+        Put a key, memory object pair in the hot cache.
+
+        If the key is already in the hot cache, we need to evict the old
+        memory object and replace it with the new one.
+        """
+        # During overwrite, we need to free the old memory object
+        # to avoid memory leak.
+        # NOTE(Jiayi): overwrite should not happen, at least for
+        # prefix caching
+        self.hot_cache_lock.acquire()
+        if key in self.hot_cache_:
+            old_memory_obj = self.hot_cache_.pop(key)
+            self.memory_allocator.ref_count_down(old_memory_obj)
+        self.hot_cache_[key] = memory_obj
+        self.memory_allocator.ref_count_up(memory_obj)
+        self.hot_cache_lock.release()
 
     def make_space_for(self, shape: torch.Size, dtype: torch.dtype) -> Optional[MemoryObj]:
         """
@@ -98,6 +146,7 @@ class LocalCPUBackend(StorageBackendInterface):
         """
         evict_keys = []
 
+        self.hot_cache_lock.acquire()
         for evict_key in self.hot_cache_:
             # If the ref_count > 1, we cannot evict it as the hot cache
             # might be used as buffers by other storage backends
@@ -119,24 +168,8 @@ class LocalCPUBackend(StorageBackendInterface):
             self.hot_cache_.pop(evict_key)
         if self.lookup_server is not None:
             self.lookup_server.batched_remove(evict_keys)
+        self.hot_cache_lock.release()
         return memory_obj
-
-    def touch(self, key: CacheEngineKey, memory_obj: MemoryObj) -> None:
-        """
-        Touch the memory object in the hot cache.
-
-        If the key is already in the hot cache, we need to evict the old
-        memory object and replace it with the new one.
-        """
-        # During overwrite, we need to free the old memory object
-        # to avoid memory leak.
-        # NOTE(Jiayi): overwrite should not happen, at least for
-        # prefix caching
-        if key in self.hot_cache_:
-            old_memory_obj = self.hot_cache_.pop(key)
-            self.memory_allocator.ref_count_down(old_memory_obj)
-        self.hot_cache_[key] = memory_obj
-        self.memory_allocator.ref_count_up(memory_obj)
 
     def close(self) -> None:
         pass
