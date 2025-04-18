@@ -52,6 +52,7 @@ class StorageManager:
                  lookup_server: Optional[LookupServerInterface] = None):
         self.memory_allocator = allocator
         self.use_hot = config.local_cpu
+        self.hot_cache = LocalCPUBackend(allocator, lookup_server)
 
         self.loop = asyncio.new_event_loop()
         self.thread = threading.Thread(target=self.loop.run_forever)
@@ -63,7 +64,6 @@ class StorageManager:
             CreateStorageBackends(
                 config, metadata,
                 self.loop, allocator, dst_device, lookup_server)
-        self.hot_cache = LocalCPUBackend(allocator, lookup_server)
 
         self.prefetch_tasks: Dict[CacheEngineKey, Future] = {}
         self.put_tasks: Dict[str, Dict[CacheEngineKey, Tuple[Future,
@@ -95,31 +95,7 @@ class StorageManager:
             return memory_obj
 
         assert isinstance(self.memory_allocator, MixedMemoryAllocator)
-        evict_keys = []
-
-        for evict_key in self.hot_cache:
-
-            # If the ref_count > 1, we cannot evict it as the hot cache
-            # might be used as buffers by other storage backends
-            if self.memory_allocator.get_ref_count(
-                    self.hot_cache[evict_key]) > 1:
-                continue
-            evict_keys.append(evict_key)
-            self.memory_allocator.ref_count_down(self.hot_cache[evict_key])
-            memory_obj = self.memory_allocator.allocate(shape, dtype)
-            logger.debug("Evicting 1 chunk from hot cache")
-            if memory_obj is not None:
-                break
-            # TODO(Jiayi): move this before the loop
-            # In this way, we don't need to do eviction for big objects
-            # TODO(Jiayi): the following code is hacky, please refactor
-            if self.memory_allocator.pin_allocator.num_active_allocations == 0:
-                break
-        for evict_key in evict_keys:
-            self.hot_cache.pop(evict_key)
-        if self.lookup_server is not None:
-            self.lookup_server.batched_remove(evict_keys)
-
+        memory_obj = self.hot_cache.make_space_for(shape, dtype)
         self.manager_lock.release()
         return memory_obj
 
