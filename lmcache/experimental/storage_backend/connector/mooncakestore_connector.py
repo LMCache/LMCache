@@ -74,7 +74,7 @@ class MooncakestoreConnector(RemoteConnector):
                  loop: asyncio.AbstractEventLoop,
                  memory_allocator: MemoryAllocatorInterface):
         try:
-            from mooncake_vllm_adaptor import MooncakeDistributedStore
+            from mooncake.store import MooncakeDistributedStore
         except ImportError as e:
             raise ImportError(
                 "Please install mooncake by following the instructions at "
@@ -110,7 +110,7 @@ class MooncakestoreConnector(RemoteConnector):
         self.loop = loop
 
     async def exists(self, key: CacheEngineKey) -> bool:
-        return self.store.isExist(key.to_string() + "metadata")
+        return self.store.is_exist(key.to_string() + "metadata")
 
     async def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         key_str = key.to_string()
