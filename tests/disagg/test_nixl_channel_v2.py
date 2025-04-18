@@ -128,7 +128,7 @@ def send_and_measure_throughput_v2(channel: NixlChannel,
     logger.info(f"Sending {len(objs)} objects using "
                 "zero_copy_send_with_callback...")
 
-    elapsed_time = 0
+    elapsed_time = 0.
 
     if batch_size is None:
         # Original behavior - send all at once
@@ -163,7 +163,7 @@ def send_and_measure_throughput_v2(channel: NixlChannel,
                         f" in {this_round:.6f} seconds")
             if simulate_workload:
                 time.sleep(0.05)  # Sleep 50ms between batches
-        elapsed_time = sum(elapsed_times)
+        elapsed_time = sum(elapsed_times) # type: ignore
         logger.info(f"Elapsed times: {elapsed_times}")
 
     logger.info(f"Sent {len(objs)} objects in {elapsed_time:.6f} seconds")
