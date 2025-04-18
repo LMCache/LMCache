@@ -22,7 +22,8 @@ class LocalCPUBackend(StorageBackendInterface):
     It can not use the LRUEvictor() helper because its size is variable
     depending on how much free space is left in the allocator.
 
-    It is synchronous and so does not need a loop and does not use futures.
+    R/W from RAM is synchronous and so does not need an event loop and
+    does not use futures.
     """
     def __init__(self,
         memory_allocator: MemoryAllocatorInterface,
