@@ -79,17 +79,16 @@ class RecvObjPool:
         logger.warning("  - Shallow remove: %d", self._dbg_shallow_remove)
         logger.warning("  - Deep remove: %d", self._dbg_deep_remove)
         logger.warning("  - Num get: %d", self._dbg_num_get)
-        logger.warning("  - Num success get: %d",
-                       self._dbg_num_success_get)
+        logger.warning("  - Num success get: %d", self._dbg_num_success_get)
         logger.warning("  - Num contains: %d", self._dbg_num_contains)
         logger.warning("  - Num success contains: %d",
                        self._dbg_num_success_contains)
         logger.warning("  - Current num_objs: %d", len(self._data))
         tot_size = sum([self._data[key].get_size() for key in self._data])
-        logger.warning("  - Total size: %.2f GB", tot_size / 1024 / 1024 / 1024)
+        logger.warning("  - Total size: %.2f GB",
+                       tot_size / 1024 / 1024 / 1024)
         logger.warning("  - Number of GC: %d", self._dbg_num_gc)
         return
-
 
     def _gc(self):
         if not self._enable_gc:
@@ -131,7 +130,6 @@ class RecvObjPool:
 
             # DEBUG
             self.dbg_report()
-
 
     def remove(self, key: CacheEngineKey):
         with self.lock:

@@ -267,7 +267,8 @@ class NixlPipe:
         # Send the data to the remote peer
         num_transfers = (write_size - 1) // NixlPipe.TRANSFER_BUFFER_SIZE + 1
         desc_indexes = list(range(num_transfers))
-        logger.debug(f"Committing write of {write_size / 1024 / 1024} MB with {num_transfers} transfers")
+        logger.debug(f"Committing write of {write_size / 1024 / 1024} "
+                     f"MB with {num_transfers} transfers")
 
         t1 = time.perf_counter()
         handle = self._agent.make_prepped_xfer("WRITE",

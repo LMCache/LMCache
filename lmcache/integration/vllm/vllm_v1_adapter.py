@@ -15,7 +15,6 @@
 import threading
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
-import time
 
 import torch
 import vllm.envs as envs
@@ -167,7 +166,8 @@ class RequestTracker:
         """
         return RequestTracker(
             req_id=new_request.req_id,
-            token_ids=new_request.prompt_token_ids[:num_tokens_to_compute].copy(),
+            token_ids=new_request.prompt_token_ids[:num_tokens_to_compute].
+            copy(),
             allocated_block_ids=new_request.block_ids.copy(),
             num_saved_tokens=0,
         )

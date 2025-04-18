@@ -111,7 +111,7 @@ if __name__ == "__main__":
             total_size = 0
 
             # Allocate and write data to buffer
-            transfer_time = 0
+            transfer_time = 0.
             for idx, obj in enumerate(objs):
                 if args.simulate_work and idx % 10 == 0:
                     time.sleep(0.05)  # Simulate some work
@@ -145,7 +145,7 @@ if __name__ == "__main__":
             # Read data from buffer
             transfer_start = time.time()
             metadatas = [obj.metadata for obj in objs]
-            received_objs = []
+            received_objs: list[MemoryObj] = []
             while len(received_objs) < len(metadatas):
                 pipe.wait_read()
                 new_objs = pipe.read_buffer(metadatas[len(received_objs):])

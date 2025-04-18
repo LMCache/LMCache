@@ -186,10 +186,9 @@ class LMCacheEngine:
         ed = time.perf_counter()
         logger.info(
             "Store %d tokens takes: %.4f ms, throughput: %.4f GB/s; "
-            "offload_time: %.4f ms, put_time: %.4f ms", 
-            torch.sum(mask), (ed - st) * 1000,
-            tot_kv_size / (ed - st) / 1024**3, offload_time * 1000,
-            put_time * 1000)
+            "offload_time: %.4f ms, put_time: %.4f ms", torch.sum(mask),
+            (ed - st) * 1000, tot_kv_size / (ed - st) / 1024**3,
+            offload_time * 1000, put_time * 1000)
 
         self.stats_monitor.on_store_finished(monitor_req_id)
 

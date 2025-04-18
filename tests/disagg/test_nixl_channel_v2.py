@@ -1,7 +1,7 @@
 import argparse
 import threading
 import time
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 
 import torch
 
@@ -110,7 +110,7 @@ def send_and_measure_throughput_v2(channel: NixlChannel,
                                    keys: List[CacheEngineKey],
                                    objs: List[MemoryObj],
                                    total_size: int,
-                                   batch_size: int = None,
+                                   batch_size: Optional[int] = None,
                                    simulate_workload: bool = False) -> float:
     """Send data through the channel and measure throughput using V2 API.
     
@@ -143,7 +143,7 @@ def send_and_measure_throughput_v2(channel: NixlChannel,
         elapsed_time = time.time() - start_time
     else:
         # Send in batches
-        elapsed_times = []
+        elapsed_times: list[float] = []
         for i in range(0, len(objs), batch_size):
             start_time = time.time()
             batch_keys = keys[i:i + batch_size]
