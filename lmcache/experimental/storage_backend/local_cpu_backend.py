@@ -18,8 +18,10 @@ class LocalCPUBackend(StorageBackendInterface):
     """
     The local CPU backend is primarily used for hot cache, thinly wrapping
     an ordered dictionary and tightly coupled with the memory allocator.
+
     It can not use the LRUEvictor() helper because its size is variable
     depending on how much free space is left in the allocator.
+
     It is synchronous and so does not need a loop and does not use futures.
     """
     def __init__(self,
@@ -29,9 +31,6 @@ class LocalCPUBackend(StorageBackendInterface):
         self.hot_cache_: OrderedDict[CacheEngineKey, MemoryObj] = OrderedDict()
         self.lookup_server = lookup_server
         self.memory_allocator = memory_allocator
-
-    def contains(self, key: CacheEngineKey) -> bool:
-        return key in self.hot_cache_
 
     def exists_in_put_tasks(self, key: CacheEngineKey) -> bool:
         """
@@ -50,11 +49,51 @@ class LocalCPUBackend(StorageBackendInterface):
         """
         the cpu backend does not need to prefetch into itself
         """
-        return None
+        raise NotImplementedError
+
+    def contains(self, key: CacheEngineKey) -> bool:
+        """
+        Check if the key is in the hot cache.
+        """
+        return key in self.hot_cache_
+
+    def get_blocking(self, key: CacheEngineKey) -> Optional[MemoryObj]:
+        """
+        Get a memory object from the cpu backend.
+
+        The caller is responsible for ref_count_down() when they're
+        done with the memory object.
+        """
+        if not self.contains(key):
+            return None
+        memory_obj = self.hot_cache_[key]
+        self.memory_allocator.ref_count_up(memory_obj)
+        return memory_obj
+
+    def pop_blocking(self, key: CacheEngineKey) -> Optional[MemoryObj]:
+        """
+        Pop a memory object from the cpu backend.
+
+        The caller is responsible for ref_count_down() when they're
+        done with the memory object.
+        """
+        if not self.contains(key):
+            return None
+        memory_obj = self.hot_cache_.pop(key)
+        # we ref up here for the caller but we also ref down
+        # because the hot cache is no longer referencing the object
+        # these cancel and we do nothing
+        return memory_obj
 
     def make_space_for(self, shape: torch.Size, dtype: torch.dtype) -> Optional[MemoryObj]:
         """
         make space for and allocate a memory object in the cpu backend
+
+        takes in the shape and dtype of the memory object to be allocated
+
+        returns:
+        - None if we could not make space for the memory object in the hot cache
+        - the allocated memory object otherwise
         """
         evict_keys = []
 
@@ -81,11 +120,22 @@ class LocalCPUBackend(StorageBackendInterface):
             self.lookup_server.batched_remove(evict_keys)
         return memory_obj
 
-    def get_blocking(self, key: CacheEngineKey) -> Optional[MemoryObj]:
-        pass
+    def touch(self, key: CacheEngineKey, memory_obj: MemoryObj) -> None:
+        """
+        Touch the memory object in the hot cache.
 
-    def put_blocking(self, key: CacheEngineKey, memory_obj: MemoryObj) -> None:
-        pass
+        If the key is already in the hot cache, we need to evict the old
+        memory object and replace it with the new one.
+        """
+        # During overwrite, we need to free the old memory object
+        # to avoid memory leak.
+        # NOTE(Jiayi): overwrite should not happen, at least for
+        # prefix caching
+        if key in self.hot_cache_:
+            old_memory_obj = self.hot_cache_.pop(key)
+            self.memory_allocator.ref_count_down(old_memory_obj)
+        self.hot_cache_[key] = memory_obj
+        self.memory_allocator.ref_count_up(memory_obj)
 
     def close(self) -> None:
         pass

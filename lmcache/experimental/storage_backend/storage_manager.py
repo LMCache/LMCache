@@ -123,16 +123,7 @@ class StorageManager:
         """
         self.manager_lock.acquire()
         if self.use_hot:
-            # During overwrite, we need to free the old memory object
-            # to avoid memory leak.
-            # NOTE(Jiayi): overwrite should not happen, at least for
-            # prefix caching
-            if key in self.hot_cache:
-                old_memory_obj = self.hot_cache.pop(key)
-                self.memory_allocator.ref_count_down(old_memory_obj)
-
-            self.hot_cache[key] = memory_obj
-            self.memory_allocator.ref_count_up(memory_obj)
+            self.hot_cache.touch(key, memory_obj)
 
         # TODO(Jiayi): currently, the entire put task will be cancelled
         # if one of the backend is already storing this cache.
