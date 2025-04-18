@@ -25,6 +25,9 @@ class LocalCPUBackend(StorageBackendInterface):
 
     R/W from RAM is synchronous and so does not need an event loop and
     does not use futures.
+
+    QUESTION(sam): four methods raise NotImplementedError. Is this the best
+    implementation and/or inheritance structure?
     """
     def __init__(self,
         memory_allocator: MemoryAllocatorInterface,
@@ -33,7 +36,10 @@ class LocalCPUBackend(StorageBackendInterface):
         # rely completely on ordered dict to manage LRU
         self.hot_cache_: OrderedDict[CacheEngineKey, MemoryObj] = OrderedDict()
         self.lookup_server = lookup_server
+
+        # has its own internal locking
         self.memory_allocator = memory_allocator
+
         # multiple threads can access the hot cache (protects self.hot_cache_)
         self.hot_cache_lock = threading.Lock()
 

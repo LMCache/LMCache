@@ -88,6 +88,9 @@ class StorageManager:
         Allocate memory object with memory allocator.
         Use LRU evictor if eviction is enabled.
         """
+        # QUESTION(sam): since the self.memory_allocator has its own lock and
+        # now the self.hot_cache has its own lock, is it okay to get rid of
+        # the self.manager_lock protection for them (such as here)?
         self.manager_lock.acquire()
         memory_obj = self.memory_allocator.allocate(shape, dtype)
         if not eviction or memory_obj is not None:
@@ -143,6 +146,9 @@ class StorageManager:
             if put_task is None:
                 continue
 
+        # QUESTION(sam): since the self.memory_allocator has its own lock, what
+        # is the purpose of acquiring the self.manager_lock here?
+        # SAME QUESTION AS ABOVE
         self.manager_lock.acquire()
         self.memory_allocator.ref_count_down(memory_obj)
         self.manager_lock.release()
@@ -164,15 +170,13 @@ class StorageManager:
 
     @_lmcache_nvtx_annotate
     def _update_hot_cache(self, key: CacheEngineKey, memory_obj: MemoryObj):
-        if memory_obj is None or not self.use_hot:
+        if memory_obj is None or not self.use_hot or self.hot_cache.contains(key):
             return
 
         if memory_obj.tensor is not None and memory_obj.tensor.is_cuda:
-            self.manager_lock.acquire()
-            if key in self.hot_cache:
-                self.manager_lock.release()
-                return
-            self.manager_lock.release()
+            # QUESTION(sam): can we maybe use self.allocate() instead of
+            # self.memory_allocator.allocate() to leverage hot cache eviction?
+            # (would have to add a default fmt kwarg to self.allocate)
 
             # Allocate a cpu memory object
             cpu_memory_obj = self.memory_allocator.allocate(
@@ -195,16 +199,14 @@ class StorageManager:
 
             # Update the hot cache
             self.manager_lock.acquire()
-            self.hot_cache[key] = cpu_memory_obj
-            self.memory_allocator.ref_count_up(cpu_memory_obj)
+            self.hot_cache.put(key, cpu_memory_obj)
             self.manager_lock.release()
             logger.debug("Updated hot cache!")
             return
         else:
+            # protect self.hot_cache.memory_allocator
             self.manager_lock.acquire()
-            if self.use_hot and key not in self.hot_cache:
-                self.hot_cache[key] = memory_obj
-                self.memory_allocator.ref_count_up(memory_obj)
+            self.hot_cache.put(key, memory_obj)
             self.manager_lock.release()
 
     def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
