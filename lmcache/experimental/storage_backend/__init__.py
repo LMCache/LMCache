@@ -1,11 +1,10 @@
 import asyncio
 from collections import OrderedDict
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 import torch
 
 from lmcache.config import LMCacheEngineMetadata
-from lmcache.experimental.cache_controller.worker import LMCacheWorker
 from lmcache.experimental.config import LMCacheEngineConfig
 from lmcache.experimental.lookup_server import LookupServerInterface
 from lmcache.experimental.memory_management import MemoryAllocatorInterface
@@ -16,6 +15,9 @@ from lmcache.experimental.storage_backend.local_disk_backend import \
 from lmcache.experimental.storage_backend.remote_backend import RemoteBackend
 from lmcache.logging import init_logger
 
+if TYPE_CHECKING:
+    from lmcache.experimental.cache_controller.worker import LMCacheWorker
+
 logger = init_logger(__name__)
 
 
@@ -25,7 +27,7 @@ def CreateStorageBackends(
     loop: asyncio.AbstractEventLoop,
     memory_allocator: MemoryAllocatorInterface,
     dst_device: str = "cuda",
-    lmcache_worker: Optional[LMCacheWorker] = None,
+    lmcache_worker: Optional["LMCacheWorker"] = None,
     lookup_server: Optional[LookupServerInterface] = None,
 ) -> OrderedDict[str, StorageBackendInterface]:
 

@@ -143,17 +143,16 @@ class LMCacheWorker:
             try:
                 serialized_request = await self.reply_socket.recv()
                 request = msgspec.msgpack.decode(serialized_request, type=Msg)
-                logger.debug(f"Received message type: {request.type}")
+                logger.debug(f"Received message: {request}")
                 if isinstance(request, ClearWorkerMsg):
                     tokens = request.tokens
                     result = self.lmcache_engine.clear(tokens)
                     serialized_ret_msg = msgspec.msgpack.encode(
                         ClearWorkerRetMsg(success=result > 0))
                 else:
-                    logger.error(f"Unknown message type: {request.type}")
+                    logger.error(f"Unknown message: {request}")
                     serialized_ret_msg = msgspec.msgpack.encode(
-                        ErrorMsg(
-                            error=f"Unknown message type: {request.type}"))
+                        ErrorMsg(error=f"Unknown message: {request}"))
 
                 await self.reply_socket.send(serialized_ret_msg)
             except Exception as e:

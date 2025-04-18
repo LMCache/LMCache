@@ -17,14 +17,13 @@ import threading
 import time
 from collections import OrderedDict
 from concurrent.futures import Future
-from typing import Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
 import torch
 
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.experimental.cache_controller.message import (KVAdmitMsg,
                                                            KVEvictMsg)
-from lmcache.experimental.cache_controller.worker import LMCacheWorker
 from lmcache.experimental.config import LMCacheEngineConfig
 from lmcache.experimental.lookup_server import LookupServerInterface
 from lmcache.experimental.memory_management import (MemoryAllocatorInterface,
@@ -36,6 +35,9 @@ from lmcache.experimental.storage_backend.abstract_backend import \
     StorageBackendInterface
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey, _lmcache_nvtx_annotate
+
+if TYPE_CHECKING:
+    from lmcache.experimental.cache_controller.worker import LMCacheWorker
 
 logger = init_logger(__name__)
 
@@ -50,7 +52,7 @@ class StorageManager:
                  config: LMCacheEngineConfig,
                  metadata: LMCacheEngineMetadata,
                  allocator: MemoryAllocatorInterface,
-                 lmcache_worker: Optional[LMCacheWorker] = None,
+                 lmcache_worker: Optional["LMCacheWorker"] = None,
                  lookup_server: Optional[LookupServerInterface] = None):
         self.memory_allocator = allocator
         self.hot_cache: OrderedDict[CacheEngineKey, MemoryObj] = OrderedDict()
