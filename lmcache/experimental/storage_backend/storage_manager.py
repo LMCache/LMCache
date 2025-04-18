@@ -63,12 +63,7 @@ class StorageManager:
             CreateStorageBackends(
                 config, metadata,
                 self.loop, allocator, dst_device, lookup_server)
-        self.hot_cache = None
-        if self.use_hot:
-            for backend in self.storage_backends.values():
-                if isinstance(backend, LocalCPUBackend):
-                    self.hot_cache = backend.dict
-                    break
+        self.hot_cache = LocalCPUBackend(allocator, lookup_server)
 
         self.prefetch_tasks: Dict[CacheEngineKey, Future] = {}
         self.put_tasks: Dict[str, Dict[CacheEngineKey, Tuple[Future,

@@ -10,10 +10,6 @@ from lmcache.experimental.lookup_server import LookupServerInterface
 from lmcache.experimental.memory_management import MemoryAllocatorInterface
 from lmcache.experimental.storage_backend.abstract_backend import \
     StorageBackendInterface
-from lmcache.experimental.storage_backend.local_cpu_backend import \
-    LocalCPUBackend
-from lmcache.experimental.storage_backend.local_disk_backend import \
-    LocalDiskBackend
 from lmcache.experimental.storage_backend.remote_backend import RemoteBackend
 from lmcache.logging import init_logger
 
@@ -37,12 +33,6 @@ def CreateStorageBackends(
         OrderedDict()
 
     # TODO(Jiayi): The hierarchy is fixed for now
-    if config.local_cpu and config.max_local_cpu_size > 0:
-        local_cpu_backend = LocalCPUBackend(config, loop, memory_allocator,
-                                            dst_device, lookup_server)
-        backend_name = str(local_cpu_backend)
-        storage_backends[backend_name] = local_cpu_backend
-
     if config.local_disk and config.max_local_disk_size > 0:
         local_disk_backend = LocalDiskBackend(config, loop, memory_allocator,
                                               dst_device, lookup_server)
