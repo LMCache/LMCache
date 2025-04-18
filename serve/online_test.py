@@ -17,7 +17,7 @@ NUM_QUERY = 200
 MODEL = "meta-llama/Llama-3.1-8B-Instruct"
 PORT = 8000
 FILES = [
-    '/home/ubuntu/shaotingf/LMCache/serve/dataset/qmsum.csv'
+    '/home/ubuntu/ShaotingFS2/LMCache/serve/dataset/qmsum.csv'
 ]
 FILE_TYPE = "sum" # or "qa"
 PREFILL_ONLY = False

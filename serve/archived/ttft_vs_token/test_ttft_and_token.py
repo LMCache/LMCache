@@ -8,11 +8,11 @@ tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.1-8B-Instruct")
 
 # Manually specify the list of CSV filenames.
 csv_files = [
-    "/home/ubuntu/shaotingf/LMCache/serve/results/Apr_1/test/test_ttft_10_0.csv",
-    "/home/ubuntu/shaotingf/LMCache/serve/results/Apr_1/test/test_ttft_10_1.csv",
-    "/home/ubuntu/shaotingf/LMCache/serve/results/Apr_1/test/test_ttft_10_02.csv",
-    "/home/ubuntu/shaotingf/LMCache/serve/results/Apr_1/test/test_ttft_10_03.csv",
-    "/home/ubuntu/shaotingf/LMCache/serve/results/Apr_1/test/test_ttft_10_06.csv",
+    "/home/ubuntu/ShaotingFS2/LMCache/serve/results/Apr_1/test/test_ttft_10_0.csv",
+    "/home/ubuntu/ShaotingFS2/LMCache/serve/results/Apr_1/test/test_ttft_10_1.csv",
+    "/home/ubuntu/ShaotingFS2/LMCache/serve/results/Apr_1/test/test_ttft_10_02.csv",
+    "/home/ubuntu/ShaotingFS2/LMCache/serve/results/Apr_1/test/test_ttft_10_03.csv",
+    "/home/ubuntu/ShaotingFS2/LMCache/serve/results/Apr_1/test/test_ttft_10_06.csv",
 ]
 
 # Dictionary to store the linear regression coefficients for each file.

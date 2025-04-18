@@ -1,7 +1,7 @@
 import pandas as pd
 
 # Replace 'your_file.csv' with the path to your CSV file.
-csv_file = "/home/ubuntu/shaotingf/LMCache/serve/results/Apr_1/1.csv"
+csv_file = "/home/ubuntu/ShaotingFS2/LMCache/serve/results/Apr_1/1.csv"
 df = pd.read_csv(csv_file)
 
 # Display the loaded DataFrame

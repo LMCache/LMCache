@@ -71,11 +71,11 @@ class ChunkedTokenDatabase(TokenDatabase):
     def _make_key_by_hash(self, chunk_hash: str, total_hashes: str, token_len: int) -> CacheEngineKey:
         # Mapping of thresholds to the corresponding score file paths.
         threshold_file_mapping = [
-            (1,   "/home/ubuntu/shaotingf/LMCache/serve/results/Apr_1/test/test_ttft_10_1.csv"),
-            (0.728571429, "/home/ubuntu/shaotingf/LMCache/serve/results/Apr_1/test/test_ttft_10_06.csv"),
-            (0.485714286, "/home/ubuntu/shaotingf/LMCache/serve/results/Apr_1/test/test_ttft_10_03.csv"),
-            (0.371428571, "/home/ubuntu/shaotingf/LMCache/serve/results/Apr_1/test/test_ttft_10_02.csv"),
-            (0,   "/home/ubuntu/shaotingf/LMCache/serve/results/Apr_1/test/test_ttft_10_0.csv")
+            (1,   "/home/ubuntu/ShaotingFS2/LMCache/serve/results/Apr_1/test/test_ttft_10_1.csv"),
+            (0.728571429, "/home/ubuntu/ShaotingFS2/LMCache/serve/results/Apr_1/test/test_ttft_10_06.csv"),
+            (0.485714286, "/home/ubuntu/ShaotingFS2/LMCache/serve/results/Apr_1/test/test_ttft_10_03.csv"),
+            (0.371428571, "/home/ubuntu/ShaotingFS2/LMCache/serve/results/Apr_1/test/test_ttft_10_02.csv"),
+            (0,   "/home/ubuntu/ShaotingFS2/LMCache/serve/results/Apr_1/test/test_ttft_10_0.csv")
         ]
 
         score_mapping = [
@@ -96,7 +96,7 @@ class ChunkedTokenDatabase(TokenDatabase):
             # Score value
             score_value = score_dict[threshold]
             # NOTE(Shaoting): alpha=1 defined here
-            computed_value = 1 - computed_value * 1 - score_value
+            computed_value = 1 - computed_value * 10 - score_value
             score_table.append((threshold, computed_value))
 
         return CacheEngineKey(self.metadata.fmt, self.metadata.model_name,
