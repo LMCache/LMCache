@@ -5,6 +5,7 @@ from typing import Optional
 import torch
 
 from lmcache.config import LMCacheEngineMetadata
+from lmcache.experimental.cache_controller.worker import LMCacheWorker
 from lmcache.experimental.config import LMCacheEngineConfig
 from lmcache.experimental.lookup_server import LookupServerInterface
 from lmcache.experimental.memory_management import MemoryAllocatorInterface
@@ -24,6 +25,7 @@ def CreateStorageBackends(
     loop: asyncio.AbstractEventLoop,
     memory_allocator: MemoryAllocatorInterface,
     dst_device: str = "cuda",
+    lmcache_worker: Optional[LMCacheWorker] = None,
     lookup_server: Optional[LookupServerInterface] = None,
 ) -> OrderedDict[str, StorageBackendInterface]:
 
@@ -37,7 +39,8 @@ def CreateStorageBackends(
     # TODO(Jiayi): The hierarchy is fixed for now
     if config.local_disk and config.max_local_disk_size > 0:
         local_disk_backend = LocalDiskBackend(config, loop, memory_allocator,
-                                              dst_device, lookup_server)
+                                              dst_device, lmcache_worker,
+                                              lookup_server)
         backend_name = str(local_disk_backend)
         storage_backends[backend_name] = local_disk_backend
 

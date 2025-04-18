@@ -8,6 +8,9 @@ from typing import List, Optional
 import aiofiles
 import torch
 
+from lmcache.experimental.cache_controller.message import (KVAdmitMsg,
+                                                           KVEvictMsg)
+from lmcache.experimental.cache_controller.worker import LMCacheWorker
 from lmcache.experimental.config import LMCacheEngineConfig
 from lmcache.experimental.lookup_server import LookupServerInterface
 from lmcache.experimental.memory_management import (MemoryAllocatorInterface,
@@ -30,6 +33,7 @@ class LocalDiskBackend(StorageBackendInterface):
         loop: asyncio.AbstractEventLoop,
         memory_allocator: MemoryAllocatorInterface,
         dst_device: str = "cuda",
+        lmcache_worker: Optional[LMCacheWorker] = None,
         lookup_server: Optional[LookupServerInterface] = None,
     ):
         self.dict: OrderedDict[CacheEngineKey,
@@ -52,6 +56,9 @@ class LocalDiskBackend(StorageBackendInterface):
         self.put_tasks: List[CacheEngineKey] = []
 
         self.memory_allocator = memory_allocator
+
+        self.lmcache_worker = lmcache_worker
+        self.instance_id = config.lmcache_instance_id
 
     def __str__(self):
         return self.__class__.__name__
@@ -80,17 +87,32 @@ class LocalDiskBackend(StorageBackendInterface):
         self.disk_lock.release()
         os.remove(path)
 
+        # push kv evict msg
+        if self.lmcache_worker is not None:
+            self.lmcache_worker.put_msg(
+                KVEvictMsg(self.instance_id, key.worker_id, key.chunk_hash,
+                           "disk"))
+
     def insert_key(self, key: CacheEngineKey, memory_obj: MemoryObj) -> None:
         path = self._key_to_path(key)
         size = memory_obj.get_size()
         shape = memory_obj.metadata.shape
         dtype = memory_obj.metadata.dtype
+
+        has_stored = False
         with self.disk_lock:
             # Need to do reinsert to update cache recency
             if key in self.dict:
                 self.dict.pop(key)
+                has_stored = True
 
             self.dict[key] = DiskCacheMetadata(path, size, shape, dtype)
+
+        # push kv admit msg
+        if self.lmcache_worker is not None and not has_stored:
+            self.lmcache_worker.put_msg(
+                KVAdmitMsg(self.instance_id, key.worker_id, key.chunk_hash,
+                           "disk"))
 
     def submit_put_task(
         self,

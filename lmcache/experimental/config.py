@@ -39,7 +39,12 @@ class LMCacheEngineConfig:
     # Controller related configurations
     enable_controller: Optional[bool] = False  # whether to enable controller
     # the id of the lmcache instance
-    lmcache_instance_id: Optional[str] = "lmcache_default_instance"
+    lmcache_instance_id: str = "lmcache_default_instance"
+    # controller url
+    controller_url: Optional[str] = None
+    # lmcache worker url
+    # NOTE: port number will add `worker_id`
+    lmcache_worker_url: Optional[str] = None
 
     # (Optional) Nixl configurations
     # whether to enable Nixl
@@ -75,7 +80,9 @@ class LMCacheEngineConfig:
         distributed_url: Optional[str] = None,
         error_handling: bool = False,
         enable_controller: Optional[bool] = False,
-        lmcache_instance_id: Optional[str] = "lmcache_default_instance",
+        lmcache_instance_id: str = "lmcache_default_instance",
+        controller_url: Optional[str] = None,
+        lmcache_worker_url: Optional[str] = None,
         enable_nixl: Optional[bool] = False,
         nixl_role: Optional[str] = None,
         nixl_peer_host: Optional[str] = None,
@@ -90,9 +97,10 @@ class LMCacheEngineConfig:
             max_local_disk_size, remote_url, remote_serde, save_decode_cache,
             enable_blending, blend_recompute_ratio, blend_min_tokens,
             enable_p2p, lookup_url, distributed_url, error_handling,
-            enable_controller, lmcache_instance_id, enable_nixl, nixl_role,
-            nixl_peer_host, nixl_peer_port, nixl_buffer_size,
-            nixl_buffer_device, nixl_enable_gc).validate()
+            enable_controller, lmcache_instance_id, controller_url,
+            lmcache_worker_url, enable_nixl, nixl_role, nixl_peer_host,
+            nixl_peer_port, nixl_buffer_size, nixl_buffer_device,
+            nixl_enable_gc).validate()
 
     @staticmethod
     def from_legacy(
@@ -189,6 +197,8 @@ class LMCacheEngineConfig:
         enable_controller = config.get("enable_controller", False)
         lmcache_instance_id = config.get("lmcache_instance_id",
                                          "lmcache_default_instance")
+        controller_url = config.get("controller_url", None)
+        lmcache_worker_url = config.get("lmcache_worker_url", None)
 
         enable_nixl = config.get("enable_nixl", False)
         nixl_role = config.get("nixl_role", None)
@@ -231,6 +241,8 @@ class LMCacheEngineConfig:
             error_handling,
             enable_controller,
             lmcache_instance_id,
+            controller_url,
+            lmcache_worker_url,
             enable_nixl,
             nixl_role,
             nixl_peer_host,
@@ -317,8 +329,14 @@ class LMCacheEngineConfig:
         config.enable_controller = to_bool(
             parse_env(get_env_name("enable_controller"),
                       config.enable_controller))
-        config.lmcache_instance_id = parse_env(
-            get_env_name("lmcache_instance_id"), config.lmcache_instance_id)
+        lmcache_instance_id = parse_env(get_env_name("lmcache_instance_id"),
+                                        "lmcache_default_instance")
+        assert lmcache_instance_id is not None
+        config.lmcache_instance_id = lmcache_instance_id
+        config.controller_url = parse_env(get_env_name("controller_url"),
+                                          config.controller_url)
+        config.lmcache_worker_url = parse_env(
+            get_env_name("lmcache_worker_url"), config.lmcache_worker_url)
 
         config.enable_nixl = to_bool(
             parse_env(get_env_name("enable_nixl"), config.enable_nixl))

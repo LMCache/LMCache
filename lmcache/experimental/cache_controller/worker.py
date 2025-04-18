@@ -1,14 +1,20 @@
 import asyncio
-import fcntl
-import inspect
-import json
-import os
+import re
 import threading
 
+import msgspec
+import zmq
+
 from lmcache.config import LMCacheEngineMetadata
-from lmcache.experimental.cache_controller.rpc_utils import (
-    clean_old_sockets, get_server_socket, get_unix_socket_path,
-    get_zmq_context)
+from lmcache.experimental.cache_controller.message import (ClearWorkerMsg,
+                                                           ClearWorkerRetMsg,
+                                                           DeRegisterMsg,
+                                                           ErrorMsg, MsgBase,
+                                                           RegisterMsg,
+                                                           WorkerMsg)
+from lmcache.experimental.cache_controller.rpc_utils import (close_zmq_socket,
+                                                             get_zmq_context,
+                                                             get_zmq_socket)
 from lmcache.experimental.cache_engine import LMCacheEngine
 from lmcache.experimental.config import LMCacheEngineConfig
 from lmcache.logging import init_logger
@@ -34,90 +40,146 @@ class LMCacheWorker:
         assert self.lmcache_instance_id is not None
         self.lmcache_engine = lmcache_engine
         self.worker_id = metadata.worker_id
-        self.metadata_path = \
-            f"/tmp/lmcache_instance_metadata_{self.lmcache_instance_id}.json"
-        self._update_metadata()
 
         self.context = get_zmq_context()
-        self.socket_path = get_unix_socket_path(self.lmcache_instance_id,
-                                                self.worker_id)
-        self.socket = get_server_socket(self.context, self.socket_path)
+
+        assert config.controller_url is not None
+
+        self.push_socket = get_zmq_socket(
+            self.context,
+            config.controller_url,
+            protocol="tcp",
+            role=zmq.PUSH,
+        )
+
+        # TODO(Jiayi): Make this less hard-coded
+        lmcache_worker_url = config.lmcache_worker_url
+        assert lmcache_worker_url is not None
+        match_obj = re.match(r"(.*):(\d+)", lmcache_worker_url)
+        if match_obj:
+            host, port = match_obj.groups()
+            new_port = int(port) + self.worker_id
+            lmcache_worker_url = f"{host}:{new_port}"
+        else:
+            raise ValueError(
+                f"Invalid remote storage url: {lmcache_worker_url}")
+
+        self.lmcache_worker_url = lmcache_worker_url
+        self.reply_socket = get_zmq_socket(
+            self.context,
+            lmcache_worker_url,
+            protocol="tcp",
+            role=zmq.REP,
+        )
 
         self.loop = asyncio.new_event_loop()
         self.thread = threading.Thread(target=self.loop.run_forever,
                                        daemon=True)
         self.thread.start()
-        asyncio.run_coroutine_threadsafe(self.start(), self.loop)
+        asyncio.run_coroutine_threadsafe(self.start_all(), self.loop)
 
-    async def handle_request(self):
+        self.msg_queue: asyncio.Queue[WorkerMsg] = asyncio.Queue()
+
+        self.register()
+
+    def register(self):
+        """
+        Register the lmcache worker with the controller.
+        """
+        assert self.lmcache_instance_id is not None
+        self.put_msg(
+            RegisterMsg(
+                instance_id=self.lmcache_instance_id,
+                worker_id=self.worker_id,
+                url=self.lmcache_worker_url,
+            ))
+
+    def deregister(self):
+        """
+        De-register the lmcache worker from the controller.
+        """
+        assert self.lmcache_instance_id is not None
+        self.put_msg(
+            DeRegisterMsg(
+                instance_id=self.lmcache_instance_id,
+                worker_id=self.worker_id,
+            ))
+
+    def put_msg(self, msg: WorkerMsg):
+        """
+        Put a message into the message queue.
+        """
+        self.loop.call_soon_threadsafe(self.msg_queue.put_nowait, msg)
+
+    async def batched_get_msg(self, max_bsz: int = 50) -> list[WorkerMsg]:
+        """
+        Get a batch of messages from the message queue.
+        """
+        batch = []
+        for _ in range(max_bsz):
+            try:
+                item = self.msg_queue.get_nowait()
+                batch.append(item)
+            except asyncio.QueueEmpty:
+                break
+        return batch
+
+    async def push(self):
         while True:
             try:
-                request = await self.socket.recv_json()
-                operation = request.get("operation")
-                data = request.get("data", {})
-                logger.info(f"Received operation: {operation}, data: {data}")
+                msgs = await self.batched_get_msg()
+                logger.debug(f"Sending {len(msgs)} messages")
+                self.push_socket.send_multipart(
+                    [msgspec.msgpack.encode(msg) for msg in msgs])
 
-                if hasattr(self.lmcache_engine, operation):
-                    method = getattr(self.lmcache_engine, operation)
-                    if inspect.iscoroutinefunction(method):
-                        result = await method(**data)
-                    else:
-                        result = method(**data)
+            except Exception as e:
+                logger.error(f"Push error: {e}")
+
+    async def handle_request(self):
+        """
+        Handle incoming requests (control msgs) from the controller.
+        """
+        while True:
+            try:
+                serialized_request = await self.reply_socket.recv()
+                request = msgspec.msgpack.decode(serialized_request,
+                                                 type=MsgBase)
+                logger.debug(f"Received message type: {request.type}")
+                if isinstance(request, ClearWorkerMsg):
+                    tokens = request.tokens
+                    result = self.lmcache_engine.clear(tokens)
+                    serialized_ret_msg = msgspec.msgpack.encode(
+                        ClearWorkerRetMsg(success=result > 0))
                 else:
-                    result = {"error": f"Unsupported operation '{operation}'"}
-                logger.info(f"Operation result: {result}")
-                await self.socket.send_json({"res": result})
+                    logger.error(f"Unknown message type: {request.type}")
+                    serialized_ret_msg = msgspec.msgpack.encode(
+                        ErrorMsg(
+                            error=f"Unknown message type: {request.type}"))
+
+                await self.reply_socket.send(serialized_ret_msg)
             except Exception as e:
                 logger.error(f"Worker error: {e}")
-                await self.socket.send_json({"error": str(e)})
+                serialized_ret_msg = msgspec.msgpack.encode(
+                    ErrorMsg(error=f"Worker error: {e}"))
+                await self.reply_socket.send(serialized_ret_msg)
 
-    def _update_metadata(self, mode="append"):
-        os.makedirs(os.path.dirname(self.metadata_path), exist_ok=True)
-        try:
-            with open(self.metadata_path, "x") as f:
-                json.dump({}, f)
-        except FileExistsError:
-            pass
-        with open(self.metadata_path, "r+") as f:
-            fcntl.flock(f, fcntl.LOCK_EX)
-            try:
-                metadata = json.load(f)
-                if mode == "append":
-                    metadata[self.lmcache_instance_id] = \
-                        metadata.get(self.lmcache_instance_id, [])
-                    if self.worker_id not in metadata[
-                            self.lmcache_instance_id]:
-                        metadata[self.lmcache_instance_id].append(
-                            self.worker_id)
-                elif mode == "remove":
-                    if self.lmcache_instance_id in metadata:
-                        metadata[self.lmcache_instance_id].remove(
-                            self.worker_id)
-                        if not metadata[self.lmcache_instance_id]:
-                            del metadata[self.lmcache_instance_id]
-                f.seek(0)
-                json.dump(metadata, f)
-                f.truncate()
-            finally:
-                fcntl.flock(f, fcntl.LOCK_UN)
-
-    async def start(self):
+    async def start_all(self):
         try:
             logger.info(f"Starting lmcache worker {self.worker_id}"
                         f"for instance {self.lmcache_instance_id}")
-            await self.handle_request()
+            await asyncio.gather(
+                self.push(),
+                self.handle_request(),
+            )
         except Exception as e:
-            logger.error(f"Worker {self.worker_id} error: {e}")
-        finally:
-            assert self.lmcache_instance_id is not None
-            clean_old_sockets(self.lmcache_instance_id, [self.worker_id])
+            logger.error(f"Instance {self.lmcache_instance_id}, "
+                         f"worker {self.worker_id} error: {e}")
 
     def close(self):
+        self.deregister()
         if self.loop.is_running():
             self.loop.call_soon_threadsafe(self.loop.stop)
         if self.thread.is_alive():
             self.thread.join()
-
-        self._update_metadata(mode="remove")
-        assert self.lmcache_instance_id is not None
-        clean_old_sockets(self.lmcache_instance_id, [self.worker_id])
+        close_zmq_socket(self.push_socket)
+        close_zmq_socket(self.reply_socket)

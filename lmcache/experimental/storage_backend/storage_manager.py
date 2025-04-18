@@ -22,6 +22,9 @@ from typing import Dict, List, Optional, Tuple
 import torch
 
 from lmcache.config import LMCacheEngineMetadata
+from lmcache.experimental.cache_controller.message import (KVAdmitMsg,
+                                                           KVEvictMsg)
+from lmcache.experimental.cache_controller.worker import LMCacheWorker
 from lmcache.experimental.config import LMCacheEngineConfig
 from lmcache.experimental.lookup_server import LookupServerInterface
 from lmcache.experimental.memory_management import (MemoryAllocatorInterface,
@@ -47,6 +50,7 @@ class StorageManager:
                  config: LMCacheEngineConfig,
                  metadata: LMCacheEngineMetadata,
                  allocator: MemoryAllocatorInterface,
+                 lmcache_worker: Optional[LMCacheWorker] = None,
                  lookup_server: Optional[LookupServerInterface] = None):
         self.memory_allocator = allocator
         self.hot_cache: OrderedDict[CacheEngineKey, MemoryObj] = OrderedDict()
@@ -61,7 +65,8 @@ class StorageManager:
         self.storage_backends: OrderedDict[str, StorageBackendInterface] =\
             CreateStorageBackends(
                 config, metadata,
-                self.loop, allocator, dst_device, lookup_server)
+                self.loop, allocator, dst_device,
+                lmcache_worker, lookup_server)
         self.prefetch_tasks: Dict[CacheEngineKey, Future] = {}
         self.put_tasks: Dict[str, Dict[CacheEngineKey, Tuple[Future,
                                                              MemoryObj]]] = {}
@@ -72,6 +77,10 @@ class StorageManager:
         self.manager_lock = threading.Lock()
 
         self.lookup_server = lookup_server
+
+        self.lmcache_worker = lmcache_worker
+        self.instance_id = config.lmcache_instance_id
+        self.worker_id = metadata.worker_id
 
         self.stream = torch.cuda.Stream()
 
@@ -114,6 +123,10 @@ class StorageManager:
                 break
         for evict_key in evict_keys:
             self.hot_cache.pop(evict_key)
+            if self.lmcache_worker is not None:
+                self.lmcache_worker.put_msg(
+                    KVEvictMsg(self.instance_id, self.worker_id,
+                               evict_key.chunk_hash, "cpu"))
         if self.lookup_server is not None:
             self.lookup_server.batched_remove(evict_keys)
 
@@ -148,11 +161,17 @@ class StorageManager:
             # to avoid memory leak.
             # NOTE(Jiayi): overwrite should not happen, at least for
             # prefix caching
+            has_stored = False
             if key in self.hot_cache:
                 old_memory_obj = self.hot_cache.pop(key)
                 self.memory_allocator.ref_count_down(old_memory_obj)
+                has_stored = True
 
             self.hot_cache[key] = memory_obj
+            if self.lmcache_worker is not None and not has_stored:
+                self.lmcache_worker.put_msg(
+                    KVAdmitMsg(self.instance_id, self.worker_id,
+                               key.chunk_hash, "cpu"))
             self.memory_allocator.ref_count_up(memory_obj)
 
         # TODO(Jiayi): currently, the entire put task will be cancelled
@@ -227,14 +246,28 @@ class StorageManager:
             self.hot_cache[key] = cpu_memory_obj
             self.memory_allocator.ref_count_up(cpu_memory_obj)
             self.manager_lock.release()
+
+            # Push kv msg
+            if self.lmcache_worker is not None:
+                self.lmcache_worker.put_msg(
+                    KVAdmitMsg(self.instance_id, self.worker_id,
+                               key.chunk_hash, "cpu"))
+
             logger.debug("Updated hot cache!")
-            return
         else:
             self.manager_lock.acquire()
             if self.use_hot and key not in self.hot_cache:
                 self.hot_cache[key] = memory_obj
                 self.memory_allocator.ref_count_up(memory_obj)
-            self.manager_lock.release()
+                self.manager_lock.release()
+
+                # Push kv msg
+                if self.lmcache_worker is not None:
+                    self.lmcache_worker.put_msg(
+                        KVAdmitMsg(self.instance_id, self.worker_id,
+                                   key.chunk_hash, "cpu"))
+            else:
+                self.manager_lock.release()
 
     def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         """
