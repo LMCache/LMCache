@@ -16,8 +16,9 @@ from lmcache.experimental.cache_controller.message import (ClearMsg,
                                                            DeRegisterMsg,
                                                            KVAdmitMsg,
                                                            KVEvictMsg,
-                                                           LookupMsg, MsgBase,
-                                                           OrchMsg, OrchRetMsg,
+                                                           LookupMsg, Msg,
+                                                           MsgBase, OrchMsg,
+                                                           OrchRetMsg,
                                                            RegisterMsg,
                                                            WorkerMsg)
 from lmcache.experimental.cache_controller.rpc_utils import (get_zmq_context,
@@ -115,8 +116,8 @@ class LMCacheControllerManager:
                 parts = await socket.recv_multipart()
 
                 for part in parts:
-                    msg = msgspec.msgpack.decode(part, type=MsgBase)
-                    logger.info(f"Received msg: {msg.type}")
+                    msg = msgspec.msgpack.decode(part, type=Msg)
+                    logger.info(f"Received msg type: {type(msg)}")
                     if isinstance(msg, WorkerMsg):
                         await self.handle_worker_message(msg)
                     elif isinstance(msg, ControlMsg):
@@ -124,7 +125,7 @@ class LMCacheControllerManager:
                     elif isinstance(msg, OrchMsg):
                         await self.handle_orchestration_message(msg)
                     else:
-                        logger.error(f"Unknown message type: {msg.type}")
+                        logger.error(f"Unknown message type: {type(msg)}")
             except Exception as e:
                 logger.error(f"Controller Manager error: {e}")
 

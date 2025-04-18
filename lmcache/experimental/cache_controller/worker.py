@@ -9,7 +9,7 @@ from lmcache.config import LMCacheEngineMetadata
 from lmcache.experimental.cache_controller.message import (ClearWorkerMsg,
                                                            ClearWorkerRetMsg,
                                                            DeRegisterMsg,
-                                                           ErrorMsg, MsgBase,
+                                                           ErrorMsg, Msg,
                                                            RegisterMsg,
                                                            WorkerMsg)
 from lmcache.experimental.cache_controller.rpc_utils import (close_zmq_socket,
@@ -142,8 +142,7 @@ class LMCacheWorker:
         while True:
             try:
                 serialized_request = await self.reply_socket.recv()
-                request = msgspec.msgpack.decode(serialized_request,
-                                                 type=MsgBase)
+                request = msgspec.msgpack.decode(serialized_request, type=Msg)
                 logger.debug(f"Received message type: {request.type}")
                 if isinstance(request, ClearWorkerMsg):
                     tokens = request.tokens

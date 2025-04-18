@@ -36,24 +36,15 @@ curl -X POST http://localhost:8000/v1/completions \
 curl -X POST http://localhost:8001/lookup \
   -H "Content-Type: application/json" \
   -d '{
-    "instance_id": "lmcache_default_instance",
     "tokens": [128000, 849, 21435, 279, 26431, 315, 85748, 6636, 304, 4221, 4211, 13]
   }'
 ```
-The above request queries how many tokens have been stored in LMCache. Note that we only support using `tokens` as input for now.
+The above request returns the instance with most KV cache hit.
 
 You should be able to see a return message:
 
 ```plaintext
-{"0":{"res":12}}
+{"0":{"res": "lmcache_default_instance"}}
 ```
 
-`12` indicates 12 tokens are stored in LMCache.
-
-
-
-curl -X POST http://localhost:8001/clear \
-  -H "Content-Type: application/json" \
-  -d '{
-    "instance_id": "lmcache_default_instance"
-  }'
+`lmcache_default_instance` indicates the best `instance_id`.

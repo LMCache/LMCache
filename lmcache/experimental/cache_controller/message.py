@@ -1,16 +1,13 @@
-from abc import ABC, abstractmethod
-from typing import Literal, Optional
+from typing import Literal, Optional, Union
 
 import msgspec
 
 
-class MsgBase(msgspec.Struct, ABC, frozen=True,
-              discriminator="type"):  # type: ignore
-    """Abstract base class for all messages"""
+class MsgBase(msgspec.Struct, frozen=True, tag=True):  # type: ignore
+    """Base class for all messages"""
 
-    @abstractmethod
     def describe(self) -> str:
-        pass
+        return ""
 
 
 # NOTE: The additional layer of abstraction is to
@@ -24,9 +21,8 @@ class MsgBase(msgspec.Struct, ABC, frozen=True,
 class WorkerMsg(MsgBase, frozen=True):
     """Message between LMCache and Controller"""
 
-    @abstractmethod
     def describe(self) -> str:
-        pass
+        return ""
 
 
 class RegisterMsg(WorkerMsg, frozen=True):
@@ -35,7 +31,6 @@ class RegisterMsg(WorkerMsg, frozen=True):
     instance_id: str
     worker_id: int
     url: str
-    type: Literal["register"] = "register"
 
     def describe(self) -> str:
         return f"Registering instance {self.instance_id}"
@@ -46,7 +41,6 @@ class DeRegisterMsg(WorkerMsg, frozen=True):
     # TODO(Jiayi): instance_id can be replaced with url
     instance_id: str
     worker_id: int
-    type: Literal["de_register"] = "de_register"
 
     def describe(self) -> str:
         return f"Deregistering instance {self.instance_id}"
@@ -59,7 +53,6 @@ class KVAdmitMsg(WorkerMsg, frozen=True):
     worker_id: int
     key: str
     location: str
-    type: Literal["kv_admit"] = "kv_admit"
 
     def describe(self) -> str:
         return f"kv_admit {self.key} to {self.instance_id}"
@@ -72,7 +65,6 @@ class KVEvictMsg(WorkerMsg, frozen=True):
     worker_id: int
     key: str
     location: str
-    type: Literal["kv_evict"] = "kv_evict"
 
     def describe(self) -> str:
         return f"kv_evict {self.key} from {self.instance_id}"
@@ -84,15 +76,13 @@ class KVEvictMsg(WorkerMsg, frozen=True):
 class ControlMsg(MsgBase, frozen=True):
     """Message from Controller to LMCache"""
 
-    @abstractmethod
     def describe(self) -> str:
-        pass
+        return ""
 
 
 class ClearWorkerMsg(ControlMsg, frozen=True):
     """Clear message for a single lmcache worker"""
     tokens: Optional[list[int]] = None
-    type: Literal["clear_worker"] = "clear_worker"
 
     def describe(self) -> str:
         return f"Clear tokens {self.tokens}"
@@ -101,15 +91,13 @@ class ClearWorkerMsg(ControlMsg, frozen=True):
 class ControlRetMsg(MsgBase, frozen=True):
     """Return message from LMCache to Controller"""
 
-    @abstractmethod
     def describe(self) -> str:
-        pass
+        return ""
 
 
 class ClearWorkerRetMsg(ControlRetMsg, frozen=True):
     """Return message for a ClearWorkerMsg"""
     success: bool
-    type: Literal["clear_worker_ret"] = "clear_worker_ret"
 
     def describe(self) -> str:
         return f"Clear success: {self.success}"
@@ -121,15 +109,13 @@ class ClearWorkerRetMsg(ControlRetMsg, frozen=True):
 class OrchMsg(MsgBase, frozen=True):
     """Message from Ochestrator to Controller"""
 
-    @abstractmethod
     def describe(self) -> str:
-        pass
+        return ""
 
 
 class LookupMsg(OrchMsg, frozen=True):
     """Lookup message"""
     tokens: list[int]
-    type: Literal["lookup"] = "lookup"
 
     def describe(self) -> str:
         return f"Lookup tokens {self.tokens}"
@@ -140,7 +126,6 @@ class ClearMsg(OrchMsg, frozen=True):
     instance_id: str
     worker_ids: Optional[list[int]] = None
     tokens: Optional[list[int]] = None
-    type: Literal["clear"] = "clear"
 
     def describe(self) -> str:
         return (f"Clear tokens {self.tokens} in instance "
@@ -150,15 +135,13 @@ class ClearMsg(OrchMsg, frozen=True):
 class OrchRetMsg(MsgBase, frozen=True):
     """Return message from  Controller to Ochestrator"""
 
-    @abstractmethod
     def describe(self) -> str:
-        pass
+        return ""
 
 
 class LookupRetMsg(OrchRetMsg, frozen=True):
     """Lookup message"""
     best_instance_id: Optional[str]
-    type: Literal["lookup_ret"] = "lookup_ret"
 
     def describe(self) -> str:
         return f"The best instance is {self.best_instance_id}"
@@ -167,7 +150,6 @@ class LookupRetMsg(OrchRetMsg, frozen=True):
 class ClearRetMsg(OrchRetMsg, frozen=True):
     """Clear message"""
     success: bool
-    type: Literal["clear_ret"] = "clear_ret"
 
     def describe(self) -> str:
         return f"Clear success: {self.success}"
@@ -176,7 +158,11 @@ class ClearRetMsg(OrchRetMsg, frozen=True):
 class ErrorMsg(MsgBase, frozen=True):
     """Control Error Message"""
     error: str
-    type: Literal["error"] = "error"
 
     def describe(self) -> str:
         return f"Error: {self.error}"
+
+
+Msg = Union[RegisterMsg, DeRegisterMsg, KVAdmitMsg, KVEvictMsg, ClearWorkerMsg,
+            ClearWorkerRetMsg, LookupMsg, LookupRetMsg, ClearMsg, ClearRetMsg,
+            ErrorMsg]

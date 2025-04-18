@@ -8,7 +8,8 @@ import zmq.asyncio
 from lmcache.experimental.cache_controller.message import (ClearMsg,
                                                            ClearRetMsg,
                                                            ClearWorkerMsg,
-                                                           ErrorMsg, MsgBase)
+                                                           ErrorMsg, Msg,
+                                                           MsgBase)
 from lmcache.logging import init_logger
 
 logger = init_logger(__name__)
@@ -61,7 +62,7 @@ class LMCacheClusterExecutor:
 
         success = True
         for i, serialized_result in enumerate(serialized_results):
-            result = msgspec.msgpack.decode(serialized_result, type=MsgBase)
+            result = msgspec.msgpack.decode(serialized_result, type=Msg)
             if success:
                 success = result.success
         return ClearRetMsg(success=success)
