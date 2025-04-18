@@ -189,6 +189,7 @@ class LocalCPUBackend(StorageBackendInterface):
         - None if we could not make space for the memory object in hot cache
         - the allocated memory object otherwise
         """
+        memory_obj = None
         evict_keys = []
 
         self.hot_cache_lock.acquire()
@@ -215,6 +216,16 @@ class LocalCPUBackend(StorageBackendInterface):
             self.lookup_server.batched_remove(evict_keys)
         self.hot_cache_lock.release()
         return memory_obj
+
+    def get_keys(self) -> List[CacheEngineKey]:
+        """
+        Primarily used for debugging / testing (thread-safe)
+        Ordering is meaningful from OrderedDict (left is coldest, right is hottest)
+        """
+        self.hot_cache_lock.acquire()
+        keys = list(self.hot_cache_.keys())
+        self.hot_cache_lock.release()
+        return keys
 
     def clear(self) -> int:
         """

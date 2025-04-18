@@ -52,7 +52,9 @@ class StorageManager:
                  lookup_server: Optional[LookupServerInterface] = None):
         self.memory_allocator = allocator
         self.use_hot = config.local_cpu
-        self.hot_cache = LocalCPUBackend(allocator, lookup_server)
+        self.hot_cache = None
+        if self.use_hot:
+            self.hot_cache = LocalCPUBackend(allocator, lookup_server)
 
         self.loop = asyncio.new_event_loop()
         self.thread = threading.Thread(target=self.loop.run_forever)
@@ -98,8 +100,9 @@ class StorageManager:
             return memory_obj
 
         assert isinstance(self.memory_allocator, MixedMemoryAllocator)
-        # this will evict from the hot cache to try to allocate
-        memory_obj = self.hot_cache.allocate(shape, dtype)
+        if self.use_hot:
+            # this will try to evict from the hot cache and allocate
+            memory_obj = self.hot_cache.allocate(shape, dtype)
         self.manager_lock.release()
         return memory_obj
 
@@ -127,7 +130,7 @@ class StorageManager:
         """
         self.manager_lock.acquire()
         if self.use_hot:
-            self.hot_cache.put(key, memory_obj, pre_allocated=True)
+            self.hot_cache.put(key, memory_obj)
 
         # TODO(Jiayi): currently, the entire put task will be cancelled
         # if one of the backend is already storing this cache.
@@ -147,9 +150,8 @@ class StorageManager:
             if put_task is None:
                 continue
 
-        # QUESTION(sam): since the self.memory_allocator has its own lock, what
-        # is the purpose of acquiring the self.manager_lock here?
-        # SAME QUESTION AS ABOVE
+        # QUESTION(sam): since the self.memory_allocator has its own lock, would
+        # it be possible to remove the self.manager_lock protection here?
         self.manager_lock.acquire()
         self.memory_allocator.ref_count_down(memory_obj)
         self.manager_lock.release()
@@ -235,11 +237,12 @@ class StorageManager:
 
         # Search in hot_cache
         self.manager_lock.acquire()
-        # hot_cache.get(key) does ref_count_up() for the caller (us here)
-        memory_obj = self.hot_cache.get(key)
-        if memory_obj is not None:
-            self.manager_lock.release()
-            return memory_obj
+        if self.use_hot:
+            # hot_cache.get(key) does ref_count_up() for the caller
+            memory_obj = self.hot_cache.get(key)
+            if memory_obj is not None:
+                self.manager_lock.release()
+                return memory_obj
 
         self.manager_lock.release()
 
@@ -302,7 +305,7 @@ class StorageManager:
 
         # Call contains for each backend. Find the nearest cache
         self.manager_lock.acquire()
-        if self.hot_cache.contains(key):
+        if self.use_hot and self.hot_cache.contains(key):
             self.manager_lock.release()
             return
         if key in self.prefetch_tasks:
@@ -342,7 +345,7 @@ class StorageManager:
         """
         with self.manager_lock:
             if search_range is None or "Hot" in search_range:
-                if self.hot_cache.contains(key):
+                if self.use_hot and self.hot_cache.contains(key):
                     return True
 
             for backend_name, backend in self.storage_backends.items():
@@ -377,9 +380,8 @@ class StorageManager:
         num_removed = 0
         with self.manager_lock:
             if locations is None or "Hot" in locations:
-                if self.use_hot and key in self.hot_cache:
-                    if self.hot_cache.remove(key):
-                        num_removed += 1
+                if self.use_hot and self.hot_cache.remove(key):
+                    num_removed += 1
 
         # TODO(Jiayi): need to handle remove in non-cpu backends
 
@@ -415,9 +417,10 @@ class StorageManager:
     def close(self):
 
         if self.lookup_server is not None:
-            self.manager_lock.acquire()
-            self.lookup_server.batched_remove(list(self.hot_cache.keys()))
-            self.manager_lock.release()
+            if self.use_hot:
+                self.manager_lock.acquire()
+                self.lookup_server.batched_remove(self.hot_cache.get_keys())
+                self.manager_lock.release()
         for backend in self.storage_backends.values():
             backend.close()
 
