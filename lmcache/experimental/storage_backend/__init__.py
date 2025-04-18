@@ -10,7 +10,7 @@ from lmcache.experimental.lookup_server import LookupServerInterface
 from lmcache.experimental.memory_management import MemoryAllocatorInterface
 from lmcache.experimental.storage_backend.abstract_backend import \
     StorageBackendInterface
-from lmcache.experimental.storage_backend.local_cpu_backend import \
+from lmcache.experimental.storage_backend.local_disk_backend import \
     LocalDiskBackend
 from lmcache.experimental.storage_backend.remote_backend import RemoteBackend
 from lmcache.logging import init_logger
