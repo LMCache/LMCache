@@ -7,12 +7,9 @@ import msgspec
 import zmq
 
 from lmcache.config import LMCacheEngineMetadata
-from lmcache.experimental.cache_controller.message import (ClearWorkerMsg,
-                                                           ClearWorkerRetMsg,
-                                                           DeRegisterMsg,
-                                                           ErrorMsg, Msg,
-                                                           RegisterMsg,
-                                                           WorkerMsg)
+from lmcache.experimental.cache_controller.message import (  # noqa
+    ClearWorkerMsg, ClearWorkerRetMsg, DeRegisterMsg, ErrorMsg, Msg,
+    RegisterMsg, WorkerMsg)
 from lmcache.experimental.cache_controller.rpc_utils import (close_zmq_socket,
                                                              get_zmq_context,
                                                              get_zmq_socket)

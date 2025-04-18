@@ -8,7 +8,7 @@ from lmcache.experimental.cache_controller.controllers import (
     KVController, RegistrationController)
 from lmcache.experimental.cache_controller.executor import \
     LMCacheClusterExecutor
-from lmcache.experimental.cache_controller.message import (ClearMsg,
+from lmcache.experimental.cache_controller.message import (ClearMsg,  # noqa
                                                            ClearRetMsg,
                                                            ControlMsg,
                                                            ControlRetMsg,
