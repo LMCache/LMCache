@@ -1,11 +1,7 @@
 from dataclasses import dataclass
 
-from lmcache.experimental.cache_controller.message import LookupRetMsg  # noqa
-from lmcache.experimental.cache_controller.message import (ClearMsg,
-                                                           ClearRetMsg,
-                                                           KVAdmitMsg,
-                                                           KVEvictMsg,
-                                                           LookupMsg)
+from lmcache.experimental.cache_controller.message import (  # noqa: E501
+    ClearMsg, ClearRetMsg, KVAdmitMsg, KVEvictMsg, LookupMsg, LookupRetMsg)
 from lmcache.experimental.token_database import ChunkedTokenDatabase
 
 

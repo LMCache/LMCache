@@ -8,18 +8,10 @@ from lmcache.experimental.cache_controller.controllers import (
     KVController, RegistrationController)
 from lmcache.experimental.cache_controller.executor import \
     LMCacheClusterExecutor
-from lmcache.experimental.cache_controller.message import (ClearMsg,  # noqa
-                                                           ClearRetMsg,
-                                                           ControlMsg,
-                                                           ControlRetMsg,
-                                                           DeRegisterMsg,
-                                                           KVAdmitMsg,
-                                                           KVEvictMsg,
-                                                           LookupMsg, Msg,
-                                                           MsgBase, OrchMsg,
-                                                           OrchRetMsg,
-                                                           RegisterMsg,
-                                                           WorkerMsg)
+from lmcache.experimental.cache_controller.message import (  # noqa: E501
+    ClearMsg, ClearRetMsg, ControlMsg, ControlRetMsg, DeRegisterMsg,
+    KVAdmitMsg, KVEvictMsg, LookupMsg, Msg, MsgBase, OrchMsg, OrchRetMsg,
+    RegisterMsg, WorkerMsg)
 from lmcache.experimental.cache_controller.rpc_utils import (get_zmq_context,
                                                              get_zmq_socket)
 from lmcache.logging import init_logger

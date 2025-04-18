@@ -5,11 +5,8 @@ import msgspec
 import zmq
 import zmq.asyncio
 
-from lmcache.experimental.cache_controller.message import (ClearMsg,
-                                                           ClearRetMsg,
-                                                           ClearWorkerMsg,
-                                                           ErrorMsg, Msg,
-                                                           MsgBase)
+from lmcache.experimental.cache_controller.message import (  # noqa: E501
+    ClearMsg, ClearRetMsg, ClearWorkerMsg, ErrorMsg, Msg, MsgBase)
 from lmcache.logging import init_logger
 
 logger = init_logger(__name__)
