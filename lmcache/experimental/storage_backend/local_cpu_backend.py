@@ -34,7 +34,7 @@ class LocalCPUBackend(StorageBackendInterface):
         self.hot_cache_: OrderedDict[CacheEngineKey, MemoryObj] = OrderedDict()
         self.lookup_server = lookup_server
         self.memory_allocator = memory_allocator
-        # multiple threads can access the hot cache
+        # multiple threads can access the hot cache (protects self.hot_cache_)
         self.hot_cache_lock = threading.Lock()
 
     def exists_in_put_tasks(self, key: CacheEngineKey) -> bool:
@@ -134,14 +134,16 @@ class LocalCPUBackend(StorageBackendInterface):
         self.memory_allocator.ref_count_up(memory_obj)
         self.hot_cache_lock.release()
 
-    def make_space_for(self, shape: torch.Size, dtype: torch.dtype) -> Optional[MemoryObj]:
+    def allocate(self, shape: torch.Size,
+                    dtype: torch.dtype) -> Optional[MemoryObj]:
         """
-        make space for and allocate a memory object in the cpu backend
+        allocate a memory object in the cpu backend by evicting LRU
+        from hot cache
 
         takes in the shape and dtype of the memory object to be allocated
 
         returns:
-        - None if we could not make space for the memory object in the hot cache
+        - None if we could not make space for the memory object in hot cache
         - the allocated memory object otherwise
         """
         evict_keys = []

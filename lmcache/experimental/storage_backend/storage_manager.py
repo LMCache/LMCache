@@ -95,7 +95,7 @@ class StorageManager:
             return memory_obj
 
         assert isinstance(self.memory_allocator, MixedMemoryAllocator)
-        memory_obj = self.hot_cache.make_space_for(shape, dtype)
+        memory_obj = self.hot_cache.allocate(shape, dtype)
         self.manager_lock.release()
         return memory_obj
 
