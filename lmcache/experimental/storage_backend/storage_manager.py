@@ -98,6 +98,7 @@ class StorageManager:
             return memory_obj
 
         assert isinstance(self.memory_allocator, MixedMemoryAllocator)
+        # this will evict from the hot cache to try to allocate
         memory_obj = self.hot_cache.allocate(shape, dtype)
         self.manager_lock.release()
         return memory_obj
@@ -126,7 +127,7 @@ class StorageManager:
         """
         self.manager_lock.acquire()
         if self.use_hot:
-            self.hot_cache.put(key, memory_obj)
+            self.hot_cache.put(key, memory_obj, pre_allocated=True)
 
         # TODO(Jiayi): currently, the entire put task will be cancelled
         # if one of the backend is already storing this cache.
@@ -291,7 +292,7 @@ class StorageManager:
         # NOTE: no need to ref_count_up here because
         # the memory_obj's ref_count is already 1
         self.manager_lock.acquire()
-        self.hot_cache[key] = memory_obj
+        self.hot_cache.put(key, memory_obj, from_callback=True)
         self.manager_lock.release()
 
     def prefetch(self, key: CacheEngineKey) -> None:
@@ -300,7 +301,7 @@ class StorageManager:
 
         # Call contains for each backend. Find the nearest cache
         self.manager_lock.acquire()
-        if key in self.hot_cache:
+        if self.hot_cache.contains(key):
             self.manager_lock.release()
             return
         if key in self.prefetch_tasks:
@@ -340,7 +341,7 @@ class StorageManager:
         """
         with self.manager_lock:
             if search_range is None or "Hot" in search_range:
-                if key in self.hot_cache:
+                if self.hot_cache.contains(key):
                     return True
 
             for backend_name, backend in self.storage_backends.items():
@@ -376,11 +377,7 @@ class StorageManager:
         with self.manager_lock:
             if locations is None or "Hot" in locations:
                 if self.use_hot and key in self.hot_cache:
-                    memory_obj = self.hot_cache[key]
-                    # NOTE(Jiayi): do not remove if other jobs are using
-                    # this `memory_obj`
-                    if self.memory_allocator.get_ref_count(memory_obj) == 1:
-                        self.memory_allocator.ref_count_down(memory_obj)
+                    if self.hot_cache.remove(key):
                         num_removed += 1
 
         # TODO(Jiayi): need to handle remove in non-cpu backends
@@ -405,22 +402,9 @@ class StorageManager:
 
         num_cleared = 0
 
-        clear_keys = []
         self.manager_lock.acquire()
         if locations is None or "Hot" in locations and self.use_hot:
-            for clear_key in self.hot_cache:
-                memory_obj = self.hot_cache[clear_key]
-                # NOTE(Jiayi): do not remove if other jobs are using
-                # this `memory_obj`
-                if self.memory_allocator.get_ref_count(memory_obj) > 1:
-                    continue
-                self.memory_allocator.ref_count_down(memory_obj)
-                clear_keys.append(clear_key)
-            for clear_key in clear_keys:
-                self.hot_cache.pop(clear_key)
-            if self.lookup_server is not None:
-                self.lookup_server.batched_remove(clear_keys)
-            num_cleared += len(clear_keys)
+            num_cleared += self.hot_cache.clear()
         self.manager_lock.release()
 
         # TODO(Jiayi): need to handle clear in non-cpu backends
