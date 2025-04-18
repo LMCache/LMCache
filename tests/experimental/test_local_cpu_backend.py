@@ -9,8 +9,10 @@ from collections import OrderedDict
 
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.experimental.config import LMCacheEngineConfig
-from lmcache.experimental.memory_management import (MemoryObj, MemoryObjMetadata,
-                                                   MemoryFormat, TensorMemoryObj)
+from lmcache.experimental.memory_management import (MemoryObj,
+                                                    MemoryObjMetadata,
+                                                    MemoryFormat,
+                                                    TensorMemoryObj)
 from lmcache.experimental.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.experimental.storage_backend.storage_manager import StorageManager
 from lmcache.utils import CacheEngineKey
@@ -19,7 +21,9 @@ from lmcache.utils import CacheEngineKey
 from concurrent.futures import Future
 import asyncio
 
+
 class MemoryObjFactory:
+
     def __init__(self):
         self.counter = 0
 
@@ -32,23 +36,27 @@ class MemoryObjFactory:
             address=self.counter,  # address is used for key generation
             phy_size=tensor.numel() * tensor.element_size(),
             ref_count=1,
-            fmt=MemoryFormat.KV_BLOB
-        )
+            fmt=MemoryFormat.KV_BLOB)
         memory_obj = TensorMemoryObj(tensor, metadata)
         return memory_obj
+
 
 # usually the key and memory object are generated together but for testing
 # we generate the memory object first and then the key
 def generate_key(memory_obj: MemoryObj):
-    return CacheEngineKey("vllm", "test_model", 1, 0, f"chunk_{memory_obj.metadata.address}")
+    return CacheEngineKey("vllm", "test_model", 1, 0,
+                          f"chunk_{memory_obj.metadata.address}")
+
 
 # fragile mock memory allocator that doesn't actually grab or distribute memory
 class MockMemoryAllocator:
+
     def __init__(self, max_allocations=None):
         self.ref_counts = {}
         self.max_allocations = max_allocations
         self.memory_obj_factory = MemoryObjFactory()
-        self.pin_allocator = type('MockPinAllocator', (), {'num_active_allocations': 0})()
+        self.pin_allocator = type('MockPinAllocator', (),
+                                  {'num_active_allocations': 0})()
 
     def ref_count_up(self, memory_obj):
         assert memory_obj in self.ref_counts, \
@@ -75,6 +83,7 @@ class MockMemoryAllocator:
         memory_obj = self.memory_obj_factory.create_memory_obj()
         self.ref_counts[memory_obj] = 1
         return memory_obj
+
 
 def test_local_cpu_backend_basic_operations():
     # setup with no lookup server
@@ -116,6 +125,7 @@ def test_local_cpu_backend_basic_operations():
     assert num_cleared == 1  # should be just new_key left
     assert not backend.contains(new_key)
 
+
 def test_local_cpu_backend_ref_counting():
     memory_allocator = MockMemoryAllocator()
     backend = LocalCPUBackend(memory_allocator)
@@ -151,6 +161,7 @@ def test_local_cpu_backend_ref_counting():
     assert backend.remove(key)
     assert memory_allocator.get_ref_count(memory_obj) == 0
 
+
 def test_local_cpu_backend_allocation_eviction():
     memory_allocator = MockMemoryAllocator(max_allocations=5)
     backend = LocalCPUBackend(memory_allocator)
@@ -158,7 +169,8 @@ def test_local_cpu_backend_allocation_eviction():
     # fill the cache to capacity
     keys = []
     for i in range(5):
-        memory_obj = memory_allocator.allocate(torch.Size([10, 10]), torch.float32)
+        memory_obj = memory_allocator.allocate(torch.Size([10, 10]),
+                                               torch.float32)
         key = generate_key(memory_obj)
         backend.put(key, memory_obj)
         keys.append(key)
@@ -166,7 +178,8 @@ def test_local_cpu_backend_allocation_eviction():
         memory_allocator.ref_count_down(memory_obj)
 
     # double check that the next allocation will fail
-    failed_memory_obj = memory_allocator.allocate(torch.Size([10, 10]), torch.float32)
+    failed_memory_obj = memory_allocator.allocate(torch.Size([10, 10]),
+                                                  torch.float32)
     assert failed_memory_obj is None
 
     # try to allocate a new object - should trigger eviction
@@ -178,6 +191,7 @@ def test_local_cpu_backend_allocation_eviction():
     assert new_obj is not None
     assert not backend.contains(keys[0])
     assert backend.contains(keys[1])
+
 
 def test_local_cpu_backend_not_implemented_methods():
     memory_allocator = MockMemoryAllocator()
@@ -197,44 +211,42 @@ def test_local_cpu_backend_not_implemented_methods():
     with pytest.raises(NotImplementedError):
         backend.get_blocking(key)
 
+
 def test_storage_manager_no_local_cpu_backend():
     # Set remote_url to None to avoid creating a remote backend
     config = LMCacheEngineConfig.from_defaults(local_cpu=False, \
                                                 local_disk=False, remote_url=None, \
                                                 lookup_url=None, distributed_url=None)
-    metadata = LMCacheEngineMetadata(
-        model_name="test_model",
-        world_size=1,
-        worker_id=0,
-        fmt="vllm",
-        kv_dtype=torch.float32,
-        kv_shape=(32, 2, 256, 8, 128)
-    )
+    metadata = LMCacheEngineMetadata(model_name="test_model",
+                                     world_size=1,
+                                     worker_id=0,
+                                     fmt="vllm",
+                                     kv_dtype=torch.float32,
+                                     kv_shape=(32, 2, 256, 8, 128))
     allocator = MockMemoryAllocator()
 
     manager = StorageManager(config, metadata, allocator)
     assert manager.hot_cache is None
     assert len(manager.storage_backends) == 0
 
+
 def test_storage_manager_with_local_cpu_backend():
     # Set remote_url to None to avoid creating a remote backend
     config = LMCacheEngineConfig.from_defaults(local_cpu=True, max_local_cpu_size=5, \
                                                 local_disk=False, remote_url=None, \
                                                 lookup_url=None, distributed_url=None)
-    metadata = LMCacheEngineMetadata(
-        model_name="test_model",
-        world_size=1,
-        worker_id=0,
-        fmt="vllm",
-        kv_dtype=torch.float32,
-        kv_shape=(32, 2, 256, 8, 128)
-    )
+    metadata = LMCacheEngineMetadata(model_name="test_model",
+                                     world_size=1,
+                                     worker_id=0,
+                                     fmt="vllm",
+                                     kv_dtype=torch.float32,
+                                     kv_shape=(32, 2, 256, 8, 128))
     allocator = MockMemoryAllocator()
 
     # mock the CreateStorageBackends function as an empty OrderedDict so that we
     # can test just the storage manager with a hot cache
     with patch("lmcache.experimental.storage_backend.CreateStorageBackends",
-                return_value=OrderedDict()):
+               return_value=OrderedDict()):
         # create the StorageManager
         manager = StorageManager(config, metadata, allocator)
 
@@ -270,20 +282,19 @@ def test_storage_manager_with_local_cpu_backend():
         assert manager.remove(key, ["Hot"]) == 1
         assert not manager.contains(key, ["Hot"])
 
+
 def test_storage_manager_with_local_cpu_backend_with_disk():
     # Set remote_url to None to avoid creating a remote backend
     config = LMCacheEngineConfig.from_defaults(local_cpu=True, max_local_cpu_size=5, \
                                                 local_disk="/tmp/test_disk", max_local_disk_size=5, \
                                                 remote_url=None, lookup_url=None, \
                                                 distributed_url=None)
-    metadata = LMCacheEngineMetadata(
-        model_name="test_model",
-        world_size=1,
-        worker_id=0,
-        fmt="vllm",
-        kv_dtype=torch.float32,
-        kv_shape=(32, 2, 256, 8, 128)
-    )
+    metadata = LMCacheEngineMetadata(model_name="test_model",
+                                     world_size=1,
+                                     worker_id=0,
+                                     fmt="vllm",
+                                     kv_dtype=torch.float32,
+                                     kv_shape=(32, 2, 256, 8, 128))
     allocator = MockMemoryAllocator()
 
     # don't mock CreateStorageBackends because we want to test the disk backend
