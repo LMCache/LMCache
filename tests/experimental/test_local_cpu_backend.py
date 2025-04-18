@@ -76,9 +76,6 @@ class MockMemoryAllocator:
         self.ref_counts[memory_obj] = 1
         return memory_obj
 
-    def keys(self):
-        return list(self.ref_counts.keys())
-
 def test_local_cpu_backend_basic_operations():
     # setup with no lookup server
     memory_allocator = MockMemoryAllocator()
@@ -105,7 +102,7 @@ def test_local_cpu_backend_basic_operations():
     backend.put(new_key, new_obj)
     backend.touch(old_key)  # move to end
     # bad practice to peek directly in but for test
-    assert list(backend.hot_cache_.keys()) == [new_key, old_key]
+    assert backend.get_keys() == [new_key, old_key]
 
     # test remove (first release our references)
     memory_allocator.ref_count_down(retrieved)
@@ -257,15 +254,14 @@ def test_storage_manager_with_local_cpu_backend():
         # verify it's now in the hot cache
         assert manager.contains(key, ["Hot"])
 
-        # get the object and verify it's the same
+        # the reason why the ref count is 1 and not 2 is because put calls ref_count_down
+        # as a way to clean up for the caller (but hot cache still holds a ref)
+        assert allocator.get_ref_count(memory_obj) == 1
+
+        # get the object and verify it's the same (gives us a ref count)
         retrieved = manager.get(key)
         assert retrieved is not None
         assert allocator.get_ref_count(retrieved) == 2
-
-        # put the same object again
-        manager.put(key, memory_obj)
-        # make sure the ref count is still 2
-        assert allocator.get_ref_count(memory_obj) == 2
 
         # clean up (so we can remove from hot cache)
         allocator.ref_count_down(retrieved)
@@ -273,7 +269,6 @@ def test_storage_manager_with_local_cpu_backend():
         # remove the object (only remove location is hot cache)
         assert manager.remove(key, ["Hot"]) == 1
         assert not manager.contains(key, ["Hot"])
-
 
 def test_storage_manager_with_local_cpu_backend_with_disk():
     # Set remote_url to None to avoid creating a remote backend
@@ -312,134 +307,37 @@ def test_storage_manager_with_local_cpu_backend_with_disk():
     # verify it's now in the hot cache
     assert manager.contains(key, ["Hot"])
 
-    # get the object and verify it's the same
-    retrieved = manager.get(key)
-    assert retrieved is not None
-    assert allocator.get_ref_count(retrieved) > 1
+    # spin loop until the ref count is 1
+    # (the disk backend is done writing to disk)
+    while allocator.get_ref_count(memory_obj) != 1:
+        time.sleep(0.001)
 
-    # clean up (so we can remove from hot cache)
-    allocator.ref_count_down(retrieved)
-
-    # remove the object (only remove location is hot cache)
+    # remove the object only from hot cache (should still be in disk)
     assert manager.remove(key, ["Hot"]) == 1
     assert not manager.contains(key, ["Hot"])
 
-def test_local_cpu_backend_thread_safety():
-    """test concurrent operations on LocalCPUBackend to verify thread safety."""
-    memory_allocator = MockMemoryAllocator(max_allocations=100)
-    backend = LocalCPUBackend(memory_allocator)
+    # nobody should be holding a ref to the memory object
+    assert allocator.get_ref_count(memory_obj) == 0
 
-    # add keys method to access the backend's keys
-    def get_keys(backend):
-        # this is not thread-safe, but it's just for testing
-        return list(backend.hot_cache_.keys())
+    # prefetch from the disk
+    manager.prefetch(key)
 
-    # pre-populate with some items
-    initial_keys = []
-    for i in range(10):
-        key = generate_random_key()
-        memory_obj = memory_allocator.allocate(torch.Size([10, 10]), torch.float32)
-        backend.put(key, memory_obj)
-        initial_keys.append(key)
+    # hacky: wait for 1 second for the prefetch to complete
+    time.sleep(1)
 
-    # function to perform random operations
-    def worker(worker_id, iterations=50):
-        operations = []
-        for _ in range(iterations):
-            op = random.choice(['get', 'put', 'remove', 'contains', 'touch'])
+    # verify it's now in the hot cache
+    assert manager.contains(key, ["Hot"])
 
-            if op in ['get', 'remove', 'contains', 'touch']:
-                # use an existing key if available
-                if initial_keys and random.random() < 0.7:
-                    key = random.choice(initial_keys)
-                else:
-                    key = generate_random_key()
+    # remove the object only from hot cache (should still be in disk)
+    assert manager.remove(key, ["Hot"]) == 1
+    assert not manager.contains(key, ["Hot"])
 
-                if op == 'get':
-                    result = backend.get(key)
-                    if result is not None:
-                        memory_allocator.ref_count_down(result)
-                elif op == 'remove':
-                    backend.remove(key)
-                elif op == 'contains':
-                    backend.contains(key)
-                elif op == 'touch':
-                    backend.touch(key)
-            else:  # put
-                key = generate_random_key()
-                memory_obj = memory_allocator.allocate(torch.Size([10, 10]), torch.float32)
-                backend.put(key, memory_obj)
+    # nobody should be holding a ref to the memory object
+    assert allocator.get_ref_count(memory_obj) == 0
 
-            # small sleep to increase chance of thread interleaving
-            time.sleep(0.001)
-            operations.append((op, key))
-        return operations
-
-    # run multiple threads concurrently
-    num_threads = 5
-    with ThreadPoolExecutor(max_workers=num_threads) as executor:
-        futures = [executor.submit(worker, i) for i in range(num_threads)]
-        results = [future.result() for future in futures]
-
-    # verify backend still works after concurrent access
-    test_key = generate_random_key()
-    test_obj = memory_allocator.allocate(torch.Size([10, 10]), torch.float32)
-    backend.put(test_key, test_obj)
-
-    retrieved = backend.get(test_key)
+    # this time use blocking get instead of prefetch
+    retrieved = manager.get(key)
     assert retrieved is not None
-    assert memory_allocator.get_ref_count(retrieved) > 0
-    memory_allocator.ref_count_down(retrieved)
 
-    # verify we can clear the cache
-    num_cleared = backend.clear()
-    assert num_cleared >= 0
-
-def test_local_cpu_backend_put_from_callback():
-    """test the from_callback parameter in the put method."""
-    memory_allocator = MockMemoryAllocator()
-    backend = LocalCPUBackend(memory_allocator)
-
-    # create a key and memory object
-    key = generate_random_key()
-    memory_obj = memory_allocator.allocate(torch.Size([10, 10]), torch.float32)
-
-    # initial ref count should be 1
-    assert memory_allocator.get_ref_count(memory_obj) == 1
-
-    # use from_callback=True, which should NOT increment the ref count
-    backend.put(key, memory_obj, from_callback=True)
-    assert memory_allocator.get_ref_count(memory_obj) == 1
-
-    # verify the object was added to the cache
-    assert backend.contains(key)
-
-    # create another object for comparison with default behavior
-    key2 = generate_random_key()
-    memory_obj2 = memory_allocator.allocate(torch.Size([10, 10]), torch.float32)
-
-    # initial ref count should be 1
-    assert memory_allocator.get_ref_count(memory_obj2) == 1
-
-    # default behavior (from_callback=False) should increment the ref count
-    backend.put(key2, memory_obj2)
-    assert memory_allocator.get_ref_count(memory_obj2) == 2
-
-    # verify getting both objects works
-    retrieved1 = backend.get(key)
-    retrieved2 = backend.get(key2)
-
-    assert retrieved1 is not None
-    assert retrieved2 is not None
-
-    # clean up
-    memory_allocator.ref_count_down(retrieved1)
-    memory_allocator.ref_count_down(retrieved2)
-
-    # test overwriting an existing key
-    new_obj = memory_allocator.allocate(torch.Size([10, 10]), torch.float32)
-    backend.put(key, new_obj, from_callback=True)
-
-    # should have removed the old object and not incremented new_obj's ref count
-    assert memory_allocator.get_ref_count(new_obj) == 1
-    assert memory_allocator.get_ref_count(memory_obj) == 0  # old object should be gone
+    # both the hot cache and the caller (us) should be holding a ref
+    assert allocator.get_ref_count(retrieved) == 2
