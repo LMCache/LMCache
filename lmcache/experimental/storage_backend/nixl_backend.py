@@ -68,6 +68,8 @@ class RecvObjPool:
         self._dbg_last_report_time = time.time()
 
     def dbg_report(self):
+        return  # Disable debug report for now
+
         curr_time = time.time()
         if curr_time - self._dbg_last_report_time < 5:
             return
@@ -88,7 +90,6 @@ class RecvObjPool:
         logger.warning("  - Total size: %.2f GB",
                        tot_size / 1024 / 1024 / 1024)
         logger.warning("  - Number of GC: %d", self._dbg_num_gc)
-        return
 
     def _gc(self):
         if not self._enable_gc:
@@ -153,22 +154,24 @@ class RecvObjPool:
                 self._gc()
 
             # DEBUG
+            ret = key in self._data
             self._dbg_num_contains += 1
-            if key in self._data:
+            if ret:
                 self._dbg_num_success_contains += 1
             self.dbg_report()
 
-            return key in self._data
+            return ret
 
     def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         with self.lock:
             # DEBUG
+            ret = self._data.get(key, None)
             self._dbg_num_get += 1
-            if key in self._data:
+            if ret is not None:
                 self._dbg_num_success_get += 1
             self.dbg_report()
 
-            return self._data.get(key, None)
+            return ret
 
 
 class BasicNixlObserver(NixlObserverInterface):
