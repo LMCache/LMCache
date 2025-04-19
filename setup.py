@@ -1,5 +1,8 @@
+from pathlib import Path
 from setuptools import find_packages, setup
 from torch.utils import cpp_extension
+
+ROOT_DIR = Path(__file__).parent
 
 # Taken from https://github.com/vllm-project/vllm/blob/main/setup.py
 def get_requirements() -> list[str]:
