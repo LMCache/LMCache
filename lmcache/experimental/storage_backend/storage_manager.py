@@ -236,15 +236,15 @@ class StorageManager:
             prefetch_task.result(timeout=1)
 
         # Search in hot_cache
-        self.manager_lock.acquire()
         if self.use_hot:
+            self.manager_lock.acquire()
             # hot_cache.get(key) does ref_count_up() for the caller
             memory_obj = self.hot_cache.get(key)
             if memory_obj is not None:
                 self.manager_lock.release()
                 return memory_obj
 
-        self.manager_lock.release()
+            self.manager_lock.release()
 
         # Search all backends for blocking get
         for backend_name, backend in self.storage_backends.items():

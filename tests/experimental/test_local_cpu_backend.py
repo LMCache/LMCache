@@ -110,7 +110,6 @@ def test_local_cpu_backend_basic_operations():
     new_key = generate_key(new_obj)
     backend.put(new_key, new_obj)
     backend.touch(old_key)  # move to end
-    # bad practice to peek directly in but for test
     assert backend.get_keys() == [new_key, old_key]
 
     # test remove (first release our references)
