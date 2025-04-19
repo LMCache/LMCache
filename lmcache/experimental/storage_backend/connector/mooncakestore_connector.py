@@ -116,7 +116,7 @@ class MooncakestoreConnector(RemoteConnector):
         key_str = key.to_string()
 
         combined_bytes = self.store.get(key_str)
-        if combined_bytes is None:
+        if combined_bytes is None or len(combined_bytes) <= METADATA_BYTES_LEN:
             return None
 
         assert not inspect.isawaitable(combined_bytes)
@@ -144,8 +144,8 @@ class MooncakestoreConnector(RemoteConnector):
         key_str = key.to_string()
         kv_bytes = memory_obj.byte_array
         metadata = RedisMetadata(len(kv_bytes), memory_obj.get_shape(),
-                                        memory_obj.get_dtype(),
-                                        memory_obj.get_memory_format())
+                                 memory_obj.get_dtype(),
+                                 memory_obj.get_memory_format())
 
         combined_bytes = metadata.serialize() + kv_bytes
 
