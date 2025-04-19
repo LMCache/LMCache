@@ -88,7 +88,7 @@ class MockMemoryAllocator:
 def test_local_cpu_backend_basic_operations():
     # setup with no lookup server
     memory_allocator = MockMemoryAllocator()
-    backend = LocalCPUBackend(memory_allocator)
+    backend = LocalCPUBackend(memory_allocator, real_allocator=False)
     memory_obj = memory_allocator.allocate(torch.Size([10, 10]), torch.float32)
     key = generate_key(memory_obj)
 
@@ -127,7 +127,7 @@ def test_local_cpu_backend_basic_operations():
 
 def test_local_cpu_backend_ref_counting():
     memory_allocator = MockMemoryAllocator()
-    backend = LocalCPUBackend(memory_allocator)
+    backend = LocalCPUBackend(memory_allocator, real_allocator=False)
     memory_obj = memory_allocator.allocate(torch.Size([10, 10]), torch.float32)
     key = generate_key(memory_obj)
 
@@ -163,7 +163,7 @@ def test_local_cpu_backend_ref_counting():
 
 def test_local_cpu_backend_allocation_eviction():
     memory_allocator = MockMemoryAllocator(max_allocations=5)
-    backend = LocalCPUBackend(memory_allocator)
+    backend = LocalCPUBackend(memory_allocator, real_allocator=False)
 
     # fill the cache to capacity
     keys = []
@@ -194,7 +194,7 @@ def test_local_cpu_backend_allocation_eviction():
 
 def test_local_cpu_backend_not_implemented_methods():
     memory_allocator = MockMemoryAllocator()
-    backend = LocalCPUBackend(memory_allocator)
+    backend = LocalCPUBackend(memory_allocator, real_allocator=False)
     memory_obj = memory_allocator.allocate(torch.Size([10, 10]), torch.float32)
     key = generate_key(memory_obj)
 

@@ -12,6 +12,7 @@ from lmcache.experimental.storage_backend.abstract_backend import \
     StorageBackendInterface
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey, _lmcache_nvtx_annotate
+from lmcache.experimental.memory_management import MixedMemoryAllocator
 
 logger = init_logger(__name__)
 
@@ -32,17 +33,17 @@ class LocalCPUBackend(StorageBackendInterface):
     implementation and/or inheritance structure?
     """
 
-    def __init__(
-        self,
-        memory_allocator: MemoryAllocatorInterface,
-        lookup_server: Optional[LookupServerInterface] = None,
-    ):
+    def __init__(self,
+                 memory_allocator: MemoryAllocatorInterface,
+                 lookup_server: Optional[LookupServerInterface] = None,
+                 real_allocator: bool = True):
         # rely on ordered dict to manage LRU
         self.hot_cache_: OrderedDict[CacheEngineKey, MemoryObj] = OrderedDict()
         self.lookup_server = lookup_server
         self.memory_allocator = memory_allocator
-        assert isinstance(self.memory_allocator, MixedMemoryAllocator), \
-            "LocalCPUBackend must be used with a MixedMemoryAllocator"
+        if real_allocator:  # turn off real_allocator for testing
+            assert isinstance(self.memory_allocator, MixedMemoryAllocator), \
+                "LocalCPUBackend must be used with a MixedMemoryAllocator"
 
         # multiple threads can access the hot cache (protects self.hot_cache_)
         self.hot_cache_lock = threading.Lock()
