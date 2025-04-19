@@ -116,7 +116,7 @@ class MooncakestoreConnector(RemoteConnector):
         key_str = key.to_string()
 
         metadata_bytes = self.store.get(key_str + "metadata")
-        if metadata_bytes is None:
+        if metadata_bytes is None or len(metadata_bytes) != METADATA_BYTES_LEN:
             return None
 
         assert not inspect.isawaitable(metadata_bytes)
