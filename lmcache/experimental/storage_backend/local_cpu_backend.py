@@ -252,4 +252,4 @@ class LocalCPUBackend(StorageBackendInterface):
         return len(clear_keys)
 
     def close(self) -> None:
-        self.hot_cache_.clear()
+        self.clear()
