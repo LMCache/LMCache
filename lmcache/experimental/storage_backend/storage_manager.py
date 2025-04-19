@@ -54,9 +54,7 @@ class StorageManager:
         self.use_hot = config.local_cpu
         self.hot_cache = None
         if self.use_hot:
-            # Check if allocator is MixedMemoryAllocator, if not we'll use real_allocator=False
-            real_allocator = isinstance(allocator, MixedMemoryAllocator)
-            self.hot_cache = LocalCPUBackend(allocator, lookup_server, real_allocator=real_allocator)
+            self.hot_cache = LocalCPUBackend(allocator, lookup_server)
 
         self.loop = asyncio.new_event_loop()
         self.thread = threading.Thread(target=self.loop.run_forever)
