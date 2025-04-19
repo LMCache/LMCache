@@ -135,7 +135,12 @@ class MooncakestoreConnector(RemoteConnector):
             logger.warning("Failed to allocate memory during remote receive")
             return None
 
-        view = memoryview(memory_obj.byte_array)
+        if isinstance(memory_obj.byte_array, memoryview):
+            view = memory_obj.byte_array
+            if view.format == "<B":
+                view = view.cast("B")
+        else:
+            view = memoryview(memory_obj.byte_array)
         view[:metadata.length] = kv_bytes
 
         return memory_obj
