@@ -41,6 +41,8 @@ class LocalCPUBackend(StorageBackendInterface):
         self.hot_cache_: OrderedDict[CacheEngineKey, MemoryObj] = OrderedDict()
         self.lookup_server = lookup_server
         self.memory_allocator = memory_allocator
+        assert isinstance(self.memory_allocator, MixedMemoryAllocator), \
+            "LocalCPUBackend must be used with a MixedMemoryAllocator"
 
         # multiple threads can access the hot cache (protects self.hot_cache_)
         self.hot_cache_lock = threading.Lock()

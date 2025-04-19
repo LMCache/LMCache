@@ -99,10 +99,10 @@ class StorageManager:
             self.manager_lock.release()
             return memory_obj
 
-        assert isinstance(self.memory_allocator, MixedMemoryAllocator)
         if self.use_hot:
             # this will try to evict from the hot cache and allocate
             memory_obj = self.hot_cache.allocate(shape, dtype)
+
         self.manager_lock.release()
         return memory_obj
 
