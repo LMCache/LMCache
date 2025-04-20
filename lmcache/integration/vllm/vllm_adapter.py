@@ -91,12 +91,12 @@ def init_lmcache_engine(
                                      parallel_config.rank, "vllm", kv_dtype,
                                      kv_shape)
     hidden_dim_size = num_kv_head * head_size
-    vllm_gpu_connector = VLLMPagedMemGPUConnectorV2(
-        hidden_dim_size, num_layer,
-        use_gpu=True,
-        chunk_size=chunk_size,
-        dtype=kv_dtype,
-        device=device)
+    vllm_gpu_connector = VLLMPagedMemGPUConnectorV2(hidden_dim_size,
+                                                    num_layer,
+                                                    use_gpu=True,
+                                                    chunk_size=chunk_size,
+                                                    dtype=kv_dtype,
+                                                    device=device)
     assert isinstance(config, LMCacheEngineConfig), \
         "LMCache experimental configuration is should be passed."
     engine = LMCacheEngineBuilder.get_or_create(ENGINE_NAME, config, metadata,
