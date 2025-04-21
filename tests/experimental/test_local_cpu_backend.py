@@ -221,7 +221,7 @@ def test_storage_manager_no_local_cpu_backend():
                                      kv_shape=(32, 2, 256, 8, 128))
     allocator = MockMemoryAllocator()
 
-    manager = StorageManager(config, metadata, allocator)
+    manager = StorageManager(config, metadata, allocator, real_allocator=False)
     assert manager.hot_cache is None
     assert len(manager.storage_backends) == 0
 
@@ -247,7 +247,7 @@ def test_storage_manager_with_local_cpu_backend():
     with patch("lmcache.experimental.storage_backend.CreateStorageBackends",
                return_value=OrderedDict()):
         # create the StorageManager
-        manager = StorageManager(config, metadata, allocator)
+        manager = StorageManager(config, metadata, allocator, real_allocator=False)
 
         # verify manager.hot_cache is LocalCPUBackend
         assert isinstance(manager.hot_cache, LocalCPUBackend)
@@ -302,7 +302,7 @@ def test_storage_manager_with_local_cpu_backend_with_disk():
 
     # don't mock CreateStorageBackends because we want to test the disk backend
     # with the hot cache
-    manager = StorageManager(config, metadata, allocator)
+    manager = StorageManager(config, metadata, allocator, real_allocator=False)
 
     # verify manager.hot_cache is LocalCPUBackend
     assert isinstance(manager.hot_cache, LocalCPUBackend)
