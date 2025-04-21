@@ -225,6 +225,9 @@ def test_storage_manager_no_local_cpu_backend():
     assert manager.hot_cache is None
     assert len(manager.storage_backends) == 0
 
+    # clean up the manager
+    manager.close()
+
 
 def test_storage_manager_with_local_cpu_backend():
     # Set remote_url to None to avoid creating a remote backend
@@ -284,6 +287,9 @@ def test_storage_manager_with_local_cpu_backend():
         # remove the object (only remove location is hot cache)
         assert manager.remove(key, ["Hot"]) == 1
         assert not manager.contains(key, ["Hot"])
+
+        # clean up the manager
+        manager.close()
 
 
 def test_storage_manager_with_local_cpu_backend_with_disk():
@@ -358,3 +364,6 @@ def test_storage_manager_with_local_cpu_backend_with_disk():
 
     # both the hot cache and the caller (us) should be holding a ref
     assert allocator.get_ref_count(retrieved) == 2
+
+    # clean up the manager
+    manager.close()

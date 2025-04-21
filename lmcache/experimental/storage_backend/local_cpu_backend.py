@@ -1,7 +1,7 @@
 from collections import OrderedDict
 from concurrent.futures import Future
 import threading
-from typing import List, Optional
+from typing import List, Optional, cast
 
 import torch
 
@@ -197,6 +197,9 @@ class LocalCPUBackend(StorageBackendInterface):
         evict_keys = []
 
         self.hot_cache_lock.acquire()
+        if self.real_allocator:
+            assert isinstance(self.memory_allocator, MixedMemoryAllocator)
+            mixed_allocator = cast(MixedMemoryAllocator, self.memory_allocator)
         for evict_key in self.hot_cache_:
             # If the ref_count > 1, we cannot evict it as the hot cache
             # might be used as buffers by other storage backends
@@ -213,8 +216,7 @@ class LocalCPUBackend(StorageBackendInterface):
             # In this way, we don't need to do eviction for big objects
             # TODO(Jiayi): the following code is hacky, please refactor
             if self.real_allocator and \
-                isinstance(self.memory_allocator, MixedMemoryAllocator) and \
-                self.memory_allocator.pin_allocator.num_active_allocations == 0:
+                mixed_allocator.pin_allocator.num_active_allocations == 0:
                 break
         for evict_key in evict_keys:
             self.hot_cache_.pop(evict_key)
