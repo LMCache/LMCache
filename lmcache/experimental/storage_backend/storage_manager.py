@@ -201,14 +201,14 @@ class StorageManager:
                                             non_blocking=True)
             memory_obj.tensor.record_stream(self.stream)
 
-            # Update the hot cache
+            # Update the hot cache (manager lock needed?)
             self.manager_lock.acquire()
             self.hot_cache.put(key, cpu_memory_obj)
             self.manager_lock.release()
             logger.debug("Updated hot cache!")
             return
         else:
-            # protect self.hot_cache.memory_allocator
+            # manager lock needed? 
             self.manager_lock.acquire()
             self.hot_cache.put(key, memory_obj)
             self.manager_lock.release()
