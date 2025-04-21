@@ -30,9 +30,9 @@ def get_zmq_socket(context, socket_path: str, protocol: str, role):
     """
     socket_addr = f"{protocol}://{socket_path}"
     socket = context.socket(role)
-    if role in [zmq.PUB, zmq.PUSH, zmq.REP]: # type: ignore[attr-defined]
+    if role in [zmq.PUB, zmq.PUSH, zmq.REP]:  # type: ignore[attr-defined]
         socket.bind(socket_addr)
-    elif role in [zmq.SUB, zmq.PULL, zmq.REQ]: # type: ignore[attr-defined]
+    elif role in [zmq.SUB, zmq.PULL, zmq.REQ]:  # type: ignore[attr-defined]
         socket.connect(socket_addr)
     else:
         raise ValueError(f"Invalid role: {role}")
@@ -49,7 +49,7 @@ def close_zmq_socket(socket: zmq.asyncio.Socket, linger: int = 0) -> None:
     Default is 0 (drop immediately).
     """
     try:
-        socket.setsockopt(zmq.LINGER, linger) # type: ignore[attr-defined]
+        socket.setsockopt(zmq.LINGER, linger)  # type: ignore[attr-defined]
         socket.close()
     except Exception as e:
         logger.error(f"Warning: Failed to close socket cleanly: {e}")
