@@ -4,6 +4,7 @@ from torch.utils import cpp_extension
 
 ROOT_DIR = Path(__file__).parent
 
+
 # Taken from https://github.com/vllm-project/vllm/blob/main/setup.py
 def get_requirements() -> list[str]:
     """Get Python package dependencies from requirements.txt."""
@@ -23,6 +24,7 @@ def get_requirements() -> list[str]:
 
     requirements = _read_requirements("requirements.txt")
     return requirements
+
 
 ext_modules = [
     cpp_extension.CUDAExtension(
