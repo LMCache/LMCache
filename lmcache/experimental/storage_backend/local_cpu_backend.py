@@ -1,18 +1,18 @@
+import threading
 from collections import OrderedDict
 from concurrent.futures import Future
-import threading
 from typing import List, Optional, cast
 
 import torch
 
 from lmcache.experimental.lookup_server import LookupServerInterface
 from lmcache.experimental.memory_management import (MemoryAllocatorInterface,
-                                                    MemoryObj)
+                                                    MemoryObj,
+                                                    MixedMemoryAllocator)
 from lmcache.experimental.storage_backend.abstract_backend import \
     StorageBackendInterface
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
-from lmcache.experimental.memory_management import MixedMemoryAllocator
 
 logger = init_logger(__name__)
 

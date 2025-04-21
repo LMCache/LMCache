@@ -1,19 +1,18 @@
+import time
+from collections import OrderedDict
+from unittest.mock import patch
+
 import pytest
 import torch
-import time
-from unittest.mock import patch
-from collections import OrderedDict
 
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.experimental.config import LMCacheEngineConfig
-from lmcache.experimental.memory_management import (MemoryObj,
+from lmcache.experimental.memory_management import (MemoryFormat, MemoryObj,
                                                     MemoryObjMetadata,
-                                                    MemoryFormat,
                                                     TensorMemoryObj)
-from lmcache.experimental.storage_backend.local_cpu_backend \
-                                        import LocalCPUBackend
-from lmcache.experimental.storage_backend.storage_manager \
-                                        import StorageManager
+from lmcache.experimental.storage_backend.local_cpu_backend import \
+    LocalCPUBackend
+from lmcache.experimental.storage_backend.storage_manager import StorageManager
 from lmcache.utils import CacheEngineKey
 
 
@@ -143,7 +142,7 @@ def test_local_cpu_backend_ref_counting():
     assert memory_allocator.get_ref_count(memory_obj) == 2
 
     # after remove, ref count should still be 2 because the hot cache refuses to
-    # evict objects with ref count > 1 (and we are sitll holding it)
+    # evict objects with ref count > 1 (and we are still holding it)
     assert not backend.remove(key)
     assert memory_allocator.get_ref_count(memory_obj) == 2
 
