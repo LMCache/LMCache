@@ -60,7 +60,7 @@ class LMCacheLookupClient:
     def __init__(self, role: KVConnectorRole, is_tp: bool,
                  vllm_config: "VllmConfig"):
         self.encoder = MsgpackEncoder()
-        self.ctx = zmq.Context()
+        self.ctx = zmq.Context()  # type: ignore[attr-defined]
         socket_path = get_zmq_rpc_path_lmcache(role, is_tp, vllm_config)
         self.socket = make_zmq_socket(self.ctx,
                                       socket_path,
@@ -83,7 +83,7 @@ class LMCacheLookupServer:
     def __init__(self, lmcache_engine: LMCacheEngine, role: KVConnectorRole,
                  is_tp: bool, vllm_config: "VllmConfig"):
         self.decoder = MsgpackDecoder(torch.Tensor)
-        self.ctx = zmq.Context()
+        self.ctx = zmq.Context()  # type: ignore[attr-defined]
         socket_path = get_zmq_rpc_path_lmcache(role, is_tp, vllm_config)
         self.socket = make_zmq_socket(self.ctx,
                                       socket_path,
