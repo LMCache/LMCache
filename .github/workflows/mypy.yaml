@@ -29,7 +29,7 @@ jobs:
         pip install -r requirements-lint.txt
         pip install redis
         pip install setuptools
-        pip install --upgrade pyzmq
+        pip install pyzmq
         pip install --no-cache-dir --force-reinstall types-setuptools
     - name: Mypy
       run: |

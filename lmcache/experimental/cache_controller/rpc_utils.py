@@ -20,12 +20,12 @@ def clean_old_sockets(instance_id: str, workers: List[int]):
 
 
 def get_server_socket(context, socket_path: str):
-    socket = context.socket(zmq.REP)
+    socket = context.socket(zmq.REP)  # type: ignore[attr-defined]
     socket.bind(f"ipc://{socket_path}")
     return socket
 
 
 def get_client_socket(context, socket_path: str):
-    socket = context.socket(zmq.REQ)
+    socket = context.socket(zmq.REQ)  # type: ignore[attr-defined]
     socket.connect(f"ipc://{socket_path}")
     return socket
