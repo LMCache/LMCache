@@ -85,7 +85,8 @@ def init_lmcache_engine(
     kv_shape = (num_layer, 2, chunk_size, num_kv_head, head_size)
 
     # Change current device.
-    device = torch.cuda.device(parallel_config.rank)
+    torch.cuda.device(parallel_config.rank)
+    device = torch.device(f"cuda:{parallel_config.rank}")
     metadata = LMCacheEngineMetadata(model_config.model,
                                      parallel_config.world_size,
                                      parallel_config.rank, "vllm", kv_dtype,
