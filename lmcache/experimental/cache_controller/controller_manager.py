@@ -60,7 +60,7 @@ class LMCacheControllerManager:
             self.zmq_context,
             self.controller_url,
             protocol="tcp",
-            role=zmq.PULL,
+            role=zmq.PULL, # type: ignore[attr-defined]
         )
         self.kv_controller = KVController()
         self.reg_controller = RegistrationController()

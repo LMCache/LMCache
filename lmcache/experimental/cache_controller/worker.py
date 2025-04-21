@@ -63,7 +63,7 @@ class LMCacheWorker:
             self.context,
             config.controller_url,
             protocol="tcp",
-            role=zmq.PUSH,
+            role=zmq.PUSH, # type: ignore[attr-defined]
         )
 
         # TODO(Jiayi): Make this less hard-coded
@@ -83,7 +83,7 @@ class LMCacheWorker:
             self.context,
             lmcache_worker_url,
             protocol="tcp",
-            role=zmq.REP,
+            role=zmq.REP, # type: ignore[attr-defined]
         )
 
         self.loop = asyncio.new_event_loop()

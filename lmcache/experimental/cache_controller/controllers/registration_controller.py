@@ -69,7 +69,7 @@ class RegistrationController:
         url = msg.url
 
         context = get_zmq_context()
-        socket = get_zmq_socket(context, url, protocol="tcp", role=zmq.REQ)
+        socket = get_zmq_socket(context, url, protocol="tcp", role=zmq.REQ) # type: ignore[attr-defined]
 
         self.socket_mapping[(instance_id, worker_id)] = socket
         if instance_id not in self.worker_mapping:
