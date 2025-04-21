@@ -247,7 +247,10 @@ def test_storage_manager_with_local_cpu_backend():
     with patch("lmcache.experimental.storage_backend.CreateStorageBackends",
                return_value=OrderedDict()):
         # create the StorageManager
-        manager = StorageManager(config, metadata, allocator, real_allocator=False)
+        manager = StorageManager(config,
+                                 metadata,
+                                 allocator,
+                                 real_allocator=False)
 
         # verify manager.hot_cache is LocalCPUBackend
         assert isinstance(manager.hot_cache, LocalCPUBackend)

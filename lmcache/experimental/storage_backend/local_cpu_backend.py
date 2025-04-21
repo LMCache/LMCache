@@ -213,6 +213,7 @@ class LocalCPUBackend(StorageBackendInterface):
             # In this way, we don't need to do eviction for big objects
             # TODO(Jiayi): the following code is hacky, please refactor
             if self.real_allocator and \
+                isinstance(self.memory_allocator, MixedMemoryAllocator) and \
                 self.memory_allocator.pin_allocator.num_active_allocations == 0:
                 break
         for evict_key in evict_keys:

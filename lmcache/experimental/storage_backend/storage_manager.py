@@ -48,11 +48,13 @@ class StorageManager:
                  config: LMCacheEngineConfig,
                  metadata: LMCacheEngineMetadata,
                  allocator: MemoryAllocatorInterface,
-                 lookup_server: Optional[LookupServerInterface] = None):
+                 lookup_server: Optional[LookupServerInterface] = None,
+                 real_allocator: bool = True):
         self.memory_allocator = allocator
         self.hot_cache = None
         if config.local_cpu:
-            self.hot_cache = LocalCPUBackend(allocator, lookup_server)
+            self.hot_cache = LocalCPUBackend(allocator, lookup_server,
+                                             real_allocator)
 
         self.loop = asyncio.new_event_loop()
         self.thread = threading.Thread(target=self.loop.run_forever)
@@ -294,7 +296,8 @@ class StorageManager:
         # NOTE: no need to ref_count_up here because
         # the memory_obj's ref_count is already 1
         self.manager_lock.acquire()
-        self.hot_cache.put(key, memory_obj, from_callback=True)
+        if self.hot_cache:
+            self.hot_cache.put(key, memory_obj, from_callback=True)
         self.manager_lock.release()
 
     def prefetch(self, key: CacheEngineKey) -> None:
@@ -404,7 +407,7 @@ class StorageManager:
         num_cleared = 0
 
         self.manager_lock.acquire()
-        if locations is None or "Hot" in locations and self.hot_cache:
+        if (locations is None or "Hot" in locations) and self.hot_cache:
             num_cleared += self.hot_cache.clear()
         self.manager_lock.release()
 
