@@ -1,7 +1,7 @@
 from collections import OrderedDict
 from concurrent.futures import Future
 import threading
-from typing import List, Optional, Tuple
+from typing import List, Optional
 
 import torch
 
@@ -11,7 +11,7 @@ from lmcache.experimental.memory_management import (MemoryAllocatorInterface,
 from lmcache.experimental.storage_backend.abstract_backend import \
     StorageBackendInterface
 from lmcache.logging import init_logger
-from lmcache.utils import CacheEngineKey, _lmcache_nvtx_annotate
+from lmcache.utils import CacheEngineKey
 from lmcache.experimental.memory_management import MixedMemoryAllocator
 
 logger = init_logger(__name__)
@@ -41,7 +41,8 @@ class LocalCPUBackend(StorageBackendInterface):
         self.hot_cache_: OrderedDict[CacheEngineKey, MemoryObj] = OrderedDict()
         self.lookup_server = lookup_server
         self.memory_allocator = memory_allocator
-        if real_allocator:  # turn off real_allocator for testing
+        self.real_allocator = real_allocator
+        if self.real_allocator:  # turn off real_allocator for testing
             assert isinstance(self.memory_allocator, MixedMemoryAllocator), \
                 "LocalCPUBackend must be used with a MixedMemoryAllocator"
 
@@ -86,8 +87,8 @@ class LocalCPUBackend(StorageBackendInterface):
         """
         Get a memory object from the hot cache
 
-        The caller is responsible for their own ref_count_down() when they're
-        done with the memory object.
+        The caller is responsible for their own ref_count_down() when
+        they're done with the memory object.
         """
         self.hot_cache_lock.acquire()
         if key not in self.hot_cache_:
@@ -105,8 +106,8 @@ class LocalCPUBackend(StorageBackendInterface):
         Pop a memory object from the hot cache
 
         The hot cache cleans up after its own reference
-        but the caller is responsible for their own ref_count_down() when they're
-        done with the memory object.
+        but the caller is responsible for their own ref_count_down()
+        when they're done with the memory object.
         """
         self.hot_cache_lock.acquire()
         if key not in self.hot_cache_:
@@ -211,7 +212,8 @@ class LocalCPUBackend(StorageBackendInterface):
             # TODO(Jiayi): move this before the loop
             # In this way, we don't need to do eviction for big objects
             # TODO(Jiayi): the following code is hacky, please refactor
-            if self.memory_allocator.pin_allocator.num_active_allocations == 0:
+            if self.real_allocator and \
+                self.memory_allocator.pin_allocator.num_active_allocations == 0:
                 break
         for evict_key in evict_keys:
             self.hot_cache_.pop(evict_key)
@@ -223,7 +225,7 @@ class LocalCPUBackend(StorageBackendInterface):
     def get_keys(self) -> List[CacheEngineKey]:
         """
         Primarily used for debugging / testing (thread-safe)
-        Ordering is meaningful from OrderedDict (left is coldest, right is hottest)
+        Ordering is meaningful (left coldest, right hottest)
         """
         self.hot_cache_lock.acquire()
         keys = list(self.hot_cache_.keys())

@@ -1,9 +1,6 @@
 import pytest
 import torch
-import threading
 import time
-import random
-from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 from collections import OrderedDict
 
@@ -13,13 +10,11 @@ from lmcache.experimental.memory_management import (MemoryObj,
                                                     MemoryObjMetadata,
                                                     MemoryFormat,
                                                     TensorMemoryObj)
-from lmcache.experimental.storage_backend.local_cpu_backend import LocalCPUBackend
-from lmcache.experimental.storage_backend.storage_manager import StorageManager
+from lmcache.experimental.storage_backend.local_cpu_backend \
+                                        import LocalCPUBackend
+from lmcache.experimental.storage_backend.storage_manager \
+                                        import StorageManager
 from lmcache.utils import CacheEngineKey
-
-# for the storage manager
-from concurrent.futures import Future
-import asyncio
 
 
 class MemoryObjFactory:
@@ -214,8 +209,10 @@ def test_local_cpu_backend_not_implemented_methods():
 def test_storage_manager_no_local_cpu_backend():
     # Set remote_url to None to avoid creating a remote backend
     config = LMCacheEngineConfig.from_defaults(local_cpu=False, \
-                                                local_disk=False, remote_url=None, \
-                                                lookup_url=None, distributed_url=None)
+                                                local_disk=False, \
+                                                remote_url=None, \
+                                                lookup_url=None, \
+                                                distributed_url=None)
     metadata = LMCacheEngineMetadata(model_name="test_model",
                                      world_size=1,
                                      worker_id=0,
@@ -231,9 +228,12 @@ def test_storage_manager_no_local_cpu_backend():
 
 def test_storage_manager_with_local_cpu_backend():
     # Set remote_url to None to avoid creating a remote backend
-    config = LMCacheEngineConfig.from_defaults(local_cpu=True, max_local_cpu_size=5, \
-                                                local_disk=False, remote_url=None, \
-                                                lookup_url=None, distributed_url=None)
+    config = LMCacheEngineConfig.from_defaults(local_cpu=True, \
+                                               max_local_cpu_size=5, \
+                                                local_disk=False, \
+                                                remote_url=None, \
+                                                lookup_url=None, \
+                                                distributed_url=None)
     metadata = LMCacheEngineMetadata(model_name="test_model",
                                      world_size=1,
                                      worker_id=0,
@@ -265,8 +265,9 @@ def test_storage_manager_with_local_cpu_backend():
         # verify it's now in the hot cache
         assert manager.contains(key, ["Hot"])
 
-        # the reason why the ref count is 1 and not 2 is because put calls ref_count_down
-        # as a way to clean up for the caller (but hot cache still holds a ref)
+        # the reason why the ref count is 1 and not 2 is because
+        # put calls ref_count_down as a way to clean up for the caller
+        # (but hot cache still holds a ref)
         assert allocator.get_ref_count(memory_obj) == 1
 
         # get the object and verify it's the same (gives us a ref count)
@@ -284,9 +285,12 @@ def test_storage_manager_with_local_cpu_backend():
 
 def test_storage_manager_with_local_cpu_backend_with_disk():
     # Set remote_url to None to avoid creating a remote backend
-    config = LMCacheEngineConfig.from_defaults(local_cpu=True, max_local_cpu_size=5, \
-                                                local_disk="/tmp/test_disk", max_local_disk_size=5, \
-                                                remote_url=None, lookup_url=None, \
+    config = LMCacheEngineConfig.from_defaults(local_cpu=True, \
+                                                max_local_cpu_size=5, \
+                                                local_disk="/tmp/test_disk", \
+                                                max_local_disk_size=5, \
+                                                remote_url=None, \
+                                                lookup_url=None, \
                                                 distributed_url=None)
     metadata = LMCacheEngineMetadata(model_name="test_model",
                                      world_size=1,

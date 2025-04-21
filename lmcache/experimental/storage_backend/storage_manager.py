@@ -26,8 +26,7 @@ from lmcache.experimental.config import LMCacheEngineConfig
 from lmcache.experimental.lookup_server import LookupServerInterface
 from lmcache.experimental.memory_management import (MemoryAllocatorInterface,
                                                     MemoryFormat, MemoryObj,
-                                                    MemoryObjMetadata,
-                                                    MixedMemoryAllocator)
+                                                    MemoryObjMetadata)
 from lmcache.experimental.storage_backend import CreateStorageBackends
 from lmcache.experimental.storage_backend.abstract_backend import \
     StorageBackendInterface
@@ -51,9 +50,8 @@ class StorageManager:
                  allocator: MemoryAllocatorInterface,
                  lookup_server: Optional[LookupServerInterface] = None):
         self.memory_allocator = allocator
-        self.use_hot = config.local_cpu
         self.hot_cache = None
-        if self.use_hot:
+        if config.local_cpu:
             self.hot_cache = LocalCPUBackend(allocator, lookup_server)
 
         self.loop = asyncio.new_event_loop()
@@ -99,7 +97,7 @@ class StorageManager:
             self.manager_lock.release()
             return memory_obj
 
-        if self.use_hot:
+        if self.hot_cache:
             # this will try to evict from the hot cache and allocate
             memory_obj = self.hot_cache.allocate(shape, dtype)
 
@@ -129,7 +127,7 @@ class StorageManager:
         storage manager) or has been stored (handled by storage backend).
         """
         self.manager_lock.acquire()
-        if self.use_hot:
+        if self.hot_cache:
             self.hot_cache.put(key, memory_obj)
 
         # TODO(Jiayi): currently, the entire put task will be cancelled
@@ -173,7 +171,7 @@ class StorageManager:
 
     @_lmcache_nvtx_annotate
     def _update_hot_cache(self, key: CacheEngineKey, memory_obj: MemoryObj):
-        if memory_obj is None or not self.use_hot or self.hot_cache.contains(
+        if memory_obj is None or not self.hot_cache or self.hot_cache.contains(
                 key):
             return
 
@@ -208,7 +206,7 @@ class StorageManager:
             logger.debug("Updated hot cache!")
             return
         else:
-            # manager lock needed? 
+            # manager lock needed?
             self.manager_lock.acquire()
             self.hot_cache.put(key, memory_obj)
             self.manager_lock.release()
@@ -226,7 +224,7 @@ class StorageManager:
         # Here, it is assumed all prefetch tasks load the memoryobj to
         # hot cache (pinned cpu buffer)
         if prefetch_task is not None:
-            assert self.use_hot is True,\
+            assert self.hot_cache is not None,\
                 "CPU cache must be enabled for prefetching"
             logger.debug("Waiting for prefetching result. "
                          "Optimally, this should not happen.")
@@ -236,7 +234,7 @@ class StorageManager:
             prefetch_task.result(timeout=1)
 
         # Search in hot_cache
-        if self.use_hot:
+        if self.hot_cache:
             self.manager_lock.acquire()
             # hot_cache.get(key) does ref_count_up() for the caller
             memory_obj = self.hot_cache.get(key)
@@ -305,7 +303,7 @@ class StorageManager:
 
         # Call contains for each backend. Find the nearest cache
         self.manager_lock.acquire()
-        if self.use_hot and self.hot_cache.contains(key):
+        if self.hot_cache and self.hot_cache.contains(key):
             self.manager_lock.release()
             return
         if key in self.prefetch_tasks:
@@ -345,7 +343,7 @@ class StorageManager:
         """
         with self.manager_lock:
             if search_range is None or "Hot" in search_range:
-                if self.use_hot and self.hot_cache.contains(key):
+                if self.hot_cache and self.hot_cache.contains(key):
                     return True
 
             for backend_name, backend in self.storage_backends.items():
@@ -380,7 +378,7 @@ class StorageManager:
         num_removed = 0
         with self.manager_lock:
             if locations is None or "Hot" in locations:
-                if self.use_hot and self.hot_cache.remove(key):
+                if self.hot_cache and self.hot_cache.remove(key):
                     num_removed += 1
 
         # TODO(Jiayi): need to handle remove in non-cpu backends
@@ -406,7 +404,7 @@ class StorageManager:
         num_cleared = 0
 
         self.manager_lock.acquire()
-        if locations is None or "Hot" in locations and self.use_hot:
+        if locations is None or "Hot" in locations and self.hot_cache:
             num_cleared += self.hot_cache.clear()
         self.manager_lock.release()
 
@@ -417,7 +415,7 @@ class StorageManager:
     def close(self):
 
         if self.lookup_server is not None:
-            if self.use_hot:
+            if self.hot_cache:
                 self.manager_lock.acquire()
                 self.lookup_server.batched_remove(self.hot_cache.get_keys())
                 self.manager_lock.release()
