@@ -6,9 +6,14 @@ from lmcache.experimental.lookup_server import LookupServerInterface
 
 import threading
 
-from lmcache.experimental.memory_management import MemoryObj, MemoryAllocatorInterface, MixedMemoryAllocator
+from lmcache.experimental.memory_management import (
+    MemoryObj,
+    MemoryAllocatorInterface,
+    MixedMemoryAllocator,
+)
 from lmcache.utils import CacheEngineKey
-from lmcache.experimental.storage_backend.abstract_backend import StorageBackendInterface
+from lmcache.experimental.storage_backend.abstract_backend import (
+    StorageBackendInterface, )
 
 
 class LocalCPUBackend(StorageBackendInterface):
@@ -22,10 +27,11 @@ class LocalCPUBackend(StorageBackendInterface):
 
     it stores memory objects in cpu memory and is completely synchronous
     """
+
     def __init__(self,
-                memory_allocator: MemoryAllocatorInterface,
-                lookup_server: Optional[LookupServerInterface] = None,
-                dst_device: str = "cpu"):
+                 memory_allocator: MemoryAllocatorInterface,
+                 lookup_server: Optional[LookupServerInterface] = None,
+                 dst_device: str = "cpu"):
         self.dict: OrderedDict[CacheEngineKey, MemoryObj] = OrderedDict()
         self.lookup_server = lookup_server
         self.memory_allocator = memory_allocator
@@ -83,7 +89,7 @@ class LocalCPUBackend(StorageBackendInterface):
             self.memory_allocator.ref_count_up(self.dict[key])
             memory_obj = self.dict[key]
 
-            future: Future[MemoryObj] = Future()
+            future: Future = Future()
             future.set_result(memory_obj)
             return future
 
