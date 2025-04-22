@@ -4,6 +4,7 @@ import hashlib
 from typing import Iterable, List, Optional, Tuple, Union
 
 import torch
+from transformers import AutoTokenizer
 
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.experimental.config import LMCacheEngineConfig
@@ -132,6 +133,101 @@ class ChunkedTokenDatabase(TokenDatabase):
         token_chunks = self._chunk_tokens(tokens)
         prefix_hashes = self._prefix_hash(token_chunks)
 
+        start_idx = 0
+        for chunk_id, hash_val in enumerate(prefix_hashes):
+            start_idx = chunk_id * self.chunk_size
+            end_idx = min(start_idx + self.chunk_size, total_len)
+            if start_idx < num_falses:
+                continue
+            else:
+                yield start_idx, end_idx, self._make_key_by_hash(hash_val)
+
+
+class SegmentTokenDatabase(TokenDatabase):
+
+    def __init__(self, config: LMCacheEngineConfig,
+                 metadata: LMCacheEngineMetadata):
+        tokenizer = AutoTokenizer.from_pretrained(
+            metadata.model_name
+        )
+        self.sep_tokens = tokenizer.encode(
+            config.blend_special_str)
+        self.metadata = metadata
+
+    def _make_key_by_hash(self, chunk_hash: str):
+        return CacheEngineKey(self.metadata.fmt, self.metadata.model_name,
+                              self.metadata.world_size,
+                              self.metadata.worker_id, chunk_hash)
+
+    def _get_init_hash(self) -> str:
+        return ""
+
+    def _hash(
+        self,
+        tokens: Union[torch.Tensor, List[int]],
+    ) -> str:
+        # TODO: change it to a more efficient hash function
+        if isinstance(tokens, torch.Tensor):
+            tokens_bytes = tokens.cpu().to(torch.uint32).numpy().tobytes()
+        elif isinstance(tokens, list):
+            tokens_bytes = array.array('I', tokens).tobytes()
+        return hashlib.sha256(tokens_bytes).hexdigest()
+
+    def _fast_split_by_subtensor(
+        self, 
+        tokens: torch.Tensor
+    ) -> Iterable[Tuple[torch.Tensor, int]]:
+        """Match the `sep_tokens` with 1d convolution"""
+        
+        k = len(self.sep_tokens)
+        if k == 0 or len(tokens) < k:
+            yield tokens
+
+        # Unfold into sliding windows
+        # shape: (L-k+1, k)
+        windows = tokens.unfold(0, k, 1)
+
+        # Compare each window with sep_tokens
+        matches = (windows == self.sep_tokens).all(dim=1).nonzero(as_tuple=True)[0].tolist()
+
+        # Split based on matches
+        start = 0
+        for idx in matches:
+            yield tokens[start:idx], start
+            start = idx + k
+
+    def process_tokens(
+        self,
+        tokens: Union[torch.Tensor, List[int]],
+        mask: Optional[torch.Tensor] = None,
+    ) -> Iterable[Tuple[int, int, CacheEngineKey]]:
+        """Process the tokens and return the corresponding cache engine keys.
+
+        :param Union[torch.Tensor, List[int]] tokens: The tokens to process.
+
+        :param Optional[torch.Tensor] mask: The mask for the tokens. Should 
+            have the same length as tokens. And the mask should ALWAYS be like
+            FFFFFTTTTTTT, where True means the tokens needs to be matched, 
+            and the Falses will ALWAYS be at the PREFIX of the tensor.
+
+        :returns: A iterable of tuples with three elements. The first element
+            is the start index of the tokens for the key. The second element
+            is the end index of the tokens for the key. The third element is
+            the cache engine key for the tokens.
+
+        """
+        
+        assert isinstance(tokens, torch.Tensor), \
+            "Only tokens in tensor format are supported for now."
+        if mask is not None:
+            num_falses = mask.numel() - mask.long().sum()
+        else:
+            num_falses = 0
+
+        total_len = len(tokens)
+
+        token_chunks = self._fast_split_by_subtensor(tokens)
+        
         start_idx = 0
         for chunk_id, hash_val in enumerate(prefix_hashes):
             start_idx = chunk_id * self.chunk_size

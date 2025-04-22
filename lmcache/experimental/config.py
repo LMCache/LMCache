@@ -27,6 +27,7 @@ class LMCacheEngineConfig:
     enable_blending: bool  # whether to enable blending
     blend_recompute_ratio: float  # the ratio of blending recompute
     blend_min_tokens: int  # the minimum number of tokens for blending
+    blend_special_str: str # the separator for blending
 
     # P2P related configurations
     enable_p2p: bool  # whether to enable peer-to-peer sharing
