@@ -95,8 +95,8 @@ at::Tensor calculate_cdf(
 
     auto output = torch::zeros({nlayers, nchannels, max_bins + 1}, input.options().dtype(at::kShort));
 
-    auto input_accessor = input.packed_accessor<int8_t, 3>();
-    auto output_accessor = output.packed_accessor<int16_t, 3>();
+    auto input_accessor = input.packed_accessor64<int8_t, 3>();
+    auto output_accessor = output.packed_accessor64<int16_t, 3>();
 
     int block_size = get_block_size(nchannels);
     dim3 block_dim(block_size, 1, 1);
