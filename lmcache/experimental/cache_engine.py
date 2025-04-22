@@ -154,32 +154,41 @@ class LMCacheEngine:
         self.storage_manager.prepare_put(keys, metadatas)
 
         offload_time = 0.
+        put_time = 0.
         tot_kv_size = 0
         # Offload the KV cache and write to remote
         for key, memobj_meta, (start, end) in zip(keys, metadatas, steds):
             assert memobj_meta.dtype is not None
             kv_shape = memobj_meta.shape
             kv_dtype = memobj_meta.dtype
+
+            # Allocate for a zero-copy buffer, trigger send if needed
+            t = time.perf_counter()
             memory_obj = self.storage_manager.allocate(kv_shape, kv_dtype)
+            put_time += time.perf_counter() - t
             if memory_obj is None:
                 logger.warning("Failed to allocate memory for the KV cache.\n"
                                "The KV cache will not be stored.")
                 break
 
+            # Copy the KV cache to the zero-copy buffer
             t = time.perf_counter()
             self.gpu_connector.from_gpu(memory_obj, start, end, **kwargs)
             offload_time += time.perf_counter() - t
-            self.storage_manager.put(key, memory_obj)
+
             tot_kv_size += memory_obj.get_size()
 
         # Flush
+        t = time.perf_counter()
         self.storage_manager.commit_put()
+        put_time += time.perf_counter() - t
 
         ed = time.perf_counter()
         logger.info(
-            "Store time: %.4f ms, throughput: %.4f GB/s; offload_time: %.4f ms",
+            "Store %d tokens takes: %.4f ms, throughput: %.4f GB/s; "
+            "offload_time: %.4f ms, put_time: %.4f ms", torch.sum(mask),
             (ed - st) * 1000, tot_kv_size / (ed - st) / 1024**3,
-            offload_time * 1000)
+            offload_time * 1000, put_time * 1000)
 
         self.stats_monitor.on_store_finished(monitor_req_id)
 
@@ -299,10 +308,13 @@ class LMCacheEngine:
             # cpu tensor for the sake of performance.
             # For example, disk->gpu is faster than disk->cpu->gpu.
             # RDMA is another example.
-
             self.gpu_connector.to_gpu(memory_obj, start, end, **kwargs)
             self.memory_allocator.ref_count_down(memory_obj)
-            if self.use_distributed_storage_manager:
+
+            # NOTE (ApostaC): This is only for the current implementation:
+            # When the object is retrieved back to vLLM, the storage backend
+            # will immediately remove the object from itself
+            if isinstance(self.storage_manager, DistributedStorageManager):
                 self.storage_manager.remove(key)
 
         retrieved_tokens = torch.sum(ret_mask)
@@ -342,6 +354,7 @@ class LMCacheEngine:
 
         :return: An int indicating how many prefix tokens are cached.
         """
+        end = 0
         for start, end, key in self.token_database.process_tokens(tokens):
             if not self.storage_manager.contains(key, search_range):
                 return start

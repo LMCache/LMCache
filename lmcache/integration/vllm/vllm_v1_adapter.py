@@ -50,7 +50,7 @@ def get_zmq_rpc_path_lmcache(
     if vllm_config is not None:
         rpc_port = vllm_config.kv_transfer_config.get_from_extra_config(
             "lmcache_rpc_port", 0)
-    logger.debug("Base URL: %s, RPC Port: %d", base_url, rpc_port)
+    logger.debug("Base URL: %s, RPC Port: %s", base_url, rpc_port)
     return f"ipc://{base_url}/lmcache_rpc_port_{rpc_port}"
 
 
@@ -168,8 +168,9 @@ class RequestTracker:
         """
         return RequestTracker(
             req_id=new_request.req_id,
-            token_ids=new_request.prompt_token_ids[:num_tokens_to_compute],
-            allocated_block_ids=new_request.block_ids,
+            token_ids=new_request.prompt_token_ids[:num_tokens_to_compute].
+            copy(),
+            allocated_block_ids=new_request.block_ids.copy(),
             num_saved_tokens=0,
         )
 
@@ -595,6 +596,7 @@ class LMCacheConnectorV1Impl:
         Args:
             scheduler_output (SchedulerOutput): the scheduler output object.
         """
+
         force_skip_save = self.kv_role == "kv_consumer"
 
         meta = LMCacheConnectorMetadata()
