@@ -211,7 +211,8 @@ class SegmentTokenDatabase(TokenDatabase):
         self,
         tokens: Union[torch.Tensor, List[int]],
         mask: Optional[torch.Tensor] = None,
-    ) -> Iterable[Tuple[int, int, CacheEngineKey]]:
+        make_key: bool = True,
+    ) -> Iterable[Tuple[int, int, Union[CacheEngineKey, str]]]:
         """Process the tokens and return the corresponding cache engine keys.
 
         :param Union[torch.Tensor, List[int]] tokens: The tokens to process.
@@ -246,6 +247,9 @@ class SegmentTokenDatabase(TokenDatabase):
                 start_idx += self.sep_len
                 end_idx += self.sep_len
             if start_idx >= num_falses:
-                yield start_idx, end_idx, self._make_key_by_hash(
-                    self._hash(token_chunk))
+                if make_key:
+                    yield start_idx, end_idx, self._make_key_by_hash(
+                        self._hash(token_chunk))
+                else:
+                    yield start_idx, end_idx, self._hash(token_chunk)
             start_idx = end_idx

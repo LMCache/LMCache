@@ -98,11 +98,11 @@ class LMCacheEngineConfig:
             chunk_size, local_cpu, max_local_cpu_size, local_disk,
             max_local_disk_size, remote_url, remote_serde, save_decode_cache,
             enable_blending, blend_recompute_ratio, blend_min_tokens,
-            blend_special_str, enable_p2p, lookup_url, distributed_url, error_handling,
-            enable_controller, lmcache_instance_id, controller_url,
-            lmcache_worker_url, enable_nixl, nixl_role, nixl_peer_host,
-            nixl_peer_port, nixl_buffer_size, nixl_buffer_device,
-            nixl_enable_gc).validate()
+            blend_special_str, enable_p2p, lookup_url, distributed_url,
+            error_handling, enable_controller, lmcache_instance_id,
+            controller_url, lmcache_worker_url, enable_nixl, nixl_role,
+            nixl_peer_host, nixl_peer_port, nixl_buffer_size,
+            nixl_buffer_device, nixl_enable_gc).validate()
 
     @staticmethod
     def from_legacy(
