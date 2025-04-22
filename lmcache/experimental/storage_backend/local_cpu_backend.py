@@ -1,19 +1,15 @@
+import threading
+from collections import OrderedDict
 from concurrent.futures import Future
 from typing import Optional
-from collections import OrderedDict
 
 from lmcache.experimental.lookup_server import LookupServerInterface
-
-import threading
-
-from lmcache.experimental.memory_management import (
-    MemoryObj,
-    MemoryAllocatorInterface,
-    MixedMemoryAllocator,
-)
+from lmcache.experimental.memory_management import (MemoryAllocatorInterface,
+                                                    MemoryObj,
+                                                    MixedMemoryAllocator)
+from lmcache.experimental.storage_backend.abstract_backend import \
+    StorageBackendInterface
 from lmcache.utils import CacheEngineKey
-from lmcache.experimental.storage_backend.abstract_backend import (
-    StorageBackendInterface, )
 
 
 class LocalCPUBackend(StorageBackendInterface):
