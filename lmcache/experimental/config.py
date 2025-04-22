@@ -71,6 +71,7 @@ class LMCacheEngineConfig:
         enable_blending: bool = False,
         blend_recompute_ratio: float = 0.15,
         blend_min_tokens: int = 256,
+        blend_special_str: str = " # # ",
         enable_p2p: bool = False,
         lookup_url: Optional[str] = None,
         distributed_url: Optional[str] = None,
@@ -90,6 +91,7 @@ class LMCacheEngineConfig:
             chunk_size, local_cpu, max_local_cpu_size, local_disk,
             max_local_disk_size, remote_url, remote_serde, save_decode_cache,
             enable_blending, blend_recompute_ratio, blend_min_tokens,
+            blend_special_str,
             enable_p2p, lookup_url, distributed_url, error_handling,
             enable_controller, lmcache_instance_id, enable_nixl, nixl_role,
             nixl_peer_host, nixl_peer_port, nixl_buffer_size,
@@ -105,6 +107,7 @@ class LMCacheEngineConfig:
         enable_blending: bool = False,
         blend_recompute_ratio: float = 0.15,
         blend_min_tokens: int = 256,
+        blend_special_str: str = " # # ",
         max_local_disk_size: float = 0.0,
         enable_p2p: bool = False,
         lookup_url: Optional[str] = None,
@@ -154,7 +157,8 @@ class LMCacheEngineConfig:
                                    local_disk, max_local_disk_size, remote_url,
                                    remote_serde, save_decode_cache,
                                    enable_blending, blend_recompute_ratio,
-                                   blend_min_tokens, enable_p2p, lookup_url,
+                                   blend_min_tokens, blend_special_str,
+                                   enable_p2p, lookup_url,
                                    distributed_url, error_handling).validate()
 
     @staticmethod
@@ -177,9 +181,11 @@ class LMCacheEngineConfig:
         remote_serde = config.get("remote_serde", "naive")
 
         save_decode_cache = config.get("save_decode_cache", False)
+        
         enable_blending = config.get("enable_blending", False)
         blend_recompute_ratio = config.get("blend_recompute_ratio", 0.15)
         blend_min_tokens = config.get("blend_min_tokens", 256)
+        blend_special_str = config.get("blend_special_str", " # # ")
 
         enable_p2p = config.get("enable_p2p", False)
         lookup_url = config.get("lookup_url", None)
@@ -226,6 +232,7 @@ class LMCacheEngineConfig:
             enable_blending,
             blend_recompute_ratio,
             blend_min_tokens,
+            blend_special_str,
             enable_p2p,
             lookup_url,
             distributed_url,
@@ -296,6 +303,7 @@ class LMCacheEngineConfig:
         config.save_decode_cache = to_bool(
             parse_env(get_env_name("save_decode_cache"),
                       config.save_decode_cache))
+        
         config.enable_blending = to_bool(
             parse_env(get_env_name("enable_blending"), config.enable_blending))
         config.blend_recompute_ratio = to_float(
@@ -304,6 +312,8 @@ class LMCacheEngineConfig:
         config.blend_min_tokens = to_int(
             parse_env(get_env_name("blend_min_tokens"),
                       config.blend_min_tokens))
+        config.blend_special_str = parse_env(get_env_name("blend_special_str"),
+                                             config.blend_special_str)
 
         config.enable_p2p = to_bool(
             parse_env(get_env_name("enable_p2p"), config.enable_p2p))

@@ -18,7 +18,8 @@ class TokenDatabase(metaclass=abc.ABCMeta):
     - ChunkedTokenDatabase: It processes tokens into chunks and convert 
     each chunk into a cache engine key using prefix hash.
 
-    - RadixTokenDatabase: more advanced implementation using radix tree.
+    - SegmentTokenDatabase: It processes tokens into segments based on
+    special separators and convert each segment into a cache engine key.
     """
 
     @abc.abstractmethod
@@ -46,7 +47,7 @@ class TokenDatabase(metaclass=abc.ABCMeta):
 
 
 class ChunkedTokenDatabase(TokenDatabase):
-
+    
     def __init__(self, config: LMCacheEngineConfig,
                  metadata: LMCacheEngineMetadata):
         self.chunk_size = config.chunk_size
@@ -121,7 +122,7 @@ class ChunkedTokenDatabase(TokenDatabase):
             multiple of the chunk size.
         """
         if mask is not None:
-            num_falses = mask.numel() - mask.long().sum()
+            num_falses = mask.numel() - mask.long().sum().item()
         else:
             num_falses = 0
 
@@ -144,23 +145,29 @@ class ChunkedTokenDatabase(TokenDatabase):
 
 
 class SegmentTokenDatabase(TokenDatabase):
-
+    """
+    Currently, we still use special separtors to identify chunks.
+    In the future, we might need to implement a fast substring match.
+    """
     def __init__(self, config: LMCacheEngineConfig,
                  metadata: LMCacheEngineMetadata):
-        tokenizer = AutoTokenizer.from_pretrained(
+        self.tokenizer = AutoTokenizer.from_pretrained(
             metadata.model_name
         )
-        self.sep_tokens = tokenizer.encode(
-            config.blend_special_str)
+        
+        # TODO (Jiayi): figure out how to decide when
+        # to use `1:` (whether there's a special starting token
+        # in the beginning)
+        self.sep_tokens = self.tokenizer.encode(
+            config.blend_special_str)[1:]
+        self.sep_tokens = torch.tensor(self.sep_tokens, device="cpu")
+        self.sep_len = len(self.sep_tokens)
         self.metadata = metadata
 
     def _make_key_by_hash(self, chunk_hash: str):
         return CacheEngineKey(self.metadata.fmt, self.metadata.model_name,
                               self.metadata.world_size,
                               self.metadata.worker_id, chunk_hash)
-
-    def _get_init_hash(self) -> str:
-        return ""
 
     def _hash(
         self,
@@ -176,16 +183,15 @@ class SegmentTokenDatabase(TokenDatabase):
     def _fast_split_by_subtensor(
         self, 
         tokens: torch.Tensor
-    ) -> Iterable[Tuple[torch.Tensor, int]]:
-        """Match the `sep_tokens` with 1d convolution"""
+    ) -> Iterable[torch.Tensor]:
+        """Match the `sep_tokens` with sliding windows"""
         
-        k = len(self.sep_tokens)
-        if k == 0 or len(tokens) < k:
+        if self.sep_len == 0 or len(tokens) < self.sep_len:
             yield tokens
 
         # Unfold into sliding windows
-        # shape: (L-k+1, k)
-        windows = tokens.unfold(0, k, 1)
+        # shape: (num_tokens-sep_len+1, sep_len)
+        windows = tokens.unfold(0, self.sep_len, 1)
 
         # Compare each window with sep_tokens
         matches = (windows == self.sep_tokens).all(dim=1).nonzero(as_tuple=True)[0].tolist()
@@ -193,8 +199,8 @@ class SegmentTokenDatabase(TokenDatabase):
         # Split based on matches
         start = 0
         for idx in matches:
-            yield tokens[start:idx], start
-            start = idx + k
+            yield tokens[start:idx]
+            start = idx + self.sep_len
 
     def process_tokens(
         self,
@@ -220,19 +226,22 @@ class SegmentTokenDatabase(TokenDatabase):
         assert isinstance(tokens, torch.Tensor), \
             "Only tokens in tensor format are supported for now."
         if mask is not None:
-            num_falses = mask.numel() - mask.long().sum()
+            num_falses = mask.numel() - mask.long().sum().item()
         else:
             num_falses = 0
-
-        total_len = len(tokens)
-
+        assert num_falses < len(tokens), \
+            ("The number of Falses in the mask shouldn't "
+            "be less than the length of tokens.")
         token_chunks = self._fast_split_by_subtensor(tokens)
-        
         start_idx = 0
-        for chunk_id, hash_val in enumerate(prefix_hashes):
-            start_idx = chunk_id * self.chunk_size
-            end_idx = min(start_idx + self.chunk_size, total_len)
-            if start_idx < num_falses:
-                continue
-            else:
-                yield start_idx, end_idx, self._make_key_by_hash(hash_val)
+        for idx, token_chunk in enumerate(token_chunks):
+            token_chunk_len = len(token_chunk)
+            end_idx = start_idx + token_chunk_len
+            if idx > 0:
+                start_idx += self.sep_len
+                end_idx += self.sep_len
+            if start_idx >= num_falses:
+                yield start_idx, end_idx, self._make_key_by_hash(
+                    self._hash(token_chunk)
+                )
+            start_idx = end_idx
