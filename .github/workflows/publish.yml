@@ -1,0 +1,60 @@
+name: Build & Publish LMCache Wheels
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install cibuildwheel
+        run: python -m pip install --upgrade cibuildwheel
+
+      - name: Install CUDA Toolkit
+        run: |
+          sudo apt update
+          sudo apt install -y wget
+          wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2004/x86_64/cuda-ubuntu2004.pin
+          sudo mv cuda-ubuntu2004.pin /etc/apt/preferences.d/cuda-repository-pin-600
+          wget https://developer.download.nvidia.com/compute/cuda/12.1.105/local_installers/cuda-repo-ubuntu2004-12-1-local_12.1.105-1_amd64.deb
+          sudo dpkg -i cuda-repo-ubuntu2004-12-1-local_12.1.105-1_amd64.deb
+          sudo cp /var/cuda-repo-ubuntu2004-12-1-local/cuda-*-keyring.gpg /usr/share/keyrings/
+          sudo apt update
+          sudo apt install -y cuda-toolkit-12-1
+
+      - name: Build wheels
+        run: python -m cibuildwheel --output-dir dist
+        env:
+          CIBW_SKIP: "pp* cp36* cp37*"
+          CIBW_BUILD: "cp310-* cp311-*"
+          CIBW_ENVIRONMENT: "CUDA_HOME=/usr/local/cuda-12.1"
+          CIBW_ENVIRONMENT_PASS_LINUX: "CUDA_HOME"
+          CIBW_BEFORE_ALL_LINUX: "echo \$CUDA_HOME"
+
+      - name: Upload wheels to GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: dist/*.whl
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          password: ${{ secrets.PYPI_API_TOKEN }}

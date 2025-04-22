@@ -50,7 +50,7 @@ def get_zmq_rpc_path_lmcache(
     if vllm_config is not None:
         rpc_port = vllm_config.kv_transfer_config.get_from_extra_config(
             "lmcache_rpc_port", 0)
-    logger.debug("Base URL: %s, RPC Port: %d", base_url, rpc_port)
+    logger.debug("Base URL: %s, RPC Port: %s", base_url, rpc_port)
     return f"ipc://{base_url}/lmcache_rpc_port_{rpc_port}"
 
 
@@ -60,12 +60,13 @@ class LMCacheLookupClient:
     def __init__(self, role: KVConnectorRole, is_tp: bool,
                  vllm_config: "VllmConfig"):
         self.encoder = MsgpackEncoder()
-        self.ctx = zmq.Context()
+        self.ctx = zmq.Context()  # type: ignore[attr-defined]
         socket_path = get_zmq_rpc_path_lmcache(role, is_tp, vllm_config)
-        self.socket = make_zmq_socket(self.ctx,
-                                      socket_path,
-                                      zmq.REQ,
-                                      bind=False)
+        self.socket = make_zmq_socket(
+            self.ctx,
+            socket_path,
+            zmq.REQ,  # type: ignore[attr-defined]
+            bind=False)
 
     def lookup(self, token_ids: torch.Tensor) -> int:
         request = self.encoder.encode(token_ids)
@@ -83,12 +84,13 @@ class LMCacheLookupServer:
     def __init__(self, lmcache_engine: LMCacheEngine, role: KVConnectorRole,
                  is_tp: bool, vllm_config: "VllmConfig"):
         self.decoder = MsgpackDecoder(torch.Tensor)
-        self.ctx = zmq.Context()
+        self.ctx = zmq.Context()  # type: ignore[attr-defined]
         socket_path = get_zmq_rpc_path_lmcache(role, is_tp, vllm_config)
-        self.socket = make_zmq_socket(self.ctx,
-                                      socket_path,
-                                      zmq.REP,
-                                      bind=True)
+        self.socket = make_zmq_socket(
+            self.ctx,
+            socket_path,
+            zmq.REP,  # type: ignore[attr-defined]
+            bind=True)
 
         self.lmcache_engine = lmcache_engine
         self.running = True
@@ -166,8 +168,9 @@ class RequestTracker:
         """
         return RequestTracker(
             req_id=new_request.req_id,
-            token_ids=new_request.prompt_token_ids[:num_tokens_to_compute],
-            allocated_block_ids=new_request.block_ids,
+            token_ids=new_request.prompt_token_ids[:num_tokens_to_compute].
+            copy(),
+            allocated_block_ids=new_request.block_ids.copy(),
             num_saved_tokens=0,
         )
 
@@ -593,6 +596,7 @@ class LMCacheConnectorV1Impl:
         Args:
             scheduler_output (SchedulerOutput): the scheduler output object.
         """
+
         force_skip_save = self.kv_role == "kv_consumer"
 
         meta = LMCacheConnectorMetadata()

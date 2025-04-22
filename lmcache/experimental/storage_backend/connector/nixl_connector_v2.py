@@ -18,21 +18,128 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Optional
+from typing import Callable, Optional, Union
 
 import torch
 import zmq
 from nixl._api import nixl_agent
 
-from lmcache.experimental.memory_management import (MemoryObj,
+from lmcache.experimental.memory_management import (MemoryAllocatorInterface,
+                                                    MemoryFormat, MemoryObj,
                                                     MemoryObjMetadata,
                                                     TensorMemoryObj)
-from lmcache.experimental.storage_backend.connector.nixl_utils import (
+from lmcache.experimental.storage_backend.connector.nixl_connector import (
     NixlConfig, NixlRole)
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
 
 logger = init_logger(__name__)
+
+
+class NixlBufferAllocator(MemoryAllocatorInterface):
+    """The memory allocator on NIXL transfer buffer.
+    """
+
+    def __init__(self, nixl_pipe: "NixlPipe"):
+        self.nixl_pipe = nixl_pipe
+        self.buffer = nixl_pipe._buffer
+        self.capacity = nixl_pipe.nixl_config.buffer_size
+
+        self.allocated_size = 0
+
+    def _flush(self):
+        self.nixl_pipe.flush()
+        self.allocated_size = 0
+
+    def allocate(
+        self,
+        shape: Union[torch.Size, tuple[int, ...]],
+        dtype: Optional[torch.dtype],
+        fmt: MemoryFormat = MemoryFormat.KV_BLOB,
+    ) -> Optional[MemoryObj]:
+        """
+        Allocates the memory to hold a tensor of the given shape.
+
+        :param torch.Size shape: The shape of the tensor to allocate.
+        :param torch.dtype dtype: The dtype of the tensor to allocate.
+        :param MemoryFormat fmt: The format of the memory to allocate.
+        
+        :return: A MemoryObj wrapping the allocated memory. Returns
+            None if the allocation failed.
+
+        :rtype: Optional[MemoryObj]
+        """
+        metadata = self.dry_allocate(shape, dtype, fmt)
+        metadata.address = self.allocated_size
+
+        # check the size and capacity
+        required_size = metadata.get_size()
+        assert required_size < self.capacity, \
+            "The object size is larger than the NIXL buffer capacity"
+
+        if self.allocated_size + required_size > self.capacity:
+            # If no enough space, try to flush
+            self._flush()
+
+        # allocate the memory
+        raw_tensor = self.buffer[self.allocated_size : self.allocated_size\
+                + required_size]
+        ret = TensorMemoryObj(raw_data=raw_tensor, metadata=metadata)
+        self.allocated_size += required_size
+        return ret
+
+    def dry_allocate(
+        self,
+        shape: torch.Size,
+        dtype: Optional[torch.dtype],
+        fmt: MemoryFormat = MemoryFormat.KV_BLOB,
+    ) -> MemoryObjMetadata:
+        """Dry allocate the memory and return the metadata.
+
+        Note: `address` is not valid in the dry allocation.
+        """
+        metadata = MemoryObjMetadata(shape,
+                                     dtype,
+                                     address=0,
+                                     phy_size=0,
+                                     ref_count=1,
+                                     fmt=fmt)
+        metadata.phy_size = metadata.get_size()
+        return metadata
+
+    def free(self, obj: MemoryObj):
+        """Free the memory object.
+        """
+        pass
+
+    def ref_count_up(self, obj: MemoryObj):
+        """Increase the reference count of the memory object.
+        """
+        pass
+
+    def ref_count_down(self, obj: MemoryObj):
+        """Decrease the reference count of the memory object.
+        """
+        pass
+
+    def get_ref_count(self, obj: MemoryObj) -> int:
+        """Get the reference count of the memory object.
+        """
+        raise NotImplementedError
+
+    ### For NIXL Pipe to call
+    def num_bytes_allocated(self) -> int:
+        """Get the number of bytes allocated.
+
+        Returns:
+            The number of bytes allocated.
+        """
+        return self.allocated_size
+
+    def reset_allocated_size(self):
+        """Reset the allocated size to 0.
+        """
+        self.allocated_size = 0
 
 
 @dataclass
@@ -43,7 +150,6 @@ class NixlRequest:
     """
     keys: list[CacheEngineKey]
     metadatas: list[MemoryObjMetadata]
-    init_uuid: str
 
     def serialize(self) -> bytes:
         return pickle.dumps(self)
@@ -56,7 +162,7 @@ class NixlRequest:
 class NixlPipe:
     """An one-directional pipe to send the data from the sender to the receiver.
     """
-    TRANSFER_BUFFER_SIZE = 128 * 1024 * 1024  # 32 MB
+    TRANSFER_BUFFER_SIZE = 128 * 1024 * 1024
 
     def __init__(self, nixl_config: NixlConfig,
                  side_channel: zmq.Socket):  # type: ignore
@@ -76,6 +182,9 @@ class NixlPipe:
         self._transfer_buffers = torch.split(self._buffer,
                                              NixlPipe.TRANSFER_BUFFER_SIZE,
                                              dim=0)
+
+        # allocator (should be initialized after self._buffer)
+        self._allocator = NixlBufferAllocator(self)
 
         self._agent = nixl_agent(str(nixl_config.role))
         self._reg_descs = self._agent.register_memory(self._transfer_buffers)
@@ -113,36 +222,120 @@ class NixlPipe:
                 self._agent.get_serialized_descs(self._local_xfer_descs))
             logger.info("Sent local transfer descriptors to sender")
 
-    def write_buffer(self, objs: list[MemoryObj], offset=0) -> tuple[int, int]:
-        """Try to write (copy) the data to NIXL transfer buffer (sender side).
+        # UUID for communication
+        self._uuid = None
+        if nixl_config.role == NixlRole.RECEIVER:
+            # Receiver send an initial uuid to sender
+            self._uuid = uuid.uuid4().hex
+            self.ack_receive()
 
-        If the data is larger than the underlying buffer, it only send the 
-        first N objects that fit in the NIXL buffer.
-
-        Returns the number of memory objects as well as the total bytes that 
-        have been successfully wrote into the buffer.
-
-        Args:
-            objs: list of MemoryObj
-            offset: the offset to start writing the data to the buffer
-        
-        Returns:
-            a tuple of: (number of memory objects, total bytes written) to 
-            the buffer
+    def _spin_check_for_ack(self) -> str:
         """
-        total_objs = 0
-        for obj in objs:
-            assert obj.tensor is not None, "object does not have tensor"
-            obj_size = obj.get_size()
-            if offset + obj_size > self.nixl_config.buffer_size:
-                break
-            self._buffer[offset:offset + obj_size] = obj.tensor.view(
-                torch.uint8).flatten()
-            offset += obj_size
-            total_objs += 1
+        Spin until receives an ack from the peer.
 
-        return total_objs, offset
+        Returns:
+            The uuid extracted from the ack message.
+        """
+        receiver_ready = False
+        while not receiver_ready:
+            notifs = self._agent.get_new_notifs()
+            if self.peer_name not in notifs:
+                time.sleep(0.001)
+                continue
 
+            for notif in notifs[self.peer_name]:
+                decoded_uuid = message_to_uuid(notif.decode("utf-8"))
+                if decoded_uuid is not None:
+                    return decoded_uuid
+            time.sleep(0.001)  # Avoid busy waiting
+
+        raise RuntimeError("Failed to receive ACK from remote peer")
+
+    def _commit_write(self, write_size: int, uid: str):
+        """A blocking function that ensures the write buffer is delivered to
+        the receiver.
+        
+        The transfer is initialized with the uuid.
+        
+        Args:
+            write_size: the size of the data that is written into the buffer
+            uuid: the uuid of the transfer
+
+        Raises:
+            RuntimeError: if the transfer fails
+        """
+        # Send the data to the remote peer
+        num_transfers = (write_size - 1) // NixlPipe.TRANSFER_BUFFER_SIZE + 1
+        desc_indexes = list(range(num_transfers))
+        logger.debug(f"Committing write of {write_size / 1024 / 1024} "
+                     f"MB with {num_transfers} transfers")
+
+        t1 = time.perf_counter()
+        handle = self._agent.make_prepped_xfer("WRITE",
+                                               self._local_xfer_handlers,
+                                               desc_indexes,
+                                               self._remote_xfer_handlers,
+                                               desc_indexes)
+        t2 = time.perf_counter()
+
+        self._agent.transfer(handle)  #, uuid_to_message(uid))
+
+        # NOTE: Potential optimization we don't immediately need to check
+        # whether the transfer is done; Instead, we can check it before the
+        # next time we allocate for write
+        while (status := self._agent.check_xfer_state(handle)) != "DONE":
+            if status == "PROC":
+                time.sleep(0.001)  # Avoid busy waiting
+            else:
+                logger.error("Transfer failed with status: %s, handle: %s",
+                             status, handle)
+                raise RuntimeError(
+                    f"Failed to send data to remote peer: {self.peer_name}, "
+                    f"status: {status}")
+        t3 = time.perf_counter()
+
+        self._agent.send_notif(self.peer_name, uuid_to_message(uid))
+
+        logger.debug(
+            "Transfer %s completed in %.4f ms, creating the transfer: %.4f ms,"
+            " transfer time: %.4f ms, pure transfer throughput: %.4f GB/s",
+            uid,
+            1000 * (t3 - t1),
+            1000 * (t2 - t1),
+            1000 * (t3 - t2),
+            (write_size / (t3 - t2)) / (2**30)  # GB/s
+        )
+
+    ###########################
+    # Sender side functions
+    ###########################
+    def allocate_for_write(
+            self,
+            shape: torch.Size,
+            dtype: Optional[torch.dtype],
+            fmt: MemoryFormat = MemoryFormat.KV_BLOB) -> Optional[MemoryObj]:
+        """Allocate the memory for write.
+
+        If the buffer is full, it will trigger a flush and then allocate
+        the memory from the beginning.
+        """
+        # NOTE: the flush() is called in the allocator, which is not explicit
+        # and may be confusing
+        return self._allocator.allocate(shape, dtype, fmt)
+
+    def flush(self):
+        """Flush the buffer to the receiver side.
+        Will also reset the allocator's allocated size to 0
+        """
+        self._uuid = self._spin_check_for_ack()
+        logger.debug("Received ACK from remote peer with UUID: %s", self._uuid)
+        size = self._allocator.num_bytes_allocated()
+        self._commit_write(size, self._uuid)
+        self._allocator.reset_allocated_size()
+
+    ###########################
+    # Receiver side functions
+    ###########################
     def read_buffer(self,
                     metadatas: list[MemoryObjMetadata]) -> list[MemoryObj]:
         """Try read the data from the NIXL transfer buffer (receiver side).
@@ -166,100 +359,37 @@ class NixlPipe:
             offset += obj_size
         return ret  # type: ignore
 
-    def commit_write(self, write_size: int, uid: str) -> str:
-        """A blocking function that ensures the write buffer is delivered to
-        the receiver.
-        
-        The transfer is initialized with the uuid.
-        
-        Args:
-            write_size: the size of the data that is written into the buffer
-            uuid: the uuid of the transfer
-
-        Returns:
-            new uuid: the new UUID that in the receiver's ACK message
-
-        Raises:
-            RuntimeError: if the transfer fails
+    def wait_read(self):
+        """Blocking until the current transfer is finished
         """
-        # Send the data to the remote peer
-        num_transfers = (write_size - 1) // NixlPipe.TRANSFER_BUFFER_SIZE + 1
-        desc_indexes = list(range(num_transfers))
-        logger.debug(f"Committing write with {num_transfers} transfers")
-
-        t1 = time.perf_counter()
-        handle = self._agent.make_prepped_xfer("WRITE",
-                                               self._local_xfer_handlers,
-                                               desc_indexes,
-                                               self._remote_xfer_handlers,
-                                               desc_indexes,
-                                               uuid_to_message(uid))
-        t2 = time.perf_counter()
-
-        self._agent.transfer(handle)
-        while (status := self._agent.check_xfer_state(handle)) != "DONE":
-            if status == "PROC":
-                time.sleep(0.001)  # Avoid busy waiting
-            else:
-                logger.error("Transfer failed with status: %s, handle: %s",
-                             status, handle)
-                raise RuntimeError(
-                    f"Failed to send data to remote peer: {self.peer_name}, "
-                    f"status: {status}")
-        t3 = time.perf_counter()
-
-        # Wait for the remote peer to acknowledge the transfer and
-        # return the new uuid
-        receiver_ready = False
-        while not receiver_ready:
-            notifs = self._agent.get_new_notifs()
-            if self.peer_name not in notifs:
-                time.sleep(0.001)
-                continue
-
-            for notif in notifs[self.peer_name]:
-                decoded_uuid = message_to_uuid(notif.decode("utf-8"))
-                if decoded_uuid is not None:
-                    t4 = time.perf_counter()
-                    logger.debug(
-                        "Transfer completed in %.4f ms, "
-                        "creating the transfer: %.4f ms, "
-                        "transfer time: %.4f ms, wait for receiver: %.4f ms\n"
-                        "Pure transfer throughput: %.4f GB/s",
-                        1000 * (t4 - t1),
-                        1000 * (t2 - t1),
-                        1000 * (t3 - t2),
-                        1000 * (t4 - t3),
-                        (write_size / (t3 - t2)) / (2**30)  # GB/s
-                    )
-
-                    return decoded_uuid
-            time.sleep(0.001)  # Avoid busy waiting
-
-        raise RuntimeError("Failed to receive ACK from remote peer")
-
-    def wait_read(self, uid: str):
-        """Blocking until the transfer of the specific uuid is finished
-        """
-        message = uuid_to_message(uid)
+        assert self._uuid is not None, \
+            "The receiver side is not initialized properly"
+        message = uuid_to_message(self._uuid)
         while True:
             if self._agent.check_remote_xfer_done(self.peer_name,
                                                   message.encode("utf-8")):
                 logger.debug(
                     "Transfer for UUID '%s' completed on the remote side (%s)",
-                    uid, self.peer_name)
+                    self._uuid, self.peer_name)
                 break
             time.sleep(0.001)
 
-    def ack_receive(self, new_uuid: str):
+    def ack_receive(self):
         """Send an acknowledgment to the remote peer indicating that 
-        the transfer was received successfully.
-
-        Args:
-            new_uuid: The new UUID to acknowledge the transfer.
+        the transfer was received AND processed successfully.
         """
-        message = uuid_to_message(new_uuid)
+        self._uuid = uuid.uuid4().hex
+        message = uuid_to_message(self._uuid)
         self._agent.send_notif(self.peer_name, message)
+        logger.debug("Receiver acked the data with new UUID: %s", self._uuid)
+
+    ###########################
+    # Common functions
+    ###########################
+    def get_allocator(self) -> MemoryAllocatorInterface:
+        """Get the underlying allocator for the NIXL pipe
+        """
+        return self._allocator
 
     def close(self):
         """Close the NIXL pipe
@@ -311,13 +441,16 @@ class NixlChannel:
             self._side_channel.bind("tcp://{}:{}".format(
                 nixl_config.peer_host_name, nixl_config.peer_port))
             self._side_channel.setsockopt(zmq.LINGER, 0)  # type: ignore
+
+        # Create NIXL Pipe
+        self._pipe = NixlPipe(nixl_config, self._side_channel)
+
+        # Add a timeout for the side channel
+        if nixl_config.role == NixlRole.RECEIVER:
             self._side_channel.setsockopt(
                 zmq.RCVTIMEO,  # type: ignore
                 5000  # Set a timeout for receiving to avoid blocking 
             )
-
-        # Create NIXL Pipe
-        self._pipe = NixlPipe(nixl_config, self._side_channel)
 
         # Observers
         self._observers: list[NixlObserverInterface] = []
@@ -336,13 +469,8 @@ class NixlChannel:
         self._prepared_count = 0
         # How many objects are added to the payload
         self._added_payload_count = 0
-        # How many bytes are added to the payload
-        self._payload_offset = 0
-        # Current uuid used in the send transaction
-        self._curr_uuid: Optional[str] = None
 
-    def _process_receive_transaction(self, init_uuid: str,
-                                     keys: list[CacheEngineKey],
+    def _process_receive_transaction(self, keys: list[CacheEngineKey],
                                      metadatas: list[MemoryObjMetadata]):
         """Process the receive transaction and notifying all observers.
 
@@ -356,9 +484,8 @@ class NixlChannel:
 
         num_received_object = 0
         offset = 0
-        curr_uuid = init_uuid
         while num_received_object < len(keys):
-            self._pipe.wait_read(curr_uuid)
+            self._pipe.wait_read()
             objs_read = self._pipe.read_buffer(metadatas[offset:])
 
             # Notify the observers
@@ -374,8 +501,7 @@ class NixlChannel:
                          1000 * (end - start))
 
             # Acknowledge the remote side that the transfer was processed
-            curr_uuid = uuid.uuid4().hex
-            self._pipe.ack_receive(curr_uuid)
+            self._pipe.ack_receive()
 
             # Update the offset
             num_received_object += len(objs_read)
@@ -392,14 +518,7 @@ class NixlChannel:
                 # Wait for a request from the side channel with shorter timeout
                 evts = poller.poll(timeout=POLL_TIMEOUT_MS)
                 if not evts:
-                    #logger.debug(
-                    #    "No events received on the side channel, continuing..."
-                    #)
                     continue
-
-                #logger.debug(
-                #    "Received event on the side channel, processing message..."
-                #)
 
                 msg = self._side_channel.recv()
                 if not msg:
@@ -408,11 +527,10 @@ class NixlChannel:
                     continue
 
                 request = NixlRequest.deserialize(msg)
-                logger.debug("Received request with %d keys and UUID: %s",
-                             len(request.keys), request.init_uuid)
+                logger.debug("Received request with %d keys",
+                             len(request.keys))
 
-                self._process_receive_transaction(init_uuid=request.init_uuid,
-                                                  keys=request.keys,
+                self._process_receive_transaction(keys=request.keys,
                                                   metadatas=request.metadatas)
 
             except zmq.Again as e:  # type: ignore
@@ -426,6 +544,21 @@ class NixlChannel:
                 if self._running:
                     time.sleep(0.01)
 
+    def get_allocator(self) -> MemoryAllocatorInterface:
+        """Get the underlying allocator for the NIXL pipe
+        """
+        return self._pipe.get_allocator()
+
+    def dry_allocate(
+        self,
+        shape: torch.Size,
+        dtype: Optional[torch.dtype],
+        fmt: MemoryFormat = MemoryFormat.KV_BLOB,
+    ) -> MemoryObjMetadata:
+        """Dry allocate the memory and return the metadata.
+        """
+        return self._pipe._allocator.dry_allocate(shape, dtype, fmt)
+
     def prepare_send(self, keys: list[CacheEngineKey],
                      metadatas: list[MemoryObjMetadata]):
         """Prepare a send transaction by sending the request using 
@@ -436,100 +569,88 @@ class NixlChannel:
                          "is in progress")
             raise RuntimeError(
                 "Another send transaction is already in progress")
-        if self._payload_offset != 0:
-            logger.warning(
-                "Payload offset is not 0, the buffer may not be flushed "
-                "correctly")
 
         # Initialize connection using side channel
-        init_uuid = uuid.uuid4().hex
-        request = NixlRequest(keys=keys,
-                              metadatas=metadatas,
-                              init_uuid=init_uuid)
+        request = NixlRequest(keys=keys, metadatas=metadatas)
 
         self._side_channel.send(request.serialize())
-        logger.debug(
-            f"Sent the request with {len(keys)} keys and UUID: {init_uuid}")
+        logger.debug("Sent the request with %d keys", len(request.keys))
 
         self._during_send = True
         self._prepared_count = len(keys)
         self._added_payload_count = 0
-        self._curr_uuid = init_uuid
-        self._payload_offset = 0
 
-    def add_payload(self, payload: MemoryObj):
-        """Add a payload after the send transaction is prepared
+    def allocate_for_send(
+        self,
+        shape: torch.Size,
+        dtype: Optional[torch.dtype],
+        fmt: MemoryFormat = MemoryFormat.KV_BLOB,
+    ) -> Optional[MemoryObj]:
+        """Allocate the memory for send.
+
+        If the buffer is full, it will trigger a flush and then allocate
+        the memory from the beginning.
         """
         if not self._during_send:
             logger.error(
                 "Cannot add payload to a send transaction that is not prepared"
             )
             raise RuntimeError("No send transaction is prepared")
+
         if self._added_payload_count >= self._prepared_count:
             logger.error("Cannot add more payloads than prepared objects")
             raise RuntimeError(
                 "Cannot add more payloads than prepared objects")
 
-        # Add the payload to the transfer buffer
-        num_objs, self._payload_offset = self._pipe.write_buffer(
-            [payload], self._payload_offset)
-        if num_objs == 0:
-            # write buffer full, flushing
-            self._flush_send()
-            num_objs, self._payload_offset = self._pipe.write_buffer(
-                [payload], self._payload_offset)
-        self._added_payload_count += num_objs
-
-    def finish_send(self):
-        self._flush_send()
-        assert self._payload_offset == 0, \
-            "Send buffer offset is not 0, the buffer may not be flushed "\
-            "correctly"
-
-        self._during_send = False
-        self._prepared_count = 0
-        self._added_payload_count = 0
-        self._curr_uuid = None
+        self._added_payload_count += 1
+        return self._pipe.allocate_for_write(shape, dtype, fmt)
 
     def _flush_send(self):
-        """Flush the send transaction
+        """Flush the underlying pipe
         """
         if not self._during_send:
             logger.error("No send transaction is prepared")
             raise RuntimeError("No send transaction is prepared")
-        if self._payload_offset == 0:
-            logger.error("Send buffer offset is 0!")
-            raise RuntimeError("Send buffer offset is 0!")
 
-        assert self._curr_uuid is not None
-        self._curr_uuid = self._pipe.commit_write(self._payload_offset,
-                                                  self._curr_uuid)
-        self._payload_offset = 0
+        self._pipe.flush()
 
-    def send(self, keys: list[CacheEngineKey], objs: list[MemoryObj]):
-        """A blocking function that ensures the objects are sent to the 
-        receiver side.
+    def finish_send(self):
+        """Finish the send transaction by flushing the buffer.
+        """
+        assert self._during_send, \
+            "No send transaction is prepared"
 
-        Should raise exception if the transmission is not successful
+        assert self._added_payload_count == self._prepared_count, \
+            "Not all payloads are added to the send transaction"
 
-        This function is equivalent to calling the following 3 functions:
-        - prepare_send
-        - add_payload
-        - finish_send
+        self._flush_send()
 
+        self._during_send = False
+        self._prepared_count = 0
+        self._added_payload_count = 0
+
+    def zero_copy_send_with_callback(
+        self,
+        keys: list[CacheEngineKey],
+        metadatas: list[MemoryObjMetadata],
+        callback: Callable[[MemoryObj, int], None],
+    ):
+        """Send the data with a zero-copy callback.
+        
         Args:
             keys: the list of CacheEngineKey for the objects being sent
-            objs: the list of MemoryObj to send
-
-        Raises:
-            RuntimeError: if the underlying NixlPipe transmission fails or 
-                failed to write to the transfer buffer
+            metadatas: the list of MemoryObjMetadata for the objects being sent
+            callback: a callable that will be called with the in-place 
+                allocated MemoryObj and its index as the argument
         """
-        self.prepare_send(keys, [obj.metadata for obj in objs])
-
-        for obj in objs:
-            self.add_payload(obj)
-
+        self.prepare_send(keys, metadatas)
+        for index, metadata in enumerate(metadatas):
+            obj = self.allocate_for_send(shape=metadata.shape,
+                                         dtype=metadata.dtype,
+                                         fmt=metadata.fmt)
+            assert obj is not None, \
+                "Failed to allocate memory for the payload"
+            callback(obj, index)
         self.finish_send()
 
     def register_receive_observer(self, observer: NixlObserverInterface):
