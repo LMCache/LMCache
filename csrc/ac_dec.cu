@@ -237,7 +237,7 @@ __global__ void decode_prefix_with_accessor_kernel(
 
     // copy bytestreams[layer_id, global_channel_offset:global_channel_offset+BLOCK_SIZE, :] to shared memory, do this channel by channel
     for (int i = 0; i < BLOCK_SIZE; i++) {
-        const int channel_id = global_channel_offset + i;
+        [[maybe_unused]] const int channel_id = global_channel_offset + i;
         const int start_offset = sum_lengths_shared[i];
         const int end_offset = sum_lengths_shared[i + 1];
         const int length = end_offset - start_offset;

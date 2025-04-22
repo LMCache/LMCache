@@ -570,18 +570,18 @@ class LMCacheConnectorV1Impl:
             # No KV tokens from external KV cache, return
             return
 
-        assert num_external_tokens == \
+        if num_external_tokens == 0:
+            # No need to load anything
+            self.load_specs[request.request_id].can_load = False
+            return
+
+        assert num_external_tokens > 0 and num_external_tokens == \
             self.load_specs[request.request_id].lmcache_cached_tokens - \
             self.load_specs[request.request_id].vllm_cached_tokens, \
             f"Mismatch in number of tokens: {num_external_tokens} vs " \
             f"{self.load_specs[request.request_id].lmcache_cached_tokens} - " \
             f"{self.load_specs[request.request_id].vllm_cached_tokens}" \
             f" for request {request.request_id}"
-
-        if num_external_tokens == 0:
-            # No need to load anything
-            self.load_specs[request.request_id].can_load = False
-            return
 
         self.load_specs[request.request_id].can_load = True
 
