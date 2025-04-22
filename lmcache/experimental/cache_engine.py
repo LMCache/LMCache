@@ -36,7 +36,7 @@ from lmcache.experimental.token_database import (ChunkedTokenDatabase,
 from lmcache.logging import init_logger
 from lmcache.observability import LMCacheStatsLogger, LMCStatsMonitor
 from lmcache.usage_context import InitializeUsageContext
-from lmcache.utils import _lmcache_nvtx_annotate
+from lmcache.utils import CacheEngineKey, _lmcache_nvtx_annotate
 
 logger = init_logger(__name__)
 
@@ -83,9 +83,14 @@ class LMCacheEngine:
         multiprocessing.set_start_method('spawn', force=True)
 
         self.lookup_server: Optional[LookupServerInterface] = None
-        # TODO(Jiayi): hard-coded for now
         if self.enable_p2p:
             self.lookup_server = RedisLookupServer(config)
+
+        # avoid circular import
+        from lmcache.experimental.cache_controller import LMCacheWorker
+        self.lmcache_worker: Optional[LMCacheWorker] = None
+        if self.config.enable_controller:
+            self.lmcache_worker = LMCacheWorker(config, metadata, self)
 
         self.use_distributed_storage_manager = False
         if config.enable_nixl:
@@ -94,8 +99,9 @@ class LMCacheEngine:
                 config, metadata, self.memory_allocator)
         else:
             self.storage_manager = StorageManager(
-                config, metadata, self.memory_allocator,
+                config, metadata, self.memory_allocator, self.lmcache_worker,
                 self.lookup_server)  # type: ignore[assignment]
+
         if self.enable_p2p:
             self.distributed_loop = asyncio.get_event_loop()
             assert self.lookup_server is not None
@@ -106,11 +112,6 @@ class LMCacheEngine:
                                        self.memory_allocator,
                                        self.distributed_loop,
                                        config)
-
-        if self.config.enable_controller:
-            # avoid circular import
-            from lmcache.experimental.cache_controller import LMCacheWorker
-            self.controller = LMCacheWorker(config, metadata, self)
 
         InitializeUsageContext(config.to_original_config(), metadata)
         self.stats_monitor = LMCStatsMonitor.GetOrCreate()
@@ -140,13 +141,13 @@ class LMCacheEngine:
         steds = []
         for start, end, key in self.token_database.process_tokens(
                 tokens, mask):
+            assert isinstance(key, CacheEngineKey)
             # Allocate the memory object
             num_tokens = end - start
             kv_shape = self.gpu_connector.get_shape(num_tokens)
             kv_dtype = self.metadata.kv_dtype
             memobj_meta = self.storage_manager.dry_allocate(kv_shape, kv_dtype)
             assert memobj_meta is not None
-
             keys.append(key)
             metadatas.append(memobj_meta)
             steds.append((start, end))
@@ -184,6 +185,7 @@ class LMCacheEngine:
         put_time += time.perf_counter() - t
 
         ed = time.perf_counter()
+        assert mask is not None
         logger.info(
             "Store %d tokens takes: %.4f ms, throughput: %.4f GB/s; "
             "offload_time: %.4f ms, put_time: %.4f ms", torch.sum(mask),
@@ -228,6 +230,7 @@ class LMCacheEngine:
 
         for start, end, key in self.token_database.process_tokens(
                 tokens, mask):
+            assert isinstance(key, CacheEngineKey)
             if self.storage_manager.contains(key):
                 continue
             # Allocate the memory object
@@ -290,6 +293,8 @@ class LMCacheEngine:
         for start, end, key in self.token_database.process_tokens(
                 tokens, mask):
 
+            assert isinstance(key, CacheEngineKey)
+
             # Get the memory object from the storage backend
             memory_obj = self.storage_manager.get(key)
 
@@ -335,6 +340,7 @@ class LMCacheEngine:
         """
         for start, end, key in self.token_database.process_tokens(
                 tokens, mask):
+            assert isinstance(key, CacheEngineKey)
             self.storage_manager.prefetch(key)
 
     # TODO(Jiayi): Currently, search_range is only used for testing.
@@ -356,6 +362,7 @@ class LMCacheEngine:
         """
         end = 0
         for start, end, key in self.token_database.process_tokens(tokens):
+            assert isinstance(key, CacheEngineKey)
             if not self.storage_manager.contains(key, search_range):
                 return start
         return end
@@ -374,6 +381,7 @@ class LMCacheEngine:
         num_removed = 0
         # Only remove the caches for the given tokens
         for start, end, key in self.token_database.process_tokens(tokens):
+            assert isinstance(key, CacheEngineKey)
             removed = self.storage_manager.remove(key, locations)
             num_removed += removed
         return num_removed
@@ -384,8 +392,8 @@ class LMCacheEngine:
         if self.enable_p2p:
             self.distributed_server.close()
 
-        if self.config.enable_controller:
-            self.controller.close()
+        if self.lmcache_worker is not None:
+            self.lmcache_worker.close()
 
         self.storage_manager.close()
         logger.info("LMCacheEngine closed.")

@@ -25,7 +25,8 @@ class TokenDatabase(metaclass=abc.ABCMeta):
         self,
         tokens: Union[torch.Tensor, List[int]],
         mask: Optional[torch.Tensor] = None,
-    ) -> Iterable[Tuple[int, int, CacheEngineKey]]:
+        make_key: bool = True,
+    ) -> Iterable[Tuple[int, int, Union[CacheEngineKey, str]]]:
         """Process the tokens and return the corresponding cache engine keys.
 
         :param Union[torch.Tensor, List[int]] tokens: The tokens to process.
@@ -38,7 +39,7 @@ class TokenDatabase(metaclass=abc.ABCMeta):
         :returns: A iterable of tuples with three elements. The first element
             is the start index of the tokens for the key. The second element
             is the end index of the tokens for the key. The third element is
-            the cache engine key for the tokens.
+            the cache engine key (or hash) for the tokens.
         """
 
         raise NotImplementedError
@@ -46,12 +47,15 @@ class TokenDatabase(metaclass=abc.ABCMeta):
 
 class ChunkedTokenDatabase(TokenDatabase):
 
-    def __init__(self, config: LMCacheEngineConfig,
-                 metadata: LMCacheEngineMetadata):
-        self.chunk_size = config.chunk_size
+    def __init__(self,
+                 config: Optional[LMCacheEngineConfig] = None,
+                 metadata: Optional[LMCacheEngineMetadata] = None):
+        if config is not None:
+            self.chunk_size = config.chunk_size
         self.metadata = metadata
 
     def _make_key_by_hash(self, chunk_hash: str):
+        assert self.metadata is not None
         return CacheEngineKey(self.metadata.fmt, self.metadata.model_name,
                               self.metadata.world_size,
                               self.metadata.worker_id, chunk_hash)
@@ -101,7 +105,8 @@ class ChunkedTokenDatabase(TokenDatabase):
         self,
         tokens: Union[torch.Tensor, List[int]],
         mask: Optional[torch.Tensor] = None,
-    ) -> Iterable[Tuple[int, int, CacheEngineKey]]:
+        make_key: bool = True,
+    ) -> Iterable[Tuple[int, int, Union[CacheEngineKey, str]]]:
         """Process the tokens and return the corresponding cache engine keys.
 
         :param Union[torch.Tensor, List[int]] tokens: The tokens to process.
@@ -114,7 +119,7 @@ class ChunkedTokenDatabase(TokenDatabase):
         :returns: A iterable of tuples with three elements. The first element
             is the start index of the tokens for the key. The second element
             is the end index of the tokens for the key. The third element is
-            the cache engine key for the tokens.
+            the cache engine key (or hash) for the tokens.
 
         :raises: ValueError if the number of Falses in the mask is not a 
             multiple of the chunk size.
@@ -139,4 +144,7 @@ class ChunkedTokenDatabase(TokenDatabase):
             if start_idx < num_falses:
                 continue
             else:
-                yield start_idx, end_idx, self._make_key_by_hash(hash_val)
+                if make_key:
+                    yield start_idx, end_idx, self._make_key_by_hash(hash_val)
+                else:
+                    yield start_idx, end_idx, hash_val
