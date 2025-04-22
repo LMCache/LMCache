@@ -1,6 +1,6 @@
 import inspect
 import os
-from typing import List, Optional, Tuple, Union
+from typing import List, Optional, Tuple
 
 import redis
 
@@ -54,9 +54,9 @@ class RedisConnector(RemoteBytesConnector):
 class RedisSentinelConnector(RemoteBytesConnector):
     """
     Uses redis.Sentinel to connect to a Redis cluster.
-    The hosts are specified in the config file, started with "redis-sentinel://" 
+    The hosts are specified in the config file, started with "redis-sentinel://"
     and separated by commas.
-    
+
     Example:
         remote_url: "redis-sentinel://localhost:26379,localhost:26380,localhost:26381"
 
@@ -68,7 +68,7 @@ class RedisSentinelConnector(RemoteBytesConnector):
     ENV_REDIS_TIMEOUT = "REDIS_TIMEOUT"
     ENV_REDIS_SERVICE_NAME = "REDIS_SERVICE_NAME"
 
-    def __init__(self, hosts_and_ports: List[Tuple[str, Union[str, int]]]):
+    def __init__(self, hosts_and_ports: List[Tuple[str, int]]):
         # Get service name
         match os.environ.get(self.ENV_REDIS_SERVICE_NAME):
             case None:
@@ -88,14 +88,14 @@ class RedisSentinelConnector(RemoteBytesConnector):
             case value:
                 timeout = float(value)
 
-        self.sentinel = redis.Sentinel(hosts_and_ports, timeout)
+        self.sentinel = redis.Sentinel(hosts_and_ports, socket_timeout=timeout)
         self.master = self.sentinel.master_for(service_name,
                                                socket_timeout=timeout)
         self.slave = self.sentinel.slave_for(service_name,
                                              socket_timeout=timeout)
 
     def exists(self, key: str) -> bool:
-        return self.slave.exists(key)
+        return bool(self.slave.exists(key))
 
     def get(self, key: str) -> Optional[bytes]:
         return self.slave.get(key)

@@ -153,7 +153,7 @@ class StorageManager:
     ) -> None:
         """
         Non-blocking function to put the memory object into the storages.
-        Do not store if the same object is being stored (handled here by 
+        Do not store if the same object is being stored (handled here by
         storage manager) or has been stored (handled by storage backend).
         """
         self.manager_lock.acquire()
@@ -179,7 +179,8 @@ class StorageManager:
         # if one of the backend is already storing this cache.
         # This might not be ideal.
         for storage_backend in self.storage_backends.values():
-            if storage_backend.exists_in_put_tasks(key):
+            if storage_backend.exists_in_put_tasks(key) or \
+                storage_backend.contains(key):
                 self.memory_allocator.ref_count_down(memory_obj)
                 self.manager_lock.release()
                 return
@@ -391,13 +392,13 @@ class StorageManager:
     ) -> bool:
         """
         Check whether the key exists in the storage backend.
-        
+
         :param CacheEngineKey key: The key to check.
-        
+
         :param Optional[List[str]] search_range: The range of storage backends
         to search in. Should be a subset of ["Hot", "LocalDiskBackend"] for now.
         If None, search in all backends.
-        
+
         return: True if the key exists in the specified storage backends.
         """
         with self.manager_lock:
@@ -422,15 +423,15 @@ class StorageManager:
         """
         Remove the key and the corresponding cache in the specified
         locations.
-        
+
         :param CacheEngineKey key: The key to remove.
-        
+
         :param Optional[List[str]] locations: The range of storage backends
-        to perform `remove` in. 
+        to perform `remove` in.
         Should be a subset of ["Hot", "LocalDiskBackend"] for now.
         If None, perform `remove` in all backends.
-        
-        return: Total number of removed caches in the specified 
+
+        return: Total number of removed caches in the specified
         storage backends.
         """
 
@@ -455,12 +456,12 @@ class StorageManager:
     ) -> int:
         """
         Clear all caches in the specified locations.
-        
+
         :param Optional[List[str]] locations: The range of storage backends
-        to perform `clear` in. 
+        to perform `clear` in.
         Should be a subset of ["Hot", "LocalDiskBackend"] for now.
         If None, perform `clear` in all backends.
-        
+
         return: Total number of cleared caches in the specified
         storage backends.
         """

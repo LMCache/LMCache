@@ -142,7 +142,7 @@ def CreateConnector(
 
         case "redis-sentinel":
             connector = RedisSentinelConnector(
-                list(zip(parsed_url.hosts, parsed_url.ports)),
+                list(zip(parsed_url.hosts, map(int, parsed_url.ports))),
                 loop,
                 memory_allocator,
             )
