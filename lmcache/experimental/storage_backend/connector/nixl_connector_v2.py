@@ -69,7 +69,7 @@ class NixlBufferAllocator(MemoryAllocatorInterface):
 
         :rtype: Optional[MemoryObj]
         """
-        metadata = self.dry_allocate(shape, dtype, fmt)
+        metadata = self.dry_allocate(torch.Size(shape), dtype, fmt)
         metadata.address = self.allocated_size
 
         # check the size and capacity

@@ -47,7 +47,7 @@ class TokenDatabase(metaclass=abc.ABCMeta):
 
 
 class ChunkedTokenDatabase(TokenDatabase):
-    
+
     def __init__(self, config: LMCacheEngineConfig,
                  metadata: LMCacheEngineMetadata):
         self.chunk_size = config.chunk_size
@@ -146,20 +146,18 @@ class ChunkedTokenDatabase(TokenDatabase):
 
 class SegmentTokenDatabase(TokenDatabase):
     """
-    Currently, we still use special separtors to identify chunks.
+    Currently, we still use special separators to identify chunks.
     In the future, we might need to implement a fast substring match.
     """
+
     def __init__(self, config: LMCacheEngineConfig,
                  metadata: LMCacheEngineMetadata):
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            metadata.model_name
-        )
-        
+        self.tokenizer = AutoTokenizer.from_pretrained(metadata.model_name)
+
         # TODO (Jiayi): figure out how to decide when
         # to use `1:` (whether there's a special starting token
         # in the beginning)
-        self.sep_tokens = self.tokenizer.encode(
-            config.blend_special_str)[1:]
+        self.sep_tokens = self.tokenizer.encode(config.blend_special_str)[1:]
         self.sep_tokens = torch.tensor(self.sep_tokens, device="cpu")
         self.sep_len = len(self.sep_tokens)
         self.metadata = metadata
@@ -181,11 +179,9 @@ class SegmentTokenDatabase(TokenDatabase):
         return hashlib.sha256(tokens_bytes).hexdigest()
 
     def _fast_split_by_subtensor(
-        self, 
-        tokens: torch.Tensor
-    ) -> Iterable[torch.Tensor]:
+            self, tokens: torch.Tensor) -> Iterable[torch.Tensor]:
         """Match the `sep_tokens` with sliding windows"""
-        
+
         if self.sep_len == 0 or len(tokens) < self.sep_len:
             yield tokens
 
@@ -194,7 +190,8 @@ class SegmentTokenDatabase(TokenDatabase):
         windows = tokens.unfold(0, self.sep_len, 1)
 
         # Compare each window with sep_tokens
-        matches = (windows == self.sep_tokens).all(dim=1).nonzero(as_tuple=True)[0].tolist()
+        matches = (windows == self.sep_tokens).all(dim=1).nonzero(
+            as_tuple=True)[0].tolist()
 
         # Split based on matches
         start = 0
@@ -222,7 +219,7 @@ class SegmentTokenDatabase(TokenDatabase):
             the cache engine key for the tokens.
 
         """
-        
+
         assert isinstance(tokens, torch.Tensor), \
             "Only tokens in tensor format are supported for now."
         if mask is not None:
@@ -242,6 +239,5 @@ class SegmentTokenDatabase(TokenDatabase):
                 end_idx += self.sep_len
             if start_idx >= num_falses:
                 yield start_idx, end_idx, self._make_key_by_hash(
-                    self._hash(token_chunk)
-                )
+                    self._hash(token_chunk))
             start_idx = end_idx

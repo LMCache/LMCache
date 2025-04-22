@@ -27,15 +27,15 @@ class LMCacheEngineConfig:
     enable_blending: bool  # whether to enable blending
     blend_recompute_ratio: float  # the ratio of blending recompute
     blend_min_tokens: int  # the minimum number of tokens for blending
-    blend_special_str: str # the separator for blending
+    blend_special_str: str = " # # "  # the separator for blending
 
     # P2P related configurations
-    enable_p2p: bool  # whether to enable peer-to-peer sharing
-    lookup_url: Optional[str]  # the url of the lookup server
-    distributed_url: Optional[str]  # the url of the distributed server
+    enable_p2p: bool = False  # whether to enable peer-to-peer sharing
+    lookup_url: Optional[str] = None  # the url of the lookup server
+    distributed_url: Optional[str] = None  # the url of the distributed server
 
     # Error handling related configurations
-    error_handling: bool  # whether to enable error handling
+    error_handling: bool = False  # whether to enable error handling
 
     # Controller related configurations
     enable_controller: Optional[bool] = False  # whether to enable controller
@@ -91,11 +91,10 @@ class LMCacheEngineConfig:
             chunk_size, local_cpu, max_local_cpu_size, local_disk,
             max_local_disk_size, remote_url, remote_serde, save_decode_cache,
             enable_blending, blend_recompute_ratio, blend_min_tokens,
-            blend_special_str,
-            enable_p2p, lookup_url, distributed_url, error_handling,
-            enable_controller, lmcache_instance_id, enable_nixl, nixl_role,
-            nixl_peer_host, nixl_peer_port, nixl_buffer_size,
-            nixl_buffer_device, nixl_enable_gc).validate()
+            blend_special_str, enable_p2p, lookup_url, distributed_url,
+            error_handling, enable_controller, lmcache_instance_id,
+            enable_nixl, nixl_role, nixl_peer_host, nixl_peer_port,
+            nixl_buffer_size, nixl_buffer_device, nixl_enable_gc).validate()
 
     @staticmethod
     def from_legacy(
@@ -158,8 +157,8 @@ class LMCacheEngineConfig:
                                    remote_serde, save_decode_cache,
                                    enable_blending, blend_recompute_ratio,
                                    blend_min_tokens, blend_special_str,
-                                   enable_p2p, lookup_url,
-                                   distributed_url, error_handling).validate()
+                                   enable_p2p, lookup_url, distributed_url,
+                                   error_handling).validate()
 
     @staticmethod
     def from_file(file_path: str) -> "LMCacheEngineConfig":
@@ -181,7 +180,7 @@ class LMCacheEngineConfig:
         remote_serde = config.get("remote_serde", "naive")
 
         save_decode_cache = config.get("save_decode_cache", False)
-        
+
         enable_blending = config.get("enable_blending", False)
         blend_recompute_ratio = config.get("blend_recompute_ratio", 0.15)
         blend_min_tokens = config.get("blend_min_tokens", 256)
@@ -303,7 +302,7 @@ class LMCacheEngineConfig:
         config.save_decode_cache = to_bool(
             parse_env(get_env_name("save_decode_cache"),
                       config.save_decode_cache))
-        
+
         config.enable_blending = to_bool(
             parse_env(get_env_name("enable_blending"), config.enable_blending))
         config.blend_recompute_ratio = to_float(
@@ -312,8 +311,10 @@ class LMCacheEngineConfig:
         config.blend_min_tokens = to_int(
             parse_env(get_env_name("blend_min_tokens"),
                       config.blend_min_tokens))
-        config.blend_special_str = parse_env(get_env_name("blend_special_str"),
-                                             config.blend_special_str)
+        blend_special_str = parse_env(get_env_name("blend_special_str"),
+                                      config.blend_special_str)
+        assert blend_special_str is not None
+        config.blend_special_str = blend_special_str
 
         config.enable_p2p = to_bool(
             parse_env(get_env_name("enable_p2p"), config.enable_p2p))

@@ -16,10 +16,13 @@ def dumb_metadata(fmt="vllm", kv_shape=(32, 2, 256, 8, 128)):
     return LMCacheEngineMetadata("test_model", 3, 123, fmt, torch.bfloat16,
                                  kv_shape)
 
-def dumb_metadata_with_model_name(
-    model_name: str, fmt="vllm", kv_shape=(32, 2, 256, 8, 128)):
+
+def dumb_metadata_with_model_name(model_name: str,
+                                  fmt="vllm",
+                                  kv_shape=(32, 2, 256, 8, 128)):
     return LMCacheEngineMetadata(model_name, 3, 123, fmt, torch.bfloat16,
                                  kv_shape)
+
 
 def dumb_cache_engine_key():
     return CacheEngineKey("vllm", "test_model", 3, 123, "hash")
@@ -105,7 +108,7 @@ def generate_kv_cache_paged_list_tensors(num_blocks,
 
 def generate_tokens(num_tokens, device, fixed=False):
     if fixed:
-        return torch.tensor([-1]*num_tokens).to(device)
+        return torch.tensor([-1] * num_tokens).to(device)
     else:
         # random tokens
         return torch.randint(0, 10000, size=[num_tokens]).to(device)
