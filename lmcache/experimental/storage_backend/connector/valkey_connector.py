@@ -31,21 +31,25 @@ from lmcache.utils import CacheEngineKey
 logger = init_logger(__name__)
 
 
-class BaseValkeyConnector(RemoteConnector):
-    """Base Valkey connector with common operations"""
+class ValkeyConnector(RemoteConnector):
+    """
+    The remote url should start with "valkey://" and only have one
+    host-port pair
+    """
 
-    def __init__(self, memory_allocator: MemoryAllocatorInterface):
+    def __init__(self, host: str, port: int, loop: asyncio.AbstractEventLoop,
+                 memory_allocator: MemoryAllocatorInterface):
         self.memory_allocator = memory_allocator
+        self._client = Valkey(host=host, port=port, decode_responses=False)
+        self.loop = loop
 
     @property
     def read_client(self) -> Valkey:
-        """Client for read operations (to be implemented by subclasses)"""
-        raise NotImplementedError
+        return self._client
 
     @property
     def write_client(self) -> Valkey:
-        """Client for write operations (to be implemented by subclasses)"""
-        raise NotImplementedError
+        return self._client
 
     async def exists(self, key: CacheEngineKey) -> bool:
         return bool(self.read_client.exists(key.to_string()))
@@ -98,37 +102,16 @@ class BaseValkeyConnector(RemoteConnector):
 
         self.memory_allocator.ref_count_down(memory_obj)
 
+    async def close(self):
+        self._client.close()
+
     # TODO
     @no_type_check
     async def list(self) -> List[str]:
         pass
 
 
-class ValkeyConnector(BaseValkeyConnector):
-    """
-    The remote url should start with "valkey://" and only have one
-    host-port pair
-    """
-
-    def __init__(self, host: str, port: int, loop: asyncio.AbstractEventLoop,
-                 memory_allocator: MemoryAllocatorInterface):
-        super().__init__(memory_allocator)
-        self._client = Valkey(host=host, port=port, decode_responses=False)
-        self.loop = loop
-
-    @property
-    def read_client(self) -> Valkey:
-        return self._client
-
-    @property
-    def write_client(self) -> Valkey:
-        return self._client
-
-    async def close(self):
-        self._client.close()
-
-
-class ValkeySentinelConnector(BaseValkeyConnector):
+class ValkeySentinelConnector(ValkeyConnector):
     """
     Uses valkey.Sentinel to connect to a Valkey cluster.
     The hosts are specified in the config file, started with "valkey-sentinel://"
@@ -148,7 +131,7 @@ class ValkeySentinelConnector(BaseValkeyConnector):
     def __init__(self, hosts_and_ports: List[Tuple[str, Union[str, int]]],
                  loop: asyncio.AbstractEventLoop,
                  memory_allocator: MemoryAllocatorInterface):
-        super().__init__(memory_allocator)
+        self.memory_allocator = memory_allocator
         # Get service name
         match os.environ.get(self.ENV_VALKEY_SERVICE_NAME):
             case None:
