@@ -59,7 +59,7 @@ class LocalDiskBackend(StorageBackendInterface):
         self.put_tasks: List[CacheEngineKey] = []
 
         self.memory_allocator = memory_allocator
-        
+
         self.lmcache_worker = lmcache_worker
         self.instance_id = config.lmcache_instance_id
         self.stats_monitor = LMCStatsMonitor.GetOrCreate()
