@@ -1,5 +1,31 @@
+from pathlib import Path
+
 from setuptools import find_packages, setup
 from torch.utils import cpp_extension
+
+ROOT_DIR = Path(__file__).parent
+
+
+# Taken from https://github.com/vllm-project/vllm/blob/main/setup.py
+def get_requirements() -> list[str]:
+    """Get Python package dependencies from requirements.txt."""
+    requirements_dir = ROOT_DIR
+
+    def _read_requirements(filename: str) -> list[str]:
+        with open(requirements_dir / filename) as f:
+            requirements = f.read().strip().split("\n")
+        resolved_requirements = []
+        for line in requirements:
+            if line.startswith("-r "):
+                resolved_requirements += _read_requirements(line.split()[1])
+            elif not line.startswith("--") and not line.startswith(
+                    "#") and line.strip() != "":
+                resolved_requirements.append(line)
+        return resolved_requirements
+
+    requirements = _read_requirements("requirements.txt")
+    return requirements
+
 
 ext_modules = [
     cpp_extension.CUDAExtension(
@@ -25,11 +51,7 @@ setup(
     long_description=open("README.md").read(),
     long_description_content_type="text/markdown",
     packages=find_packages(exclude=("csrc")),
-    install_requires=[
-        "torch == 2.5.1", "numpy==1.26.4", "aiofiles", "pyyaml", "redis",
-        "nvtx", "safetensors", "transformers", "torchac_cuda >= 0.2.5",
-        "sortedcontainers", "prometheus_client", "infinistore", "msgspec"
-    ],
+    install_requires=get_requirements(),
     ext_modules=ext_modules,
     cmdclass=cmdclass,
     classifiers=[

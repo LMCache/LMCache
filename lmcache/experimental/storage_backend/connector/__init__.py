@@ -26,6 +26,7 @@ from lmcache.experimental.storage_backend.connector.redis_connector import (
     RedisConnector, RedisSentinelConnector)
 from lmcache.logging import init_logger
 
+from .blackhole_connector import BlackholeConnector
 from .infinistore_connector import InfinistoreConnector
 from .mooncakestore_connector import MooncakestoreConnector
 
@@ -128,8 +129,8 @@ def CreateConnector(
     num_hosts = len(parsed_url.hosts)
 
     connector: Optional[RemoteConnector] = None
-
-    match parsed_url.connector_type:
+    connector_type = parsed_url.connector_type
+    match connector_type:
         case "redis":
             if num_hosts == 1:
                 host, port = parsed_url.hosts[0], parsed_url.ports[0]
@@ -165,9 +166,11 @@ def CreateConnector(
             device_name = parsed_url.query_params[0].get("device", "")
             connector = MooncakestoreConnector(host, port, device_name, loop,
                                                memory_allocator)
+        case "blackhole":
+            connector = BlackholeConnector(memory_allocator)
         case _:
-            raise ValueError(
-                f"Unknown connector type {parsed_url.connector_type} "
-                f"(url is: {url})")
+            raise ValueError(f"Unknown connector type {connector_type} "
+                             f"(url is: {url})")
 
+    logger.info(f"Created connector {connector} for {connector_type}")
     return connector
