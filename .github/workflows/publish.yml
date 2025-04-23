@@ -115,20 +115,16 @@ jobs:
           name: release-artifacts
           path: dist/
 
-      - name: Create GitHub Release
-        uses: actions/create-release@v1
+      - name: Create GitHub Release + Upload Wheels
+        uses: softprops/action-gh-release@v1
         with:
           tag_name: ${{ github.ref_name }}
-          release_name: Release ${{ github.ref_name }}
+          name: Release ${{ github.ref_name }}
           body: |
             Release generated from tag `${{ github.ref_name }}`.
             Built with CUDA 12.4 wheels and uploaded to PyPI.
+          files: dist/*
           draft: false
           prerelease: false
-
-      - name: Upload release artifacts
-        uses: softprops/action-gh-release@v1
-        with:
-          files: dist/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
