@@ -1,5 +1,6 @@
 import hashlib
 import threading
+import time
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
@@ -16,6 +17,29 @@ class DiskCacheMetadata:
     size: int  # in bytes
     shape: Optional[torch.Size] = None
     dtype: Optional[torch.dtype] = None
+    expire_time: Optional[float] = None
+
+    def update_lifetime(self, ttl: Optional[float] = None):
+        """
+        Update the lifetime of the disk cache.
+        """
+        current_time = time.time()
+        if ttl is None:
+            expire_time = float("inf")
+        else:
+            expire_time = current_time + ttl
+        self.expire_time = expire_time
+
+    def is_expire(self):
+        """
+        Check if the MemoryObj is expired.
+        """
+        if self.expire_time is None:
+            return False
+        current_time = time.time()
+        if current_time > self.expire_time:
+            return True
+        return False
 
 
 TORCH_DTYPE_TO_STR_DTYPE = {

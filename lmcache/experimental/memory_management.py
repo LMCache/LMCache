@@ -1,6 +1,7 @@
 import abc
 import ctypes
 import threading
+import time
 from dataclasses import dataclass
 from enum import Enum
 from typing import Optional, Tuple, Union
@@ -64,6 +65,9 @@ class MemoryObjMetadata:
     # The 'logical' format of the tensor
     fmt: MemoryFormat = MemoryFormat.UNDEFINED
 
+    # The expiration time of the memory object
+    expire_time: Optional[float] = None
+
     def get_size(self):
         """
         Calculate the size of the memory object in bytes 
@@ -117,6 +121,28 @@ class MemoryObj(metaclass=abc.ABCMeta):
         """
         return None
 
+    def update_lifetime(self, ttl: Optional[float] = None):
+        """
+        Update the lifetime of the MemoryObj.
+        """
+        current_time = time.time()
+        if ttl is None:
+            expire_time = float("inf")
+        else:
+            expire_time = current_time + ttl
+        self.metadata.expire_time = expire_time
+
+    def is_expire(self):
+        """
+        Check if the MemoryObj is expired.
+        """
+        if self.metadata.expire_time is None:
+            return False
+        current_time = time.time()
+        if current_time > self.metadata.expire_time:
+            return True
+        return False
+
     @abc.abstractmethod
     def get_memory_format(self) -> MemoryFormat:
         """
@@ -135,7 +161,7 @@ class MemoryObj(metaclass=abc.ABCMeta):
     @abc.abstractmethod
     def metadata(self) -> MemoryObjMetadata:
         """
-        Get the metada of the MemoryObj.
+        Get the metadata of the MemoryObj.
         """
         raise NotImplementedError
 

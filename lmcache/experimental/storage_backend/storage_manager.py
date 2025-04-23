@@ -106,13 +106,17 @@ class StorageManager:
 
         for evict_key in self.hot_cache:
 
+            memory_obj = self.hot_cache[evict_key]
+
+            if not memory_obj.is_expire():
+                continue
+
             # If the ref_count > 1, we cannot evict it as the hot cache
             # might be used as buffers by other storage backends
-            if self.memory_allocator.get_ref_count(
-                    self.hot_cache[evict_key]) > 1:
+            if self.memory_allocator.get_ref_count(memory_obj) > 1:
                 continue
             evict_keys.append(evict_key)
-            self.memory_allocator.ref_count_down(self.hot_cache[evict_key])
+            self.memory_allocator.ref_count_down(memory_obj)
             memory_obj = self.memory_allocator.allocate(shape, dtype)
             logger.debug("Evicting 1 chunk from hot cache")
             if memory_obj is not None:
@@ -296,6 +300,11 @@ class StorageManager:
         self.manager_lock.acquire()
         memory_obj = self.hot_cache.get(key, None)
         if memory_obj is not None:
+            if memory_obj.is_expire():
+                self.hot_cache.pop(key)
+                self.memory_allocator.ref_count_down(memory_obj)
+                self.manager_lock.release()
+                return None
             self.memory_allocator.ref_count_up(memory_obj)
             self.hot_cache.move_to_end(key)
             self.manager_lock.release()
@@ -403,16 +412,22 @@ class StorageManager:
         with self.manager_lock:
             if search_range is None or "Hot" in search_range:
                 if key in self.hot_cache:
+                    # Check expiration
+                    # TODO(Jiayi): we might need to evict directly upon
+                    # lookup. This should be done after refactoring the
+                    # cpu backend.
+                    if self.hot_cache[key].is_expire():
+                        return False
                     return True
 
-            for backend_name, backend in self.storage_backends.items():
-                if search_range is not None and \
-                    backend_name not in search_range:
-                    continue
-                if backend.contains(key):
-                    return True
+        for backend_name, backend in self.storage_backends.items():
+            if search_range is not None and \
+                backend_name not in search_range:
+                continue
+            if backend.contains(key):
+                return True
 
-            return False
+        return False
 
     def remove(
         self,
@@ -488,6 +503,38 @@ class StorageManager:
         # TODO(Jiayi): need to handle clear in non-cpu backends
 
         return num_cleared
+
+    def pin(
+        self,
+        key: CacheEngineKey,
+        pin_range: Optional[List[str]] = None,
+        ttl: Optional[float] = None,
+    ) -> bool:
+        """
+        Pin the KV cache of the key in the specified locations.
+        
+        :param CacheEngineKey key: The key of the KV cache to pin.
+        
+        :param Optional[List[str]] pin_range: The range of storage backends
+        to pin in. Should be a subset of ["Hot", "LocalDiskBackend"] for now.
+        If None, pin in all backends.
+        
+        return: True if the KV cache of the key has been pinned successfully.
+        """
+        with self.manager_lock:
+            if pin_range is None or "Hot" in pin_range:
+                if key in self.hot_cache:
+                    self.hot_cache[key].update_lifetime(ttl)
+                    return True
+
+        for backend_name, backend in self.storage_backends.items():
+            if pin_range is not None and \
+                backend_name not in pin_range:
+                continue
+            if backend.pin(key, ttl):
+                return True
+
+        return False
 
     def close(self):
 
@@ -610,6 +657,13 @@ class DistributedStorageManager:
         search_range: Optional[List[str]] = None,
     ) -> bool:
         return self.storage_backend.contains(key)
+
+    def pin(self,
+            key: CacheEngineKey,
+            pin_range: Optional[List[str]] = None,
+            ttl: Optional[float] = None) -> int:
+        raise NotImplementedError("Pin is not implemented for "
+                                  "distributed storage manager.")
 
     def close(self):
         self.storage_backend.close()

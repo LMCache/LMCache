@@ -20,7 +20,8 @@ import zmq
 import zmq.asyncio
 
 from lmcache.experimental.cache_controller.message import (  # noqa: E501
-    ClearMsg, ClearRetMsg, ClearWorkerMsg, ErrorMsg, Msg, MsgBase)
+    ClearMsg, ClearRetMsg, ClearWorkerMsg, ErrorMsg, Msg, MsgBase, PinMsg,
+    PinRetMsg, PinWorkerMsg)
 from lmcache.logging import init_logger
 
 logger = init_logger(__name__)
@@ -77,6 +78,41 @@ class LMCacheClusterExecutor:
             if success:
                 success = result.success
         return ClearRetMsg(success=success)
+
+    async def pin(self, msg: PinMsg) -> Union[PinRetMsg, ErrorMsg]:
+        """
+        Execute a cache operation with error handling.
+        """
+        instance_id = msg.instance_id
+        worker_ids = msg.worker_ids
+        tokens = msg.tokens
+        ttl = msg.ttl
+
+        if worker_ids is None or len(worker_ids) == 0:
+            worker_ids = self.reg_controller.get_workers(instance_id)
+        assert worker_ids is not None
+        sockets = []
+        serialized_msgs = []
+        for worker_id in worker_ids:
+            socket = self.reg_controller.get_socket(instance_id, worker_id)
+            if socket is None:
+                return ErrorMsg(error=(f"Worker {worker_id} not registered"
+                                       f"for instance {instance_id}"))
+            sockets.append(socket)
+            serialized_msg = msgspec.msgpack.encode(
+                PinWorkerMsg(tokens=tokens, ttl=ttl))
+            serialized_msgs.append(serialized_msg)
+        serialized_results = await self.execute_workers(
+            sockets=sockets,
+            serialized_msgs=serialized_msgs,
+        )
+
+        success = True
+        for i, serialized_result in enumerate(serialized_results):
+            result = msgspec.msgpack.decode(serialized_result, type=Msg)
+            if success:
+                success = result.success
+        return PinRetMsg(success=success)
 
     # TODO(Jiayi): need to make the types more specific
     async def execute(self, operation: str, msg: MsgBase) -> MsgBase:

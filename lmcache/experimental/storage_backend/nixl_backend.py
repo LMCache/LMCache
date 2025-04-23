@@ -394,6 +394,10 @@ class NixlBackend(StorageBackendInterface):
         """
         return self._nixl_channel.get_allocator()
 
+    def pin(self, key: CacheEngineKey, ttl: Optional[float] = None) -> bool:
+        raise NotImplementedError("Pin is not implemented for "
+                                  "nixl backend.")
+
     @staticmethod
     def CreateNixlBackend(config: LMCacheEngineConfig,
                           metadata: LMCacheEngineMetadata) -> "NixlBackend":

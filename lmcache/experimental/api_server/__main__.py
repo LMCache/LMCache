@@ -12,7 +12,8 @@ from lmcache.experimental.cache_controller.controller_manager import \
 from lmcache.experimental.cache_controller.message import (ClearMsg,
                                                            ClearRetMsg,
                                                            LookupMsg,
-                                                           LookupRetMsg)
+                                                           LookupRetMsg,
+                                                           PinMsg, PinRetMsg)
 from lmcache.logging import init_logger
 
 logger = init_logger(__name__)
@@ -69,6 +70,26 @@ def create_app(controller_url: str) -> FastAPI:
             ret_msg = await lmcache_controller_manager.\
                 handle_orchestration_message(msg)
             assert isinstance(ret_msg, ClearRetMsg)
+            return {"res": ret_msg.success}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e)) from e
+
+    class PinCacheRequest(BaseModel):
+        instance_id: str
+        tokens: List[int] = []
+        ttl: Optional[float] = None
+        worker_ids: Optional[List[int]] = []
+
+    @app.post("/pin")
+    async def pin(req: PinCacheRequest):
+        try:
+            msg = PinMsg(instance_id=req.instance_id,
+                         worker_ids=req.worker_ids,
+                         tokens=req.tokens,
+                         ttl=req.ttl)
+            ret_msg = await lmcache_controller_manager.\
+                handle_orchestration_message(msg)
+            assert isinstance(ret_msg, PinRetMsg)
             return {"res": ret_msg.success}
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e)) from e

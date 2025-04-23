@@ -25,7 +25,7 @@ from lmcache.experimental.cache_controller.executor import \
 from lmcache.experimental.cache_controller.message import (  # noqa: E501
     ClearMsg, ClearRetMsg, ControlMsg, ControlRetMsg, DeRegisterMsg,
     KVAdmitMsg, KVEvictMsg, LookupMsg, Msg, MsgBase, OrchMsg, OrchRetMsg,
-    RegisterMsg, WorkerMsg)
+    PinMsg, PinRetMsg, RegisterMsg, WorkerMsg)
 from lmcache.experimental.cache_controller.rpc_utils import (get_zmq_context,
                                                              get_zmq_socket)
 from lmcache.logging import init_logger
@@ -74,18 +74,14 @@ class LMCacheControllerManager:
         self.reg_controller.post_init(kv_controller=self.kv_controller,
                                       cluster_executor=self.cluster_executor)
 
-        #self.loop = asyncio.new_event_loop()
-        #self.thread = threading.Thread(target=self.loop.run_forever,
-        #                               daemon=True)
-        #self.thread.start()
-        #asyncio.run_coroutine_threadsafe(self.start_all(), self.loop)
-
     # FIXME(Jiayi): the input and return type are weird
     async def issue_control_message(
         self, msg: Union[OrchMsg, ControlMsg]
     ) -> Optional[Union[OrchRetMsg, ControlRetMsg]]:
         if isinstance(msg, ClearMsg):
             return await self.kv_controller.clear(msg)
+        elif isinstance(msg, PinMsg):
+            return await self.kv_controller.pin(msg)
         else:
             logger.error("Unknown control or orchestration"
                          f"message type: {msg}")
@@ -110,6 +106,10 @@ class LMCacheControllerManager:
         elif isinstance(msg, ClearMsg):
             ret_msg = await self.issue_control_message(msg)
             assert isinstance(ret_msg, ClearRetMsg)
+            return ret_msg
+        elif isinstance(msg, PinMsg):
+            ret_msg = await self.issue_control_message(msg)
+            assert isinstance(ret_msg, PinRetMsg)
             return ret_msg
         else:
             logger.error(f"Unknown ochestration message type: {msg}")

@@ -367,6 +367,31 @@ class LMCacheEngine:
                 return start
         return end
 
+    def pin(
+        self,
+        tokens: Union[torch.Tensor, List[int]],
+        pin_range: Optional[List[str]] = None,
+        ttl: Optional[float] = None,
+    ) -> int:
+        """
+        Pins the KV cache of the tokens from the cache engine.
+
+        :param tokens: the input tokens, with shape [seq_len]
+        
+        :param Optional[List[str]] search_range: The range of storage backends
+        to search in. Should be a subset of ["Hot", "LocalDiskBackend"] for now.
+        If None, search in all backends.
+
+        :return: An int indicating how many prefix tokens have been
+        successfully pinned.
+        """
+        end = 0
+        for start, end, key in self.token_database.process_tokens(tokens):
+            assert isinstance(key, CacheEngineKey)
+            if self.storage_manager.pin(key, pin_range, ttl) > 0:
+                return start
+        return end
+
     def clear(
         self,
         tokens: Optional[Union[torch.Tensor, List[int]]] = None,

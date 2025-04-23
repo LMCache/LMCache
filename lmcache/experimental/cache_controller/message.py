@@ -102,6 +102,15 @@ class ClearWorkerMsg(ControlMsg):
         return f"Clear tokens {self.tokens}"
 
 
+class PinWorkerMsg(ControlMsg):
+    """Pin message for a single lmcache worker"""
+    tokens: list[int]
+    ttl: Optional[float] = None
+
+    def describe(self) -> str:
+        return f"Pin {self.tokens} for {self.ttl} seconds"
+
+
 class ControlRetMsg(MsgBase):
     """Return message from LMCache to Controller"""
 
@@ -115,6 +124,14 @@ class ClearWorkerRetMsg(ControlRetMsg):
 
     def describe(self) -> str:
         return f"Clear success: {self.success}"
+
+
+class PinWorkerRetMsg(ControlRetMsg):
+    """Return message for a PinWorkerMsg"""
+    success: bool
+
+    def describe(self) -> str:
+        return f"Pin success: {self.success}"
 
 
 """Orchestration Message from Ochestrator to LMCache"""
@@ -146,6 +163,19 @@ class ClearMsg(OrchMsg):
                 f"{self.instance_id} on workers {self.worker_ids}")
 
 
+class PinMsg(OrchMsg):
+    """Pin message"""
+    instance_id: str
+    tokens: list[int]
+    worker_ids: Optional[list[int]] = None
+    ttl: Optional[float] = None
+
+    def describe(self) -> str:
+        return (f"Pin tokens {self.tokens} for {self.ttl} seconds "
+                f"in instance {self.instance_id} on workers "
+                f"{self.worker_ids}")
+
+
 class OrchRetMsg(MsgBase):
     """Return message from  Controller to Ochestrator"""
 
@@ -154,7 +184,7 @@ class OrchRetMsg(MsgBase):
 
 
 class LookupRetMsg(OrchRetMsg):
-    """Lookup message"""
+    """Lookup return message"""
     best_instance_id: Optional[str]
 
     def describe(self) -> str:
@@ -162,11 +192,19 @@ class LookupRetMsg(OrchRetMsg):
 
 
 class ClearRetMsg(OrchRetMsg):
-    """Clear message"""
+    """Clear return message"""
     success: bool
 
     def describe(self) -> str:
         return f"Clear success: {self.success}"
+
+
+class PinRetMsg(OrchRetMsg):
+    """Pin return message"""
+    success: bool
+
+    def describe(self) -> str:
+        return f"Pin success: {self.success}"
 
 
 class ErrorMsg(MsgBase):
@@ -179,4 +217,4 @@ class ErrorMsg(MsgBase):
 
 Msg = Union[RegisterMsg, DeRegisterMsg, KVAdmitMsg, KVEvictMsg, ClearWorkerMsg,
             ClearWorkerRetMsg, LookupMsg, LookupRetMsg, ClearMsg, ClearRetMsg,
-            ErrorMsg]
+            PinMsg, PinRetMsg, PinWorkerMsg, PinWorkerRetMsg, ErrorMsg]

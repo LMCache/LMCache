@@ -76,7 +76,20 @@ class LocalDiskBackend(StorageBackendInterface):
 
     def contains(self, key: CacheEngineKey) -> bool:
         with self.disk_lock:
-            return key in self.dict
+            # check expiration
+            if key not in self.dict:
+                return False
+            if self.dict[key].is_expire():
+                # TODO (Jiayi): evict upon `contains`
+                return False
+            return True
+
+    def pin(self, key: CacheEngineKey, ttl: Optional[float] = None) -> bool:
+        with self.disk_lock:
+            if key not in self.dict:
+                return False
+            self.dict[key].update_lifetime(ttl)
+            return True
 
     def exists_in_put_tasks(self, key: CacheEngineKey) -> bool:
         with self.disk_lock:
@@ -186,6 +199,11 @@ class LocalDiskBackend(StorageBackendInterface):
             self.disk_lock.release()
             return None
 
+        # Check if the key is expired
+        if self.dict[key].is_expire():
+            self.disk_lock.release()
+            return None
+
         # Update cache recency
         self.evictor.update_on_hit(key, self.dict)
 
@@ -227,8 +245,6 @@ class LocalDiskBackend(StorageBackendInterface):
         self.put_tasks.remove(key)
         self.disk_lock.release()
 
-    # TODO(Jiayi): use `bytes_read = await f.readinto(buffer)`
-    # for better performance (i.e., fewer copy)
     async def async_load_bytes_from_disk(
         self,
         path: str,

@@ -23,7 +23,7 @@ import zmq
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.experimental.cache_controller.message import (  # noqa
     ClearWorkerMsg, ClearWorkerRetMsg, DeRegisterMsg, ErrorMsg, Msg,
-    RegisterMsg, WorkerMsg)
+    PinWorkerMsg, PinWorkerRetMsg, RegisterMsg, WorkerMsg)
 from lmcache.experimental.cache_controller.rpc_utils import (close_zmq_socket,
                                                              get_zmq_context,
                                                              get_zmq_socket)
@@ -173,6 +173,12 @@ class LMCacheWorker:
                     result = self.lmcache_engine.clear(tokens)
                     serialized_ret_msg = msgspec.msgpack.encode(
                         ClearWorkerRetMsg(success=result > 0))
+                elif isinstance(request, PinWorkerMsg):
+                    tokens = request.tokens
+                    ttl = request.ttl
+                    result = self.lmcache_engine.pin(tokens=tokens, ttl=ttl)
+                    serialized_ret_msg = msgspec.msgpack.encode(
+                        PinWorkerRetMsg(success=result > 0))
                 else:
                     logger.error(f"Unknown message: {request}")
                     serialized_ret_msg = msgspec.msgpack.encode(

@@ -37,6 +37,13 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
         raise NotImplementedError
 
     @abc.abstractmethod
+    def pin(self, key: CacheEngineKey, ttl: Optional[float] = None) -> bool:
+        """
+        Pin KV cache in the storage backend. 
+        """
+        raise NotImplementedError
+
+    @abc.abstractmethod
     def exists_in_put_tasks(self, key: CacheEngineKey) -> bool:
         """
         Check whether key is in the ongoing put tasks. 

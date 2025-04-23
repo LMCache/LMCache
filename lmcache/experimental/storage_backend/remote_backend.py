@@ -129,6 +129,10 @@ class RemoteBackend(StorageBackendInterface):
                      f"deserialization takes {(t3 - t2) * 1000:.6f} msec")
         return decompressed_memory_obj
 
+    def pin(self, key: CacheEngineKey, ttl: Optional[float] = None) -> bool:
+        raise NotImplementedError("Pin is not implemented for "
+                                  "remote backend.")
+
     def close(self):
         future = asyncio.run_coroutine_threadsafe(self.connection.close(),
                                                   self.loop)

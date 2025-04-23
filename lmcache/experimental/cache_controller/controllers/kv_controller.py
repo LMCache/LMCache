@@ -15,7 +15,8 @@
 from dataclasses import dataclass
 
 from lmcache.experimental.cache_controller.message import (  # noqa: E501
-    ClearMsg, ClearRetMsg, KVAdmitMsg, KVEvictMsg, LookupMsg, LookupRetMsg)
+    ClearMsg, ClearRetMsg, KVAdmitMsg, KVEvictMsg, LookupMsg, LookupRetMsg,
+    PinMsg, PinRetMsg)
 from lmcache.experimental.token_database import ChunkedTokenDatabase
 
 
@@ -90,6 +91,12 @@ class KVController:
         Clear all kv chunks of instance-worker(s).
         """
         return await self.cluster_executor.execute("clear", msg)
+
+    async def pin(self, msg: PinMsg) -> PinRetMsg:
+        """
+        Pin a KV cache in an instance-worker(s).
+        """
+        return await self.cluster_executor.execute("pin", msg)
 
     async def deregister(self, instance_id: str, worker_id: int) -> None:
         """

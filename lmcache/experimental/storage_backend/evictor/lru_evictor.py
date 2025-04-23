@@ -40,6 +40,9 @@ class LRUEvictor(BaseEvictor):
         while cache_size + self.current_cache_size > \
             self.MAX_CACHE_SIZE:
             evict_key = next(iter_cache_dict)
+            if not cache_dict[evict_key].is_expire():
+                # skip if cache not expired
+                continue
             evict_cache_size = cache_dict[evict_key].size
             self.current_cache_size -= evict_cache_size
             evict_keys.append(evict_key)
