@@ -7,6 +7,8 @@ on:
 # example:
 # git tag v1.0.0
 # git push origin v1.0.0
+# this will not apply the version to PyPI, this needs
+# to be manually changed in setup.py
 
 jobs:
   build-and-publish:
@@ -21,6 +23,15 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+
+      - name: Verify tag matches setup.py version
+        run: |
+          TAG_VERSION="${GITHUB_REF#refs/tags/v}"
+          SETUP_VERSION=$(python setup.py --version)
+          if [ "$TAG_VERSION" != "$SETUP_VERSION" ]; then
+            echo "Git tag version ($TAG_VERSION) does not match setup.py version ($SETUP_VERSION)"
+            exit 1
+          fi
 
       - name: Install packaging tools
         run: |
@@ -37,7 +48,18 @@ jobs:
 
       - name: Build CUDA wheels with cibuildwheel
         env:
-          CIBW_SKIP: "pp* cp36* cp37*"  # Skip PyPy, older Python
+          # lmcache supports python 3.10 or higher right now
+          CIBW_BUILD: "cp310-* cp311-* cp312-*"
+          CIBW_SKIP: "pp*"
+          # see https://developer.nvidia.com/cuda-gpus for compute capabilities
+          # "CUDA-Enabled Datacenter Products"
+          # 7.0: V100
+          # 7.5: T4
+          # 8.0: A100, A30
+          # 8.6: A40, A10, A16, A2
+          # 8.9: L4, L40, L40S
+          # 9.0: H100
+          CIBW_ENVIRONMENT: "TORCH_CUDA_ARCH_LIST='7.0;7.5;8.0;8.6;8.9;9.0'"
         run: |
           python -m cibuildwheel --output-dir dist
 

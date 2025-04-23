@@ -43,8 +43,8 @@ ext_modules = [
 cmdclass = {'build_ext': cpp_extension.BuildExtension}
 
 setup(
-    name="lmcache",
-    version="0.1.4",
+    name="lmcache_test",
+    version="1.0.0",
     description="LMCache: prefill your long contexts only once",
     author="LMCache team",
     author_email="lmcacheteam@gmail.com",

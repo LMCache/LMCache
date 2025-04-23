@@ -36,4 +36,9 @@ FIX #xxxx (*link existing issues this PR will resolve*)
 
 <h3>What to Expect for the Reviews</h3>
 
+To trigger a new pip version of lmcache, follow the steps:
+`git tag v1.x.x`
+match the same `version=1.x.x` as above in `setup.py`
+`git push origin v1.x.x` (same version again)
+
 We aim to address all PRs in a timely manner. If no one reviews your PR within 5 days, please @-mention one of KuntaiDu, ApostaC or YaoJiayi.
