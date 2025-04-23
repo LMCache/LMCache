@@ -7,22 +7,35 @@ on:
 # example:
 # git tag v1.0.0
 # git push origin v1.0.0
-# this will not apply the version to PyPI, this needs
-# to be manually changed in setup.py
+# version must be manually updated in lmcache/_version.py
 
 jobs:
   build-and-publish:
     name: Build with CUDA 12.4 and Publish to PyPI
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
 
     steps:
+      - name: Remove toolcache to free space
+        run: |
+          sudo rm -rf /opt/hostedtoolcache || true
+          df -h
+
+      - name: Remove other cruft to free space
+        run: |
+          docker system prune -af || true
+          sudo rm -rf ~/.cache || true
+          df -h
+
       - name: Checkout code
         uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.python-version }}
 
       - name: Verify tag matches setup.py version
         run: |
@@ -42,25 +55,16 @@ jobs:
         run: |
           rm -rf dist/
 
-      - name: Build source distribution
+      - name: Build source distribution (no CUDA)
         run: |
-          # build sdist without CUDA extensions
           NO_CUDA_EXT=1 python -m build --sdist
 
       - name: Build CUDA wheels with cibuildwheel
         env:
-          # lmcache supports python 3.10 or higher right now
-          CIBW_BUILD: "cp310-* cp311-* cp312-*"
+          CIBW_BUILD: "cp3*-manylinux_x86_64"  # builds all Python versions in matrix
           CIBW_SKIP: "pp*"
-          # see https://developer.nvidia.com/cuda-gpus for compute capabilities
-          # "CUDA-Enabled Datacenter Products"
-          # 7.0: V100
-          # 7.5: T4
-          # 8.0: A100, A30
-          # 8.6: A40, A10, A16, A2
-          # 8.9: L4, L40, L40S
-          # 9.0: H100
           CIBW_ENVIRONMENT: "TORCH_CUDA_ARCH_LIST='7.0;7.5;8.0;8.6;8.9;9.0'"
+          CIBW_REPAIR_WHEEL_COMMAND_LINUX: "mkdir -p {dest_dir} && cp {wheel} {dest_dir}"
         run: |
           python -m cibuildwheel --output-dir dist
 
