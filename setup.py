@@ -5,7 +5,6 @@ from setuptools import find_packages, setup
 
 ROOT_DIR = Path(__file__).parent
 
-
 def get_version():
     version_file = ROOT_DIR / "lmcache" / "_version.py"
     with open(version_file) as f:
@@ -33,9 +32,12 @@ def get_requirements() -> list[str]:
     requirements = _read_requirements("requirements.txt")
     return requirements
 
+# python -m build --sdist
+# will run python setup.py sdist --dist-dir dist
 BUILDING_SDIST = "sdist" in sys.argv
 
 if not BUILDING_SDIST:
+    print("Building CUDA extensions")
     from torch.utils import cpp_extension
     ext_modules = [
         cpp_extension.CUDAExtension(
@@ -51,6 +53,8 @@ if not BUILDING_SDIST:
     ]
     cmdclass = {'build_ext': cpp_extension.BuildExtension}
 else:
+    # don't build CUDA extensions when building sdist
+    print("Not building CUDA extensions")
     ext_modules = []
     cmdclass = {}
 
