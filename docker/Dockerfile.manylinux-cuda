@@ -1,0 +1,48 @@
+# multi-stage dockerfile for building lmcache with CUDA 12.4 on manylinux
+
+# Stage 1: Build environment
+FROM quay.io/pypa/manylinux2014_x86_64 AS builder
+
+# Install necessary dev tools and CUDA dependencies
+RUN yum install -y \
+    wget tar xz gcc make elfutils-libelf-devel kernel-headers \
+    gzip openssl bzip2 bzip2-devel zlib-devel ncurses-devel \
+    sqlite-devel readline-devel tk-devel libffi-devel curl git && \
+    yum clean all
+
+# Install CUDA toolkit
+ENV CUDA_VERSION=12.4
+ENV CUDA_HOME=/usr/local/cuda-${CUDA_VERSION}
+ENV PATH=${CUDA_HOME}/bin:$PATH
+ENV LD_LIBRARY_PATH=${CUDA_HOME}/lib64:$LD_LIBRARY_PATH
+
+RUN wget https://developer.download.nvidia.com/compute/cuda/repos/rhel7/x86_64/cuda-rhel7.repo \
+    -O /etc/yum.repos.d/cuda.repo && \
+    rpm --import https://developer.download.nvidia.com/compute/cuda/repos/rhel7/x86_64/7fa2af80.pub && \
+    yum -y install cuda-toolkit-12-4 && \
+    yum clean all
+
+# Install PyTorch using Python 3.10 from manylinux
+RUN /opt/python/cp310-cp310/bin/python -m ensurepip && \
+    /opt/python/cp310-cp310/bin/pip install --upgrade pip && \
+    /opt/python/cp310-cp310/bin/pip install torch==2.6.0+cu124 \
+    --index-url https://download.pytorch.org/whl/cu124
+
+# Stage 2: Final minimal image for cibuildwheel
+FROM quay.io/pypa/manylinux2014_x86_64 AS final
+
+# Copy CUDA and PyTorch libraries ONLY
+COPY --from=builder /usr/local/cuda-12.4 /usr/local/cuda-12.4
+COPY --from=builder /opt/python/cp310-cp310 /opt/python/cp310-cp310
+
+# Set environment variables
+ENV CUDA_VERSION=12.4
+ENV CUDA_HOME=/usr/local/cuda-${CUDA_VERSION}
+ENV PATH=${CUDA_HOME}/bin:/opt/python/cp310-cp310/bin:$PATH
+ENV LD_LIBRARY_PATH=${CUDA_HOME}/lib64:/opt/python/cp310-cp310/lib/python3.10/site-packages/torch/lib:$LD_LIBRARY_PATH
+
+# Verify CUDA and Python
+RUN nvcc --version && python --version && pip list | grep torch
+
+# Working directory for cibuildwheel
+WORKDIR /io
