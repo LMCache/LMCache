@@ -26,6 +26,7 @@ class LMCacheStats:
 
     local_cache_usage_bytes: int  # Size of the used local cache in bytes
     remote_cache_usage_bytes: int  # Size of the used remote cache in bytes
+    local_storage_usage_bytes: int  # Size of the used local storage in bytes
 
     # Distribution measurements
     time_to_retrieve: List[float]
@@ -87,6 +88,7 @@ class LMCStatsMonitor:
 
         self.local_cache_usage_bytes = 0
         self.remote_cache_usage_bytes = 0
+        self.local_storage_usage_bytes = 0
 
         self.retrieve_requests: Dict[int, RetrieveRequestStats] = {}
         self.store_requests: Dict[int, StoreRequestStats] = {}
@@ -153,6 +155,10 @@ class LMCStatsMonitor:
         self.remote_cache_usage_bytes = usage
 
     @thread_safe
+    def update_local_storage_usage(self, usage: int):
+        self.local_storage_usage_bytes = usage
+
+    @thread_safe
     def _clear(self):
         """
         Clear all the distribution stats 
@@ -210,6 +216,7 @@ class LMCStatsMonitor:
             cache_hit_rate=cache_hit_rate,
             local_cache_usage_bytes=self.local_cache_usage_bytes,
             remote_cache_usage_bytes=self.remote_cache_usage_bytes,
+            local_storage_usage_bytes=self.local_storage_usage_bytes,
             time_to_retrieve=time_to_retrieve,
             time_to_store=time_to_store,
             retrieve_speed=retrieve_speed,
@@ -281,6 +288,12 @@ class PrometheusLogger:
         self.gauge_remote_cache_usage = self._gauge_cls(
             name="lmcache:remote_cache_usage",
             documentation="Remote cache usage (bytes) of lmcache",
+            labelnames=labelnames,
+            multiprocess_mode="sum")
+
+        self.gauge_local_storage_usage = self._gauge_cls(
+            name="lmcache:local_storage_usage",
+            documentation="Local storage usage (bytes) of lmcache",
             labelnames=labelnames,
             multiprocess_mode="sum")
 
@@ -362,6 +375,9 @@ class PrometheusLogger:
 
         self._log_gauge(self.gauge_remote_cache_usage,
                         stats.remote_cache_usage_bytes)
+
+        self._log_gauge(self.gauge_local_storage_usage,
+                        stats.local_storage_usage_bytes)
 
         self._log_histogram(self.histogram_time_to_retrieve,
                             stats.time_to_retrieve)
