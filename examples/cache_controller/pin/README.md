@@ -36,29 +36,12 @@ curl -X POST http://localhost:9000/pin\
   -d '{
     "instance_id": "lmcache_default_instance",
     "tokens": [128000, 849, 21435, 279, 26431, 315, 85748, 6636, 304, 4221, 4211, 13],
-    "ttl": 1
   }'
 ```
-The above request pins the KV cache for 1 seconds.
+The above request pins the KV cache such that it won't be evicted.
 
 You should be able to see a return message indicating the sucess of pinning:
 
 ```plaintext
-{"res": ""}
-```
-
-
-5. Send a lookup request to lmcache controller:  
-```bash
-curl -X POST http://localhost:9000/lookup \
-  -H "Content-Type: application/json" \
-  -d '{
-    "tokens": [128000, 849, 21435, 279, 26431, 315, 85748, 6636, 304, 4221, 4211, 13]
-  }'
-```
-
-You should be able to see a return message:
-
-```plaintext
-{"res": ""}
+{"res": true}
 ```
