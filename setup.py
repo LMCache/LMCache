@@ -83,6 +83,8 @@ setup(
         "Programming Language :: Python :: 3",
         "License :: OSI Approved :: Apache Software License",
     ],
+    license="Apache-2.0",
+    license_files=["LICENSE"],
     python_requires=">=3.10",
     entry_points={
         "console_scripts": [
