@@ -6,12 +6,14 @@ from setuptools import find_packages, setup
 
 ROOT_DIR = Path(__file__).parent
 
+
 def get_version():
     version_file = ROOT_DIR / "lmcache" / "_version.py"
     with open(version_file) as f:
         version_ns = {}
         exec(f.read(), version_ns)
         return version_ns["__version__"]
+
 
 # Taken from https://github.com/vllm-project/vllm/blob/main/setup.py
 def get_requirements() -> list[str]:
@@ -32,6 +34,7 @@ def get_requirements() -> list[str]:
 
     requirements = _read_requirements("requirements.txt")
     return requirements
+
 
 # python -m build --sdist
 # will run python setup.py sdist --dist-dir dist
