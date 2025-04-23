@@ -32,8 +32,6 @@ from lmcache.experimental.memory_management import (MemoryAllocatorInterface,
 from lmcache.experimental.storage_backend import CreateStorageBackends
 from lmcache.experimental.storage_backend.abstract_backend import \
     StorageBackendInterface
-from lmcache.experimental.storage_backend.local_cpu_backend import \
-    LocalCPUBackend
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey, _lmcache_nvtx_annotate
 
@@ -56,8 +54,8 @@ class StorageManager:
                  lmcache_worker: Optional["LMCacheWorker"] = None,
                  lookup_server: Optional[LookupServerInterface] = None):
         self.memory_allocator = allocator
+        self.hot_cache: OrderedDict[CacheEngineKey, MemoryObj] = OrderedDict()
         self.use_hot = config.local_cpu
-        self.hot_cache = LocalCPUBackend(allocator, lookup_server)
 
         self.loop = asyncio.new_event_loop()
         self.thread = threading.Thread(target=self.loop.run_forever)
@@ -97,9 +95,6 @@ class StorageManager:
         Allocate memory object with memory allocator.
         Use LRU evictor if eviction is enabled.
         """
-        # QUESTION(sam): since the self.memory_allocator has its own lock and
-        # now the self.hot_cache has its own lock, is it okay to get rid of
-        # the self.manager_lock protection for them (such as here)?
         self.manager_lock.acquire()
         memory_obj = self.memory_allocator.allocate(shape, dtype)
         if not eviction or memory_obj is not None:
@@ -158,7 +153,7 @@ class StorageManager:
     ) -> None:
         """
         Non-blocking function to put the memory object into the storages.
-        Do not store if the same object is being stored (handled here by
+        Do not store if the same object is being stored (handled here by 
         storage manager) or has been stored (handled by storage backend).
         """
         self.manager_lock.acquire()
@@ -184,8 +179,7 @@ class StorageManager:
         # if one of the backend is already storing this cache.
         # This might not be ideal.
         for storage_backend in self.storage_backends.values():
-            if storage_backend.exists_in_put_tasks(key) or \
-                storage_backend.contains(key):
+            if storage_backend.exists_in_put_tasks(key):
                 self.memory_allocator.ref_count_down(memory_obj)
                 self.manager_lock.release()
                 return
@@ -198,9 +192,6 @@ class StorageManager:
             if put_task is None:
                 continue
 
-        # QUESTION(sam): since the self.memory_allocator has its own lock, what
-        # is the purpose of acquiring the self.manager_lock here?
-        # SAME QUESTION AS ABOVE
         self.manager_lock.acquire()
         self.memory_allocator.ref_count_down(memory_obj)
         self.manager_lock.release()
@@ -222,14 +213,15 @@ class StorageManager:
 
     @_lmcache_nvtx_annotate
     def _update_hot_cache(self, key: CacheEngineKey, memory_obj: MemoryObj):
-        if memory_obj is None or not self.use_hot or self.hot_cache.contains(
-                key):
+        if memory_obj is None or not self.use_hot:
             return
 
         if memory_obj.tensor is not None and memory_obj.tensor.is_cuda:
-            # QUESTION(sam): can we maybe use self.allocate() instead of
-            # self.memory_allocator.allocate() to leverage hot cache eviction?
-            # (would have to add a default fmt kwarg to self.allocate)
+            self.manager_lock.acquire()
+            if key in self.hot_cache:
+                self.manager_lock.release()
+                return
+            self.manager_lock.release()
 
             # Allocate a cpu memory object
             cpu_memory_obj = self.memory_allocator.allocate(
@@ -252,7 +244,8 @@ class StorageManager:
 
             # Update the hot cache
             self.manager_lock.acquire()
-            self.hot_cache.put(key, cpu_memory_obj)
+            self.hot_cache[key] = cpu_memory_obj
+            self.memory_allocator.ref_count_up(cpu_memory_obj)
             self.manager_lock.release()
 
             # Push kv msg
@@ -263,19 +256,10 @@ class StorageManager:
 
             logger.debug("Updated hot cache!")
         else:
-            # protect self.hot_cache.memory_allocator
             self.manager_lock.acquire()
             if self.use_hot and key not in self.hot_cache:
                 self.hot_cache[key] = memory_obj
                 self.memory_allocator.ref_count_up(memory_obj)
-            self.manager_lock.release()
-
-                # Push kv msg
-                if self.lmcache_worker is not None:
-                    self.lmcache_worker.put_msg(
-                        KVAdmitMsg(self.instance_id, self.worker_id,
-                                   key.chunk_hash, "cpu"))
-            else:
                 self.manager_lock.release()
 
                 # Push kv msg
@@ -310,9 +294,10 @@ class StorageManager:
 
         # Search in hot_cache
         self.manager_lock.acquire()
-        # hot_cache.get(key) does ref_count_up() for the caller (us here)
-        memory_obj = self.hot_cache.get(key)
+        memory_obj = self.hot_cache.get(key, None)
         if memory_obj is not None:
+            self.memory_allocator.ref_count_up(memory_obj)
+            self.hot_cache.move_to_end(key)
             self.manager_lock.release()
             return memory_obj
 
@@ -368,7 +353,7 @@ class StorageManager:
         # NOTE: no need to ref_count_up here because
         # the memory_obj's ref_count is already 1
         self.manager_lock.acquire()
-        self.hot_cache.put(key, memory_obj, from_callback=True)
+        self.hot_cache[key] = memory_obj
         self.manager_lock.release()
 
     def prefetch(self, key: CacheEngineKey) -> None:
@@ -377,7 +362,7 @@ class StorageManager:
 
         # Call contains for each backend. Find the nearest cache
         self.manager_lock.acquire()
-        if self.hot_cache.contains(key):
+        if key in self.hot_cache:
             self.manager_lock.release()
             return
         if key in self.prefetch_tasks:
@@ -406,18 +391,18 @@ class StorageManager:
     ) -> bool:
         """
         Check whether the key exists in the storage backend.
-
+        
         :param CacheEngineKey key: The key to check.
-
+        
         :param Optional[List[str]] search_range: The range of storage backends
         to search in. Should be a subset of ["Hot", "LocalDiskBackend"] for now.
         If None, search in all backends.
-
+        
         return: True if the key exists in the specified storage backends.
         """
         with self.manager_lock:
             if search_range is None or "Hot" in search_range:
-                if self.hot_cache.contains(key):
+                if key in self.hot_cache:
                     return True
 
             for backend_name, backend in self.storage_backends.items():
@@ -437,15 +422,15 @@ class StorageManager:
         """
         Remove the key and the corresponding cache in the specified
         locations.
-
+        
         :param CacheEngineKey key: The key to remove.
-
+        
         :param Optional[List[str]] locations: The range of storage backends
-        to perform `remove` in.
+        to perform `remove` in. 
         Should be a subset of ["Hot", "LocalDiskBackend"] for now.
         If None, perform `remove` in all backends.
-
-        return: Total number of removed caches in the specified
+        
+        return: Total number of removed caches in the specified 
         storage backends.
         """
 
@@ -453,7 +438,11 @@ class StorageManager:
         with self.manager_lock:
             if locations is None or "Hot" in locations:
                 if self.use_hot and key in self.hot_cache:
-                    if self.hot_cache.remove(key):
+                    memory_obj = self.hot_cache[key]
+                    # NOTE(Jiayi): do not remove if other jobs are using
+                    # this `memory_obj`
+                    if self.memory_allocator.get_ref_count(memory_obj) == 1:
+                        self.memory_allocator.ref_count_down(memory_obj)
                         num_removed += 1
 
         # TODO(Jiayi): need to handle remove in non-cpu backends
@@ -466,21 +455,34 @@ class StorageManager:
     ) -> int:
         """
         Clear all caches in the specified locations.
-
+        
         :param Optional[List[str]] locations: The range of storage backends
-        to perform `clear` in.
+        to perform `clear` in. 
         Should be a subset of ["Hot", "LocalDiskBackend"] for now.
         If None, perform `clear` in all backends.
-
+        
         return: Total number of cleared caches in the specified
         storage backends.
         """
 
         num_cleared = 0
 
+        clear_keys = []
         self.manager_lock.acquire()
         if locations is None or "Hot" in locations and self.use_hot:
-            num_cleared += self.hot_cache.clear()
+            for clear_key in self.hot_cache:
+                memory_obj = self.hot_cache[clear_key]
+                # NOTE(Jiayi): do not remove if other jobs are using
+                # this `memory_obj`
+                if self.memory_allocator.get_ref_count(memory_obj) > 1:
+                    continue
+                self.memory_allocator.ref_count_down(memory_obj)
+                clear_keys.append(clear_key)
+            for clear_key in clear_keys:
+                self.hot_cache.pop(clear_key)
+            if self.lookup_server is not None:
+                self.lookup_server.batched_remove(clear_keys)
+            num_cleared += len(clear_keys)
         self.manager_lock.release()
 
         # TODO(Jiayi): need to handle clear in non-cpu backends
