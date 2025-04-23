@@ -6,6 +6,13 @@ from torch.utils import cpp_extension
 ROOT_DIR = Path(__file__).parent
 
 
+def get_version():
+    version_file = ROOT_DIR / "lmcache" / "_version.py"
+    with open(version_file) as f:
+        version_ns = {}
+        exec(f.read(), version_ns)
+        return version_ns["__version__"]
+
 # Taken from https://github.com/vllm-project/vllm/blob/main/setup.py
 def get_requirements() -> list[str]:
     """Get Python package dependencies from requirements.txt."""
@@ -44,7 +51,7 @@ cmdclass = {'build_ext': cpp_extension.BuildExtension}
 
 setup(
     name="lmcache_test",
-    version="1.0.0",
+    version=get_version(),
     description="LMCache: prefill your long contexts only once",
     author="LMCache team",
     author_email="lmcacheteam@gmail.com",

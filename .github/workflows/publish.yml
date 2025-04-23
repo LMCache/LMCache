@@ -27,7 +27,7 @@ jobs:
       - name: Verify tag matches setup.py version
         run: |
           TAG_VERSION="${GITHUB_REF#refs/tags/v}"
-          SETUP_VERSION=$(python setup.py --version)
+          SETUP_VERSION=$(grep '__version__' lmcache/_version.py | cut -d'"' -f2)
           if [ "$TAG_VERSION" != "$SETUP_VERSION" ]; then
             echo "Git tag version ($TAG_VERSION) does not match setup.py version ($SETUP_VERSION)"
             exit 1
