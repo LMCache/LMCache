@@ -52,3 +52,7 @@ follow_imports = "silent"
 files = [
     "lmcache"
 ]
+
+# use a custom manylinux image for cibuildwheel that contains CUDA 12.4
+[tool.cibuildwheel]
+manylinux-x86_64-image = "docker.io/apostab/manylinux-cuda124"
