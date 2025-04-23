@@ -15,6 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
+        # lmcache supports python 3.10 or higher right now
         python-version: ["3.10", "3.11", "3.12"]
 
     steps:
@@ -61,10 +62,28 @@ jobs:
 
       - name: Build CUDA wheels with cibuildwheel
         env:
-          CIBW_BUILD: "cp3*-manylinux_x86_64"  # builds all Python versions in matrix
+          CIBW_BUILD: "cp3*-manylinux_x86_64"
           CIBW_SKIP: "pp*"
+          # see https://developer.nvidia.com/cuda-gpus for compute capabilities
+          # "CUDA-Enabled Datacenter Products"
+          # 7.0: V100
+          # 7.5: T4
+          # 8.0: A100, A30
+          # 8.6: A40, A10, A16, A2
+          # 8.9: L4, L40, L40S
+          # 9.0: H100
           CIBW_ENVIRONMENT: "TORCH_CUDA_ARCH_LIST='7.0;7.5;8.0;8.6;8.9;9.0'"
-          CIBW_REPAIR_WHEEL_COMMAND_LINUX: "mkdir -p {dest_dir} && cp {wheel} {dest_dir}"
+          CIBW_MANYLINUX_X86_64_IMAGE: "docker.io/apostab/manylinux-cuda124"
+          CIBW_REPAIR_WHEEL_COMMAND_LINUX: >
+            auditwheel repair
+            --plat manylinux_2_17_x86_64
+            --exclude libtorch.so
+            --exclude libtorch_cuda.so
+            --exclude libtorch_python.so
+            --exclude libtorch_cpu.so
+            --exclude libc10.so
+            --exclude libc10_cuda.so
+            -w {dest_dir} {wheel}
         run: |
           python -m cibuildwheel --output-dir dist
 
