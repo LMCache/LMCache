@@ -1,7 +1,7 @@
+import sys
 from pathlib import Path
 
 from setuptools import find_packages, setup
-from torch.utils import cpp_extension
 
 ROOT_DIR = Path(__file__).parent
 
@@ -33,21 +33,26 @@ def get_requirements() -> list[str]:
     requirements = _read_requirements("requirements.txt")
     return requirements
 
+BUILDING_SDIST = "sdist" in sys.argv
 
-ext_modules = [
-    cpp_extension.CUDAExtension(
-        'lmcache.c_ops',
-        [
-            'csrc/pybind.cpp',
-            'csrc/mem_kernels.cu',
-            'csrc/cal_cdf.cu',
-            'csrc/ac_enc.cu',
-            'csrc/ac_dec.cu',
-        ],
-    ),
-]
-
-cmdclass = {'build_ext': cpp_extension.BuildExtension}
+if not BUILDING_SDIST:
+    from torch.utils import cpp_extension
+    ext_modules = [
+        cpp_extension.CUDAExtension(
+            'lmcache.c_ops',
+            [
+                'csrc/pybind.cpp',
+                'csrc/mem_kernels.cu',
+                'csrc/cal_cdf.cu',
+                'csrc/ac_enc.cu',
+                'csrc/ac_dec.cu',
+            ],
+        ),
+    ]
+    cmdclass = {'build_ext': cpp_extension.BuildExtension}
+else:
+    ext_modules = []
+    cmdclass = {}
 
 setup(
     name="lmcache_test",
