@@ -110,21 +110,18 @@ class MooncakestoreConnector(RemoteConnector):
         self.loop = loop
 
     async def exists(self, key: CacheEngineKey) -> bool:
-        return self.store.is_exist(key.to_string())
+        return self.store.is_exist(key.to_string() + "metadata")
 
     async def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         key_str = key.to_string()
 
-        combined_bytes = self.store.get(key_str)
-        if combined_bytes is None or len(combined_bytes) <= METADATA_BYTES_LEN:
+        metadata_bytes = self.store.get(key_str + "metadata")
+        if metadata_bytes is None or len(metadata_bytes) != METADATA_BYTES_LEN:
             return None
 
-        assert not inspect.isawaitable(combined_bytes)
+        assert not inspect.isawaitable(metadata_bytes)
 
-        metadata = RedisMetadata.deserialize(
-            memoryview(combined_bytes[:METADATA_BYTES_LEN]))
-        kv_bytes = combined_bytes[METADATA_BYTES_LEN:METADATA_BYTES_LEN +
-                                  metadata.length]
+        metadata = RedisMetadata.deserialize(memoryview(metadata_bytes))
 
         memory_obj = self.memory_allocator.allocate(
             metadata.shape,
@@ -134,6 +131,10 @@ class MooncakestoreConnector(RemoteConnector):
         if memory_obj is None:
             logger.warning("Failed to allocate memory during remote receive")
             return None
+
+        kv_bytes = self.store.get(key_str + "kv_bytes")
+        assert not inspect.isawaitable(kv_bytes)
+        assert kv_bytes is not None
 
         if isinstance(memory_obj.byte_array, memoryview):
             view = memory_obj.byte_array
@@ -146,19 +147,23 @@ class MooncakestoreConnector(RemoteConnector):
         return memory_obj
 
     async def put(self, key: CacheEngineKey, memory_obj: MemoryObj):
-        key_str = key.to_string()
+        # Please use a function like `memory_obj.to_meta()`.
         kv_bytes = memory_obj.byte_array
-        metadata = RedisMetadata(len(kv_bytes), memory_obj.get_shape(),
-                                 memory_obj.get_dtype(),
-                                 memory_obj.get_memory_format())
+        kv_shape = memory_obj.get_shape()
+        kv_dtype = memory_obj.get_dtype()
+        memory_format = memory_obj.get_memory_format()
 
-        combined_bytes = metadata.serialize() + kv_bytes
+        metadata_bytes = RedisMetadata(len(kv_bytes), kv_shape, kv_dtype,
+                                       memory_format).serialize()
 
+        key_str = key.to_string()
+        self.store.put(key_str + "metadata", metadata_bytes)
+        key_byte_str = key_str + "kv_bytes"
         try:
-            self.store.put(key_str, combined_bytes)
+            self.store.put(key_byte_str, kv_bytes)
         except Exception as e:
-            logger.error(f"Failed to put key {key_str},"
-                         f"meta type: {type(metadata)},"
+            logger.error(f"Failed to put key {key_byte_str},"
+                         f"meta type: {type(metadata_bytes)},"
                          f"data: {type(kv_bytes)}: {e}")
 
         self.memory_allocator.ref_count_down(memory_obj)
