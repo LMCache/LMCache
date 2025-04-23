@@ -40,7 +40,7 @@ curl -X POST http://localhost:9000/pin\
 ```
 The above request pins the KV cache such that it won't be evicted.
 
-You should be able to see a return message indicating the sucess of pinning:
+You should be able to see a return message indicating the success of pinning:
 
 ```plaintext
 {"res": true}
