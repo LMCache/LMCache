@@ -86,13 +86,17 @@ jobs:
         run: |
           python -m cibuildwheel --output-dir dist || true
 
+      - name: Upload dist/ as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-artifacts
+          path: dist/
+
       - name: Publish to PyPI
         env:
           TWINE_USERNAME: __token__
           TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
-        run: |
-          twine upload dist/*
-
+        run: twine upload dist/*
 
   create-release:
     name: Create GitHub Release
@@ -102,7 +106,14 @@ jobs:
       contents: write
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download built artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: release-artifacts
+          path: dist/
 
       - name: Create GitHub Release
         uses: actions/create-release@v1
@@ -110,11 +121,12 @@ jobs:
           tag_name: ${{ github.ref_name }}
           release_name: Release ${{ github.ref_name }}
           body: |
-            Release generated automatically from tag `${{ github.ref_name }}`
+            Release generated from tag `${{ github.ref_name }}`.
+            Built with CUDA 12.4 wheels and uploaded to PyPI.
           draft: false
           prerelease: false
 
-      - name: Upload Release Artifacts
+      - name: Upload release artifacts
         uses: softprops/action-gh-release@v1
         with:
           files: dist/*
