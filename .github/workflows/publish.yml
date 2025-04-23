@@ -44,7 +44,8 @@ jobs:
 
       - name: Build source distribution
         run: |
-          python -m build --sdist
+          # build sdist without CUDA extensions
+          NO_CUDA=1 python -m build --sdist
 
       - name: Build CUDA wheels with cibuildwheel
         env:

@@ -1,3 +1,4 @@
+import os
 import sys
 from pathlib import Path
 
@@ -34,7 +35,8 @@ def get_requirements() -> list[str]:
 
 # python -m build --sdist
 # will run python setup.py sdist --dist-dir dist
-BUILDING_SDIST = "sdist" in sys.argv
+BUILDING_SDIST = "sdist" in sys.argv or \
+                os.environ.get("NO_CUDA_EXT", "0") == "1"
 
 if not BUILDING_SDIST:
     print("Building CUDA extensions")
