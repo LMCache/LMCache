@@ -4,7 +4,7 @@ requires = [
     "setuptools >= 49.4.0",
     "wheel",
     "packaging",
-    "torch == 2.5.1",
+    "torch == 2.6.0",
     "ninja",
     "pybind11",
 ]
