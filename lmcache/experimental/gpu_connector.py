@@ -6,9 +6,6 @@ import torch
 import lmcache.c_ops as lmc_ops
 from lmcache.experimental.memory_management import MemoryFormat, MemoryObj
 from lmcache.utils import _lmcache_nvtx_annotate
-from lmcache.logging import init_logger
-
-logger = init_logger(__name__)
 
 
 class GPUConnectorInterface(metaclass=abc.ABCMeta):

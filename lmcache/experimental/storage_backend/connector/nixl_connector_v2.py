@@ -31,8 +31,7 @@ from lmcache.experimental.memory_management import (MemoryAllocatorInterface,
 from lmcache.experimental.storage_backend.connector.nixl_connector import (
     NixlConfig, NixlRole)
 from lmcache.logging import init_logger
-from lmcache.utils import CacheEngineKey
-from lmcache.utils import _lmcache_nvtx_annotate
+from lmcache.utils import CacheEngineKey, _lmcache_nvtx_annotate
 
 logger = init_logger(__name__)
 
