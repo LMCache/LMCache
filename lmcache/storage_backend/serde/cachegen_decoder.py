@@ -1,8 +1,8 @@
 from typing import List, Optional
 
 import torch
-import torchac_cuda  # type: ignore
 
+import lmcache.c_ops as lmc_ops
 import lmcache.storage_backend.serde.cachegen_basics as CGBasics
 from lmcache.config import LMCacheEngineConfig, LMCacheEngineMetadata
 from lmcache.logging import init_logger
@@ -62,8 +62,8 @@ def decode_chunk(
     length_prefsum = (
         data_chunk.bytestream_lengths.flatten().cumsum(0).reshape(
             data_chunk.bytestream_lengths.shape))
-    torchac_cuda.decode_fast_prefsum(cdf, bytes_tensor, length_prefsum,
-                                     target_buffer)
+    lmc_ops.decode_fast_prefsum(cdf, bytes_tensor, length_prefsum,
+                                target_buffer)
 
 
 @_lmcache_nvtx_annotate

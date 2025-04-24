@@ -1,8 +1,8 @@
 from typing import Dict, Tuple
 
 import torch
-import torchac_cuda  # type: ignore
 
+import lmcache.c_ops as lmc_ops
 import lmcache.storage_backend.serde.cachegen_basics as CGBasics
 from lmcache.config import LMCacheEngineConfig, LMCacheEngineMetadata
 from lmcache.logging import init_logger
@@ -252,7 +252,7 @@ def encode_ntokens(cdf_int, encode_input, output_buffer,
 
     :return byte_tensor: the byte tensor
     """
-    torchac_cuda.encode_fast_new(
+    lmc_ops.encode_fast_new(
         cdf_int,
         encode_input,
         output_buffer,
@@ -284,9 +284,8 @@ def encode_function(
     encode_input = torch.cat((new_key, new_value),
                              dim=0).reshape(nlayers, chunk_size, nchannels)
 
-    new_cdf_key = torchac_cuda.calculate_cdf(new_key, int(key_bins.max()))
-    new_cdf_value = torchac_cuda.calculate_cdf(new_value,
-                                               int(value_bins.max()))
+    new_cdf_key = lmc_ops.calculate_cdf(new_key, int(key_bins.max()))
+    new_cdf_value = lmc_ops.calculate_cdf(new_value, int(value_bins.max()))
     cdf_int = torch.cat([new_cdf_key, new_cdf_value])
 
     output_buffer = torch.zeros(
