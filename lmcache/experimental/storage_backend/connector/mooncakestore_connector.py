@@ -157,7 +157,7 @@ class MooncakestoreConnector(RemoteConnector):
         key_str = key.to_string()
 
         try:
-            self.store.put(key_str, metadata_bytes, kv_bytes)
+            self.store.put_parts(key_str, metadata_bytes, kv_bytes)
         except Exception as e:
             logger.error(f"Failed to put key {key_str},"
                          f"meta type: {type(metadata_bytes)},"
