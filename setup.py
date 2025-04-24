@@ -1,9 +1,18 @@
+import os
+import sys
 from pathlib import Path
 
 from setuptools import find_packages, setup
-from torch.utils import cpp_extension
 
 ROOT_DIR = Path(__file__).parent
+
+
+def get_version():
+    version_file = ROOT_DIR / "lmcache" / "_version.py"
+    with open(version_file) as f:
+        version_ns = {}
+        exec(f.read(), version_ns)
+        return version_ns["__version__"]
 
 
 # Taken from https://github.com/vllm-project/vllm/blob/main/setup.py
@@ -27,24 +36,36 @@ def get_requirements() -> list[str]:
     return requirements
 
 
-ext_modules = [
-    cpp_extension.CUDAExtension(
-        'lmcache.c_ops',
-        [
-            'csrc/pybind.cpp',
-            'csrc/mem_kernels.cu',
-            'csrc/cal_cdf.cu',
-            'csrc/ac_enc.cu',
-            'csrc/ac_dec.cu',
-        ],
-    ),
-]
+# python -m build --sdist
+# will run python setup.py sdist --dist-dir dist
+BUILDING_SDIST = "sdist" in sys.argv or \
+                os.environ.get("NO_CUDA_EXT", "0") == "1"
 
-cmdclass = {'build_ext': cpp_extension.BuildExtension}
+if not BUILDING_SDIST:
+    print("Building CUDA extensions")
+    from torch.utils import cpp_extension
+    ext_modules = [
+        cpp_extension.CUDAExtension(
+            'lmcache.c_ops',
+            [
+                'csrc/pybind.cpp',
+                'csrc/mem_kernels.cu',
+                'csrc/cal_cdf.cu',
+                'csrc/ac_enc.cu',
+                'csrc/ac_dec.cu',
+            ],
+        ),
+    ]
+    cmdclass = {'build_ext': cpp_extension.BuildExtension}
+else:
+    # don't build CUDA extensions when building sdist
+    print("Not building CUDA extensions")
+    ext_modules = []
+    cmdclass = {}
 
 setup(
     name="lmcache",
-    version="0.1.4",
+    version=get_version(),
     description="LMCache: prefill your long contexts only once",
     author="LMCache team",
     author_email="lmcacheteam@gmail.com",
@@ -62,6 +83,8 @@ setup(
         "Programming Language :: Python :: 3",
         "License :: OSI Approved :: Apache Software License",
     ],
+    license="Apache-2.0",
+    license_files=["LICENSE"],
     python_requires=">=3.10",
     entry_points={
         "console_scripts": [

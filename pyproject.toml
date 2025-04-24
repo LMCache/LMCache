@@ -52,3 +52,18 @@ follow_imports = "silent"
 files = [
     "lmcache"
 ]
+
+# use a custom manylinux image for cibuildwheel that contains CUDA 12.4
+[tool.cibuildwheel]
+manylinux-x86_64-image = "docker.io/apostab/manylinux-cuda124"
+repair-wheel-command = """
+auditwheel repair \
+  --plat manylinux_2_17_x86_64 \
+  --exclude libtorch.so \
+  --exclude libtorch_cuda.so \
+  --exclude libtorch_python.so \
+  --exclude libtorch_cpu.so \
+  --exclude libc10.so \
+  --exclude libc10_cuda.so \
+  -w {dest_dir} {wheel}
+"""
