@@ -18,6 +18,7 @@ import json
 import os
 from dataclasses import dataclass
 from typing import List, Optional, no_type_check
+import ctypes 
 
 from lmcache.experimental.memory_management import (MemoryAllocatorInterface,
                                                     MemoryObj)
@@ -115,11 +116,17 @@ class MooncakestoreConnector(RemoteConnector):
     async def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         key_str = key.to_string()
 
-        metadata_bytes = self.store.get(key_str + "metadata")
+        buffer = self.store.get(key_str) # buffer is pybind11 buffer type
+
+        buffer_len = buffer.size()
+        buffer_ptr = buffer.consolidated_ptr()
+        metadata_bytes = bytes((ctypes.c_char * METADATA_BYTES_LEN).from_address(buffer_ptr))
         if metadata_bytes is None or len(metadata_bytes) != METADATA_BYTES_LEN:
             return None
 
-        assert not inspect.isawaitable(metadata_bytes)
+        data_bytes = bytes((ctypes.c_char * (METADATA_BYTES_LEN)).from_address(buffer_ptr + METADATA_BYTES_LEN))
+        if data_bytes is None:
+            return None
 
         metadata = RedisMetadata.deserialize(memoryview(metadata_bytes))
 
@@ -132,12 +139,8 @@ class MooncakestoreConnector(RemoteConnector):
             logger.warning("Failed to allocate memory during remote receive")
             return None
 
-        kv_bytes = self.store.get(key_str + "kv_bytes")
-        assert not inspect.isawaitable(kv_bytes)
-        assert kv_bytes is not None
-
         view = memoryview(memory_obj.byte_array)
-        view[:metadata.length] = kv_bytes
+        view[:metadata.length] = data_bytes
 
         return memory_obj
 
@@ -152,12 +155,11 @@ class MooncakestoreConnector(RemoteConnector):
                                        memory_format).serialize()
 
         key_str = key.to_string()
-        self.store.put(key_str + "metadata", metadata_bytes)
-        key_byte_str = key_str + "kv_bytes"
+
         try:
-            self.store.put(key_byte_str, kv_bytes)
+            self.store.put(key_str, metadata_bytes, kv_bytes)
         except Exception as e:
-            logger.error(f"Failed to put key {key_byte_str},"
+            logger.error(f"Failed to put key {key_str},"
                          f"meta type: {type(metadata_bytes)},"
                          f"data: {type(kv_bytes)}: {e}")
 
