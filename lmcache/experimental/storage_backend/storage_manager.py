@@ -179,7 +179,7 @@ class KVCacheManager:
             first_update_key = next(iter(to_save_list))
             return KVDecision("cpu", first_update_key.metadata.method[0], new_kv_rate), final_drop_list
         else:
-            return KVDecision("cpu", "kivi", 0.728571429), {}
+            return KVDecision("cpu", "kivi", 0.371428571), {}
 
 # TODO: extend this class to implement caching policies and eviction policies
 class StorageManager:
