@@ -7,9 +7,9 @@ INPUT02 = 'results/Apr_14/baseline_kivi/02.csv'
 INPUT03 = 'results/Apr_14/baseline_kivi/03.csv'
 INPUT06 = 'results/Apr_14/baseline_kivi/06.csv'
 
-INPUT_OURS1 = 'results/Apr_14/new/1.csv'
-INPUT_OURS01 = 'results/Apr_14/new/01.csv'
-INPUT_OURS10 = 'results/Apr_14/new/10.csv'
+INPUT_OURS01 = 'results/Apr_14/context_based/01.csv'
+INPUT_OURS10 = 'results/Apr_14/context_based/10.csv'
+INPUT_OURS100 = 'results/Apr_14/context_based/100.csv'
 
 INPUT_TRUTH = 'results/Apr_1/1.csv'
 
@@ -19,17 +19,17 @@ def main():
     df02 = pd.read_csv(INPUT02)
     df03 = pd.read_csv(INPUT03)
     df06 = pd.read_csv(INPUT06)
-    df_ours1 = pd.read_csv(INPUT_OURS1)
     df_ours01 = pd.read_csv(INPUT_OURS01)
     df_ours10 = pd.read_csv(INPUT_OURS10)
+    df_ours100 = pd.read_csv(INPUT_OURS100)
     df_truth1 = pd.read_csv(INPUT_TRUTH)
-    dataframes = [df1, df02, df03, df06, df_ours1, df_ours01, df_ours10]
-    filenames = ['results/Apr_14/baseline_kivi/1_processed.csv', 'results/Apr_14/baseline_kivi/02_processed.csv', 'results/Apr_14/baseline_kivi/03_processed.csv', 'results/Apr_14/baseline_kivi/06_processed.csv', 'results/Apr_14/new/1_processed.csv', 'results/Apr_14/new/01_processed.csv', 'results/Apr_14/new/10_processed.csv']
+    dataframes = [df1, df02, df03, df06, df_ours01, df_ours10, df_ours100]
+    filenames = ['results/Apr_14/baseline_kivi/1_processed.csv', 'results/Apr_14/baseline_kivi/02_processed.csv', 'results/Apr_14/baseline_kivi/03_processed.csv', 'results/Apr_14/baseline_kivi/06_processed.csv', 'results/Apr_14/context_based/01_processed.csv', 'results/Apr_14/context_based/10_processed.csv', 'results/Apr_14/context_based/100_processed.csv']
         
     # Apply the evaluate_answer function to each row and store the result in a new column.
     for df, fname in zip(dataframes, filenames):
         df['f1_score'] = df.apply(
-            lambda row: evaluate_answer(
+            lambda row: f1_score(
                 row['answer'],
                 df_truth1.loc[df_truth1['index_in_dataset'] == row['index_in_dataset'], 'answer'].iloc[0]
             ),
