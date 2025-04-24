@@ -110,9 +110,9 @@ echo 'lmcache yapf: Done'
 
 # Run mypy
 echo 'lmcache mypy:'
-mypy --cache-dir=/dev/null
-mypy tests --follow-imports skip --cache-dir=/dev/null
-mypy lmcache --follow-imports skip --cache-dir=/dev/null
+mypy
+mypy tests --follow-imports skip
+mypy lmcache --follow-imports skip
 echo 'lmcache mypy: Done'
 
 
