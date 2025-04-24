@@ -64,6 +64,8 @@ class RedisLookupServer(LookupServerInterface):
         Perform batched remove in the lookup server.
         """
         logger.debug("Call to batched remove in lookup server")
+        if not keys:
+            return
         # TODO(Jiayi): We might need to cache the `str_keys` for performance.
         str_keys = [key.to_string() for key in keys]
         self.connection.delete(*str_keys)
