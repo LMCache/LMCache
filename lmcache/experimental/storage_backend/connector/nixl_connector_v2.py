@@ -32,6 +32,7 @@ from lmcache.experimental.storage_backend.connector.nixl_connector import (
     NixlConfig, NixlRole)
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
+from lmcache.utils import _lmcache_nvtx_annotate
 
 logger = init_logger(__name__)
 
@@ -229,6 +230,7 @@ class NixlPipe:
             self._uuid = uuid.uuid4().hex
             self.ack_receive()
 
+    @_lmcache_nvtx_annotate
     def _spin_check_for_ack(self) -> str:
         """
         Spin until receives an ack from the peer.
@@ -251,6 +253,7 @@ class NixlPipe:
 
         raise RuntimeError("Failed to receive ACK from remote peer")
 
+    @_lmcache_nvtx_annotate
     def _commit_write(self, write_size: int, uid: str):
         """A blocking function that ensures the write buffer is delivered to
         the receiver.
@@ -264,6 +267,10 @@ class NixlPipe:
         Raises:
             RuntimeError: if the transfer fails
         """
+        # Synchronize the default stream since the transfer happens in another
+        # stream
+        torch.cuda.default_stream().synchronize()
+
         # Send the data to the remote peer
         num_transfers = (write_size - 1) // NixlPipe.TRANSFER_BUFFER_SIZE + 1
         desc_indexes = list(range(num_transfers))
@@ -323,6 +330,7 @@ class NixlPipe:
         # and may be confusing
         return self._allocator.allocate(shape, dtype, fmt)
 
+    @_lmcache_nvtx_annotate
     def flush(self):
         """Flush the buffer to the receiver side.
         Will also reset the allocator's allocated size to 0
@@ -336,6 +344,7 @@ class NixlPipe:
     ###########################
     # Receiver side functions
     ###########################
+    @_lmcache_nvtx_annotate
     def read_buffer(self,
                     metadatas: list[MemoryObjMetadata]) -> list[MemoryObj]:
         """Try read the data from the NIXL transfer buffer (receiver side).

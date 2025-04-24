@@ -48,6 +48,12 @@ class RetrieveStatus(Enum):
     NONE = 4
 
 
+def need_gpu_interm_buffer(lmcache_config: LMCacheEngineConfig):
+    if lmcache_config.local_cpu:
+        return True
+    else:
+        return False
+
 def init_lmcache_engine(
     model_config: ModelConfig,
     parallel_config: ParallelConfig,
@@ -92,9 +98,11 @@ def init_lmcache_engine(
                                      parallel_config.rank, "vllm", kv_dtype,
                                      kv_shape)
     hidden_dim_size = num_kv_head * head_size
+    use_gpu = need_gpu_interm_buffer(config)
+    logger.warning("HERE USE GPU IS %s", use_gpu)
     vllm_gpu_connector = VLLMPagedMemGPUConnectorV2(hidden_dim_size,
                                                     num_layer,
-                                                    use_gpu=True,
+                                                    use_gpu=use_gpu,
                                                     chunk_size=chunk_size,
                                                     dtype=kv_dtype,
                                                     device=device)

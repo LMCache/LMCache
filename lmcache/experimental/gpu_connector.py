@@ -6,6 +6,9 @@ import torch
 import lmcache.c_ops as lmc_ops
 from lmcache.experimental.memory_management import MemoryFormat, MemoryObj
 from lmcache.utils import _lmcache_nvtx_annotate
+from lmcache.logging import init_logger
+
+logger = init_logger(__name__)
 
 
 class GPUConnectorInterface(metaclass=abc.ABCMeta):
@@ -423,7 +426,11 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
                                             self.page_buffer_size, True)
             memory_obj.tensor.copy_(tmp_gpu_buffer, non_blocking=True)
 
-        torch.cuda.synchronize()
+        if not memory_obj.tensor.is_cuda:
+            # Force a synchronize if the target buffer is NOT CUDA device
+            # NOTE: for better performance, we may not want to sync for every
+            # memory object
+            torch.cuda.synchronize()
         memory_obj.metadata.fmt = MemoryFormat.KV_BLOB
 
     def get_shape(self, num_tokens: int) -> torch.Size:
