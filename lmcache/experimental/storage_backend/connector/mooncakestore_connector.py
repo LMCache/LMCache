@@ -124,7 +124,7 @@ class MooncakestoreConnector(RemoteConnector):
         if metadata_bytes is None or len(metadata_bytes) != METADATA_BYTES_LEN:
             return None
 
-        data_bytes = bytes((ctypes.c_char * (METADATA_BYTES_LEN)).from_address(buffer_ptr + METADATA_BYTES_LEN))
+        data_bytes = bytes((ctypes.c_char * (buffer_len - METADATA_BYTES_LEN)).from_address(buffer_ptr + METADATA_BYTES_LEN))
         if data_bytes is None:
             return None
 
