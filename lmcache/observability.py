@@ -363,7 +363,8 @@ class PrometheusLogger:
 
         self._log_counter(self.counter_num_requested_tokens,
                           stats.interval_requested_tokens)
-        self._log_counter(self.counter_num_hit_tokens, stats.interval_hit_tokens)
+        self._log_counter(self.counter_num_hit_tokens,
+                          stats.interval_hit_tokens)
 
         self._log_gauge(self.gauge_cache_hit_rate, stats.cache_hit_rate)
 
