@@ -13,3 +13,4 @@ prometheus_client
 infinistore
 msgspec
 pyzmq
+transformers
