@@ -42,66 +42,89 @@ Welcome to LMCache!
 
 :raw-html:`<br />`
 
-What's next?
-=====================
+.. toctree::
+   :maxdepth: 2
+   :caption: Getting Started
 
-Follow these links to get started with LMCache:
-
-* :ref:`speedup` 
-* :ref:`installation`
-* :ref:`docker`
+   getting_started/installation
+   getting_started/quickstart/index
+   getting_started/troubleshoot
+   getting_started/faq
 
 :raw-html:`<br />`
 
-Documentation
-=====================
-
 .. toctree::
-   :maxdepth: 1
-   :caption: Getting Started
+   :maxdepth: 2
+   :caption: KV Cache offloading and sharing
 
-   getting_started/speedup
-   getting_started/installation   
-   getting_started/docker
-   getting_started/quickstart
+   kv_cache/cpu_ram
+   kv_cache/local_storage
+   kv_cache/redis
+   kv_cache/infinistore
+   kv_cache/mooncake
+   kv_cache/valkey
+
+:raw-html:`<br />`
 
 .. toctree::
    :maxdepth: 2
-   :caption: Configure LMCache
+   :caption: Disaggregated prefill
 
-   configuration/v1/index
-   configuration/v0/index
+   disaggregated_prefill/nixl/index
+   disaggregated_prefill/shared_storage
+
+:raw-html:`<br />`
 
 .. toctree::
    :maxdepth: 2
-   :caption: Detailed Examples
+   :caption: KV Cache management
 
-   examples/v1/index
-   examples/v0/index
-   
-.. toctree::
-   :maxdepth: 1
-   :caption: Models
+   kv_cache_management/controller
+   kv_cache_management/lookup
+   kv_cache_management/persist
+   kv_cache_management/clear
 
-   models/models
+:raw-html:`<br />`
 
 .. toctree::
-   :maxdepth: 1
-   :caption: Developer Documentation
+   :maxdepth: 2
+   :caption: KV Cache Optimizations
 
-   developer_tutorial/overview
-   developer_tutorial/EngineInterface
-   developer_tutorial/GPUConnectorInterface
-   developer_tutorial/MemoryObject
-   developer_tutorial/MemoryInterface
-   developer_tutorial/BackendInterface
+   kv_cache_optimizations/compression
+   kv_cache_optimizations/blending
 
+:raw-html:`<br />`
 
 .. toctree::
-   :maxdepth: 1
-   :caption: Advanced
+   :maxdepth: 2
+   :caption: Use LMCache in production
 
-   advanced/KVBlend
-   advanced/KVEvictor
-   advanced/vLLMIntegration
+   production/docker_deployment
+   production/kubernetes_deployment
 
+:raw-html:`<br />`
+
+.. toctree::
+   :maxdepth: 2
+   :caption: Developer Guide
+
+   developer_guide/contributing
+   developer_guide/dockerfile
+
+:raw-html:`<br />`
+
+.. toctree::
+   :maxdepth: 2
+   :caption: API Reference
+
+   api_reference/configurations
+   api_reference/storage_backends
+
+:raw-html:`<br />`
+
+.. toctree::
+   :maxdepth: 2
+   :caption: Community
+
+   community/meetings
+   community/blogs
