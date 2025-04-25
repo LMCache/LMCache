@@ -6,6 +6,9 @@ from typing import Any, Optional
 import yaml
 
 import lmcache.config as orig_config
+from lmcache.logging import init_logger
+
+logger = init_logger(__name__)
 
 
 @dataclass
@@ -166,7 +169,7 @@ class LMCacheEngineConfig:
                                    enable_blending, blend_recompute_ratio,
                                    blend_min_tokens, blend_special_str,
                                    enable_p2p, lookup_url, distributed_url,
-                                   error_handling).validate()
+                                   error_handling).validate().log_config()
 
     @staticmethod
     def from_file(file_path: str) -> "LMCacheEngineConfig":
@@ -257,7 +260,7 @@ class LMCacheEngineConfig:
             nixl_buffer_size,
             nixl_buffer_device,
             nixl_enable_gc,
-        ).validate()
+        ).validate().log_config()
 
     @staticmethod
     def from_env() -> "LMCacheEngineConfig":
@@ -365,7 +368,7 @@ class LMCacheEngineConfig:
             get_env_name("nixl_buffer_device"), config.nixl_buffer_device)
         config.nixl_enable_gc = to_bool(
             parse_env(get_env_name("nixl_enable_gc"), config.nixl_enable_gc))
-        return config.validate()
+        return config.validate().log_config()
 
     def to_original_config(self) -> orig_config.LMCacheEngineConfig:
         # NOTE: This function is purely for UsageContext compatibility
@@ -414,5 +417,38 @@ class LMCacheEngineConfig:
                     "Nixl only supports save_decode_cache=False"
             assert self.enable_p2p is False, \
                     "Nixl only supports enable_p2p=False"
+
+        return self
+
+    def log_config(self) -> 'LMCacheEngineConfig':
+        """log the configuration in LMCache
+        """
+        config_dict = {
+            'chunk_size': self.chunk_size,
+            'local_cpu': self.local_cpu,
+            'max_local_cpu_size': f"{self.max_local_cpu_size} GB",
+            'local_disk': self.local_disk,
+            'max_local_disk_size': f"{self.max_local_disk_size} GB",
+            'remote_url': self.remote_url,
+            'remote_serde': self.remote_serde,
+            'save_decode_cache': self.save_decode_cache,
+            'enable_blending': self.enable_blending,
+            'blend_recompute_ratio': self.blend_recompute_ratio,
+            'blend_min_tokens': self.blend_min_tokens,
+            'enable_p2p': self.enable_p2p,
+            'lookup_url': self.lookup_url,
+            'distributed_url': self.distributed_url,
+            'error_handling': self.error_handling,
+            'enable_controller': self.enable_controller,
+            'lmcache_instance_id': self.lmcache_instance_id,
+            'enable_nixl': self.enable_nixl,
+            'nixl_role': self.nixl_role,
+            'nixl_peer_host': self.nixl_peer_host,
+            'nixl_peer_port': self.nixl_peer_port,
+            'nixl_buffer_size': self.nixl_buffer_size,
+            'nixl_buffer_device': self.nixl_buffer_device,
+            'nixl_enable_gc': self.nixl_enable_gc
+        }
+        logger.info(f"LMCache Configuration: {config_dict}")
 
         return self
