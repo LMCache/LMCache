@@ -18,7 +18,6 @@ import json
 import os
 from dataclasses import dataclass
 from typing import List, Optional, no_type_check
-import ctypes 
 
 from lmcache.experimental.memory_management import (MemoryAllocatorInterface,
                                                     MemoryObj)
@@ -117,9 +116,9 @@ class MooncakestoreConnector(RemoteConnector):
         key_str = key.to_string()
 
         try:
-            buffer = self.store.get(key_str) # buffer is pybind11 buffer type
+            buffer = self.store.get(key_str)  # buffer is pybind11 buffer type
         except Exception as e:
-            logger.error(f"Failed to get key {key_str}")
+            logger.error(f"Failed to get key {key_str}. {e}")
 
         if buffer is None:
             return None
