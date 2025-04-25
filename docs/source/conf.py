@@ -10,7 +10,6 @@ import os
 import sys
 from dataclasses import asdict
 
-from unittest import mock
 from sphinx.ext import autodoc
 from sphinxawesome_theme import ThemeOptions
 
