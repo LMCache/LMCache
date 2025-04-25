@@ -6,13 +6,7 @@ on:
     branches:
       - '**'  # Matches all branches
     paths:
-      - '**'
-  pull_request:
-    branches:
-      - '**'  # Matches all branches
-    paths:
-      - '**'
-
+      - 'docs/**'
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
