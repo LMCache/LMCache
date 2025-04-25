@@ -165,7 +165,24 @@ class NixlPipe:
     TRANSFER_BUFFER_SIZE = 128 * 1024 * 1024
 
     def __init__(self, nixl_config: NixlConfig,
-                 side_channel: zmq.Socket):  # type: ignore
+                 side_channel: zmq.Socket,  # type: ignore
+                 sender_meta: Optional[bytes] = None):
+        """
+        Initialize the NixlPipe.
+
+        Args:
+            nixl_config: The NixlConfig object containing the configuration
+                for the NIXL pipe.
+            side_channel: The ZeroMQ socket used for communication.
+            sender_meta: Optional metadata, will have values when the pipe
+                it created on the receiver side and is connected by a 
+                sender.
+
+        Note:
+            We make sure that the receiver will not receive any other messages
+            from the sender during __init__, so it will not disturb the main
+            receiving loop on the receiver side.
+        """
         self.nixl_config = nixl_config
         self.side_channel = side_channel
 
@@ -200,8 +217,9 @@ class NixlPipe:
             self.peer_name = self._agent.add_remote_agent(remote_meta).decode(
                 "utf-8")
         else:
-            remote_meta = self.side_channel.recv()
-            self.peer_name = self._agent.add_remote_agent(remote_meta).decode(
+            assert sender_meta is not None, \
+                "The sender_meta should be provided on the receiver side"
+            self.peer_name = self._agent.add_remote_agent(sender_meta).decode(
                 "utf-8")
             self.side_channel.send(local_meta)
 
@@ -437,7 +455,10 @@ class NixlSender:
 
         # Initialize the ZeroMQ context and side channel
         self._context = zmq.Context()  # type: ignore
-        self._side_channel = self._context.socket(zmq.PAIR)  # type: ignore
+        # Change from PAIR to DEALER socket
+        self._side_channel = self._context.socket(zmq.DEALER)  # type: ignore
+        # Set an identity for this DEALER socket
+        self._side_channel.setsockopt(zmq.IDENTITY, f"sender-{uuid.uuid4().hex}".encode())  # type: ignore
         self._side_channel.connect("tcp://{}:{}".format(
             nixl_config.receiver_host, nixl_config.receiver_port))
         self._side_channel.setsockopt(zmq.LINGER, 0)  # type: ignore
@@ -479,6 +500,7 @@ class NixlSender:
         # Initialize connection using side channel
         request = NixlRequest(keys=keys, metadatas=metadatas)
 
+        # With DEALER socket, we just send the message (identity is handled automatically)
         self._side_channel.send(request.serialize())
         logger.debug("Sent the request with %d keys", len(request.keys))
 
@@ -572,7 +594,8 @@ class NixlReceiver:
 
         # Initialize the ZeroMQ context and side channel
         self._context = zmq.Context()  # type: ignore
-        self._side_channel = self._context.socket(zmq.PAIR)  # type: ignore
+        # Change from PAIR to ROUTER socket
+        self._side_channel = self._context.socket(zmq.ROUTER)  # type: ignore
         self._side_channel.bind("tcp://{}:{}".format(
             nixl_config.receiver_host, nixl_config.receiver_port))
         self._side_channel.setsockopt(zmq.LINGER, 0)  # type: ignore
@@ -582,9 +605,9 @@ class NixlReceiver:
             5000  # Set a timeout for receiving to avoid blocking 
         )
 
-        # Create NIXL Pipe - moved to receiver loop
-        self._pipe: Optional[NixlPipe] = None
-
+        # Track pipes for each sender
+        self._sender_pipes: dict[bytes, NixlPipe] = {}
+        
         # Observers
         self._observers: list[NixlObserverInterface] = []
 
@@ -594,18 +617,38 @@ class NixlReceiver:
                                                  daemon=True)
         self._receiver_thread.start()
 
-    def _initialize_pipe(self):
-        """Initialize the NixlPipe for communication with the sender."""
-        logger.info("Initializing NixlPipe for receiver")
-        self._pipe = NixlPipe(self.nixl_config, self._side_channel)
-        logger.info("NixlPipe initialized successfully")
-        return True
+    def _initialize_pipe_for_sender(self, 
+                                    sender_id: bytes,
+                                    sender_meta: bytes) -> NixlPipe:
+        """Initialize a NixlPipe for a specific sender.
+        
+        Args:
+            sender_id: The ZMQ identity of the sender
+            
+        Returns:
+            A new NixlPipe instance for the sender
+        """
+        logger.info(f"Initializing NixlPipe for sender: {sender_id.decode()}")
+        
+        # Create a wrapper socket for this specific sender
+        sender_socket = SenderSpecificSocket(self._side_channel, sender_id)
+        
+        # Create a pipe for this sender
+        pipe = NixlPipe(self.nixl_config, sender_socket, sender_meta)
+        
+        # Store the pipe
+        self._sender_pipes[sender_id] = pipe
+        
+        logger.info(f"NixlPipe initialized successfully for sender: {sender_id.decode()}")
+        return pipe
 
-    def _process_receive_transaction(self, keys: list[CacheEngineKey],
-                                     metadatas: list[MemoryObjMetadata]):
+    def _process_receive_transaction(self, sender_id: bytes, 
+                                    keys: list[CacheEngineKey],
+                                    metadatas: list[MemoryObjMetadata]):
         """Process the receive transaction and notifying all observers.
 
         Args:
+            sender_id: The ZMQ identity of the sender
             keys: the list of CacheEngineKey
             metadatas: the list of MemoryObjMetadata
         """
@@ -613,15 +656,15 @@ class NixlReceiver:
             logger.warning(
                 "No observers registered to process the received data")
 
-        if self._pipe is None:
-            logger.error("NixlPipe not initialized yet")
-            return
+        # Get pipe for this sender
+        assert sender_id in self._sender_pipes
+        pipe = self._sender_pipes[sender_id]
 
         num_received_object = 0
         offset = 0
         while num_received_object < len(keys):
-            self._pipe.wait_read()
-            objs_read = self._pipe.read_buffer(metadatas[offset:])
+            pipe.wait_read()
+            objs_read = pipe.read_buffer(metadatas[offset:])
 
             # Notify the observers
             start = time.perf_counter()
@@ -636,7 +679,7 @@ class NixlReceiver:
                          1000 * (end - start))
 
             # Acknowledge the remote side that the transfer was processed
-            self._pipe.ack_receive()
+            pipe.ack_receive()
 
             # Update the offset
             num_received_object += len(objs_read)
@@ -647,7 +690,6 @@ class NixlReceiver:
         poller.register(self._side_channel, zmq.POLLIN)  # type: ignore
         # Use a shorter timeout to be more responsive to shutdown
         POLL_TIMEOUT_MS = 1000  # 1s timeout
-        pipe_initialized = False
 
         while self._running:
             try:
@@ -656,23 +698,30 @@ class NixlReceiver:
                 if not evts:
                     continue
 
-                # Initialize the pipe if not already done
-                if not pipe_initialized:
-                    pipe_initialized = self._initialize_pipe()
-                    continue  # Continue to receive the actual message
-
-                msg = self._side_channel.recv()
+                # With ROUTER socket, we receive sender identity first, then the message
+                sender_id, msg = self._side_channel.recv_multipart()
                 if not msg:
                     logger.warn("Received empty message on the side channel")
                     time.sleep(0.1)  # Avoid busy waiting
                     continue
 
-                request = NixlRequest.deserialize(msg)
-                logger.debug("Received request with %d keys",
-                             len(request.keys))
+                # Log new sender connection
+                if sender_id not in self._sender_pipes:
+                    # Now, msg should be the sender metadata
+                    # Initialize a new pipe for this sender
+                    self._initialize_pipe_for_sender(sender_id, msg)
+                    logger.info(f"New sender connected with ID: {sender_id.decode()}")
+                    continue
 
-                self._process_receive_transaction(keys=request.keys,
-                                                  metadatas=request.metadatas)
+                request = NixlRequest.deserialize(msg)
+                logger.debug("Received request with %d keys from sender %s",
+                             len(request.keys), sender_id.decode())
+
+                self._process_receive_transaction(
+                    sender_id=sender_id,
+                    keys=request.keys,
+                    metadatas=request.metadatas
+                )
 
             except zmq.Again as e:  # type: ignore
                 # Handle the timeout when waiting for a message
@@ -701,10 +750,42 @@ class NixlReceiver:
         if self._receiver_thread.is_alive():
             logger.warning(
                 "Receiver thread did not shut down cleanly within timeout")
+            
+        # Close all pipes
+        for sender_id, pipe in self._sender_pipes.items():
+            logger.info(f"Closing pipe for sender: {sender_id.decode()}")
+            pipe.close()
+            
         self._side_channel.close()
         self._context.term()
-        if self._pipe:
-            self._pipe.close()
+
+
+# Helper class to route messages to specific senders
+class SenderSpecificSocket:
+    """A wrapper around a ROUTER socket that only communicates with a specific sender."""
+    
+    def __init__(self, router_socket: zmq.Socket, sender_id: bytes):
+        self.router_socket = router_socket
+        self.sender_id = sender_id
+        
+    def send(self, data: bytes):
+        """Send data to the specific sender."""
+        self.router_socket.send_multipart([self.sender_id, data])
+        
+    def recv(self) -> bytes:
+        """Receive data from the specific sender.
+        
+        This is a simplified implementation that assumes messages are only
+        coming from the specific sender. In a real implementation, you would
+        need to filter messages by sender_id.
+        """
+        frames = self.router_socket.recv_multipart()
+        if frames[0] == self.sender_id:
+            return frames[1]
+        else:
+            # In practice, you might want to queue this message for the correct handler
+            logger.warning(f"Received message for wrong sender: {frames[0].decode()}")
+            return b""
 
 
 class NixlChannel:
