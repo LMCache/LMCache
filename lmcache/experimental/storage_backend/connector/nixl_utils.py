@@ -17,8 +17,8 @@ class NixlRole(enum.Enum):
 @dataclass
 class NixlConfig:
     role: Union[NixlRole, str]
-    peer_host_name: str
-    peer_port: int
+    receiver_host: str
+    receiver_port: int
     buffer_size: int
     buffer_device: str
     enable_gc: bool
@@ -43,15 +43,15 @@ class NixlConfig:
                 f"Invalid role: {config.nixl_role}, must be either "\
                 f"{NixlRole.SENDER} or {NixlRole.RECEIVER}"
 
-        assert config.nixl_peer_host is not None
-        assert config.nixl_peer_port is not None
+        assert config.nixl_receiver_host is not None
+        assert config.nixl_receiver_port is not None
         assert config.nixl_buffer_size is not None
         assert config.nixl_buffer_device is not None
         assert config.nixl_enable_gc is not None
 
         return NixlConfig(role=nixl_role,
-                          peer_host_name=config.nixl_peer_host,
-                          peer_port=config.nixl_peer_port + worker_id,
+                          receiver_host=config.nixl_receiver_host,
+                          receiver_port=config.nixl_receiver_port + worker_id,
                           buffer_size=config.nixl_buffer_size,
                           buffer_device=config.nixl_buffer_device,
                           enable_gc=config.nixl_enable_gc)

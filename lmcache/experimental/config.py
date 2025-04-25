@@ -52,10 +52,10 @@ class LMCacheEngineConfig:
     enable_nixl: Optional[bool] = False
     # Role: sender or receiver
     nixl_role: Optional[str] = None
-    # The url of the nixl peer
-    nixl_peer_host: Optional[str] = None
-    # The BASE port of the nixl peer, real port is nixl_peer_port + WORKER_RANK
-    nixl_peer_port: Optional[int] = None
+    # The host of the nixl receiver
+    nixl_receiver_host: Optional[str] = None
+    # The BASE port of the nixl receiver, real port is nixl_receiver_port + WORKER_RANK
+    nixl_receiver_port: Optional[int] = None
     # The transport buffer size of nixl in bytes
     nixl_buffer_size: Optional[int] = None
     # The device that nixl uses
@@ -87,8 +87,8 @@ class LMCacheEngineConfig:
         lmcache_worker_url: Optional[str] = None,
         enable_nixl: Optional[bool] = False,
         nixl_role: Optional[str] = None,
-        nixl_peer_host: Optional[str] = None,
-        nixl_peer_port: Optional[int] = None,
+        nixl_receiver_host: Optional[str] = None,
+        nixl_receiver_port: Optional[int] = None,
         nixl_buffer_size: Optional[int] = None,
         nixl_buffer_device: Optional[str] = None,
         nixl_enable_gc: Optional[bool] = False,
@@ -101,7 +101,7 @@ class LMCacheEngineConfig:
             blend_special_str, enable_p2p, lookup_url, distributed_url,
             error_handling, enable_controller, lmcache_instance_id,
             controller_url, lmcache_worker_url, enable_nixl, nixl_role,
-            nixl_peer_host, nixl_peer_port, nixl_buffer_size,
+            nixl_receiver_host, nixl_receiver_port, nixl_buffer_size,
             nixl_buffer_device, nixl_enable_gc).validate()
 
     @staticmethod
@@ -208,8 +208,8 @@ class LMCacheEngineConfig:
 
         enable_nixl = config.get("enable_nixl", False)
         nixl_role = config.get("nixl_role", None)
-        nixl_peer_host = config.get("nixl_peer_host", None)
-        nixl_peer_port = config.get("nixl_peer_port", None)
+        nixl_receiver_host = config.get("nixl_receiver_host", None)
+        nixl_receiver_port = config.get("nixl_receiver_port", None)
         nixl_buffer_size = config.get("nixl_buffer_size", None)
         nixl_buffer_device = config.get("nixl_buffer_device", None)
         nixl_enable_gc = config.get("nixl_enable_gc", False)
@@ -252,8 +252,8 @@ class LMCacheEngineConfig:
             lmcache_worker_url,
             enable_nixl,
             nixl_role,
-            nixl_peer_host,
-            nixl_peer_port,
+            nixl_receiver_host,
+            nixl_receiver_port,
             nixl_buffer_size,
             nixl_buffer_device,
             nixl_enable_gc,
@@ -354,10 +354,10 @@ class LMCacheEngineConfig:
             parse_env(get_env_name("enable_nixl"), config.enable_nixl))
         config.nixl_role = parse_env(get_env_name("nixl_role"),
                                      config.nixl_role)
-        config.nixl_peer_host = parse_env(get_env_name("nixl_peer_host"),
-                                          config.nixl_peer_host)
-        config.nixl_peer_port = to_int(
-            parse_env(get_env_name("nixl_peer_port"), config.nixl_peer_port))
+        config.nixl_receiver_host = parse_env(get_env_name("nixl_receiver_host"),
+                                          config.nixl_receiver_host)
+        config.nixl_receiver_port = to_int(
+            parse_env(get_env_name("nixl_receiver_port"), config.nixl_receiver_port))
         config.nixl_buffer_size = to_int(
             parse_env(get_env_name("nixl_buffer_size"),
                       config.nixl_buffer_size))
@@ -393,8 +393,8 @@ class LMCacheEngineConfig:
 
         if self.enable_nixl:
             assert self.nixl_role is not None
-            assert self.nixl_peer_host is not None
-            assert self.nixl_peer_port is not None
+            assert self.nixl_receiver_host is not None
+            assert self.nixl_receiver_port is not None
             assert self.nixl_buffer_size is not None
             assert self.nixl_buffer_device is not None
             assert self.nixl_enable_gc is not None

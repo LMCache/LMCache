@@ -112,8 +112,8 @@ def create_config(role: str, host: str, port: int) -> LMCacheEngineConfig:
         enable_p2p=False,  # Nixl requires enable_p2p=False
         enable_nixl=True,  # Enable Nixl
         nixl_role=role,  # 'sender' or 'receiver'
-        nixl_peer_host=host,
-        nixl_peer_port=port,
+        nixl_receiver_host=host,
+        nixl_receiver_port=port,
         nixl_buffer_size=2**30,  # 1GB
         nixl_buffer_device='cuda',
     )
