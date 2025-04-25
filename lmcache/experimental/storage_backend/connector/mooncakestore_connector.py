@@ -116,15 +116,20 @@ class MooncakestoreConnector(RemoteConnector):
     async def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         key_str = key.to_string()
 
-        buffer = self.store.get(key_str) # buffer is pybind11 buffer type
+        try:
+            buffer = self.store.get(key_str) # buffer is pybind11 buffer type
+        except Exception as e:
+            logger.error(f"Failed to get key {key_str}")
 
-        buffer_len = buffer.size()
-        buffer_ptr = buffer.consolidated_ptr()
-        metadata_bytes = bytes((ctypes.c_char * METADATA_BYTES_LEN).from_address(buffer_ptr))
+        if buffer is None:
+            return None
+
+        retrieved_view = memoryview(buffer)
+        metadata_bytes = retrieved_view[:METADATA_BYTES_LEN]
         if metadata_bytes is None or len(metadata_bytes) != METADATA_BYTES_LEN:
             return None
 
-        data_bytes = bytes((ctypes.c_char * (buffer_len - METADATA_BYTES_LEN)).from_address(buffer_ptr + METADATA_BYTES_LEN))
+        data_bytes = retrieved_view[METADATA_BYTES_LEN:]
         if data_bytes is None:
             return None
 
