@@ -164,9 +164,11 @@ class NixlPipe:
     """
     TRANSFER_BUFFER_SIZE = 128 * 1024 * 1024
 
-    def __init__(self, nixl_config: NixlConfig,
-                 side_channel: zmq.Socket,  # type: ignore
-                 sender_meta: Optional[bytes] = None):
+    def __init__(
+            self,
+            nixl_config: NixlConfig,
+            side_channel: zmq.Socket,  # type: ignore
+            sender_meta: Optional[bytes] = None):
         """
         Initialize the NixlPipe.
 
@@ -458,7 +460,9 @@ class NixlSender:
         # Change from PAIR to DEALER socket
         self._side_channel = self._context.socket(zmq.DEALER)  # type: ignore
         # Set an identity for this DEALER socket
-        self._side_channel.setsockopt(zmq.IDENTITY, f"sender-{uuid.uuid4().hex}".encode())  # type: ignore
+        self._side_channel.setsockopt(
+            zmq.IDENTITY,  # type: ignore
+            f"sender-{uuid.uuid4().hex}".encode())  # type: ignore
         self._side_channel.connect("tcp://{}:{}".format(
             nixl_config.receiver_host, nixl_config.receiver_port))
         self._side_channel.setsockopt(zmq.LINGER, 0)  # type: ignore
@@ -500,7 +504,6 @@ class NixlSender:
         # Initialize connection using side channel
         request = NixlRequest(keys=keys, metadatas=metadatas)
 
-        # With DEALER socket, we just send the message (identity is handled automatically)
         self._side_channel.send(request.serialize())
         logger.debug("Sent the request with %d keys", len(request.keys))
 
@@ -607,7 +610,7 @@ class NixlReceiver:
 
         # Track pipes for each sender
         self._sender_pipes: dict[bytes, NixlPipe] = {}
-        
+
         # Observers
         self._observers: list[NixlObserverInterface] = []
 
@@ -617,8 +620,7 @@ class NixlReceiver:
                                                  daemon=True)
         self._receiver_thread.start()
 
-    def _initialize_pipe_for_sender(self, 
-                                    sender_id: bytes,
+    def _initialize_pipe_for_sender(self, sender_id: bytes,
                                     sender_meta: bytes) -> NixlPipe:
         """Initialize a NixlPipe for a specific sender.
         
@@ -629,22 +631,23 @@ class NixlReceiver:
             A new NixlPipe instance for the sender
         """
         logger.info(f"Initializing NixlPipe for sender: {sender_id.decode()}")
-        
+
         # Create a wrapper socket for this specific sender
         sender_socket = SenderSpecificSocket(self._side_channel, sender_id)
-        
+
         # Create a pipe for this sender
         pipe = NixlPipe(self.nixl_config, sender_socket, sender_meta)
-        
+
         # Store the pipe
         self._sender_pipes[sender_id] = pipe
-        
-        logger.info(f"NixlPipe initialized successfully for sender: {sender_id.decode()}")
+
+        logger.info("NixlPipe initialized successfully for sender: %s",
+                    sender_id.decode())
         return pipe
 
-    def _process_receive_transaction(self, sender_id: bytes, 
-                                    keys: list[CacheEngineKey],
-                                    metadatas: list[MemoryObjMetadata]):
+    def _process_receive_transaction(self, sender_id: bytes,
+                                     keys: list[CacheEngineKey],
+                                     metadatas: list[MemoryObjMetadata]):
         """Process the receive transaction and notifying all observers.
 
         Args:
@@ -698,30 +701,28 @@ class NixlReceiver:
                 if not evts:
                     continue
 
-                # With ROUTER socket, we receive sender identity first, then the message
                 sender_id, msg = self._side_channel.recv_multipart()
                 if not msg:
                     logger.warn("Received empty message on the side channel")
                     time.sleep(0.1)  # Avoid busy waiting
                     continue
 
-                # Log new sender connection
+                # New sender connection
                 if sender_id not in self._sender_pipes:
                     # Now, msg should be the sender metadata
                     # Initialize a new pipe for this sender
                     self._initialize_pipe_for_sender(sender_id, msg)
-                    logger.info(f"New sender connected with ID: {sender_id.decode()}")
+                    logger.info(
+                        f"New sender connected with ID: {sender_id.decode()}")
                     continue
 
                 request = NixlRequest.deserialize(msg)
                 logger.debug("Received request with %d keys from sender %s",
                              len(request.keys), sender_id.decode())
 
-                self._process_receive_transaction(
-                    sender_id=sender_id,
-                    keys=request.keys,
-                    metadatas=request.metadatas
-                )
+                self._process_receive_transaction(sender_id=sender_id,
+                                                  keys=request.keys,
+                                                  metadatas=request.metadatas)
 
             except zmq.Again as e:  # type: ignore
                 # Handle the timeout when waiting for a message
@@ -750,28 +751,33 @@ class NixlReceiver:
         if self._receiver_thread.is_alive():
             logger.warning(
                 "Receiver thread did not shut down cleanly within timeout")
-            
+
         # Close all pipes
         for sender_id, pipe in self._sender_pipes.items():
             logger.info(f"Closing pipe for sender: {sender_id.decode()}")
             pipe.close()
-            
+
         self._side_channel.close()
         self._context.term()
 
 
 # Helper class to route messages to specific senders
 class SenderSpecificSocket:
-    """A wrapper around a ROUTER socket that only communicates with a specific sender."""
-    
-    def __init__(self, router_socket: zmq.Socket, sender_id: bytes):
+    """A wrapper around a ROUTER socket that only communicates with a specific 
+    sender.
+    """
+
+    def __init__(
+            self,
+            router_socket: zmq.Socket,  # type: ignore
+            sender_id: bytes):
         self.router_socket = router_socket
         self.sender_id = sender_id
-        
+
     def send(self, data: bytes):
         """Send data to the specific sender."""
         self.router_socket.send_multipart([self.sender_id, data])
-        
+
     def recv(self) -> bytes:
         """Receive data from the specific sender.
         
@@ -783,8 +789,8 @@ class SenderSpecificSocket:
         if frames[0] == self.sender_id:
             return frames[1]
         else:
-            # In practice, you might want to queue this message for the correct handler
-            logger.warning(f"Received message for wrong sender: {frames[0].decode()}")
+            logger.warning(
+                f"Received message for wrong sender: {frames[0].decode()}")
             return b""
 
 

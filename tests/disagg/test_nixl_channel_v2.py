@@ -33,7 +33,8 @@ def generate_test_data(
                            worker_id=0,
                            chunk_hash=f"test_{i}"))
         obj = allocator.allocate(shape, dtype, fmt=MemoryFormat.KV_BLOB)
-        obj.tensor.fill_((i + 1) / num_objs)  # Fill with some test data, e.g., the index
+        obj.tensor.fill_(
+            (i + 1) / num_objs)  # Fill with some test data, e.g., the index
         objs.append(obj)
     return keys, objs
 
@@ -54,10 +55,10 @@ class TestObserver(NixlObserverInterface):
         self.expected_count = None
         self.num_expected_senders = 1  # Default to 1 sender
         self.reset()
-    
+
     def set_expected_count(self, count: int):
         self.expected_count = count
-        
+
     def set_num_expected_senders(self, num_senders: int):
         self.num_expected_senders = num_senders
 
@@ -69,7 +70,7 @@ class TestObserver(NixlObserverInterface):
         if is_view:
             for i, obj in enumerate(objs):
                 copied_tensor = obj.tensor.clone().detach()
-                
+
                 # Store tensor by key for verification
                 key = keys[i]
                 if key not in self.key_to_tensors:
@@ -84,13 +85,16 @@ class TestObserver(NixlObserverInterface):
                 self.key_to_tensors[key].append(obj.tensor)
 
         # Calculate total received tensors
-        total_received = sum(len(tensors) for tensors in self.key_to_tensors.values())
-        
-        if self.expected_count and total_received >= self.expected_count * self.num_expected_senders:
+        total_received = sum(
+            len(tensors) for tensors in self.key_to_tensors.values())
+
+        if self.expected_count and total_received >= \
+                self.expected_count * self.num_expected_senders:
             self.received_event.set()
 
     def summarize(self):
-        total_tensors = sum(len(tensors) for tensors in self.key_to_tensors.values())
+        total_tensors = sum(
+            len(tensors) for tensors in self.key_to_tensors.values())
         logger.info(f"Received {len(self.key_to_tensors)} unique keys and "
                     f"{total_tensors} total tensors")
 
@@ -197,51 +201,60 @@ def receive_and_verify_data(observer: TestObserver,
         logger.info("Waiting to receive data...")
         start_time = time.time()
         expected_total = len(expected_keys) * num_expected_senders
-        
+
         # Calculate total received tensors
-        total_received = sum(len(tensors) for tensors in observer.key_to_tensors.values())
+        total_received = sum(
+            len(tensors) for tensors in observer.key_to_tensors.values())
 
         while total_received < expected_total:
             if time.time() - start_time > timeout:
                 logger.error("Timed out waiting for data")
                 return False
-            logger.info(f"Received {total_received}/{expected_total} tensors so far...")
+            logger.info(
+                f"Received {total_received}/{expected_total} tensors so far..."
+            )
             time.sleep(1)
             # Update total received count
-            total_received = sum(len(tensors) for tensors in observer.key_to_tensors.values())
+            total_received = sum(
+                len(tensors) for tensors in observer.key_to_tensors.values())
 
         if total_received >= expected_total:
-            logger.info(f"Received all {len(observer.key_to_tensors)} unique keys and "
-                        f"{total_received} total tensors")
+            logger.info(
+                f"Received all {len(observer.key_to_tensors)} unique keys and "
+                f"{total_received} total tensors")
 
             # Verify the received data
             success = True
-            
+
             # Check that we received the expected number of tensors for each key
             for key in expected_keys:
                 if key not in observer.key_to_tensors:
                     logger.error(f"Missing key: {key}")
                     success = False
                     continue
-                    
+
                 if len(observer.key_to_tensors[key]) != num_expected_senders:
-                    logger.error(f"Expected {num_expected_senders} tensors for key {key}, "
-                                f"but got {len(observer.key_to_tensors[key])}")
+                    logger.error(
+                        f"Expected {num_expected_senders} objs for key {key}, "
+                        f"but got {len(observer.key_to_tensors[key])}")
                     success = False
                     continue
-                
+
                 # Extract the index from the chunk_hash (format is "test_{i}")
                 chunk_hash = key.chunk_hash
                 try:
-                    # Extract the index from the chunk_hash (format is "test_{i}")
                     idx = int(chunk_hash.split('_')[1])
-                    expected_value = (idx + 1) / len(expected_keys)  # Match the value in generate_test_data
-                    
+                    expected_value = (idx + 1) / len(
+                        expected_keys)  # Match the value in generate_test_data
+
                     # Verify the data for this key
                     for tensor in observer.key_to_tensors[key]:
                         # Check if tensor values match expected value
-                        if not torch.allclose(tensor, torch.full_like(tensor, expected_value)):
-                            logger.error(f"Data mismatch for key {key}. Expected value: {expected_value}")
+                        if not torch.allclose(
+                                tensor, torch.full_like(
+                                    tensor, expected_value)):
+                            logger.error(f"Data mismatch for key {key}. "
+                                         f"Expected value: {expected_value}")
                             success = False
                 except (IndexError, ValueError) as e:
                     logger.error(f"Error parsing chunk_hash {chunk_hash}: {e}")
@@ -249,7 +262,8 @@ def receive_and_verify_data(observer: TestObserver,
 
             return success
         else:
-            logger.error(f"Only received {total_received}/{expected_total} tensors before timeout")
+            logger.error(f"Only received {total_received}/{expected_total} "
+                         "tensors before timeout")
             return False
     finally:
         # Always cleanup, even if verification fails
@@ -360,7 +374,8 @@ def main():
         observer.set_expected_count(len(keys))
         observer.set_num_expected_senders(args.num_expected_senders)
         channel.register_receive_observer(observer)
-        success = receive_and_verify_data(observer, keys, objs, args.num_expected_senders)
+        success = receive_and_verify_data(observer, keys, objs,
+                                          args.num_expected_senders)
         if not success:
             logger.error("Data verification failed")
 
