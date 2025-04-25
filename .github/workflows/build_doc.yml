@@ -1,0 +1,49 @@
+
+name: Deploy Sphinx Docs
+
+on:
+  push:
+    branches:
+      - '**'  # Matches all branches
+    paths:
+      - 'docs/**'
+      - 'lmcache/**'
+      - 'examples/**'
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Source Repository
+        uses: actions/checkout@v4
+
+      - name: Set Up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Dependencies
+        run: |
+          pip install -r docs/requirements-docs.txt
+      - name: Build Sphinx Documentation
+        run: |
+          sphinx-build docs/source output
+        continue-on-error: false
+
+      - name: Add .nojekyll
+        run: |
+          touch output/.nojekyll
+      - name: Clone Target Repository
+        run: |
+          git clone https://github.com/LM-Cache-Website/lm-cache-website.github.io.git target-repo
+      - name: Copy Files to Target Repository
+        run: |
+          cp -r output/* target-repo/
+      - name: Commit and Push to Target Repository
+        run: |
+          cd target-repo
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions@github.com"
+          git add .
+          git commit -m "Deploy updated Sphinx docs"
+          git push https://x-access-token:${{ secrets.LMCACHE_DOC }}@github.com/LM-Cache-Website/lm-cache-website.github.io.git main --force
