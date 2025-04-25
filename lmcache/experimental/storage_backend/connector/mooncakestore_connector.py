@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import asyncio
-import inspect
 import json
 import os
 from dataclasses import dataclass
@@ -110,7 +109,7 @@ class MooncakestoreConnector(RemoteConnector):
         self.loop = loop
 
     async def exists(self, key: CacheEngineKey) -> bool:
-        return self.store.is_exist(key.to_string() + "metadata")
+        return self.store.is_exist(key.to_string())
 
     async def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         key_str = key.to_string()
