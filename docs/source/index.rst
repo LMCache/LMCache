@@ -21,6 +21,8 @@ Welcome to LMCache!
    <strong> Redis for LLMs. </strong>
    </p>
 
+.. note::
+   We are currently in the process of upgrading our documentation to provide better guidance and examples. Some sections may be under construction. Thank you for your patience!
 
 .. raw:: html
 
@@ -40,7 +42,22 @@ Welcome to LMCache!
    By combining LMCache with vLLM, LMCaches achieves 3-10x delay savings and GPU cycle reduction in many LLM use cases, including multi-round QA and RAG.
    </p>
 
+
+For more information, check out the following:
+
+* `LMCache blogs <https://lmcache.github.io>`_
+* `Join LMCache slack workspace <https://join.slack.com/t/lmcacheworkspace/shared_invite/zt-2viziwhue-5Amprc9k5hcIdXT7XevTaQ>`_
+* Our papers:
+
+  * `CacheGen: KV Cache Compression and Streaming for Fast Large Language Model Serving <https://dl.acm.org/doi/10.1145/3603269.3604823>`_
+  * `CacheBlend: Fast Large Language Model Serving with Cached Knowledge Fusion <https://arxiv.org/abs/2405.16444>`_
+  * `Do Large Language Models Need a Content Delivery Network? <https://arxiv.org/abs/2409.13761>`_
+
 :raw-html:`<br />`
+
+
+Documentation
+-------------
 
 .. toctree::
    :maxdepth: 2
