@@ -29,8 +29,8 @@ from lmcache.experimental.storage_backend.abstract_backend import \
     StorageBackendInterface
 from lmcache.experimental.storage_backend.connector.nixl_connector_v2 import (
     NixlChannel, NixlObserverInterface)
-from lmcache.experimental.storage_backend.connector.nixl_utils import \
-    NixlConfig, NixlRole
+from lmcache.experimental.storage_backend.connector.nixl_utils import (
+    NixlConfig, NixlRole)
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey, _lmcache_nvtx_annotate
 

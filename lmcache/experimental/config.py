@@ -54,7 +54,8 @@ class LMCacheEngineConfig:
     nixl_role: Optional[str] = None
     # The host of the nixl receiver
     nixl_receiver_host: Optional[str] = None
-    # The BASE port of the nixl receiver, real port is nixl_receiver_port + WORKER_RANK
+    # The BASE port of the nixl receiver,
+    # real port is nixl_receiver_port + WORKER_RANK
     nixl_receiver_port: Optional[int] = None
     # The transport buffer size of nixl in bytes
     nixl_buffer_size: Optional[int] = None
@@ -354,10 +355,11 @@ class LMCacheEngineConfig:
             parse_env(get_env_name("enable_nixl"), config.enable_nixl))
         config.nixl_role = parse_env(get_env_name("nixl_role"),
                                      config.nixl_role)
-        config.nixl_receiver_host = parse_env(get_env_name("nixl_receiver_host"),
-                                          config.nixl_receiver_host)
+        config.nixl_receiver_host = parse_env(
+            get_env_name("nixl_receiver_host"), config.nixl_receiver_host)
         config.nixl_receiver_port = to_int(
-            parse_env(get_env_name("nixl_receiver_port"), config.nixl_receiver_port))
+            parse_env(get_env_name("nixl_receiver_port"),
+                      config.nixl_receiver_port))
         config.nixl_buffer_size = to_int(
             parse_env(get_env_name("nixl_buffer_size"),
                       config.nixl_buffer_size))

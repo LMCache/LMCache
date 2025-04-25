@@ -434,17 +434,17 @@ class NixlSender:
 
     def __init__(self, nixl_config: NixlConfig):
         self.nixl_config = nixl_config
-        
+
         # Initialize the ZeroMQ context and side channel
         self._context = zmq.Context()  # type: ignore
         self._side_channel = self._context.socket(zmq.PAIR)  # type: ignore
         self._side_channel.connect("tcp://{}:{}".format(
             nixl_config.receiver_host, nixl_config.receiver_port))
         self._side_channel.setsockopt(zmq.LINGER, 0)  # type: ignore
-        
+
         # Create NIXL Pipe
         self._pipe = NixlPipe(nixl_config, self._side_channel)
-        
+
         # Send state tracker
         self._during_send = False
         # How may objects are prepared to send
@@ -556,7 +556,7 @@ class NixlSender:
                 "Failed to allocate memory for the payload"
             callback(obj, index)
         self.finish_send()
-        
+
     def close(self):
         """Close the sender resources."""
         self._side_channel.close()
@@ -569,7 +569,7 @@ class NixlReceiver:
 
     def __init__(self, nixl_config: NixlConfig):
         self.nixl_config = nixl_config
-        
+
         # Initialize the ZeroMQ context and side channel
         self._context = zmq.Context()  # type: ignore
         self._side_channel = self._context.socket(zmq.PAIR)  # type: ignore
@@ -581,17 +581,17 @@ class NixlReceiver:
             zmq.RCVTIMEO,  # type: ignore
             5000  # Set a timeout for receiving to avoid blocking 
         )
-        
+
         # Create NIXL Pipe - moved to receiver loop
-        self._pipe = None
-        
+        self._pipe: Optional[NixlPipe] = None
+
         # Observers
         self._observers: list[NixlObserverInterface] = []
-        
+
         # Start the receiver thread
         self._running = True
-        self._receiver_thread = threading.Thread(
-            target=self._receiver_loop, daemon=True)
+        self._receiver_thread = threading.Thread(target=self._receiver_loop,
+                                                 daemon=True)
         self._receiver_thread.start()
 
     def _initialize_pipe(self):
@@ -659,7 +659,7 @@ class NixlReceiver:
                 # Initialize the pipe if not already done
                 if not pipe_initialized:
                     pipe_initialized = self._initialize_pipe()
-                    continue  # Continue to next iteration to receive the actual message
+                    continue  # Continue to receive the actual message
 
                 msg = self._side_channel.recv()
                 if not msg:
@@ -692,7 +692,7 @@ class NixlReceiver:
             observer: The observer to register
         """
         self._observers.append(observer)
-        
+
     def close(self):
         """Close the receiver resources."""
         self._running = False
@@ -719,7 +719,7 @@ class NixlChannel:
         # Create sender or receiver based on role
         self._sender = None
         self._receiver = None
-        
+
         if nixl_config.role == NixlRole.SENDER:
             self._sender = NixlSender(nixl_config)
         else:
