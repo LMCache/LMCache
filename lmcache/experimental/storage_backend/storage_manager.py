@@ -584,6 +584,7 @@ class DistributedStorageManager:
         raise NotImplementedError
         #self.storage_backend.submit_put_task(key, memory_obj)
 
+    @_lmcache_nvtx_annotate
     def commit_put(self):
         self.storage_backend.flush_put_tasks()
 

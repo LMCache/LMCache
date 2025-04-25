@@ -183,9 +183,10 @@ class LMCacheEngine:
         t = time.perf_counter()
         self.storage_manager.commit_put()
         put_time += time.perf_counter() - t
-
         ed = time.perf_counter()
+
         assert mask is not None
+
         logger.info(
             "Store %d tokens takes: %.4f ms, throughput: %.4f GB/s; "
             "offload_time: %.4f ms, put_time: %.4f ms", torch.sum(mask),

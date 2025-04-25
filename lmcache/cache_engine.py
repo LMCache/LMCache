@@ -69,9 +69,10 @@ class LMCacheEngine:
         prefix_hash: str,
     ) -> str:
         # TODO: change it to a more efficient hash function
-        return hashlib.sha256(
-            prefix_hash.encode("ascii") +
-            tokens.cpu().numpy().tobytes()).hexdigest()
+        hasher = hashlib.sha256()
+        hasher.update(prefix_hash.encode("ascii"))
+        hasher.update(tokens.numpy().tobytes())
+        return hasher.hexdigest()
 
     def _chunk_tokens(
         self,
@@ -87,6 +88,7 @@ class LMCacheEngine:
                 shape [chunk_size]
         """
         # TODO(Jiayi): the following step can be parallelized
+        tokens = tokens.cpu()
         for i in range(0, len(tokens), self.chunk_size):
             yield tokens[i:i + self.chunk_size]
 
@@ -231,7 +233,6 @@ class LMCacheEngine:
             return self._make_chunks_skip_existing(tokens, kv_tensors, fmt,
                                                    num_skip_prefix_chunk)
         else:
-            assert num_skip_prefix_chunk == 0
             return zip(
                 self._prefix_hash(self._chunk_tokens(tokens)),
                 self._chunk_kv(kv_tensors, fmt),
@@ -294,6 +295,8 @@ class LMCacheEngine:
             "token length does not match mask length"
         # NOTE(Sixian): Now kv_tensors_mask always a suffix mask.
         num_skip_tok = (len(kv_tensors_mask) - torch.sum(kv_tensors_mask))
+        assert num_skip_tok == 0 or skip_existing, \
+            "When skip_existing is False, the mask must cover all tokens"
         num_skip_chunk = num_skip_tok // self.chunk_size
         assert num_skip_tok == num_skip_chunk * self.chunk_size, \
             "Store KV mask should align to chunk size"

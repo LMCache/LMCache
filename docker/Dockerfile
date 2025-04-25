@@ -73,22 +73,13 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 ARG LMCACHE_COMMIT_ID=1
 
 RUN git clone https://github.com/LMCache/LMCache.git
-RUN git clone https://github.com/LMCache/torchac_cuda.git
-
 
 WORKDIR /workspace/LMCache
 RUN --mount=type=cache,target=/root/.cache/ccache \
     --mount=type=cache,target=/root/.cache/pip \
     python3 setup.py bdist_wheel --dist-dir=dist_lmcache
 
-WORKDIR /workspace/torchac_cuda
-RUN --mount=type=cache,target=/root/.cache/ccache \
-    --mount=type=cache,target=/root/.cache/pip \
-    python3 setup.py bdist_wheel --dist-dir=/workspace/LMCache/dist_lmcache
-    
-
 #################### vLLM installation IMAGE ####################
-# Install torchac_cuda wheel into the vLLM image
 FROM vllm/vllm-openai:v0.7.3 AS vllm-openai
 RUN --mount=type=bind,from=build,src=/workspace/LMCache/dist_lmcache,target=/vllm-workspace/dist_lmcache \
 --mount=type=cache,target=/root/.cache/pip \

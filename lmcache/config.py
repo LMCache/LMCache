@@ -19,7 +19,7 @@ class LMCacheEngineMetadata:
     fmt: str
     """ the data type of kv tensors """
     kv_dtype: torch.dtype
-    """ the data type of kv tensors """
+    """ the shape of kv tensors """
     """ (num_layer, 2, chunk_size, num_kv_head, head_size) """
     kv_shape: tuple[int, int, int, int, int]
 

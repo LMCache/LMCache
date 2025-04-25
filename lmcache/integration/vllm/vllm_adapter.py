@@ -48,6 +48,13 @@ class RetrieveStatus(Enum):
     NONE = 4
 
 
+def need_gpu_interm_buffer(lmcache_config: LMCacheEngineConfig):
+    if lmcache_config.local_cpu:
+        return True
+    else:
+        return False
+
+
 def init_lmcache_engine(
     model_config: ModelConfig,
     parallel_config: ParallelConfig,
@@ -73,6 +80,8 @@ def init_lmcache_engine(
         return None
 
     config = lmcache_get_config()
+    assert isinstance(config, LMCacheEngineConfig), \
+        "LMCache experimental configuration is should be passed."
 
     kv_dtype = get_kv_cache_torch_dtype(cache_config.cache_dtype,
                                         model_config.dtype)
@@ -92,14 +101,13 @@ def init_lmcache_engine(
                                      parallel_config.rank, "vllm", kv_dtype,
                                      kv_shape)
     hidden_dim_size = num_kv_head * head_size
+    use_gpu = need_gpu_interm_buffer(config)
     vllm_gpu_connector = VLLMPagedMemGPUConnectorV2(hidden_dim_size,
                                                     num_layer,
-                                                    use_gpu=True,
+                                                    use_gpu=use_gpu,
                                                     chunk_size=chunk_size,
                                                     dtype=kv_dtype,
                                                     device=device)
-    assert isinstance(config, LMCacheEngineConfig), \
-        "LMCache experimental configuration is should be passed."
     engine = LMCacheEngineBuilder.get_or_create(ENGINE_NAME, config, metadata,
                                                 vllm_gpu_connector)
 
