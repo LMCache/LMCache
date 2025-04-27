@@ -4,21 +4,21 @@
 Installation Guide
 ====================
 
-LMCache is a Python library that also contains pre-compiled C++ and CUDA (12.1) binaries.
+LMCache is a Python library that also contains pre-compiled C++ and CUDA (12.4) binaries.
 
 Requirements
 ------------
 
 * OS: Linux
 * Python: 3.10 or higher
-* CUDA: 12.1
+* CUDA: 12.4
 
 .. note::
-    LMCache requires CUDA 12.1. You can check ``nvcc --version`` to see if you loaded CUDA 12. Following, please add the following to your ``~/.bashrc`` file:
+    LMCache requires CUDA 12.4. You can check ``nvcc --version`` to see if you loaded CUDA 12. Following, please add the following to your ``~/.bashrc`` file:
 
 .. code-block:: bash
-    
-    cuda_version=12.1
+
+    cuda_version=12.4
     export CUDA_HOME=/usr/local/cuda-${cuda_version}
     export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
     export PATH=$CUDA_HOME/bin:$PATH
@@ -35,23 +35,23 @@ You can install the latest code from the GitHub repository:
     # NOTE: Run the below script in a virtual environment to avoid mess up the default env
     $ pip install vllm --pre --extra-index-url https://wheels.vllm.ai/nightly
     $ git clone https://github.com/LMCache/LMCache.git
-    $ cd LMCache 
+    $ cd LMCache
     $ pip install -e .
 
 .. note::
-    For LMCache v1, LMCACHE_USE_EXPERIMENTAL=True is required to use the experimental features. The 
-    relevant source code is in the ``lmcache/experimental`` directory in the ``dev`` branch of the 
+    For LMCache v1, LMCACHE_USE_EXPERIMENTAL=True is required to use the experimental features. The
+    relevant source code is in the ``lmcache/experimental`` directory in the ``dev`` branch of the
     LMCache repository. Source installation is the same for v0 and v1 but v0 doesn't require
     LMCACHE_USE_EXPERIMENTAL=True.
 
 .. note::
-    For LMCache v1, please refer to the examples in the :ref:`v1_index` section. 
+    For LMCache v1, please refer to the examples in the :ref:`v1_index` section.
     LMCache v1 can be directly run with the ``vllm serve`` command.
 
 Install from source (v0)
 ----------------------------
 
-You can install the latest code from the GitHub repository: 
+You can install the latest code from the GitHub repository:
 
 .. code-block:: console
 
@@ -104,5 +104,5 @@ You can install LMCache using pip:
 
 .. note::
 
-    pip install for LMCache v1 is not available yet (will be released soon). 
+    pip install for LMCache v1 is not available yet (will be released soon).
     Please install LMCache v1 from source for now.

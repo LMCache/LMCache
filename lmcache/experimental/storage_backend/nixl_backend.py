@@ -32,7 +32,7 @@ from lmcache.experimental.storage_backend.connector.nixl_connector_v2 import (
 from lmcache.experimental.storage_backend.connector.nixl_utils import \
     NixlConfig
 from lmcache.logging import init_logger
-from lmcache.utils import CacheEngineKey
+from lmcache.utils import CacheEngineKey, _lmcache_nvtx_annotate
 
 logger = init_logger(__name__)
 
@@ -186,6 +186,7 @@ class BasicNixlObserver(NixlObserverInterface):
         """
         self.obj_pool = obj_pool
 
+    @_lmcache_nvtx_annotate
     def __call__(self,
                  keys: list[CacheEngineKey],
                  objs: list[MemoryObj],
