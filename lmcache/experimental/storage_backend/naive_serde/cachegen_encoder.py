@@ -62,9 +62,12 @@ class CacheGenSerializer(Serializer):
     def serialize(self, memory_obj: MemoryObj) -> BytesBufferMemoryObj:
         """
         Serialize a KV_BLOB MemoryObj to CACHEGEN_BINARY MemoryObj.
+        The input tensor is expected to have the shape [2, num_layers, num_tokens, num_heads * head_size].
+        It is reshaped and permuted before being passed to the CacheGen encode_function.
 
         Input:
-            memory_obj: the memory object to be serialized.
+            memory_obj: the memory object to be serialized. Its tensor should have shape
+                        [2, num_layers, num_tokens, num_heads * head_size].
 
         Returns:
             MemoryObj: the serialized binary memory object.
@@ -78,20 +81,22 @@ class CacheGenSerializer(Serializer):
         # Temporary fix for issue #83: encoder will have the default device 0
         # on all the ray workers. Need to set it to the correct device.
         # Also need to figure out why this happens.
-        if torch.cuda.current_device != tensor.device:
+        if torch.cuda.current_device() != tensor.device:
             torch.cuda.set_device(tensor.device)
         if tensor.device != self.key_bins.device:
             self.key_bins = self.key_bins.to(tensor.device)
         if tensor.device != self.value_bins.device:
             self.value_bins = self.value_bins.to(tensor.device)
 
-        # tensor is [2, num_layers, num_tokens, hidden_size]
+        # Input tensor shape: [2, num_layers, num_tokens, num_heads * head_size]
+        # Reshape the last dimension into (num_heads, head_size)
         tensor = tensor.view(*tensor.shape[:-1], self.kv_shape[-2],
                              self.kv_shape[-1])
+        # Permute to [num_layers, 2, num_tokens, num_heads, head_size] for encode_function
         tensor = tensor.permute([1, 0, 2, 3, 4])
 
         # TODO(Jiayi): remove hardcoded "2"
-        """ expecting a tensor of shape 
+        """ encode_function expects a tensor of shape 
         [num_layers, 2, num_tokens, num_heads, head_size] """
         ntokens = tensor.shape[2]
         output_dict = encode_function(

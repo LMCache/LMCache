@@ -33,6 +33,9 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
     def contains(self, key: CacheEngineKey) -> bool:
         """
         Check whether key is in the storage backend. 
+        
+        :param key: The key to check (CacheEngineKey).
+        :return: True if the key exists, False otherwise.
         """
         raise NotImplementedError
 
@@ -40,6 +43,9 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
     def exists_in_put_tasks(self, key: CacheEngineKey) -> bool:
         """
         Check whether key is in the ongoing put tasks. 
+        
+        :param key: The key to check (CacheEngineKey).
+        :return: True if a put task for this key is currently active, False otherwise.
         """
         raise NotImplementedError
 
@@ -50,9 +56,11 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
         An async function to put the MemoryObj into the storage backend.
 
         :param CacheEngineKey key: The key of the MemoryObj.
-        :param MemoryObj obj: The MemoryObj to be stored.
+        :param MemoryObj obj: The MemoryObj to be stored. The underlying tensor
+                              is expected to have shape [2, num_layers, ...].
         
-        :return: a future object
+        :return: A future object representing the asynchronous put operation, 
+                 or None if the operation could not be submitted.
         """
         raise NotImplementedError
 
@@ -62,11 +70,15 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
         key: CacheEngineKey,
     ) -> Optional[Future]:
         """
-        An async function to get the MemoryObj from the storage backend.
+        An async function to prefetch the MemoryObj from the storage backend.
 
-        :param CacheEngineKey key: The key of the MemoryObj.
+        The future, when completed, will yield the MemoryObj containing the KV cache
+        tensor with shape [2, num_layers, ...], or None if the key was not found.
 
-        :return: a future object. None if the key does not exist.
+        :param CacheEngineKey key: The key of the MemoryObj to prefetch.
+
+        :return: A future object representing the asynchronous prefetch operation. 
+                 Returns None if the key does not exist or prefetching cannot be initiated.
         """
         raise NotImplementedError
 
@@ -76,17 +88,21 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
         key: CacheEngineKey,
     ) -> Optional[MemoryObj]:
         """
-        A blcocking function to get the kv cache from the storage backend.
+        A blocking function to get the MemoryObj from the storage backend.
+
+        The returned MemoryObj contains the KV cache tensor with shape 
+        [2, num_layers, ...].
         
         :param CacheEngineKey key: The key of the MemoryObj.
         
-        :return: MemoryObj. None if the key does not exist.
+        :return: MemoryObj containing the KV cache tensor if the key exists, 
+                 otherwise None. The tensor will be on the device specified by `self.dst_device`.
         """
         raise NotImplementedError
 
     @abc.abstractmethod
     def close(self, ) -> None:
         """
-        Close the storage backend.
+        Close the storage backend and release resources.
         """
         raise NotImplementedError

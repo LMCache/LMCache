@@ -160,7 +160,9 @@ class RedisSentinelConnector(RemoteConnector):
                 timeout = float(value)
 
         logger.info(f"Host and ports: {hosts_and_ports}")
-        self.sentinel = redis.Sentinel(hosts_and_ports, timeout)
+        self.sentinel = redis.Sentinel([(node[0], int(node[1]))
+                                        for node in hosts_and_ports],
+                                       socket_timeout=int(timeout))
         self.master = self.sentinel.master_for(service_name,
                                                socket_timeout=timeout)
         self.slave = self.sentinel.slave_for(service_name,
@@ -169,7 +171,7 @@ class RedisSentinelConnector(RemoteConnector):
         self.memory_allocator = memory_allocator
 
     async def exists(self, key: CacheEngineKey) -> bool:
-        return self.slave.exists(key.to_string() + "metadata")
+        return bool(self.slave.exists(key.to_string() + "metadata"))
 
     async def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         key_str = key.to_string()

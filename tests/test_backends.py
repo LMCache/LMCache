@@ -135,7 +135,7 @@ def test_creation_from_file(autorelease, lmserver_process):
 def test_backends(backend_type, dst_device, autorelease, lmserver_process):
     config = get_config(backend_type, lmserver_process.server_url)
 
-    kv_shape = (16, 2, 128, 4, 128)
+    kv_shape = (2, 16, 128, 4, 128)
     metadata = get_metadata(kv_shape=kv_shape)
 
     backend = autorelease(CreateStorageBackend(config, metadata, dst_device))
@@ -162,7 +162,7 @@ def test_backends(backend_type, dst_device, autorelease, lmserver_process):
                          indirect=True)
 def test_nonblocking_put(backend_type, autorelease, lmserver_process):
     config = get_config(backend_type, lmserver_process.server_url)
-    kv_shape = (16, 2, 128, 4, 128)
+    kv_shape = (2, 16, 128, 4, 128)
     metadata = get_metadata(kv_shape=kv_shape)
 
     backend = autorelease(CreateStorageBackend(config, metadata))
@@ -199,7 +199,7 @@ def test_restart(autorelease, lmserver_process):
     config = get_config("hybrid", lmserver_process.server_url)
     # LMCacheEngineConfig.from_defaults(local_device = "cuda",
     # remote_url = None)
-    kv_shape = (16, 2, 128, 4, 128)
+    kv_shape = (2, 16, 128, 4, 128)
     metadata = get_metadata(kv_shape=kv_shape)
     backend = autorelease(CreateStorageBackend(config, metadata))
 

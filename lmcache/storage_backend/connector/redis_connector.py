@@ -54,9 +54,9 @@ class RedisConnector(RemoteBytesConnector):
 class RedisSentinelConnector(RemoteBytesConnector):
     """
     Uses redis.Sentinel to connect to a Redis cluster.
-    The hosts are specified in the config file, started with "redis-sentinel://" 
+    The hosts are specified in the config file, started with "redis-sentinel://"
     and separated by commas.
-    
+
     Example:
         remote_url: "redis-sentinel://localhost:26379,localhost:26380,localhost:26381"
 
@@ -84,31 +84,50 @@ class RedisSentinelConnector(RemoteBytesConnector):
         # Get timeout
         match os.environ.get(self.ENV_REDIS_TIMEOUT):
             case None:
-                timeout = 1
+                timeout = 1.0  # Ensure float for consistency before casting
             case value:
-                timeout = float(value)
+                try:
+                    timeout = float(value)
+                except ValueError:
+                    logger.warning(
+                        (f"Invalid value for {self.ENV_REDIS_TIMEOUT}: {value}. "
+                         f"Using default 1.0")
+                    )
+                    timeout = 1.0
 
-        self.sentinel = redis.Sentinel(hosts_and_ports, timeout)
-        self.master = self.sentinel.master_for(service_name,
-                                               socket_timeout=timeout)
-        self.slave = self.sentinel.slave_for(service_name,
-                                             socket_timeout=timeout)
+        # Ensure hosts_and_ports has the correct type for redis.Sentinel
+        sentinel_nodes: List[Tuple[str,
+                                   int]] = [(host, int(port))
+                                            for host, port in hosts_and_ports]
+
+        # Cast timeout to int for Sentinel
+        self.sentinel = redis.Sentinel(sentinel_nodes,
+                                       socket_timeout=int(timeout))
+        self.master = self.sentinel.master_for(
+            service_name, socket_timeout=timeout)  # master_for can take float
+        self.slave = self.sentinel.slave_for(
+            service_name, socket_timeout=timeout)  # slave_for can take float
 
     def exists(self, key: str) -> bool:
-        return self.slave.exists(key)
+        # redis-py exists returns int (number of keys found), cast to bool
+        return bool(self.slave.exists(key))
 
     def get(self, key: str) -> Optional[bytes]:
-        return self.slave.get(key)
+        result = self.slave.get(key)
+        # redis-py get returns bytes or None, ensure it's bytes if not None
+        return result if result is None else bytes(result)
 
     def set(self, key: str, obj: bytes) -> None:  # type: ignore[override]
         self.master.set(key, obj)
 
     def list(self):
         cursor = 0
-        all_keys = []
+        all_keys: List[bytes] = []
 
         while True:
-            cursor, keys = self.slave.scan(cursor=cursor, match="*")
+            ret: Tuple[int, List[bytes]] = self.slave.scan(
+                cursor=cursor, match="*")  # type: ignore
+            cursor, keys = ret
             all_keys.extend(keys)
             if cursor == 0:
                 break
@@ -116,5 +135,10 @@ class RedisSentinelConnector(RemoteBytesConnector):
         return [key.decode("utf-8") for key in all_keys]
 
     def close(self):
-        self.master.close()
-        self.slave.close()
+        # Ensure connections are closed if they were successfully established
+        if hasattr(self, 'master') and self.master:
+            self.master.close()  # type: ignore
+        if hasattr(self, 'slave') and self.slave:
+            self.slave.close()  # type: ignore
+        # Sentinel itself doesn't have a direct close method in older redis-py,
+        # closing master/slave connections is usually sufficient.

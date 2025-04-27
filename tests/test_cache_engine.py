@@ -184,9 +184,9 @@ def test_retrieve_single_tensor(fmt, backend, autorelease):
     retrieved_cache, ret_mask = engine.retrieve(tokens, return_tuple=False)
 
     assert torch.sum(ret_mask).item() == num_tokens
+    assert retrieved_cache.shape[0] == 2  # Check the first dimension (K/V)
     assert retrieved_cache.shape[
-        0] == 32  # 32 is num_layers used in generate_kv_cache
-    assert retrieved_cache.shape[1] == 2
+        1] == 32  # Check the second dimension (num_layers)
     token_dim = 2 if fmt == "vllm" else 3
     assert retrieved_cache.shape[token_dim] == num_tokens
 

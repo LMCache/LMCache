@@ -37,18 +37,19 @@ class LMCBackendInterface(metaclass=abc.ABCMeta):
         blocking=True,
     ) -> None:
         """
-        Store the KV cache of the tokens into the cache engine.
+        Store the KV cache chunk into the cache engine.
 
-        :param key: the key of the token chunk, in the format of 
-                    CacheEngineKey
-        :param kv_chunk: the kv cache of the token chunk, as a big tensor.
-        :param blocking: to block the call before the operation is
-            completed.
+        :param key: The key of the token chunk (CacheEngineKey).
+        :param kv_chunk: The KV cache chunk tensor. 
+                         Expected shape: [2, num_layers, ...], where the specific
+                         dimensions depend on the format (e.g., vLLM or\nHuggingFace)
+                         and chunk size. The first dimension represents K (0) and V\n(1).
+        :param blocking: Whether to block the call until the operation is\ncompleted.
 
         :return: None
 
         Note:
-            The KV cache should NOT have the "batch" dimension.
+            The KV cache chunk should NOT have the "batch" dimension.
         """
         raise NotImplementedError
 
@@ -58,7 +59,10 @@ class LMCBackendInterface(metaclass=abc.ABCMeta):
         key: CacheEngineKey,
     ) -> bool:
         """
-        Query if a key is in the cache or not
+        Query if a key is in the cache or not.
+        
+        :param key: The key to check (CacheEngineKey).
+        :return: True if the key exists, False otherwise.
         """
         raise NotImplementedError
 
@@ -68,13 +72,13 @@ class LMCBackendInterface(metaclass=abc.ABCMeta):
         key: CacheEngineKey,
     ) -> Optional[torch.Tensor]:
         """
-        Retrieve the KV cache chunk by the given key
+        Retrieve the KV cache chunk by the given key.
 
-        :param key: the key of the token chunk, including 
-         prefix hash and format
+        :param key: The key of the token chunk (CacheEngineKey).
 
-        :return: the kv cache of the token chunk, in the format 
-            of a big tensor and None if the key is not found
+        :return: The KV cache chunk tensor with shape [2, num_layers, ...] 
+                 if the key is found, otherwise None. The tensor will be on
+                 the device specified by `self.dst_device`.
         """
         raise NotImplementedError
 
@@ -84,17 +88,15 @@ class LMCBackendInterface(metaclass=abc.ABCMeta):
         blocking=True,
     ) -> int:
         """
-        Store the multiple keys and KV cache chunks into the cache engine in a
+        Store multiple keys and KV cache chunks into the cache engine in a
         batched manner.
 
-        :param keys: the iterable of keys of the token chunks, in the format of 
-                CacheEngineKey
-        :param kv_chunks: the iterable of kv cache of the token chunks, in the 
-                format of a big tensor
-        :param blocking: whether to block the call before the operation is 
-                completed
+        :param keys_and_chunks: An iterable of tuples, where each tuple contains
+                                (CacheEngineKey, kv_chunk_tensor). The tensor
+                                should have shape [2, num_layers, ...].
+        :param blocking: Whether to block the call until all operations are\ncompleted.
 
-        :return: the number of chunks are stored
+        :return: The number of chunks successfully stored.
         """
         logger.info("Using default batched implementation of the put() method")
         nchunks = 0
@@ -108,26 +110,24 @@ class LMCBackendInterface(metaclass=abc.ABCMeta):
         keys: Iterable[CacheEngineKey],
     ) -> Iterable[Optional[torch.Tensor]]:
         """
-        Retrieve the kv cache chunks by the given keys in a batched manner
+        Retrieve KV cache chunks for the given keys in a batched manner.
 
-        
-        :param keys: the iterator of keys of the token chunks, including prefix 
-                hash and format
+        :param keys: An iterable of keys (CacheEngineKey) to retrieve.
 
-        :return: the iterator of kv cache of the token chunks, in the format
-            of a big tensor and None if the key is not found
+        :return: An iterable yielding the corresponding KV cache chunk tensors 
+                 (shape [2, num_layers, ...]) or None if a key is not found. 
+                 Tensors will be on the device specified by `self.dst_device`.
         """
         logger.info("Using default batched implementation of the get() method")
         for key in keys:
-            if self.contains(key):  # Jiayi: This seems to be redundant?
-                yield self.get(key)
-            else:
-                yield None
+            # Optimization: Directly call get and yield result, no need for\ncontains check
+            # The get method should handle returning None if not found.
+            yield self.get(key)
 
     @abc.abstractmethod
     def close(self):
         """
-        Do the cleanup things
-        Children classes should override this method if necessary
+        Perform cleanup operations for the storage backend.
+        Children classes should override this method if necessary.
         """
         pass
