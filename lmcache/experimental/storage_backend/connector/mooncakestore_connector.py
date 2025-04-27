@@ -115,7 +115,7 @@ class MooncakestoreConnector(RemoteConnector):
         key_str = key.to_string()
 
         try:
-            buffer = self.store.get_buffer(key_str)  # buffer is pybind11 buffer type
+            buffer = self.store.get_buffer(key_str)  # buffer is pybind11 buffer
         except Exception as e:
             logger.error(f"Failed to get key {key_str}. {e}")
 
