@@ -15,7 +15,7 @@
 import asyncio
 import inspect
 import os
-from typing import List, Optional, Tuple, Union, no_type_check
+from typing import List, Optional, Tuple, no_type_check
 
 import redis
 
@@ -123,9 +123,9 @@ class RedisConnector(RemoteConnector):
 class RedisSentinelConnector(RemoteConnector):
     """
     Uses redis.Sentinel to connect to a Redis cluster.
-    The hosts are specified in the config file, started with "redis-sentinel://" 
+    The hosts are specified in the config file, started with "redis-sentinel://"
     and separated by commas.
-    
+
     Example:
         remote_url: "redis-sentinel://localhost:26379,localhost:26380,localhost:26381"
 
@@ -137,7 +137,7 @@ class RedisSentinelConnector(RemoteConnector):
     ENV_REDIS_TIMEOUT = "REDIS_TIMEOUT"
     ENV_REDIS_SERVICE_NAME = "REDIS_SERVICE_NAME"
 
-    def __init__(self, hosts_and_ports: List[Tuple[str, Union[str, int]]],
+    def __init__(self, hosts_and_ports: List[Tuple[str, int]],
                  loop: asyncio.AbstractEventLoop,
                  memory_allocator: MemoryAllocatorInterface):
         # Get service name
@@ -160,7 +160,7 @@ class RedisSentinelConnector(RemoteConnector):
                 timeout = float(value)
 
         logger.info(f"Host and ports: {hosts_and_ports}")
-        self.sentinel = redis.Sentinel(hosts_and_ports, timeout)
+        self.sentinel = redis.Sentinel(hosts_and_ports, socket_timeout=timeout)
         self.master = self.sentinel.master_for(service_name,
                                                socket_timeout=timeout)
         self.slave = self.sentinel.slave_for(service_name,
@@ -169,7 +169,7 @@ class RedisSentinelConnector(RemoteConnector):
         self.memory_allocator = memory_allocator
 
     async def exists(self, key: CacheEngineKey) -> bool:
-        return self.slave.exists(key.to_string() + "metadata")
+        return bool(self.slave.exists(key.to_string() + "metadata"))
 
     async def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         key_str = key.to_string()

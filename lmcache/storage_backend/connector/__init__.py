@@ -82,7 +82,7 @@ def CreateConnector(url: str, device=None) -> RemoteConnector:
 
         case "redis-sentinel":
             connector = RedisSentinelConnector(
-                list(zip(parsed_url.hosts, parsed_url.ports)))
+                list(zip(parsed_url.hosts, map(int, parsed_url.ports))))
 
         case "lm":
             if num_hosts == 1:
