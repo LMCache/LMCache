@@ -44,7 +44,9 @@ class LRUEvictor(BaseEvictor):
         
         Return:
             evict_keys: a list of keys to be evicted
-            status: PutStatus.LEGAL if the cache is legal, PutStatus.ILLEGAL if the cache is illegal
+            status: 
+                PutStatus.LEGAL if the cache is legal, 
+                PutStatus.ILLEGAL if the cache is illegal
         """
         evict_keys = []
         iter_cache_dict = iter(cache_dict)

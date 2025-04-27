@@ -47,7 +47,9 @@ class BaseEvictor(metaclass=abc.ABCMeta):
         
         Return:
             evict_keys: a list of keys to be evicted
-            status: PutStatus.LEGAL if the cache is legal, PutStatus.ILLEGAL if the cache is illegal
+            status: 
+                PutStatus.LEGAL if the cache is legal, 
+                PutStatus.ILLEGAL if the cache is illegal
         """
         raise NotImplementedError
 
