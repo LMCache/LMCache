@@ -13,6 +13,9 @@
 # limitations under the License.
 
 import asyncio
+from functools import reduce
+import operator
+import torch
 import json
 import os
 from dataclasses import dataclass
@@ -115,7 +118,7 @@ class MooncakestoreConnector(RemoteConnector):
         key_str = key.to_string()
 
         try:
-            buffer = self.store.get_buffer(key_str)  # buffer is pybind11 buffer
+            buffer = self.store.get_buffer(key_str)
         except Exception as e:
             logger.error(f"Failed to get key {key_str}. {e}")
 
@@ -127,24 +130,27 @@ class MooncakestoreConnector(RemoteConnector):
         if metadata_bytes is None or len(metadata_bytes) != METADATA_BYTES_LEN:
             return None
 
-        data_bytes = retrieved_view[METADATA_BYTES_LEN:]
-        if data_bytes is None:
-            return None
-
-        metadata = RedisMetadata.deserialize(memoryview(metadata_bytes))
+        metadata = RedisMetadata.deserialize(metadata_bytes)
 
         memory_obj = self.memory_allocator.allocate(
             metadata.shape,
             metadata.dtype,
             metadata.fmt,
         )
+        assert len(retrieved_view) == metadata.length + METADATA_BYTES_LEN
+
         if memory_obj is None:
             logger.warning("Failed to allocate memory during remote receive")
             return None
 
-        view = memoryview(memory_obj.byte_array)
-        view[:metadata.length] = data_bytes
-
+        num_elements = reduce(operator.mul, metadata.shape)
+        temp_tensor = torch.frombuffer(buffer,
+                                       dtype=metadata.dtype,
+                                       offset=METADATA_BYTES_LEN,
+                                       count=num_elements).reshape(
+                                           metadata.shape)   
+        
+        memory_obj.tensor.copy_(temp_tensor)
         return memory_obj
 
     async def put(self, key: CacheEngineKey, memory_obj: MemoryObj):
@@ -156,7 +162,7 @@ class MooncakestoreConnector(RemoteConnector):
 
         metadata_bytes = RedisMetadata(len(kv_bytes), kv_shape, kv_dtype,
                                        memory_format).serialize()
-
+        assert len(metadata_bytes) == METADATA_BYTES_LEN
         key_str = key.to_string()
 
         try:
