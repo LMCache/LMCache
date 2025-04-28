@@ -145,7 +145,7 @@ class MooncakestoreConnector(RemoteConnector):
             return None
 
         if memory_obj.tensor:
-            assert metadata.dtype != None
+            assert metadata.dtype is not None
             num_elements = reduce(operator.mul, metadata.shape)
             temp_tensor = torch.frombuffer(buffer,
                                            dtype=metadata.dtype,
