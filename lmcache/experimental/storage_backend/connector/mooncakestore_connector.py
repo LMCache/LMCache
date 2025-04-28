@@ -144,15 +144,19 @@ class MooncakestoreConnector(RemoteConnector):
             logger.warning("Failed to allocate memory during remote receive")
             return None
 
-        num_elements = reduce(operator.mul, metadata.shape)
-        temp_tensor = torch.frombuffer(buffer,
-                                       dtype=metadata.dtype,
-                                       offset=METADATA_BYTES_LEN,
-                                       count=num_elements).reshape(
-                                           metadata.shape)
+        if memory_obj.tensor:
+            assert metadata.dtype != None
+            num_elements = reduce(operator.mul, metadata.shape)
+            temp_tensor = torch.frombuffer(buffer,
+                                           dtype=metadata.dtype,
+                                           offset=METADATA_BYTES_LEN,
+                                           count=num_elements).reshape(
+                                               metadata.shape)
 
-        memory_obj.tensor.copy_(temp_tensor)
-        return memory_obj
+            memory_obj.tensor.copy_(temp_tensor)
+            return memory_obj
+        else:
+            return None
 
     async def put(self, key: CacheEngineKey, memory_obj: MemoryObj):
         # Please use a function like `memory_obj.to_meta()`.
