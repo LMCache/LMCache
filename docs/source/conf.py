@@ -65,6 +65,7 @@ add_module_names = False
 html_title = project
 html_theme = "sphinxawesome_theme"
 html_static_path = ["_static"]
+html_css_files = ["custom.css"]
 html_favicon = "assets/lmcache-logo.png"
 html_permalinks_icon = "<span>#</span>"
 pygments_style = "sphinx"

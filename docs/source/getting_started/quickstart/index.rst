@@ -13,7 +13,7 @@ KV cache offloading allows you to move KV caches from GPU memory to CPU memory o
 
 By offloading KV caches, LMCache can reduce both time-to-first-token (TTFT) and GPU cycles.
 
-See :ref:`Example: Offload KV cache to CPU` for more details.
+See :ref:`offload_kv_cache` for more details.
 
 KV Cache Sharing
 ----------------
@@ -25,7 +25,7 @@ KV cache sharing enables sharing the KV cache across different LLM instances. Th
 
 Sharing KV caches also reduces TTFT and GPU computation by eliminating redundant calculations across different LLM instances.
 
-See :ref:`Example: Share KV cache across multiple LLMs` for more details.
+See :ref:`share_kv_cache` for more details.
 
 Disaggregated Prefill
 ---------------------
@@ -38,7 +38,7 @@ Disaggregated prefill separates the prefill and decode phases across different c
 
 This architecture is particularly valuable in large-scale deployment scenarios where maximizing resource efficiency and keeping a stable generation speed are both important.
 
-See :ref:`Example: Disaggregated Prefill` for more details.
+See :ref:`disaggregated_prefill` for more details.
 
 Detailed Examples
 -----------------
