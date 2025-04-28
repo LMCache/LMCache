@@ -169,6 +169,11 @@ class LocalCPUBackend(StorageBackendInterface):
                 logger.debug("Evicting 1 chunk from cpu memory")
                 if memory_obj is not None:
                     break
+                # TODO(Jiayi): move this before the loop
+                # In this way, we don't need to do eviction for big objects
+                # TODO(Jiayi): the following code is hacky, please refactor
+                if self.memory_allocator.pin_allocator.num_active_allocations == 0:
+                    break
         for evict_key in evict_keys:
             self.remove(evict_key)
         if self.lookup_server is not None:
