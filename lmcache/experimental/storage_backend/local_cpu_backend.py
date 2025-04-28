@@ -40,9 +40,9 @@ class LocalCPUBackend(StorageBackendInterface):
                  lookup_server: Optional[LookupServerInterface] = None,
                  lmcache_worker: Optional["LMCacheWorker"] = None,
                  dst_device: str = "cpu"):
-        self.hot_cache = None
+        self.hot_cache: Optional[OrderedDict[CacheEngineKey, MemoryObj]] = None
         if config.local_cpu:
-            self.hot_cache: OrderedDict[CacheEngineKey, MemoryObj] = OrderedDict()
+            self.hot_cache = OrderedDict()
         self.lookup_server = lookup_server
         self.memory_allocator = memory_allocator
         self.dst_device = dst_device
@@ -168,11 +168,6 @@ class LocalCPUBackend(StorageBackendInterface):
                 memory_obj = self.memory_allocator.allocate(shape, dtype)
                 logger.debug("Evicting 1 chunk from cpu memory")
                 if memory_obj is not None:
-                    break
-                # TODO(Jiayi): move this before the loop
-                # In this way, we don't need to do eviction for big objects
-                # TODO(Jiayi): the following code is hacky, please refactor
-                if self.memory_allocator.pin_allocator.num_active_allocations == 0:
                     break
         for evict_key in evict_keys:
             self.remove(evict_key)
