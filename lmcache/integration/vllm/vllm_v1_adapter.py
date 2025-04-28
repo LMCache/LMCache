@@ -19,12 +19,13 @@ from typing import TYPE_CHECKING, Optional
 import torch
 import vllm.envs as envs
 import zmq
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
 from vllm.utils import cdiv, make_zmq_socket
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
+from vllm.attention.layer import Attention
 
 from lmcache.experimental.cache_engine import LMCacheEngine
 from lmcache.integration.vllm.vllm_adapter import init_lmcache_engine
@@ -340,19 +341,8 @@ class LMCacheConnectorV1Impl:
 
         # TODO: need to align this chunk size with lmcache
         self._lmcache_chunk_size = 256
+        self.vllm_config = vllm_config
 
-    def _init_kv_caches_from_forward_context(
-            self, forward_context: "ForwardContext"):
-        for layer_name in forward_context.no_compile_layers:
-            attn_layer = forward_context.no_compile_layers[layer_name]
-            if not hasattr(attn_layer, "kv_cache"):
-                logger.debug("The layer %s does not have kv_cache, skip it",
-                             layer_name)
-                continue
-
-            if layer_name not in self.kv_caches:
-                self.kv_caches[layer_name] = attn_layer.kv_cache[\
-                        forward_context.virtual_engine]
 
     ####################
     # Worker side APIs
@@ -372,7 +362,17 @@ class LMCacheConnectorV1Impl:
             the same.
         """
         if len(self.kv_caches) == 0:
-            self._init_kv_caches_from_forward_context(forward_context)
+            layers = get_layers_from_vllm_config(self.vllm_config, Attention)
+
+            for layer_name, attn_layer in layers.items():
+                if not hasattr(attn_layer, "kv_cache"):
+                    logger.debug("The layer %s does not have kv_cache, skip it",
+                                 layer_name)
+                    continue
+
+                if layer_name not in self.kv_caches:
+                    self.kv_caches[layer_name] = attn_layer.kv_cache[\
+                        forward_context.virtual_engine]
 
         metadata = self._parent._get_connector_metadata()
         assert isinstance(metadata, LMCacheConnectorMetadata)
