@@ -37,10 +37,6 @@ def generate_workload_trace(trace_files, num_query):
         if 'index_in_dataset' in df.columns:
             df.drop(columns=['index_in_dataset'], inplace=True)
         df.insert(0, 'index_in_dataset', df.index)
-        # df = df.rename(columns={'Unnamed: 0': 'index_in_dataset'})
-
-        # dataset_name = os.path.splitext(os.path.basename(file_path))[0]
-        # df.insert(0, 'dataset', dataset_name)
         
         df_list.append(df)
     
@@ -74,34 +70,6 @@ def execute_openai_request_with_output(row, model: str, client: openai.Client) -
 
     {row.input}
     """
-
-    # if FILE_TYPE == "qa":
-    #     prompt += (
-    #         "Answer the question based on the given passages. Only give me the answer and do not output any other words. Answer within 10 words."
-    #         "\n\nThe following are given passages."
-    #         f"{row.context}"
-    #     )
-    # elif FILE_TYPE == "sum":
-    #     prompt += (
-    #         "Answer the question based on the given passages. Only give me the answer and do not output any other words."
-    #         "\n\nThe following are given passages."
-    #         f"{row.context}"
-    #     )
-
-    # # If there's a question column and it is non-empty, append the question prompt
-    # if hasattr(row, 'question') and row.question.strip():
-    #     if FILE_TYPE == "qa":
-    #         prompt += (
-    #             "\n\nAnswer the question based on the given passages. "
-    #             "Answer the question precisely. Answer within 10 words. Do NOT repeat the question or output any other words. "
-    #             f"Question: {row.question.strip()}\nAnswer:"
-    #         )
-    #     elif FILE_TYPE == "sum":
-    #         prompt += (
-    #             "\n\nAnswer the question based on the given passages. "
-    #             "Answer the question precisely. Do NOT repeat the question or output any other words. "
-    #             f"Question: {row.question.strip()}\nAnswer:"
-    #         )
     
     messages = [
         {

@@ -86,7 +86,7 @@ class KVCacheManager:
     def __init__(self, hot_cache: OrderedDict[CacheEngineKey, MemoryObj]):
         # NOTE(Shaoting): policy related variables define here
         self.method = "baseline_KIVI"
-        self.rate = 0.371428571
+        self.rate = 1
         self.cpu_size = 5368709120 * 7.8 # 39 GB
 
         self.hot_cache = hot_cache
