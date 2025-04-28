@@ -17,10 +17,10 @@ NUM_QUERY = 200
 MODEL = "meta-llama/Llama-3.1-8B-Instruct"
 PORT = 8000
 FILES = [
-    'dataset/offline_profile/qmsum_processed.csv'
+    'dataset/qmsum.csv'
 ]
 FILE_TYPE = "sum" # or "qa"
-PREFILL_ONLY = False
+PREFILL_ONLY = True
 
 dataset_entries = 0
 
@@ -48,7 +48,7 @@ def generate_workload_trace(trace_files, num_query):
     # Generate the workload trace by sampling with replacement
     run_workload_trace = df_all.sample(n=num_query, replace=True, random_state=42)
     # workload_trace = pd.concat([df_all, run_workload_trace]).reset_index(drop=True)
-    workload_trace = pd.concat([df_all, df_all]).reset_index(drop=True)
+    workload_trace = pd.concat([df_all]).reset_index(drop=True)
 
     return workload_trace
 
