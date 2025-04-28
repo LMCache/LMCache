@@ -1,3 +1,5 @@
+.. _offload_kv_cache:
+
 Example: Offload KV cache to CPU
 ================================
 

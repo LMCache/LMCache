@@ -1,3 +1,5 @@
+.. _disaggregated_prefill:
+
 Example: Disaggregated prefill
 ==============================
 
