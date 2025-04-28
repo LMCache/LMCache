@@ -2,4 +2,4 @@ chunk_size: 1024
 local_disk: "file:///local/end-to-end-tests/local/"
 max_local_disk_size: 550
 local_cpu: True
-max_local_cpu_size: 90 # actually 60 + 5, set to 90 to avoid bubble
+max_local_cpu_size: 60 # actually 39 + 5, set to 60 to avoid bubble
