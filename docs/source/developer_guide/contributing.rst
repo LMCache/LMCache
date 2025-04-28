@@ -1,4 +1,4 @@
 Contributing guide
-===============
+==================
 
 Coming soon... 

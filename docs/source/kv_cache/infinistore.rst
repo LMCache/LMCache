@@ -1,4 +1,4 @@
 InfiniStore
-==========
+===========
 
 Coming soon... 

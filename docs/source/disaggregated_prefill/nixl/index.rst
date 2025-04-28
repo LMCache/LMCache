@@ -1,5 +1,5 @@
 Using NIXL
-=========
+==========
 
 .. toctree::
    :maxdepth: 1
