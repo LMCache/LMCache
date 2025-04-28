@@ -149,8 +149,8 @@ class MooncakestoreConnector(RemoteConnector):
                                        dtype=metadata.dtype,
                                        offset=METADATA_BYTES_LEN,
                                        count=num_elements).reshape(
-                                           metadata.shape)   
-        
+                                           metadata.shape)
+
         memory_obj.tensor.copy_(temp_tensor)
         return memory_obj
 
