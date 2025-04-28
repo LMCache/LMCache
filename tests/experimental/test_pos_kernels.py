@@ -1,4 +1,5 @@
 import torch
+
 from lmcache.experimental.blend.positional_encoding import get_fused_rope
 
 
@@ -11,7 +12,6 @@ def verify_rope():
     is_neox_style = True
     dtype = torch.bfloat16
 
-
     fused_rotary_emb = get_fused_rope(
         head_dim,
         rotary_dim=head_dim,
@@ -21,9 +21,10 @@ def verify_rope():
         is_neox_style=is_neox_style,
         dtype=dtype,
     )
-    
+
     assert fused_rotary_emb is not None, \
         "Failed to get fused rotary embedding"
+
 
 if __name__ == "__main__":
     verify_rope()
