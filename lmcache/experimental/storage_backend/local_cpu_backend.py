@@ -84,20 +84,12 @@ class LocalCPUBackend(StorageBackendInterface):
 
     def submit_put_task(self, key: CacheEngineKey,
                         obj: MemoryObj) -> Optional[Future]:
-        """
-        return a dummy future object (result is immediately available so
-        non blocking)
-        """
-        self.insert_key(key, obj)
-        return Future()
+        pass
 
     def submit_prefetch_task(
         self,
         key: CacheEngineKey,
     ) -> Optional[Future]:
-        """
-        this is not a meaningful operation for local cpu backend
-        """
         pass
 
     def get_blocking(
