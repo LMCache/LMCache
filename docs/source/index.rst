@@ -21,6 +21,8 @@ Welcome to LMCache!
    <strong> Redis for LLMs. </strong>
    </p>
 
+.. note::
+   We are currently in the process of upgrading our documentation to provide better guidance and examples. Some sections may be under construction. Thank you for your patience!
 
 .. raw:: html
 
@@ -40,68 +42,106 @@ Welcome to LMCache!
    By combining LMCache with vLLM, LMCaches achieves 3-10x delay savings and GPU cycle reduction in many LLM use cases, including multi-round QA and RAG.
    </p>
 
+
+For more information, check out the following:
+
+* `LMCache blogs <https://lmcache.github.io>`_
+* `Join LMCache slack workspace <https://join.slack.com/t/lmcacheworkspace/shared_invite/zt-2viziwhue-5Amprc9k5hcIdXT7XevTaQ>`_
+* Our papers:
+
+  * `CacheGen: KV Cache Compression and Streaming for Fast Large Language Model Serving <https://dl.acm.org/doi/10.1145/3603269.3604823>`_
+  * `CacheBlend: Fast Large Language Model Serving with Cached Knowledge Fusion <https://arxiv.org/abs/2405.16444>`_
+  * `Do Large Language Models Need a Content Delivery Network? <https://arxiv.org/abs/2409.13761>`_
+
 :raw-html:`<br />`
 
-What's next?
-=====================
-
-Follow these links to get started with LMCache:
-
-* :ref:`speedup` 
-* :ref:`installation`
-* :ref:`docker`
-
-:raw-html:`<br />`
 
 Documentation
-=====================
+-------------
 
 .. toctree::
-   :maxdepth: 1
+   :maxdepth: 2
    :caption: Getting Started
 
-   getting_started/speedup
-   getting_started/installation   
-   getting_started/docker
-   getting_started/quickstart
+   getting_started/installation
+   getting_started/quickstart/index
+   getting_started/troubleshoot
+   getting_started/faq
+
+:raw-html:`<br />`
 
 .. toctree::
    :maxdepth: 2
-   :caption: Configure LMCache
+   :caption: KV Cache offloading and sharing
 
-   configuration/v1/index
-   configuration/v0/index
+   kv_cache/cpu_ram
+   kv_cache/local_storage
+   kv_cache/redis
+   kv_cache/infinistore
+   kv_cache/mooncake
+   kv_cache/valkey
+
+:raw-html:`<br />`
 
 .. toctree::
    :maxdepth: 2
-   :caption: Detailed Examples
+   :caption: Disaggregated prefill
 
-   examples/v1/index
-   examples/v0/index
-   
-.. toctree::
-   :maxdepth: 1
-   :caption: Models
+   disaggregated_prefill/nixl/index
+   disaggregated_prefill/shared_storage
 
-   models/models
+:raw-html:`<br />`
 
 .. toctree::
-   :maxdepth: 1
-   :caption: Developer Documentation
+   :maxdepth: 2
+   :caption: KV Cache management
 
-   developer_tutorial/overview
-   developer_tutorial/EngineInterface
-   developer_tutorial/GPUConnectorInterface
-   developer_tutorial/MemoryObject
-   developer_tutorial/MemoryInterface
-   developer_tutorial/BackendInterface
+   kv_cache_management/controller
+   kv_cache_management/lookup
+   kv_cache_management/persist
+   kv_cache_management/clear
 
+:raw-html:`<br />`
 
 .. toctree::
-   :maxdepth: 1
-   :caption: Advanced
+   :maxdepth: 2
+   :caption: KV Cache Optimizations
 
-   advanced/KVBlend
-   advanced/KVEvictor
-   advanced/vLLMIntegration
+   kv_cache_optimizations/compression
+   kv_cache_optimizations/blending
 
+:raw-html:`<br />`
+
+.. toctree::
+   :maxdepth: 2
+   :caption: Use LMCache in production
+
+   production/docker_deployment
+   production/kubernetes_deployment
+
+:raw-html:`<br />`
+
+.. toctree::
+   :maxdepth: 2
+   :caption: Developer Guide
+
+   developer_guide/contributing
+   developer_guide/dockerfile
+
+:raw-html:`<br />`
+
+.. toctree::
+   :maxdepth: 2
+   :caption: API Reference
+
+   api_reference/configurations
+   api_reference/storage_backends
+
+:raw-html:`<br />`
+
+.. toctree::
+   :maxdepth: 2
+   :caption: Community
+
+   community/meetings
+   community/blogs

@@ -1,0 +1,4 @@
+Contributing guide
+==================
+
+Coming soon... 
