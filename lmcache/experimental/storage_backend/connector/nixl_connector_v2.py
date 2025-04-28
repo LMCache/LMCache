@@ -167,7 +167,9 @@ class NixlPipe:
     def __init__(
             self,
             nixl_config: NixlConfig,
-            side_channel: zmq.Socket,  # type: ignore
+            side_channel: Union[
+                zmq.Socket,  # type: ignore
+                "SenderSpecificSocket"],
             sender_meta: Optional[bytes] = None):
         """
         Initialize the NixlPipe.
