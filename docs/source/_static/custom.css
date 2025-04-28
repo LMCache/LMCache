@@ -1,0 +1,4 @@
+/* Fix long lines not being copyable */
+div.highlight pre {
+    overflow: visible;
+}
