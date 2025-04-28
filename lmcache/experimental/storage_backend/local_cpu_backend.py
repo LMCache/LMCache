@@ -38,14 +38,12 @@ class LocalCPUBackend(StorageBackendInterface):
                  config: LMCacheEngineConfig,
                  memory_allocator: MemoryAllocatorInterface,
                  lookup_server: Optional[LookupServerInterface] = None,
-                 lmcache_worker: Optional["LMCacheWorker"] = None,
-                 dst_device: str = "cpu"):
+                 lmcache_worker: Optional["LMCacheWorker"] = None):
         self.hot_cache: Optional[OrderedDict[CacheEngineKey, MemoryObj]] = None
         if config.local_cpu:
             self.hot_cache = OrderedDict()
         self.lookup_server = lookup_server
         self.memory_allocator = memory_allocator
-        self.dst_device = dst_device
         self.lmcache_worker = lmcache_worker
         self.instance_id = config.lmcache_instance_id
         self.cpu_lock = threading.Lock()
