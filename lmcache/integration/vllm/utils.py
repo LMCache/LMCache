@@ -10,6 +10,9 @@ from lmcache.logging import init_logger
 logger = init_logger(__name__)
 ENGINE_NAME = "vllm-instance"
 
+def is_false(value: str) -> bool:
+    """Check if the given string value is equivalent to 'false'."""
+    return value.lower() in ("false", "0", "no", "n", "off")
 
 def lmcache_get_config() -> Union[Config, ExperimentalConfig]:
     """Get the LMCache configuration from the environment variable
@@ -17,10 +20,16 @@ def lmcache_get_config() -> Union[Config, ExperimentalConfig]:
     function will return the default configuration.
     """
 
-    if os.getenv("LMCACHE_USE_EXPERIMENTAL") == "True":
-        LMCacheEngineConfig = ExperimentalConfig  # type: ignore
+    if is_false(os.getenv("LMCACHE_USE_EXPERIMENTAL", "True")):
+        logger.warning(
+            "Detected LMCACHE_USE_EXPERIMENTAL is set to False. "
+            "Using legacy configuration is deprecated and will "
+            "be remove soon! Please set LMCACHE_USE_EXPERIMENTAL "
+            "to True.")
+        LMCacheEngineConfig = Config
     else:
-        LMCacheEngineConfig = Config  # type: ignore
+        LMCacheEngineConfig = ExperimentalConfig
+
     if "LMCACHE_CONFIG_FILE" not in os.environ:
         logger.warn("No LMCache configuration file is set. Trying to read"
                     " configurations from the environment variables.")

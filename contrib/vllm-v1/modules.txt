@@ -1,2 +1,0 @@
-vllm.distributed.kv_transfer.kv_connector.v1.lmcache_connector
-vllm.distributed.kv_transfer.kv_connector.factory

@@ -31,34 +31,26 @@ To install from source, clone the repository and install in editable mode:
     cd LMCache
     pip install -e .
 
-Make LMCache work with latest vLLM v1
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+LMCache with vLLM v1
+~~~~~~~~~~~~~~~~~~~~
 
-LMCache is integrated with latest vLLM v1. To use it, you need to install the latest vLLM main branch:
+LMCache is integrated with latest vLLM v1. To use it, install the latest vLLM main branch:
 
 .. code-block:: bash
 
     pip install vllm --pre --extra-index-url https://wheels.vllm.ai/nightly
 
-
-Then, install a small patch to enable vLLM v1 use LMCache:
-
-.. code-block:: bash
-
-    git clone https://github.com/LMCache/LMCache.git
-    cd LMCache/contrib
-    python3 install_modules.py
-
-.. note::
-    This patch will no longer need to be installed after PR `vllm-project/vllm#16625 <https://github.com/vllm-project/vllm/pull/16625>`_ is merged.
-
-
-Test whether LMCache works with vLLM v1:
+Test whether LMCache works with vLLM v1 by running:
 
 .. code-block:: bash
 
     python3 -c "import vllm.distributed.kv_transfer.kv_connector.v1.lmcache_connector"
 
+LMCache with vLLM v0
+~~~~~~~~~~~~~~~~~~~~
+
+.. note::
+    LMCache is also integrated with vLLM v0. The documentation is right now work in progress, but you can refer to `this example in vLLM <https://github.com/vllm-project/vllm/blob/main/examples/lmcache/cpu_offload_lmcache_v0.py>`__.
 
 Setup using Docker
 ------------------
