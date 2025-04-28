@@ -3,20 +3,21 @@ import matplotlib.pyplot as plt
 
 # List of file paths for baseline, ours, and prefill
 file_paths = [
-    'results/Apr_14/baseline_kivi/1_processed.csv',
-    'results/Apr_14/baseline_kivi/02_processed.csv',
-    'results/Apr_14/baseline_kivi/03_processed.csv',
-    'results/Apr_14/baseline_kivi/06_processed.csv'
+    'results/Apr_28_samsum/baseline_kivi/1_processed.csv',
+    'results/Apr_28_samsum/baseline_kivi/02_processed.csv',
+    'results/Apr_28_samsum/baseline_kivi/03_processed.csv',
+    'results/Apr_28_samsum/baseline_kivi/06_processed.csv'
 ]
 
 file_paths_ours = [
-    'results/Apr_14/context_based/01_processed.csv',
-    'results/Apr_14/context_based/10_processed.csv',
-    'results/Apr_14/context_based/100_processed.csv'
+    'results/Apr_28_samsum/ours/001_processed.csv',
+    'results/Apr_28_samsum/ours/01_processed.csv',
+    'results/Apr_28_samsum/ours/1_processed.csv',
+    'results/Apr_28_samsum/ours/100_processed.csv'
 ]
 
 file_path_prefill = [
-    'results/Apr_14/baseline_kivi/0_processed.csv'
+    'results/Apr_28_samsum/0_processed.csv'
 ]
 
 # --- Process baseline files ---
