@@ -3,6 +3,8 @@ from collections import OrderedDict
 from concurrent.futures import Future
 from typing import TYPE_CHECKING, Optional
 
+from lmcache.experimental.cache_controller.message import (KVAdmitMsg,
+                                                           KVEvictMsg)
 from lmcache.experimental.config import LMCacheEngineConfig
 from lmcache.experimental.lookup_server import LookupServerInterface
 from lmcache.experimental.memory_management import (MemoryAllocatorInterface,
@@ -10,10 +12,9 @@ from lmcache.experimental.memory_management import (MemoryAllocatorInterface,
                                                     MixedMemoryAllocator)
 from lmcache.experimental.storage_backend.abstract_backend import \
     StorageBackendInterface
-from lmcache.experimental.cache_controller.message import (KVAdmitMsg,
-                                                           KVEvictMsg)
-from lmcache.utils import CacheEngineKey
 from lmcache.observability import LMCStatsMonitor
+from lmcache.utils import CacheEngineKey
+
 if TYPE_CHECKING:
     from lmcache.experimental.cache_controller.worker import LMCacheWorker
 
