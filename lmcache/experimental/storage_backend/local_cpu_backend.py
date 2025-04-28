@@ -1,4 +1,5 @@
 import threading
+import torch
 from collections import OrderedDict
 from concurrent.futures import Future
 from typing import TYPE_CHECKING, Optional
@@ -14,10 +15,10 @@ from lmcache.experimental.storage_backend.abstract_backend import \
     StorageBackendInterface
 from lmcache.observability import LMCStatsMonitor
 from lmcache.utils import CacheEngineKey
-
+from lmcache.logging import init_logger
 if TYPE_CHECKING:
     from lmcache.experimental.cache_controller.worker import LMCacheWorker
-
+logger = init_logger(__name__)
 
 class LocalCPUBackend(StorageBackendInterface):
     """
@@ -123,19 +124,72 @@ class LocalCPUBackend(StorageBackendInterface):
                         KVEvictMsg(self.instance_id, key.worker_id,
                                    key.chunk_hash, "cpu"))
 
+    def touch(self, key: CacheEngineKey) -> None:
+        """
+        Touch a key in the local cpu cache (maximize recency)
+        """
+        with self.cpu_lock:
+            if key in self.dict:
+                self.dict.move_to_end(key)
+
+    def allocate(self, shape: torch.Size,
+                 dtype: torch.dtype) -> Optional[MemoryObj]:
+        """
+        allocate a memory object in the cpu backend by evicting LRU policy
+        takes in the shape and dtype of the memory object to be allocated
+        returns:
+        - None if we could not make space for the memory object in cpu memory
+        - the allocated memory object otherwise
+        """
+        memory_obj = None
+        evict_keys = []
+        with self.cpu_lock:
+            for evict_key in self.dict:
+                # If the ref_count > 1, we cannot evict it as the hot cache
+                # might be used as buffers by other storage backends
+                if self.memory_allocator.get_ref_count(
+                        self.dict[evict_key]) > 1:
+                    continue
+                evict_keys.append(evict_key)
+
+                self.memory_allocator.ref_count_down(self.hot_cache_[evict_key])
+                memory_obj = self.memory_allocator.allocate(shape, dtype)
+                logger.debug("Evicting 1 chunk from hot cache")
+                if memory_obj is not None:
+                    break
+        for evict_key in evict_keys:
+            self.remove(evict_key)
+        if self.lookup_server is not None:
+            self.lookup_server.batched_remove(evict_keys)
+        return memory_obj
+
+    def get_keys(self) -> List[CacheEngineKey]:
+        """
+        array ordering of keys from LRU to MRU
+        """
+        with self.cpu_lock:
+            return list(self.dict.keys())
+
     def clear(self) -> int:
         """
         counts the number of memory objects removed
         """
-        num_removed = 0
+        clear_keys = []
         with self.cpu_lock:
-            if self.lookup_server is not None:
-                self.lookup_server.batched_remove(list(self.dict.keys()))
-            for memory_obj in self.dict.values():
+            for key in self.dict:
+                memory_obj = self.dict[key]
+                if self.memory_allocator.get_ref_count(memory_obj) > 1:
+                    continue
+                clear_keys.append(key)
                 self.memory_allocator.ref_count_down(memory_obj)
-                num_removed += 1
-            self.dict.clear()
-        return num_removed
+
+        for key in clear_keys:
+            self.remove(key)
+
+        if self.lookup_server is not None:
+            self.lookup_server.batched_remove(clear_keys)
+
+        return len(clear_keys)
 
     def close(self) -> None:
         self.clear()
