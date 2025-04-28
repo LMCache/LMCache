@@ -29,7 +29,7 @@ extensions = [
     "sphinx.ext.viewcode",
     "sphinx.ext.napoleon",
     "sphinx.ext.autosectionlabel",
-    "sphinx_copybutton",
+    # "sphinx_copybutton",
 ]
 
 copybutton_prompt_text = r"^(\$ |>>> |\# )"
