@@ -1,8 +1,9 @@
 import threading
-import torch
 from collections import OrderedDict
 from concurrent.futures import Future
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, List, Optional
+
+import torch
 
 from lmcache.experimental.cache_controller.message import (KVAdmitMsg,
                                                            KVEvictMsg)
@@ -13,12 +14,15 @@ from lmcache.experimental.memory_management import (MemoryAllocatorInterface,
                                                     MixedMemoryAllocator)
 from lmcache.experimental.storage_backend.abstract_backend import \
     StorageBackendInterface
+from lmcache.logging import init_logger
 from lmcache.observability import LMCStatsMonitor
 from lmcache.utils import CacheEngineKey
-from lmcache.logging import init_logger
+
 if TYPE_CHECKING:
     from lmcache.experimental.cache_controller.worker import LMCacheWorker
+
 logger = init_logger(__name__)
+
 
 class LocalCPUBackend(StorageBackendInterface):
     """
@@ -145,16 +149,16 @@ class LocalCPUBackend(StorageBackendInterface):
         evict_keys = []
         with self.cpu_lock:
             for evict_key in self.dict:
-                # If the ref_count > 1, we cannot evict it as the hot cache
+                # If the ref_count > 1, we cannot evict it as the cpu memory
                 # might be used as buffers by other storage backends
                 if self.memory_allocator.get_ref_count(
                         self.dict[evict_key]) > 1:
                     continue
                 evict_keys.append(evict_key)
 
-                self.memory_allocator.ref_count_down(self.hot_cache_[evict_key])
+                self.memory_allocator.ref_count_down(self.dict[evict_key])
                 memory_obj = self.memory_allocator.allocate(shape, dtype)
-                logger.debug("Evicting 1 chunk from hot cache")
+                logger.debug("Evicting 1 chunk from cpu memory")
                 if memory_obj is not None:
                     break
         for evict_key in evict_keys:
