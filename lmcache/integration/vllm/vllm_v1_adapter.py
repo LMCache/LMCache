@@ -365,11 +365,6 @@ class LMCacheConnectorV1Impl:
             layers = get_layers_from_vllm_config(self.vllm_config, Attention)
 
             for layer_name, attn_layer in layers.items():
-                if not hasattr(attn_layer, "kv_cache"):
-                    logger.debug("The layer %s does not have kv_cache, skip it",
-                                 layer_name)
-                    continue
-
                 if layer_name not in self.kv_caches:
                     self.kv_caches[layer_name] = attn_layer.kv_cache[\
                         forward_context.virtual_engine]
