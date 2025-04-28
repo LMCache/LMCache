@@ -39,9 +39,7 @@ class LocalCPUBackend(StorageBackendInterface):
                  memory_allocator: MemoryAllocatorInterface,
                  lookup_server: Optional[LookupServerInterface] = None,
                  lmcache_worker: Optional["LMCacheWorker"] = None):
-        self.hot_cache: Optional[OrderedDict[CacheEngineKey, MemoryObj]] = None
-        if config.local_cpu:
-            self.hot_cache = OrderedDict()
+        self.hot_cache: OrderedDict[CacheEngineKey, MemoryObj] = OrderedDict()
         self.lookup_server = lookup_server
         self.memory_allocator = memory_allocator
         self.lmcache_worker = lmcache_worker
@@ -52,7 +50,7 @@ class LocalCPUBackend(StorageBackendInterface):
         self.usage = 0
 
     def contains(self, key: CacheEngineKey) -> bool:
-        if not self.hot_cache:
+        if not self.config.local_cpu:
             return False
         with self.cpu_lock:
             return key in self.hot_cache
@@ -68,7 +66,7 @@ class LocalCPUBackend(StorageBackendInterface):
         synchronously (immediately) write to cpu memory
         ref count stays up because the memory object stays in cpu memory
         """
-        if not self.hot_cache:
+        if not self.config.local_cpu:
             return
         with self.cpu_lock:
             if key in self.hot_cache:
@@ -100,7 +98,7 @@ class LocalCPUBackend(StorageBackendInterface):
         self,
         key: CacheEngineKey,
     ) -> Optional[MemoryObj]:
-        if not self.hot_cache:
+        if not self.config.local_cpu:
             return None
         with self.cpu_lock:
             if key not in self.hot_cache:
@@ -113,7 +111,7 @@ class LocalCPUBackend(StorageBackendInterface):
             return memory_obj
 
     def remove(self, key: CacheEngineKey) -> None:
-        if not self.hot_cache:
+        if not self.config.local_cpu:
             return
         with self.cpu_lock:
             if key in self.hot_cache:
@@ -132,7 +130,7 @@ class LocalCPUBackend(StorageBackendInterface):
         """
         maximize recency of a key
         """
-        if not self.hot_cache:
+        if not self.config.local_cpu:
             return
         with self.cpu_lock:
             if key in self.hot_cache:
@@ -177,7 +175,7 @@ class LocalCPUBackend(StorageBackendInterface):
         """
         array ordering of keys from LRU to MRU
         """
-        if not self.hot_cache:
+        if not self.config.local_cpu:
             return []
         with self.cpu_lock:
             return list(self.hot_cache.keys())
@@ -186,7 +184,7 @@ class LocalCPUBackend(StorageBackendInterface):
         """
         counts the number of memory objects removed
         """
-        if not self.hot_cache:
+        if not self.config.local_cpu:
             return 0
         clear_keys = []
         with self.cpu_lock:
