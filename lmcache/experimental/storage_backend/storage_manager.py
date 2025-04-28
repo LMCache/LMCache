@@ -85,7 +85,7 @@ class KVDecision:
 class KVCacheManager:
     def __init__(self, hot_cache: OrderedDict[CacheEngineKey, MemoryObj]):
         # NOTE(Shaoting): policy related variables define here
-        self.method = "ours"
+        self.method = "profile"
         self.rate = 1
         self.cpu_size = 5368709120 * 12 # 60 GB
 
@@ -179,7 +179,7 @@ class KVCacheManager:
             first_update_key = next(iter(to_save_list))
             return KVDecision("cpu", first_update_key.metadata.method[0], new_kv_rate), final_drop_list
         else:
-            return KVDecision("cpu", "kivi", 0.371428571), {}
+            return KVDecision("cpu", "kivi", 0), {}
 
 # TODO: extend this class to implement caching policies and eviction policies
 class StorageManager:
