@@ -1,0 +1,831 @@
+INFO 04-28 18:44:46 __init__.py:186] Automatically detected platform cuda.
+INFO 04-28 18:44:50 api_server.py:840] vLLM API server version 0.7.2.dev43+geb5db26a8
+INFO 04-28 18:44:50 api_server.py:841] args: Namespace(subparser='serve', model_tag='meta-llama/Llama-3.1-8B-Instruct', config='', host=None, port=8000, uvicorn_log_level='info', allow_credentials=False, allowed_origins=['*'], allowed_methods=['*'], allowed_headers=['*'], api_key=None, lora_modules=None, prompt_adapters=None, chat_template=None, chat_template_content_format='auto', response_role='assistant', ssl_keyfile=None, ssl_certfile=None, ssl_ca_certs=None, ssl_cert_reqs=0, root_path=None, middleware=[], return_tokens_as_token_ids=False, disable_frontend_multiprocessing=False, enable_request_id_headers=False, enable_auto_tool_choice=False, enable_reasoning=False, reasoning_parser=None, tool_call_parser=None, tool_parser_plugin='', model='meta-llama/Llama-3.1-8B-Instruct', task='auto', tokenizer=None, skip_tokenizer_init=False, revision=None, code_revision=None, tokenizer_revision=None, tokenizer_mode='auto', trust_remote_code=True, allowed_local_media_path=None, download_dir=None, load_format='auto', config_format=<ConfigFormat.AUTO: 'auto'>, dtype='auto', kv_cache_dtype='auto', max_model_len=None, guided_decoding_backend='xgrammar', logits_processor_pattern=None, model_impl='auto', distributed_executor_backend=None, pipeline_parallel_size=1, tensor_parallel_size=1, max_parallel_loading_workers=None, ray_workers_use_nsight=False, block_size=None, enable_prefix_caching=None, disable_sliding_window=False, use_v2_block_manager=True, num_lookahead_slots=0, seed=0, swap_space=4, cpu_offload_gb=0, gpu_memory_utilization=0.95, num_gpu_blocks_override=None, max_num_batched_tokens=None, max_num_seqs=None, max_logprobs=20, disable_log_stats=True, quantization=None, rope_scaling=None, rope_theta=None, hf_overrides=None, enforce_eager=False, max_seq_len_to_capture=8192, disable_custom_all_reduce=False, tokenizer_pool_size=0, tokenizer_pool_type='ray', tokenizer_pool_extra_config=None, limit_mm_per_prompt=None, mm_processor_kwargs=None, disable_mm_preprocessor_cache=False, enable_lora=False, enable_lora_bias=False, max_loras=1, max_lora_rank=16, lora_extra_vocab_size=256, lora_dtype='auto', long_lora_scaling_factors=None, max_cpu_loras=None, fully_sharded_loras=False, enable_prompt_adapter=False, max_prompt_adapters=1, max_prompt_adapter_token=0, device='auto', num_scheduler_steps=1, multi_step_stream_outputs=True, scheduler_delay_factor=0.0, enable_chunked_prefill=False, speculative_model=None, speculative_model_quantization=None, num_speculative_tokens=None, speculative_disable_mqa_scorer=False, speculative_draft_tensor_parallel_size=None, speculative_max_model_len=None, speculative_disable_by_batch_size=None, ngram_prompt_lookup_max=None, ngram_prompt_lookup_min=None, spec_decoding_acceptance_method='rejection_sampler', typical_acceptance_sampler_posterior_threshold=None, typical_acceptance_sampler_posterior_alpha=None, disable_logprobs_during_spec_decoding=None, model_loader_extra_config=None, ignore_patterns=[], preemption_mode=None, served_model_name=None, qlora_adapter_name_or_path=None, otlp_traces_endpoint=None, collect_detailed_traces=None, disable_async_output_proc=False, scheduling_policy='fcfs', override_neuron_config=None, override_pooler_config=None, compilation_config=None, kv_transfer_config=KVTransferConfig(kv_connector='LMCacheConnector', kv_buffer_device='cuda', kv_buffer_size=1000000000.0, kv_role='kv_both', kv_rank=None, kv_parallel_size=1, kv_ip='127.0.0.1', kv_port=14579), worker_cls='auto', generation_config=None, override_generation_config=None, enable_sleep_mode=False, calculate_kv_scales=False, disable_log_requests=False, max_log_len=None, disable_fastapi_docs=False, enable_prompt_tokens_details=False, dispatch_function=<function serve at 0x7325d1bb3a60>)
+INFO 04-28 18:44:51 api_server.py:206] Started engine process with PID 3138814
+INFO 04-28 18:45:02 __init__.py:186] Automatically detected platform cuda.
+INFO 04-28 18:45:08 config.py:542] This model supports multiple tasks: {'reward', 'generate', 'embed', 'score', 'classify'}. Defaulting to 'generate'.
+WARNING 04-28 18:45:08 arg_utils.py:1145] The model has a long context length (131072). This may cause OOM errors during the initial memory profiling phase, or result in low performance due to small KV cache space. Consider setting --max-model-len to a smaller value.
+INFO 04-28 18:45:24 config.py:542] This model supports multiple tasks: {'classify', 'reward', 'score', 'generate', 'embed'}. Defaulting to 'generate'.
+WARNING 04-28 18:45:24 arg_utils.py:1145] The model has a long context length (131072). This may cause OOM errors during the initial memory profiling phase, or result in low performance due to small KV cache space. Consider setting --max-model-len to a smaller value.
+INFO 04-28 18:45:24 llm_engine.py:234] Initializing a V0 LLM engine (v0.7.2.dev43+geb5db26a8) with config: model='meta-llama/Llama-3.1-8B-Instruct', speculative_config=None, tokenizer='meta-llama/Llama-3.1-8B-Instruct', skip_tokenizer_init=False, tokenizer_mode=auto, revision=None, override_neuron_config=None, tokenizer_revision=None, trust_remote_code=True, dtype=torch.bfloat16, max_seq_len=131072, download_dir=None, load_format=LoadFormat.AUTO, tensor_parallel_size=1, pipeline_parallel_size=1, disable_custom_all_reduce=False, quantization=None, enforce_eager=False, kv_cache_dtype=auto,  device_config=cuda, decoding_config=DecodingConfig(guided_decoding_backend='xgrammar'), observability_config=ObservabilityConfig(otlp_traces_endpoint=None, collect_model_forward_time=False, collect_model_execute_time=False), seed=0, served_model_name=meta-llama/Llama-3.1-8B-Instruct, num_scheduler_steps=1, multi_step_stream_outputs=True, enable_prefix_caching=False, chunked_prefill_enabled=False, use_async_output_proc=True, disable_mm_preprocessor_cache=False, mm_processor_kwargs=None, pooler_config=None, compilation_config={"splitting_ops":[],"compile_sizes":[],"cudagraph_capture_sizes":[256,248,240,232,224,216,208,200,192,184,176,168,160,152,144,136,128,120,112,104,96,88,80,72,64,56,48,40,32,24,16,8,4,2,1],"max_capture_size":256}, use_cached_outputs=True, 
+INFO 04-28 18:45:27 cuda.py:230] Using Flash Attention backend.
+INFO 04-28 18:45:29 lmcache_connector.py:42] Initializing LMCacheConfig under kv_transfer_config kv_connector='LMCacheConnector' kv_buffer_device='cuda' kv_buffer_size=1000000000.0 kv_role='kv_both' kv_rank=None kv_parallel_size=1 kv_ip='127.0.0.1' kv_port=14579
+[33mINFO LMCache: [0mLoading LMCache config file /home/ubuntu/ShaotingFS2/LMCache/config/qmsum.yaml [2025-04-28 18:45:29,780] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/utils.py:32
+[33mINFO LMCache: [0mCreating LMCacheEngine instance vllm-instance [2025-04-28 18:45:29,789] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/experimental/cache_engine.py:262
+[33mINFO LMCache: [0mInitializing usage context. [2025-04-28 18:46:32,594] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/usage_context.py:235
+[33mDEBUG LMCache: [0mcontext message updated [2025-04-28 18:46:34,712] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/usage_context.py:98
+[33mDEBUG LMCache: [0mcontext message updated [2025-04-28 18:46:35,087] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/usage_context.py:98
+[33mDEBUG LMCache: [0mcontext message updated [2025-04-28 18:46:35,476] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/usage_context.py:98
+INFO 04-28 18:46:35 model_runner.py:1115] Starting to load model meta-llama/Llama-3.1-8B-Instruct...
+INFO 04-28 18:46:35 weight_utils.py:252] Using model weights format ['*.safetensors']
+Loading safetensors checkpoint shards:   0% Completed | 0/4 [00:00<?, ?it/s]
+Loading safetensors checkpoint shards:  25% Completed | 1/4 [00:00<00:02,  1.27it/s]
+Loading safetensors checkpoint shards:  50% Completed | 2/4 [00:01<00:01,  1.06it/s]
+Loading safetensors checkpoint shards:  75% Completed | 3/4 [00:02<00:00,  1.40it/s]
+Loading safetensors checkpoint shards: 100% Completed | 4/4 [00:03<00:00,  1.31it/s]
+Loading safetensors checkpoint shards: 100% Completed | 4/4 [00:03<00:00,  1.28it/s]
+
+INFO 04-28 18:46:39 model_runner.py:1120] Loading model weights took 14.9888 GB
+INFO 04-28 18:46:56 worker.py:267] Memory profiling takes 17.00 seconds
+INFO 04-28 18:46:56 worker.py:267] the current vLLM instance can use total_gpu_memory (47.53GiB) x gpu_memory_utilization (0.95) = 45.15GiB
+INFO 04-28 18:46:56 worker.py:267] model weights take 14.99GiB; non_torch_memory takes 0.22GiB; PyTorch activation peak memory takes 13.51GiB; the rest of the memory reserved for KV Cache is 16.43GiB.
+INFO 04-28 18:46:57 executor_base.py:110] # CUDA blocks: 8414, # CPU blocks: 2048
+INFO 04-28 18:46:57 executor_base.py:115] Maximum concurrency for 131072 tokens per request: 1.03x
+INFO 04-28 18:47:00 model_runner.py:1439] Capturing cudagraphs for decoding. This may lead to unexpected consequences if the model is not static. To run the model in eager mode, set 'enforce_eager=True' or use '--enforce-eager' in the CLI. If out-of-memory error occurs during cudagraph capture, consider decreasing `gpu_memory_utilization` or switching to eager mode. You can also reduce the `max_num_seqs` as needed to decrease memory usage.
+Capturing CUDA graph shapes:   0%|          | 0/35 [00:00<?, ?it/s]Capturing CUDA graph shapes:   3%|▎         | 1/35 [00:00<00:17,  1.96it/s]Capturing CUDA graph shapes:   6%|▌         | 2/35 [00:00<00:16,  2.05it/s]Capturing CUDA graph shapes:   9%|▊         | 3/35 [00:01<00:15,  2.08it/s]Capturing CUDA graph shapes:  11%|█▏        | 4/35 [00:01<00:14,  2.10it/s]Capturing CUDA graph shapes:  14%|█▍        | 5/35 [00:02<00:14,  2.10it/s]Capturing CUDA graph shapes:  17%|█▋        | 6/35 [00:02<00:13,  2.11it/s]Capturing CUDA graph shapes:  20%|██        | 7/35 [00:03<00:13,  2.11it/s]Capturing CUDA graph shapes:  23%|██▎       | 8/35 [00:03<00:12,  2.11it/s]Capturing CUDA graph shapes:  26%|██▌       | 9/35 [00:04<00:12,  2.14it/s]Capturing CUDA graph shapes:  29%|██▊       | 10/35 [00:04<00:11,  2.15it/s]Capturing CUDA graph shapes:  31%|███▏      | 11/35 [00:05<00:11,  2.16it/s]Capturing CUDA graph shapes:  34%|███▍      | 12/35 [00:05<00:10,  2.17it/s]Capturing CUDA graph shapes:  37%|███▋      | 13/35 [00:06<00:10,  2.18it/s]Capturing CUDA graph shapes:  40%|████      | 14/35 [00:06<00:09,  2.19it/s]Capturing CUDA graph shapes:  43%|████▎     | 15/35 [00:07<00:09,  2.20it/s]Capturing CUDA graph shapes:  46%|████▌     | 16/35 [00:07<00:08,  2.19it/s]Capturing CUDA graph shapes:  49%|████▊     | 17/35 [00:07<00:08,  2.18it/s]Capturing CUDA graph shapes:  51%|█████▏    | 18/35 [00:08<00:07,  2.18it/s]Capturing CUDA graph shapes:  54%|█████▍    | 19/35 [00:08<00:07,  2.19it/s]Capturing CUDA graph shapes:  57%|█████▋    | 20/35 [00:09<00:06,  2.22it/s]Capturing CUDA graph shapes:  60%|██████    | 21/35 [00:09<00:06,  2.23it/s]Capturing CUDA graph shapes:  63%|██████▎   | 22/35 [00:10<00:05,  2.24it/s]Capturing CUDA graph shapes:  66%|██████▌   | 23/35 [00:10<00:05,  2.23it/s]Capturing CUDA graph shapes:  69%|██████▊   | 24/35 [00:11<00:04,  2.24it/s]Capturing CUDA graph shapes:  71%|███████▏  | 25/35 [00:11<00:04,  2.25it/s]Capturing CUDA graph shapes:  74%|███████▍  | 26/35 [00:11<00:03,  2.25it/s]Capturing CUDA graph shapes:  77%|███████▋  | 27/35 [00:12<00:03,  2.26it/s]Capturing CUDA graph shapes:  80%|████████  | 28/35 [00:12<00:03,  2.27it/s]Capturing CUDA graph shapes:  83%|████████▎ | 29/35 [00:13<00:02,  2.28it/s]Capturing CUDA graph shapes:  86%|████████▌ | 30/35 [00:13<00:02,  2.28it/s]Capturing CUDA graph shapes:  89%|████████▊ | 31/35 [00:14<00:01,  2.28it/s]Capturing CUDA graph shapes:  91%|█████████▏| 32/35 [00:14<00:01,  2.28it/s]Capturing CUDA graph shapes:  94%|█████████▍| 33/35 [00:14<00:00,  2.29it/s]Capturing CUDA graph shapes:  97%|█████████▋| 34/35 [00:15<00:00,  2.29it/s]Capturing CUDA graph shapes: 100%|██████████| 35/35 [00:15<00:00,  2.29it/s]Capturing CUDA graph shapes: 100%|██████████| 35/35 [00:15<00:00,  2.21it/s]
+INFO 04-28 18:47:16 model_runner.py:1567] Graph capturing finished in 16 secs, took 0.24 GiB
+INFO 04-28 18:47:16 llm_engine.py:431] init engine (profile, create kv cache, warmup model) took 37.13 seconds
+INFO 04-28 18:47:17 api_server.py:756] Using supplied chat template:
+INFO 04-28 18:47:17 api_server.py:756] None
+INFO 04-28 18:47:17 launcher.py:21] Available routes are:
+INFO 04-28 18:47:17 launcher.py:29] Route: /openapi.json, Methods: GET, HEAD
+INFO 04-28 18:47:17 launcher.py:29] Route: /docs, Methods: GET, HEAD
+INFO 04-28 18:47:17 launcher.py:29] Route: /docs/oauth2-redirect, Methods: GET, HEAD
+INFO 04-28 18:47:17 launcher.py:29] Route: /redoc, Methods: GET, HEAD
+INFO 04-28 18:47:17 launcher.py:29] Route: /health, Methods: GET
+INFO 04-28 18:47:17 launcher.py:29] Route: /ping, Methods: GET, POST
+INFO 04-28 18:47:17 launcher.py:29] Route: /tokenize, Methods: POST
+INFO 04-28 18:47:17 launcher.py:29] Route: /detokenize, Methods: POST
+INFO 04-28 18:47:17 launcher.py:29] Route: /v1/models, Methods: GET
+INFO 04-28 18:47:17 launcher.py:29] Route: /version, Methods: GET
+INFO 04-28 18:47:17 launcher.py:29] Route: /v1/chat/completions, Methods: POST
+INFO 04-28 18:47:17 launcher.py:29] Route: /v1/completions, Methods: POST
+INFO 04-28 18:47:17 launcher.py:29] Route: /v1/embeddings, Methods: POST
+INFO 04-28 18:47:17 launcher.py:29] Route: /pooling, Methods: POST
+INFO 04-28 18:47:17 launcher.py:29] Route: /score, Methods: POST
+INFO 04-28 18:47:17 launcher.py:29] Route: /v1/score, Methods: POST
+INFO 04-28 18:47:17 launcher.py:29] Route: /rerank, Methods: POST
+INFO 04-28 18:47:17 launcher.py:29] Route: /v1/rerank, Methods: POST
+INFO 04-28 18:47:17 launcher.py:29] Route: /v2/rerank, Methods: POST
+INFO 04-28 18:47:17 launcher.py:29] Route: /invocations, Methods: POST
+INFO:     Started server process [3138099]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+INFO 04-28 18:47:24 chat_utils.py:332] Detected the chat template content format to be 'string'. You can set `--chat-template-content-format` to override this.
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:47:24 engine.py:275] Added request chatcmpl-6808ae7c09fc44518718aac4cf50cd74.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:47:24,648] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:47:24,648] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 9543 tokens [2025-04-28 18:47:26,472] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:47:26 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:47:28 engine.py:275] Added request chatcmpl-d14a9204aa554989a493ef584dc025fd.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:47:28,157] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:47:28,157] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 2687 tokens [2025-04-28 18:47:28,624] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:47:29 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:47:29 engine.py:275] Added request chatcmpl-5ef4b7b00b224ff1b40c247fee92bd0a.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:47:29,831] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:47:29,831] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 13129 tokens [2025-04-28 18:47:32,469] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:47:33 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:47:33 engine.py:275] Added request chatcmpl-1f8515a81e84465893f0de32fd38b0a5.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:47:33,667] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:47:33,667] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 8434 tokens [2025-04-28 18:47:35,243] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:47:36 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:47:36 engine.py:275] Added request chatcmpl-9d75778ca6f54019a331c815238d1662.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:47:36,977] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:47:36,977] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 9970 tokens [2025-04-28 18:47:38,881] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:47:41 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:47:41 engine.py:275] Added request chatcmpl-75b7570420f64264954791f062efd6dc.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:47:41,669] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:47:41,669] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 14297 tokens [2025-04-28 18:47:44,591] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:47:46 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:47:46 engine.py:275] Added request chatcmpl-3b839ada79c0400cbda9f31d4a1a14b2.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:47:46,999] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:47:47,000] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 16775 tokens [2025-04-28 18:47:50,568] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:47:51 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:47:52 engine.py:275] Added request chatcmpl-fa3594b12b5b4cd4918bff90489e2190.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:47:52,543] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:47:52,543] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 16637 tokens [2025-04-28 18:47:56,069] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:47:57 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:47:57 engine.py:275] Added request chatcmpl-a7b7a1a160c2458a8f34ef1dbc227361.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:47:57,986] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:47:57,986] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 11619 tokens [2025-04-28 18:48:00,298] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:48:01 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:48:01 engine.py:275] Added request chatcmpl-9fb17688f5264696b34c041a9154803b.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:48:01,961] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:48:01,961] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 3123 tokens [2025-04-28 18:48:02,533] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:48:03 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:48:04 engine.py:275] Added request chatcmpl-342e7fbe16d6482e9e47fdd90a667a1f.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:48:04,152] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:48:04,152] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 9920 tokens [2025-04-28 18:48:06,073] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:48:06 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:48:07 engine.py:275] Added request chatcmpl-07a2a21845274121858519b1a52f3943.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:48:07,423] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:48:07,423] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 9724 tokens [2025-04-28 18:48:09,307] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:48:10 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:48:10 engine.py:275] Added request chatcmpl-fcf60537dcf240d1a02c535fbfed3077.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:48:10,626] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:48:10,626] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 5173 tokens [2025-04-28 18:48:11,574] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:48:12 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:48:12 engine.py:275] Added request chatcmpl-35e37ba138334068ab9b7a5e3992eeb8.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:48:12,905] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:48:12,906] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 13071 tokens [2025-04-28 18:48:15,582] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:48:16 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:48:17 engine.py:275] Added request chatcmpl-7aac5890856d4b55ad31c12c98f73abc.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:48:17,405] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:48:17,405] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 11102 tokens [2025-04-28 18:48:19,616] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:48:20 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:48:20 engine.py:275] Added request chatcmpl-2cbe75f82a324090a879d0c4a5ba6313.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:48:20,987] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:48:20,987] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 9914 tokens [2025-04-28 18:48:22,919] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:48:23 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:48:24 engine.py:275] Added request chatcmpl-0917881159c047f19a7645e8d69de727.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:48:24,104] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:48:24,104] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 4572 tokens [2025-04-28 18:48:24,962] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:48:25 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:48:25 engine.py:275] Added request chatcmpl-aa36d6475ba24704b18937808f8314ad.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:48:25,977] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:48:25,977] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 3225 tokens [2025-04-28 18:48:26,570] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:48:27 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:48:27 engine.py:275] Added request chatcmpl-ca9b7f923f3f458d849760bcd0b777b6.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:48:27,641] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:48:27,641] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 14459 tokens [2025-04-28 18:48:30,649] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:48:31 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:48:31 engine.py:275] Added request chatcmpl-dfab9425cebe4e528491dae418e4d2f0.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:48:31,940] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:48:31,940] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 4829 tokens [2025-04-28 18:48:32,829] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:48:33 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:48:33 engine.py:275] Added request chatcmpl-81f0820ea85c49ec96a7b40ebf25895e.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:48:33,477] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:48:33,477] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 16268 tokens [2025-04-28 18:48:36,965] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:48:37 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:48:38 engine.py:275] Added request chatcmpl-4a0770622175404fb89e44c99e087c5f.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:48:38,032] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:48:38,032] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 15916 tokens [2025-04-28 18:48:41,416] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:48:42 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:48:42 engine.py:275] Added request chatcmpl-f78c9696c0af487d8ac5880ded5bc181.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:48:42,949] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:48:42,949] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 3353 tokens [2025-04-28 18:48:43,569] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:48:44 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:48:44 engine.py:275] Added request chatcmpl-a8c695d72c5447a9b6cb1d6d87c10ebe.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:48:44,936] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:48:44,936] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 7039 tokens [2025-04-28 18:48:46,265] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:48:47 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:48:47 engine.py:275] Added request chatcmpl-0e76c968c4e64d31a9422293b9550456.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:48:47,665] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:48:47,665] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 14004 tokens [2025-04-28 18:48:50,564] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:48:51 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:48:51 engine.py:275] Added request chatcmpl-25e0eb52e8d84356a3367b81b28a5f9b.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:48:52,003] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:48:52,003] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 4836 tokens [2025-04-28 18:48:52,892] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:48:54 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:48:54 engine.py:275] Added request chatcmpl-d99da32ec34f44c0a5b8c5f9d55958be.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:48:54,666] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:48:54,666] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 10308 tokens [2025-04-28 18:48:56,706] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:48:57 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:48:57 engine.py:275] Added request chatcmpl-bc313d3f32f34600abc3123abaf0c980.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:48:57,801] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:48:57,801] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 13714 tokens [2025-04-28 18:49:00,646] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:49:01 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:49:01 engine.py:275] Added request chatcmpl-3c9dd010547a41e9b95e9f093d6a51d6.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:49:01,847] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:49:01,847] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 9537 tokens [2025-04-28 18:49:03,718] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:49:06 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:49:06 engine.py:275] Added request chatcmpl-e54ec4e08772427fa538095ab1f781ba.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:49:06,772] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:49:06,772] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 18086 tokens [2025-04-28 18:49:10,766] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:49:11 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:49:11 engine.py:275] Added request chatcmpl-5f6e24a23d3f4828b78cb5d73cedd44b.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:49:11,768] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:49:11,768] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 5528 tokens [2025-04-28 18:49:12,811] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:49:13 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:49:14 engine.py:275] Added request chatcmpl-fba7eb0575714519a089f10c7468bc0b.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:49:14,176] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:49:14,176] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 6488 tokens [2025-04-28 18:49:15,392] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:49:15 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:49:16 engine.py:275] Added request chatcmpl-30a9d80a85c54732a1c4c13e1a3c8401.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:49:16,188] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:49:16,188] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 6878 tokens [2025-04-28 18:49:17,494] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:49:19 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:49:20 engine.py:275] Added request chatcmpl-015e7f943d8d429b8d22aa7313c2670f.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:49:20,117] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:49:20,117] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 13911 tokens [2025-04-28 18:49:23,008] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:49:23 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:49:24 engine.py:275] Added request chatcmpl-8a68258baf7541fda93e67027b8044d3.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:49:24,020] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:49:24,020] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 2119 tokens [2025-04-28 18:49:24,413] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:49:24 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:49:24 engine.py:275] Added request chatcmpl-62e815f6d0894aa08e033c6021f4241e.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:49:24,870] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:49:24,870] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 14608 tokens [2025-04-28 18:49:27,931] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:49:28 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:49:29 engine.py:275] Added request chatcmpl-2e86ddb95e264e8cbcc13a1ff0ca5690.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:49:29,042] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:49:29,042] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 12995 tokens [2025-04-28 18:49:31,711] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:49:34 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:49:34 engine.py:275] Added request chatcmpl-a9556ed860ce4acfbc8ee14bd6faf17a.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:49:34,591] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:49:34,591] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 14734 tokens [2025-04-28 18:49:37,706] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:49:38 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:49:38 engine.py:275] Added request chatcmpl-5174779b552b4287bb0283e851ecc505.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:49:38,639] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:49:38,639] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 12178 tokens [2025-04-28 18:49:41,121] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:49:43 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:49:43 engine.py:275] Added request chatcmpl-511c3bb16a494c549cd15f2788469ce8.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:49:43,781] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:49:43,781] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 4007 tokens [2025-04-28 18:49:44,548] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:49:45 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:49:45 engine.py:275] Added request chatcmpl-8923f4755d2245a7996c4fe5a1c71f29.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:49:45,415] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:49:45,415] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 4807 tokens [2025-04-28 18:49:46,304] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:49:47 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:49:47 engine.py:275] Added request chatcmpl-4ccde8c53a964f2ea40bd0d68b800316.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:49:47,258] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:49:47,258] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 1846 tokens [2025-04-28 18:49:47,604] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:49:49 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:49:49 engine.py:275] Added request chatcmpl-ffe1e835ae1044f6ba20b1b2e01789d7.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:49:49,370] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:49:49,371] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 7101 tokens [2025-04-28 18:49:50,716] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:49:53 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:49:53 engine.py:275] Added request chatcmpl-6d25234ae0044810b6e4c18c0b2f9204.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:49:53,603] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:49:53,603] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 15357 tokens [2025-04-28 18:49:56,852] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:49:58 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:49:58 engine.py:275] Added request chatcmpl-207d3664acf14f90a5021d448bd86324.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:49:58,577] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:49:58,577] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 12193 tokens [2025-04-28 18:50:01,064] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:50:01 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:50:01 engine.py:275] Added request chatcmpl-401d584a80d345698912dae3576f1a43.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:50:01,962] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:50:01,962] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 11633 tokens [2025-04-28 18:50:04,312] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:50:06 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:50:07 engine.py:275] Added request chatcmpl-3e15f42db3b14023bba6c5b5da7ca4bf.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:50:07,033] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:50:07,033] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 2507 tokens [2025-04-28 18:50:07,491] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:50:08 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:50:08 engine.py:275] Added request chatcmpl-ba05fee6a1714a11ac5fdea6ad3f4e6f.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:50:08,562] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:50:08,563] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 7336 tokens [2025-04-28 18:50:09,974] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:50:10 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:50:10 engine.py:275] Added request chatcmpl-a4526ffe8e24463a81e8ed82038a9b4f.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:50:10,600] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:50:10,600] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 1831 tokens [2025-04-28 18:50:10,944] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:50:11 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:50:11 engine.py:275] Added request chatcmpl-25a31122216e4528bbb0be7c4093c0b6.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:50:11,912] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:50:11,912] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 11673 tokens [2025-04-28 18:50:14,272] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:50:15 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:50:15 engine.py:275] Added request chatcmpl-59ae17e2f4ca40069f3ebdb467aff0ab.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:50:15,459] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:50:15,459] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 4082 tokens [2025-04-28 18:50:16,213] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:50:16 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:50:17 engine.py:275] Added request chatcmpl-1aeb48de1bcc40e98d3b596b745c4e3c.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:50:17,271] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:50:17,272] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 14921 tokens [2025-04-28 18:50:20,421] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:50:20 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:50:21 engine.py:275] Added request chatcmpl-c28f919a7ff34c8cb5d7781d2799f32f.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:50:21,483] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:50:21,483] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 14044 tokens [2025-04-28 18:50:24,402] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:50:25 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:50:25 engine.py:275] Added request chatcmpl-e1957f70d687477dba0cb65c9f2a3d41.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:50:25,814] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:50:25,814] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 12741 tokens [2025-04-28 18:50:28,436] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:50:30 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:50:31 engine.py:275] Added request chatcmpl-14fcb0e6215a4a7587eb89d7b8fe0c85.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:50:31,086] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:50:31,086] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 3641 tokens [2025-04-28 18:50:31,764] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:50:32 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:50:32 engine.py:275] Added request chatcmpl-5b4432da2c7549b391167ade59f027f2.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:50:32,564] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:50:32,564] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 10552 tokens [2025-04-28 18:50:34,649] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:50:35 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:50:35 engine.py:275] Added request chatcmpl-75c2172f0bda4eb6afacb1f59bd790e6.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:50:35,732] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:50:35,732] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 16526 tokens [2025-04-28 18:50:39,301] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:50:41 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:50:41 engine.py:275] Added request chatcmpl-d8a37002ea7b431480d07f2aba08b1a4.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:50:41,933] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:50:41,933] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 2150 tokens [2025-04-28 18:50:42,327] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:50:42 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:50:42 engine.py:275] Added request chatcmpl-ca367497b3fc41328d0d1638b27a4823.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:50:42,940] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:50:42,941] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 4756 tokens [2025-04-28 18:50:43,824] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:50:45 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:50:45 engine.py:275] Added request chatcmpl-5cc05d900b294ddbb298248a30c792e0.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:50:45,404] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:50:45,404] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 15985 tokens [2025-04-28 18:50:48,807] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:50:51 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:50:51 engine.py:275] Added request chatcmpl-d1cb44f802a24278893b35539dac1b4a.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:50:51,796] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:50:51,797] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 3695 tokens [2025-04-28 18:50:52,478] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:50:52 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:50:53 engine.py:275] Added request chatcmpl-423dfdb19d2e4ce38c92ff4ae2a49b6f.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:50:53,080] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:50:53,080] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 14557 tokens [2025-04-28 18:50:56,127] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:50:56 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:50:57 engine.py:275] Added request chatcmpl-da6ea15b675d47e2824379f491651556.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:50:57,454] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:50:57,454] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 6162 tokens [2025-04-28 18:50:58,632] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:50:59 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:50:59 engine.py:275] Added request chatcmpl-5e577d673afd457cbb9d935c30012ea1.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:50:59,831] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:50:59,831] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 8512 tokens [2025-04-28 18:51:01,475] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:51:01 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:51:02 engine.py:275] Added request chatcmpl-dfae382f97964e758d3a027a30e26a7e.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:51:02,213] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:51:02,213] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 13166 tokens [2025-04-28 18:51:04,920] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:51:05 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:51:06 engine.py:275] Added request chatcmpl-a8bca653788c41cbb75e78d8a9c3afa8.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:51:06,154] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:51:06,154] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 13908 tokens [2025-04-28 18:51:09,044] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:51:09 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:51:09 engine.py:275] Added request chatcmpl-8731b237fe194296a28c1d0a2c40015e.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:51:09,999] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:51:09,999] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 2518 tokens [2025-04-28 18:51:10,458] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:51:11 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:51:12 engine.py:275] Added request chatcmpl-14f99fe10f2948ddb42f82d58c32efbb.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:51:12,056] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:51:12,056] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 10009 tokens [2025-04-28 18:51:14,047] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:51:14 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:51:14 engine.py:275] Added request chatcmpl-2921ffcbe9ba481fb2e05b2c7c68a32c.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:51:14,969] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:51:14,969] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 9227 tokens [2025-04-28 18:51:16,771] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:51:17 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:51:18 engine.py:275] Added request chatcmpl-c0bc42773bde40fc83c84d014450ef53.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:51:18,191] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:51:18,191] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 1498 tokens [2025-04-28 18:51:18,461] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:51:19 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:51:19 engine.py:275] Added request chatcmpl-9a2f7a106cd24323b206789f0a68ca8f.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:51:19,331] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:51:19,331] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 11042 tokens [2025-04-28 18:51:21,547] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:51:22 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:51:22 engine.py:275] Added request chatcmpl-a04434897eb347c7a26b2c26799df4f6.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:51:22,711] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:51:22,712] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 9054 tokens [2025-04-28 18:51:24,477] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:51:25 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:51:25 engine.py:275] Added request chatcmpl-24924538ffb84d62b351b4a23e5d5d1c.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:51:25,460] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:51:25,460] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 3160 tokens [2025-04-28 18:51:26,044] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:51:26 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:51:26 engine.py:275] Added request chatcmpl-b13a818548cb438a8202b43bf5d1d18b.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:51:26,685] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:51:26,685] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 8550 tokens [2025-04-28 18:51:28,336] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:51:28 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:51:29 engine.py:275] Added request chatcmpl-19214e8003b34b598037b0afd4a04360.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:51:29,311] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:51:29,311] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 9793 tokens [2025-04-28 18:51:31,234] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:51:31 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:51:32 engine.py:275] Added request chatcmpl-e104e5d8bb5f4099a9f78f69a05bff6e.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:51:32,302] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:51:32,303] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 4726 tokens [2025-04-28 18:51:33,177] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:51:34 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:51:34 engine.py:275] Added request chatcmpl-8a6a6d5db29a4453a6cee96d0b3b9248.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:51:34,448] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:51:34,449] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 14123 tokens [2025-04-28 18:51:37,401] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:51:38 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:51:38 engine.py:275] Added request chatcmpl-7fc25cab94f1443ea3a1910813744de0.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:51:38,775] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:51:38,775] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 13737 tokens [2025-04-28 18:51:41,622] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:51:42 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:51:42 engine.py:275] Added request chatcmpl-7535a2a4ab4148018c53e3d390d40b7e.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:51:42,610] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:51:42,610] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 8267 tokens [2025-04-28 18:51:44,208] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:51:44 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:51:45 engine.py:275] Added request chatcmpl-508b551144aa4f2d9f85b18b3fe12014.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:51:45,141] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:51:45,141] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 15411 tokens [2025-04-28 18:51:48,424] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:51:51 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:51:52 engine.py:275] Added request chatcmpl-2cd11446ce484d2e9a2d08d87bd0c28a.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:51:52,038] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:51:52,038] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 7247 tokens [2025-04-28 18:51:53,413] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:51:53 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:51:54 engine.py:275] Added request chatcmpl-8767409b833841ac90f997905f401b18.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:51:54,240] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:51:54,240] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 16707 tokens [2025-04-28 18:51:57,854] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:52:00 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:52:00 engine.py:275] Added request chatcmpl-59b838518a42438aab829f69ed203bc1.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:52:00,869] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:52:00,869] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 6609 tokens [2025-04-28 18:52:02,111] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:52:02 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:52:03 engine.py:275] Added request chatcmpl-3a2c710ae9af46ffbfe8f5b0617bcbe8.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:52:03,052] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:52:03,052] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 6232 tokens [2025-04-28 18:52:04,230] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:52:04 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:52:04 engine.py:275] Added request chatcmpl-ce4a947b6f35474c9332fb3e670b591f.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:52:04,901] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:52:04,901] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 12940 tokens [2025-04-28 18:52:07,568] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:52:08 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:52:09 engine.py:275] Added request chatcmpl-75b46a149b54451793913dd33b98bc04.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:52:09,244] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:52:09,245] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 3819 tokens [2025-04-28 18:52:09,960] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:52:10 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:52:10 engine.py:275] Added request chatcmpl-bb9442f5a9c443db9971c8cd28c0da03.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:52:11,003] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:52:11,003] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 3321 tokens [2025-04-28 18:52:11,607] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:52:12 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:52:12 engine.py:275] Added request chatcmpl-6728b0de16a94047ba817d9f66a5ba2d.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:52:12,503] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:52:12,504] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 3250 tokens [2025-04-28 18:52:13,101] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:52:13 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:52:14 engine.py:275] Added request chatcmpl-5d87f8e71ca44281a73cab8adaa288b2.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:52:14,123] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:52:14,123] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 10482 tokens [2025-04-28 18:52:16,180] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:52:16 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:52:16 engine.py:275] Added request chatcmpl-936a1e30bb2a4636aa5d601e1173d8af.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:52:16,968] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:52:16,968] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 12118 tokens [2025-04-28 18:52:19,440] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:52:20 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:52:21 engine.py:275] Added request chatcmpl-a21400cd20c94169bfdaaed11240bdce.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:52:21,340] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:52:21,340] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 2661 tokens [2025-04-28 18:52:21,817] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:52:22 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:52:23 engine.py:275] Added request chatcmpl-785f2868a7584a5fb42d5f4517c3a383.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:52:23,067] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:52:23,067] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 9358 tokens [2025-04-28 18:52:24,919] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:52:25 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:52:26 engine.py:275] Added request chatcmpl-34aaf5580fa2456b90377caba0cd4248.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:52:26,114] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:52:26,114] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 14142 tokens [2025-04-28 18:52:29,071] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:52:29 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:52:30 engine.py:275] Added request chatcmpl-bbfee44dd2634b7aa69ec94bc2dc96ca.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:52:30,244] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:52:30,244] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 9246 tokens [2025-04-28 18:52:32,048] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:52:32 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:52:32 engine.py:275] Added request chatcmpl-cddb7cf634e04aca8d1681dd480ab4c6.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:52:32,793] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:52:32,793] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 11740 tokens [2025-04-28 18:52:35,165] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:52:35 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:52:36 engine.py:275] Added request chatcmpl-a1e42d7f94f64ce08a35d3a5a2133243.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:52:36,067] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:52:36,067] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 17927 tokens [2025-04-28 18:52:40,023] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:52:40 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:52:41 engine.py:275] Added request chatcmpl-47f2c119c1424969b2daf19b4cee3a3d.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:52:41,096] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:52:41,097] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 5928 tokens [2025-04-28 18:52:42,217] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:52:42 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:52:43 engine.py:275] Added request chatcmpl-646ae24e966f4a21b4f2f2b5d5973b1e.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:52:43,045] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:52:43,045] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 15083 tokens [2025-04-28 18:52:46,228] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:52:47 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:52:47 engine.py:275] Added request chatcmpl-d516de3b32ca4b81baf5027b20657fe1.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:52:47,807] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:52:47,807] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 2503 tokens [2025-04-28 18:52:48,264] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:52:48 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:52:49 engine.py:275] Added request chatcmpl-ee25560779564a578cd991ce2a3fc480.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:52:49,187] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:52:49,187] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 10365 tokens [2025-04-28 18:52:51,236] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:52:51 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:52:52 engine.py:275] Added request chatcmpl-30a1b05494c04b0e98bca5101b35dd0b.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:52:52,250] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:52:52,250] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 12953 tokens [2025-04-28 18:52:54,921] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:52:57 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:52:57 engine.py:275] Added request chatcmpl-92befbf786864820902104ccc8c88b46.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:52:57,712] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:52:57,712] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 11725 tokens [2025-04-28 18:53:00,084] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:53:02 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:53:02 engine.py:275] Added request chatcmpl-c6cc3d52867941b1a1279eb2811602e7.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:53:02,983] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:53:02,983] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 10122 tokens [2025-04-28 18:53:04,998] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:53:05 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:53:06 engine.py:275] Added request chatcmpl-89322956637f4d91b4152e5f3a9a884b.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:53:06,208] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:53:06,209] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 3238 tokens [2025-04-28 18:53:06,806] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:53:08 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:53:08 engine.py:275] Added request chatcmpl-b18c296fe01d4565a766c7916907da32.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:53:08,398] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:53:08,398] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 3039 tokens [2025-04-28 18:53:08,956] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:53:09 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:53:10 engine.py:275] Added request chatcmpl-f04f3c59f9f14c2db77282458aecb415.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:53:10,152] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:53:10,152] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 9350 tokens [2025-04-28 18:53:12,002] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:53:12 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:53:12 engine.py:275] Added request chatcmpl-66750cc6dcd649f3831af8fa1e2c08d8.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:53:12,961] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:53:12,961] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 5313 tokens [2025-04-28 18:53:13,939] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:53:14 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:53:14 engine.py:275] Added request chatcmpl-59c006f55c3b4fd7bbeed74a7988dd12.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:53:14,845] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:53:14,845] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 8215 tokens [2025-04-28 18:53:16,441] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:53:17 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:53:17 engine.py:275] Added request chatcmpl-cb5d429ffb564a8b9bf40155d55be420.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:53:17,577] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:53:17,577] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 7919 tokens [2025-04-28 18:53:19,089] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:53:20 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:53:20 engine.py:275] Added request chatcmpl-db5c4cccf6734c21b1c06a3787c0ad6e.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:53:20,489] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:53:20,489] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 7004 tokens [2025-04-28 18:53:21,814] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:53:22 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:53:23 engine.py:275] Added request chatcmpl-cb2067ae9e114d31a26e2ce791517493.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:53:23,163] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:53:23,163] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 5754 tokens [2025-04-28 18:53:24,242] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:53:26 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:53:26 engine.py:275] Added request chatcmpl-7784eb3175aa47b094d177e440d26dd5.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:53:26,862] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:53:26,862] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 12736 tokens [2025-04-28 18:53:29,479] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:53:30 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:53:30 engine.py:275] Added request chatcmpl-cfcc5ec1be70436fa47b9335b6c5a369.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:53:30,706] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:53:30,706] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 8502 tokens [2025-04-28 18:53:32,352] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:53:33 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:53:33 engine.py:275] Added request chatcmpl-38d28ce433254459ba095cf3fbdcfa04.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:53:33,818] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:53:33,818] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 5961 tokens [2025-04-28 18:53:34,944] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:53:35 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:53:36 engine.py:275] Added request chatcmpl-9f5669bec65943689c96ce89eb17b775.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:53:36,265] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:53:36,265] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 6223 tokens [2025-04-28 18:53:37,439] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:53:37 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:53:38 engine.py:275] Added request chatcmpl-e83cbc2cd6024f69b6d668308604a498.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:53:38,079] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:53:38,079] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 3370 tokens [2025-04-28 18:53:38,703] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:53:39 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:53:39 engine.py:275] Added request chatcmpl-56d0a527a7a34ecaaf5fc6791c60f2f1.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:53:39,538] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:53:39,538] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 3386 tokens [2025-04-28 18:53:40,164] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:53:42 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:53:42 engine.py:275] Added request chatcmpl-bd3af67fb2164d12bea8381843f35ffc.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:53:42,868] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:53:42,868] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 17240 tokens [2025-04-28 18:53:46,626] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:53:47 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:53:48 engine.py:275] Added request chatcmpl-6a9f2675cd914a08a6bd14537ad43b0b.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:53:48,479] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:53:48,479] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 7587 tokens [2025-04-28 18:53:49,938] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:53:52 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:53:52 engine.py:275] Added request chatcmpl-a32dd7d8c2c14b1398345c2485df06ec.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:53:52,777] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:53:52,778] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 6469 tokens [2025-04-28 18:53:53,997] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:53:55 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:53:55 engine.py:275] Added request chatcmpl-baf82e61e0924bab8c66a11f6eab54bc.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:53:55,347] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:53:55,348] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 7147 tokens [2025-04-28 18:53:56,700] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:53:56 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:53:57 engine.py:275] Added request chatcmpl-2e10c0ad859a4e48a4f2897e2a16b5c0.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:53:57,318] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:53:57,318] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 5208 tokens [2025-04-28 18:53:58,278] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:53:59 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:54:00 engine.py:275] Added request chatcmpl-4edc905a00b3480a87f6ee0801276d00.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:54:00,151] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:54:00,151] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 10655 tokens [2025-04-28 18:54:02,253] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:54:03 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:54:04 engine.py:275] Added request chatcmpl-7a25112c2b3748ebbeda23ca74d51255.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:54:04,313] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:54:04,313] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 16050 tokens [2025-04-28 18:54:07,742] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:54:09 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:54:10 engine.py:275] Added request chatcmpl-96447c2241884c0eadd689b19e59b5c6.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:54:10,017] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:54:10,017] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 4992 tokens [2025-04-28 18:54:10,935] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:54:11 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:54:11 engine.py:275] Added request chatcmpl-2e56f82b1ee843dcb51661ede06cad3d.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:54:11,843] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:54:11,843] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 5840 tokens [2025-04-28 18:54:12,948] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:54:14 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:54:14 engine.py:275] Added request chatcmpl-70a3230caad840fb864f0e6a872571b6.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:54:14,938] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:54:14,938] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 15756 tokens [2025-04-28 18:54:18,318] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 04-28 18:54:19 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:56844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 04-28 18:54:19 engine.py:275] Added request chatcmpl-596ba4ea76f44121afcc0aaf2cbebad6.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-28 18:54:19,750] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-04-28 18:54:19,750] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772

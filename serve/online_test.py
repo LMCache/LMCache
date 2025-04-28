@@ -17,10 +17,10 @@ NUM_QUERY = 200
 MODEL = "meta-llama/Llama-3.1-8B-Instruct"
 PORT = 8000
 FILES = [
-    'dataset/qmsum.csv'
+    'dataset/samsum.csv'
 ]
 FILE_TYPE = "sum" # or "qa"
-PREFILL_ONLY = True
+PREFILL_ONLY = False
 
 dataset_entries = 0
 
@@ -34,12 +34,14 @@ def generate_workload_trace(trace_files, num_query):
         global dataset_entries
         dataset_entries += len(df)
 
-        # Rename "Unnamed: 0" to "index_in_dataset" if it exists
-        df = df.rename(columns={'Unnamed: 0': 'index_in_dataset'})
-        # Derive dataset name from the file name (e.g., "hotpotqa" from "hotpotqa.csv")
-        dataset_name = os.path.splitext(os.path.basename(file_path))[0]
-        # Insert the new column "dataset" at the beginning
-        df.insert(0, 'dataset', dataset_name)
+        if 'index_in_dataset' in df.columns:
+            df.drop(columns=['index_in_dataset'], inplace=True)
+        df.insert(0, 'index_in_dataset', df.index)
+        # df = df.rename(columns={'Unnamed: 0': 'index_in_dataset'})
+
+        # dataset_name = os.path.splitext(os.path.basename(file_path))[0]
+        # df.insert(0, 'dataset', dataset_name)
+        
         df_list.append(df)
     
     # Concatenate all DataFrames
@@ -47,8 +49,7 @@ def generate_workload_trace(trace_files, num_query):
     
     # Generate the workload trace by sampling with replacement
     run_workload_trace = df_all.sample(n=num_query, replace=True, random_state=42)
-    # workload_trace = pd.concat([df_all, run_workload_trace]).reset_index(drop=True)
-    workload_trace = pd.concat([df_all]).reset_index(drop=True)
+    workload_trace = pd.concat([df_all, df_all]).reset_index(drop=True)
 
     return workload_trace
 
@@ -61,35 +62,46 @@ def execute_openai_request_with_output(row, model: str, client: openai.Client) -
 
     # Build the prompt using your template
 
-    prompt = f"This is user {row.index_in_dataset} in {row.dataset}."
+    prompt = f"This is user {row.index_in_dataset} in {row.dataset}.\n\n"
+    prompt += f"""
+    You are an expert at summarising conversations into concise summaries.  
+    Below are example contexts (with their reference summaries) to illustrate the desired format:
 
-    if FILE_TYPE == "qa":
-        prompt += (
-            "Answer the question based on the given passages. Only give me the answer and do not output any other words. Answer within 10 words."
-            "\n\nThe following are given passages."
-            f"{row.context}"
-        )
-    elif FILE_TYPE == "sum":
-        prompt += (
-            "Answer the question based on the given passages. Only give me the answer and do not output any other words."
-            "\n\nThe following are given passages."
-            f"{row.context}"
-        )
+    {row.context}
 
-    # If there's a question column and it is non-empty, append the question prompt
-    if hasattr(row, 'question') and row.question.strip():
-        if FILE_TYPE == "qa":
-            prompt += (
-                "\n\nAnswer the question based on the given passages. "
-                "Answer the question precisely. Answer within 10 words. Do NOT repeat the question or output any other words. "
-                f"Question: {row.question.strip()}\nAnswer:"
-            )
-        elif FILE_TYPE == "sum":
-            prompt += (
-                "\n\nAnswer the question based on the given passages. "
-                "Answer the question precisely. Do NOT repeat the question or output any other words. "
-                f"Question: {row.question.strip()}\nAnswer:"
-            )
+    Now, using that style, please summarise the following dialogue.
+    **Do not include any heading or the word “Summary:” — just output the summary text.**
+
+    {row.input}
+    """
+
+    # if FILE_TYPE == "qa":
+    #     prompt += (
+    #         "Answer the question based on the given passages. Only give me the answer and do not output any other words. Answer within 10 words."
+    #         "\n\nThe following are given passages."
+    #         f"{row.context}"
+    #     )
+    # elif FILE_TYPE == "sum":
+    #     prompt += (
+    #         "Answer the question based on the given passages. Only give me the answer and do not output any other words."
+    #         "\n\nThe following are given passages."
+    #         f"{row.context}"
+    #     )
+
+    # # If there's a question column and it is non-empty, append the question prompt
+    # if hasattr(row, 'question') and row.question.strip():
+    #     if FILE_TYPE == "qa":
+    #         prompt += (
+    #             "\n\nAnswer the question based on the given passages. "
+    #             "Answer the question precisely. Answer within 10 words. Do NOT repeat the question or output any other words. "
+    #             f"Question: {row.question.strip()}\nAnswer:"
+    #         )
+    #     elif FILE_TYPE == "sum":
+    #         prompt += (
+    #             "\n\nAnswer the question based on the given passages. "
+    #             "Answer the question precisely. Do NOT repeat the question or output any other words. "
+    #             f"Question: {row.question.strip()}\nAnswer:"
+    #         )
     
     messages = [
         {
