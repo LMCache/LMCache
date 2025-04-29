@@ -57,45 +57,47 @@ class AuditConnector(RemoteConnector):
         """Store data with optional checksum tracking"""
         data = memory_obj.byte_array
         checksum = self._calculate_checksum(data)
-
+        data_size = len(data)
         self.logger.debug(
-            f"[REMOTE_AUDIT]:PUT|START|Key: {key}|Size: {len(data)} bytes|"
-            f"Checksum: {checksum[:8]}|Saved: {len(self.checksum_registry)}")
+            f"[REMOTE_AUDIT]:PUT|START|Size:{data_size}|"
+            f"Checksum:{checksum[:8]}|Saved:{len(self.checksum_registry)}|Key:{key}"
+        )
 
         try:
             t1 = time.perf_counter()
             await self.real_connector.put(key, memory_obj)
             t2 = time.perf_counter()
+            cost = (t2 - t1) * 1000
             if self.registry_lock:
                 with self.registry_lock:
                     self.checksum_registry[key] = checksum
-            cost = (t2 - t1) * 1000
             self.logger.info(
-                f"[REMOTE_AUDIT]PUT|SUCCESS|Key: {key}|Size: {len(data)} bytes|"
-                f"Checksum: {checksum[:8]}|Cost: {cost:.6f}ms|Saved: "
-                f"{len(self.checksum_registry)}")
+                f"[REMOTE_AUDIT]PUT|SUCCESS|Size:{data_size}|"
+                f"Checksum:{checksum[:8]}|Cost:{cost:.6f}ms|Saved:"
+                f"{len(self.checksum_registry)}|Key:{key}")
 
         except Exception as e:
-            self.logger.error(
-                f"[REMOTE_AUDIT]PUT|FAILED|Key: {key}|Error: {str(e)}")
+            self.logger.error(f"[REMOTE_AUDIT]PUT|FAILED|Size:{data_size}"
+                              f"|Key:{key}|Error: {str(e)}")
             raise
 
     async def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         """Retrieve data with optional integrity check"""
-        self.logger.debug(f"[REMOTE_AUDIT]GET|START|Key: {key}|"
-                          f"Saved: {len(self.checksum_registry)}")
+        self.logger.debug(f"[REMOTE_AUDIT]GET|START|"
+                          f"Saved:{len(self.checksum_registry)}|Key:{key}")
 
         try:
             t1 = time.perf_counter()
             result = await self.real_connector.get(key)
             t2 = time.perf_counter()
             if result is None:
-                self.logger.info(f"[REMOTE_AUDIT]GET|MISS|Key: {key}|"
+                self.logger.info(f"[REMOTE_AUDIT]GET|MISS|Key:{key}|"
                                  f"Saved: {len(self.checksum_registry)}")
                 return None
 
             current_data = result.byte_array
             current_checksum = self._calculate_checksum(current_data)
+            data_size = len(current_data)
 
             if self.registry_lock:
                 with self.registry_lock:
@@ -103,26 +105,27 @@ class AuditConnector(RemoteConnector):
 
                 if expected_checksum and current_checksum != expected_checksum:
                     self.logger.error(
-                        f"[REMOTE_AUDIT]GET|CHECKSUM MISMATCH|Key: {key}|"
-                        f"Expected: {expected_checksum[:8]}|"
-                        f"Actual: {current_checksum[:8]}")
+                        f"[REMOTE_AUDIT]GET|MISMATCH|Size:{data_size}|"
+                        f"Expected:<{expected_checksum[:8]}>|"
+                        f"Actual:<{current_checksum[:8]}>|Key:{key}")
                     return None
 
             cost = (t2 - t1) * 1000
             self.logger.info(
-                f"[REMOTE_AUDIT]GET|SUCCESS|Key: {key}|"
-                f"Checksum: {current_checksum[:8]}|"
-                f"Cost: {cost:.6f}ms|Saved: {len(self.checksum_registry)}")
+                f"[REMOTE_AUDIT]GET|SUCCESS|"
+                f"Checksum:{current_checksum[:8]}|"
+                f"Cost:{cost:.6f}ms|Saved:{len(self.checksum_registry)}|Key:{key}"
+            )
             return result
 
         except Exception as e:
             self.logger.error(
-                f"[REMOTE_AUDIT]GET|FAILED|Key: {key}|Error: {str(e)}")
+                f"[REMOTE_AUDIT]GET|FAILED|Key:{key}|Error: {str(e)}")
             raise
 
     async def exists(self, key: CacheEngineKey) -> bool:
         """Check key existence with audit log"""
-        self.logger.debug(f"[REMOTE_AUDIT]EXISTS|START|Key: {key}")
+        self.logger.debug(f"[REMOTE_AUDIT]EXISTS|START|Key:{key}")
         result = await self.real_connector.exists(key)
         self.logger.info(f"[REMOTE_AUDIT]EXISTS|{result}|Key: {key}")
         return result
@@ -131,8 +134,7 @@ class AuditConnector(RemoteConnector):
         """List keys with audit log"""
         self.logger.debug("[REMOTE_AUDIT]LIST|START")
         result = await self.real_connector.list()
-        self.logger.info(
-            f"[REMOTE_AUDIT]LIST|SUCCESS|Found {len(result)} keys")
+        self.logger.info(f"[REMOTE_AUDIT]LIST|SUCCESS|Size:{len(result)}")
         return result
 
     async def close(self):
