@@ -45,15 +45,14 @@ Our latest [blog posts](https://lmcache.github.io) and the [documentation](https
 
 # Community meeting
 
-The community meeting for LMCache is co-hosted with the community meeting for the [vLLM production stack project](https://github.com/vllm-project/production-stack/tree/main). 
-
+The community meeting for LMCache is hosted weekly.
 Meeting Details:
 
-- Tuesdays at 4:00 PM PT – [Add to Calendar](https://drive.usercontent.google.com/u/0/uc?id=1j1gO2PcFQLBi98fq4djEEiqOK_oHgq9j&export=download)
+- Tuesdays at 9:00 AM PT – [Add to Calendar](https://drive.google.com/file/d/15Xz8-LtpBQ5QgR7KrorOOyfuohCFQmwn/view?usp=drive_link)
 
-- Tuesdays at 8:00 AM PT – [Add to Calendar](https://drive.usercontent.google.com/u/0/uc?id=1xdkxpg-OpxkuLqjegHQhihwBM9koFvSh&export=download)
+- Tuesdays at 6:30 PM PT – [Add to Calendar](https://drive.google.com/file/d/1WMZNFXV24kWzprDjvO-jQ7mOY7whqEdG/view?usp=drive_link)
 
-Meetings alternate weekly between the two times. All are welcome to join!
+Meetings **alternate weekly** between the two times. All are welcome to join!
 
 ## Contributing
 
