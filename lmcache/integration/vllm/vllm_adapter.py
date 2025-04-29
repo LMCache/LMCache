@@ -60,8 +60,8 @@ def init_lmcache_engine(
     parallel_config: ParallelConfig,
     cache_config: CacheConfig,
 ) -> Optional[LMCacheEngine]:
-    """Initialize the LMCache engine by the given model config and parallel 
-    config. This function will check the environment variable 
+    """Initialize the LMCache engine by the given model config and parallel
+    config. This function will check the environment variable
     `LMCACHE_CONFIG_FILE` to load the configuration file. If that environment
     variable is not set, this function will return None.
 
@@ -123,7 +123,7 @@ def broadcast_seq_group_list(
     :param model_input: The model input for the current request.
     :type model_input: ModelInputForGPUWithSamplingMetadata
 
-    :param is_driver_worker: Whether the code is executed in driver worker. 
+    :param is_driver_worker: Whether the code is executed in driver worker.
     :type is_driver_worker: bool
 
     : return: Original `model_input` if driver_worker.
@@ -238,7 +238,7 @@ def lmcache_should_store(
 
 
     :return: A list of StoreStatus.
-             StoreStatus.PREFILL/DECODE/CHUNK_PREFILL if 
+             StoreStatus.PREFILL/DECODE/CHUNK_PREFILL if
              we should store KV after PREFILL/DECODE.
              StoreStatus.NONE if no storing is required.
     """
@@ -357,7 +357,7 @@ def lmcache_store_kv(
 
     :param kv_caches: The paged memory to get KV from
     :type kv_caches: List[torch.Tensor]
-    
+
     :param store_status: Indicate whether and how KV cache of each req is stored
     :type store_status: List[StoreStatus]
     """
@@ -489,7 +489,7 @@ def lmcache_retrieve_kv(
     retrieve_status: List[RetrieveStatus],
 ) -> Tuple["ModelInputForGPUWithSamplingMetadata", bool, Union[
         torch.Tensor, IntermediateTensors]]:
-    """Retrieve the KV caches from LMCache for the current model_input. And 
+    """Retrieve the KV caches from LMCache for the current model_input. And
     rebuild the model_input to reflect the changes in KV if necessary.
 
     :param model_executable: The model executable for the current request.
@@ -501,12 +501,12 @@ def lmcache_retrieve_kv(
     :param kv_caches: The paged memory to put KV to
     :type kv_caches: List[torch.Tensor]
 
-    :param retrieve_status: Indicate whether and how 
+    :param retrieve_status: Indicate whether and how
                             KV cache of each req is retrieved
     :type retrieve_status: List[RetrieveStatus]
-    
+
     :return: The rebuilt model_input to reflect the changes in KV.
-    :return: The boolean value to indicate whether the 
+    :return: The boolean value to indicate whether the
              entire execute_model should be skipped
     """
 
