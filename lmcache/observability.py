@@ -14,12 +14,12 @@ logger = init_logger(__name__)
 
 @dataclass
 class LMCacheStats:
-    # Counter (will accumulate over time)
-    num_retrieve_requests: int
-    num_store_requests: int
-
-    num_requested_tokens: int
-    num_hit_tokens: int
+    # Counter (Note that these are incremental values,
+    # which will accumulate over time in Counter)
+    interval_retrieve_requests: int
+    interval_store_requests: int
+    interval_requested_tokens: int
+    interval_hit_tokens: int
 
     # Real time value measurements (will be reset after each log)
     cache_hit_rate: float
@@ -75,14 +75,10 @@ class StoreRequestStats:
 class LMCStatsMonitor:
 
     def __init__(self):
-        # Accumulated stats over time
-        self.num_retrieve_requests = 0
-        self.num_store_requests = 0
-
-        self.num_requested_tokens = 0
-        self.num_hit_tokens = 0
-
         # Interval metrics that will be reset after each log
+        # Accumulate incremental values in the Prometheus Counter
+        self.interval_retrieve_requests = 0
+        self.interval_store_requests = 0
         self.interval_requested_tokens = 0
         self.interval_hit_tokens = 0
 
@@ -109,8 +105,7 @@ class LMCStatsMonitor:
                                               start_time=curr_time,
                                               end_time=0)
         self.interval_requested_tokens += num_tokens
-        self.num_requested_tokens += num_tokens
-        self.num_retrieve_requests += 1
+        self.interval_retrieve_requests += 1
         self.retrieve_requests[self.retrieve_request_id] = retrieve_stats
         self.retrieve_request_id += 1
         return self.retrieve_request_id - 1
@@ -123,7 +118,6 @@ class LMCStatsMonitor:
         retrieve_stats.local_hit_tokens = retrieved_tokens
         retrieve_stats.end_time = curr_time
         self.interval_hit_tokens += retrieved_tokens
-        self.num_hit_tokens += retrieved_tokens
 
     @thread_safe
     def on_store_request(self, num_tokens: int) -> int:
@@ -134,7 +128,7 @@ class LMCStatsMonitor:
         store_stats = StoreRequestStats(num_tokens=num_tokens,
                                         start_time=curr_time,
                                         end_time=0)
-        self.num_store_requests += 1
+        self.interval_store_requests += 1
         self.store_requests[self.store_request_id] = store_stats
         self.store_request_id += 1
         return self.store_request_id - 1
@@ -163,6 +157,9 @@ class LMCStatsMonitor:
         """
         Clear all the distribution stats 
         """
+        self.interval_retrieve_requests = 0
+        self.interval_store_requests = 0
+
         self.interval_requested_tokens = 0
         self.interval_hit_tokens = 0
 
@@ -209,10 +206,10 @@ class LMCStatsMonitor:
             [stats.store_speed() for stats in self.store_requests.values()])
 
         ret = LMCacheStats(
-            num_retrieve_requests=self.num_retrieve_requests,
-            num_store_requests=self.num_store_requests,
-            num_requested_tokens=self.num_requested_tokens,
-            num_hit_tokens=self.num_hit_tokens,
+            interval_retrieve_requests=self.interval_retrieve_requests,
+            interval_store_requests=self.interval_store_requests,
+            interval_requested_tokens=self.interval_requested_tokens,
+            interval_hit_tokens=self.interval_hit_tokens,
             cache_hit_rate=cache_hit_rate,
             local_cache_usage_bytes=self.local_cache_usage_bytes,
             remote_cache_usage_bytes=self.remote_cache_usage_bytes,
@@ -360,13 +357,14 @@ class PrometheusLogger:
 
     def log_prometheus(self, stats: LMCacheStats):
         self._log_counter(self.counter_num_retrieve_requests,
-                          stats.num_retrieve_requests)
+                          stats.interval_retrieve_requests)
         self._log_counter(self.counter_num_store_requests,
-                          stats.num_store_requests)
+                          stats.interval_store_requests)
 
         self._log_counter(self.counter_num_requested_tokens,
-                          stats.num_requested_tokens)
-        self._log_counter(self.counter_num_hit_tokens, stats.num_hit_tokens)
+                          stats.interval_requested_tokens)
+        self._log_counter(self.counter_num_hit_tokens,
+                          stats.interval_hit_tokens)
 
         self._log_gauge(self.gauge_cache_hit_rate, stats.cache_hit_rate)
 
