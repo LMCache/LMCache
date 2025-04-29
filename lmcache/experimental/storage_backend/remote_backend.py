@@ -117,11 +117,12 @@ class RemoteBackend(StorageBackendInterface):
         Blocking get function.
         """
         t1 = time.perf_counter()
-        future = asyncio.run_coroutine_threadsafe(self.connection_get_wrapper(key),
-                                                  self.loop)
+        future = asyncio.run_coroutine_threadsafe(
+            self.connection_get_wrapper(key), self.loop)
         memory_obj = future.result()
         t2 = time.perf_counter()
-        self.stats_monitor.update_interval_remote_time_to_get_sync((t2 - t1) * 1000)
+        self.stats_monitor.update_interval_remote_time_to_get_sync(
+            (t2 - t1) * 1000)
         if memory_obj is None:
             return None
         decompressed_memory_obj = self.deserializer.deserialize(memory_obj)
@@ -136,12 +137,15 @@ class RemoteBackend(StorageBackendInterface):
         future.result()
         logger.info("Remote backend closed.")
 
-    async def connection_put_wrapper(self, key: CacheEngineKey, memory_obj: MemoryObj):
+    async def connection_put_wrapper(self,
+                                     key: CacheEngineKey,
+                                     memory_obj: MemoryObj):
         obj_size = memory_obj.get_size()
         begin = time.perf_counter()
         await self.connection.put(key, memory_obj)
         end = time.perf_counter()
-        self.stats_monitor.update_interval_remote_time_to_put((end - begin) * 1000)
+        self.stats_monitor.update_interval_remote_time_to_put(
+            (end - begin) * 1000)
         self.stats_monitor.update_interval_remote_write_metrics(obj_size)
         logger.debug(f"Bytes offloaded: {obj_size / 1e6:.4f} MBytes, ")
 
@@ -149,7 +153,8 @@ class RemoteBackend(StorageBackendInterface):
         begin = time.perf_counter()
         memory_obj = await self.connection.get(key)
         end = time.perf_counter()
-        self.stats_monitor.update_interval_remote_time_to_get((end - begin) * 1000)
+        self.stats_monitor.update_interval_remote_time_to_get(
+            (end - begin) * 1000)
         if memory_obj is not None:
             obj_size = memory_obj.get_size()
             self.stats_monitor.update_interval_remote_read_metrics(obj_size)

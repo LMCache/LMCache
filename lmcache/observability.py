@@ -332,25 +332,29 @@ class PrometheusLogger:
 
         self.counter_num_remote_read_requests = self._counter_cls(
             name="lmcache:num_remote_read_requests",
-            documentation="Total number of requests read from remote backends in lmcache",
+            documentation="Total number of requests read from "
+                          "remote backends in lmcache",
             labelnames=labelnames,
         )
 
         self.counter_num_remote_read_bytes = self._counter_cls(
             name="lmcache:num_remote_read_bytes",
-            documentation="Total number of bytes read from remote backends in lmcache",
+            documentation="Total number of bytes read from "
+                          "remote backends in lmcache",
             labelnames=labelnames,
         )
 
         self.counter_num_remote_write_requests = self._counter_cls(
             name="lmcache:num_remote_write_requests",
-            documentation="Total number of requests write to remote backends in lmcache",
+            documentation="Total number of requests write to "
+                          "remote backends in lmcache",
             labelnames=labelnames,
         )
 
         self.counter_num_remote_write_bytes = self._counter_cls(
             name="lmcache:num_remote_write_bytes",
-            documentation="Total number of bytes write to remote backends in lmcache",
+            documentation="Total number of bytes write to "
+                          "remote backends in lmcache",
             labelnames=labelnames,
         )
 
