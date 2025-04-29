@@ -243,7 +243,7 @@ echo 'lmcache isort: Done'
 
 
 if ! git diff --quiet &>/dev/null; then
-    echo 
+    echo
     echo "🔍🔍There are files changed by the format checker or by you that are not added and committed:"
     git --no-pager diff --name-only
     echo "🔍🔍Format checker passed, but please add, commit and push all the files above to include changes made by the format checker."
