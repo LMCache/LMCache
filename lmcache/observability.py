@@ -267,10 +267,10 @@ class LMCStatsMonitor:
             interval_remote_read_bytes=self.interval_remote_read_bytes,
             interval_remote_write_requests=self.interval_remote_write_requests,
             interval_remote_write_bytes=self.interval_remote_write_bytes,
-            interval_remote_time_to_get=self.
-            interval_remote_time_to_get.copy(),
-            interval_remote_time_to_put=self.
-            interval_remote_time_to_put.copy(),
+            interval_remote_time_to_get=self.interval_remote_time_to_get.copy(
+            ),
+            interval_remote_time_to_put=self.interval_remote_time_to_put.copy(
+            ),
             interval_remote_time_to_get_sync=self.
             interval_remote_time_to_get_sync.copy(),
             cache_hit_rate=cache_hit_rate,
