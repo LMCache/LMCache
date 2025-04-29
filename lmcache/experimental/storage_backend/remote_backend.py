@@ -137,8 +137,7 @@ class RemoteBackend(StorageBackendInterface):
         future.result()
         logger.info("Remote backend closed.")
 
-    async def connection_put_wrapper(self,
-                                     key: CacheEngineKey,
+    async def connection_put_wrapper(self, key: CacheEngineKey,
                                      memory_obj: MemoryObj):
         obj_size = memory_obj.get_size()
         begin = time.perf_counter()

@@ -267,9 +267,12 @@ class LMCStatsMonitor:
             interval_remote_read_bytes=self.interval_remote_read_bytes,
             interval_remote_write_requests=self.interval_remote_write_requests,
             interval_remote_write_bytes=self.interval_remote_write_bytes,
-            interval_remote_time_to_get=self.interval_remote_time_to_get.copy(),
-            interval_remote_time_to_put=self.interval_remote_time_to_put.copy(),
-            interval_remote_time_to_get_sync=self.interval_remote_time_to_get_sync.copy(),
+            interval_remote_time_to_get=self.
+            interval_remote_time_to_get.copy(),
+            interval_remote_time_to_put=self.
+            interval_remote_time_to_put.copy(),
+            interval_remote_time_to_get_sync=self.
+            interval_remote_time_to_get_sync.copy(),
             cache_hit_rate=cache_hit_rate,
             local_cache_usage_bytes=self.local_cache_usage_bytes,
             remote_cache_usage_bytes=self.remote_cache_usage_bytes,
@@ -333,28 +336,28 @@ class PrometheusLogger:
         self.counter_num_remote_read_requests = self._counter_cls(
             name="lmcache:num_remote_read_requests",
             documentation="Total number of requests read from "
-                          "remote backends in lmcache",
+            "remote backends in lmcache",
             labelnames=labelnames,
         )
 
         self.counter_num_remote_read_bytes = self._counter_cls(
             name="lmcache:num_remote_read_bytes",
             documentation="Total number of bytes read from "
-                          "remote backends in lmcache",
+            "remote backends in lmcache",
             labelnames=labelnames,
         )
 
         self.counter_num_remote_write_requests = self._counter_cls(
             name="lmcache:num_remote_write_requests",
             documentation="Total number of requests write to "
-                          "remote backends in lmcache",
+            "remote backends in lmcache",
             labelnames=labelnames,
         )
 
         self.counter_num_remote_write_bytes = self._counter_cls(
             name="lmcache:num_remote_write_bytes",
             documentation="Total number of bytes write to "
-                          "remote backends in lmcache",
+            "remote backends in lmcache",
             labelnames=labelnames,
         )
 
@@ -427,8 +430,8 @@ class PrometheusLogger:
         )
 
         remote_time_to_get = [
-            1, 5, 10, 20, 40, 60, 80, 100, 250, 500, 750,
-            1000, 2500, 5000, 7500, 10000
+            1, 5, 10, 20, 40, 60, 80, 100, 250, 500, 750, 1000, 2500, 5000,
+            7500, 10000
         ]
         self.histogram_remote_time_to_get = self._histogram_cls(
             name="lmcache:remote_time_to_get",
@@ -438,8 +441,8 @@ class PrometheusLogger:
         )
 
         remote_time_to_put = [
-            1, 5, 10, 20, 40, 60, 80, 100, 250, 500, 750,
-            1000, 2500, 5000, 7500, 10000
+            1, 5, 10, 20, 40, 60, 80, 100, 250, 500, 750, 1000, 2500, 5000,
+            7500, 10000
         ]
         self.histogram_remote_time_to_put = self._histogram_cls(
             name="lmcache:remote_time_to_put",
@@ -449,8 +452,8 @@ class PrometheusLogger:
         )
 
         remote_time_to_get_sync = [
-            1, 5, 10, 20, 40, 60, 80, 100, 250, 500, 750,
-            1000, 2500, 5000, 7500, 10000
+            1, 5, 10, 20, 40, 60, 80, 100, 250, 500, 750, 1000, 2500, 5000,
+            7500, 10000
         ]
         self.histogram_remote_time_to_get_sync = self._histogram_cls(
             name="lmcache:remote_time_to_get_sync",
