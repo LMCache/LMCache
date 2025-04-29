@@ -5,7 +5,7 @@ Overview
 --------
 
 CPU RAM and Local Storage are the two ways of offloading KV cache onto non-GPU
-memory of the same machine that is running inference for your model.
+memory of the same machine that is running inference.
 
 Two ways to configure LMCache CPU Offloading:
 ---------------------------------------------
