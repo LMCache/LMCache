@@ -107,9 +107,29 @@ class LMCacheControllerManager:
             self, msg: OrchMsg) -> Optional[OrchRetMsg]:
         if isinstance(msg, LookupMsg):
             return await self.kv_controller.lookup(msg)
+        elif isinstance(msg, HealthMsg):
+            ret_msg = await self.reg_controller.health(msg)
+            assert isinstance(ret_msg, HealthRetMsg)
+            return ret_msg
         elif isinstance(msg, ClearMsg):
             ret_msg = await self.issue_control_message(msg)
             assert isinstance(ret_msg, ClearRetMsg)
+            return ret_msg
+        elif isinstance(msg, PinMsg):
+            ret_msg = await self.issue_control_message(msg)
+            assert isinstance(ret_msg, PinRetMsg)
+            return ret_msg
+        elif isinstance(msg, CompressMsg):
+            ret_msg = await self.issue_control_message(msg)
+            assert isinstance(ret_msg, CompressRetMsg)
+            return ret_msg
+        elif isinstance(msg, MoveMsg):
+            ret_msg = await self.issue_control_message(msg)
+            assert isinstance(ret_msg, MoveRetMsg)
+            return ret_msg
+        elif isinstance(msg, CheckFinishMsg):
+            ret_msg = await self.issue_control_message(msg)
+            assert isinstance(ret_msg, CheckFinishRetMsg)
             return ret_msg
         else:
             logger.error(f"Unknown ochestration message type: {msg}")
