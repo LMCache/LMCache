@@ -6,6 +6,10 @@ from typing import Any, Optional, Tuple
 import torch
 import yaml
 
+from lmcache.logging import init_logger
+
+logger = init_logger(__name__)
+
 
 @dataclass
 class LMCacheEngineMetadata:
@@ -114,7 +118,7 @@ class LMCacheEngineConfig:
             blend_min_tokens=256,
             blend_separator=blend_default_separator,
             blend_add_special_in_precomp=False,
-        )
+        ).log_config()
 
     @staticmethod
     def from_file(file_path: str) -> "LMCacheEngineConfig":
@@ -170,7 +174,7 @@ class LMCacheEngineConfig:
             blend_min_tokens,
             blend_separator,
             blend_add_special_in_precomp,
-        )
+        ).log_config()
 
     @staticmethod
     def from_env() -> "LMCacheEngineConfig":
@@ -227,7 +231,28 @@ class LMCacheEngineConfig:
             parse_env(get_env_name("blend_add_special_in_precomp"),
                       config.blend_add_special_in_precomp))
 
-        return config
+        return config.log_config()
+
+    def log_config(self) -> 'LMCacheEngineConfig':
+        """Log all configuration settings
+        """
+        config_dict = {
+            'chunk_size': self.chunk_size,
+            'local_device': self.local_device,
+            'max_local_cache_size': f"{self.max_local_cache_size} GB",
+            'remote_url': self.remote_url,
+            'remote_serde': self.remote_serde,
+            'pipelined_backend': self.pipelined_backend,
+            'save_decode_cache': self.save_decode_cache,
+            'enable_blending': self.enable_blending,
+            'blend_recompute_ratio': self.blend_recompute_ratio,
+            'blend_min_tokens': self.blend_min_tokens,
+            'blend_separator': self.blend_separator,
+            'blend_add_special_in_precomp': self.blend_add_special_in_precomp
+        }
+        logger.info(f"LMCache Configuration: {config_dict}")
+
+        return self
 
 
 ### SOME GLOBAL CONFIGS

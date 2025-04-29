@@ -1,5 +1,5 @@
-Sphinx==7.4.7
-sphinx-rtd-theme==2.0.0
+Sphinx==8.2.3
+sphinx-rtd-theme==3.0.2
 sphinxcontrib-applehelp==2.0.0
 sphinxcontrib-devhelp==2.0.0
 sphinxcontrib-htmlhelp==2.1.0
@@ -7,7 +7,6 @@ sphinxcontrib-jquery==4.1
 sphinxcontrib-jsmath==1.0.1
 sphinxcontrib-qthelp==2.0.0
 sphinxcontrib-serializinghtml==2.0.0
-sphinxawesome_theme
-sphinxawesome_theme
-sphinx-copybutton
+sphinxawesome_theme==5.3.2
+sphinx-copybutton==0.5.2
 msgspec

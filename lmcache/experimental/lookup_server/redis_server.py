@@ -25,8 +25,8 @@ class RedisLookupServer(LookupServerInterface):
         self.host = host
         self.port = int(port)
 
-        self.connection = redis.Redis(host=host,
-                                      port=port,
+        self.connection = redis.Redis(host=self.host,
+                                      port=self.port,
                                       decode_responses=True)
         logger.info(f"Connected to Redis lookup server at {host}:{port}")
         #decode_responses=False)

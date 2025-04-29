@@ -343,6 +343,10 @@ class LMCacheConnectorV1Impl:
         self._lmcache_chunk_size = 256
         self.vllm_config = vllm_config
 
+        self.skip_last_n_tokens = \
+            vllm_config.kv_transfer_config.get_from_extra_config(
+                "skip_last_n_tokens", 0)
+
 
     ####################
     # Worker side APIs
@@ -399,16 +403,26 @@ class LMCacheConnectorV1Impl:
                 lmcache_chunk_size * lmcache_chunk_size
             token_mask[:masked_token_count] = False
 
-            ret_token_mask = self.lmcache_engine.retrieve(
-                tokens,
-                token_mask,
-                kvcaches=kvcaches,
-                slot_mapping=slot_mapping)
+            if self.skip_last_n_tokens > 0:
+                ret_token_mask = self.lmcache_engine.retrieve(
+                    tokens[:-self.skip_last_n_tokens],
+                    token_mask[:-self.skip_last_n_tokens],
+                    kvcaches=kvcaches,
+                    slot_mapping=slot_mapping[:-self.skip_last_n_tokens],
+                )
+            else:
+                ret_token_mask = self.lmcache_engine.retrieve(
+                    tokens,
+                    token_mask,
+                    kvcaches=kvcaches,
+                    slot_mapping=slot_mapping,
+                )
 
             # Check the result
             num_retrieved_tokens = ret_token_mask.sum().item()
             num_expected_tokens = request.load_spec.lmcache_cached_tokens - \
-                    request.load_spec.vllm_cached_tokens
+                    request.load_spec.vllm_cached_tokens - \
+                    self.skip_last_n_tokens
             if num_retrieved_tokens < num_expected_tokens:
                 logger.error(
                     "The number of retrieved tokens is less than the "
@@ -524,7 +538,11 @@ class LMCacheConnectorV1Impl:
             return 0
 
         token_ids = torch.tensor(request.prompt_token_ids)
-        num_external_hit_tokens = self.lookup_client.lookup(token_ids)
+        if self.skip_last_n_tokens > 0:
+            num_external_hit_tokens = self.lookup_client.lookup(
+                token_ids[:-self.skip_last_n_tokens])
+        else:
+            num_external_hit_tokens = self.lookup_client.lookup(token_ids)
 
         # When prompt length is divisible by the block size and all
         # blocks are cached, we need to recompute the last token.

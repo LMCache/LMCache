@@ -13,11 +13,14 @@
 # limitations under the License.
 
 import asyncio
-import inspect
 import json
+import operator
 import os
 from dataclasses import dataclass
+from functools import reduce
 from typing import List, Optional, no_type_check
+
+import torch
 
 from lmcache.experimental.memory_management import (MemoryAllocatorInterface,
                                                     MemoryObj)
@@ -110,36 +113,50 @@ class MooncakestoreConnector(RemoteConnector):
         self.loop = loop
 
     async def exists(self, key: CacheEngineKey) -> bool:
-        return self.store.is_exist(key.to_string() + "metadata")
+        return self.store.is_exist(key.to_string())
 
     async def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         key_str = key.to_string()
 
-        metadata_bytes = self.store.get(key_str + "metadata")
+        try:
+            buffer = self.store.get_buffer(key_str)
+        except Exception as e:
+            logger.error(f"Failed to get key {key_str}. {e}")
+
+        if buffer is None:
+            return None
+
+        retrieved_view = memoryview(buffer)
+        metadata_bytes = retrieved_view[:METADATA_BYTES_LEN]
         if metadata_bytes is None or len(metadata_bytes) != METADATA_BYTES_LEN:
             return None
 
-        assert not inspect.isawaitable(metadata_bytes)
-
-        metadata = RedisMetadata.deserialize(memoryview(metadata_bytes))
+        metadata = RedisMetadata.deserialize(metadata_bytes)
 
         memory_obj = self.memory_allocator.allocate(
             metadata.shape,
             metadata.dtype,
             metadata.fmt,
         )
+        assert len(retrieved_view) == metadata.length + METADATA_BYTES_LEN
+
         if memory_obj is None:
             logger.warning("Failed to allocate memory during remote receive")
             return None
 
-        kv_bytes = self.store.get(key_str + "kv_bytes")
-        assert not inspect.isawaitable(kv_bytes)
-        assert kv_bytes is not None
+        if memory_obj.tensor:
+            assert metadata.dtype is not None
+            num_elements = reduce(operator.mul, metadata.shape)
+            temp_tensor = torch.frombuffer(buffer,
+                                           dtype=metadata.dtype,
+                                           offset=METADATA_BYTES_LEN,
+                                           count=num_elements).reshape(
+                                               metadata.shape)
 
-        view = memoryview(memory_obj.byte_array)
-        view[:metadata.length] = kv_bytes
-
-        return memory_obj
+            memory_obj.tensor.copy_(temp_tensor)
+            return memory_obj
+        else:
+            return None
 
     async def put(self, key: CacheEngineKey, memory_obj: MemoryObj):
         # Please use a function like `memory_obj.to_meta()`.
@@ -150,14 +167,13 @@ class MooncakestoreConnector(RemoteConnector):
 
         metadata_bytes = RedisMetadata(len(kv_bytes), kv_shape, kv_dtype,
                                        memory_format).serialize()
-
+        assert len(metadata_bytes) == METADATA_BYTES_LEN
         key_str = key.to_string()
-        self.store.put(key_str + "metadata", metadata_bytes)
-        key_byte_str = key_str + "kv_bytes"
+
         try:
-            self.store.put(key_byte_str, kv_bytes)
+            self.store.put_parts(key_str, metadata_bytes, kv_bytes)
         except Exception as e:
-            logger.error(f"Failed to put key {key_byte_str},"
+            logger.error(f"Failed to put key {key_str},"
                          f"meta type: {type(metadata_bytes)},"
                          f"data: {type(kv_bytes)}: {e}")
 

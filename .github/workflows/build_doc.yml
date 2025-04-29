@@ -4,7 +4,7 @@ name: Deploy Sphinx Docs
 on:
   push:
     branches:
-      - '**'  # Matches all branches
+      - 'dev'  # Matches dev branch
     paths:
       - 'docs/**'
       - 'lmcache/**'
@@ -45,5 +45,9 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions@github.com"
           git add .
-          git commit -m "Deploy updated Sphinx docs"
-          git push https://x-access-token:${{ secrets.LMCACHE_DOC }}@github.com/LM-Cache-Website/lm-cache-website.github.io.git main --force
+          if ! git diff --cached --quiet; then
+            git commit -m "Deploy updated Sphinx docs"
+            git push https://x-access-token:${{ secrets.LMCACHE_DOC }}@github.com/LM-Cache-Website/lm-cache-website.github.io.git main --force
+          else
+            echo "No changes to commit."
+          fi
