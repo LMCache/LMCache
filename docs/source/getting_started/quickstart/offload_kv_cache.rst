@@ -7,7 +7,7 @@ In this example, we will show you how to offload KV cache to CPU memory.
 
 .. note::
     Besides CPU memory, LMCache also supports offloading KV cache to many different destinations.
-    See :ref:`Supported offloading destinations` for more details.
+    See :ref:`getting_started/quickstart/offload_kv_cache:Supported offloading destinations` for more details.
 
 Prerequisites
 -------------
@@ -165,8 +165,8 @@ Example: CPU offloading benefits
 
 This section demonstrates the performance benefits of using CPU offloading with LMCache. We'll use a script that generates multiple prompts and compare the performance with and without LMCache.
 
-Prerequisites
-~~~~~~~~~~~~~
+Prerequisites (Setup)
+~~~~~~~~~~~~~~~~~~~~~~
 
 - At least 24GB GPU memory
 - Access to model ``meta-llama/Meta-Llama-3.1-8B-Instruct``
