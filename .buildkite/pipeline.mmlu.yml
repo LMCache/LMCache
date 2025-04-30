@@ -4,8 +4,8 @@ steps:
     timeout_in_minutes: 60
     command:
       - bash .buildkite/scripts/run_mmlu_correctness.sh
-    agents:
-      gpu: "true"
+    # agents:
+    #   gpu: "true"
 
 
 
