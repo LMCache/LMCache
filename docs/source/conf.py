@@ -13,7 +13,7 @@ from dataclasses import asdict
 from sphinx.ext import autodoc
 from sphinxawesome_theme import ThemeOptions
 
-sys.path.insert(0, os.path.abspath("../../lmcache"))
+sys.path.insert(0, os.path.abspath("../.."))
 
 project = "LMCache"
 copyright = "2024, The LMCache Team"
@@ -28,7 +28,8 @@ extensions = [
     "sphinx.ext.githubpages",
     "sphinx.ext.viewcode",
     "sphinx.ext.napoleon",
-    "sphinx_copybutton",
+    "sphinx.ext.autosectionlabel",
+    # "sphinx_copybutton",
 ]
 
 copybutton_prompt_text = r"^(\$ |>>> |\# )"
@@ -55,6 +56,7 @@ autodoc.ClassDocumenter = MockedClassDocumenter
 
 templates_path = ["_templates"]
 exclude_patterns = []
+add_module_names = False
 
 # -- Options for HTML output -------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#options-for-html-output
@@ -63,6 +65,7 @@ exclude_patterns = []
 html_title = project
 html_theme = "sphinxawesome_theme"
 html_static_path = ["_static"]
+html_css_files = ["custom.css"]
 html_favicon = "assets/lmcache-logo.png"
 html_permalinks_icon = "<span>#</span>"
 pygments_style = "sphinx"
@@ -128,3 +131,21 @@ intersphinx_mapping = {
     "torch": ("https://pytorch.org/docs/stable", None),
     "psutil": ("https://psutil.readthedocs.io/en/stable", None),
 }
+
+# Mock import
+autodoc_mock_imports = [
+    "sortedcontainers",
+    "torch",
+    "prometheus_client",
+    "yaml",
+    "vllm",
+    "nvtx",
+    "redis",
+    "lmcache.c_ops",
+    "aiofiles",
+    "zmq",
+    "infinistore",
+    "transformers",
+    "safetensors",
+    "torch.Tensor",
+]

@@ -1,8 +1,10 @@
 import abc
+import array
 import hashlib
-from typing import Iterable, Optional, Tuple
+from typing import Iterable, List, Optional, Tuple, Union
 
 import torch
+from transformers import AutoTokenizer
 
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.experimental.config import LMCacheEngineConfig
@@ -16,18 +18,20 @@ class TokenDatabase(metaclass=abc.ABCMeta):
     - ChunkedTokenDatabase: It processes tokens into chunks and convert 
     each chunk into a cache engine key using prefix hash.
 
-    - RadixTokenDatabase: more advanced implementation using radix tree.
+    - SegmentTokenDatabase: It processes tokens into segments based on
+    special separators and convert each segment into a cache engine key.
     """
 
     @abc.abstractmethod
     def process_tokens(
         self,
-        tokens: torch.Tensor,
+        tokens: Union[torch.Tensor, List[int]],
         mask: Optional[torch.Tensor] = None,
-    ) -> Iterable[Tuple[int, int, CacheEngineKey]]:
+        make_key: bool = True,
+    ) -> Iterable[Tuple[int, int, Union[CacheEngineKey, str]]]:
         """Process the tokens and return the corresponding cache engine keys.
 
-        :param torch.Tensor tokens: The tokens to process, in 1-D CPU tensor.
+        :param Union[torch.Tensor, List[int]] tokens: The tokens to process.
 
         :param Optional[torch.Tensor] mask: The mask for the tokens. Should 
             have the same length as tokens. And the mask should ALWAYS be like
@@ -37,7 +41,7 @@ class TokenDatabase(metaclass=abc.ABCMeta):
         :returns: A iterable of tuples with three elements. The first element
             is the start index of the tokens for the key. The second element
             is the end index of the tokens for the key. The third element is
-            the cache engine key for the tokens.
+            the cache engine key (or hash) for the tokens.
         """
 
         raise NotImplementedError
@@ -45,12 +49,15 @@ class TokenDatabase(metaclass=abc.ABCMeta):
 
 class ChunkedTokenDatabase(TokenDatabase):
 
-    def __init__(self, config: LMCacheEngineConfig,
-                 metadata: LMCacheEngineMetadata):
-        self.chunk_size = config.chunk_size
+    def __init__(self,
+                 config: Optional[LMCacheEngineConfig] = None,
+                 metadata: Optional[LMCacheEngineMetadata] = None):
+        if config is not None:
+            self.chunk_size = config.chunk_size
         self.metadata = metadata
 
     def _make_key_by_hash(self, chunk_hash: str):
+        assert self.metadata is not None
         return CacheEngineKey(self.metadata.fmt, self.metadata.model_name,
                               self.metadata.world_size,
                               self.metadata.worker_id, chunk_hash)
@@ -60,18 +67,21 @@ class ChunkedTokenDatabase(TokenDatabase):
 
     def _hash(
         self,
-        tokens: torch.Tensor,
+        tokens: Union[torch.Tensor, List[int]],
         prefix_hash: str,
     ) -> str:
         # TODO: change it to a more efficient hash function
-        return hashlib.sha256(
-            prefix_hash.encode("ascii") +
-            tokens.cpu().numpy().tobytes()).hexdigest()
+        if isinstance(tokens, torch.Tensor):
+            tokens_bytes = tokens.cpu().to(torch.uint32).numpy().tobytes()
+        elif isinstance(tokens, list):
+            tokens_bytes = array.array('I', tokens).tobytes()
+        return hashlib.sha256(prefix_hash.encode("ascii") +
+                              tokens_bytes).hexdigest()
 
     def _chunk_tokens(
         self,
-        tokens: torch.Tensor,
-    ) -> Iterable[torch.Tensor]:
+        tokens: Union[torch.Tensor, List[int]],
+    ) -> Iterable[Union[torch.Tensor, List[int]]]:
         """
         Chunk the tokens into chunks of size self.chunk_size.
 
@@ -86,7 +96,7 @@ class ChunkedTokenDatabase(TokenDatabase):
 
     def _prefix_hash(
         self,
-        token_chunks: Iterable[torch.Tensor],
+        token_chunks: Iterable[Union[torch.Tensor, List[int]]],
     ) -> Iterable[str]:
         prefix_hash = self._get_init_hash()
         for token_chunk in token_chunks:
@@ -95,12 +105,13 @@ class ChunkedTokenDatabase(TokenDatabase):
 
     def process_tokens(
         self,
-        tokens: torch.Tensor,
+        tokens: Union[torch.Tensor, List[int]],
         mask: Optional[torch.Tensor] = None,
-    ) -> Iterable[Tuple[int, int, CacheEngineKey]]:
+        make_key: bool = True,
+    ) -> Iterable[Tuple[int, int, Union[CacheEngineKey, str]]]:
         """Process the tokens and return the corresponding cache engine keys.
 
-        :param torch.Tensor tokens: The tokens to process, in 1-D CPU tensor.
+        :param Union[torch.Tensor, List[int]] tokens: The tokens to process.
 
         :param Optional[torch.Tensor] mask: The mask for the tokens. Should 
             have the same length as tokens. And the mask should ALWAYS be like
@@ -110,13 +121,13 @@ class ChunkedTokenDatabase(TokenDatabase):
         :returns: A iterable of tuples with three elements. The first element
             is the start index of the tokens for the key. The second element
             is the end index of the tokens for the key. The third element is
-            the cache engine key for the tokens.
+            the cache engine key (or hash) for the tokens.
 
         :raises: ValueError if the number of Falses in the mask is not a 
             multiple of the chunk size.
         """
         if mask is not None:
-            num_falses = mask.numel() - mask.long().sum()
+            num_falses = mask.numel() - mask.long().sum().item()
         else:
             num_falses = 0
 
@@ -135,4 +146,110 @@ class ChunkedTokenDatabase(TokenDatabase):
             if start_idx < num_falses:
                 continue
             else:
-                yield start_idx, end_idx, self._make_key_by_hash(hash_val)
+                if make_key:
+                    yield start_idx, end_idx, self._make_key_by_hash(hash_val)
+                else:
+                    yield start_idx, end_idx, hash_val
+
+
+class SegmentTokenDatabase(TokenDatabase):
+    """
+    Currently, we still use special separators to identify chunks.
+    In the future, we might need to implement a fast substring match.
+    """
+
+    def __init__(self, config: LMCacheEngineConfig,
+                 metadata: LMCacheEngineMetadata):
+        self.tokenizer = AutoTokenizer.from_pretrained(metadata.model_name)
+
+        # TODO (Jiayi): figure out how to decide when
+        # to use `1:` (whether there's a special starting token
+        # in the beginning)
+        self.sep_tokens = self.tokenizer.encode(config.blend_special_str)[1:]
+        self.sep_tokens = torch.tensor(self.sep_tokens, device="cpu")
+        self.sep_len = len(self.sep_tokens)
+        self.metadata = metadata
+
+    def _make_key_by_hash(self, chunk_hash: str):
+        return CacheEngineKey(self.metadata.fmt, self.metadata.model_name,
+                              self.metadata.world_size,
+                              self.metadata.worker_id, chunk_hash)
+
+    def _hash(
+        self,
+        tokens: Union[torch.Tensor, List[int]],
+    ) -> str:
+        # TODO: change it to a more efficient hash function
+        if isinstance(tokens, torch.Tensor):
+            tokens_bytes = tokens.cpu().to(torch.uint32).numpy().tobytes()
+        elif isinstance(tokens, list):
+            tokens_bytes = array.array('I', tokens).tobytes()
+        return hashlib.sha256(tokens_bytes).hexdigest()
+
+    def _fast_split_by_subtensor(
+            self, tokens: torch.Tensor) -> Iterable[torch.Tensor]:
+        """Match the `sep_tokens` with sliding windows"""
+
+        if self.sep_len == 0 or len(tokens) < self.sep_len:
+            yield tokens
+
+        # Unfold into sliding windows
+        # shape: (num_tokens-sep_len+1, sep_len)
+        windows = tokens.unfold(0, self.sep_len, 1)
+
+        # Compare each window with sep_tokens
+        matches = (windows == self.sep_tokens).all(dim=1).nonzero(
+            as_tuple=True)[0].tolist()
+
+        # Split based on matches
+        start = 0
+        for idx in matches:
+            yield tokens[start:idx]
+            start = idx + self.sep_len
+
+    def process_tokens(
+        self,
+        tokens: Union[torch.Tensor, List[int]],
+        mask: Optional[torch.Tensor] = None,
+        make_key: bool = True,
+    ) -> Iterable[Tuple[int, int, Union[CacheEngineKey, str]]]:
+        """Process the tokens and return the corresponding cache engine keys.
+
+        :param Union[torch.Tensor, List[int]] tokens: The tokens to process.
+
+        :param Optional[torch.Tensor] mask: The mask for the tokens. Should 
+            have the same length as tokens. And the mask should ALWAYS be like
+            FFFFFTTTTTTT, where True means the tokens needs to be matched, 
+            and the Falses will ALWAYS be at the PREFIX of the tensor.
+
+        :returns: A iterable of tuples with three elements. The first element
+            is the start index of the tokens for the key. The second element
+            is the end index of the tokens for the key. The third element is
+            the cache engine key for the tokens.
+
+        """
+
+        assert isinstance(tokens, torch.Tensor), \
+            "Only tokens in tensor format are supported for now."
+        if mask is not None:
+            num_falses = mask.numel() - mask.long().sum().item()
+        else:
+            num_falses = 0
+        assert num_falses < len(tokens), \
+            ("The number of Falses in the mask shouldn't "
+            "be less than the length of tokens.")
+        token_chunks = self._fast_split_by_subtensor(tokens)
+        start_idx = 0
+        for idx, token_chunk in enumerate(token_chunks):
+            token_chunk_len = len(token_chunk)
+            end_idx = start_idx + token_chunk_len
+            if idx > 0:
+                start_idx += self.sep_len
+                end_idx += self.sep_len
+            if start_idx >= num_falses:
+                if make_key:
+                    yield start_idx, end_idx, self._make_key_by_hash(
+                        self._hash(token_chunk))
+                else:
+                    yield start_idx, end_idx, self._hash(token_chunk)
+            start_idx = end_idx

@@ -1,3 +1,19 @@
+/*
+ * Copyright 2024-2025 LMCache Authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+ 
 #include <iostream>
 #include <cstdio>
 #include <cuda_runtime.h>
@@ -221,7 +237,7 @@ __global__ void decode_prefix_with_accessor_kernel(
 
     // copy bytestreams[layer_id, global_channel_offset:global_channel_offset+BLOCK_SIZE, :] to shared memory, do this channel by channel
     for (int i = 0; i < BLOCK_SIZE; i++) {
-        const int channel_id = global_channel_offset + i;
+        [[maybe_unused]] const int channel_id = global_channel_offset + i;
         const int start_offset = sum_lengths_shared[i];
         const int end_offset = sum_lengths_shared[i + 1];
         const int length = end_offset - start_offset;

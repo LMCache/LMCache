@@ -54,6 +54,22 @@ class RedisMetadata:
     dtype: Optional[torch.dtype]
     fmt: MemoryFormat
 
+    def serialize_into(self, buffer):
+        assert (len(self.shape) == 4), "Shape dimension should be 4"
+
+        struct.pack_into(
+            "iiiiiii",
+            buffer,
+            0,
+            self.length,
+            int(self.fmt.value),
+            DTYPE_TO_INT[self.dtype],
+            self.shape[0],
+            self.shape[1],
+            self.shape[2],
+            self.shape[3],
+        )
+
     def serialize(self) -> bytes:
 
         # NOTE(Jiayi): 4 is the maximum dimension of memory object.
@@ -75,7 +91,7 @@ class RedisMetadata:
     @staticmethod
     def deserialize(s: bytes) -> "RedisMetadata":
         length, fmt, dtype, shape0, shape1, shape2, shape3 = \
-            struct.unpack("iiiiiii", s)
+            struct.unpack_from("iiiiiii", s)
         return RedisMetadata(length,
                              torch.Size([shape0, shape1, shape2, shape3]),
                              INT_TO_DTYPE[dtype], MemoryFormat(fmt))

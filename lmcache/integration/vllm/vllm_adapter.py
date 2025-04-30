@@ -48,13 +48,20 @@ class RetrieveStatus(Enum):
     NONE = 4
 
 
+def need_gpu_interm_buffer(lmcache_config: LMCacheEngineConfig):
+    if lmcache_config.local_cpu:
+        return True
+    else:
+        return False
+
+
 def init_lmcache_engine(
     model_config: ModelConfig,
     parallel_config: ParallelConfig,
     cache_config: CacheConfig,
 ) -> Optional[LMCacheEngine]:
-    """Initialize the LMCache engine by the given model config and parallel 
-    config. This function will check the environment variable 
+    """Initialize the LMCache engine by the given model config and parallel
+    config. This function will check the environment variable
     `LMCACHE_CONFIG_FILE` to load the configuration file. If that environment
     variable is not set, this function will return None.
 
@@ -73,6 +80,8 @@ def init_lmcache_engine(
         return None
 
     config = lmcache_get_config()
+    assert isinstance(config, LMCacheEngineConfig), \
+        "LMCache experimental configuration is should be passed."
 
     kv_dtype = get_kv_cache_torch_dtype(cache_config.cache_dtype,
                                         model_config.dtype)
@@ -86,14 +95,19 @@ def init_lmcache_engine(
 
     # Change current device.
     torch.cuda.device(parallel_config.rank)
+    device = torch.device(f"cuda:{parallel_config.rank}")
     metadata = LMCacheEngineMetadata(model_config.model,
                                      parallel_config.world_size,
                                      parallel_config.rank, "vllm", kv_dtype,
                                      kv_shape)
     hidden_dim_size = num_kv_head * head_size
-    vllm_gpu_connector = VLLMPagedMemGPUConnectorV2(hidden_dim_size, num_layer)
-    assert isinstance(config, LMCacheEngineConfig), \
-        "LMCache experimental configuration is should be passed."
+    use_gpu = need_gpu_interm_buffer(config)
+    vllm_gpu_connector = VLLMPagedMemGPUConnectorV2(hidden_dim_size,
+                                                    num_layer,
+                                                    use_gpu=use_gpu,
+                                                    chunk_size=chunk_size,
+                                                    dtype=kv_dtype,
+                                                    device=device)
     engine = LMCacheEngineBuilder.get_or_create(ENGINE_NAME, config, metadata,
                                                 vllm_gpu_connector)
 
@@ -109,7 +123,7 @@ def broadcast_seq_group_list(
     :param model_input: The model input for the current request.
     :type model_input: ModelInputForGPUWithSamplingMetadata
 
-    :param is_driver_worker: Whether the code is executed in driver worker. 
+    :param is_driver_worker: Whether the code is executed in driver worker.
     :type is_driver_worker: bool
 
     : return: Original `model_input` if driver_worker.
@@ -224,7 +238,7 @@ def lmcache_should_store(
 
 
     :return: A list of StoreStatus.
-             StoreStatus.PREFILL/DECODE/CHUNK_PREFILL if 
+             StoreStatus.PREFILL/DECODE/CHUNK_PREFILL if
              we should store KV after PREFILL/DECODE.
              StoreStatus.NONE if no storing is required.
     """
@@ -343,7 +357,7 @@ def lmcache_store_kv(
 
     :param kv_caches: The paged memory to get KV from
     :type kv_caches: List[torch.Tensor]
-    
+
     :param store_status: Indicate whether and how KV cache of each req is stored
     :type store_status: List[StoreStatus]
     """
@@ -376,7 +390,6 @@ def lmcache_store_kv(
 
     seq_group_list = model_input.sampling_metadata.seq_groups
 
-    seq_group_list = model_input.sampling_metadata.seq_groups
     assert seq_group_list is not None
 
     next_start_pos = 0
@@ -476,7 +489,7 @@ def lmcache_retrieve_kv(
     retrieve_status: List[RetrieveStatus],
 ) -> Tuple["ModelInputForGPUWithSamplingMetadata", bool, Union[
         torch.Tensor, IntermediateTensors]]:
-    """Retrieve the KV caches from LMCache for the current model_input. And 
+    """Retrieve the KV caches from LMCache for the current model_input. And
     rebuild the model_input to reflect the changes in KV if necessary.
 
     :param model_executable: The model executable for the current request.
@@ -488,12 +501,12 @@ def lmcache_retrieve_kv(
     :param kv_caches: The paged memory to put KV to
     :type kv_caches: List[torch.Tensor]
 
-    :param retrieve_status: Indicate whether and how 
+    :param retrieve_status: Indicate whether and how
                             KV cache of each req is retrieved
     :type retrieve_status: List[RetrieveStatus]
-    
+
     :return: The rebuilt model_input to reflect the changes in KV.
-    :return: The boolean value to indicate whether the 
+    :return: The boolean value to indicate whether the
              entire execute_model should be skipped
     """
 
@@ -532,7 +545,6 @@ def lmcache_retrieve_kv(
     assert model_input.sampling_metadata is not None
     seq_group_list = model_input.sampling_metadata.seq_groups
 
-    seq_group_list = model_input.sampling_metadata.seq_groups
     assert seq_group_list is not None
 
     chunk_prefill_full_hit = True

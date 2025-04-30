@@ -1,3 +1,19 @@
+/*
+ * Copyright 2024-2025 LMCache Authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 #include <iostream>
 #include <cstdio>
 #include <cuda_runtime.h>
@@ -79,8 +95,8 @@ at::Tensor calculate_cdf(
 
     auto output = torch::zeros({nlayers, nchannels, max_bins + 1}, input.options().dtype(at::kShort));
 
-    auto input_accessor = input.packed_accessor<int8_t, 3>();
-    auto output_accessor = output.packed_accessor<int16_t, 3>();
+    auto input_accessor = input.packed_accessor64<int8_t, 3>();
+    auto output_accessor = output.packed_accessor64<int16_t, 3>();
 
     int block_size = get_block_size(nchannels);
     dim3 block_dim(block_size, 1, 1);

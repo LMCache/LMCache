@@ -1,22 +1,42 @@
+# Copyright 2024-2025 LMCache Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import asyncio
 import threading
 from collections import OrderedDict
 from concurrent.futures import Future
-from typing import Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
 import torch
 
 from lmcache.config import LMCacheEngineMetadata
+from lmcache.experimental.cache_controller.message import (KVAdmitMsg,
+                                                           KVEvictMsg)
 from lmcache.experimental.config import LMCacheEngineConfig
 from lmcache.experimental.lookup_server import LookupServerInterface
 from lmcache.experimental.memory_management import (MemoryAllocatorInterface,
                                                     MemoryFormat, MemoryObj,
+                                                    MemoryObjMetadata,
                                                     MixedMemoryAllocator)
 from lmcache.experimental.storage_backend import CreateStorageBackends
 from lmcache.experimental.storage_backend.abstract_backend import \
     StorageBackendInterface
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey, _lmcache_nvtx_annotate
+
+if TYPE_CHECKING:
+    from lmcache.experimental.cache_controller.worker import LMCacheWorker
 
 logger = init_logger(__name__)
 
@@ -31,6 +51,7 @@ class StorageManager:
                  config: LMCacheEngineConfig,
                  metadata: LMCacheEngineMetadata,
                  allocator: MemoryAllocatorInterface,
+                 lmcache_worker: Optional["LMCacheWorker"] = None,
                  lookup_server: Optional[LookupServerInterface] = None):
         self.memory_allocator = allocator
         self.hot_cache: OrderedDict[CacheEngineKey, MemoryObj] = OrderedDict()
@@ -45,7 +66,8 @@ class StorageManager:
         self.storage_backends: OrderedDict[str, StorageBackendInterface] =\
             CreateStorageBackends(
                 config, metadata,
-                self.loop, allocator, dst_device, lookup_server)
+                self.loop, allocator, dst_device,
+                lmcache_worker, lookup_server)
         self.prefetch_tasks: Dict[CacheEngineKey, Future] = {}
         self.put_tasks: Dict[str, Dict[CacheEngineKey, Tuple[Future,
                                                              MemoryObj]]] = {}
@@ -56,6 +78,10 @@ class StorageManager:
         self.manager_lock = threading.Lock()
 
         self.lookup_server = lookup_server
+
+        self.lmcache_worker = lmcache_worker
+        self.instance_id = config.lmcache_instance_id
+        self.worker_id = metadata.worker_id
 
         self.stream = torch.cuda.Stream()
 
@@ -98,11 +124,27 @@ class StorageManager:
                 break
         for evict_key in evict_keys:
             self.hot_cache.pop(evict_key)
+            if self.lmcache_worker is not None:
+                self.lmcache_worker.put_msg(
+                    KVEvictMsg(self.instance_id, self.worker_id,
+                               evict_key.chunk_hash, "cpu"))
         if self.lookup_server is not None:
             self.lookup_server.batched_remove(evict_keys)
 
         self.manager_lock.release()
         return memory_obj
+
+    def dry_allocate(
+        self,
+        shape: torch.Size,
+        dtype: torch.dtype,
+        eviction=True,
+    ) -> Optional[MemoryObjMetadata]:
+        """
+        Allocate memory object with memory allocator.
+        Use LRU evictor if eviction is enabled.
+        """
+        return self.memory_allocator.dry_allocate(shape, dtype)
 
     def put(
         self,
@@ -111,7 +153,7 @@ class StorageManager:
     ) -> None:
         """
         Non-blocking function to put the memory object into the storages.
-        Do not store if the same object is being stored (handled here by 
+        Do not store if the same object is being stored (handled here by
         storage manager) or has been stored (handled by storage backend).
         """
         self.manager_lock.acquire()
@@ -120,18 +162,25 @@ class StorageManager:
             # to avoid memory leak.
             # NOTE(Jiayi): overwrite should not happen, at least for
             # prefix caching
+            has_stored = False
             if key in self.hot_cache:
                 old_memory_obj = self.hot_cache.pop(key)
                 self.memory_allocator.ref_count_down(old_memory_obj)
+                has_stored = True
 
             self.hot_cache[key] = memory_obj
+            if self.lmcache_worker is not None and not has_stored:
+                self.lmcache_worker.put_msg(
+                    KVAdmitMsg(self.instance_id, self.worker_id,
+                               key.chunk_hash, "cpu"))
             self.memory_allocator.ref_count_up(memory_obj)
 
         # TODO(Jiayi): currently, the entire put task will be cancelled
         # if one of the backend is already storing this cache.
         # This might not be ideal.
         for storage_backend in self.storage_backends.values():
-            if storage_backend.exists_in_put_tasks(key):
+            if storage_backend.exists_in_put_tasks(key) or \
+                storage_backend.contains(key):
                 self.memory_allocator.ref_count_down(memory_obj)
                 self.manager_lock.release()
                 return
@@ -147,6 +196,21 @@ class StorageManager:
         self.manager_lock.acquire()
         self.memory_allocator.ref_count_down(memory_obj)
         self.manager_lock.release()
+
+    def batched_put(
+        self,
+        keys: List[CacheEngineKey],
+        memory_objs: List[MemoryObj],
+    ) -> None:
+        """
+        Non-blocking function to put the memory objects into the storages.
+        Do not store if the same object is being stored (handled here by
+        storage manager) or has been stored (handled by storage backend).
+
+        A default implementation using "put"
+        """
+        for key, obj in zip(keys, memory_objs):
+            self.put(key, obj)
 
     @_lmcache_nvtx_annotate
     def _update_hot_cache(self, key: CacheEngineKey, memory_obj: MemoryObj):
@@ -184,14 +248,28 @@ class StorageManager:
             self.hot_cache[key] = cpu_memory_obj
             self.memory_allocator.ref_count_up(cpu_memory_obj)
             self.manager_lock.release()
+
+            # Push kv msg
+            if self.lmcache_worker is not None:
+                self.lmcache_worker.put_msg(
+                    KVAdmitMsg(self.instance_id, self.worker_id,
+                               key.chunk_hash, "cpu"))
+
             logger.debug("Updated hot cache!")
-            return
         else:
             self.manager_lock.acquire()
             if self.use_hot and key not in self.hot_cache:
                 self.hot_cache[key] = memory_obj
                 self.memory_allocator.ref_count_up(memory_obj)
-            self.manager_lock.release()
+                self.manager_lock.release()
+
+                # Push kv msg
+                if self.lmcache_worker is not None:
+                    self.lmcache_worker.put_msg(
+                        KVAdmitMsg(self.instance_id, self.worker_id,
+                                   key.chunk_hash, "cpu"))
+            else:
+                self.manager_lock.release()
 
     def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         """
@@ -314,13 +392,13 @@ class StorageManager:
     ) -> bool:
         """
         Check whether the key exists in the storage backend.
-        
+
         :param CacheEngineKey key: The key to check.
-        
+
         :param Optional[List[str]] search_range: The range of storage backends
         to search in. Should be a subset of ["Hot", "LocalDiskBackend"] for now.
         If None, search in all backends.
-        
+
         return: True if the key exists in the specified storage backends.
         """
         with self.manager_lock:
@@ -336,6 +414,81 @@ class StorageManager:
                     return True
 
             return False
+
+    def remove(
+        self,
+        key: CacheEngineKey,
+        locations: Optional[List[str]] = None,
+    ) -> int:
+        """
+        Remove the key and the corresponding cache in the specified
+        locations.
+
+        :param CacheEngineKey key: The key to remove.
+
+        :param Optional[List[str]] locations: The range of storage backends
+        to perform `remove` in.
+        Should be a subset of ["Hot", "LocalDiskBackend"] for now.
+        If None, perform `remove` in all backends.
+
+        return: Total number of removed caches in the specified
+        storage backends.
+        """
+
+        num_removed = 0
+        with self.manager_lock:
+            if locations is None or "Hot" in locations:
+                if self.use_hot and key in self.hot_cache:
+                    memory_obj = self.hot_cache[key]
+                    # NOTE(Jiayi): do not remove if other jobs are using
+                    # this `memory_obj`
+                    if self.memory_allocator.get_ref_count(memory_obj) == 1:
+                        self.memory_allocator.ref_count_down(memory_obj)
+                        num_removed += 1
+
+        # TODO(Jiayi): need to handle remove in non-cpu backends
+
+        return num_removed
+
+    def clear(
+        self,
+        locations: Optional[List[str]] = None,
+    ) -> int:
+        """
+        Clear all caches in the specified locations.
+
+        :param Optional[List[str]] locations: The range of storage backends
+        to perform `clear` in.
+        Should be a subset of ["Hot", "LocalDiskBackend"] for now.
+        If None, perform `clear` in all backends.
+
+        return: Total number of cleared caches in the specified
+        storage backends.
+        """
+
+        num_cleared = 0
+
+        clear_keys = []
+        self.manager_lock.acquire()
+        if locations is None or "Hot" in locations and self.use_hot:
+            for clear_key in self.hot_cache:
+                memory_obj = self.hot_cache[clear_key]
+                # NOTE(Jiayi): do not remove if other jobs are using
+                # this `memory_obj`
+                if self.memory_allocator.get_ref_count(memory_obj) > 1:
+                    continue
+                self.memory_allocator.ref_count_down(memory_obj)
+                clear_keys.append(clear_key)
+            for clear_key in clear_keys:
+                self.hot_cache.pop(clear_key)
+            if self.lookup_server is not None:
+                self.lookup_server.batched_remove(clear_keys)
+            num_cleared += len(clear_keys)
+        self.manager_lock.release()
+
+        # TODO(Jiayi): need to handle clear in non-cpu backends
+
+        return num_cleared
 
     def close(self):
 
@@ -354,3 +507,111 @@ class StorageManager:
             self.thread.join()
 
         logger.info("Storage manager closed.")
+
+
+class DistributedStorageManager:
+    """
+    The storage manager for P-D disaggregation setting
+
+    Key primitives:
+    - allocate(): allocate the memory object when 'store'
+    - put(): put the memory object into the storage backend
+    - batched_put(): put multiple memory objects into the storage backend
+    - get(): get the memory object from the storage backend
+    - prefetch(): NotImplemented (TODO)
+    - contains(): check if the key exists in the storage backend
+    - close(): close the storage manager
+    """
+
+    def __init__(
+        self,
+        config: LMCacheEngineConfig,
+        metadata: LMCacheEngineMetadata,
+        allocator: MemoryAllocatorInterface,
+    ):
+        # lazy import because nixl cannot be installed on some machines
+        from lmcache.experimental.storage_backend.nixl_backend import \
+            NixlBackend
+
+        self.storage_backend = NixlBackend.CreateNixlBackend(config, metadata)
+        assert config.nixl_buffer_device is not None
+
+        # TODO, HACK: we are not using the AdHocMemoryAllocator or other passed
+        # allocators. Instead, we are using the NixlBackend's allocator for
+        # zero-copy allocatations
+        #self.allocator = allocator
+
+    def allocate(
+        self,
+        shape: torch.Size,
+        dtype: torch.dtype,
+        eviction=True,
+    ) -> Optional[MemoryObj]:
+        """
+        Allocate memory object with memory allocator.
+        Use LRU evictor if eviction is enabled.
+        """
+        return self.storage_backend.allocate_zero_copy_write_object(
+            shape, dtype)
+        #return self.allocator.allocate(shape, dtype)
+
+    def dry_allocate(
+        self,
+        shape: torch.Size,
+        dtype: torch.dtype,
+        eviction=True,
+    ) -> Optional[MemoryObjMetadata]:
+        """
+        Allocate memory object with memory allocator.
+        Use LRU evictor if eviction is enabled.
+        """
+        return self.storage_backend.get_underlying_allocator().dry_allocate(
+            shape, dtype)
+        #return self.allocator.dry_allocate(shape, dtype)
+
+    def prepare_put(
+        self,
+        keys: list[CacheEngineKey],
+        metadatas: list[MemoryObjMetadata],
+    ) -> None:
+        self.storage_backend.register_put_tasks(keys, metadatas)
+
+    def put(
+        self,
+        key: CacheEngineKey,
+        memory_obj: MemoryObj,
+    ) -> None:
+        # NOTE: For zero-copy, we should not use put anymore
+        raise NotImplementedError
+        #self.storage_backend.submit_put_task(key, memory_obj)
+
+    @_lmcache_nvtx_annotate
+    def commit_put(self):
+        self.storage_backend.flush_put_tasks()
+
+    def get(
+        self,
+        key: CacheEngineKey,
+    ) -> Optional[MemoryObj]:
+        obj = self.storage_backend.get_blocking(key)
+        return obj
+
+    def remove(
+        self,
+        key: CacheEngineKey,
+    ) -> None:
+        self.storage_backend.remove(key)
+
+    def prefetch(self, key: CacheEngineKey) -> None:
+        raise NotImplementedError("Prefetch is not implemented for "
+                                  "distributed storage manager.")
+
+    def contains(
+        self,
+        key: CacheEngineKey,
+        search_range: Optional[List[str]] = None,
+    ) -> bool:
+        return self.storage_backend.contains(key)
+
+    def close(self):
+        self.storage_backend.close()

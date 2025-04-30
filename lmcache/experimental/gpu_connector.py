@@ -282,6 +282,23 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
                                           dtype=kwargs["dtype"],
                                           device=kwargs["device"])
 
+    def _pointers_are_good(self, kv_caches: List[torch.Tensor]):
+        """
+        Check if the initialized pointers are the same as the pointers in 
+        the KV caches. 
+
+        Returns:
+            bool: True if the pointers are the same, False otherwise (
+                including uninitialized).
+        """
+        if not self.pointers_initialized:
+            return False
+
+        for i in range(self.num_layers):
+            if self.kv_cache_pointers[i] != kv_caches[i].data_ptr():
+                return False
+        return True
+
     def _initialize_pointers(self, kv_caches: List[torch.Tensor]):
         for i in range(self.num_layers):
             self.kv_cache_pointers[i] = kv_caches[i].data_ptr()
@@ -323,7 +340,7 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
         kvcaches: List[torch.Tensor] = kwargs["kvcaches"]
         slot_mapping: torch.Tensor = kwargs["slot_mapping"]
 
-        if not self.pointers_initialized:
+        if not self._pointers_are_good(kvcaches):
             self._initialize_pointers(kvcaches)
 
         # NOTE(ApostaC): By default, detour from a GPU buffer is slower
@@ -384,7 +401,8 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
         kvcaches: List[torch.Tensor] = kwargs["kvcaches"]
         slot_mapping: torch.Tensor = kwargs["slot_mapping"]
 
-        if not self.pointers_initialized:
+        #if not self.pointers_initialized:
+        if not self._pointers_are_good(kvcaches):
             self._initialize_pointers(kvcaches)
 
         if self.gpu_buffer is None or \
@@ -405,7 +423,11 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
                                             self.page_buffer_size, True)
             memory_obj.tensor.copy_(tmp_gpu_buffer, non_blocking=True)
 
-        torch.cuda.synchronize()
+        if not memory_obj.tensor.is_cuda:
+            # Force a synchronize if the target buffer is NOT CUDA device
+            # NOTE: for better performance, we may not want to sync for every
+            # memory object
+            torch.cuda.synchronize()
         memory_obj.metadata.fmt = MemoryFormat.KV_BLOB
 
     def get_shape(self, num_tokens: int) -> torch.Size:

@@ -1,4 +1,4 @@
-torch>=2.2.0
+torch==2.6.0
 numpy==1.26.4
 aiofiles
 pyyaml
@@ -8,8 +8,9 @@ safetensors
 transformers
 psutil
 aiohttp
-torchac_cuda>=0.2.5
 sortedcontainers
 prometheus_client
 infinistore
 msgspec
+pyzmq
+transformers

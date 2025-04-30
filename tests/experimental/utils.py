@@ -7,12 +7,20 @@ import torch
 
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.experimental.gpu_connector import (VLLMNestedTupleGPUConnector,
-                                                VLLMPagedMemGPUConnector)
+                                                VLLMPagedMemGPUConnector,
+                                                VLLMPagedMemGPUConnectorV2)
 from lmcache.utils import CacheEngineKey
 
 
 def dumb_metadata(fmt="vllm", kv_shape=(32, 2, 256, 8, 128)):
     return LMCacheEngineMetadata("test_model", 3, 123, fmt, torch.bfloat16,
+                                 kv_shape)
+
+
+def dumb_metadata_with_model_name(model_name: str,
+                                  fmt="vllm",
+                                  kv_shape=(32, 2, 256, 8, 128)):
+    return LMCacheEngineMetadata(model_name, 3, 123, fmt, torch.bfloat16,
                                  kv_shape)
 
 
@@ -58,7 +66,11 @@ def generate_kv_cache(num_tokens, fmt, device):
 def generate_kv_cache_paged(num_blocks,
                             device,
                             block_size=16,
-                            dtype=torch.bfloat16):
+                            dtype=torch.bfloat16,
+                            use_list=False):
+    if use_list:
+        return generate_kv_cache_paged_list_tensors(num_blocks, device,
+                                                    block_size, dtype)
     ret = []
     num_layers = 32
     num_heads = 8
@@ -94,8 +106,12 @@ def generate_kv_cache_paged_list_tensors(num_blocks,
     return ret
 
 
-def generate_tokens(num_tokens, device):
-    return torch.randint(0, 10000, size=[num_tokens]).to(device)
+def generate_tokens(num_tokens, device, fixed=False):
+    if fixed:
+        return torch.tensor([-1] * num_tokens).to(device)
+    else:
+        # random tokens
+        return torch.randint(0, 10000, size=[num_tokens]).to(device)
 
 
 def concatenate_kv_caches(kv_chunks, fmt):
@@ -203,8 +219,10 @@ def check_kv_cache_device(kvs, device):
         assert v.device == torch.device(device)
 
 
-def create_gpu_connector(hidden_dim, num_layers, paged=False):
+def create_gpu_connector(hidden_dim, num_layers, paged=False, use_list=False):
     if paged:
+        if use_list:
+            return VLLMPagedMemGPUConnectorV2(hidden_dim, num_layers)
         return VLLMPagedMemGPUConnector(hidden_dim, num_layers)
     else:
         return VLLMNestedTupleGPUConnector(hidden_dim, num_layers)

@@ -110,7 +110,8 @@ echo 'lmcache yapf: Done'
 
 # Run mypy
 echo 'lmcache mypy:'
-mypy
+#mypy
+mypy tests --follow-imports skip
 mypy lmcache --follow-imports skip
 echo 'lmcache mypy: Done'
 
@@ -242,7 +243,7 @@ echo 'lmcache isort: Done'
 
 
 if ! git diff --quiet &>/dev/null; then
-    echo 
+    echo
     echo "🔍🔍There are files changed by the format checker or by you that are not added and committed:"
     git --no-pager diff --name-only
     echo "🔍🔍Format checker passed, but please add, commit and push all the files above to include changes made by the format checker."
