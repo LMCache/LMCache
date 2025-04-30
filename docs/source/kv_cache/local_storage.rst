@@ -24,7 +24,8 @@ Two ways to configure LMCache Disk Offloading:
     export LMCACHE_CHUNK_SIZE=256
     # None if disabled
     # Otherwise, enable by setting the directory where LMCache will
-    # create files to store KV caches (this directory does NOT need to exist beforehand)
+    # create files for each KV cache chunks
+    # (this directory does NOT need to exist beforehand)
     export LMCACHE_LOCAL_DISK="file://local/disk_test/local_disk/"
     # 5GB of Disk
     export LMCACHE_MAX_LOCAL_DISK_SIZE=5.0
@@ -51,13 +52,13 @@ Unlike CPU RAM offloading, disk offloading is *disabled* by default (local_disk 
 max local disk size is set to 0GB instead of 5GB like the default max local cpu size
 since the disk space is not strictly necessary for LMCache to function.
 
-Furthermore, instead of greedily allocating the max space up front like the CPU RAM, the disk backend will
+Furthermore, instead of greedily allocating the max space up front like the pinned CPU RAM, the disk backend will
 create one file per KV cache chunk as they are stored, evicting if capacity is exceeded (LRU currently).
 
-The disk and remote (see :doc:`Redis <./redis>`, :doc:`Mooncake <./mooncake>`, :doc:`Valkey <./valkey>`, :doc:`InfiniBand <./infinistore>`)
-backends have asynchronouse put() operations so that the IO latency will not slow down inference in addition to blocking get() operations.
-The local disk backend also has a prefetch() operation that will prefetch KV caches from the disk to CPU RAM offloading storage
-(i.e. ``LMCACHE_LOCAL_CPU=True`` should be set, see :doc:`CPU RAM <./cpu_ram>`).
+The disk and remote (see :doc:`Redis <./redis>`, :doc:`Mooncake <./mooncake>`, :doc:`Valkey <./valkey>`, :doc:`InfiniStore <./infinistore>`)
+backends have asynchronous put() operations so that the IO latency will not slow down inference in addition to blocking get() operations.
+The local disk backend also has a prefetch() operation that will preemptively move KV caches from the disk to CPU RAM offloading storage
+(i.e. ``LMCACHE_LOCAL_CPU=True`` should be set, see :doc:`CPU RAM <./cpu_ram>`) for specified tokens (these KV caches are also still kept in the disk).
 
 Online Inference Example
 -----------------------
@@ -180,7 +181,6 @@ Create a script called ``query-twice.py`` and paste the following code:
     def query_and_measure_ttft():
         start = time.perf_counter()
         ttft = None
-        server_message = []
 
         chat_completion = client.chat.completions.create(
             messages=[{"role": "user", "content": prompt}],
@@ -195,17 +195,16 @@ Create a script called ``query-twice.py`` and paste the following code:
                 if ttft is None:
                     ttft = time.perf_counter()
                 print(chunk_message, end="", flush=True)
-                server_message.append(chunk_message)
 
         print("\n")  # New line after streaming
-        return ttft - start, "".join(server_message)
+        return ttft - start
 
     print("Querying vLLM server with cold LMCache Disk Offload")
-    cold_ttft, cold_response = query_and_measure_ttft()
+    cold_ttft = query_and_measure_ttft()
     print(f"Cold TTFT: {cold_ttft:.3f} seconds")
 
     print("\nQuerying vLLM server with warm LMCache Disk Offload")
-    warm_ttft, warm_response = query_and_measure_ttft()
+    warm_ttft = query_and_measure_ttft()
     print(f"Warm TTFT: {warm_ttft:.3f} seconds")
 
     print(f"\nTTFT Improvement: {(cold_ttft - warm_ttft):.3f} seconds \
@@ -221,10 +220,10 @@ Since we're in streaming mode, you'll be able to feel the TTFT differential in
 real time!
 
 Note that if we were to enable ``LMCACHE_LOCAL_CPU=True``, we would just be using
-the same example from :doc:`CPU RAM <./cpu_ram>` since the faster CPU RAM is checked before
-the disk by LMCache so our disk offloading would not be used. In practice, the disk
-will be capable of storing a larger quantity of KV caches so the CPU RAM offloading
-will only be able to store a subset of the disk's KV caches.
+the same example from :doc:`CPU RAM <./cpu_ram>` since the CPU RAM is checked before
+the disk by LMCache. In practice, the disk will be capable of storing a larger
+quantity of KV caches so the CPU RAM offloading will only be able to store a
+subset of the disk's KV caches.
 
 **Example Output:**
 
@@ -276,8 +275,6 @@ If you look at the logs of your vLLM server, you should see (the logs are trunca
 
     LMCache INFO: Reqid: chatcmpl-136d9dac1ba94bd4b4ae85007e8ad437, Total tokens 15410,
     LMCache hit tokens: 15409, need to load: 1
-
-This means that LMCache hit 15409 tokens and needed to load 1 token from the disk backend.
 
 Tips:
 -----

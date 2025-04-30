@@ -175,7 +175,6 @@ Create a script called ``query-twice.py`` and paste the following code:
     def query_and_measure_ttft():
         start = time.perf_counter()
         ttft = None
-        server_message = []
 
         chat_completion = client.chat.completions.create(
             messages=[{"role": "user", "content": prompt}],
@@ -190,17 +189,16 @@ Create a script called ``query-twice.py`` and paste the following code:
                 if ttft is None:
                     ttft = time.perf_counter()
                 print(chunk_message, end="", flush=True)
-                server_message.append(chunk_message)
 
         print("\n")  # New line after streaming
-        return ttft - start, "".join(server_message)
+        return ttft - start
 
     print("Querying vLLM server with cold LMCache CPU Offload")
-    cold_ttft, cold_response = query_and_measure_ttft()
+    cold_ttft = query_and_measure_ttft()
     print(f"Cold TTFT: {cold_ttft:.3f} seconds")
 
     print("\nQuerying vLLM server with warm LMCache CPU Offload")
-    warm_ttft, warm_response = query_and_measure_ttft()
+    warm_ttft = query_and_measure_ttft()
     print(f"Warm TTFT: {warm_ttft:.3f} seconds")
 
     print(f"\nTTFT Improvement: {(cold_ttft - warm_ttft):.3f} seconds \
@@ -264,10 +262,6 @@ If you look at the logs of your vLLM server, you should see (the logs are trunca
 
     LMCache INFO: Reqid: chatcmpl-136d9dac1ba94bd4b4ae85007e8ad437, Total tokens 15410,
     LMCache hit tokens: 15409, need to load: 1
-
-This means that LMCache hit 15409 tokens and needed to load 1 token from the disk backend.
-
-
 
 Tips:
 -----
