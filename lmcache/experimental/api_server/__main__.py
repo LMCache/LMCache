@@ -1,7 +1,7 @@
 import argparse
 import asyncio
 from contextlib import asynccontextmanager
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import uvicorn
 from fastapi import FastAPI, HTTPException
@@ -9,10 +9,18 @@ from pydantic import BaseModel
 
 from lmcache.experimental.cache_controller.controller_manager import \
     LMCacheControllerManager
-from lmcache.experimental.cache_controller.message import (ClearMsg,
+from lmcache.experimental.cache_controller.message import (CheckFinishMsg,
+                                                           CheckFinishRetMsg,
+                                                           ClearMsg,
                                                            ClearRetMsg,
+                                                           CompressMsg,
+                                                           CompressRetMsg,
+                                                           HealthMsg,
+                                                           HealthRetMsg,
                                                            LookupMsg,
-                                                           LookupRetMsg)
+                                                           LookupRetMsg,
+                                                           MoveMsg, MoveRetMsg,
+                                                           PinMsg, PinRetMsg)
 from lmcache.logging import init_logger
 
 logger = init_logger(__name__)
@@ -41,10 +49,10 @@ def create_app(controller_url: str) -> FastAPI:
 
     class LookupRequest(BaseModel):
         tokens: List[int]
-    
+
     class LookupResponse(BaseModel):
         # a list of (instance_id, location, token_count)
-        layout_info: List[Tuple[str, str, int]]
+        layout_info: Dict[str, Tuple[str, int]]
 
     @app.post("/lookup")
     async def lookup(req: LookupRequest, response_model=LookupResponse):
@@ -61,7 +69,7 @@ def create_app(controller_url: str) -> FastAPI:
         instance_id: str
         locations: Optional[List[str]] = []
         tokens: Optional[List[int]] = []
-    
+
     class ClearResponse(BaseModel):
         success: bool
 
@@ -84,10 +92,10 @@ def create_app(controller_url: str) -> FastAPI:
         instance_id: str
         locations: Optional[List[str]] = []
         tokens: Optional[List[int]] = []
-    
+
     class PinResponse(BaseModel):
         success: bool
-    
+
     @app.post("/pin", response_model=PinResponse)
     async def pin(req: PinRequest):
         try:
@@ -102,17 +110,16 @@ def create_app(controller_url: str) -> FastAPI:
             return PinResponse(success=ret_msg.success)
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e)) from e
-    
-    
+
     class CompressRequest(BaseModel):
         instance_id: str
         method: str
         locations: Optional[List[str]] = []
         tokens: Optional[List[int]] = []
-    
+
     class CompressResponse(BaseModel):
         event_id: str
-    
+
     @app.post("/compress", response_model=CompressResponse)
     async def compress(req: CompressRequest):
         try:
@@ -128,16 +135,16 @@ def create_app(controller_url: str) -> FastAPI:
             return CompressResponse(success=ret_msg.event_id)
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e)) from e
-    
+
     class MoveRequest(BaseModel):
         # (instance_id, location)
         old_position: Tuple[str, str]
         new_position: Tuple[str, str]
         tokens: Optional[List[int]] = []
-    
+
     class MoveResponse(BaseModel):
         event_id: str
-    
+
     @app.post("/move", response_model=MoveResponse)
     async def move(req: MoveRequest):
         try:
@@ -148,49 +155,45 @@ def create_app(controller_url: str) -> FastAPI:
             )
             ret_msg = await lmcache_controller_manager.\
                 handle_orchestration_message(msg)
-            assert isinstance(ret_msg, CompressRetMsg)
+            assert isinstance(ret_msg, MoveRetMsg)
             return MoveResponse(success=ret_msg.event_id)
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e)) from e
-    
+
     class HealthRequest(BaseModel):
         instance_id: str
-    
+
     class HealthResponse(BaseModel):
         alive: bool
-        
+
     @app.post("/health", response_model=HealthResponse)
     async def health(req: HealthRequest):
         try:
-            msg = HealthMsg(
-                instance_id=req.instance_id,
-            )
+            msg = HealthMsg(instance_id=req.instance_id, )
             ret_msg = await lmcache_controller_manager.\
                 handle_orchestration_message(msg)
             assert isinstance(ret_msg, HealthRetMsg)
             return HealthResponse(alive=ret_msg.alive)
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e)) from e
-    
+
     class CheckFinishRequest(BaseModel):
         event_id: str
-    
+
     class CheckFinishResponse(BaseModel):
         finished: bool
-    
+
     @app.post("/check_finish", response_model=CheckFinishResponse)
     async def check_finish(req: CheckFinishRequest):
         try:
-            msg = CheckFinishMsg(
-                event_id=req.event_id,
-            )
+            msg = CheckFinishMsg(event_id=req.event_id, )
             ret_msg = await lmcache_controller_manager.\
                 handle_orchestration_message(msg)
             assert isinstance(ret_msg, CheckFinishRetMsg)
             return CheckFinishResponse(finished=ret_msg.finished)
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e)) from e
-    
+
     return app
 
 
