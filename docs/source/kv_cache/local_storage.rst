@@ -238,7 +238,7 @@ subset of the disk's KV caches.
     Bash is a Unix shell and command-line interpreter that reads and executes
     commands from standard input or a file, incorporating features from the
     Korn and C shells. It is a conformant implementation of the IEEE POSIX
-    specification and can be configuree to be POSIX-conformant by default,
+    specification and can be configure to be POSIX-conformant by default,
     supporting a wide range of options, built-in commands,
     and features for scripting, job control, and interactive use.
 
