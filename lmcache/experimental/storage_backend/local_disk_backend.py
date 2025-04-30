@@ -1,5 +1,7 @@
 import asyncio
+import glob
 import os
+import pickle
 import threading
 from collections import OrderedDict
 from concurrent.futures import Future
@@ -64,6 +66,7 @@ class LocalDiskBackend(StorageBackendInterface):
         self.instance_id = config.lmcache_instance_id
         self.stats_monitor = LMCStatsMonitor.GetOrCreate()
         self.usage = 0
+        self._load_dict_from_disk()
 
     def __str__(self):
         return self.__class__.__name__
@@ -73,6 +76,12 @@ class LocalDiskBackend(StorageBackendInterface):
         key: CacheEngineKey,
     ) -> str:
         return self.path + key.to_string().replace("/", "-") + ".pt"
+
+    def _key_to_meta_path(
+        self,
+        key: CacheEngineKey,
+    ) -> str:
+        return self.path + key.to_string().replace("/", "-") + ".meta"
 
     def contains(self, key: CacheEngineKey) -> bool:
         with self.disk_lock:
@@ -87,6 +96,7 @@ class LocalDiskBackend(StorageBackendInterface):
         key: CacheEngineKey,
     ) -> None:
         path = self.dict[key].path
+        meta_path = self._key_to_meta_path(key)
         self.disk_lock.acquire()
         self.dict.pop(key)
         self.disk_lock.release()
@@ -94,6 +104,7 @@ class LocalDiskBackend(StorageBackendInterface):
         self.usage -= size
         self.stats_monitor.update_local_storage_usage(self.usage)
         os.remove(path)
+        os.remove(meta_path)
 
         # push kv evict msg
         if self.lmcache_worker is not None:
@@ -101,12 +112,8 @@ class LocalDiskBackend(StorageBackendInterface):
                 KVEvictMsg(self.instance_id, key.worker_id, key.chunk_hash,
                            "disk"))
 
-    def insert_key(self, key: CacheEngineKey, memory_obj: MemoryObj) -> None:
-        path = self._key_to_path(key)
-        size = memory_obj.get_size()
-        shape = memory_obj.metadata.shape
-        dtype = memory_obj.metadata.dtype
-
+    def insert_key(self, key: CacheEngineKey,
+                   metadata: DiskCacheMetadata) -> None:
         has_stored = False
         with self.disk_lock:
             # Need to do reinsert to update cache recency
@@ -114,7 +121,7 @@ class LocalDiskBackend(StorageBackendInterface):
                 self.dict.pop(key)
                 has_stored = True
 
-            self.dict[key] = DiskCacheMetadata(path, size, shape, dtype)
+            self.dict[key] = metadata
 
         # push kv admit msg
         if self.lmcache_worker is not None and not has_stored:
@@ -212,15 +219,22 @@ class LocalDiskBackend(StorageBackendInterface):
         assert kv_chunk is not None
         byte_array = memory_obj.byte_array
         path = self._key_to_path(key)
+        meta_path = self._key_to_meta_path(key)
+        size = memory_obj.get_size()
+        shape = memory_obj.metadata.shape
+        dtype = memory_obj.metadata.dtype
+        metadata = DiskCacheMetadata(path, size, shape, dtype)
 
-        size = len(byte_array)
         self.usage += size
         self.stats_monitor.update_local_storage_usage(self.usage)
-
         async with aiofiles.open(path, 'wb') as f:
             await f.write(byte_array)
 
-        self.insert_key(key, memory_obj)
+        with open(meta_path, 'wb') as f:
+            pickle.dump(metadata, f)
+            pickle.dump(key, f)
+
+        self.insert_key(key, metadata)
         self.memory_allocator.ref_count_down(memory_obj)
 
         self.disk_lock.acquire()
@@ -293,3 +307,14 @@ class LocalDiskBackend(StorageBackendInterface):
             self.disk_lock.acquire()
             self.lookup_server.batched_remove(list(self.dict.keys()))
             self.disk_lock.release()
+
+    def _load_dict_from_disk(self) -> None:
+        meta_extension = '.meta'
+        meta_file_paths = glob.glob(f'{self.path}/*{meta_extension}')
+        for meta_file_path in meta_file_paths:
+            with open(meta_file_path, 'rb') as f:
+                metadata = pickle.load(f)
+                key = pickle.load(f)
+            self.dict[key] = metadata
+            self.usage += metadata.size
+            self.stats_monitor.update_local_storage_usage(self.usage)
