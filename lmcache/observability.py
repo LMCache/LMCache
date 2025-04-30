@@ -21,6 +21,15 @@ class LMCacheStats:
     interval_requested_tokens: int
     interval_hit_tokens: int
 
+    interval_remote_read_requests: int
+    interval_remote_read_bytes: int
+    interval_remote_write_requests: int
+    interval_remote_write_bytes: int
+
+    interval_remote_time_to_get: List[float]
+    interval_remote_time_to_put: List[float]
+    interval_remote_time_to_get_sync: List[float]
+
     # Real time value measurements (will be reset after each log)
     cache_hit_rate: float
 
@@ -81,6 +90,19 @@ class LMCStatsMonitor:
         self.interval_store_requests = 0
         self.interval_requested_tokens = 0
         self.interval_hit_tokens = 0
+
+        # remote backends read/write metrics
+        self.interval_remote_read_requests = 0
+        self.interval_remote_read_bytes = 0
+        self.interval_remote_write_requests = 0
+        self.interval_remote_write_bytes = 0
+
+        # remote backends get/put cost time metrics
+        self.interval_remote_time_to_get: List[float] = []
+        self.interval_remote_time_to_put: List[float] = []
+        # the time of get value from remote backends synchronously,
+        # which includes rpc and schedule time
+        self.interval_remote_time_to_get_sync: List[float] = []
 
         self.local_cache_usage_bytes = 0
         self.remote_cache_usage_bytes = 0
@@ -153,6 +175,28 @@ class LMCStatsMonitor:
         self.local_storage_usage_bytes = usage
 
     @thread_safe
+    def update_interval_remote_read_metrics(self, read_bytes: int):
+        self.interval_remote_read_requests += 1
+        self.interval_remote_read_bytes += read_bytes
+
+    @thread_safe
+    def update_interval_remote_write_metrics(self, write_bytes: int):
+        self.interval_remote_write_requests += 1
+        self.interval_remote_write_bytes += write_bytes
+
+    @thread_safe
+    def update_interval_remote_time_to_get(self, get_time: float):
+        self.interval_remote_time_to_get.append(get_time)
+
+    @thread_safe
+    def update_interval_remote_time_to_put(self, put_time: float):
+        self.interval_remote_time_to_put.append(put_time)
+
+    @thread_safe
+    def update_interval_remote_time_to_get_sync(self, get_time_sync: float):
+        self.interval_remote_time_to_get_sync.append(get_time_sync)
+
+    @thread_safe
     def _clear(self):
         """
         Clear all the distribution stats 
@@ -162,6 +206,15 @@ class LMCStatsMonitor:
 
         self.interval_requested_tokens = 0
         self.interval_hit_tokens = 0
+
+        self.interval_remote_read_requests = 0
+        self.interval_remote_read_bytes = 0
+        self.interval_remote_write_requests = 0
+        self.interval_remote_write_bytes = 0
+
+        self.interval_remote_time_to_get.clear()
+        self.interval_remote_time_to_put.clear()
+        self.interval_remote_time_to_get_sync.clear()
 
         new_retrieve_requests = {}
         for request_id, retrieve_stats in self.retrieve_requests.items():
@@ -210,6 +263,16 @@ class LMCStatsMonitor:
             interval_store_requests=self.interval_store_requests,
             interval_requested_tokens=self.interval_requested_tokens,
             interval_hit_tokens=self.interval_hit_tokens,
+            interval_remote_read_requests=self.interval_remote_read_requests,
+            interval_remote_read_bytes=self.interval_remote_read_bytes,
+            interval_remote_write_requests=self.interval_remote_write_requests,
+            interval_remote_write_bytes=self.interval_remote_write_bytes,
+            interval_remote_time_to_get=self.interval_remote_time_to_get.copy(
+            ),
+            interval_remote_time_to_put=self.interval_remote_time_to_put.copy(
+            ),
+            interval_remote_time_to_get_sync=self.
+            interval_remote_time_to_get_sync.copy(),
             cache_hit_rate=cache_hit_rate,
             local_cache_usage_bytes=self.local_cache_usage_bytes,
             remote_cache_usage_bytes=self.remote_cache_usage_bytes,
@@ -267,6 +330,34 @@ class PrometheusLogger:
         self.counter_num_hit_tokens = self._counter_cls(
             name="lmcache:num_hit_tokens",
             documentation="Total number of tokens hit in lmcache",
+            labelnames=labelnames,
+        )
+
+        self.counter_num_remote_read_requests = self._counter_cls(
+            name="lmcache:num_remote_read_requests",
+            documentation="Total number of requests read from "
+            "remote backends in lmcache",
+            labelnames=labelnames,
+        )
+
+        self.counter_num_remote_read_bytes = self._counter_cls(
+            name="lmcache:num_remote_read_bytes",
+            documentation="Total number of bytes read from "
+            "remote backends in lmcache",
+            labelnames=labelnames,
+        )
+
+        self.counter_num_remote_write_requests = self._counter_cls(
+            name="lmcache:num_remote_write_requests",
+            documentation="Total number of requests write to "
+            "remote backends in lmcache",
+            labelnames=labelnames,
+        )
+
+        self.counter_num_remote_write_bytes = self._counter_cls(
+            name="lmcache:num_remote_write_bytes",
+            documentation="Total number of bytes write to "
+            "remote backends in lmcache",
             labelnames=labelnames,
         )
 
@@ -338,6 +429,39 @@ class PrometheusLogger:
             buckets=store_speed_buckets,
         )
 
+        remote_time_to_get = [
+            1, 5, 10, 20, 40, 60, 80, 100, 250, 500, 750, 1000, 2500, 5000,
+            7500, 10000
+        ]
+        self.histogram_remote_time_to_get = self._histogram_cls(
+            name="lmcache:remote_time_to_get",
+            documentation="Time to get from remote backends (ms)",
+            labelnames=labelnames,
+            buckets=remote_time_to_get,
+        )
+
+        remote_time_to_put = [
+            1, 5, 10, 20, 40, 60, 80, 100, 250, 500, 750, 1000, 2500, 5000,
+            7500, 10000
+        ]
+        self.histogram_remote_time_to_put = self._histogram_cls(
+            name="lmcache:remote_time_to_put",
+            documentation="Time to put to remote backends (ms)",
+            labelnames=labelnames,
+            buckets=remote_time_to_put,
+        )
+
+        remote_time_to_get_sync = [
+            1, 5, 10, 20, 40, 60, 80, 100, 250, 500, 750, 1000, 2500, 5000,
+            7500, 10000
+        ]
+        self.histogram_remote_time_to_get_sync = self._histogram_cls(
+            name="lmcache:remote_time_to_get_sync",
+            documentation="Time to get from remote backends synchronously(ms)",
+            labelnames=labelnames,
+            buckets=remote_time_to_get_sync,
+        )
+
     def _log_gauge(self, gauge, data: Union[int, float]) -> None:
         # Convenience function for logging to gauge.
         gauge.labels(**self.labels).set(data)
@@ -366,6 +490,15 @@ class PrometheusLogger:
         self._log_counter(self.counter_num_hit_tokens,
                           stats.interval_hit_tokens)
 
+        self._log_counter(self.counter_num_remote_read_requests,
+                          stats.interval_remote_read_requests)
+        self._log_counter(self.counter_num_remote_read_bytes,
+                          stats.interval_remote_read_bytes)
+        self._log_counter(self.counter_num_remote_write_requests,
+                          stats.interval_remote_write_requests)
+        self._log_counter(self.counter_num_remote_write_bytes,
+                          stats.interval_remote_write_bytes)
+
         self._log_gauge(self.gauge_cache_hit_rate, stats.cache_hit_rate)
 
         self._log_gauge(self.gauge_local_cache_usage,
@@ -386,6 +519,13 @@ class PrometheusLogger:
                             stats.retrieve_speed)
 
         self._log_histogram(self.histogram_store_speed, stats.store_speed)
+
+        self._log_histogram(self.histogram_remote_time_to_get,
+                            stats.interval_remote_time_to_get)
+        self._log_histogram(self.histogram_remote_time_to_put,
+                            stats.interval_remote_time_to_put)
+        self._log_histogram(self.histogram_remote_time_to_get_sync,
+                            stats.interval_remote_time_to_get_sync)
 
     @staticmethod
     def _metadata_to_labels(metadata: LMCacheEngineMetadata):
