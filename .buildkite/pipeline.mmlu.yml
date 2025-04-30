@@ -1,18 +1,48 @@
+# for the Web UI
+# steps:
+  # - label: ":pipeline: Upload pipeline definition"
+  #   command: "buildkite-agent pipeline upload .buildkite/pipeline.mmlu.yml"
+
 steps:
-  - label: ":brain: MMLU Correctness Check"
-    key: "mmlu-correctness"
-    timeout_in_minutes: 60
-    command:
-      - bash .buildkite/scripts/run_mmlu_correctness.sh
-    # agents:
-    #   gpu: "true"
+  - label: ":hammer: Check HuggingFace auth and patch vLLM"
+    key: "setup"
+    commands:
+      - bash .buildkite/scripts/setup_vllm_and_hf.sh
+    artifact_paths:
+      - vllm-patch-status.txt
 
+  - wait
 
+  - label: ":brain: MMLU | LMCache + MLA (expected to fail)"
+    key: "lmcache-mla-on"
+    timeout_in_minutes: 30
+    commands:
+      - bash .buildkite/scripts/run_mmlu_lmcache_mla_on.sh
+    artifact_paths:
+      - mmlu-results/v0_lmcache_deepseek2_errors.txt
+    soft_fail: true
 
+  - label: ":brain: MMLU | LMCache + MLA disabled"
+    key: "lmcache-mla-off"
+    timeout_in_minutes: 30
+    commands:
+      - bash .buildkite/scripts/run_mmlu_lmcache_mla_off.sh
+    artifact_paths:
+      - mmlu-results/v0_lmcache_deepseek2_no_mla.txt
 
+  - label: ":brain: MMLU | No LMCache"
+    key: "no-lmcache"
+    timeout_in_minutes: 30
+    commands:
+      - bash .buildkite/scripts/run_mmlu_no_lmcache.sh
+    artifact_paths:
+      - mmlu-results/v0_deepseek2.txt
 
-
-
-
-
-
+  - label: ":bar_chart: Compare Results"
+    depends_on:
+      - "lmcache-mla-off"
+      - "no-lmcache"
+    command: |
+      python3 .buildkite/scripts/compare_mmlu_scores.py \
+        mmlu-results/v0_lmcache_deepseek2_no_mla.txt \
+        mmlu-results/v0_deepseek2.txt
