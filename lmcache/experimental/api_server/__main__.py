@@ -9,18 +9,10 @@ from pydantic import BaseModel
 
 from lmcache.experimental.cache_controller.controller_manager import \
     LMCacheControllerManager
-from lmcache.experimental.cache_controller.message import (CheckFinishMsg,
-                                                           CheckFinishRetMsg,
-                                                           ClearMsg,
-                                                           ClearRetMsg,
-                                                           CompressMsg,
-                                                           CompressRetMsg,
-                                                           HealthMsg,
-                                                           HealthRetMsg,
-                                                           LookupMsg,
-                                                           LookupRetMsg,
-                                                           MoveMsg, MoveRetMsg,
-                                                           PinMsg, PinRetMsg)
+from lmcache.experimental.cache_controller.message import (  # noqa: E501
+    CheckFinishMsg, CheckFinishRetMsg, ClearMsg, ClearRetMsg, CompressMsg,
+    CompressRetMsg, HealthMsg, HealthRetMsg, LookupMsg, LookupRetMsg, MoveMsg,
+    MoveRetMsg, PinMsg, PinRetMsg)
 from lmcache.logging import init_logger
 
 logger = init_logger(__name__)
