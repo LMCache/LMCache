@@ -37,7 +37,7 @@ copybutton_prompt_is_regexp = True
 
 
 class MockedClassDocumenter(autodoc.ClassDocumenter):
-    """Remove note about base class when a class is 
+    """Remove note about base class when a class is
     derived from object."""
 
     def add_line(self, line: str, source: str, *lineno: int) -> None:
@@ -65,7 +65,7 @@ add_module_names = False
 html_title = project
 html_theme = "sphinxawesome_theme"
 html_static_path = ["_static"]
-html_css_files = ["custom.css"]
+html_css_files = ["custom.css", "scroll.css"]
 html_favicon = "assets/lmcache-logo.png"
 html_permalinks_icon = "<span>#</span>"
 pygments_style = "sphinx"

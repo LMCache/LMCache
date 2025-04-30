@@ -45,10 +45,10 @@ Passed in through ``LMCACHE_CONFIG_FILE=your-lmcache-config.yaml``
     # 5GB of Disk memory
     max_local_disk_size: 5.0
 
-Explanation:
+Local Storage Explanation:
 -----------
 
-Unlike CPU RAM offloading, disk offloading is *disabled* by default (local_disk is set to None) and the
+Unlike CPU RAM offloading, disk offloading is *disabled* by default (``local_disk`` is set to ``None``) and the
 max local disk size is set to 0GB instead of 5GB like the default max local cpu size
 since the disk space is not strictly necessary for LMCache to function.
 
@@ -97,17 +97,20 @@ Let's feel the TTFT (time to first token) differential!
 **Step 1. Prepare a long context!**
 
 We want a context long enough that vllm's prefix caching will not be able to hold the KV caches in
-GPU memory and LMCache is necessary to help keep the KV caches in CPU memory:
+GPU memory and LMCache is necessary to keep KV caches in non-GPU memory:
 
 .. code-block:: bash
 
+    # 382757 bytes
     man bash > man-bash.txt
 
 **Step 2. Start a vLLM server with Disk offloading enabled:**
 
 *Generally, it is not recommended but we will disable CPU offloading to feel just the disk offloading latency.*
 
-Create a configuration file called: ``disk-offload.yaml``
+Create a an lmcache configuration file called: ``disk-offload.yaml``
+
+Example ``config.yaml``:
 
 .. code-block:: yaml
 
@@ -232,20 +235,22 @@ subset of the disk's KV caches.
 
     Number of tokens in prompt: 15376
     Querying vLLM server with cold LMCache Disk Offload
-    Bash is a Unix shell and command-line interpreter that reads and executes commands
-    from standard input or a file, incorporating features from the Korn and C shells.
-    It is a conformant implementation of the IEEE POSIX specification and can be configured
-     to be POSIX-conformant by default, supporting a wide range of options, built-in commands,
-     and features for scripting, job control, and interactive use.
+    Bash is a Unix shell and command-line interpreter that reads and executes
+    commands from standard input or a file, incorporating features from the
+    Korn and C shells. It is a conformant implementation of the IEEE POSIX
+    specification and can be configuree to be POSIX-conformant by default,
+    supporting a wide range of options, built-in commands,
+    and features for scripting, job control, and interactive use.
 
     Cold TTFT: 6.314 seconds
 
     Querying vLLM server with warm LMCache Disk Offload
-    Bash is a Unix shell and command-line interpreter that reads and executes commands from
-    the standard input or a file, and is designed to be a conformant implementation of the IEEE POSIX
-    specification. It is a powerful tool for automating tasks, managing files and directories, and
-    interacting with other programs and services, with features such as scripting, conditional
-    statements, loops, and functions.
+    Bash is a Unix shell and command-line interpreter that reads and
+    executes commands from the standard input or a file, and is designed
+    to be a conformant implementation of the IEEE POSIX specification. It
+    is a powerful tool for automating tasks, managing files and directories,
+    and interacting with other programs and services, with features such as
+    scripting, conditional statements, loops, and functions.
 
     Warm TTFT: 0.148 seconds
 

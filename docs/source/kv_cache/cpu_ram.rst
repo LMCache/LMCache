@@ -31,6 +31,8 @@ Passed in through ``LMCACHE_CONFIG_FILE=your-lmcache-config.yaml``
 
 ``LMCACHE_USE_EXPERIMENTAL`` MUST be set by environment variable directly.
 
+Example ``config.yaml``:
+
 .. code-block:: yaml
 
     # 256 Tokens per KV Chunk
@@ -40,7 +42,7 @@ Passed in through ``LMCACHE_CONFIG_FILE=your-lmcache-config.yaml``
     # 5GB of Pinned CPU memory
     max_local_cpu_size: 5.0 # default
 
-Explanation:
+CPU RAM Explanation:
 -----------
 
 The ``LMCACHE_MAX_LOCAL_CPU_SIZE`` is the amount of page-locked (for fast GPU transfer)
@@ -98,15 +100,16 @@ Let's feel the TTFT (time to first token) differential!
 **Step 1. Prepare a long context!**
 
 We want a context long enough that vllm's prefix caching will not be able to hold the KV caches in
-GPU memory and LMCache is necessary to help keep the KV caches in CPU memory:
+GPU memory and LMCache is necessary to keep KV caches in non-GPU memory:
 
 .. code-block:: bash
 
+    # 382757 bytes
     man bash > man-bash.txt
 
 **Step 2. Start a vLLM server with CPU offloading enabled:**
 
-Create a configuration file called: ``cpu-offload.yaml``
+Create a an lmcache configuration file called: ``cpu-offload.yaml``
 
 .. code-block:: yaml
 
