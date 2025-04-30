@@ -1,0 +1,8 @@
+steps:
+  - label: ":brain: MMLU Correctness Check"
+    key: "mmlu-correctness"
+    timeout_in_minutes: 60
+    command:
+      - bash .buildkite/scripts/run_mmlu_correctness.sh
+    agents:
+      gpu: "true"
