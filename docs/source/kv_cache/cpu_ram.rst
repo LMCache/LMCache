@@ -21,11 +21,13 @@ Two ways to configure LMCache CPU Offloading:
     # 256 Tokens per KV Chunk
     export LMCACHE_CHUNK_SIZE=256
     # Enable CPU memory backend
-    export LMCACHE_LOCAL_CPU=True
+    export LMCACHE_LOCAL_CPU=True # default
     # 5GB of Pinned CPU memory
-    export LMCACHE_MAX_LOCAL_CPU_SIZE=5.0
+    export LMCACHE_MAX_LOCAL_CPU_SIZE=5.0 # default
 
-**2. Configuration File (passed in through ``LMCACHE_CONFIG_FILE=your-lmcache-config.yaml``):**
+**2. Configuration File**:
+
+Passed in through ``LMCACHE_CONFIG_FILE=your-lmcache-config.yaml``
 
 ``LMCACHE_USE_EXPERIMENTAL`` MUST be set by environment variable directly.
 
@@ -34,22 +36,24 @@ Two ways to configure LMCache CPU Offloading:
     # 256 Tokens per KV Chunk
     chunk_size: 256
     # Enable CPU memory backend
-    local_cpu: true
+    local_cpu: true # default
     # 5GB of Pinned CPU memory
-    max_local_cpu_size: 5.0
+    max_local_cpu_size: 5.0 # default
 
 Explanation:
 -----------
 
 The ``LMCACHE_MAX_LOCAL_CPU_SIZE`` is the amount of page-locked (for fast GPU transfer)
-CPU memory that LMCache will reserve and must be set to a number greater than 0 since the
-local and remote backends use CPU RAM as an intermediate buffer when transferring KV caches
-with the GPU.
+CPU memory that LMCache will reserve and must be set to a number greater than 0 since
+local and remote backends also use CPU RAM as an intermediate buffer when transferring KV caches
+with the GPU. This means it is possible to set ``LMCACHE_LOCAL_CPU=False`` even
+though ``LMCACHE_MAX_LOCAL_CPU_SIZE`` is set to a non-zero number.
 
-It is recommended to *always* set ``LMCACHE_USE_LOCAL_CPU=True`` since this allows
-all currently unused pinned CPU RAM that LMCache has reserved to hold KV caches. When the pinned
-CPU RAM is required for disk or remote transfers, the CPU KV caches will be evicted from to make
-space. The current eviction policy is LRU.
+
+However, it is recommended to *always* set ``LMCACHE_USE_LOCAL_CPU=True`` (the default is ``True`` so if you
+don't specify, CPU offloading will automatically be enabled) since this allows all currently unused pinned CPU RAM that
+LMCache has reserved to hold KV caches. When the pinned CPU RAM is required for any disk or remote transfers, the CPU KV caches will be LRU evicted to make
+space so there is no danger of running out of pinned CPU RAM.
 
 When ``LMCACHE_USE_LOCAL_CPU=True`` is used in conjunction with the disk backend or
 a remote backend (:doc:`Redis <./redis>`, :doc:`Mooncake <./mooncake>`, :doc:`Valkey <./valkey>`,
@@ -78,7 +82,7 @@ Let's feel the TTFT (time to first token) differential!
 
     export HF_TOKEN=your_hugging_face_token
 
-- A few packages;
+- A few packages:
 
 .. code-block:: bash
 
@@ -129,6 +133,8 @@ and then comment out the ``LMCACHE_CONFIG_FILE`` below:
 - ``--kv-transfer-config``: This is the parameter that actually tells vLLM to use LMCache for KV cache offloading.
     - ``kv_connector``: Specifies the LMCache connector for vLLM V1
     - ``kv_role``: Set to "kv_both" for both storing and loading KV cache (important because we will run two queries and the first will produce/store a KV cache while the second will consume/load that KV cache)
+
+**Step 3. Query TTFT improvements with LMCache:**
 
 Once the Open AI compatible server is running on default vllm port 8000, let's query it twice with the same long context!
 
@@ -189,11 +195,11 @@ Create a script called ``query-twice.py`` and paste the following code:
         print("\n")  # New line after streaming
         return ttft - start, "".join(server_message)
 
-    print("Querying vLLM server with cold LMCache")
+    print("Querying vLLM server with cold LMCache CPU Offload")
     cold_ttft, cold_response = query_and_measure_ttft()
     print(f"Cold TTFT: {cold_ttft:.3f} seconds")
 
-    print("\nQuerying vLLM server with warm LMCache")
+    print("\nQuerying vLLM server with warm LMCache CPU Offload")
     warm_ttft, warm_response = query_and_measure_ttft()
     print(f"Warm TTFT: {warm_ttft:.3f} seconds")
 
@@ -215,26 +221,53 @@ real time!
 
     Number of tokens in prompt: 15376
     Querying vLLM server with cold LMCache
-    Bash is a command-line interpreter that executes commands read from the
-    standard input or from a file, and it incorporates features from the Korn
-    and C shells. It is an sh-compatible command language interpreter that
-    can be configured to be POSIX-conformant by default, and it provides a
-    wide range of features, including shell functions, arrays, and conditional
-    expressions, as well as built-in commands and options for customizing
-    its behavior.
+    Bash is a Unix shell and command-line interpreter that executes commands read
+    from the standard input or from a file, incorporating features from the Korn
+    and C shells. It is an sh-compatible command language interpreter that can be
+    configured to be POSIX-conformant by default and is intended to be a conformant
+    implementation of the Shell and Utilities portion of the IEEE POSIX specification.
 
-    Cold TTFT: 5.632 seconds
+    Cold TTFT: 6.537 seconds
 
     Querying vLLM server with warm LMCache
-    Bash is a Unix shell and command-line interpreter that reads and
-    executes commands from the standard input or a file, incorporating features
-    from the Korn and C shells. It is designed to be a conformant implementation
-    of the IEEE POSIX specification and can be configured to be POSIX-conformant
-    by default.
+    Bash is a Unix shell and command-line interpreter that eead from the standard
+    input or from a file, incorporatinhe Korn and C shells. It is intended to be a
+    conformant tation of the IEEE POSIX specification and can be configured to be
+    POSIX-conformant by default, with options for setting the shell's behavior and
+    interacting with the user.
 
-    Warm TTFT: 0.144 seconds
+    Warm TTFT: 0.147 seconds
 
-    TTFT Improvement: 5.487 seconds (39.0x faster)
+    TTFT Improvement: 6.390 seconds (44.5x faster)
+
+If you look at the logs of your vLLM server, you should see (the logs are truncated for cleanliness):
+
+.. code-block:: text
+
+    # Cold LMCache Miss and then Store
+
+    LMCache INFO: Reqid: chatcmpl-8676f9b9ebf04c79a5d47b9ada7b65fd, Total tokens 15410,
+    LMCache hit tokens: 0, need to load: 0
+
+    # you should see 8 of these storing logs total
+    # 2048 tokens is a multiple of the chunk size
+    LMCache INFO: Storing KV cache for 2048 out of 12288 tokens for request
+    chatcmpl-8676f9b9ebf04c79a5d47b9ada7b65fd
+
+    LMCache INFO: Storing KV cache for 2048 out of 14336 tokens for request
+    chatcmpl-8676f9b9ebf04c79a5d47b9ada7b65fd
+
+    LMCache INFO: Storing KV cache for 1074 out of 15410 tokens for request
+    chatcmpl-8676f9b9ebf04c79a5d47b9ada7b65fd
+
+    # Warm LMCache Hit!!
+
+    LMCache INFO: Reqid: chatcmpl-136d9dac1ba94bd4b4ae85007e8ad437, Total tokens 15410,
+    LMCache hit tokens: 15409, need to load: 1
+
+This means that LMCache hit 15409 tokens and needed to load 1 token from the disk backend.
+
+
 
 Tips:
 -----
