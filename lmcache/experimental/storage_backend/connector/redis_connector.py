@@ -21,7 +21,7 @@ import redis
 
 from lmcache.experimental.memory_management import (MemoryAllocatorInterface,
                                                     MemoryObj)
-from lmcache.experimental.protocol import CommonMetadata
+from lmcache.experimental.protocol import RemoteMetadata
 from lmcache.experimental.storage_backend.connector.base_connector import \
     RemoteConnector
 from lmcache.logging import init_logger
@@ -61,7 +61,7 @@ class RedisConnector(RemoteConnector):
 
         assert not inspect.isawaitable(metadata_bytes)
 
-        metadata = CommonMetadata.deserialize(memoryview(metadata_bytes))
+        metadata = RemoteMetadata.deserialize(memoryview(metadata_bytes))
 
         memory_obj = self.memory_allocator.allocate(
             metadata.shape,
@@ -100,7 +100,7 @@ class RedisConnector(RemoteConnector):
         kv_dtype = memory_obj.get_dtype()
         memory_format = memory_obj.get_memory_format()
 
-        metadata_bytes = CommonMetadata(len(kv_bytes), kv_shape, kv_dtype,
+        metadata_bytes = RemoteMetadata(len(kv_bytes), kv_shape, kv_dtype,
                                         memory_format).serialize()
 
         key_str = key.to_string()
@@ -179,7 +179,7 @@ class RedisSentinelConnector(RemoteConnector):
 
         assert not inspect.isawaitable(metadata_bytes)
 
-        metadata = CommonMetadata.deserialize(metadata_bytes)
+        metadata = RemoteMetadata.deserialize(metadata_bytes)
 
         memory_obj = self.memory_allocator.allocate(
             metadata.shape,
@@ -218,7 +218,7 @@ class RedisSentinelConnector(RemoteConnector):
         kv_dtype = memory_obj.get_dtype()
         memory_format = memory_obj.get_memory_format()
 
-        metadata_bytes = CommonMetadata(len(kv_bytes), kv_shape, kv_dtype,
+        metadata_bytes = RemoteMetadata(len(kv_bytes), kv_shape, kv_dtype,
                                         memory_format).serialize()
 
         key_str = key.to_string()
