@@ -181,10 +181,11 @@ class StorageManager:
 
             # NOTE(Jiayi): bypass the allocator for now
             memory_obj = backend.get_blocking(key)
-            if memory_obj is not None and backend_name != "LocalCPUBackend":
-                local_cpu_backend = self.storage_backends["LocalCPUBackend"]
-                assert isinstance(local_cpu_backend, LocalCPUBackend)
-                local_cpu_backend.write_back(key, memory_obj)
+            if memory_obj is not None:
+                if backend_name != "LocalCPUBackend":
+                    local_cpu_backend = self.storage_backends["LocalCPUBackend"]
+                    assert isinstance(local_cpu_backend, LocalCPUBackend)
+                    local_cpu_backend.write_back(key, memory_obj)
                 return memory_obj
 
         return None
@@ -331,8 +332,12 @@ class StorageManager:
         for backend_name, backend in self.storage_backends.items():
             # TODO(Jiayi): need to handle remove in non-cpu backends
             if locations is None or "LocalCPUBackend" in locations:
-                assert hasattr(backend, "clear")
-                num_cleared += backend.clear()
+                if hasattr(backend, "clear"):
+                    num_cleared += backend.clear()
+                else:
+                    logger.warning(
+                        f"Storage backend {backend_name} does not support "
+                        "clear operation. Skipping.")
 
         return num_cleared
 

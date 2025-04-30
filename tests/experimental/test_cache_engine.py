@@ -59,7 +59,6 @@ def test_same_retrieve_store(autorelease_experimental):
     """ test retrieve """
     ret_mask = engine.retrieve(tokens, kvcaches=retrieved_cache)
     length = torch.sum(ret_mask)
-
     assert length == num_tokens
     check_kv_cache_equal(retrieved_cache, kv_cache, num_tokens, fmt)
 

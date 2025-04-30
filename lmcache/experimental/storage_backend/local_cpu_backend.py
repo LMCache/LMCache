@@ -70,6 +70,9 @@ class LocalCPUBackend(StorageBackendInterface):
         """
         Synchronously put the MemoryObj into the local cpu backend.
         """
+        if not self.use_hot:
+            return
+        
         with self.cpu_lock:
             if key in self.hot_cache:
                 old_memory_obj = self.hot_cache.pop(key)
@@ -85,7 +88,6 @@ class LocalCPUBackend(StorageBackendInterface):
                 self.lmcache_worker.put_msg(
                     KVAdmitMsg(self.instance_id, key.worker_id, key.chunk_hash,
                                "cpu"))
-        return None
 
     # NOTE (Jiayi): prefetch might be deprecated in the future.
     # Should be replaced by `move`.
