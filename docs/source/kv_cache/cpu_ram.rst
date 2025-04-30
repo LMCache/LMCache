@@ -1,6 +1,8 @@
 CPU RAM
 =======
 
+.. _cpu_ram-overview:
+
 Overview
 --------
 
@@ -43,7 +45,7 @@ Example ``config.yaml``:
     max_local_cpu_size: 5.0 # default
 
 CPU RAM Explanation:
------------
+---------------------
 
 The ``LMCACHE_MAX_LOCAL_CPU_SIZE`` is the amount of page-locked (for fast GPU transfer)
 CPU memory that LMCache will reserve and must be set to a number greater than 0 since
@@ -67,10 +69,14 @@ tokens into the pinned CPU RAM from the disk or remote storage (*if* the KV cach
 tokens are already stored there). This can preemptively avoid the latency of the disk and
 remote KV transfer if we predict these tokens will be requested soon.
 
+.. _cpu_ram-online-inference-example:
+
 Online Inference Example
------------------------
+------------------------
 
 Let's feel the TTFT (time to first token) differential!
+
+.. _cpu_ram-prerequisites:
 
 **Prerequisites:**
 
@@ -265,6 +271,8 @@ If you look at the logs of your vLLM server, you should see (the logs are trunca
 
     LMCache INFO: Reqid: chatcmpl-136d9dac1ba94bd4b4ae85007e8ad437, Total tokens 15410,
     LMCache hit tokens: 15409, need to load: 1
+
+.. _cpu_ram-tips:
 
 Tips:
 -----

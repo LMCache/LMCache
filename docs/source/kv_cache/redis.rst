@@ -1,6 +1,8 @@
 Redis
 =====
 
+.. _redis-overview:
+
 Overview
 --------
 
@@ -9,7 +11,7 @@ Some other remote backends are :doc:`Mooncake <./mooncake>`, :doc:`Valkey <./val
 This guide will mainly focus on single-node Redis but also shows you how to set up Redis Sentinels and an LMCache Server.
 
 Two ways to configure LMCache Redis Offloading:
-----------------------------------------------
+-----------------------------------------------
 
 **1. Environment Variables:**
 
@@ -54,7 +56,7 @@ Example ``config.yaml``:
     remote_serde: "naive" # "naive" (default) or "cachegen"
 
 Remote Storage Explanation:
------------
+----------------------------
 
 LMCache's backend is configured to prioritize CPU RAM offloading, then Local Storage
 offloading, and finally remote offloading.
@@ -75,6 +77,8 @@ Examples of ``remote_url``'s:
 
 Remote Storage Example
 -----------------------
+
+.. _redis-prerequisites:
 
 **Prerequisites:**
 
@@ -130,7 +134,7 @@ monitor the master and automatically fail over to a replica if needed.
 
 Create three files: ``sentinel-26379.conf``, ``sentinel-26380.conf``, and ``sentinel-26381.conf``, with contents like this:
 
-.. code-block:: infinistore
+.. code-block:: ini
 
     port 26379  # Use 26380 and 26381 in other files respectively
     sentinel monitor mymaster 127.0.0.1 6379 1

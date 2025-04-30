@@ -1,6 +1,8 @@
 Local storage
 =============
 
+.. _local-storage-overview:
+
 Overview
 --------
 
@@ -9,7 +11,7 @@ memory of the same machine that is running inference.
 
 
 Two ways to configure LMCache Disk Offloading:
----------------------------------------------
+----------------------------------------------
 
 
 **1. Environment Variables:**
@@ -46,7 +48,7 @@ Passed in through ``LMCACHE_CONFIG_FILE=your-lmcache-config.yaml``
     max_local_disk_size: 5.0
 
 Local Storage Explanation:
------------
+--------------------------
 
 Unlike CPU RAM offloading, disk offloading is *disabled* by default (``local_disk`` is set to ``None``) and the
 max local disk size is set to 0GB instead of 5GB like the default max local cpu size
@@ -60,12 +62,16 @@ backends have asynchronous put() operations so that the IO latency will not slow
 The local disk backend also has a prefetch() operation that will preemptively move KV caches from the disk to CPU RAM offloading storage
 (i.e. ``LMCACHE_LOCAL_CPU=True`` should be set, see :doc:`CPU RAM <./cpu_ram>`) for specified tokens (these KV caches are also still kept in the disk).
 
+.. _local-storage-online-inference-example:
+
 Online Inference Example
------------------------
+------------------------
 
 This example is almost identical to the :doc:`CPU RAM <./cpu_ram>` example.
 
 Let's feel the TTFT (time to first token) differential!
+
+.. _local-storage-prerequisites:
 
 **Prerequisites:**
 
@@ -280,6 +286,9 @@ If you look at the logs of your vLLM server, you should see (the logs are trunca
 
     LMCache INFO: Reqid: chatcmpl-136d9dac1ba94bd4b4ae85007e8ad437, Total tokens 15410,
     LMCache hit tokens: 15409, need to load: 1
+
+
+.. _local-storage-tips:
 
 Tips:
 -----
