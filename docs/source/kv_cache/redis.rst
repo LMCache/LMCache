@@ -279,7 +279,7 @@ If you would like to feel the TTFT speed up with offloading and KV Cache reuse, 
 
 Here, we are instead going to demonstrate how to search for and modify LMCache KV Chunk entries in Redis.
 
-Please note that the official LMCache way to achieve this redis-specific functionality is available in :doc:`LMCache Controller <../kv_cache_management/controller>`.
+Please note that the official LMCache way to achieve this redis-specific functionality of viewing and modifying LMCache KV Chunks is available in :doc:`LMCache Controller <../kv_cache_management/controller>`.
 
 Let's warm/populate LMCache first with ``curl`` this time:
 
@@ -366,7 +366,7 @@ Delete a specific LMCache entry:
 
 .. code-block:: bash
 
-    EXISTS "vllm@meta-llama/Llama-3.1-8B-Instruct@1@0@02783dafec...kv_bytes"
+    localhost:6379> EXISTS "vllm@meta-llama/Llama-3.1-8B-Instruct@1@0@02783dafec...kv_bytes"
 
 **View memory usage for a key:**
 
