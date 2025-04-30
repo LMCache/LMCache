@@ -183,7 +183,8 @@ class StorageManager:
             memory_obj = backend.get_blocking(key)
             if memory_obj is not None:
                 if backend_name != "LocalCPUBackend":
-                    local_cpu_backend = self.storage_backends["LocalCPUBackend"]
+                    local_cpu_backend = self.storage_backends[
+                        "LocalCPUBackend"]
                     assert isinstance(local_cpu_backend, LocalCPUBackend)
                     local_cpu_backend.write_back(key, memory_obj)
                 return memory_obj
