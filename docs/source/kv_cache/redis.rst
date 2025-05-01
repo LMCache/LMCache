@@ -58,7 +58,7 @@ Example ``config.yaml``:
 Remote Storage Explanation:
 ----------------------------
 
-LMCache's backend is configured to prioritize CPU RAM offloading, then Local Storage
+LMCache's backend is obeys the natural memory hierarhcy of prioritizing CPU RAM offloading, then Local Storage
 offloading, and finally remote offloading.
 
 For LMCache to know how to create a connector to a remote backend, you must specify in

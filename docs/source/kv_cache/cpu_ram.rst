@@ -67,7 +67,7 @@ will contain the "hottest" (most recently accessed)subset of KV caches from Disk
 Thus, the cache engine also has a **prefetch** mechanism to preload the KV caches for specified
 tokens into the pinned CPU RAM from the disk or remote storage (*if* the KV caches for these
 tokens are already stored there). This can preemptively avoid the latency of the disk and
-remote KV transfer if we predict these tokens will be requested soon.
+remote KV transfer if we predict these tokens will be requested soon (e.g. structured or agentic workflows).
 
 .. _cpu_ram-online-inference-example:
 
