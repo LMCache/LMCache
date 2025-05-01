@@ -9,19 +9,22 @@ steps:
     commands:
       - bash .buildkite/mmlu_scripts/download_data.sh
       - find data -type f | head -n 20  # debug
+      - ls -la data/  # add this to see directory structure
     artifact_paths:
-      - data/val/**
-      - data/test/**
-      - data/train/**
-      - data/auxiliary_train/**
+      - "data/**/*"  # Change to better pattern
 
   - label: ":brain: MMLU | No LMCache"
     key: "no-lmcache"
     depends_on: ["setup", "download-mmlu-data"]
     timeout_in_minutes: 25
     commands:
+      # Create the data directory if it doesn't exist
       - mkdir -p data
-      - buildkite-agent artifact download "data/**" data/
+      # Download artifacts to the correct location
+      - buildkite-agent artifact download "data/**/*" .
+      # Debug output to verify files were downloaded correctly
+      - find data -type d | sort
+      - find data -type f | wc -l
       - bash .buildkite/mmlu_scripts/run_mmlu_no_lmcache.sh
     artifact_paths:
       - mmlu-results/v0_deepseek2.txt
@@ -32,7 +35,8 @@ steps:
     timeout_in_minutes: 25
     commands:
       - mkdir -p data
-      - buildkite-agent artifact download "data/**" data/
+      - buildkite-agent artifact download "data/**/*" .
+      - find data -type d | sort
       - bash .buildkite/mmlu_scripts/run_mmlu_lmcache_mla_on.sh
     artifact_paths:
       - mmlu-results/v0_lmcache_deepseek2_mla_on.txt
@@ -44,7 +48,8 @@ steps:
     timeout_in_minutes: 25
     commands:
       - mkdir -p data
-      - buildkite-agent artifact download "data/**" data/
+      - buildkite-agent artifact download "data/**/*" .
+      - find data -type d | sort
       - bash .buildkite/mmlu_scripts/run_mmlu_lmcache_mla_off.sh
     artifact_paths:
       - mmlu-results/v0_lmcache_deepseek2_no_mla.txt
@@ -52,7 +57,7 @@ steps:
   - label: ":bar_chart: Compare Results"
     commands:
       - mkdir -p compare-results
-      - buildkite-agent artifact download "mmlu-results/v0_*.txt" mmlu-results/
+      - buildkite-agent artifact download "mmlu-results/v0_*.txt" .
       - python3 .buildkite/mmlu_scripts/compare_mmlu_scores.py \
         mmlu-results/v0_lmcache_deepseek2_no_mla.txt \
         mmlu-results/v0_deepseek2.txt \
