@@ -66,14 +66,14 @@ else:
     print(f'File does not exist: {so_file}')
 "
 
-MODEL=deepseek-ai/DeepSeek-V2-Lite
-PORT=8000
+export MODEL=deepseek-ai/DeepSeek-V2-Lite
+export PORT=8000
+export LMCACHE_USE_EXPERIMENTAL=True
+export LMCACHE_TRACK_USAGE=false
+export VLLM_MLA_DISABLE=0
+export VLLM_USE_V1=0
+export LMCACHE_CONFIG_FILE=.buildkite/mmlu_scripts/lmc-cpu.yaml
 
-LMCACHE_USE_EXPERIMENTAL=True \
-LMCACHE_TRACK_USAGE=false \
-VLLM_MLA_DISABLE=0 \
-VLLM_USE_V1=0 \
-LMCACHE_CONFIG_FILE=.buildkite/mmlu_scripts/lmc-cpu.yaml \
 python3 -c "import torch; print('Preloaded torch')" && \
 python3 -m vllm.entrypoints.api_server \
   --model $MODEL \
@@ -86,7 +86,7 @@ python3 -m vllm.entrypoints.api_server \
   --host 0.0.0.0 \
   --port $PORT \
   --tensor-parallel-size 2 \
-  --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both","kv_parallel_size":2}' &
+  --kv-transfer-config '{"kv_connector":"LMCacheConnector","kv_role":"kv_both","kv_parallel_size":2}' &
 SERVER_PID=$!
 
 # Wait until the vLLM server is ready

@@ -4,11 +4,11 @@ set -euxo pipefail
 eval "$(conda shell.bash hook)"
 conda activate buildkite
 
-MODEL=deepseek-ai/DeepSeek-V2-Lite
-PORT=8000
+export MODEL=deepseek-ai/DeepSeek-V2-Lite
+export PORT=8000
+export VLLM_MLA_DISABLE=0
+export VLLM_USE_V1=0
 
-VLLM_MLA_DISABLE=0 \
-VLLM_USE_V1=0 \
 python3 -m vllm.entrypoints.api_server \
   --model $MODEL \
   --trust-remote-code \

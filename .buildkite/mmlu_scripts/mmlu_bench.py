@@ -64,7 +64,7 @@ def add_common_other_args_and_parse(parser: argparse.ArgumentParser):
 
 choices = ["A", "B", "C", "D"]
 
-tokenizer = AutoTokenizer.from_pretrained("deepseek-ai/DeepSeek-V2-Lite-Chat")
+tokenizer = AutoTokenizer.from_pretrained("deepseek-ai/DeepSeek-V2-Lite")
 
 def format_subject(subject):
     l = subject.split("_")

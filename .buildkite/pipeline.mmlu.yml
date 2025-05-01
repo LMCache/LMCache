@@ -41,7 +41,7 @@ steps:
     artifact_paths:
       - mmlu-results/v0_lmcache_deepseek2_no_mla.txt
 
-  - label: ":brain: MMLU | LMCache + MLA (expected to fail)"
+  - label: ":brain: MMLU | LMCache + MLA"
     key: "lmcache-mla-on"
     depends_on: ["setup", "download-mmlu-data"]
     timeout_in_minutes: 25
