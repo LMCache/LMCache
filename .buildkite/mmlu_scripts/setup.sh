@@ -32,6 +32,10 @@ set -xe
 
 pip install -r .buildkite/mmlu_scripts/mmlu_requirements.txt
 
+# Patch vllm api_server.py to add engine_client assignment
+API_SERVER_FILE=$(python -c "import vllm.entrypoints.api_server as m; print(m.__file__)")
+sed -i '/engine = (llm_engine/,/UsageContext.API_SERVER))/a \ \ \ \ app.state.engine_client = engine' "$API_SERVER_FILE"
+
 set +x
 echo "Current env:"
 pip freeze
