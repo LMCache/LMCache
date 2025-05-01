@@ -1,19 +1,18 @@
 import argparse
-import asyncio
 import json
 import os
+import sys
 import time
+import traceback
 from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 
 import numpy as np
 import pandas as pd
-from transformers import AutoTokenizer
-from tqdm import tqdm
-from functools import partial
-
 import requests
-import traceback
-import sys
+from tqdm import tqdm
+from transformers import AutoTokenizer
+
 
 def get_exception_traceback():
     etype, value, tb = sys.exc_info()
@@ -21,7 +20,12 @@ def get_exception_traceback():
     return err_str
 
 
-def call_generate_vllm(prompt, temperature, max_tokens, stop=None, n=1, url=None):
+def call_generate_vllm(prompt,
+                       temperature,
+                       max_tokens,
+                       stop=None,
+                       n=1,
+                       url=None):
     assert url is not None
 
     data = {
@@ -34,13 +38,15 @@ def call_generate_vllm(prompt, temperature, max_tokens, stop=None, n=1, url=None
     res = requests.post(url, json=data)
     assert res.status_code == 200
     if n == 1:
-        pred = res.json()["text"][0][len(prompt) :]
+        pred = res.json()["text"][0][len(prompt):]
     else:
-        pred = [x[len(prompt) :] for x in res.json()["text"]]
+        pred = [x[len(prompt):] for x in res.json()["text"]]
     return pred
 
+
 def _get_call_generate(args: argparse.Namespace):
-    return partial(call_generate_vllm, url=f"http://127.0.0.1:8000/generate")
+    return partial(call_generate_vllm, url="http://127.0.0.1:8000/generate")
+
 
 def get_call_generate(args: argparse.Namespace):
     call_generate = _get_call_generate(args)
@@ -54,6 +60,7 @@ def get_call_generate(args: argparse.Namespace):
 
     return func
 
+
 def add_common_other_args_and_parse(parser: argparse.ArgumentParser):
     parser.add_argument("--parallel", type=int, default=4)
     parser.add_argument("--n-ctx", type=int, default=4096)
@@ -66,10 +73,11 @@ choices = ["A", "B", "C", "D"]
 
 tokenizer = AutoTokenizer.from_pretrained("deepseek-ai/DeepSeek-V2-Lite")
 
+
 def format_subject(subject):
-    l = subject.split("_")
+    split_subject = subject.split("_")
     s = ""
-    for entry in l:
+    for entry in split_subject:
         s += " " + entry
     return s
 
@@ -86,9 +94,8 @@ def format_example(df, idx, include_answer=True):
 
 
 def gen_prompt(train_df, subject, k=-1):
-    prompt = "The following are multiple choice questions (with answers) about{}.\n\n".format(
-        format_subject(subject)
-    )
+    prompt = "The following are multiple choice questions \
+                (with answers) about{}.\n\n".format(format_subject(subject))
     if k == -1:
         k = train_df.shape[0]
     for i in range(k):
@@ -138,23 +145,18 @@ def evaluate(args, subject, dev_df, test_df, call_generate):
     acc = np.mean(cors)
     cors = np.array(cors)
 
-    print(
-        "Average accuracy {:.3f}, latency {:.2f}, #q: {} - {}".format(
-            acc, latency, len(prompts), subject
-        )
-    )
+    print("Average accuracy {:.3f}, latency {:.2f}, #q: {} - {}".format(
+        acc, latency, len(prompts), subject))
 
     return cors, acc, latency
 
 
 def main(args):
-    subjects = sorted(
-        [
-            f.split("_test.csv")[0]
-            for f in os.listdir(os.path.join(args.data_dir, "test"))
-            if "_test.csv" in f
-        ]
-    )
+    subjects = sorted([
+        f.split("_test.csv")[0]
+        for f in os.listdir(os.path.join(args.data_dir, "test"))
+        if "_test.csv" in f
+    ])
 
     all_cors = []
     all_latencies = []
@@ -163,15 +165,16 @@ def main(args):
     # Select backend
     call_generate = get_call_generate(args)
 
-    for subject in tqdm(subjects[: args.nsub]):
-        dev_df = pd.read_csv(
-            os.path.join(args.data_dir, "dev", subject + "_dev.csv"), header=None
-        )[: args.ntrain]
-        test_df = pd.read_csv(
-            os.path.join(args.data_dir, "test", subject + "_test.csv"), header=None
-        )
+    for subject in tqdm(subjects[:args.nsub]):
+        dev_df = pd.read_csv(os.path.join(args.data_dir, "dev",
+                                          subject + "_dev.csv"),
+                             header=None)[:args.ntrain]
+        test_df = pd.read_csv(os.path.join(args.data_dir, "test",
+                                           subject + "_test.csv"),
+                              header=None)
 
-        cors, acc, latency = evaluate(args, subject, dev_df, test_df, call_generate)
+        cors, acc, latency = evaluate(args, subject, dev_df, test_df,
+                                      call_generate)
         all_cors.append(cors)
         all_latencies.append(latency)
         num_requests += len(test_df)

@@ -1,9 +1,10 @@
+import glob
 import os
 import re
-import glob
 
 RESULTS_DIR = "mmlu-results"
 OUTFILE = "compare-results/comparison.txt"
+
 
 def parse_file(path):
     acc, lat = None, None
@@ -17,6 +18,7 @@ def parse_file(path):
     except Exception as e:
         print(f"⚠️ Failed to parse {path}: {e}")
     return acc, lat
+
 
 def main():
     os.makedirs("compare-results", exist_ok=True)
@@ -32,13 +34,15 @@ def main():
         acc, lat = parse_file(f)
         acc_str = f"{acc:.4f}" if acc is not None else "N/A"
         lat_str = f"{lat:.2f}" if lat is not None else "N/A"
-        report.append(f"- **{name}** → accuracy: {acc_str}, latency: {lat_str}")
+        report.append(
+            f"- **{name}** → accuracy: {acc_str}, latency: {lat_str}")
 
     text = "\n".join(report)
     print(text)
 
     with open(OUTFILE, "w") as f:
         f.write(text)
+
 
 if __name__ == "__main__":
     main()
