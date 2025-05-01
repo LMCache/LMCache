@@ -3,7 +3,7 @@ import asyncio
 import json
 import os
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 import pandas as pd
@@ -121,9 +121,7 @@ def evaluate(args, subject, dev_df, test_df, call_generate):
     # Run requests
     # Use thread pool
     def get_one_answer(i):
-        print(f"[Thread {i}] Sending request...")
         pred = call_generate(prompts[i], temperature=0, max_tokens=max_tokens)
-        print(f"[Thread {i}] Received response.")
         preds[i] = pred.strip()[0]
 
     tic = time.time()
@@ -132,12 +130,7 @@ def evaluate(args, subject, dev_df, test_df, call_generate):
             get_one_answer(i)
     else:
         with ThreadPoolExecutor(args.parallel) as executor:
-            futures = [executor.submit(get_one_answer, i) for i in range(len(prompts))]
-            for future in as_completed(futures):
-                try:
-                    future.result()
-                except Exception as e:
-                    print(f"Thread failed with: {repr(e)}")
+            executor.map(get_one_answer, list(range(len(prompts))))
     latency = time.time() - tic
 
     # Compute accuracy
