@@ -30,6 +30,7 @@ conda activate ${CONDA_ENV_NAME}
 
 set -xe
 
+pip uninstall -y vllm # need to repair it
 pip install -r .buildkite/mmlu_scripts/mmlu_requirements.txt
 
 # Patch vllm api_server.py to add engine_client assignment
