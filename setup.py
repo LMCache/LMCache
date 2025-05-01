@@ -54,6 +54,10 @@ if not BUILDING_SDIST:
                 'csrc/ac_enc.cu',
                 'csrc/ac_dec.cu',
             ],
+            extra_compile_args={
+                'cxx': ['-D_GLIBCXX_USE_CXX11_ABI=0'],
+                'nvcc': ['-D_GLIBCXX_USE_CXX11_ABI=0']
+            },
         ),
     ]
     cmdclass = {'build_ext': cpp_extension.BuildExtension}
