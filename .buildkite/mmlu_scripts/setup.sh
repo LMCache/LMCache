@@ -53,8 +53,11 @@ else
     exit 1
 fi
 
+# Completely clean and reinstall lmcache
+echo "Reinstalling lmcache with C extensions..."
 pip uninstall -y lmcache
-pip install lmcache
+rm -rf build/ dist/ *.egg-info/
+VERBOSE=1 pip install -e . --no-cache-dir
 
 # Verify C extensions are built correctly
 # After installing lmcache
