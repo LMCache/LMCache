@@ -22,9 +22,6 @@ def benchmark(args):
     engine = init_lmcache_engine(model_config, args.rank, args.world_size,
                                  args.tensor_parallel_size)
 
-    assert args.seq_len % args.chunk_size == 0, \
-        "seq_len should be divisible by chunk_size"
-
     # Generate random tokens
     random_token = torch.randint(0, 10000, (args.seq_len, ))
     token_pool = [
@@ -91,6 +88,7 @@ def benchmark(args):
             {throughput_hash:.2f} sequences/s")
     
     token = token_pool[0]
+    print(token)
     torch.save(token, "token.pt")
 
     kvsize = (
@@ -105,7 +103,7 @@ def benchmark(args):
     print(f"load throughput(cold cache): {kvsize * args.seq_num / (retrieve_latency / 1000) / 1e6} MB/s")
     print(f"load throughput(hash-based): {kvsize * args.seq_num / (retrieve_latency_hash / 1000) / 1e6} MB/s")
 
-    time.sleep(10)
+    time.sleep(120)
     LMCacheEngineBuilder.destroy(ENGINE_NAME)
     print("LMCache engine destroyed.")
 
@@ -136,10 +134,6 @@ if __name__ == "__main__":
                         type=int,
                         default=1,
                         help="Tensor parallel size")
-    parser.add_argument("--chunk_size",
-                        type=int,
-                        default=1,
-                        help="Chunk size for storing and retrieving KV cache")
     parser.add_argument("--seq_num",
                         type=int,
                         default=10,

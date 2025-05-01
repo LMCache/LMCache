@@ -7,8 +7,9 @@ chunk_size: 256
 local_disk: file:///local_disk/
 
 # The maximum size of the local KV cache as an integer (GB)
-# Set to 5 by default
-max_local_disk_size: 5
+max_local_disk_size: 20
+
+max_local_disk_size: 300
 
 # experimental features in LMCache
 use_experimental: True

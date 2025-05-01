@@ -17,9 +17,6 @@ Ensure the following dependencies are installed:
 - `lmcache`
 - `sglang`
 
-```bash
-pip install torch lmcache sglang
-```
 
 ## API Review
 
@@ -41,6 +38,7 @@ init_lmcache_engine(model_config, rank, world_size, tensor_parallel_size=1)
 - `rank` (`int`): Rank of the current process.
 - `world_size` (`int`): Total number of distributed processes.
 - `tensor_parallel_size` (`int`, optional): Size of tensor parallel group (default: `1`).
+- `--dram_connector_version`(`int`, optional): Data Layout of cache memory. With `--dram_connector_version 1`, the data layout is each chunk is `layer, chunksize, head_num, head_dim` while with `--dram_connector_version 1`, the data layout is each chunk is `chunksize, layer, head_num, head_dim`
 
 **Returns:** `LMCacheEngine` or `None` if already initialized.
 
@@ -59,38 +57,20 @@ get_hash(engine, token_ids, mask=None, prefix_hash=None)
 
 **Returns:** `List[CacheEngineKey]`
 
-
----
-### `Status`
-Enums used to track chunk-level store and retrieve operation states.
-
-```python
-class StoreStatus(IntEnum):
-    FAIL = -1
-    PREFILLING = 0
-
-class RetrieveStatus(IntEnum):
-    FAIL = -1
-    PREFILLING = 0
-
-```
-These enums are used to initialize and check store_status and retrieve_status tensors or lists during operations. Notice: For SGLang integration, each status is mapped to one block/chunk.
-
 ---
 ### `lmcache_store_kv`
 Stores KV cache blocks associated with a token sequence in LMCache.
 ```python
-lmcache_store_kv(engine, token_ids, kv_caches, store_status, prefix_hash=None)
+lmcache_store_kv(engine, token_ids, kv_caches, prefix_hash=None)
 ```
 **Parameters:**
 
 - `engine` (`LMCacheEngine`): Cache engine instance.
 - `token_ids` (`torch.Tensor`): 1D tensor of token IDs.
 - `kv_caches` (`torch.Tensor` or `List[torch.Tensor]`): KV tensors to store.
-- `store_status` (`List[StoreStatus]`): Status list for each chunk.
 - `prefix_hash` (`CacheEngineKey`, optional): Prefix hash for continuation.
 
-**Returns:** `List[CacheEngineKey]` used for storage.
+**Returns:** `Tuple(bool, List[CacheEngineKey])`. The `bool` stands for the success of the operation and `List[CacheEngineKey]` is the hash prefix.
 
 
 
@@ -98,33 +78,30 @@ lmcache_store_kv(engine, token_ids, kv_caches, store_status, prefix_hash=None)
 ### `lmcache_store_kv_hash`
 Stores KV blocks directly using precomputed hash keys.
 ```
-lmcache_store_kv_hash(engine, hash_, kv_caches, store_status)
+lmcache_store_kv_hash(engine, hash_, kv_caches)
 ```
 **Parameters:**
 
 - `engine` (`LMCacheEngine`): Cache engine instance.
 - `hash_` (`List[CacheEngineKey]`): Precomputed hash keys.
 - `kv_caches` (`List[torch.Tensor]`): KV tensors to store.
-- `store_status` (`List[StoreStatus]`): Storage status for each chunk.
 
-**Returns:** `List[str]` of stored hash key strings.
-
+**Returns:** `Tuple(bool, List[CacheEngineKey])`
 
 ---
 ### `lmcache_retrieve_kv`
 Retrieves KV cache blocks based on token IDs.
 ```
-lmcache_retrieve_kv(engine, token_ids, kv_caches, retrieve_status, prefix_hash=None)
+lmcache_retrieve_kv(engine, token_ids, kv_caches,  prefix_hash=None)
 ```
 **Parameters:**
 
 - `engine` (`LMCacheEngine`): Cache engine.
 - `token_ids` (`torch.Tensor`): 1D tensor of token IDs.
 - `kv_caches` (`torch.Tensor` or `List[torch.Tensor]`): Buffer to fill.
-- `retrieve_status` (`List[RetrieveStatus]`): Status list for each chunk.
 - `prefix_hash` (`CacheEngineKey`, optional): Prefix hash for continuation.
 
-**Returns:** None
+**Returns:** `bool` stands for the success
 
 
 ---
@@ -138,6 +115,5 @@ lmcache_retrieve_kv_hash(engine, hash_, kv_caches, retrieve_status)
 - `engine` (`LMCacheEngine`): Cache engine.
 - `hash_` (`List[CacheEngineKey]`): Hash keys for retrieval.
 - `kv_caches` (`torch.Tensor` or `List[torch.Tensor]`): Buffer to fill.
-- `retrieve_status` (`List[RetrieveStatus]`): Retrieval status per chunk.
 
-**Returns:** None
+**Returns:** `bool` stands for the success

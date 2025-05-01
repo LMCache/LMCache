@@ -337,6 +337,27 @@ class StorageManager:
                     return True
 
             return False
+        
+    def remove(self, key: CacheEngineKey) -> None:
+        """
+        Remove the key from the storage backend.
+        """
+        self.manager_lock.acquire()
+        if key in self.hot_cache:
+            if memory_allocator.get_ref_count(
+                    self.hot_cache[key]) > 1:
+                logger.warning(
+                    "Cannot remove key from hot cache, ref_count > 1")
+                self.manager_lock.release()
+                return
+            self.hot_cache.pop(key)
+            self.memory_allocator.ref_count_down(self.hot_cache[key])
+            if self.lookup_server is not None:
+                self.lookup_server.batched_remove([key])
+        self.manager_lock.release()
+
+        for backend in self.storage_backends.values():
+            backend.remove(key)
 
     def close(self):
 

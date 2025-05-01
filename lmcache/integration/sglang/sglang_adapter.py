@@ -1,5 +1,5 @@
 from enum import IntEnum
-from typing import List, Optional, Union
+from typing import List, Optional, Union, Tuple
 
 import torch
 from sglang.srt.configs.model_config import ModelConfig
@@ -8,7 +8,8 @@ from lmcache.config import LMCacheEngineMetadata
 from lmcache.experimental.cache_engine import (LMCacheEngine,
                                                LMCacheEngineBuilder)
 from lmcache.experimental.config import LMCacheEngineConfig
-from lmcache.experimental.dram_connector import SGLangDramNestedConnector
+from lmcache.experimental.dram_connector import (SGLangDramNestedConnector,
+                                                 SGLangDramNestedConnectorInner)
 from lmcache.integration.sglang.utils import ENGINE_NAME, lmcache_get_config
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey, _lmcache_nvtx_annotate
@@ -31,6 +32,7 @@ def init_lmcache_engine(
     rank: int,
     world_size: int,
     tensor_parallel_size: int = 1,
+    dram_connector_version: int = 1,
 ) -> Optional[LMCacheEngine]:
     """
     Initialize the LMCache engine for SGLang.
@@ -60,8 +62,14 @@ def init_lmcache_engine(
     metadata = LMCacheEngineMetadata(model_config.model_path, world_size, rank,
                                      "sglang", kv_dtype, kv_shape)
     hidden_dim_size = num_kv_head * head_size
-    sglang_dram_connector = SGLangDramNestedConnector(hidden_dim_size,
-                                                      num_layer, chunk_size)
+    if dram_connector_version == 1:
+        sglang_dram_connector = SGLangDramNestedConnector(hidden_dim_size,
+                                                          num_layer, chunk_size)
+    elif dram_connector_version == 2:
+        sglang_dram_connector = SGLangDramNestedConnectorInner(hidden_dim_size,
+                                                              num_layer, chunk_size)
+    else:
+        raise ValueError(f"Invalid DRAM connector version: {dram_connector_version}")
     assert isinstance(config, LMCacheEngineConfig), \
         "LMCache experimental configuration is should be passed."
     engine = LMCacheEngineBuilder.get_or_create(
@@ -95,9 +103,8 @@ def lmcache_store_kv(
     engine: LMCacheEngine,
     token_ids: torch.Tensor,
     kv_caches: Union[torch.Tensor, List[torch.Tensor]],
-    store_status: List[StoreStatus],
     prefix_hash: Optional[CacheEngineKey] = None,
-) -> List[CacheEngineKey]:
+) -> Tuple[bool, List[CacheEngineKey]]:
     """
     Store the KV caches in LMCache.
     :param engine: The LMCache engine.
@@ -107,18 +114,19 @@ def lmcache_store_kv(
     :param prefix_hash: The prefix hash.
     :return: List of CacheEngineKey for the stored KV caches.
     """
-    if len(store_status) == 0:
-        store_status = [StoreStatus.FAIL
-                        ] * (len(token_ids) // engine.config.chunk_size)
+
+    store_status = [StoreStatus.FAIL
+                    ] * (len(token_ids) // engine.config.chunk_size)
     if prefix_hash is not None:
         prefix_chunk_hash = prefix_hash.chunk_hash
     else:
         prefix_chunk_hash = None
-    return engine.store(token_ids,
+    hash_keys = engine.store(token_ids,
                         mask=None,
                         kvcaches=kv_caches,
                         store_status=store_status,
                         prefix_hash=prefix_chunk_hash)
+    return StoreStatus.FAIL not in store_status, hash_keys
 
 
 @_lmcache_nvtx_annotate
@@ -126,9 +134,8 @@ def lmcache_retrieve_kv(
     engine: LMCacheEngine,
     token_ids: torch.Tensor,
     kv_caches: Union[torch.Tensor, List[torch.Tensor]],
-    retrieve_status: List[RetrieveStatus],
     prefix_hash: Optional[CacheEngineKey] = None,
-) -> None:
+) -> bool:
     """
     Retrieve the KV caches from LMCache.
     :param engine: The LMCache engine.
@@ -138,8 +145,8 @@ def lmcache_retrieve_kv(
     :param prefix_hash: The prefix hash.
     :return: None
     """
-    if len(retrieve_status) == 0:
-        retrieve_status = [RetrieveStatus.FAIL
+
+    retrieve_status = [RetrieveStatus.FAIL
                            ] * (len(token_ids) // engine.config.chunk_size)
     if prefix_hash is not None:
         prefix_chunk_hash = prefix_hash.chunk_hash
@@ -150,6 +157,7 @@ def lmcache_retrieve_kv(
                     kvcaches=kv_caches,
                     retrieve_status=retrieve_status,
                     prefix_hash=prefix_chunk_hash)
+    return RetrieveStatus.FAIL not in retrieve_status
 
 
 @_lmcache_nvtx_annotate
@@ -157,8 +165,7 @@ def lmcache_store_kv_hash(
     engine: LMCacheEngine,
     hash_: List[CacheEngineKey],
     kv_caches: List[torch.Tensor],
-    store_status: List[RetrieveStatus],
-) -> List[str]:
+) -> Tuple[bool, List[CacheEngineKey]]:
     """ 
     Store the KV caches in LMCache using existing hash.
     :param engine: The LMCache engine. 
@@ -167,11 +174,11 @@ def lmcache_store_kv_hash(
     :param store_status: The status of the store operation.
     :return: List of CacheEngineKey for the stored KV caches.
     """
-    if len(store_status) == 0:
-        store_status = [RetrieveStatus.FAIL] * len(hash_)
-    return engine.hash_store(hash_,
+    store_status = [RetrieveStatus.FAIL] * len(hash_)
+    hash_keys = engine.hash_store(hash_,
                              kvcaches=kv_caches,
                              store_status=store_status)
+    return StoreStatus.FAIL not in store_status, hash_keys
 
 
 @_lmcache_nvtx_annotate
@@ -179,8 +186,7 @@ def lmcache_retrieve_kv_hash(
     engine: LMCacheEngine,
     hash_: List[CacheEngineKey],
     kv_caches: List[torch.Tensor],
-    retrieve_status: List[RetrieveStatus],
-) -> None:
+) -> bool:
     """
     Retrieve the KV caches from LMCache using existing hash.
     :param engine: The LMCache engine.
@@ -189,8 +195,8 @@ def lmcache_retrieve_kv_hash(
     :param retrieve_status: The status of the retrieve operation.
     :return: None
     """
-    if len(retrieve_status) == 0:
-        retrieve_status = [RetrieveStatus.FAIL] * len(hash_)
+    retrieve_status = [RetrieveStatus.FAIL] * len(hash_)
     engine.hash_retrieve(hash_,
                          kvcaches=kv_caches,
                          retrieve_status=retrieve_status)
+    return RetrieveStatus.FAIL not in retrieve_status

@@ -212,10 +212,6 @@ class LMCacheEngine:
 
             ret_mask[start:end] = True
 
-            # NOTE(Jiayi): memory_obj doesn't have to be a pinned
-            # cpu tensor for the sake of performance.
-            # For example, disk->gpu is faster than disk->cpu->gpu.
-            # RDMA is another example.
             if self.gpu_connector is not None:
                 self.gpu_connector.to_gpu(memory_obj, start, end, **kwargs)
             elif self.dram_connector is not None:
@@ -337,6 +333,13 @@ class LMCacheEngine:
                 tokens, mask, prefix_hash):
             ret.append(key)
         return ret
+    
+    def remove(
+        self,
+        hash_keys: List[CacheEngineKey],
+    ) -> bool:
+        pass
+
 
     def close(self) -> None:
         """Close the cache engine and free all the resources"""
