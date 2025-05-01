@@ -11,6 +11,16 @@ else
 fi
 
 cuda_version=12.4
+
+cuda_path="/usr/local/cuda-${cuda_version}"
+
+if [[ -d "$cuda_path" ]]; then
+    echo "Found CUDA ${cuda_version} at ${cuda_path}"
+else
+    echo "❌ CUDA ${cuda_version} not found at ${cuda_path}"
+    exit 1
+fi
+
 export CUDA_HOME=/usr/local/cuda-${cuda_version}
 export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
 export PATH=$CUDA_HOME/bin:$PATH

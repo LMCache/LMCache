@@ -4,7 +4,7 @@ steps:
     commands:
       - bash .buildkite/mmlu_scripts/setup.sh
 
-  - label: ":download: Download MMLU Data"
+  - label: ":hammer: Download MMLU Data"
     key: "download-mmlu-data"
     commands:
       - bash .buildkite/mmlu_scripts/download_data.sh

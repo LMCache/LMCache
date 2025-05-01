@@ -1,8 +1,8 @@
 #!/bin/bash
 set -euxo pipefail
 
-source /dataheart/yihua98/Applications/anaconda3/envs/buildkite/bin/activate
-
+eval "$(conda shell.bash hook)"
+conda activate buildkite
 
 MODEL=deepseek-ai/DeepSeek-V2-Lite
 PORT=8000
