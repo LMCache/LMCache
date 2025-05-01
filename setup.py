@@ -95,4 +95,5 @@ setup(
             "lmcache_controller=lmcache.experimental.api_server.__main__:main",
         ],
     },
+    include_package_data=True,
 )
