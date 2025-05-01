@@ -13,7 +13,7 @@ huggingface-cli login --token "$HF_TOKEN"
 echo "✅ HuggingFace login complete." > vllm-patch-status.txt
 
 # Patch vllm/entrypoints/api_server.py if needed
-patch_file="vllm/entrypoints/api_server.py"
+patch_file="vllm/vllm/entrypoints/api_server.py"
 grep -q "app.state.engine_client" $patch_file || \
   sed -i '/assert engine is not None/a \
 app.state.engine_client = engine' $patch_file
