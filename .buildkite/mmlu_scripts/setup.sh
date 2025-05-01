@@ -48,7 +48,6 @@ API_SERVER_FILE=$(python -c "import vllm.entrypoints.api_server as m; print(m.__
 if [[ -f "$API_SERVER_FILE" ]]; then
     # Preload torch at the top of the vllm API server
     sed -i '1i import torch; print("✅ Preloaded torch inside vLLM api_server")' "$API_SERVER_FILE"
-
     # Patch the line after the usage_context=UsageContext.API_SERVER)) line
     sed -i '/usage_context=UsageContext.API_SERVER))/a \    app.state.engine_client = engine' "$API_SERVER_FILE"
     echo "✅ Patched $API_SERVER_FILE"
