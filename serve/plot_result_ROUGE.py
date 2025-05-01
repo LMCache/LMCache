@@ -13,6 +13,7 @@ file_paths_ours = [
     'results/Apr_28_samsum/ours/001_processed.csv',
     'results/Apr_28_samsum/ours/01_processed.csv',
     'results/Apr_28_samsum/ours/1_processed.csv',
+    'results/Apr_28_samsum/ours/10_processed.csv',
     'results/Apr_28_samsum/ours/100_processed.csv'
 ]
 

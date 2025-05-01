@@ -17,7 +17,7 @@ from vllm.config import KVTransferConfig
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 os.environ["LMCACHE_USE_EXPERIMENTAL"] = "True"
-os.environ["LMCACHE_CONFIG_FILE"] = "/home/ubuntu/ShaotingFS2/LMCache/config/qmsum.yaml"
+os.environ["LMCACHE_CONFIG_FILE"] = "../config/qmsum.yaml"
 
 # This example script runs two requests with a shared prefix.
 shared_prompt = "Hello, how are you?" * 1000
@@ -75,19 +75,19 @@ for output in outputs:
     print(f"Generated text: {generated_text!r}")
 print("Third request done.")
 
-outputs = llm.generate(fourth_prompt, sampling_params)
+outputs = llm.generate(first_prompt, sampling_params)
 for output in outputs:
     generated_text = output.outputs[0].text
     print(f"Generated text: {generated_text!r}")
 print("Fourth request done.")
 
-outputs = llm.generate(fifth_prompt, sampling_params)
+outputs = llm.generate(second_prompt, sampling_params)
 for output in outputs:
     generated_text = output.outputs[0].text
     print(f"Generated text: {generated_text!r}")
 print("Fifth request done.")
 
-outputs = llm.generate(sixth_prompt, sampling_params)
+outputs = llm.generate(third_prompt, sampling_params)
 for output in outputs:
     generated_text = output.outputs[0].text
     print(f"Generated text: {generated_text!r}")
