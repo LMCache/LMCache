@@ -5,4 +5,3 @@ tqdm
 requests
 torch==2.6.0
 vllm
-lmcache_test_test

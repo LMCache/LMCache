@@ -44,6 +44,8 @@ else
     exit 1
 fi
 
+pip install -e .
+
 set +x
 echo "Current env:"
 pip freeze
