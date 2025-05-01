@@ -25,7 +25,7 @@ steps:
     commands:
       - bash .buildkite/mmlu_scripts/run_mmlu_lmcache_mla_on.sh
     artifact_paths:
-      - mmlu-results/v0_lmcache_deepseek2_errors.txt
+      - mmlu-results/v0_lmcache_deepseek2_mla_on.txt
     soft_fail: true
 
   - label: ":brain: MMLU | LMCache + MLA disabled"
@@ -43,6 +43,12 @@ steps:
       - "no-lmcache"
       - "lmcache-mla-on"
     command: |
+      mkdir compare-results
       python3 .buildkite/mmlu_scripts/compare_mmlu_scores.py \
         mmlu-results/v0_lmcache_deepseek2_no_mla.txt \
-        mmlu-results/v0_deepseek2.txt
+        mmlu-results/v0_deepseek2.txt \
+        | tee compare-results/comparison.txt
+
+      buildkite-agent annotate --style "info" --context "compare-results" < compare-results/comparison.txt
+    artifact_paths:
+      - compare-results/comparison.txt

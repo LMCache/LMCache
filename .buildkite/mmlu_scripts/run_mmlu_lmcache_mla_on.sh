@@ -37,6 +37,6 @@ mkdir mmlu-results
 python3 .buildkite/mmlu_scripts/mmlu_bench.py \
   --nsub 6 \
   --parallel 16 \
-  > mmlu-results/v0_lmcache_deepseek2_errors.txt || true
+  > mmlu-results/v0_lmcache_deepseek2_mla_on.txt || true
 
 kill $SERVER_PID || true
