@@ -11,7 +11,7 @@ LMCACHE_USE_EXPERIMENTAL=true \
 LMCACHE_TRACK_USAGE=false \
 VLLM_MLA_DISABLE=0 \
 VLLM_USE_V1=0 \
-LMCACHE_CONFIG_FILE=/home/samuelshen/lmc-cpu.yaml \
+LMCACHE_CONFIG_FILE=.buildkite/mmlu_scripts/lmc-cpu.yaml \
 python3 -m vllm.entrypoints.api_server \
   --model $MODEL \
   --trust-remote-code \
@@ -27,7 +27,7 @@ python3 -m vllm.entrypoints.api_server \
 SERVER_PID=$!
 
 # Wait until the vLLM server is ready
-until curl -s http://localhost:$PORT/v1/models | grep -q "deepseek_test"; do
+until curl -s http://localhost:$PORT/models | grep -q "deepseek_test"; do
   echo "Waiting for vLLM API server to become ready..."
   sleep 2
 done
