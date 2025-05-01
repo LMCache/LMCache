@@ -1,3 +1,5 @@
+.. _lookup:
+
 Lookup the KV cache
 ===================
 
