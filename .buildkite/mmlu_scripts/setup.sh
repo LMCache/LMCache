@@ -44,6 +44,8 @@ else
     exit 1
 fi
 
+# Install a fresh lmcache
+pip uninstall -y lmcache
 pip install -e .
 
 set +x
