@@ -4,6 +4,17 @@ set -euxo pipefail
 eval "$(conda shell.bash hook)"
 conda activate buildkite
 
+python3 -c "
+import os, lmcache
+pkg_dir = lmcache.__path__[0]
+contents = os.listdir(pkg_dir)
+so_files = [f for f in contents if 'c_ops' in f and f.endswith('.so')]
+if so_files and 'c_ops.so' not in contents:
+    os.symlink(os.path.join(pkg_dir, so_files[0]), os.path.join(pkg_dir, 'c_ops.so'))
+    print('✅ Symlinked c_ops.so')
+import lmcache.c_ops
+"
+
 MODEL=deepseek-ai/DeepSeek-V2-Lite
 PORT=8000
 
