@@ -44,8 +44,11 @@ else
     exit 1
 fi
 
-# Install a fresh lmcache
+apt-get update && apt-get install -y build-essential python3-dev
+
+# Install a fresh lmcache (force rebuild)
 pip uninstall -y lmcache
+rm -rf build/ dist/ *.egg-info/
 pip install -e .
 
 set +x
