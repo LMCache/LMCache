@@ -21,7 +21,14 @@ python3 -m vllm.entrypoints.api_server \
   --port $PORT \
   --tensor-parallel-size 2 &
 SERVER_PID=$!
-sleep 45
+
+# Wait until the vLLM server is ready
+until curl -s http://localhost:$PORT/v1/models | grep -q "deepseek_test"; do
+  echo "Waiting for vLLM API server to become ready..."
+  sleep 2
+done
+
+mkdir mmlu-results
 
 python3 .buildkite/mmlu_scripts/mmlu_bench.py \
   --nsub 60 \

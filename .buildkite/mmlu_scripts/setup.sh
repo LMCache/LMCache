@@ -44,8 +44,6 @@ else
     exit 1
 fi
 
-mkdir mmlu-results
-
 set +x
 echo "Current env:"
 pip freeze
