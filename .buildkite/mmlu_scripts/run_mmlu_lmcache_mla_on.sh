@@ -7,7 +7,7 @@ conda activate buildkite
 MODEL=deepseek-ai/DeepSeek-V2-Lite
 PORT=8000
 
-LMCACHE_USE_EXPERIMENTAL=true \
+LMCACHE_USE_EXPERIMENTAL=True \
 LMCACHE_TRACK_USAGE=false \
 VLLM_MLA_DISABLE=0 \
 VLLM_USE_V1=0 \
@@ -28,6 +28,10 @@ SERVER_PID=$!
 
 # Wait until the vLLM server is ready
 until curl --fail http://localhost:8000/health; do
+  if ! ps -p $SERVER_PID > /dev/null; then
+    echo "❌ vLLM server process exited prematurely"
+    exit 1
+  fi
   echo "Waiting for vLLM server to become ready..."
   sleep 2
 done

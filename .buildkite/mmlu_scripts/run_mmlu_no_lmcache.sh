@@ -24,6 +24,10 @@ SERVER_PID=$!
 
 # Wait until the vLLM server is ready
 until curl --fail http://localhost:8000/health; do
+  if ! ps -p $SERVER_PID > /dev/null; then
+    echo "❌ vLLM server process exited prematurely"
+    exit 1
+  fi
   echo "Waiting for vLLM server to become ready..."
   sleep 2
 done

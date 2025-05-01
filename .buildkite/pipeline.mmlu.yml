@@ -8,12 +8,15 @@ steps:
     key: "download-mmlu-data"
     commands:
       - bash .buildkite/mmlu_scripts/download_data.sh
+    artifact_paths:
+      - data/**
 
   - label: ":brain: MMLU | No LMCache"
     key: "no-lmcache"
     depends_on: ["setup", "download-mmlu-data"]
     timeout_in_minutes: 25
     commands:
+      - buildkite-agent artifact download "data/**" .
       - bash .buildkite/mmlu_scripts/run_mmlu_no_lmcache.sh
     artifact_paths:
       - mmlu-results/v0_deepseek2.txt
@@ -23,6 +26,7 @@ steps:
     depends_on: ["setup", "download-mmlu-data"]
     timeout_in_minutes: 25
     commands:
+      - buildkite-agent artifact download "data/**" .
       - bash .buildkite/mmlu_scripts/run_mmlu_lmcache_mla_on.sh
     artifact_paths:
       - mmlu-results/v0_lmcache_deepseek2_mla_on.txt
@@ -33,6 +37,7 @@ steps:
     depends_on: ["setup", "download-mmlu-data"]
     timeout_in_minutes: 25
     commands:
+      - buildkite-agent artifact download "data/**" .
       - bash .buildkite/mmlu_scripts/run_mmlu_lmcache_mla_off.sh
     artifact_paths:
       - mmlu-results/v0_lmcache_deepseek2_no_mla.txt
@@ -43,6 +48,7 @@ steps:
       - "no-lmcache"
       - "lmcache-mla-on"
     command: |
+      buildkite-agent artifact download "mmlu-results/v0_*.txt" .
       mkdir compare-results
       python3 .buildkite/mmlu_scripts/compare_mmlu_scores.py \
         mmlu-results/v0_lmcache_deepseek2_no_mla.txt \
