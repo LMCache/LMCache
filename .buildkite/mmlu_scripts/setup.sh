@@ -53,6 +53,9 @@ else
     exit 1
 fi
 
+pip uninstall -y lmcache
+pip install lmcache
+
 # Verify C extensions are built correctly
 # After installing lmcache
 echo "Verifying C extensions..."
