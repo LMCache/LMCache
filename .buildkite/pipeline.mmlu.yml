@@ -29,6 +29,18 @@ steps:
     artifact_paths:
       - mmlu-results/v0_deepseek2.txt
 
+  - label: ":brain: MMLU | LMCache + MLA disabled"
+    key: "lmcache-mla-off"
+    depends_on: ["setup", "download-mmlu-data"]
+    timeout_in_minutes: 25
+    commands:
+      - mkdir -p data
+      - buildkite-agent artifact download "data/**/*" .
+      - find data -type d | sort
+      - bash .buildkite/mmlu_scripts/run_mmlu_lmcache_mla_off.sh
+    artifact_paths:
+      - mmlu-results/v0_lmcache_deepseek2_no_mla.txt
+
   - label: ":brain: MMLU | LMCache + MLA (expected to fail)"
     key: "lmcache-mla-on"
     depends_on: ["setup", "download-mmlu-data"]
@@ -41,18 +53,6 @@ steps:
     artifact_paths:
       - mmlu-results/v0_lmcache_deepseek2_mla_on.txt
     soft_fail: true
-
-  - label: ":brain: MMLU | LMCache + MLA disabled"
-    key: "lmcache-mla-off"
-    depends_on: ["setup", "download-mmlu-data"]
-    timeout_in_minutes: 25
-    commands:
-      - mkdir -p data
-      - buildkite-agent artifact download "data/**/*" .
-      - find data -type d | sort
-      - bash .buildkite/mmlu_scripts/run_mmlu_lmcache_mla_off.sh
-    artifact_paths:
-      - mmlu-results/v0_lmcache_deepseek2_no_mla.txt
 
   - label: ":bar_chart: Compare Results"
     commands:

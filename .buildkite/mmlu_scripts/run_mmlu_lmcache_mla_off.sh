@@ -33,7 +33,7 @@ python3 -m vllm.entrypoints.api_server \
   --host 0.0.0.0 \
   --port $PORT \
   --tensor-parallel-size 2 \
-  --kv-transfer-config '{"kv_connector":"LMCacheConnector","kv_role":"kv_both","kv_parallel_size":2}' &
+  --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both","kv_parallel_size":2}' &
 SERVER_PID=$!
 
 # Wait until the vLLM server is ready
