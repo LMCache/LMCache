@@ -1,0 +1,1 @@
+LMCACHE_CONFIG_FILE=./config.yaml python ssd_benchmark_inner.py --model_path meta-llama/Llama-3.1-8B-Instruct --kv_pool_size 40000 --seq_len 1024 --seq_num 200 --dram_connector_version 2
