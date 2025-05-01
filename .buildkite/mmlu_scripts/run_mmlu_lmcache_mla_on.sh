@@ -4,15 +4,6 @@ set -euxo pipefail
 eval "$(conda shell.bash hook)"
 conda activate buildkite
 
-# Verify torch first, then lmcache in the SAME Python process
-echo "Verifying torch and lmcache installation..."
-python3 -c "import torch; print('torch version:', torch.__version__); import lmcache; print('lmcache version:', lmcache.__version__)" || { echo "❌ Installation verification failed!"; exit 1; }
-
-# Set up LD_LIBRARY_PATH to include torch libraries
-echo "Setting up PyTorch library path..."
-export LD_LIBRARY_PATH=$(python3 -c "import torch, os; print(os.path.join(os.path.dirname(torch.__file__), 'lib'))")${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}
-echo "LD_LIBRARY_PATH: $LD_LIBRARY_PATH"
-
 MODEL=deepseek-ai/DeepSeek-V2-Lite
 PORT=8000
 
