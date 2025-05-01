@@ -4,15 +4,58 @@ set -euxo pipefail
 eval "$(conda shell.bash hook)"
 conda activate buildkite
 
-python3 -c "
-import os, lmcache
+echo "Verifying C extensions..."
+python -c "
+import lmcache
+import os
+import sys
+import importlib.util
+
+print('lmcache path:', lmcache.__path__)
+contents = os.listdir(lmcache.__path__[0])
+print('lmcache directory contents:', contents)
+
+# Check for .so file with c_ops in the name
+c_ops_files = [f for f in contents if 'c_ops' in f and f.endswith('.so')]
+if c_ops_files:
+    print('Found C extension files:', c_ops_files)
+    # Create a symlink if necessary
+    if 'c_ops' not in contents:
+        os.symlink(
+            os.path.join(lmcache.__path__[0], c_ops_files[0]),
+            os.path.join(lmcache.__path__[0], 'c_ops.so')
+        )
+        print('Created symlink for c_ops.so')
+else:
+    print('WARNING: No c_ops module found in lmcache package!', file=sys.stderr)
+    sys.exit(1)
+"
+
+python -c "
+import sys
+import os
+import importlib.util
+
+# Force load PyTorch first to ensure its libraries are in memory
+import torch
+print(f'PyTorch library path: {os.path.dirname(torch.__file__)}')
+
+# Now try to import lmcache
+import lmcache
 pkg_dir = lmcache.__path__[0]
-contents = os.listdir(pkg_dir)
-so_files = [f for f in contents if 'c_ops' in f and f.endswith('.so')]
-if so_files and 'c_ops.so' not in contents:
-    os.symlink(os.path.join(pkg_dir, so_files[0]), os.path.join(pkg_dir, 'c_ops.so'))
-    print('✅ Symlinked c_ops.so')
-import lmcache.c_ops
+so_file = os.path.join(pkg_dir, 'c_ops.so')
+
+if os.path.exists(so_file):
+    print(f'File exists: {so_file}')
+
+    # Try importing the normal way now that PyTorch is loaded
+    try:
+        import lmcache.c_ops
+        print('Successfully imported lmcache.c_ops after loading PyTorch')
+    except Exception as e:
+        print(f'Error during import: {e}')
+else:
+    print(f'File does not exist: {so_file}')
 "
 
 MODEL=deepseek-ai/DeepSeek-V2-Lite
