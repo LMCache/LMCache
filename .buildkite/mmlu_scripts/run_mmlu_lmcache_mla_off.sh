@@ -4,6 +4,14 @@ set -euxo pipefail
 eval "$(conda shell.bash hook)"
 conda activate buildkite
 
+# Completely clean and reinstall lmcache
+echo "Reinstalling lmcache with C extensions..."
+pip uninstall -y lmcache
+rm -rf build/ dist/ *.egg-info/
+VERBOSE=1 pip install -e . --no-cache-dir
+
+# Verify C extensions are built correctly
+# After installing lmcache
 echo "Verifying C extensions..."
 python -c "
 import lmcache
