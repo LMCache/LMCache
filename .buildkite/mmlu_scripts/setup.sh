@@ -36,7 +36,7 @@ pip install -r .buildkite/mmlu_scripts/mmlu_requirements.txt
 API_SERVER_FILE=$(python -c "import vllm.entrypoints.api_server as m; print(m.__file__)" | tail -n 1)
 
 if [[ -f "$API_SERVER_FILE" ]]; then
-    sed -i '/engine = (llm_engine/,/UsageContext.API_SERVER))/a \    app.state.engine_client = engine' "$API_SERVER_FILE"
+    sed -i '/usage_context=UsageContext.API_SERVER))/a \    app.state.engine_client = engine' "$API_SERVER_FILE"
     echo "✅ Patched $API_SERVER_FILE"
 else
     echo "❌ Could not find vllm.api_server.py"
