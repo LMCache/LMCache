@@ -10,11 +10,10 @@ steps:
       - bash .buildkite/mmlu_scripts/download_data.sh
       - find data -type f | head -n 20  # debug
     artifact_paths:
-      - data/**
-      # - data/val/**
-      # - data/test/**
-      # - data/train/**
-      # - data/auxiliary_train/**
+      - data/val/**
+      - data/test/**
+      - data/train/**
+      - data/auxiliary_train/**
 
   - label: ":brain: MMLU | No LMCache"
     key: "no-lmcache"
