@@ -1,6 +1,9 @@
 #!/bin/bash
 set -euxo pipefail
 
+# Activate virtual environment
+source mmlu_venv/bin/activate
+
 MODEL=deepseek-ai/DeepSeek-V2-Lite
 PORT=8000
 

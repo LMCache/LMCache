@@ -1,15 +1,10 @@
-# for the Web UI
-# steps:
-  # - label: ":pipeline: Upload pipeline definition"
-  #   command: "buildkite-agent pipeline upload .buildkite/pipeline.mmlu.yml"
-
 steps:
-  - label: ":hammer: Check HuggingFace auth and patch vLLM"
+  - label: ":hammer: Setup Environment"
     key: "setup"
     commands:
-      - bash .buildkite/scripts/setup_vllm_and_hf.sh
+      - bash .buildkite/scripts/setup_hf_vllm_lmcache_sglang.sh
     artifact_paths:
-      - vllm-patch-status.txt
+      - setup-status.txt
 
   - wait
 
