@@ -1,6 +1,10 @@
 #!/bin/bash
 set -euxo pipefail
 
+# Install SSL development packages
+sudo apt-get update
+sudo apt-get install -y libssl-dev
+
 # Create and activate virtual environment
 python3 -m venv mmlu_venv
 source mmlu_venv/bin/activate
@@ -20,14 +24,26 @@ if [[ ! -d "vllm" ]]; then
   git clone https://github.com/vllm-project/vllm.git
 fi
 
-# Patch api_server.py for app.state.engine_client
 patch_file="vllm/vllm/entrypoints/api_server.py"
-if ! grep -q "app.state.engine_client" "$patch_file"; then
+
+# 1. Patch inside init_app (usually already there, but idempotent)
+if ! grep -q "app.state.engine_client = engine" "$patch_file"; then
   sed -i '/assert engine is not None/a \
 app.state.engine_client = engine' "$patch_file"
-  echo "✅ vLLM patch applied to $patch_file" >> setup-status.txt
+  echo "✅ Patch 1 applied to init_app" >> setup-status.txt
 else
-  echo "ℹ️ Patch already present in $patch_file" >> setup-status.txt
+  echo "ℹ️ Patch 1 already present in init_app" >> setup-status.txt
+fi
+
+# 2. Patch inside run_server (new location)
+# Match: assert engine is not None
+# Insert: app.state.engine_client = engine
+if ! grep -A1 "await init_app" "$patch_file" | grep -q "app.state.engine_client"; then
+  sed -i '/assert engine is not None/a \
+app.state.engine_client = engine' "$patch_file"
+  echo "✅ Patch 2 applied to run_server" >> setup-status.txt
+else
+  echo "ℹ️ Patch 2 already present in run_server" >> setup-status.txt
 fi
 
 # Install vLLM
