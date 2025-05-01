@@ -20,7 +20,7 @@ conda activate ${CONDA_ENV_NAME}
 
 set -xe
 
-pip install -r ./buildkite/mmlu_scripts/mmlu_requirements.txt
+pip install -r .buildkite/mmlu_scripts/mmlu_requirements.txt
 
 set +x
 echo "Current env:"
