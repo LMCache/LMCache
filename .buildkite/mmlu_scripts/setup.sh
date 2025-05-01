@@ -30,6 +30,15 @@ conda activate ${CONDA_ENV_NAME}
 
 set -xe
 
+# Clear vLLM cache
+echo "Clearing vLLM cache..."
+rm -rf ~/.cache/vllm/
+mkdir -p ~/.cache/vllm/
+
+# Clear Python cache files
+echo "Clearing Python cache files..."
+find . -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
+
 pip uninstall -y vllm # need to repair it
 pip install -r .buildkite/mmlu_scripts/mmlu_requirements.txt
 
@@ -44,12 +53,44 @@ else
     exit 1
 fi
 
-apt-get update && apt-get install -y build-essential python3-dev
+# Install build dependencies
+echo "Installing build dependencies..."
+sudo apt-get update && sudo apt-get install -y build-essential python3-dev || true
 
-# Install a fresh lmcache (force rebuild)
+# Completely clean and reinstall lmcache
+echo "Reinstalling lmcache with C extensions..."
 pip uninstall -y lmcache
 rm -rf build/ dist/ *.egg-info/
-pip install -e .
+VERBOSE=1 pip install -e . --no-cache-dir
+
+# Verify C extensions are built correctly
+# After installing lmcache
+echo "Verifying C extensions..."
+python -c "
+import lmcache
+import os
+import sys
+import importlib.util
+
+print('lmcache path:', lmcache.__path__)
+contents = os.listdir(lmcache.__path__[0])
+print('lmcache directory contents:', contents)
+
+# Check for .so file with c_ops in the name
+c_ops_files = [f for f in contents if 'c_ops' in f and f.endswith('.so')]
+if c_ops_files:
+    print('Found C extension files:', c_ops_files)
+    # Create a symlink if necessary
+    if 'c_ops' not in contents:
+        os.symlink(
+            os.path.join(lmcache.__path__[0], c_ops_files[0]),
+            os.path.join(lmcache.__path__[0], 'c_ops.so')
+        )
+        print('Created symlink for c_ops.so')
+else:
+    print('WARNING: No c_ops module found in lmcache package!', file=sys.stderr)
+    sys.exit(1)
+"
 
 set +x
 echo "Current env:"
