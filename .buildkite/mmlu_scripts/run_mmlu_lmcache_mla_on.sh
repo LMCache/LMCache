@@ -25,7 +25,7 @@ python3 -m vllm.entrypoints.api_server \
   --tensor-parallel-size 2 \
   --kv-transfer-config '{"kv_connector":"LMCacheConnector","kv_role":"kv_both","kv_parallel_size":2}' &
 SERVER_PID=$!
-sleep 15
+sleep 45
 
 python3 ./buildkite/mmlu_scripts/mmlu_bench.py \
   --nsub 6 \
