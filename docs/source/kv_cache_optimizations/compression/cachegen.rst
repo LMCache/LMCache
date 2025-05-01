@@ -10,7 +10,7 @@ Configuring CacheGen in LMCache
 ---------------------------------------
 
 The settings should be very similar to :ref:`naive KV cache sharing <share_kv_cache>`. 
-Only minor configurations need to be done to enbale CacheGen. 
+Only minor configurations need to be done to enable CacheGen. 
 
 To enable CacheGen in offline inference, we need to set:
 
