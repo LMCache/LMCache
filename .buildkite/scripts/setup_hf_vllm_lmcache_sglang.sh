@@ -1,10 +1,6 @@
 #!/bin/bash
 set -euxo pipefail
 
-# Install SSL development packages
-sudo apt-get update
-sudo apt-get install -y libssl-dev
-
 # Create and activate virtual environment
 python3 -m venv mmlu_venv
 source mmlu_venv/bin/activate
