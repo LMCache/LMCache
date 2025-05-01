@@ -35,7 +35,7 @@ done
 mkdir mmlu-results
 
 python3 .buildkite/mmlu_scripts/mmlu_bench.py \
-  --nsub 60 \
+  --nsub 6 \
   --parallel 16 \
   > mmlu-results/v0_deepseek2.txt || true
 

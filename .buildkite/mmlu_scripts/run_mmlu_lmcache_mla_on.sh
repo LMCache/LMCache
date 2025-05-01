@@ -4,6 +4,13 @@ set -euxo pipefail
 eval "$(conda shell.bash hook)"
 conda activate buildkite
 
+# Verify that lmcache and torch are installed
+echo "Verifying lmcache installation..."
+python3 -c "import lmcache; print('lmcache version:', lmcache.__version__)" || { echo "❌ lmcache is not installed!"; exit 1; }
+
+echo "Verifying torch installation..."
+python3 -c "import torch; print('torch version:', torch.__version__)" || { echo "❌ torch is not installed!"; exit 1; }
+
 MODEL=deepseek-ai/DeepSeek-V2-Lite
 PORT=8000
 
