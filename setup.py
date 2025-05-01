@@ -8,7 +8,7 @@ ROOT_DIR = Path(__file__).parent
 
 
 def get_version():
-    version_file = ROOT_DIR / "lmcache" / "_version.py"
+    version_file = ROOT_DIR / "lmcache" / "__init__.py"
     with open(version_file) as f:
         version_ns = {}
         exec(f.read(), version_ns)
@@ -64,7 +64,7 @@ else:
     cmdclass = {}
 
 setup(
-    name="lmcache_test_test",
+    name="lmcache",
     version=get_version(),
     description="LMCache: prefill your long contexts only once",
     author="LMCache team",
