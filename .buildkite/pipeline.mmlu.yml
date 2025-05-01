@@ -2,11 +2,12 @@ steps:
   - label: ":hammer: Setup Environment"
     key: "setup"
     commands:
-      - bash .buildkite/scripts/setup_hf_vllm_lmcache_sglang.sh
-    artifact_paths:
-      - setup-status.txt
+      - bash .buildkite/scripts/setup.sh
 
-  - wait
+  - label: ":hammer: Download MMLU Data"
+    key: "download-mmlu-data"
+    commands:
+      - bash .buildkite/scripts/download_data.sh
 
   - label: ":brain: MMLU | LMCache + MLA (expected to fail)"
     key: "lmcache-mla-on"

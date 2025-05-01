@@ -1,8 +1,7 @@
 #!/bin/bash
 set -euxo pipefail
 
-# Activate virtual environment
-source mmlu_venv/bin/activate
+source /dataheart/yihua98/Applications/anaconda3/envs/buildkite/bin/activate
 
 MODEL=deepseek-ai/DeepSeek-V2-Lite
 PORT=8000
@@ -23,7 +22,7 @@ python3 -m vllm.entrypoints.api_server \
 SERVER_PID=$!
 sleep 15
 
-python3 sglang/benchmark/mmlu/bench_other.py \
+python3 ./buildkite/scripts/mmlu_bench.py \
   --backend vllm \
   --host http://localhost \
   --port $PORT \
