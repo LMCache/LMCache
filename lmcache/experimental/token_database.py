@@ -65,6 +65,8 @@ class ChunkedTokenDatabase(TokenDatabase):
         self.metadata = metadata
         # Load the coefficients once during initialization.
         self.coefficients = load_linear_coefficients("linear_coefficients.csv")
+        self.alpha = config.alpha
+        logger.info(f"ChunkedTokenDatabase initialized with alpha {self.alpha}.")
 
     # TODO(Shaoting): Add real score table
     # NOTE(Shaoting): For 7006 tokens, TTFT: prefill (1.511s), cpu (0.0876s), disk (0.2814s)
@@ -96,13 +98,13 @@ class ChunkedTokenDatabase(TokenDatabase):
             # Score value
             score_value = score_dict[threshold]
             # NOTE(Shaoting): alpha=1 defined here
-            computed_value = 1 - computed_value * 10 - score_value
+            computed_value = 1 - computed_value * self.alpha - score_value
             score_table.append((threshold, computed_value))
 
         return CacheEngineKey(self.metadata.fmt, self.metadata.model_name,
                               self.metadata.world_size,
                               self.metadata.worker_id, chunk_hash,
-                              CacheManagerMetadata([total_hashes], ["kivi"], 1, token_len, [score_table]))
+                              CacheManagerMetadata([total_hashes], ["kivi"], 1, 0.0, token_len, [score_table]))
 
     def _get_init_hash(self) -> str:
         return ""

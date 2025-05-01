@@ -27,6 +27,9 @@ class LMCacheEngineConfig:
     blend_recompute_ratio: float  # the ratio of blending recompute
     blend_min_tokens: int  # the minimum number of tokens for blending
 
+    alpha: float
+    policy: str
+
     @staticmethod
     def from_defaults(
         chunk_size: int = 256,
@@ -40,12 +43,14 @@ class LMCacheEngineConfig:
         enable_blending: bool = False,
         blend_recompute_ratio: float = 0.15,
         blend_min_tokens: int = 256,
+        alpha: float = 1.0,
+        policy: str = "ours",
     ) -> "LMCacheEngineConfig":
         return LMCacheEngineConfig(chunk_size, local_cpu, max_local_cpu_size,
                                    local_disk, max_local_disk_size, remote_url,
                                    remote_serde, save_decode_cache,
                                    enable_blending, blend_recompute_ratio,
-                                   blend_min_tokens)
+                                   blend_min_tokens, alpha, policy)
 
     @staticmethod
     def from_legacy(
@@ -58,6 +63,8 @@ class LMCacheEngineConfig:
         blend_recompute_ratio: float = 0.15,
         blend_min_tokens: int = 256,
         max_local_disk_size: float = 0.0,
+        alpha: float = 1.0,
+        policy: str = "ours",
     ) -> "LMCacheEngineConfig":
         if backend == "cpu":
             local_cpu = True
@@ -101,7 +108,7 @@ class LMCacheEngineConfig:
                                    local_disk, max_local_disk_size, remote_url,
                                    remote_serde, save_decode_cache,
                                    enable_blending, blend_recompute_ratio,
-                                   blend_min_tokens)
+                                   blend_min_tokens, alpha, policy)
 
     @staticmethod
     def from_file(file_path: str) -> "LMCacheEngineConfig":
@@ -126,6 +133,9 @@ class LMCacheEngineConfig:
         enable_blending = config.get("enable_blending", False)
         blend_recompute_ratio = config.get("blend_recompute_ratio", 0.15)
         blend_min_tokens = config.get("blend_min_tokens", 256)
+
+        alpha = config.get("alpha", 1.0)
+        policy = config.get("policy", "ours")
 
         match local_disk:
             case None:
@@ -154,6 +164,8 @@ class LMCacheEngineConfig:
             enable_blending,
             blend_recompute_ratio,
             blend_min_tokens,
+            alpha,
+            policy,
         )
 
     @staticmethod
@@ -219,6 +231,8 @@ class LMCacheEngineConfig:
         config.blend_min_tokens = to_int(
             parse_env(get_env_name("blend_min_tokens"),
                       config.blend_min_tokens))
+        config.alpha = to_float(parse_env(get_env_name("alpha"), config.alpha))
+        config.policy = parse_env(get_env_name("policy"), config.policy)
         return config
 
     def to_original_config(self) -> orig_config.LMCacheEngineConfig:
@@ -235,5 +249,5 @@ class LMCacheEngineConfig:
             blend_recompute_ratio=self.blend_recompute_ratio,
             blend_min_tokens=self.blend_min_tokens,
             blend_separator="[BLEND_SEP]",
-            blend_add_special_in_precomp=False,
+            blend_add_special_in_precomp=False
         )

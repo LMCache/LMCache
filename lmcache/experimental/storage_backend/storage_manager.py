@@ -83,13 +83,14 @@ class KVDecision:
 
 # TODO(Shaoting): add freqency estimator
 class KVCacheManager:
-    def __init__(self, hot_cache: OrderedDict[CacheEngineKey, MemoryObj]):
+    def __init__(self, hot_cache: OrderedDict[CacheEngineKey, MemoryObj], method: str):
         # NOTE(Shaoting): policy related variables define here
-        self.method = "baseline_KIVI"
+        self.method = method
         self.rate = 1
         self.cpu_size = 5368709120 * 7.8 # 39 GB
 
         self.hot_cache = hot_cache
+        logger.info(f"KVCacheManager initialized with self.method: {self.method}")
 
     def inform_new(self, to_save_list: OrderedDict):
 
@@ -123,11 +124,11 @@ class KVCacheManager:
 
                 # 1) Process the *new* key 
                 first_update_key = next(iter(to_save_list))
-                update_total_length = sum(key.metadata.length for key in to_save_list.keys())
+                update_total_tokens = first_update_key.metadata.num_tokens
                 new_best, new_drop = compute_best_rate_and_drop(
                     first_update_key.metadata.score_table,
                     new_kv_rate,
-                    update_total_length,
+                    update_total_tokens,
                     first_update_key.metadata.rate
                 )
                 if new_drop < min_quality_drop:
@@ -150,12 +151,12 @@ class KVCacheManager:
                     curr_rate = final_drop_list.get(rep, rep.metadata.rate)
 
                     # aggregate length
-                    total_length = sum(k.metadata.length for k in keys)
+                    total_tokens = rep.metadata.num_tokens
 
                     best_r, drop_r = compute_best_rate_and_drop(
                         rep.metadata.score_table,
                         curr_rate,
-                        total_length,
+                        total_tokens,
                         rep.metadata.rate
                     )
                     # compare against the running minimum
@@ -217,7 +218,7 @@ class StorageManager:
 
         self.stream = torch.cuda.Stream()
 
-        self.manager = KVCacheManager(self.hot_cache)
+        self.manager = KVCacheManager(self.hot_cache, config.policy)
 
         self.update_queue: OrderedDict[CacheEngineKey, MemoryObj] = OrderedDict()
 

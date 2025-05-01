@@ -12,10 +12,10 @@ from typing import Tuple
 import openai
 import pandas as pd
 import traceback
+import argparse
 
 NUM_QUERY = 200
 MODEL = "meta-llama/Llama-3.1-8B-Instruct"
-PORT = 8000
 FILES = [
     'dataset/samsum.csv'
 ]
@@ -124,11 +124,25 @@ def create_openai_client(port: int, model) -> openai.Client:
 
 
 def main():
+    # parse output filename
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--output", "-o",
+        default="result.csv",
+        help="Output CSV file name"
+    )
+    parser.add_argument(
+        "--port", "-p",
+        default=8000,
+        help="Port number for OpenAI API"
+    )
+    args = parser.parse_args()
+
     # Load the workload trace
     workload_trace = generate_workload_trace(FILES, NUM_QUERY)
 
     # Initialize OpenAI client
-    client = create_openai_client(PORT, MODEL)
+    client = create_openai_client(args.port, MODEL)
 
     # Record answers
     answers = []
@@ -166,7 +180,7 @@ def main():
 
     # Save the results
     workload_trace = workload_trace.reset_index(drop=True)
-    workload_trace.to_csv("result.csv")
+    workload_trace.to_csv(args.output)  # <-- now uses parsed filename
 
 if __name__ == "__main__":
     main()
