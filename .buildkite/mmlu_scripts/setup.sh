@@ -53,16 +53,6 @@ else
     exit 1
 fi
 
-# Install build dependencies
-echo "Installing build dependencies..."
-sudo apt-get update && sudo apt-get install -y build-essential python3-dev || true
-
-# Completely clean and reinstall lmcache
-echo "Reinstalling lmcache with C extensions..."
-pip uninstall -y lmcache
-rm -rf build/ dist/ *.egg-info/
-VERBOSE=1 pip install -e . --no-cache-dir
-
 # Verify C extensions are built correctly
 # After installing lmcache
 echo "Verifying C extensions..."

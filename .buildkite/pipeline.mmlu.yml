@@ -13,11 +13,6 @@ steps:
     artifact_paths:
       - "data/**/*"  # Change to better pattern
 
-  - label: "Testing lmcache deployment"
-    key: "test-lmcache-installation"
-    commands:
-      - bash .buildkite/mmlu_scripts/test_lmcache_deployment.sh
-
   - label: ":brain: MMLU | No LMCache"
     key: "no-lmcache"
     depends_on: ["setup", "download-mmlu-data"]
