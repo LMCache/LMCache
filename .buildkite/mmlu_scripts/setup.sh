@@ -90,32 +90,27 @@ else:
 
 python -c "
 import sys
-import importlib.util
 import os
-import lmcache
+import importlib.util
 
-# Get the path to the .so file
+# Force load PyTorch first to ensure its libraries are in memory
+import torch
+print(f'PyTorch library path: {os.path.dirname(torch.__file__)}')
+
+# Now try to import lmcache
+import lmcache
 pkg_dir = lmcache.__path__[0]
 so_file = os.path.join(pkg_dir, 'c_ops.so')
-print(f'Looking for {so_file}')
 
 if os.path.exists(so_file):
     print(f'File exists: {so_file}')
 
-    # Try manual import using importlib
+    # Try importing the normal way now that PyTorch is loaded
     try:
-        spec = importlib.util.spec_from_file_location('lmcache.c_ops', so_file)
-        module = importlib.util.module_from_spec(spec)
-        sys.modules['lmcache.c_ops'] = module
-        spec.loader.exec_module(module)
-        print('Successfully loaded c_ops module using importlib')
-
-        # Create a direct reference in the lmcache package
-        import lmcache
-        setattr(lmcache, 'c_ops', module)
-        print('Successfully attached c_ops to lmcache package')
+        import lmcache.c_ops
+        print('Successfully imported lmcache.c_ops after loading PyTorch')
     except Exception as e:
-        print(f'Error during manual import: {e}')
+        print(f'Error during import: {e}')
 else:
     print(f'File does not exist: {so_file}')
 "
