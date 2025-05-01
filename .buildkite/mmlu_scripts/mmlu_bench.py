@@ -12,6 +12,14 @@ from tqdm import tqdm
 from functools import partial
 
 import requests
+import traceback
+import sys
+
+def get_exception_traceback():
+    etype, value, tb = sys.exc_info()
+    err_str = "".join(traceback.format_exception(etype, value, tb))
+    return err_str
+
 
 def call_generate_vllm(prompt, temperature, max_tokens, stop=None, n=1, url=None):
     assert url is not None
@@ -32,7 +40,7 @@ def call_generate_vllm(prompt, temperature, max_tokens, stop=None, n=1, url=None
     return pred
 
 def _get_call_generate(args: argparse.Namespace):
-    return partial(call_generate_vllm, url=f"http://127.0.0.1:8000/v1/chat/completions")
+    return partial(call_generate_vllm, url=f"http://127.0.0.1:8000/generate")
 
 def get_call_generate(args: argparse.Namespace):
     call_generate = _get_call_generate(args)

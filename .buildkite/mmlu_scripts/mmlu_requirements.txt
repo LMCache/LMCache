@@ -1,0 +1,8 @@
+numpy
+pandas
+tiktoken
+tqdm
+requests
+torch==2.6.0
+vllm
+lmcache
