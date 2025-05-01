@@ -1,44 +1,48 @@
 steps:
-  - label: ":hammer: Setup Environment"
+  - label: ":pip: Setup Environment"
     key: "setup"
     commands:
-      - bash .buildkite/scripts/setup.sh
+      - bash .buildkite/mmlu_scripts/setup.sh
 
-  - label: ":hammer: Download MMLU Data"
+  - label: ":download: Download MMLU Data"
     key: "download-mmlu-data"
     commands:
-      - bash .buildkite/scripts/download_data.sh
+      - bash .buildkite/mmlu_scripts/download_data.sh
+
+  - label: ":brain: MMLU | No LMCache"
+    key: "no-lmcache"
+    depends_on: ["setup", "download-mmlu-data"]
+    timeout_in_minutes: 25
+    commands:
+      - bash .buildkite/mmlu_scripts/run_mmlu_no_lmcache.sh
+    artifact_paths:
+      - mmlu-results/v0_deepseek2.txt
 
   - label: ":brain: MMLU | LMCache + MLA (expected to fail)"
     key: "lmcache-mla-on"
-    timeout_in_minutes: 30
+    depends_on: ["setup", "download-mmlu-data"]
+    timeout_in_minutes: 25
     commands:
-      - bash .buildkite/scripts/run_mmlu_lmcache_mla_on.sh
+      - bash .buildkite/mmlu_scripts/run_mmlu_lmcache_mla_on.sh
     artifact_paths:
       - mmlu-results/v0_lmcache_deepseek2_errors.txt
     soft_fail: true
 
   - label: ":brain: MMLU | LMCache + MLA disabled"
     key: "lmcache-mla-off"
-    timeout_in_minutes: 30
+    depends_on: ["setup", "download-mmlu-data"]
+    timeout_in_minutes: 25
     commands:
-      - bash .buildkite/scripts/run_mmlu_lmcache_mla_off.sh
+      - bash .buildkite/mmlu_scripts/run_mmlu_lmcache_mla_off.sh
     artifact_paths:
       - mmlu-results/v0_lmcache_deepseek2_no_mla.txt
-
-  - label: ":brain: MMLU | No LMCache"
-    key: "no-lmcache"
-    timeout_in_minutes: 30
-    commands:
-      - bash .buildkite/scripts/run_mmlu_no_lmcache.sh
-    artifact_paths:
-      - mmlu-results/v0_deepseek2.txt
 
   - label: ":bar_chart: Compare Results"
     depends_on:
       - "lmcache-mla-off"
       - "no-lmcache"
+      - "lmcache-mla-on"
     command: |
-      python3 .buildkite/scripts/compare_mmlu_scores.py \
+      python3 .buildkite/mmlu_scripts/compare_mmlu_scores.py \
         mmlu-results/v0_lmcache_deepseek2_no_mla.txt \
         mmlu-results/v0_deepseek2.txt

@@ -22,10 +22,8 @@ python3 -m vllm.entrypoints.api_server \
 SERVER_PID=$!
 sleep 15
 
-python3 ./buildkite/scripts/mmlu_bench.py \
-  --backend vllm \
-  --host http://localhost \
-  --port $PORT \
+python3 ./buildkite/mmlu_scripts/mmlu_bench.py \
+  --nsub 60 \
   --parallel 16 \
   > mmlu-results/v0_deepseek2.txt || true
 
