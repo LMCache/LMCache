@@ -29,7 +29,7 @@ This section introduces the key APIs provided by `lmcache.integration.sglang.sgl
 Initializes an LMCache engine instance for use in SGLang.
 
 ```python
-init_lmcache_engine(model_config, rank, world_size, tensor_parallel_size=1)
+init_lmcache_engine(model_config, rank, world_size, tensor_parallel_size=1, dram_connector_version=1)
 ```
 
 **Parameters:**
@@ -38,7 +38,7 @@ init_lmcache_engine(model_config, rank, world_size, tensor_parallel_size=1)
 - `rank` (`int`): Rank of the current process.
 - `world_size` (`int`): Total number of distributed processes.
 - `tensor_parallel_size` (`int`, optional): Size of tensor parallel group (default: `1`).
-- `--dram_connector_version`(`int`, optional): Data Layout of cache memory. With `--dram_connector_version 1`, the data layout is each chunk is `layer, chunksize, head_num, head_dim` while with `--dram_connector_version 1`, the data layout is each chunk is `chunksize, layer, head_num, head_dim`
+- `dram_connector_version`(`int`, optional): Data Layout of cache memory. With `--dram_connector_version 1`, the data layout is each chunk is `layer, chunksize, head_num, head_dim` while with `--dram_connector_version 1`, the data layout is each chunk is `chunksize, layer, head_num, head_dim`
 
 **Returns:** `LMCacheEngine` or `None` if already initialized.
 
