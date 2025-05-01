@@ -49,7 +49,7 @@ For more information, check out the following:
 * `Join LMCache slack workspace <https://join.slack.com/t/lmcacheworkspace/shared_invite/zt-2viziwhue-5Amprc9k5hcIdXT7XevTaQ>`_
 * Our papers:
 
-  * `CacheGen: KV Cache Compression and Streaming for Fast Large Language Model Serving <https://dl.acm.org/doi/10.1145/3603269.3604823>`_
+  * `CacheGen: KV Cache Compression and Streaming for Fast Large Language Model Serving <https://dl.acm.org/doi/10.1145/3651890.3672274>`_
   * `CacheBlend: Fast Large Language Model Serving with Cached Knowledge Fusion <https://arxiv.org/abs/2405.16444>`_
   * `Do Large Language Models Need a Content Delivery Network? <https://arxiv.org/abs/2409.13761>`_
 
@@ -100,6 +100,9 @@ Documentation
    kv_cache_management/lookup
    kv_cache_management/persist
    kv_cache_management/clear
+   kv_cache_management/move
+   kv_cache_management/compress
+   kv_cache_management/check_finish
 
 :raw-html:`<br />`
 
@@ -107,7 +110,7 @@ Documentation
    :maxdepth: 2
    :caption: KV Cache Optimizations
 
-   kv_cache_optimizations/compression
+   kv_cache_optimizations/compression/index
    kv_cache_optimizations/blending
 
 :raw-html:`<br />`
