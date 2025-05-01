@@ -9,6 +9,7 @@ steps:
     commands:
       - bash .buildkite/mmlu_scripts/download_data.sh
     artifact_paths:
+      - data/
       - data/**
 
   - label: ":brain: MMLU | No LMCache"
