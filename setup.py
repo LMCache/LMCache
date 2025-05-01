@@ -64,7 +64,7 @@ else:
     cmdclass = {}
 
 setup(
-    name="lmcache",
+    name="lmcache_test_test",
     version=get_version(),
     description="LMCache: prefill your long contexts only once",
     author="LMCache team",
