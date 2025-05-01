@@ -50,10 +50,6 @@ steps:
       - mmlu-results/v0_lmcache_deepseek2_no_mla.txt
 
   - label: ":bar_chart: Compare Results"
-    depends_on:
-      - "lmcache-mla-off"
-      - "no-lmcache"
-      - "lmcache-mla-on"
     commands:
       - mkdir -p compare-results
       - buildkite-agent artifact download "mmlu-results/v0_*.txt" mmlu-results/
