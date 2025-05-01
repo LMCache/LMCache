@@ -63,6 +63,6 @@ steps:
         mmlu-results/v0_deepseek2.txt \
         | tee compare-results/comparison.txt
 
-      buildkite-agent annotate --style "info" --context "compare-results" < compare-results/comparison.txt
+      - buildkite-agent annotate --style "info" --context "compare-results" < compare-results/comparison.txt
     artifact_paths:
       - compare-results/comparison.txt
