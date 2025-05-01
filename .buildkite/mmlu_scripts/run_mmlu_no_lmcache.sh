@@ -22,6 +22,10 @@ python3 -m vllm.entrypoints.api_server \
   --tensor-parallel-size 2 &
 SERVER_PID=$!
 
+# Start 5-minute self-destruct
+(sleep 300 && echo "Timeout reached, force killing server..." && kill -9 $SERVER_PID) &
+TIMER_PID=$!
+
 # Wait until the vLLM server is ready
 until curl --fail http://localhost:8000/health; do
   if ! ps -p $SERVER_PID > /dev/null; then
