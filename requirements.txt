@@ -1,5 +1,5 @@
-torch==2.6.0
-numpy==1.26.4
+torch
+numpy
 aiofiles
 pyyaml
 redis
