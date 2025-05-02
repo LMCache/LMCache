@@ -16,13 +16,15 @@ Before you begin, make sure you have:
 
 - vLLM v1 with LMCache installed (see :doc:`Installation <../installation>`)
 - A GPU that can run a LLM
+- `Logged into HuggingFace <https://huggingface.co/docs/huggingface_hub/en/guides/cli#huggingface-cli-login>`_ using a token with gated access permission (required for model downloads)
 
 
 Use CPU offloading in offline inference
 ---------------------------------------
 
-This section demonstrates how to use CPU memory offloading in offline inference scenarios using LMCache with vLLM v1.
-The example script we used is also available in vLLM's `main repo <https://github.com/vllm-project/vllm/blob/main/examples/lmcache/cpu_offload_lmcache_v1.py>`_.
+This section demonstrates how to use CPU memory offloading in offline inference scenarios using LMCache with vLLM.
+The example script we use here is available in `vLLM examples <https://github.com/vllm-project/vllm/blob/main/examples/lmcache/cpu_offload_lmcache.py>`_.
+See the `examples README <https://github.com/vllm-project/vllm/tree/main/examples/lmcache#2-cpu-offload-examples>`_ to understand how to run the script for vLLM v1.
 
 First, set up the necessary environment variables for LMCache:
 

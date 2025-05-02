@@ -3,6 +3,7 @@ import threading
 import time
 from typing import List, Optional, Tuple
 
+import pytest
 import torch
 
 from lmcache.experimental.memory_management import (AdHocMemoryAllocator,
@@ -233,6 +234,7 @@ def receive_and_verify_data(observer: TestObserver,
         torch.cuda.empty_cache()
 
 
+@pytest.mark.skip(reason="test needs to be parameterized")
 def test_allocate_for_send(channel: NixlChannel, shape: torch.Size,
                            dtype: torch.dtype) -> None:
     """Test the allocate_for_send API"""
