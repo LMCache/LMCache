@@ -9,8 +9,8 @@ Meeting schedule
 -----------------
 The LMCache community meetings held separately for each project: 
 
-- LMCache - `Github <https://github.com/LMCache/LMCache/>`_
-- Production Stack - `Github <https://github.com/vllm-project/production-stack>`_
+- LMCache - `Github <https://github.com/LMCache/LMCache/>`__
+- Production Stack - `Github <https://github.com/vllm-project/production-stack>`__
 
 LMCache Project
 ++++++++++++++++
