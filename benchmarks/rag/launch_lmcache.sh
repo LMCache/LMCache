@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-MODEL_NAME="casperhansen/llama-3-70b-instruct-awq"
-DATASET_PATH=input.json
+MODEL_NAME="mistralai/Mistral-7B-Instruct-v0.2"
+DATASET_PATH=~/CacheBlend/inputs/musique_s.json
 PROMPT_BUILD_METHOD=QA
-KV_STORAGE_SIZE=20GB
-KV_CHUNK_SIZE=1024
+KV_STORAGE_SIZE=30GB
+KV_CHUNK_SIZE=256
 QPS=3.5
 BASE_URL="http://localhost:8000/v1"
 DATASET_NAME=$(echo $DATASET_PATH | awk -F'/' '{print $NF}' | awk -F'.' '{print $1}')
