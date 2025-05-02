@@ -89,7 +89,7 @@ class StorageManager:
         eviction=True,
     ) -> Optional[MemoryObj]:
         """
-        Dry allocate memory object with memory allocator.
+        Allocate memory object with memory allocator.
         Use LRU evictor if eviction is enabled.
         """
         local_cpu_backend = self.storage_backends["LocalCPUBackend"]
