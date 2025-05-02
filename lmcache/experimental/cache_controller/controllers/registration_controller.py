@@ -18,6 +18,8 @@ import zmq
 import zmq.asyncio
 
 from lmcache.experimental.cache_controller.message import (DeRegisterMsg,
+                                                           QueryInstMsg,
+                                                           QueryInstRetMsg,
                                                            RegisterMsg)
 from lmcache.experimental.cache_controller.rpc_utils import (close_zmq_socket,
                                                              get_zmq_context,
@@ -33,8 +35,12 @@ class RegistrationController:
 
         # Mapping from `instance_id` -> `worker_ids`
         self.worker_mapping: dict[str, list[int]] = {}
+
         # Mapping from `(instance_id, worker_id)` -> `url`
         self.socket_mapping: dict[tuple[str, int], zmq.asyncio.Socket] = {}
+
+        # Mapping from `ip` -> `instance_id`
+        self.instance_mapping: dict[str, str] = {}
 
     def post_init(self, kv_controller, cluster_executor):
         """
@@ -60,13 +66,28 @@ class RegistrationController:
         """
         return self.worker_mapping.get(instance_id, [])
 
+    async def get_instance_id(self, msg: QueryInstMsg) -> QueryInstRetMsg:
+        """
+        Get the instance id given an ip address.
+        """
+        ip = msg.ip
+        instance_id = self.instance_mapping.get(ip)
+        if instance_id is None:
+            logger.warning(f"Instance not registered for IP {ip}")
+            return QueryInstRetMsg(instance_id=None)
+        return QueryInstRetMsg(instance_id=instance_id)
+
     async def register(self, msg: RegisterMsg) -> None:
         """
         Register a new instance-worker connection mapping.
         """
         instance_id = msg.instance_id
         worker_id = msg.worker_id
-        url = msg.url
+        ip = msg.ip
+        port = msg.port
+        url = f"{ip}:{port}"
+
+        self.instance_mapping[ip] = instance_id
 
         context = get_zmq_context()
         socket = get_zmq_socket(
@@ -89,6 +110,10 @@ class RegistrationController:
         """
         instance_id = msg.instance_id
         worker_id = msg.worker_id
+        ip = msg.ip
+
+        self.instance_mapping.pop(ip, None)
+
         if instance_id in self.worker_mapping:
             self.worker_mapping[instance_id].remove(worker_id)
             if not self.worker_mapping[instance_id]:
