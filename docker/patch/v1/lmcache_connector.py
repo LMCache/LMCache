@@ -2,13 +2,13 @@
 from typing import TYPE_CHECKING
 
 import torch
-from lmcache.integration.vllm.vllm_v1_adapter import LMCacheConnectorV1Impl
-
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
 from vllm.logger import init_logger
 from vllm.v1.core.sched.output import SchedulerOutput
+
+from lmcache.integration.vllm.vllm_v1_adapter import LMCacheConnectorV1Impl
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
