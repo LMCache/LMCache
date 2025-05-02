@@ -1,4 +1,4 @@
-IMAGE=<IMAGE_NAME>:<TAG>
+IMAGE=lmcache/vllm-openai:2025-04-18
 docker run --runtime nvidia --gpus all \
     --env "HF_TOKEN=<YOUR_HUGGINGFACE_TOKEN>" \
     --env "LMCACHE_USE_EXPERIMENTAL=True" \
@@ -10,5 +10,6 @@ docker run --runtime nvidia --gpus all \
     --entrypoint "/usr/local/bin/vllm" \
     $IMAGE \
     serve mistralai/Mistral-7B-Instruct-v0.2 --kv-transfer-config \
-    '{"kv_connector":"LMCacheConnector","kv_role":"kv_both"}' \
-    --enable-chunked-prefill false
+    '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both","kv_connector_extra_config": {}}' \
+
+

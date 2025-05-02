@@ -36,10 +36,11 @@ RUN ldconfig /usr/local/cuda-$(echo $CUDA_VERSION | cut -d. -f1,2)/compat/
 WORKDIR /workspace
 
 # install build and runtime dependencies
-COPY requirements-common.txt requirements-common.txt
-COPY requirements-cuda.txt requirements-cuda.txt
+COPY common.txt common.txt
+COPY cuda.txt cuda.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
-    python3 -m pip install -r requirements-cuda.txt
+    python3 -m pip install torch==2.6.0 torchvision==0.21.0 && \
+    python3 -m pip install -r cuda.txt
 
 
 # cuda arch list used by torch
@@ -57,7 +58,7 @@ ENV VLLM_FA_CMAKE_GPU_ARCHES=${vllm_fa_cmake_gpu_arches}
 FROM base AS build
 
 # install build dependencies
-COPY requirements-build.txt requirements-build.txt
+COPY build.txt build.txt
 
 # max jobs used by Ninja to build extensions
 ARG max_jobs=2
@@ -68,35 +69,48 @@ ENV NVCC_THREADS=$nvcc_threads
 
 
 RUN --mount=type=cache,target=/root/.cache/pip \
-    python3 -m pip install -r requirements-build.txt
+    python3 -m pip install -r build.txt
 
 ARG LMCACHE_COMMIT_ID=1
 
 RUN git clone https://github.com/LMCache/LMCache.git
+RUN git clone https://github.com/LMCache/torchac_cuda.git
+
 
 WORKDIR /workspace/LMCache
 RUN --mount=type=cache,target=/root/.cache/ccache \
     --mount=type=cache,target=/root/.cache/pip \
     python3 setup.py bdist_wheel --dist-dir=dist_lmcache
 
+WORKDIR /workspace/torchac_cuda
+RUN --mount=type=cache,target=/root/.cache/ccache \
+    --mount=type=cache,target=/root/.cache/pip \
+    python3 setup.py bdist_wheel --dist-dir=/workspace/LMCache/dist_lmcache
+    
+
 #################### vLLM installation IMAGE ####################
-FROM vllm/vllm-openai:v0.7.3 AS vllm-openai
+# Install torchac_cuda wheel into the vLLM image
+FROM  public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:247195d4ac91334adf87ca6b9a940eec68f6f6cb AS vllm-openai
 RUN --mount=type=bind,from=build,src=/workspace/LMCache/dist_lmcache,target=/vllm-workspace/dist_lmcache \
 --mount=type=cache,target=/root/.cache/pip \
 pip install dist_lmcache/*.whl --verbose
 
+COPY patch/v1/factory.py \
+    /usr/local/lib/python3.12/dist-packages/vllm/distributed/kv_transfer/kv_connector/
+COPY patch/v1/lmcache_connector.py \
+    /usr/local/lib/python3.12/dist-packages/vllm/distributed/kv_transfer/kv_connector/v1/
 # Copy lmc_connector patch into vllm
-COPY patch/factory.py \
-    /usr/local/lib/python3.12/dist-packages/vllm/distributed/kv_transfer/kv_connector/
-COPY patch/lmcache_connector.py \
-    /usr/local/lib/python3.12/dist-packages/vllm/distributed/kv_transfer/kv_connector/
+# COPY patch/factory.py \
+#     /usr/local/lib/python3.12/dist-packages/vllm/distributed/kv_transfer/kv_connector/
+# COPY patch/lmcache_connector.py \
+#     /usr/local/lib/python3.12/dist-packages/vllm/distributed/kv_transfer/kv_connector/
 
-# Use diff if file is too large
-COPY patch/parallel_state.patch \
-    /usr/local/lib/python3.12/dist-packages/vllm/distributed/
+# # Use diff if file is too large
+# COPY patch/parallel_state.patch \
+#     /usr/local/lib/python3.12/dist-packages/vllm/distributed/
 
-RUN patch /usr/local/lib/python3.12/dist-packages/vllm/distributed/parallel_state.py \
-    /usr/local/lib/python3.12/dist-packages/vllm/distributed/parallel_state.patch
+# RUN patch /usr/local/lib/python3.12/dist-packages/vllm/distributed/parallel_state.py \
+#     /usr/local/lib/python3.12/dist-packages/vllm/distributed/parallel_state.patch
 
 
 ENTRYPOINT ["vllm", "serve"]
