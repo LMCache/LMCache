@@ -399,6 +399,78 @@ class LMCacheEngine:
         self.storage_manager.close()
         logger.info("LMCacheEngine closed.")
 
+class LayerwiseLMCacheEngine(LMCacheEngine):
+    """A specialized LMCacheEngine for layerwise cache engine.
+    
+    This class is used to store the layerwise cache engine. It is a
+    subclass of LMCacheEngine and inherits all the methods and attributes
+    from it. The only difference is that it uses a different token database
+    and memory allocator.
+    """
+
+    def __init__(
+        self,
+        config: LMCacheEngineConfig,
+        metadata: LMCacheEngineMetadata,
+        memory_allocator: MemoryAllocatorInterface,
+        token_database: TokenDatabase,
+        layerwise_gpu_connector: GPUConnectorInterface,
+    ):
+        super().__init__(config, metadata, memory_allocator, token_database,
+                         layerwise_gpu_connector)
+        
+        self.num_layers = 
+    
+    @_lmcache_nvtx_annotate
+    @torch.inference_mode()
+    def store_layer(self,
+              tokens: torch.Tensor,
+              mask: Optional[torch.Tensor] = None,
+              **kwargs) -> None:
+        """
+        Store the KV cache in a layerwise manner.
+        """
+        
+        if mask is not None:
+            num_stored_tokens = torch.sum(mask).item()
+        else:
+            num_stored_tokens = len(tokens)
+        monitor_req_id = self.stats_monitor.on_store_request(num_stored_tokens)
+        
+        starts = []
+        ends = []
+        keys = []
+        memory_objs = []
+        for start, end, key in self.token_database.process_tokens(
+                tokens, mask):
+            assert isinstance(key, CacheEngineKey)
+            if self.storage_manager.contains(key):
+                continue
+            # Allocate the memory object
+            num_tokens = end - start
+            kv_shape = self.gpu_connector.get_shape(num_tokens)
+            kv_dtype = self.metadata.kv_dtype
+            memory_obj = self.storage_manager.allocate(kv_shape, kv_dtype)
+            if memory_obj is None:
+                logger.warning("Failed to allocate memory for the KV cache.\n"
+                               "The KV cache will not be stored.")
+                break
+            
+            starts.append(start)
+            ends.append(end)
+            keys.append(key)
+            memory_objs.append(memory_obj)
+            
+            # Update lookup server
+            if self.lookup_server is not None:
+                self.lookup_server.insert(key)
+        
+        
+        
+        self.stats_monitor.on_store_finished(monitor_req_id)
+        logger.debug(f"Stored {num_stored_tokens} "
+                     f"out of total {len(tokens)} tokens")
+
 
 class LMCacheEngineBuilder:
     _instances: Dict[str, LMCacheEngine] = {}
