@@ -126,7 +126,7 @@ Documentation
    :caption: Developer Guide
 
    developer_guide/contributing
-   developer_guide/dockerfile
+   developer_guide/docker_file
 
 :raw-html:`<br />`
 

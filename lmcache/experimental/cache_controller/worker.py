@@ -64,6 +64,7 @@ class LMCacheWorker:
             config.controller_url,
             protocol="tcp",
             role=zmq.PUSH,  # type: ignore[attr-defined]
+            bind_or_connect="connect",
         )
 
         # TODO(Jiayi): Make this less hard-coded
@@ -84,6 +85,7 @@ class LMCacheWorker:
             lmcache_worker_url,
             protocol="tcp",
             role=zmq.REP,  # type: ignore[attr-defined]
+            bind_or_connect="bind",
         )
 
         self.loop = asyncio.new_event_loop()

@@ -34,6 +34,7 @@ extensions = [
 
 copybutton_prompt_text = r"^(\$ |>>> |\# )"
 copybutton_prompt_is_regexp = True
+autosectionlabel_prefix_document = True
 
 
 class MockedClassDocumenter(autodoc.ClassDocumenter):

@@ -24,18 +24,19 @@ def get_zmq_context():
     return zmq.asyncio.Context.instance()
 
 
-def get_zmq_socket(context, socket_path: str, protocol: str, role):
+def get_zmq_socket(context, socket_path: str, protocol: str, role,
+                   bind_or_connect: str):
     """
     Create a ZeroMQ socket with the specified protocol and role.
     """
     socket_addr = f"{protocol}://{socket_path}"
     socket = context.socket(role)
-    if role in [zmq.PUB, zmq.PUSH, zmq.REP]:  # type: ignore[attr-defined]
+    if bind_or_connect == "bind":
         socket.bind(socket_addr)
-    elif role in [zmq.SUB, zmq.PULL, zmq.REQ]:  # type: ignore[attr-defined]
+    elif bind_or_connect == "connect":
         socket.connect(socket_addr)
     else:
-        raise ValueError(f"Invalid role: {role}")
+        raise ValueError(f"Invalid bind_or_connect: {bind_or_connect}")
 
     return socket
 
