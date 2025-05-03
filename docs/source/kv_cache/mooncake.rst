@@ -1,6 +1,8 @@
 MoonCake
 ========
 
+Coming soon...
+
 .. _mooncake-overview:
 
 Overview
