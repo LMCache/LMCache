@@ -22,6 +22,16 @@ class LookupServerInterface(metaclass=abc.ABCMeta):
         Perform insert in the lookup server.
         """
         raise NotImplementedError
+    
+    @abc.abstractmethod
+    def batched_insert(
+        self,
+        key: List[CacheEngineKey],
+    ):
+        """
+        Perform batched insert in the lookup server.
+        """
+        raise NotImplementedError
 
     @abc.abstractmethod
     def remove(

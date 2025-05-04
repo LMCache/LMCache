@@ -53,6 +53,16 @@ class CacheEngineKey:
         return f"{self.fmt}@{self.model_name}@{self.world_size}"\
             f"@{self.worker_id}@{self.chunk_hash}"
 
+    def split_layers(self, num_layers: int) -> List["LayerCacheEngineKey"]:
+        """ Split the key into multiple keys for each layer """
+        keys = []
+        for layer_id in range(num_layers):
+            keys.append(LayerCacheEngineKey(
+                self.fmt, self.model_name, self.world_size,
+                self.worker_id, layer_id, self.chunk_hash))
+        return keys
+        
+    
     @staticmethod
     def from_string(s):
         parts = s.split("@")
@@ -61,6 +71,28 @@ class CacheEngineKey:
         return CacheEngineKey(parts[0], parts[1], int(parts[2]), int(parts[3]),
                               parts[4])
 
+@dataclass(order=True)
+class LayerCacheEngineKey(CacheEngineKey):
+    """ A key for the layer cache engine """
+    fmt: str
+    model_name: str
+    world_size: int
+    worker_id: int
+    layer_id: int
+    chunk_hash: str
+
+    def to_string(self):
+        return f"{self.fmt}@{self.model_name}@{self.world_size}"\
+            f"@{self.worker_id}@{self.layer_id}@{self.chunk_hash}"
+    
+    @staticmethod
+    def from_string(s):
+        parts = s.split("@")
+        if len(parts) != 6:
+            raise ValueError(f"Invalid key string: {s}")
+        return LayerCacheEngineKey(
+            parts[0], parts[1], int(parts[2]), int(parts[3]),
+            int(parts[4]), parts[5])
 
 ##### NVTX annotation #####
 _NVTX_COLORS = ["green", "blue", "purple", "rapids"]

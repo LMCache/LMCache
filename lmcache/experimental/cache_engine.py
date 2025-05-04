@@ -419,7 +419,7 @@ class LayerwiseLMCacheEngine(LMCacheEngine):
         super().__init__(config, metadata, memory_allocator, token_database,
                          layerwise_gpu_connector)
         
-        self.num_layers = 
+        self.num_layers = self.gpu_connector.get_shape()[0]
     
     @_lmcache_nvtx_annotate
     @torch.inference_mode()
@@ -441,6 +441,7 @@ class LayerwiseLMCacheEngine(LMCacheEngine):
         ends = []
         keys = []
         memory_objs = []
+        kv_dtype = self.metadata.kv_dtype
         for start, end, key in self.token_database.process_tokens(
                 tokens, mask):
             assert isinstance(key, CacheEngineKey)
@@ -448,23 +449,49 @@ class LayerwiseLMCacheEngine(LMCacheEngine):
                 continue
             # Allocate the memory object
             num_tokens = end - start
-            kv_shape = self.gpu_connector.get_shape(num_tokens)
-            kv_dtype = self.metadata.kv_dtype
-            memory_obj = self.storage_manager.allocate(kv_shape, kv_dtype)
-            if memory_obj is None:
-                logger.warning("Failed to allocate memory for the KV cache.\n"
+            kv_shape_single_layer = self.gpu_connector.get_shape(num_tokens)
+            
+            # TODO(Jiayi): Optmize with batched allocation
+            memory_objs_multi_layer = []
+            no_space_left = False
+            for layer_id in range(self.num_layers):
+                mem_obj_single_layer = self.storage_manager.allocate(
+                    kv_shape_single_layer, kv_dtype)
+                
+                if memory_obj is None:
+                    logger.warning("Failed to allocate memory for the KV cache.\n"
                                "The KV cache will not be stored.")
+                    no_space_left = True
+                    break
+            
+                memory_objs_multi_layer.append(mem_obj_single_layer)
+            
+            if no_space_left:
                 break
+            
+            keys_multi_layer = key.split_layers(self.num_layers)
             
             starts.append(start)
             ends.append(end)
-            keys.append(key)
-            memory_objs.append(memory_obj)
+            keys.append(keys_multi_layer)
+            memory_objs.append(memory_objs_multi_layer)
             
             # Update lookup server
             if self.lookup_server is not None:
-                self.lookup_server.insert(key)
+                self.lookup_server.batched_insert(keys_multi_layer)
         
+        # FIXME(Jiayi)
+        mem_obj_generator = self.gpu_connector.from_gpu(
+            memory_objs, starts, ends, **kwargs)
+        
+        put_genertor = self.storage_manager.layerwise_batched_put(keys, memory_objs)
+        
+        for layer_id in range(self.num_layers):
+            
+            next(mem_obj_generator)
+            next(put_genertor)
+            
+            yield
         
         
         self.stats_monitor.on_store_finished(monitor_req_id)

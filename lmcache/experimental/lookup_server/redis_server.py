@@ -51,6 +51,18 @@ class RedisLookupServer(LookupServerInterface):
         assert self.distributed_url is not None
         logger.debug("Call to insert in lookup server")
         self.connection.set(key.to_string(), self.distributed_url)
+    
+    def batched_insert(self, keys: List[CacheEngineKey]):
+        """
+        Perform batched insert in the lookup server.
+        """
+        assert self.distributed_url is not None
+        logger.debug("Call to batched insert in lookup server")
+        
+        # TODO(Jiayi): Optimize this with redis pipe
+        for key in keys:
+            self.connection.set(key.to_string(), self.distributed_url)
+        
 
     def remove(self, key: CacheEngineKey):
         """

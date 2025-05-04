@@ -89,7 +89,7 @@ class StorageManager:
         eviction=True,
     ) -> Optional[MemoryObj]:
         """
-        Dry allocate memory object with memory allocator.
+        Allocate memory object with memory allocator.
         Use LRU evictor if eviction is enabled.
         """
         local_cpu_backend = self.storage_backends["LocalCPUBackend"]
@@ -155,6 +155,25 @@ class StorageManager:
         """
         for key, obj in zip(keys, memory_objs):
             self.put(key, obj)
+    
+    def layerwise_batched_put(
+        self,
+        keys: List[CacheEngineKey],
+        memory_objs: List[MemoryObj],
+        num_layers: int,
+    ) -> None:
+        """
+        Non-blocking function to put the memory objects into the storages
+        in a layerwise manner.
+        Do not store if the same object is being stored (handled here by
+        storage manager) or has been stored (handled by storage backend).
+        """
+        for layer_id in num_layers:
+            for keys_multi_layer, objs_multi_layer in zip(keys, memory_objs):
+                key = keys_multi_layer[layer_id]
+                obj = objs_multi_layer[layer_id]
+                self.put(key, obj)
+            yield
 
     def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         """
