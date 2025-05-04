@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import asyncio
-import re
 import threading
 from typing import TYPE_CHECKING
 
@@ -25,6 +24,7 @@ from lmcache.experimental.cache_controller.message import (  # noqa
     ClearWorkerMsg, ClearWorkerRetMsg, DeRegisterMsg, ErrorMsg, Msg,
     RegisterMsg, WorkerMsg)
 from lmcache.experimental.cache_controller.rpc_utils import (close_zmq_socket,
+                                                             get_ip,
                                                              get_zmq_context,
                                                              get_zmq_socket)
 from lmcache.experimental.config import LMCacheEngineConfig
@@ -50,6 +50,8 @@ class LMCacheWorker:
         metadata: LMCacheEngineMetadata,
         lmcache_engine: "LMCacheEngine",
     ):
+        # TODO (Jiayi): "instance_id" might not be needed anymore.
+        # Please consider removing it.
         self.lmcache_instance_id = config.lmcache_instance_id
         assert self.lmcache_instance_id is not None
         self.lmcache_engine = lmcache_engine
@@ -68,21 +70,18 @@ class LMCacheWorker:
         )
 
         # TODO(Jiayi): Make this less hard-coded
-        lmcache_worker_url = config.lmcache_worker_url
-        assert lmcache_worker_url is not None
-        match_obj = re.match(r"(.*):(\d+)", lmcache_worker_url)
-        if match_obj:
-            host, port = match_obj.groups()
-            new_port = int(port) + self.worker_id
-            lmcache_worker_url = f"{host}:{new_port}"
-        else:
-            raise ValueError(
-                f"Invalid remote storage url: {lmcache_worker_url}")
+        lmcache_worker_port = config.lmcache_worker_port
+        assert lmcache_worker_port is not None
+        # TODO(Jiayi): Make this port assignment smarter
+        lmcache_worker_port += self.worker_id
 
-        self.lmcache_worker_url = lmcache_worker_url
+        self.lmcache_worker_internal_url = f"*:{lmcache_worker_port}"
+        self.lmcache_worker_ip = get_ip()
+        self.lmcache_worker_port = lmcache_worker_port
+
         self.reply_socket = get_zmq_socket(
             self.context,
-            lmcache_worker_url,
+            self.lmcache_worker_internal_url,
             protocol="tcp",
             role=zmq.REP,  # type: ignore[attr-defined]
             bind_or_connect="bind",
@@ -109,7 +108,8 @@ class LMCacheWorker:
             RegisterMsg(
                 instance_id=self.lmcache_instance_id,
                 worker_id=self.worker_id,
-                url=self.lmcache_worker_url,
+                ip=self.lmcache_worker_ip,
+                port=self.lmcache_worker_port,
             ))
 
     def deregister(self):
@@ -121,6 +121,8 @@ class LMCacheWorker:
             DeRegisterMsg(
                 instance_id=self.lmcache_instance_id,
                 worker_id=self.worker_id,
+                ip=self.lmcache_worker_ip,
+                port=self.lmcache_worker_port,
             ))
 
     def put_msg(self, msg: WorkerMsg):

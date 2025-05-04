@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import socket
+
 import zmq
 import zmq.asyncio
 
@@ -54,3 +56,20 @@ def close_zmq_socket(socket: zmq.asyncio.Socket, linger: int = 0) -> None:
         socket.close()
     except Exception as e:
         logger.error(f"Warning: Failed to close socket cleanly: {e}")
+
+
+def get_ip():
+    """
+    Get the local IP address of the machine.
+    """
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        # "Connect" to a public IP — just to determine local IP
+        s.connect(("8.8.8.8", 80))
+        return s.getsockname()[0]
+    except Exception:
+        logger.warning("Failed to get local IP address. "
+                       "Falling back to loopback address.")
+        return "127.0.0.1"  # Fallback to loopback
+    finally:
+        s.close()
