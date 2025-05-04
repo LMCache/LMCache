@@ -74,13 +74,11 @@ class CacheEngineKey:
 
     @staticmethod
     def from_dict(d):
-        return CacheEngineKey(
-            fmt=d["fmt"],
-            model_name=d["model_name"],
-            world_size=d["world_size"],
-            worker_id=d["worker_id"],
-            chunk_hash=d["chunk_hash"]
-        )
+        return CacheEngineKey(fmt=d["fmt"],
+                              model_name=d["model_name"],
+                              world_size=d["world_size"],
+                              worker_id=d["worker_id"],
+                              chunk_hash=d["chunk_hash"])
 
 
 ##### NVTX annotation #####

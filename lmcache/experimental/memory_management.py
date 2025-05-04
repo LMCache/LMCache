@@ -78,7 +78,7 @@ class MemoryObjMetadata:
         return size_in_bytes
 
     def to_dict(self):
-        # Note(Kuntai): this is used for serializing MemoryObjMetadata via 
+        # Note(Kuntai): this is used for serializing MemoryObjMetadata via
         # msgpack.
         return {
             "__type__": "MemoryObjMetadata",
@@ -93,19 +93,14 @@ class MemoryObjMetadata:
     @staticmethod
     def from_dict(d):
         dtype_str = d["dtype"]
-        dtype = (
-            getattr(torch, dtype_str.replace("torch.", ""))
-            if dtype_str
-            else None
-        )
-        return MemoryObjMetadata(
-            shape=torch.Size(d["shape"]),
-            dtype=dtype,
-            address=d["address"],
-            phy_size=d["phy_size"],
-            ref_count=d["ref_count"],
-            fmt=MemoryFormat(d["fmt"])
-        )
+        dtype = (getattr(torch, dtype_str.replace("torch.", ""))
+                 if dtype_str else None)
+        return MemoryObjMetadata(shape=torch.Size(d["shape"]),
+                                 dtype=dtype,
+                                 address=d["address"],
+                                 phy_size=d["phy_size"],
+                                 ref_count=d["ref_count"],
+                                 fmt=MemoryFormat(d["fmt"]))
 
 
 class MemoryObj(metaclass=abc.ABCMeta):
