@@ -570,6 +570,12 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
         #if not self._pointers_are_good(kvcaches):
         #    self._initialize_pointers(kvcaches)
 
+        slot_mapping_chunks = []
+        for start, end in zip(start, end):
+            slot_mapping_chunks.append(slot_mapping[start:end])
+        
+        slot_mapping_full = torch.cat(slot_mapping_chunks, dim=0)
+        
         for layer_id in range(self.num_layers):
             
             if self.gpu_buffer is None or \
