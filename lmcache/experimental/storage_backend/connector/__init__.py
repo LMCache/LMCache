@@ -17,6 +17,7 @@ import re
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
+from lmcache.experimental.config import LMCacheEngineConfig
 from lmcache.experimental.memory_management import MemoryAllocatorInterface
 from lmcache.experimental.storage_backend.connector.base_connector import \
     RemoteConnector
@@ -26,6 +27,7 @@ from lmcache.experimental.storage_backend.connector.redis_connector import (
     RedisConnector, RedisSentinelConnector)
 from lmcache.logging import init_logger
 
+from .audit_connector import AuditConnector
 from .blackhole_connector import BlackholeConnector
 from .infinistore_connector import InfinistoreConnector
 from .mooncakestore_connector import MooncakestoreConnector
@@ -117,6 +119,7 @@ def CreateConnector(
     url: str,
     loop: asyncio.AbstractEventLoop,
     memory_allocator: MemoryAllocatorInterface,
+    config: Optional[LMCacheEngineConfig] = None,
 ) -> RemoteConnector:
     """
     Creates the corresponding remote connector from the given URL.
@@ -168,6 +171,22 @@ def CreateConnector(
                                                memory_allocator)
         case "blackhole":
             connector = BlackholeConnector(memory_allocator)
+        case "audit":
+            if num_hosts != 1:
+                raise ValueError(
+                    f"Audit connector only supports a single host, but got url:"
+                    f" {url}")
+            if not config or not config.audit_actual_remote_url:
+                raise ValueError(
+                    "Audit connector requires audit_actual_remote_url in config"
+                )
+            real_url = config.audit_actual_remote_url
+            verify_checksum = parsed_url.query_params[0].get(
+                'verify') is not None
+            logger.info(f"Creating audit connector for {real_url}")
+            real_connector = CreateConnector(real_url, loop, memory_allocator)
+            return AuditConnector(real_connector=real_connector,
+                                  verify_checksum=verify_checksum)
         case _:
             raise ValueError(f"Unknown connector type {connector_type} "
                              f"(url is: {url})")
