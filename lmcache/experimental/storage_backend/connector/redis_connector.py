@@ -21,7 +21,7 @@ import redis
 
 from lmcache.experimental.memory_management import (MemoryAllocatorInterface,
                                                     MemoryObj)
-from lmcache.experimental.protocol import RedisMetadata
+from lmcache.experimental.protocol import RemoteMetadata
 from lmcache.experimental.storage_backend.connector.base_connector import \
     RemoteConnector
 from lmcache.logging import init_logger
@@ -54,20 +54,19 @@ class RedisConnector(RemoteConnector):
 
     async def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         key_str = key.to_string()
-        redis_metadata_bytes = self.connection.get(key_str + "metadata")
+        metadata_bytes = self.connection.get(key_str + "metadata")
 
-        if redis_metadata_bytes is None:
+        if metadata_bytes is None:
             return None
 
-        assert not inspect.isawaitable(redis_metadata_bytes)
+        assert not inspect.isawaitable(metadata_bytes)
 
-        redis_metadata = RedisMetadata.deserialize(
-            memoryview(redis_metadata_bytes))
+        metadata = RemoteMetadata.deserialize(memoryview(metadata_bytes))
 
         memory_obj = self.memory_allocator.allocate(
-            redis_metadata.shape,
-            redis_metadata.dtype,
-            redis_metadata.fmt,
+            metadata.shape,
+            metadata.dtype,
+            metadata.fmt,
         )
         if memory_obj is None:
             logger.warning("Failed to allocate memory during remote receive")
@@ -89,7 +88,7 @@ class RedisConnector(RemoteConnector):
             return None
 
         view = memoryview(memory_obj.byte_array)
-        view[:redis_metadata.length] = kv_bytes
+        view[:metadata.length] = kv_bytes
 
         return memory_obj
 
@@ -101,11 +100,11 @@ class RedisConnector(RemoteConnector):
         kv_dtype = memory_obj.get_dtype()
         memory_format = memory_obj.get_memory_format()
 
-        redis_metadata_bytes = RedisMetadata(len(kv_bytes), kv_shape, kv_dtype,
-                                             memory_format).serialize()
+        metadata_bytes = RemoteMetadata(len(kv_bytes), kv_shape, kv_dtype,
+                                        memory_format).serialize()
 
         key_str = key.to_string()
-        self.connection.set(key_str + "metadata", redis_metadata_bytes)
+        self.connection.set(key_str + "metadata", metadata_bytes)
         self.connection.set(key_str + "kv_bytes", kv_bytes)
 
         self.memory_allocator.ref_count_down(memory_obj)
@@ -173,19 +172,19 @@ class RedisSentinelConnector(RemoteConnector):
 
     async def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         key_str = key.to_string()
-        redis_metadata_bytes = self.slave.get(key_str + "metadata")
+        metadata_bytes = self.slave.get(key_str + "metadata")
 
-        if redis_metadata_bytes is None:
+        if metadata_bytes is None:
             return None
 
-        assert not inspect.isawaitable(redis_metadata_bytes)
+        assert not inspect.isawaitable(metadata_bytes)
 
-        redis_metadata = RedisMetadata.deserialize(redis_metadata_bytes)
+        metadata = RemoteMetadata.deserialize(metadata_bytes)
 
         memory_obj = self.memory_allocator.allocate(
-            redis_metadata.shape,
-            redis_metadata.dtype,
-            redis_metadata.fmt,
+            metadata.shape,
+            metadata.dtype,
+            metadata.fmt,
         )
         if memory_obj is None:
             logger.warning("Failed to allocate memory during remote receive")
@@ -207,7 +206,7 @@ class RedisSentinelConnector(RemoteConnector):
             return None
 
         view = memoryview(memory_obj.byte_array)
-        view[0:redis_metadata.length] = kv_bytes
+        view[0:metadata.length] = kv_bytes
 
         return memory_obj
 
@@ -219,11 +218,11 @@ class RedisSentinelConnector(RemoteConnector):
         kv_dtype = memory_obj.get_dtype()
         memory_format = memory_obj.get_memory_format()
 
-        redis_metadata_bytes = RedisMetadata(len(kv_bytes), kv_shape, kv_dtype,
-                                             memory_format).serialize()
+        metadata_bytes = RemoteMetadata(len(kv_bytes), kv_shape, kv_dtype,
+                                        memory_format).serialize()
 
         key_str = key.to_string()
-        self.master.set(key_str + "metadata", redis_metadata_bytes)
+        self.master.set(key_str + "metadata", metadata_bytes)
         self.master.set(key_str + "kv_bytes", kv_bytes)
 
         self.memory_allocator.ref_count_down(memory_obj)

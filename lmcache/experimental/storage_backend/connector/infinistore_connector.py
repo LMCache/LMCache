@@ -25,7 +25,7 @@ from lmcache.experimental.memory_management import (CopyLessMemoryObj,
                                                     MemoryAllocatorInterface,
                                                     MemoryObj)
 # reuse
-from lmcache.experimental.protocol import RedisMetadata
+from lmcache.experimental.protocol import RemoteMetadata
 from lmcache.experimental.storage_backend.connector.base_connector import \
     RemoteConnector
 from lmcache.logging import init_logger
@@ -102,7 +102,7 @@ class InfinistoreConnector(RemoteConnector):
             self.recv_queue.put_nowait(buf_idx)
             return None
 
-        metadata = RedisMetadata.deserialize(buffer)
+        metadata = RemoteMetadata.deserialize(buffer)
 
         def callback():
             self.recv_queue.put_nowait(buf_idx)
@@ -134,8 +134,8 @@ class InfinistoreConnector(RemoteConnector):
         buf_idx = await self.send_queue.get()
         buffer = self.send_buffers[buf_idx]
 
-        RedisMetadata(len(kv_bytes), kv_shape, kv_dtype,
-                      memory_format).serialize_into(buffer)
+        RemoteMetadata(len(kv_bytes), kv_shape, kv_dtype,
+                       memory_format).serialize_into(buffer)
 
         buffer[METADATA_BYTES_LEN:METADATA_BYTES_LEN +
                len(kv_bytes)] = kv_bytes
