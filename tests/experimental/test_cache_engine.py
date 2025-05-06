@@ -59,7 +59,6 @@ def test_same_retrieve_store(autorelease_experimental):
     """ test retrieve """
     ret_mask = engine.retrieve(tokens, kvcaches=retrieved_cache)
     length = torch.sum(ret_mask)
-
     assert length == num_tokens
     check_kv_cache_equal(retrieved_cache, kv_cache, num_tokens, fmt)
 
@@ -135,7 +134,7 @@ def test_paged_retrieve_prefix(fmt, chunk_size, backend,
     """ Store is async. Need to wait for the store to finish """
     if backend == "cpu":
         timeout = 1
-        search_range = "Hot"
+        search_range = "LocalCPUBackend"
     elif backend == "local_disk":
         timeout = 30
         search_range = "LocalDiskBackend"
@@ -303,7 +302,7 @@ def test_mixed_retrieve(fmt, chunk_size, backend, autorelease_experimental):
     expected_length = expected_chunk_cnt * chunk_size
     if backend == "cpu":
         timeout = 1
-        search_range = "Hot"
+        search_range = "LocalCPUBackend"
     elif backend == "local_disk":
         timeout = 30
         search_range = "LocalDiskBackend"
@@ -510,7 +509,7 @@ def test_hierarchy_retrieve(fmt, chunk_size, backend, retrieve_from,
         time.sleep(0.01)
     """ Wait until disk save is finished """
     if retrieve_from in ["local_disk", "remote"]:
-        engine.storage_manager.hot_cache.clear()
+        engine.storage_manager.clear(locations=["LocalCPUBackend"])
         timeout = 30
         start_time = time.time()
         while engine.lookup(tokens, ["LocalDiskBackend"]) < expected_length:
@@ -520,7 +519,8 @@ def test_hierarchy_retrieve(fmt, chunk_size, backend, retrieve_from,
             time.sleep(0.01)
     """ Wait until remote save is finished """
     if retrieve_from == "remote":
-        engine.storage_manager.hot_cache.clear()
+        engine.storage_manager.clear(locations=["LocalCPUBackend"])
+        # FIXME: change this `clear`
         engine.storage_manager.storage_backends["LocalDiskBackend"].dict.clear(
         )
         timeout = 30
@@ -543,7 +543,7 @@ def test_hierarchy_retrieve(fmt, chunk_size, backend, retrieve_from,
     check_kv_cache_equal(retrieved_cache, kv_cache, expected_length, fmt)
     """ Wait until disk save is finished before deleting the directory"""
     if backend in ["local_cpu_disk"]:
-        engine.storage_manager.hot_cache.clear()
+        engine.storage_manager.clear(locations=["LocalCPUBackend"])
         timeout = 30
         start_time = time.time()
         while engine.lookup(tokens) < expected_length:
@@ -607,7 +607,7 @@ def test_prefetch_retrieve(backend, prefetch_from, autorelease_experimental):
         time.sleep(0.01)
     """ Delete cpu cache and wait until disk save finishes."""
     if prefetch_from == "local_disk":
-        engine.storage_manager.hot_cache.clear()
+        engine.storage_manager.clear(locations=["LocalCPUBackend"])
         timeout = 30
         start_time = time.time()
         while engine.lookup(tokens) < expected_length:
@@ -622,7 +622,7 @@ def test_prefetch_retrieve(backend, prefetch_from, autorelease_experimental):
         timeout = 60
         start_time = time.time()
         while engine.lookup(torch.cat([tokens, new_tokens]),
-                            ["Hot"]) < expected_length:
+                            ["LocalCPUBackend"]) < expected_length:
             if time.time() - start_time > timeout:
                 raise TimeoutError(
                     f"Operation timed out after {timeout} seconds.")
@@ -695,7 +695,7 @@ def test_mem_leak(fmt, chunk_size, backend, lmserver_experimental_process,
     '''Wait until cpu store finishes'''
     if "cpu" in backend:
         start_time = time.time()
-        while engine.lookup(tokens, ["Hot"]) < expected_length:
+        while engine.lookup(tokens, ["LocalCPUBackend"]) < expected_length:
             if time.time() - start_time > timeout:
                 raise TimeoutError(
                     f"Operation timed out after {timeout} seconds.")
