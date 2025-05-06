@@ -8,7 +8,6 @@ Prerequisites
 
 - Python 3.10+
 - CUDA 12.4+
-- PyTorch 2.6+
 
 Setup using Python
 ------------------
