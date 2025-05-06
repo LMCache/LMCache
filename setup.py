@@ -48,11 +48,8 @@ if not BUILDING_SDIST:
         cpp_extension.CUDAExtension(
             'lmcache.c_ops',
             [
-                'csrc/pybind.cpp',
-                'csrc/mem_kernels.cu',
-                'csrc/cal_cdf.cu',
-                'csrc/ac_enc.cu',
-                'csrc/ac_dec.cu',
+                'csrc/pybind.cpp', 'csrc/mem_kernels.cu', 'csrc/cal_cdf.cu',
+                'csrc/ac_enc.cu', 'csrc/ac_dec.cu', 'csrc/pos_kernels.cu'
             ],
             extra_compile_args={
                 'cxx': ['-D_GLIBCXX_USE_CXX11_ABI=0'],
