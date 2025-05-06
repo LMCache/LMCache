@@ -158,9 +158,8 @@ class StorageManager:
     
     def layerwise_batched_put(
         self,
-        keys: List[CacheEngineKey],
-        memory_objs: List[MemoryObj],
-        num_layers: int,
+        keys: List[List[CacheEngineKey]],
+        memory_objs: List[List[MemoryObj]],
     ) -> None:
         """
         Non-blocking function to put the memory objects into the storages
@@ -168,10 +167,9 @@ class StorageManager:
         Do not store if the same object is being stored (handled here by
         storage manager) or has been stored (handled by storage backend).
         """
-        for layer_id in num_layers:
-            for keys_multi_layer, objs_multi_layer in zip(keys, memory_objs):
-                key = keys_multi_layer[layer_id]
-                obj = objs_multi_layer[layer_id]
+        for keys_multi_chunk, objs_multi_chunk in zip(keys, memory_objs):
+            # Store all chunks for one layer
+            for key, obj in zip(keys_multi_chunk, objs_multi_chunk):
                 self.put(key, obj)
             yield
 

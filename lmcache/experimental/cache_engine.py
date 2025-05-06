@@ -445,8 +445,16 @@ class LayerwiseLMCacheEngine(LMCacheEngine):
         for start, end, key in self.token_database.process_tokens(
                 tokens, mask):
             assert isinstance(key, CacheEngineKey)
-            if self.storage_manager.contains(key):
-                continue
+            
+            # TODO (Jiayi): The following two lines should
+            # be removed because it's handled by mask.
+            
+            # TODO (Jiayi): Lookup should only check the first layer
+            # if all layers are evicted at the same time.
+            #if self.storage_manager.contains(key):
+            #    continue
+            
+            
             # Allocate the memory object
             num_tokens = end - start
             kv_shape_single_layer = self.gpu_connector.get_shape(num_tokens)
@@ -480,6 +488,10 @@ class LayerwiseLMCacheEngine(LMCacheEngine):
             if self.lookup_server is not None:
                 self.lookup_server.batched_insert(keys_multi_layer)
         
+        # Transpose the keys and memory objects into layer major format
+        memory_objs = [list(row) for row in zip(*memory_objs)]
+        keys = [list(row) for row in zip(*keys)]
+        
         # FIXME(Jiayi)
         mem_obj_generator = self.gpu_connector.from_gpu(
             memory_objs, starts, ends, **kwargs)
@@ -489,10 +501,9 @@ class LayerwiseLMCacheEngine(LMCacheEngine):
         for layer_id in range(self.num_layers):
             
             next(mem_obj_generator)
+            yield
             next(put_genertor)
             
-            yield
-        
         
         self.stats_monitor.on_store_finished(monitor_req_id)
         logger.debug(f"Stored {num_stored_tokens} "
