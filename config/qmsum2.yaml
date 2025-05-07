@@ -1,7 +1,8 @@
 chunk_size: 1024
-local_disk: "file:///local/end-to-end-tests/local/"
+local_disk: "file:///home/ubuntu/st-prodstack-a/kvcache/engine2/"
 max_local_disk_size: 550
 local_cpu: True
-max_local_cpu_size: 60 # actually 39 + 5, set to 60 to avoid bubble
-alpha: 0.001
+max_local_cpu_size: 60 # actually 40 + 5, set to 60 to avoid bubble
+alpha: 0.7
 policy: "ours"
+rate: 1

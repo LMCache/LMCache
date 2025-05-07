@@ -16,25 +16,20 @@ args = parser.parse_args()
 
 # List of file paths for baseline, ours, and prefill
 file_paths = [
-    'results/Apr_28_samsum/baseline_kivi/1_processed.csv',
-    'results/Apr_28_samsum/baseline_kivi/02_processed.csv',
-    'results/Apr_28_samsum/baseline_kivi/03_processed.csv',
-    'results/Apr_28_samsum/baseline_kivi/06_processed.csv'
+    'results/May_7/baseline/02_processed.csv',
+    'results/May_7/baseline/03_processed.csv',
+    'results/May_7/baseline/06_processed.csv'
 ]
 
 file_paths_ours = [
-    'results/Apr_28_samsum/ours_token_based_decision/0001_processed.csv',
-    'results/Apr_28_samsum/ours_token_based_decision/001_processed.csv',
-    'results/Apr_28_samsum/ours_token_based_decision/01_processed.csv',
-    'results/Apr_28_samsum/ours_token_based_decision/04_processed.csv',
-    'results/Apr_28_samsum/ours_token_based_decision/07_processed.csv',
-    'results/Apr_28_samsum/ours_token_based_decision/1_processed.csv',
-    'results/Apr_28_samsum/ours_token_based_decision/100_processed.csv',
-    'results/Apr_28_samsum/ours_token_based_decision/1000_processed.csv'
+    'results/May_7/ours/01_processed.csv',
+    'results/May_7/ours/04_processed.csv',
+    'results/May_7/ours/07_processed.csv',
+    'results/May_7/ours/1_processed.csv',
 ]
 
 file_path_prefill = [
-    'results/Apr_28_samsum/0_processed.csv'
+    'results/May_7/prefill/0_processed.csv'
 ]
 
 # --- Process baseline files ---

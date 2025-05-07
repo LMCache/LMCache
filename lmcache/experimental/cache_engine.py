@@ -62,6 +62,8 @@ class LMCacheEngine:
         InitializeUsageContext(config.to_original_config(), metadata)
         self.stats_monitor = LMCStatsMonitor.GetOrCreate()
 
+        self.emerge_id = 0
+
     @_lmcache_nvtx_annotate
     @torch.inference_mode()
     def store(self,
@@ -111,11 +113,12 @@ class LMCacheEngine:
             # self.put_queue.put((key, memory_obj, start, end, kwargs))
 
             self.gpu_connector.from_gpu(memory_obj, start, end, **kwargs)
-            self.storage_manager.put_in_queue(key, memory_obj)
+            self.storage_manager.put_in_queue(key, memory_obj, self.emerge_id)
         self.stats_monitor.on_store_finished(monitor_req_id)
 
     def update(self) -> None:
         self.storage_manager.update()
+        self.emerge_id += 1
 
     @_lmcache_nvtx_annotate
     @torch.inference_mode()
@@ -156,7 +159,7 @@ class LMCacheEngine:
                 tokens, mask):
 
             # Get the memory object from the storage backend
-            memory_obj = self.storage_manager.get(key)
+            memory_obj = self.storage_manager.get(key, self.emerge_id)
 
             if memory_obj is None:
                 break

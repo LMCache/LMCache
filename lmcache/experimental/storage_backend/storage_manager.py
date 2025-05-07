@@ -83,14 +83,14 @@ class KVDecision:
 
 # TODO(Shaoting): add freqency estimator
 class KVCacheManager:
-    def __init__(self, hot_cache: OrderedDict[CacheEngineKey, MemoryObj], method: str):
+    def __init__(self, hot_cache: OrderedDict[CacheEngineKey, MemoryObj], method: str, rate: float):
         # NOTE(Shaoting): policy related variables define here
         self.method = method
-        self.rate = 1
-        self.cpu_size = 5368709120 * 7.8 # 39 GB
+        self.rate = rate
+        self.cpu_size = 5368709120 * 8 # 40 GB
 
         self.hot_cache = hot_cache
-        logger.info(f"KVCacheManager initialized with self.method: {self.method}")
+        logger.info(f"KVCacheManager initialized with self.method: {self.method} and self.rate: {self.rate}")
 
     def inform_new(self, to_save_list: OrderedDict):
 
@@ -103,10 +103,31 @@ class KVCacheManager:
         # TODO(Shaoting): add other manager logics
         if self.method == "baseline_KIVI":
             size_kv_cpu = sum(key.metadata.length for key in self.hot_cache.keys())
-            if size_kv_cpu + size > self.cpu_size:
-                return KVDecision("cpu", "kivi", 0), {} #hahaha
-            else:
-                return KVDecision("cpu", "kivi", self.rate), {}
+            size_kv_cpu += size
+
+            # 2) 如果超限，就循环驱逐，直到足够
+            final_drop_list = {}
+            while size_kv_cpu > self.cpu_size:
+                keys_snapshot = list(self.hot_cache.keys())
+                # 2.1 找到最旧的那个 key（OrderedDict 第一个）
+                oldest_key = next(iter(keys_snapshot))
+
+                # 2.2 拿最旧 entry 的完整 context_id 列表
+                oldest_ctx = oldest_key.metadata.context_id
+
+                # 2.3 只淘汰与之完全相同 context_id 的 entries
+                drop_keys = [
+                    k for k in keys_snapshot
+                    if k.metadata.context_id == oldest_ctx
+                ]
+
+                # 2.4 一并弹出，并记录到 final_drop_list
+                for k in drop_keys:
+                    final_drop_list[k] = 0
+                    size_kv_cpu -= k.metadata.length
+
+            # 4) 返回 “把 new_key 放到 CPU 上并走 LRU” 的决策，以及这次真正丢弃的列表
+            return KVDecision("cpu", "kivi", self.rate), final_drop_list #hahaha
             
         elif self.method == "ours":
             # TODO(Shaoting): save unit quality drop to speed up decisions. Also need to update the storage when retrieval.
@@ -130,7 +151,7 @@ class KVCacheManager:
                     new_kv_rate,
                     update_total_tokens
                 )
-                if new_drop < min_quality_drop:
+                if new_drop * len(first_update_key.metadata.emerge_id) < min_quality_drop:
                     min_quality_drop = new_drop
                     drop_list[-1] = new_best
 
@@ -158,11 +179,11 @@ class KVCacheManager:
                         total_tokens
                     )
                     # compare against the running minimum
-                    if drop_r < min_quality_drop:
+                    if drop_r * len(rep.metadata.emerge_id) < min_quality_drop:
                         min_quality_drop = drop_r
                         # assign to all keys in this group
                         drop_list = {k: best_r for k in keys}
-                    elif drop_r == min_quality_drop:
+                    elif drop_r * len(rep.metadata.emerge_id) == min_quality_drop:
                         for k in keys:
                             drop_list[k] = best_r
 
@@ -216,7 +237,7 @@ class StorageManager:
 
         self.stream = torch.cuda.Stream()
 
-        self.manager = KVCacheManager(self.hot_cache, config.policy)
+        self.manager = KVCacheManager(self.hot_cache, config.policy, config.rate)
 
         self.update_queue: OrderedDict[CacheEngineKey, MemoryObj] = OrderedDict()
 
@@ -267,10 +288,12 @@ class StorageManager:
         self,
         key: CacheEngineKey,
         memory_obj: MemoryObj,
+        emerge_id: int,
     ) -> None:
         """
         Put the memory object into the queue.
         """
+        key.metadata.emerge_id.append(emerge_id)
         self.update_queue[key] = memory_obj
 
     def update(self) -> None:  
@@ -488,7 +511,7 @@ class StorageManager:
                 self.memory_allocator.ref_count_up(memory_obj)
             self.manager_lock.release()
 
-    def get(self, key: CacheEngineKey) -> Optional[Union[MemoryObj, Tensor]]:
+    def get(self, key: CacheEngineKey, emerge_id) -> Optional[Union[MemoryObj, Tensor]]:
         """
         Blocking function to get the memory object from the storages.
         """
@@ -523,13 +546,15 @@ class StorageManager:
         if memory_obj is not None:
             self.memory_allocator.ref_count_up(memory_obj)
 
-            # NOTE(Shaoting): didn't think about partial prefill. This may cause calculate unit quality drop to be wrong. Maybe not.
             # Update key
             if key.metadata.context_id[0] not in old_key.metadata.context_id:
                 old_key.metadata.context_id.append(key.metadata.context_id[0])
                 old_key.metadata.method.append(key.metadata.method[0])
                 old_key.metadata.score_table.append(key.metadata.score_table[0])
-                self.hot_cache[old_key] = self.hot_cache.pop(key)
+            # Record request pattern
+            old_key.metadata.emerge_id.append(emerge_id)
+            # Also for LRU
+            self.hot_cache[old_key] = self.hot_cache.pop(key)
 
             self.manager_lock.release()
 
