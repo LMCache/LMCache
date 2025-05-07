@@ -3,15 +3,38 @@
 </a>
 </div>
 
-| [**Blog**](https://lmcache.github.io) | [**Documentation**](https://docs.lmcache.ai/) | [**Join Slack**](https://join.slack.com/t/lmcacheworkspace/shared_invite/zt-2viziwhue-5Amprc9k5hcIdXT7XevTaQ) | [**Interest Form**](https://forms.gle/mQfQDUXbKfp2St1z7) | [**Official Email**](contact@lmcache.ai) |
+<p align="center">
+  <a href="https://docs.lmcache.ai/">
+    <img alt="Documentation" src="https://img.shields.io/badge/docs-blue?logo=readthedocs&logoColor=f0f8ff">
+  </a>
+  
+  <a href="https://join.slack.com/t/lmcacheworkspace/shared_invite/zt-2viziwhue-5Amprc9k5hcIdXT7XevTaQ">
+    <img alt="Join Slack" src="https://img.shields.io/badge/LMCache-Join%20Slack-blue?logo=slack">
+  </a>
 
-# 💡 What is LMCache?
 
-TL;DR - Redis for LLMs. 
+  <img alt="GitHub commit activity" src="https://img.shields.io/github/commit-activity/w/LMCache/LMCache">
 
-LMCache is a **LLM** serving engine extension to **reduce TTFT** and **increase throughput**, especially under long-context scenarios. By storing the KV caches of reusable texts across various locations including (GPU, CPU DRAM, Local Disk), LMCache reuse the KV caches of **_any_** reused text (not necessarily prefix) in **_any_** serving engine instance. Thus, LMCache saves precious GPU cycles and reduces response delay for users.  
 
-By combining LMCache with vLLM, LMCaches achieves 3-10x delay savings and GPU cycle reduction in many LLM use cases, including multi-round QA and RAG.
+  <img alt="PyPI - Downloads" src="https://img.shields.io/pypi/dm/LMCache">
+
+  <a href="https://www.youtube.com/channel/UC58zMz55n70rtf1Ak2PULJA">
+    <img alt="YouTube Channel Views" src="https://img.shields.io/youtube/channel/views/UC58zMz55n70rtf1Ak2PULJA">
+  </a>
+
+
+</p>
+
+<h3 align="center">
+    Redis for LLMs - Infinite and Ultra-Fast
+</h3>
+
+----
+
+
+LMCache is an **LLM** serving engine extension to **reduce TTFT** and **increase throughput**, especially under long-context scenarios. By storing the KV caches of reusable texts across various locations, including (GPU, CPU DRAM, Local Disk), LMCache reuses the KV caches of **_any_** reused text (not necessarily prefix) in **_any_** serving engine instance. Thus, LMCache saves precious GPU cycles and reduces user response delay.  
+
+By combining LMCache with vLLM, LMCache achieves 3-10x delay savings and GPU cycle reduction in many LLM use cases, including multi-round QA and RAG.
 
 Try LMCache with pre-built vllm docker images [here](https://docs.lmcache.ai/getting_started/docker.html).
 
@@ -23,8 +46,8 @@ Try LMCache with pre-built vllm docker images [here](https://docs.lmcache.ai/get
 Please refer to our detailed documentation for [LMCache V1](https://docs.lmcache.ai/getting_started/installation.html#install-from-source-v1) and [LMCache V0](https://docs.lmcache.ai/getting_started/installation.html#install-from-source-v0)
 
 # Interested in Connecting?
-Fill out the interest form and our team will reach out to you!
-https://forms.gle/mQfQDUXbKfp2St1z7
+Fill out the interest form or [drop an email](contact@lmcache.ai), and our team will reach out to you!
+[Google Form](https://forms.gle/mQfQDUXbKfp2St1z7)
 
 # 🛣️ News and Milestones
 
