@@ -6,7 +6,7 @@ import os
 INPUT02       = 'results/May_7/baseline/02.csv'
 INPUT03       = 'results/May_7/baseline/03.csv'
 INPUT06       = 'results/May_7/baseline/06.csv'
-INPUT0        = 'results/May_7/prefill/0.csv'
+INPUT0        = 'results/May_7_2/prefill/0.csv'
 INPUT_OURS01 = 'results/May_7/ours/01.csv'
 INPUT_OURS04 = 'results/May_7/ours/04.csv'
 INPUT_OURS07 = 'results/May_7/ours/07.csv'
