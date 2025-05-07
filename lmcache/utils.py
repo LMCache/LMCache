@@ -39,6 +39,7 @@ class CacheManagerMetadata:
     length: float # real-time chunk bytes size
     num_tokens: int # number of all tokens in a context
     score_table: List[List[Tuple[float, float]]] # a list of score tables for each context, each table is a list of (rate, score) pairs
+    emerge_id: List[int]
 
 @dataclass(order=True)
 class CacheEngineKey:
@@ -79,7 +80,7 @@ class CacheEngineKey:
         if len(parts) != 5:
             raise ValueError(f"Invalid key string: {s}")
         return CacheEngineKey(parts[0], parts[1], int(parts[2]), int(parts[3]),
-                              parts[4], CacheManagerMetadata([], [], 0.0, 0.0, 0, []))
+                              parts[4], CacheManagerMetadata([], [], 0.0, 0.0, 0, [], []))
 
 
 ##### NVTX annotation #####

@@ -104,7 +104,7 @@ class ChunkedTokenDatabase(TokenDatabase):
         return CacheEngineKey(self.metadata.fmt, self.metadata.model_name,
                               self.metadata.world_size,
                               self.metadata.worker_id, chunk_hash,
-                              CacheManagerMetadata([total_hashes], ["kivi"], 1, 0.0, token_len, [score_table]))
+                              CacheManagerMetadata([total_hashes], ["kivi"], 1, 0.0, token_len, [score_table], []))
 
     def _get_init_hash(self) -> str:
         return ""

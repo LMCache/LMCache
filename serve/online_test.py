@@ -27,7 +27,7 @@ def execute_openai_request_with_output(row, model: str, client: openai.Client) -
     Returns: start_time (seconds), TTFT (seconds), finish_time (seconds), throughput (tokens per second), and generated text
     """
     # Build the prompt using your template
-    prompt = f"This is user {row.Index} in {row.dataset}.\n\n"
+    prompt = f"This is user {row.index_in_dataset} in {row.dataset}.\n\n"
     prompt += f"""
     You are an expert at summarising conversations into concise summaries.  
     Below are example contexts (with their reference summaries) to illustrate the desired format:
