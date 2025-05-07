@@ -1,0 +1,3 @@
+pandas
+matplotlib
+rouge_score
