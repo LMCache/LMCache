@@ -61,6 +61,13 @@ class CacheEngineKey:
                 self.fmt, self.model_name, self.world_size,
                 self.worker_id, layer_id, self.chunk_hash))
         return keys
+    
+    def split_layers(self) -> "LayerCacheEngineKey":
+        """ Return the key for the first layer """
+        key = LayerCacheEngineKey(
+                self.fmt, self.model_name, self.world_size,
+                self.worker_id, 0, self.chunk_hash)
+        return key
         
     
     @staticmethod

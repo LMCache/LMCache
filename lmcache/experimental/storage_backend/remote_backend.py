@@ -106,7 +106,7 @@ class RemoteBackend(StorageBackendInterface):
         self,
         key: CacheEngineKey,
     ) -> Optional[Future]:
-        pass
+        raise NotImplementedError
 
     @_lmcache_nvtx_annotate
     def get_blocking(
@@ -131,6 +131,12 @@ class RemoteBackend(StorageBackendInterface):
                      f"deserialization takes {(t3 - t2) * 1000:.6f} msec")
         return decompressed_memory_obj
 
+    def get_non_blocking(
+        self,
+        key: CacheEngineKey,
+    ) -> Optional[Future]:
+        raise NotImplementedError
+    
     async def connection_put_wrapper(self, key: CacheEngineKey,
                                      memory_obj: MemoryObj):
         obj_size = memory_obj.get_size()

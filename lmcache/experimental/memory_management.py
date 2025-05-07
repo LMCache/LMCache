@@ -19,11 +19,16 @@ class MemoryFormat(Enum):
     """[2, num_layers, num_tokens, hidden_dim]
     """
     KV_BLOB = 1
+    
+    """[num_tokens, 2, hidden_dim]
+    """
+    LAYER_KV_BLOB = 2
+    
     """Compressed binary array format
     """
-    BINARY = 2
+    BINARY = 3
 
-    BINARY_BUFFER = 3
+    BINARY_BUFFER = 4
 
     def token_dim(self) -> int:
         if self == MemoryFormat.KV_BLOB:
@@ -723,7 +728,7 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
     ) -> Optional[MemoryObj]:
         if fmt == MemoryFormat.BINARY_BUFFER:
             return self.buffer_allocator.allocate(shape, dtype, fmt)
-        elif fmt == MemoryFormat.KV_BLOB:
+        elif fmt in [MemoryFormat.KV_BLOB, MemoryFormat.LAYER_KV_BLOB]:
             with self.host_mem_lock:
                 return self.pin_allocator.allocate(shape, dtype, fmt)
         else:
@@ -741,7 +746,7 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
         fmt = memory_obj.get_memory_format()
         if fmt == MemoryFormat.BINARY_BUFFER:
             self.buffer_allocator.free(memory_obj)
-        elif fmt == MemoryFormat.KV_BLOB:
+        elif fmt in [MemoryFormat.KV_BLOB, MemoryFormat.LAYER_KV_BLOB]:
             with self.host_mem_lock:
                 self.pin_allocator.free(memory_obj)
         else:
@@ -751,7 +756,7 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
         fmt = memory_obj.get_memory_format()
         if fmt == MemoryFormat.BINARY_BUFFER:
             self.buffer_allocator.ref_count_up(memory_obj)
-        elif fmt == MemoryFormat.KV_BLOB:
+        elif fmt in [MemoryFormat.KV_BLOB, MemoryFormat.LAYER_KV_BLOB]:
             with self.host_mem_lock:
                 self.pin_allocator.ref_count_up(memory_obj)
         else:
@@ -761,7 +766,7 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
         fmt = memory_obj.get_memory_format()
         if fmt == MemoryFormat.BINARY_BUFFER:
             self.buffer_allocator.ref_count_down(memory_obj)
-        elif fmt == MemoryFormat.KV_BLOB:
+        elif fmt in [MemoryFormat.KV_BLOB, MemoryFormat.LAYER_KV_BLOB]:
             with self.host_mem_lock:
                 self.pin_allocator.ref_count_down(memory_obj)
         else:
@@ -771,7 +776,7 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
         fmt = memory_obj.get_memory_format()
         if fmt == MemoryFormat.BINARY_BUFFER:
             return self.buffer_allocator.get_ref_count(memory_obj)
-        elif fmt == MemoryFormat.KV_BLOB:
+        elif fmt in [MemoryFormat.KV_BLOB, MemoryFormat.LAYER_KV_BLOB]:
             with self.host_mem_lock:
                 return self.pin_allocator.get_ref_count(memory_obj)
         else:

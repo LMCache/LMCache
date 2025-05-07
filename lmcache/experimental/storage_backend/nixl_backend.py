@@ -374,6 +374,12 @@ class NixlBackend(StorageBackendInterface):
         :return: MemoryObj. None if the key does not exist.
         """
         return self._obj_pool.get(key)
+    
+    def get_non_blocking(
+        self,
+        key: CacheEngineKey,
+    ) -> Optional[Future]:
+        raise NotImplementedError
 
     def remove(self, key: CacheEngineKey) -> None:
         """

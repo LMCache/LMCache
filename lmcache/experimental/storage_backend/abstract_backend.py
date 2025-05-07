@@ -83,6 +83,20 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
         :return: MemoryObj. None if the key does not exist.
         """
         raise NotImplementedError
+    
+    @abc.abstractmethod
+    def get_non_blocking(
+        self,
+        key: CacheEngineKey,
+    ) -> Optional[Future]:
+        """
+        A non-blcocking function to get the kv cache from the storage backend.
+        
+        :param CacheEngineKey key: The key of the MemoryObj.
+        
+        :return: a future object. None if the key does not exist.
+        """
+        raise NotImplementedError
 
     @abc.abstractmethod
     def close(self, ) -> None:

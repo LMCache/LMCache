@@ -207,6 +207,39 @@ class StorageManager:
                 return memory_obj
 
         return None
+    
+    def get_non_blocking(self, key: CacheEngineKey) -> Optional[Future]:
+        """
+        Non-blocking function to get the memory object from the storages.
+        """
+        # TODO (Jiayi): incorporate prefetching here
+
+        # Search all backends for non-blocking get
+        for backend_name, backend in self.storage_backends.items():
+
+            # NOTE(Jiayi): bypass the allocator for now
+            task = backend.get_non_blocking(key)
+            if task is not None:
+                # TODO (Jiayi): add write-back logic here
+                return task
+        return None
+    
+    def layerwise_batched_get(
+        self,
+        keys: List[List[CacheEngineKey]],
+    ) -> None:
+        """
+        Non-blocking function to get the memory objects into the storages
+        in a layerwise manner.
+        Do not store if the same object is being stored (handled here by
+        storage manager) or has been stored (handled by storage backend).
+        """
+        for keys_multi_chunk in zip(keys):
+            # Store all chunks for one layer
+            tasks = []
+            for key in keys_multi_chunk:
+                tasks.append(self.get_non_blocking(key))
+            yield tasks
 
     # TODO(Jiayi): we need to consider eviction in prefetch
     def prefetch_callback(self, future, key):

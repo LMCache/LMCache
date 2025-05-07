@@ -356,7 +356,8 @@ class LMCacheEngine:
         :param tokens: the input tokens, with shape [seq_len]
         
         :param Optional[List[str]] search_range: The range of storage backends
-        to search in. Should be a subset of ["Hot", "LocalDiskBackend"] for now.
+        to search in. Should be a subset of ["LocalCPUBackend", "LocalDiskBackend"]
+        for now.
         If None, search in all backends.
 
         :return: An int indicating how many prefix tokens are cached.
@@ -446,14 +447,6 @@ class LayerwiseLMCacheEngine(LMCacheEngine):
                 tokens, mask):
             assert isinstance(key, CacheEngineKey)
             
-            # TODO (Jiayi): The following two lines should
-            # be removed because it's handled by mask.
-            
-            # TODO (Jiayi): Lookup should only check the first layer
-            # if all layers are evicted at the same time.
-            #if self.storage_manager.contains(key):
-            #    continue
-            
             
             # Allocate the memory object
             num_tokens = end - start
@@ -508,6 +501,92 @@ class LayerwiseLMCacheEngine(LMCacheEngine):
         self.stats_monitor.on_store_finished(monitor_req_id)
         logger.debug(f"Stored {num_stored_tokens} "
                      f"out of total {len(tokens)} tokens")
+        
+    @_lmcache_nvtx_annotate
+    @torch.inference_mode()
+    def retrieve_layer(self,
+              tokens: torch.Tensor,
+              mask: Optional[torch.Tensor] = None,
+              **kwargs) -> None:
+        """
+        Retrieve the KV cache in a layerwise manner.
+        """
+        
+        if mask is not None:
+            num_required_tokens = torch.sum(mask).item()
+        else:
+            num_required_tokens = len(tokens)
+        monitor_req_id = self.stats_monitor.on_retrieve_request(
+            num_retrieved_tokens)
+        
+        ret_mask = torch.zeros_like(tokens, dtype=torch.bool, device="cpu")
+        
+        starts = []
+        ends = []
+        keys = []
+        for start, end, key in self.token_database.process_tokens(
+                tokens, mask):
+            assert isinstance(key, CacheEngineKey)
+            
+            keys_multi_layer = key.split_layers(self.num_layers)
+            
+            starts.append(start)
+            ends.append(end)
+            keys.append(keys_multi_layer)
+            
+            ret_mask[start:end] = True
+            
+        
+        # Transpose the keys into layer major format
+        keys = [list(row) for row in zip(*keys)]
+        
+        get_generator = storage_manager.layerwise_batched_get(keys)
+  
+        mem_obj_consumer = gpu_connector.to_gpu(
+            starts, ends, **kwargs)
+        
+        for layer_id in range(self.num_layers):
+            
+            tasks = next(get_generator)
+            
+            assert None not in tasks
+            
+            yield
+                
+            memory_objs_layer = [task.result() for task in tasks]
+            mem_obj_consumer.send(mem_objs_layer)
+        
+        self.stats_monitor.on_retrieve_finished(monitor_req_id)
+        logger.debug(f"Retrieved {retrieved_tokens} "
+                     f"out of {num_required_tokens} "
+                     f"out of total {len(tokens)} tokens")
+        
+        yield ret_mask
+    
+    def lookup(
+        self,
+        tokens: Union[torch.Tensor, List[int]],
+        search_range: Optional[List[str]] = None,
+    ) -> int:
+        """
+        Checks the existence of KV cache of the tokens from the cache engine.
+
+        :param tokens: the input tokens, with shape [seq_len]
+        
+        :param Optional[List[str]] search_range: The range of storage backends
+        to search in. Should be a subset of ["LocalCPUBackend", "LocalDiskBackend"]
+        for now.
+        If None, search in all backends.
+
+        :return: An int indicating how many prefix tokens are cached.
+        """
+        end = 0
+        for start, end, key in self.token_database.process_tokens(tokens):
+            assert isinstance(key, CacheEngineKey)
+            key_first_layer = key.get_first_layer_key()
+            if not self.storage_manager.contains(key_first_layer, search_range):
+                return start
+        return end
 
 
 class LMCacheEngineBuilder:

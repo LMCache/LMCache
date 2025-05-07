@@ -112,6 +112,23 @@ class LocalCPUBackend(StorageBackendInterface):
             self.memory_allocator.ref_count_up(memory_obj)
             self.hot_cache.move_to_end(key)
             return memory_obj
+    
+    def get_non_blocking(
+        self,
+        key: CacheEngineKey,
+    ) -> Optional[Future]:
+        """
+        Return the dummy future object.
+        """
+        with self.cpu_lock:
+            if key not in self.hot_cache:
+                return None
+            memory_obj = self.hot_cache[key]
+            self.memory_allocator.ref_count_up(memory_obj)
+            self.hot_cache.move_to_end(key)
+            f = Future()
+            f.set_result(memory_obj)
+            return f
 
     def remove(self, key: CacheEngineKey) -> bool:
         with self.cpu_lock:
