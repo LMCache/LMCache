@@ -40,16 +40,22 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+import socket
+
 def get_zmq_rpc_path_lmcache(
         role: KVConnectorRole,
         is_tp: bool = False,
         vllm_config: Optional["VllmConfig"] = None) -> str:
+    
     base_url = envs.VLLM_RPC_BASE_PATH
     # Default to 0 if not configured
     rpc_port = 0
-    if vllm_config is not None:
-        rpc_port = vllm_config.kv_transfer_config.get_from_extra_config(
-            "lmcache_rpc_port", 0)
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s = socket.socket()
+        s.bind(("", 0))
+        rpc_port = s.getsockname()[1]
+    
     logger.debug("Base URL: %s, RPC Port: %s", base_url, rpc_port)
     return f"ipc://{base_url}/lmcache_rpc_port_{rpc_port}"
 
