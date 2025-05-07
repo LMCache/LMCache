@@ -1,5 +1,18 @@
+import argparse
 import pandas as pd
 import matplotlib.pyplot as plt
+
+# --- Parse command-line arguments for plot filename ---
+parser = argparse.ArgumentParser(
+    description="Plot Average ROUGEL vs Average ttft from CSV results"
+)
+parser.add_argument(
+    "--plot-filename",
+    type=str,
+    default="ttft_vs_ROUGEL_similarity.png",
+    help="Filename for saving the plot"
+)
+args = parser.parse_args()
 
 # List of file paths for baseline, ours, and prefill
 file_paths = [
@@ -10,11 +23,14 @@ file_paths = [
 ]
 
 file_paths_ours = [
-    'results/Apr_28_samsum/ours/001_processed.csv',
-    'results/Apr_28_samsum/ours/01_processed.csv',
-    'results/Apr_28_samsum/ours/1_processed.csv',
-    'results/Apr_28_samsum/ours/10_processed.csv',
-    'results/Apr_28_samsum/ours/100_processed.csv'
+    'results/Apr_28_samsum/ours_token_based_decision/0001_processed.csv',
+    'results/Apr_28_samsum/ours_token_based_decision/001_processed.csv',
+    'results/Apr_28_samsum/ours_token_based_decision/01_processed.csv',
+    'results/Apr_28_samsum/ours_token_based_decision/04_processed.csv',
+    'results/Apr_28_samsum/ours_token_based_decision/07_processed.csv',
+    'results/Apr_28_samsum/ours_token_based_decision/1_processed.csv',
+    'results/Apr_28_samsum/ours_token_based_decision/100_processed.csv',
+    'results/Apr_28_samsum/ours_token_based_decision/1000_processed.csv'
 ]
 
 file_path_prefill = [
@@ -120,7 +136,6 @@ plt.title("Average ROUGEL vs. Average ttft")
 plt.grid(True)
 plt.legend()
 
-# Save the figure
-plot_filename = "ttft_vs_ROUGEL_similarity.png"
-plt.savefig(plot_filename, dpi=300, bbox_inches="tight")
-print(f"Plot saved as {plot_filename}")
+# Save the figure using the provided filename argument
+plt.savefig(args.plot_filename, dpi=300, bbox_inches="tight")
+print(f"Plot saved as {args.plot_filename}")

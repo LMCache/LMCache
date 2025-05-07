@@ -8,11 +8,14 @@ INPUT02       = 'results/Apr_28_samsum/baseline_kivi/02.csv'
 INPUT03       = 'results/Apr_28_samsum/baseline_kivi/03.csv'
 INPUT06       = 'results/Apr_28_samsum/baseline_kivi/06.csv'
 INPUT0        = 'results/Apr_28_samsum/0.csv'
-INPUT_OURS001 = 'results/Apr_28_samsum/ours/001.csv'
+INPUT_OURS0001 = 'results/Apr_28_samsum/ours_token_based_decision/0001.csv'
+INPUT_OURS001 = 'results/Apr_28_samsum/ours_token_based_decision/001.csv'
 INPUT_OURS01 = 'results/Apr_28_samsum/ours_token_based_decision/01.csv'
-INPUT_OURS1   = 'results/Apr_28_samsum/ours/1.csv'
-INPUT_OURS10   = 'results/Apr_28_samsum/ours_token_based_decision/10.csv'
-INPUT_OURS100 = 'results/Apr_28_samsum/ours/100.csv'
+INPUT_OURS04 = 'results/Apr_28_samsum/ours_token_based_decision/04.csv'
+INPUT_OURS07 = 'results/Apr_28_samsum/ours_token_based_decision/07.csv'
+INPUT_OURS1   = 'results/Apr_28_samsum/ours_token_based_decision/1.csv'
+INPUT_OURS100 = 'results/Apr_28_samsum/ours_token_based_decision/100.csv'
+INPUT_OURS1000 = 'results/Apr_28_samsum/ours_token_based_decision/1000.csv'
 
 def main():
     # Load the reference answers

@@ -6,7 +6,6 @@ with LMCache.
 Note that `pip install lmcache` is needed to run this example.
 Learn more about LMCache in https://github.com/LMCache/LMCache.
 """
-import os
 import time
 from typing import Tuple
 import openai
@@ -14,51 +13,21 @@ import pandas as pd
 import traceback
 import argparse
 
-NUM_QUERY = 200
 MODEL = "meta-llama/Llama-3.1-8B-Instruct"
 FILES = [
-    'dataset/samsum.csv'
+    'dataset/samsum_processed.csv'
 ]
-FILE_TYPE = "sum" # or "qa"
-PREFILL_ONLY = False
 
-dataset_entries = 0
+# Sends each CSV entry as a separate request
+# No index insertion or CSV reuse logic
 
-# Trace generator
-def generate_workload_trace(trace_files, num_query):
-    df_list = []
-    for file_path in trace_files:
-        # Read CSV file
-        df = pd.read_csv(file_path)
-
-        global dataset_entries
-        dataset_entries += len(df)
-
-        if 'index_in_dataset' in df.columns:
-            df.drop(columns=['index_in_dataset'], inplace=True)
-        df.insert(0, 'index_in_dataset', df.index)
-        
-        df_list.append(df)
-    
-    # Concatenate all DataFrames
-    df_all = pd.concat(df_list)
-    
-    # Generate the workload trace by sampling with replacement
-    run_workload_trace = df_all.sample(n=num_query, replace=True, random_state=42)
-    workload_trace = pd.concat([df_all, df_all]).reset_index(drop=True)
-
-    return workload_trace
-
-
-def execute_openai_request_with_output(row, model: str, client: openai.Client) -> Tuple[float, float, float, str]:
+def execute_openai_request_with_output(row, model: str, client: openai.Client) -> Tuple[float, float, float, float, str]:
     """
     Execute a single request to the OpenAI engine
-    Returns: TTFT (seconds) and throughput (tokens per second)
+    Returns: start_time (seconds), TTFT (seconds), finish_time (seconds), throughput (tokens per second), and generated text
     """
-
     # Build the prompt using your template
-
-    prompt = f"This is user {row.index_in_dataset} in {row.dataset}.\n\n"
+    prompt = f"This is user {row.Index} in {row.dataset}.\n\n"
     prompt += f"""
     You are an expert at summarising conversations into concise summaries.  
     Below are example contexts (with their reference summaries) to illustrate the desired format:
@@ -70,33 +39,27 @@ def execute_openai_request_with_output(row, model: str, client: openai.Client) -
 
     {row.input}
     """
-    
-    messages = [
-        {
-            "role": "user",
-            "content": prompt
-        }
-    ]
-    
+    messages = [{"role": "user", "content": prompt}]
+
     try:
         chat_completion = client.chat.completions.create(
-                messages = messages,
-                model = model,
-                temperature = 0,
-                stream = True,
-                max_tokens = 100,
-            )
-
+            messages=messages,
+            model=model,
+            temperature=0,
+            stream=True,
+            max_tokens=100,
+        )
+        # Record the time when request starts
         start_time = time.perf_counter()
         first_token_time = None
         ntokens = 0
-        messages = []
+        output_parts = []
         for chunk in chat_completion:
-            chunk_message = chunk.choices[0].delta.content
-            if chunk_message is not None:
-                if first_token_time is None and chunk_message != " " and chunk_message != "":
+            content = chunk.choices[0].delta.content
+            if content is not None:
+                if first_token_time is None and content.strip():
                     first_token_time = time.perf_counter()
-                messages.append(chunk_message)
+                output_parts.append(content)
                 ntokens += 1
         end_time = time.perf_counter()
 
@@ -106,20 +69,18 @@ def execute_openai_request_with_output(row, model: str, client: openai.Client) -
     except Exception as e:
         traceback.print_exc()
         print(f"OpenAI request failed: {e}")
-        return -1, -1, -1, "ERROR"
+        return -1, -1, -1, -1, "ERROR"
 
-    return ttft, finish_time, throughput, f"{''.join(messages)}"
+    return start_time, ttft, finish_time, throughput, "".join(output_parts)
 
 
 def create_openai_client(port: int, model) -> openai.Client:
     openai_api_key = "EMPTY"
     openai_api_base = f"http://localhost:{port}/v1"
-
     client = openai.OpenAI(
         api_key=openai_api_key,
         base_url=openai_api_base,
     )
-
     return client
 
 
@@ -134,53 +95,46 @@ def main():
     parser.add_argument(
         "--port", "-p",
         default=8000,
+        type=int,
         help="Port number for OpenAI API"
     )
     args = parser.parse_args()
 
     # Load the workload trace
-    workload_trace = generate_workload_trace(FILES, NUM_QUERY)
+    workload_trace = pd.read_csv(FILES[0])
 
     # Initialize OpenAI client
     client = create_openai_client(args.port, MODEL)
 
-    # Record answers
+    # Prepare result lists
+    start_times = []
     answers = []
     ttfts = []
     finish_times = []
     throughputs = []
 
-    # List to store indices of rows to delete
-    rows_to_drop = []
-
     # Iterate over each row in workload_trace
     for row in workload_trace.itertuples():
         # Execute the OpenAI request
-        ttft, finish_time, throughput, generated_answer = execute_openai_request_with_output(row, MODEL, client)
-
-        # If ttft equals -1, mark this row for deletion and skip processing its results
-        if ttft == -1:
-            rows_to_drop.append(row.Index)
-
+        st, ttft, finish_time, throughput, generated_answer = execute_openai_request_with_output(
+            row, MODEL, client
+        )
+        start_times.append(st)
         answers.append(generated_answer)
         ttfts.append(ttft)
         finish_times.append(finish_time)
         throughputs.append(throughput)
 
     # Add the results as new columns to the DataFrame
+    workload_trace["start_time"] = start_times
     workload_trace["answer"] = answers
     workload_trace["ttft"] = ttfts
     workload_trace["finish_time"] = finish_times
     workload_trace["throughput"] = throughputs
 
-    # Delete the rows from workload_trace where ttft was -1
-    if not PREFILL_ONLY:
-        rows_to_drop = list(set(rows_to_drop) | set(range(dataset_entries)))
-    workload_trace = workload_trace.drop(index=rows_to_drop)
-
     # Save the results
-    workload_trace = workload_trace.reset_index(drop=True)
-    workload_trace.to_csv(args.output)  # <-- now uses parsed filename
+    workload_trace.to_csv(args.output, index=False)
+
 
 if __name__ == "__main__":
     main()
