@@ -79,8 +79,8 @@ def drop_encode_and_indices(prompt: str,
 def concatenate_kv_caches(kv_chunks, fmt):
     dim = 1 if fmt == "huggingface" else 0
     ret = []
-    for kv_layer in zip(*kv_chunks):
-        klist, vlist = zip(*kv_layer)
+    for kv_layer in zip(*kv_chunks, strict=False):
+        klist, vlist = zip(*kv_layer, strict=False)
         klayer = torch.cat(klist, dim=dim)
         vlayer = torch.cat(vlist, dim=dim)
         ret.append((klayer, vlayer))
@@ -190,7 +190,7 @@ def test_spt_full_hit(fmt, autorelease):
     metadata = dumb_metadata(fmt)
     engine = autorelease(LMCacheEngine(cfg, dumb_metadata(fmt)))
 
-    for token_ids_tensor, kv in zip(token_ids_tensors, kvs):
+    for token_ids_tensor, kv in zip(token_ids_tensors, kvs, strict=False):
         engine.store(token_ids_tensor, kv)
 
     retriever = SPTBlendRetriever(engine, metadata)
@@ -244,8 +244,10 @@ def test_spt_hit_miss(fmt, autorelease):
     metadata = dumb_metadata(fmt)
     engine = autorelease(LMCacheEngine(cfg, dumb_metadata(fmt)))
 
-    for flag, token_ids_tensor, kv in zip(has_insterted, token_ids_tensors,
-                                          kvs):
+    for flag, token_ids_tensor, kv in zip(has_insterted,
+                                          token_ids_tensors,
+                                          kvs,
+                                          strict=False):
         if flag:
             engine.store(token_ids_tensor, kv)
 
@@ -310,8 +312,10 @@ def test_spt_all_miss(fmt, autorelease):
     metadata = dumb_metadata(fmt)
     engine = autorelease(LMCacheEngine(cfg, dumb_metadata(fmt)))
 
-    for flag, token_ids_tensor, kv in zip(has_insterted, token_ids_tensors,
-                                          kvs):
+    for flag, token_ids_tensor, kv in zip(has_insterted,
+                                          token_ids_tensors,
+                                          kvs,
+                                          strict=False):
         if flag:
             engine.store(token_ids_tensor, kv)
 
@@ -359,8 +363,10 @@ def test_spt_partial_hit(fmt, autorelease):
     metadata = dumb_metadata(fmt)
     engine = autorelease(LMCacheEngine(cfg, dumb_metadata(fmt)))
 
-    for ilen, token_ids_tensor, kv in zip(inserted_length, token_ids_tensors,
-                                          kvs):
+    for ilen, token_ids_tensor, kv in zip(inserted_length,
+                                          token_ids_tensors,
+                                          kvs,
+                                          strict=False):
         assert ilen < len(token_ids_tensor)
         s = slice(0, ilen)
         partial_kv = slice_kv_caches(kv, s, fmt)
@@ -431,7 +437,7 @@ def test_spt_multi_query(fmt, autorelease):
     metadata = dumb_metadata(fmt)
     engine = autorelease(LMCacheEngine(cfg, dumb_metadata(fmt)))
 
-    for token_ids_tensor, kv in zip(token_ids_tensors, kvs):
+    for token_ids_tensor, kv in zip(token_ids_tensors, kvs, strict=False):
         engine.store(token_ids_tensor, kv)
 
     retriever = SPTBlendRetriever(engine, metadata)

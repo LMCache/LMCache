@@ -111,7 +111,9 @@ class CacheBlendImpl(BlendExecutor):
         """
         #ret = torch.arange(int(query_start_loc[-1]), device=device)
         ret = torch.arange(query_start_loc[-1], device=device)  # type: ignore
-        for start, end in zip(query_start_loc[:-1], query_start_loc[1:]):
+        for start, end in zip(query_start_loc[:-1],
+                              query_start_loc[1:],
+                              strict=False):
             ret[start:end] -= start
         return ret.long()
 
@@ -147,7 +149,9 @@ class CacheBlendImpl(BlendExecutor):
         diff_per_token = diff_per_token * valid.to(diff_per_token.device)
         if self.all_reduce_function is not None:
             diff_per_token = self.all_reduce_function(diff_per_token)
-        for qstart, qend in zip(query_start_loc[:-1], query_start_loc[1:]):
+        for qstart, qend in zip(query_start_loc[:-1],
+                                query_start_loc[1:],
+                                strict=False):
             local_valid = valid[qstart:qend]
             num_valid_tokens = local_valid.sum()
             num_selected_tokens = int(num_valid_tokens * self.recompute_ratio)

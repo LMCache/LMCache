@@ -158,7 +158,10 @@ class LMCacheEngine:
         put_time = 0.
         tot_kv_size = 0
         # Offload the KV cache and write to remote
-        for key, memobj_meta, (start, end) in zip(keys, metadatas, steds):
+        for key, memobj_meta, (start, end) in zip(keys,
+                                                  metadatas,
+                                                  steds,
+                                                  strict=False):
             assert memobj_meta.dtype is not None
             kv_shape = memobj_meta.shape
             kv_dtype = memobj_meta.dtype
