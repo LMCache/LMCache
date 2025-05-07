@@ -1,16 +1,16 @@
-torch
-numpy
 aiofiles
-pyyaml
-redis
-nvtx
-safetensors
-transformers
-psutil
 aiohttp
-sortedcontainers
-prometheus_client
 infinistore
 msgspec
-pyzmq
-transformers
+nixl==0.2.0
+numpy
+nvtx
+prometheus_client >= 0.18.0
+psutil
+pyyaml
+pyzmq >= 25.0.0
+redis
+safetensors
+sortedcontainers
+torch==2.6.0 # Should correspond to the version used by latest vLLM package
+transformers >= 4.51.1

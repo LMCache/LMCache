@@ -1,13 +1,6 @@
 [build-system]
-# Should be mirrored in requirements-build.txt
-requires = [
-    "setuptools >=70.1.0",
-    "wheel",
-    "packaging",
-    "torch",
-    "ninja",
-    "pybind11",
-]
+# Should be mirrored in docker/requirements-build.txt
+requires = ["ninja", "packaging>=24.2", "setuptools>=77.0.3,<80.0.0", "setuptools_scm>=8", "torch==2.6.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [tool.ruff]
