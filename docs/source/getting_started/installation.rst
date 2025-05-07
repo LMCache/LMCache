@@ -43,7 +43,7 @@ We recommend developers to use `uv` for a better package management:
     cd LMCache
     
     uv venv --python 3.12
-    source activate venv
+    source .venv/bin/activate
     uv pip install -e .
 
 
