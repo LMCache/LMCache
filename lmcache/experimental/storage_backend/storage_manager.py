@@ -25,12 +25,12 @@ from lmcache.experimental.storage_backend.naive_serde.kivi_serde import (
 
 logger = init_logger(__name__)
 
-def compute_best_rate_and_drop(score_tables, orig_rate, length, full_rate):
+def compute_best_rate_and_drop(score_tables, orig_rate, length):
     """
     Given:
       - score_tables: list of lists [(rate, score), …] for each context
       - orig_rate: the current rate to degrade from
-      - length, full_rate: metadata.length and metadata.rate
+      - length: metadata.num_tokens
     Returns:
       (best_rate, min_total_drop)
     """
@@ -66,7 +66,7 @@ def compute_best_rate_and_drop(score_tables, orig_rate, length, full_rate):
             # accumulate drop
             total_drop += (
                 (baseline_score - s_sel) /
-                ((length / full_rate) * (baseline_rate - r_sel))
+                (length * (baseline_rate - r_sel))
             ) * 1e9
 
         if total_drop < min_total_drop:
@@ -128,8 +128,7 @@ class KVCacheManager:
                 new_best, new_drop = compute_best_rate_and_drop(
                     first_update_key.metadata.score_table,
                     new_kv_rate,
-                    update_total_tokens,
-                    first_update_key.metadata.rate
+                    update_total_tokens
                 )
                 if new_drop < min_quality_drop:
                     min_quality_drop = new_drop
@@ -156,8 +155,7 @@ class KVCacheManager:
                     best_r, drop_r = compute_best_rate_and_drop(
                         rep.metadata.score_table,
                         curr_rate,
-                        total_tokens,
-                        rep.metadata.rate
+                        total_tokens
                     )
                     # compare against the running minimum
                     if drop_r < min_quality_drop:

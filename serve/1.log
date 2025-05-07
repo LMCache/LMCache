@@ -1,89 +1,0 @@
-INFO 04-29 21:47:06 __init__.py:186] Automatically detected platform cuda.
-INFO 04-29 21:47:10 api_server.py:840] vLLM API server version 0.7.2.dev43+geb5db26a8
-INFO 04-29 21:47:10 api_server.py:841] args: Namespace(subparser='serve', model_tag='meta-llama/Llama-3.1-8B-Instruct', config='', host=None, port=9001, uvicorn_log_level='info', allow_credentials=False, allowed_origins=['*'], allowed_methods=['*'], allowed_headers=['*'], api_key=None, lora_modules=None, prompt_adapters=None, chat_template=None, chat_template_content_format='auto', response_role='assistant', ssl_keyfile=None, ssl_certfile=None, ssl_ca_certs=None, ssl_cert_reqs=0, root_path=None, middleware=[], return_tokens_as_token_ids=False, disable_frontend_multiprocessing=False, enable_request_id_headers=False, enable_auto_tool_choice=False, enable_reasoning=False, reasoning_parser=None, tool_call_parser=None, tool_parser_plugin='', model='meta-llama/Llama-3.1-8B-Instruct', task='auto', tokenizer=None, skip_tokenizer_init=False, revision=None, code_revision=None, tokenizer_revision=None, tokenizer_mode='auto', trust_remote_code=True, allowed_local_media_path=None, download_dir=None, load_format='auto', config_format=<ConfigFormat.AUTO: 'auto'>, dtype='auto', kv_cache_dtype='auto', max_model_len=None, guided_decoding_backend='xgrammar', logits_processor_pattern=None, model_impl='auto', distributed_executor_backend=None, pipeline_parallel_size=1, tensor_parallel_size=1, max_parallel_loading_workers=None, ray_workers_use_nsight=False, block_size=None, enable_prefix_caching=None, disable_sliding_window=False, use_v2_block_manager=True, num_lookahead_slots=0, seed=0, swap_space=4, cpu_offload_gb=0, gpu_memory_utilization=0.95, num_gpu_blocks_override=None, max_num_batched_tokens=None, max_num_seqs=None, max_logprobs=20, disable_log_stats=True, quantization=None, rope_scaling=None, rope_theta=None, hf_overrides=None, enforce_eager=False, max_seq_len_to_capture=8192, disable_custom_all_reduce=False, tokenizer_pool_size=0, tokenizer_pool_type='ray', tokenizer_pool_extra_config=None, limit_mm_per_prompt=None, mm_processor_kwargs=None, disable_mm_preprocessor_cache=False, enable_lora=False, enable_lora_bias=False, max_loras=1, max_lora_rank=16, lora_extra_vocab_size=256, lora_dtype='auto', long_lora_scaling_factors=None, max_cpu_loras=None, fully_sharded_loras=False, enable_prompt_adapter=False, max_prompt_adapters=1, max_prompt_adapter_token=0, device='auto', num_scheduler_steps=1, multi_step_stream_outputs=True, scheduler_delay_factor=0.0, enable_chunked_prefill=False, speculative_model=None, speculative_model_quantization=None, num_speculative_tokens=None, speculative_disable_mqa_scorer=False, speculative_draft_tensor_parallel_size=None, speculative_max_model_len=None, speculative_disable_by_batch_size=None, ngram_prompt_lookup_max=None, ngram_prompt_lookup_min=None, spec_decoding_acceptance_method='rejection_sampler', typical_acceptance_sampler_posterior_threshold=None, typical_acceptance_sampler_posterior_alpha=None, disable_logprobs_during_spec_decoding=None, model_loader_extra_config=None, ignore_patterns=[], preemption_mode=None, served_model_name=None, qlora_adapter_name_or_path=None, otlp_traces_endpoint=None, collect_detailed_traces=None, disable_async_output_proc=False, scheduling_policy='fcfs', override_neuron_config=None, override_pooler_config=None, compilation_config=None, kv_transfer_config=KVTransferConfig(kv_connector='LMCacheConnector', kv_buffer_device='cuda', kv_buffer_size=1000000000.0, kv_role='kv_both', kv_rank=None, kv_parallel_size=1, kv_ip='127.0.0.1', kv_port=14579), worker_cls='auto', generation_config=None, override_generation_config=None, enable_sleep_mode=False, calculate_kv_scales=False, disable_log_requests=False, max_log_len=None, disable_fastapi_docs=False, enable_prompt_tokens_details=False, dispatch_function=<function serve at 0x724f7f2c7a60>)
-INFO 04-29 21:47:10 api_server.py:206] Started engine process with PID 1047051
-INFO 04-29 21:47:22 __init__.py:186] Automatically detected platform cuda.
-INFO 04-29 21:47:26 config.py:542] This model supports multiple tasks: {'score', 'embed', 'classify', 'generate', 'reward'}. Defaulting to 'generate'.
-WARNING 04-29 21:47:26 arg_utils.py:1145] The model has a long context length (131072). This may cause OOM errors during the initial memory profiling phase, or result in low performance due to small KV cache space. Consider setting --max-model-len to a smaller value.
-INFO 04-29 21:47:43 config.py:542] This model supports multiple tasks: {'classify', 'score', 'reward', 'embed', 'generate'}. Defaulting to 'generate'.
-WARNING 04-29 21:47:43 arg_utils.py:1145] The model has a long context length (131072). This may cause OOM errors during the initial memory profiling phase, or result in low performance due to small KV cache space. Consider setting --max-model-len to a smaller value.
-INFO 04-29 21:47:43 llm_engine.py:234] Initializing a V0 LLM engine (v0.7.2.dev43+geb5db26a8) with config: model='meta-llama/Llama-3.1-8B-Instruct', speculative_config=None, tokenizer='meta-llama/Llama-3.1-8B-Instruct', skip_tokenizer_init=False, tokenizer_mode=auto, revision=None, override_neuron_config=None, tokenizer_revision=None, trust_remote_code=True, dtype=torch.bfloat16, max_seq_len=131072, download_dir=None, load_format=LoadFormat.AUTO, tensor_parallel_size=1, pipeline_parallel_size=1, disable_custom_all_reduce=False, quantization=None, enforce_eager=False, kv_cache_dtype=auto,  device_config=cuda, decoding_config=DecodingConfig(guided_decoding_backend='xgrammar'), observability_config=ObservabilityConfig(otlp_traces_endpoint=None, collect_model_forward_time=False, collect_model_execute_time=False), seed=0, served_model_name=meta-llama/Llama-3.1-8B-Instruct, num_scheduler_steps=1, multi_step_stream_outputs=True, enable_prefix_caching=False, chunked_prefill_enabled=False, use_async_output_proc=True, disable_mm_preprocessor_cache=False, mm_processor_kwargs=None, pooler_config=None, compilation_config={"splitting_ops":[],"compile_sizes":[],"cudagraph_capture_sizes":[256,248,240,232,224,216,208,200,192,184,176,168,160,152,144,136,128,120,112,104,96,88,80,72,64,56,48,40,32,24,16,8,4,2,1],"max_capture_size":256}, use_cached_outputs=True, 
-INFO 04-29 21:47:46 cuda.py:230] Using Flash Attention backend.
-INFO 04-29 21:47:48 lmcache_connector.py:42] Initializing LMCacheConfig under kv_transfer_config kv_connector='LMCacheConnector' kv_buffer_device='cuda' kv_buffer_size=1000000000.0 kv_role='kv_both' kv_rank=None kv_parallel_size=1 kv_ip='127.0.0.1' kv_port=14579
-[33mINFO LMCache: [0mLoading LMCache config file ../config/qmsum.yaml [2025-04-29 21:47:48,030] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/utils.py:32
-[33mINFO LMCache: [0mCreating LMCacheEngine instance vllm-instance [2025-04-29 21:47:48,036] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/experimental/cache_engine.py:262
-[33mINFO LMCache: [0mInitializing usage context. [2025-04-29 21:48:52,359] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/usage_context.py:235
-[33mDEBUG LMCache: [0mcontext message updated [2025-04-29 21:48:54,075] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/usage_context.py:98
-[33mDEBUG LMCache: [0mcontext message updated [2025-04-29 21:48:54,596] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/usage_context.py:98
-[33mDEBUG LMCache: [0mcontext message updated [2025-04-29 21:48:54,945] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/usage_context.py:98
-INFO 04-29 21:48:54 model_runner.py:1115] Starting to load model meta-llama/Llama-3.1-8B-Instruct...
-INFO 04-29 21:48:55 weight_utils.py:252] Using model weights format ['*.safetensors']
-Loading safetensors checkpoint shards:   0% Completed | 0/4 [00:00<?, ?it/s]
-Loading safetensors checkpoint shards:  25% Completed | 1/4 [00:00<00:02,  1.14it/s]
-Loading safetensors checkpoint shards:  50% Completed | 2/4 [00:01<00:01,  1.01it/s]
-Loading safetensors checkpoint shards:  75% Completed | 3/4 [00:02<00:00,  1.36it/s]
-Loading safetensors checkpoint shards: 100% Completed | 4/4 [00:03<00:00,  1.29it/s]
-Loading safetensors checkpoint shards: 100% Completed | 4/4 [00:03<00:00,  1.25it/s]
-
-INFO 04-29 21:48:59 model_runner.py:1120] Loading model weights took 14.9888 GB
-INFO 04-29 21:49:16 worker.py:267] Memory profiling takes 17.44 seconds
-INFO 04-29 21:49:16 worker.py:267] the current vLLM instance can use total_gpu_memory (47.53GiB) x gpu_memory_utilization (0.95) = 45.15GiB
-INFO 04-29 21:49:16 worker.py:267] model weights take 14.99GiB; non_torch_memory takes 0.22GiB; PyTorch activation peak memory takes 13.51GiB; the rest of the memory reserved for KV Cache is 16.43GiB.
-INFO 04-29 21:49:17 executor_base.py:110] # CUDA blocks: 8414, # CPU blocks: 2048
-INFO 04-29 21:49:17 executor_base.py:115] Maximum concurrency for 131072 tokens per request: 1.03x
-INFO 04-29 21:49:22 model_runner.py:1439] Capturing cudagraphs for decoding. This may lead to unexpected consequences if the model is not static. To run the model in eager mode, set 'enforce_eager=True' or use '--enforce-eager' in the CLI. If out-of-memory error occurs during cudagraph capture, consider decreasing `gpu_memory_utilization` or switching to eager mode. You can also reduce the `max_num_seqs` as needed to decrease memory usage.
-Capturing CUDA graph shapes:   0%|          | 0/35 [00:00<?, ?it/s]Capturing CUDA graph shapes:   3%|▎         | 1/35 [00:00<00:21,  1.60it/s]Capturing CUDA graph shapes:   6%|▌         | 2/35 [00:01<00:18,  1.83it/s]Capturing CUDA graph shapes:   9%|▊         | 3/35 [00:01<00:16,  1.96it/s]Capturing CUDA graph shapes:  11%|█▏        | 4/35 [00:02<00:15,  2.02it/s]Capturing CUDA graph shapes:  14%|█▍        | 5/35 [00:02<00:14,  2.03it/s]Capturing CUDA graph shapes:  17%|█▋        | 6/35 [00:03<00:14,  2.02it/s]Capturing CUDA graph shapes:  20%|██        | 7/35 [00:03<00:14,  1.96it/s]Capturing CUDA graph shapes:  23%|██▎       | 8/35 [00:04<00:13,  1.99it/s]Capturing CUDA graph shapes:  26%|██▌       | 9/35 [00:04<00:12,  2.04it/s]Capturing CUDA graph shapes:  29%|██▊       | 10/35 [00:05<00:12,  2.06it/s]Capturing CUDA graph shapes:  31%|███▏      | 11/35 [00:05<00:11,  2.06it/s]Capturing CUDA graph shapes:  34%|███▍      | 12/35 [00:05<00:10,  2.09it/s]Capturing CUDA graph shapes:  37%|███▋      | 13/35 [00:06<00:10,  2.08it/s]Capturing CUDA graph shapes:  40%|████      | 14/35 [00:06<00:09,  2.11it/s]Capturing CUDA graph shapes:  43%|████▎     | 15/35 [00:07<00:09,  2.02it/s]Capturing CUDA graph shapes:  46%|████▌     | 16/35 [00:07<00:09,  2.07it/s]Capturing CUDA graph shapes:  49%|████▊     | 17/35 [00:08<00:08,  2.12it/s]Capturing CUDA graph shapes:  51%|█████▏    | 18/35 [00:08<00:07,  2.17it/s]Capturing CUDA graph shapes:  54%|█████▍    | 19/35 [00:09<00:07,  2.20it/s]Capturing CUDA graph shapes:  57%|█████▋    | 20/35 [00:09<00:06,  2.23it/s]Capturing CUDA graph shapes:  60%|██████    | 21/35 [00:10<00:06,  2.25it/s]Capturing CUDA graph shapes:  63%|██████▎   | 22/35 [00:10<00:05,  2.27it/s]Capturing CUDA graph shapes:  66%|██████▌   | 23/35 [00:10<00:05,  2.26it/s]Capturing CUDA graph shapes:  69%|██████▊   | 24/35 [00:11<00:04,  2.26it/s]Capturing CUDA graph shapes:  71%|███████▏  | 25/35 [00:11<00:04,  2.27it/s]Capturing CUDA graph shapes:  74%|███████▍  | 26/35 [00:12<00:04,  2.21it/s]Capturing CUDA graph shapes:  77%|███████▋  | 27/35 [00:12<00:03,  2.08it/s]Capturing CUDA graph shapes:  80%|████████  | 28/35 [00:13<00:03,  2.06it/s]Capturing CUDA graph shapes:  83%|████████▎ | 29/35 [00:13<00:02,  2.12it/s]Capturing CUDA graph shapes:  86%|████████▌ | 30/35 [00:14<00:02,  2.14it/s]Capturing CUDA graph shapes:  89%|████████▊ | 31/35 [00:14<00:01,  2.16it/s]Capturing CUDA graph shapes:  91%|█████████▏| 32/35 [00:15<00:01,  2.20it/s]Capturing CUDA graph shapes:  94%|█████████▍| 33/35 [00:15<00:00,  2.24it/s]Capturing CUDA graph shapes:  97%|█████████▋| 34/35 [00:16<00:00,  2.26it/s]Capturing CUDA graph shapes: 100%|██████████| 35/35 [00:16<00:00,  2.28it/s]Capturing CUDA graph shapes: 100%|██████████| 35/35 [00:16<00:00,  2.13it/s]
-INFO 04-29 21:49:39 model_runner.py:1567] Graph capturing finished in 16 secs, took 0.24 GiB
-INFO 04-29 21:49:39 llm_engine.py:431] init engine (profile, create kv cache, warmup model) took 39.82 seconds
-INFO 04-29 21:49:39 api_server.py:756] Using supplied chat template:
-INFO 04-29 21:49:39 api_server.py:756] None
-INFO 04-29 21:49:39 launcher.py:21] Available routes are:
-INFO 04-29 21:49:39 launcher.py:29] Route: /openapi.json, Methods: GET, HEAD
-INFO 04-29 21:49:39 launcher.py:29] Route: /docs, Methods: GET, HEAD
-INFO 04-29 21:49:39 launcher.py:29] Route: /docs/oauth2-redirect, Methods: GET, HEAD
-INFO 04-29 21:49:39 launcher.py:29] Route: /redoc, Methods: GET, HEAD
-INFO 04-29 21:49:39 launcher.py:29] Route: /health, Methods: GET
-INFO 04-29 21:49:39 launcher.py:29] Route: /ping, Methods: POST, GET
-INFO 04-29 21:49:39 launcher.py:29] Route: /tokenize, Methods: POST
-INFO 04-29 21:49:39 launcher.py:29] Route: /detokenize, Methods: POST
-INFO 04-29 21:49:39 launcher.py:29] Route: /v1/models, Methods: GET
-INFO 04-29 21:49:39 launcher.py:29] Route: /version, Methods: GET
-INFO 04-29 21:49:39 launcher.py:29] Route: /v1/chat/completions, Methods: POST
-INFO 04-29 21:49:39 launcher.py:29] Route: /v1/completions, Methods: POST
-INFO 04-29 21:49:39 launcher.py:29] Route: /v1/embeddings, Methods: POST
-INFO 04-29 21:49:39 launcher.py:29] Route: /pooling, Methods: POST
-INFO 04-29 21:49:39 launcher.py:29] Route: /score, Methods: POST
-INFO 04-29 21:49:39 launcher.py:29] Route: /v1/score, Methods: POST
-INFO 04-29 21:49:39 launcher.py:29] Route: /rerank, Methods: POST
-INFO 04-29 21:49:39 launcher.py:29] Route: /v1/rerank, Methods: POST
-INFO 04-29 21:49:39 launcher.py:29] Route: /v2/rerank, Methods: POST
-INFO 04-29 21:49:39 launcher.py:29] Route: /invocations, Methods: POST
-INFO:     Started server process [1046306]
-INFO:     Waiting for application startup.
-INFO:     Application startup complete.
-INFO:     Uvicorn running on http://0.0.0.0:9001 (Press CTRL+C to quit)
-INFO 04-29 21:50:46 chat_utils.py:332] Detected the chat template content format to be 'string'. You can set `--chat-template-content-format` to override this.
-INFO:     127.0.0.1:44932 - "POST /v1/chat/completions HTTP/1.1" 200 OK
-INFO 04-29 21:50:46 engine.py:275] Added request chatcmpl-0cc75e9f54b649ffb7ec2f0a7eaa0d30.
-[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-29 21:50:46,963] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
-[33mDEBUG LMCache: [0mReturning the original input! [2025-04-29 21:50:46,963] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
-[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 9543 tokens [2025-04-29 21:50:48,709] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
-INFO 04-29 21:50:48 llm_engine.py:1143] Start updating memory
-INFO:     127.0.0.1:44932 - "POST /v1/chat/completions HTTP/1.1" 200 OK
-INFO 04-29 21:50:49 engine.py:275] Added request chatcmpl-45e624e1b44d406db0fee216e54fd0b7.
-[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-29 21:50:49,034] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
-[33mDEBUG LMCache: [0mReturning the original input! [2025-04-29 21:50:49,034] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
-[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 2687 tokens [2025-04-29 21:50:49,481] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
-INFO 04-29 21:50:50 llm_engine.py:1143] Start updating memory
-INFO:     127.0.0.1:44932 - "POST /v1/chat/completions HTTP/1.1" 200 OK
-INFO 04-29 21:50:50 engine.py:275] Added request chatcmpl-df13c19afd524a2bbd4e2ddbea923161.
-[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-29 21:50:50,573] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
-[33mDEBUG LMCache: [0mReturning the original input! [2025-04-29 21:50:50,573] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
-[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 13129 tokens [2025-04-29 21:50:53,101] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
-INFO 04-29 21:50:53 llm_engine.py:1143] Start updating memory
-INFO:     127.0.0.1:44932 - "POST /v1/chat/completions HTTP/1.1" 200 OK
-INFO 04-29 21:50:54 engine.py:275] Added request chatcmpl-17b94e0fd35e433ca9bb7fd6015f3037.
-[33mDEBUG LMCache: [0mInjected token number: 0 [2025-04-29 21:50:54,020] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
-[33mDEBUG LMCache: [0mReturning the original input! [2025-04-29 21:50:54,020] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
-[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 8434 tokens [2025-04-29 21:50:55,538] -- /home/ubuntu/ShaotingFS2/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
-INFO 04-29 21:50:55 engine.py:293] Aborted request chatcmpl-17b94e0fd35e433ca9bb7fd6015f3037.
