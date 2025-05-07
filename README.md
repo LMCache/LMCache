@@ -25,10 +25,8 @@
 
 </p>
 
-| [**Blog**](https://lmcache.github.io) | [**Documentation**](https://docs.lmcache.ai/) | [**Join Slack**](https://join.slack.com/t/lmcacheworkspace/shared_invite/zt-2viziwhue-5Amprc9k5hcIdXT7XevTaQ) | [**Interest Form**](https://forms.gle/mQfQDUXbKfp2St1z7) | [**Official Email**](contact@lmcache.ai) |
-
 <h3 align="center">
-    Redis for LLMs
+    Redis for LLMs - Infinite and Ultra-Fast
 </h3>
 
 ----
