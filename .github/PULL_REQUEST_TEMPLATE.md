@@ -36,4 +36,11 @@ FIX #xxxx (*link existing issues this PR will resolve*)
 
 <h3>What to Expect for the Reviews</h3>
 
+To trigger a new version of lmcache, follow the steps:
+`git tag vx.x.x`
+`git push origin vx.x.x` (same version again)
+In case the workflow fails, delete the tag and try again:
+`git tag -d vx.x.x`
+`git push origin :refs/tags/vx.x.x`
+
 We aim to address all PRs in a timely manner. If no one reviews your PR within 5 days, please @-mention one of KuntaiDu, ApostaC or YaoJiayi.
