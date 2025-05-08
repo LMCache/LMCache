@@ -1,5 +1,12 @@
 #!/bin/bash
 
+# conda
+if [ -f "$HOME/miniconda3/etc/profile.d/conda.sh" ]; then
+    . "$HOME/miniconda3/etc/profile.d/conda.sh"
+else
+    export PATH="$HOME/miniconda3/bin:$PATH"
+fi
+
 CONDA_ENV_NAME="buildkite"
 PYTHON_VERSION=3.10
 
