@@ -102,6 +102,7 @@ def main():
 
     # Load the workload trace
     workload_trace = pd.read_csv(FILES[0])
+    workload_trace = workload_trace.head(5)
 
     # Initialize OpenAI client
     client = create_openai_client(args.port, MODEL)
