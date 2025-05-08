@@ -20,9 +20,10 @@ conda activate ${CONDA_ENV_NAME}
 
 set -xe 
 
-pip install -r requirements.txt
-pip install -r requirements-test.txt
-pip install coverage
+python3 -m pip install uv
+uv pip install -r requirements.txt
+uv pip install -r requirements-test.txt
+uv pip install coverage
 
 set +x
 echo "Current env:"
