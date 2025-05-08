@@ -2,4 +2,4 @@
 
 set -xe 
 
-pip install -e . --no-build-isolation
+uv pip install -e . --no-build-isolation
