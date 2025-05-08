@@ -60,7 +60,8 @@ class RemoteBackend(StorageBackendInterface):
     def __str__(self):
         return self.__class__.__name__
 
-    def contains(self, key: CacheEngineKey) -> bool:
+    # TODO(Jiayi): handle `touch` semantics
+    def contains(self, key: CacheEngineKey, touch: bool = False) -> bool:
         future = asyncio.run_coroutine_threadsafe(self.connection.exists(key),
                                                   self.loop)
         return future.result()
@@ -136,7 +137,7 @@ class RemoteBackend(StorageBackendInterface):
         key: CacheEngineKey,
     ) -> Optional[Future]:
         raise NotImplementedError
-    
+
     async def connection_put_wrapper(self, key: CacheEngineKey,
                                      memory_obj: MemoryObj):
         obj_size = memory_obj.get_size()
@@ -159,6 +160,12 @@ class RemoteBackend(StorageBackendInterface):
             self.stats_monitor.update_interval_remote_read_metrics(obj_size)
             logger.debug(f"Bytes loaded: {obj_size / 1e6:.4f} MBytes, ")
         return memory_obj
+
+    def pin(self, key: CacheEngineKey) -> bool:
+        raise NotImplementedError
+
+    def unpin(self, key: CacheEngineKey) -> bool:
+        raise NotImplementedError
 
     def close(self):
         future = asyncio.run_coroutine_threadsafe(self.connection.close(),

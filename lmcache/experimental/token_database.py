@@ -56,19 +56,13 @@ class ChunkedTokenDatabase(TokenDatabase):
             self.chunk_size = config.chunk_size
         self.metadata = metadata
 
-    def _make_key_by_hash(self, chunk_hash: str, layer_id: Optional[int] = None):
+    def _make_key_by_hash(self,
+                          chunk_hash: str,
+                          layer_id: Optional[int] = None):
         assert self.metadata is not None
-        if layer_id is None:
-            return CacheEngineKey(self.metadata.fmt, self.metadata.model_name,
-                                self.metadata.world_size,
-                                self.metadata.worker_id, 
-                                chunk_hash)
-        else:
-            return CacheEngineKey(self.metadata.fmt, self.metadata.model_name,
-                                self.metadata.world_size,
-                                self.metadata.worker_id, 
-                                self.layer_id,
-                                chunk_hash)
+        return CacheEngineKey(self.metadata.fmt, self.metadata.model_name,
+                              self.metadata.world_size,
+                              self.metadata.worker_id, chunk_hash)
 
     def _get_init_hash(self) -> str:
         return ""
@@ -116,7 +110,6 @@ class ChunkedTokenDatabase(TokenDatabase):
         tokens: Union[torch.Tensor, List[int]],
         mask: Optional[torch.Tensor] = None,
         make_key: bool = True,
-        split_layers: Optional[int] = None,
     ) -> Iterable[Tuple[int, int, Union[CacheEngineKey, str]]]:
         """Process the tokens and return the corresponding cache engine keys.
 
@@ -162,11 +155,6 @@ class ChunkedTokenDatabase(TokenDatabase):
                 continue
             else:
                 if make_key:
-                    # if split_layers is not None:
-                    #     assert split_layers > 0, \
-                    #         "The split layers should be greater than 0."
-                    #     for layer_id in range(split_layers):
-                            
                     yield start_idx, end_idx, self._make_key_by_hash(hash_val)
                 else:
                     yield start_idx, end_idx, hash_val

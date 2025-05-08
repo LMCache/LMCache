@@ -30,9 +30,17 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
         self.dst_device = dst_device
 
     @abc.abstractmethod
-    def contains(self, key: CacheEngineKey) -> bool:
+    def contains(self, key: CacheEngineKey, touch: bool = False) -> bool:
         """
         Check whether key is in the storage backend. 
+        
+        :param CacheEngineKey key: The key of the MemoryObj.
+        
+        :param bool touch: Whether to touch the key. 
+            If True, the corresponding KV cache will be
+            pinned in the storage backend.
+        
+        :return: True if the key exists, False otherwise.
         """
         raise NotImplementedError
 
@@ -83,7 +91,7 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
         :return: MemoryObj. None if the key does not exist.
         """
         raise NotImplementedError
-    
+
     @abc.abstractmethod
     def get_non_blocking(
         self,
@@ -95,6 +103,34 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
         :param CacheEngineKey key: The key of the MemoryObj.
         
         :return: a future object. None if the key does not exist.
+        """
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    def pin(
+        self,
+        key: CacheEngineKey,
+    ) -> bool:
+        """
+        Touch/Pin a memory object so it will not be evicted.
+        
+        :param CacheEngineKey key: The key of the MemoryObj.
+        
+        :return: a bool indicates whether touch is successful.
+        """
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    def unpin(
+        self,
+        key: CacheEngineKey,
+    ) -> bool:
+        """
+        Untouch/Unpin a memory object so it can be evicted.
+        
+        :param CacheEngineKey key: The key of the MemoryObj.
+        
+        :return: a bool indicates whether untouch is successful.
         """
         raise NotImplementedError
 

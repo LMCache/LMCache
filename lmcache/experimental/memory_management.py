@@ -19,11 +19,9 @@ class MemoryFormat(Enum):
     """[2, num_layers, num_tokens, hidden_dim]
     """
     KV_BLOB = 1
-    
     """[num_tokens, 2, hidden_dim]
     """
     LAYER_KV_BLOB = 2
-    
     """Compressed binary array format
     """
     BINARY = 3
@@ -65,6 +63,12 @@ class MemoryObjMetadata:
 
     # Reference count
     ref_count: int
+
+    # TODO(Jiayi): Need to differentiate between temporary pin/touch
+    # and persistent pin. Or maybe it's better to use only
+    # `ref_count` to manage these semantics.
+    # Whether the object is pinned and cannot be evicted
+    is_pin: bool = False
 
     # The 'logical' format of the tensor
     fmt: MemoryFormat = MemoryFormat.UNDEFINED
@@ -136,6 +140,20 @@ class MemoryObj(metaclass=abc.ABCMeta):
         """
         raise NotImplementedError
 
+    @abc.abstractmethod
+    def pin(self) -> bool:
+        """
+        Pin the memory obj so that it will not be evicted.
+        """
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    def unpin(self) -> bool:
+        """
+        Unpin the memory obj so that it can be evicted.
+        """
+        raise NotImplementedError
+
     @property
     @abc.abstractmethod
     def metadata(self) -> MemoryObjMetadata:
@@ -157,6 +175,14 @@ class MemoryObj(metaclass=abc.ABCMeta):
     def byte_array(self) -> bytes:
         """
         Get the byte array from the MemoryObj.
+        """
+        raise NotImplementedError
+
+    @property
+    @abc.abstractmethod
+    def is_pinned(self) -> bool:
+        """
+        Check whether the memory obj is pinned.
         """
         raise NotImplementedError
 
@@ -196,6 +222,14 @@ class TensorMemoryObj(MemoryObj):
     def get_physical_size(self) -> int:
         return self.metadata.phy_size
 
+    def pin(self) -> bool:
+        self.metadata.is_pin = True
+        return True
+
+    def unpin(self) -> bool:
+        self.metadata.is_pin = False
+        return True
+
     @property
     def metadata(self) -> MemoryObjMetadata:
         return self.meta
@@ -220,7 +254,12 @@ class TensorMemoryObj(MemoryObj):
             ctypes.addressof(ubyte_ptr.contents))
         return memoryview(byte_array)
 
+    @property
+    def is_pinned(self) -> bool:
+        return self.metadata.is_pin
 
+
+# TODO(Jiayi): Need to make this compatible with touch/untouch semantics
 class CopyLessMemoryObj(TensorMemoryObj):
 
     def __init__(self, raw_data, metadata, callback):
@@ -247,6 +286,7 @@ class BytesBufferMemoryObj(MemoryObj):
                                           address=0,
                                           phy_size=0,
                                           ref_count=1,
+                                          is_pin=False,
                                           fmt=MemoryFormat.BINARY_BUFFER)
         else:
             self.meta = metadata
@@ -273,6 +313,14 @@ class BytesBufferMemoryObj(MemoryObj):
     def get_physical_size(self) -> int:
         return self.metadata.phy_size
 
+    def pin(self) -> bool:
+        self.metadata.is_pin = True
+        return True
+
+    def unpin(self) -> bool:
+        self.metadata.is_pin = False
+        return True
+
     @property
     def metadata(self) -> MemoryObjMetadata:
         return self.meta
@@ -287,6 +335,10 @@ class BytesBufferMemoryObj(MemoryObj):
     @property
     def byte_array(self) -> bytes:
         return self.raw_data
+
+    @property
+    def is_pinned(self) -> bool:
+        return self.metadata.is_pin
 
 
 class MemoryAllocatorInterface(metaclass=abc.ABCMeta):
@@ -468,7 +520,7 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         return TensorMemoryObj(
             raw_data=self.buffer[block.start:block.start + raw_size],
             metadata=MemoryObjMetadata(shape, dtype, block.start, aligned_size,
-                                       1, fmt))
+                                       1, False, fmt))
 
     def dry_allocate(
         self,
@@ -509,7 +561,7 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
 
     def ref_count_down(self, memory_obj: MemoryObj):
         memory_obj.metadata.ref_count -= 1
-        if memory_obj.metadata.ref_count == 0:
+        if memory_obj.metadata.ref_count <= 0 and not memory_obj.is_pinned:
             self.free(memory_obj)
 
     def get_ref_count(self, memory_obj: MemoryObj):
@@ -580,6 +632,7 @@ class BufferAllocator(MemoryAllocatorInterface):
                                  address=0,
                                  phy_size=0,
                                  ref_count=1,
+                                 is_pin=False,
                                  fmt=MemoryFormat.BINARY_BUFFER)
 
     def free(self, memory_obj: MemoryObj):
@@ -865,6 +918,7 @@ class AdHocMemoryAllocator(MemoryAllocatorInterface):
                                                           address=0,
                                                           phy_size=0,
                                                           ref_count=1,
+                                                          is_pin=False,
                                                           fmt=fmt))
 
     def dry_allocate(
@@ -886,6 +940,7 @@ class AdHocMemoryAllocator(MemoryAllocatorInterface):
                                  address=0,
                                  phy_size=0,
                                  ref_count=1,
+                                 is_pin=False,
                                  fmt=fmt)
 
     def free(self, memory_obj: MemoryObj):

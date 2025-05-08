@@ -1,5 +1,5 @@
 import abc
-from typing import List, Optional, Tuple
+from typing import Optional, Sequence, Tuple
 
 from lmcache.utils import CacheEngineKey
 
@@ -22,11 +22,11 @@ class LookupServerInterface(metaclass=abc.ABCMeta):
         Perform insert in the lookup server.
         """
         raise NotImplementedError
-    
+
     @abc.abstractmethod
     def batched_insert(
         self,
-        key: List[CacheEngineKey],
+        key: Sequence[CacheEngineKey],
     ):
         """
         Perform batched insert in the lookup server.
@@ -46,7 +46,7 @@ class LookupServerInterface(metaclass=abc.ABCMeta):
     @abc.abstractmethod
     def batched_remove(
         self,
-        keys: List[CacheEngineKey],
+        keys: Sequence[CacheEngineKey],
     ):
         """
         Perform batched remove in the lookup server.

@@ -16,7 +16,8 @@ import asyncio
 import threading
 from collections import OrderedDict
 from concurrent.futures import Future
-from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
+from typing import (TYPE_CHECKING, Dict, Generator, List, Optional, Sequence,
+                    Tuple)
 
 import torch
 
@@ -155,12 +156,12 @@ class StorageManager:
         """
         for key, obj in zip(keys, memory_objs):
             self.put(key, obj)
-    
+
     def layerwise_batched_put(
         self,
         keys: List[List[CacheEngineKey]],
         memory_objs: List[List[MemoryObj]],
-    ) -> None:
+    ) -> Generator[None, None, None]:
         """
         Non-blocking function to put the memory objects into the storages
         in a layerwise manner.
@@ -207,7 +208,7 @@ class StorageManager:
                 return memory_obj
 
         return None
-    
+
     def get_non_blocking(self, key: CacheEngineKey) -> Optional[Future]:
         """
         Non-blocking function to get the memory object from the storages.
@@ -223,22 +224,24 @@ class StorageManager:
                 # TODO (Jiayi): add write-back logic here
                 return task
         return None
-    
+
     def layerwise_batched_get(
         self,
         keys: List[List[CacheEngineKey]],
-    ) -> None:
+    ) -> Generator[List[Future], None, None]:
         """
         Non-blocking function to get the memory objects into the storages
         in a layerwise manner.
         Do not store if the same object is being stored (handled here by
         storage manager) or has been stored (handled by storage backend).
         """
-        for keys_multi_chunk in zip(keys):
+        for keys_multi_chunk in keys:
             # Store all chunks for one layer
             tasks = []
             for key in keys_multi_chunk:
-                tasks.append(self.get_non_blocking(key))
+                task = self.get_non_blocking(key)
+                assert task is not None
+                tasks.append(task)
             yield tasks
 
     # TODO(Jiayi): we need to consider eviction in prefetch
@@ -311,6 +314,7 @@ class StorageManager:
         self,
         key: CacheEngineKey,
         search_range: Optional[List[str]] = None,
+        touch: bool = False,
     ) -> bool:
         """
         Check whether the key exists in the storage backend.
@@ -329,7 +333,7 @@ class StorageManager:
             if search_range is not None and \
                 backend_name not in search_range:
                 continue
-            if backend.contains(key):
+            if backend.contains(key, touch):
                 return True
 
         return False
@@ -362,6 +366,27 @@ class StorageManager:
                 num_removed += backend.remove(key)
 
         return num_removed
+
+    def batched_untouch(
+        self,
+        keys: List[CacheEngineKey],
+        locations: Optional[List[str]] = None,
+    ) -> None:
+        """
+        Untouch the keys in the specified locations.
+
+        :param List[CacheEngineKey] keys: The keys to untouch.
+
+        :param Optional[List[str]] locations: The range of storage backends
+        to perform `untouch` in.
+        Should be a subset of ["LocalCPUBackend", "LocalDiskBackend"] for now.
+        If None, perform `untouch` in all backends.
+        """
+        for backend_name, backend in self.storage_backends.items():
+            # TODO(Jiayi): need to handle untouch in non-cpu backends
+            if locations is None or backend_name in locations:
+                for key in keys:
+                    backend.unpin(key)
 
     def clear(
         self,
@@ -479,6 +504,13 @@ class DistributedStorageManager:
         # NOTE: For zero-copy, we should not use put anymore
         raise NotImplementedError
 
+    def layerwise_batched_put(
+        self,
+        keys: Sequence[Sequence[CacheEngineKey]],
+        memory_objs: List[List[MemoryObj]],
+    ) -> Generator[None, None, None]:
+        raise NotImplementedError
+
     @_lmcache_nvtx_annotate
     def commit_put(self):
         self.storage_backend.flush_put_tasks()
@@ -489,6 +521,19 @@ class DistributedStorageManager:
     ) -> Optional[MemoryObj]:
         obj = self.storage_backend.get_blocking(key)
         return obj
+
+    def layerwise_batched_get(
+        self,
+        keys: Sequence[Sequence[CacheEngineKey]],
+    ) -> Generator[List[Future], None, None]:
+        raise NotImplementedError
+
+    def batched_untouch(
+        self,
+        keys: Sequence[CacheEngineKey],
+        locations: Optional[List[str]] = None,
+    ) -> None:
+        raise NotImplementedError
 
     def remove(
         self,
@@ -504,6 +549,7 @@ class DistributedStorageManager:
         self,
         key: CacheEngineKey,
         search_range: Optional[List[str]] = None,
+        touch: bool = False,
     ) -> bool:
         return self.storage_backend.contains(key)
 

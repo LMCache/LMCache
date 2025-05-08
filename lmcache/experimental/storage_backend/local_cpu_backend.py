@@ -55,9 +55,13 @@ class LocalCPUBackend(StorageBackendInterface):
     def __str__(self):
         return self.__class__.__name__
 
-    def contains(self, key: CacheEngineKey) -> bool:
+    def contains(self, key: CacheEngineKey, touch: bool = False) -> bool:
         with self.cpu_lock:
-            return key in self.hot_cache
+            if key not in self.hot_cache:
+                return False
+            if touch:
+                self.hot_cache[key].pin()
+            return True
 
     def exists_in_put_tasks(self, key: CacheEngineKey) -> bool:
         """
@@ -112,7 +116,7 @@ class LocalCPUBackend(StorageBackendInterface):
             self.memory_allocator.ref_count_up(memory_obj)
             self.hot_cache.move_to_end(key)
             return memory_obj
-    
+
     def get_non_blocking(
         self,
         key: CacheEngineKey,
@@ -126,9 +130,25 @@ class LocalCPUBackend(StorageBackendInterface):
             memory_obj = self.hot_cache[key]
             self.memory_allocator.ref_count_up(memory_obj)
             self.hot_cache.move_to_end(key)
-            f = Future()
+            f: Future = Future()
             f.set_result(memory_obj)
             return f
+
+    def pin(self, key: CacheEngineKey) -> bool:
+        with self.cpu_lock:
+            if key not in self.hot_cache:
+                return False
+            memory_obj = self.hot_cache[key]
+            memory_obj.pin()
+            return True
+
+    def unpin(self, key: CacheEngineKey) -> bool:
+        with self.cpu_lock:
+            if key not in self.hot_cache:
+                return False
+            memory_obj = self.hot_cache[key]
+            memory_obj.unpin()
+            return True
 
     def remove(self, key: CacheEngineKey) -> bool:
         with self.cpu_lock:
@@ -168,14 +188,15 @@ class LocalCPUBackend(StorageBackendInterface):
         evict_keys = []
         with self.cpu_lock:
             for evict_key in self.hot_cache:
+                old_mem_obj = self.hot_cache[evict_key]
                 # If the ref_count > 1, we cannot evict it as the cpu memory
                 # might be used as buffers by other storage backends
                 if self.memory_allocator.get_ref_count(
-                        self.hot_cache[evict_key]) > 1:
+                        old_mem_obj) > 1 or old_mem_obj.is_pinned:
                     continue
                 evict_keys.append(evict_key)
 
-                self.memory_allocator.ref_count_down(self.hot_cache[evict_key])
+                self.memory_allocator.ref_count_down(old_mem_obj)
                 memory_obj = self.memory_allocator.allocate(shape, dtype)
                 logger.debug("Evicting 1 chunk from cpu memory")
                 if memory_obj is not None:
