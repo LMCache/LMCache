@@ -1,19 +1,5 @@
 #!/bin/bash
 
-# ——— DEBUG INFO ———
-echo "--- DEBUG: whoami=$(whoami), HOME=$HOME, SHELL=$SHELL"
-echo "--- DEBUG: listing conda base dir:"
-ls -ld "$HOME/miniconda3" || echo "ERROR: $HOME/miniconda3 not found"
-echo "--- DEBUG: listing conda.sh:"
-ls -l "$HOME/miniconda3/etc/profile.d/conda.sh" || echo "ERROR: conda.sh missing"
-
-# conda
-if [ -f "$HOME/miniconda3/etc/profile.d/conda.sh" ]; then
-    . "$HOME/miniconda3/etc/profile.d/conda.sh"
-else
-    export PATH="$HOME/miniconda3/bin:$PATH"
-fi
-
 CONDA_ENV_NAME="buildkite"
 PYTHON_VERSION=3.10
 
