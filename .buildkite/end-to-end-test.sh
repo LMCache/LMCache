@@ -1,15 +1,12 @@
 #!/bin/bash
 
 uv pip install -e .
+uv pip install matplotlib
+pip show vllm
 
 set -x
 
-uv pip install matplotlib
-
-pip show vllm
-
 orig_dir="$(pwd)"
-
 cd /home/shaotingf/lmcache-tests
 
 set +x
@@ -40,9 +37,8 @@ done
 
 LMCACHE_TRACK_USAGE="false" python3 main.py tests/tests.py -f test_local -o outputs/ -p $port1 $port2
 
-cd "$orig_dir"/.buildkite
-
 set -x
 
+cd "$orig_dir"/.buildkite
 python3 drawing_wrapper.py /home/shaotingf/lmcache-tests/outputs/
 mv /home/shaotingf/lmcache-tests/outputs/*.{csv,pdf} ../
