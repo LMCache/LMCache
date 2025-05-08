@@ -1,16 +1,16 @@
 #!/bin/bash
 
-pip install -e .
+uv pip install -e .
 
 set -x
 
-cd ../lmcache-vllm
-git pull
+uv pip install matplotlib
 
-pip install matplotlib
+pip show vllm
 
-cd ../lmcache-tests
-git pull
+orig_dir="$(pwd)"
+
+cd /home/shaotingf/lmcache-tests
 
 set +x
 
@@ -38,18 +38,11 @@ while [ $port2 -le $max_port ]; do
     fi
 done
 
-LMCACHE_TRACK_USAGE="false" python3 main.py tests/tests.py -f test_lmcache_local_gpu -o outputs/ -p $port1 $port2
-# If the previous command fails, skip the next two commands.
-if [ -d "outputs/" ] && find outputs/ -type f -name "*.csv" | grep .; then
-    LMCACHE_TRACK_USAGE="false" python3 main.py tests/tests.py -f test_lmcache_local_distributed -o outputs/ -p $port1 $port2
-    LMCACHE_TRACK_USAGE="false" python3 main.py tests/tests.py -f test_lmcache_remote_cachegen -o outputs/ -p $port1 $port2
-else
-    echo "Error in test_lmcache_local_gpu, skipping next two commands."
-fi
+LMCACHE_TRACK_USAGE="false" python3 main.py tests/tests.py -f test_local -o outputs/ -p $port1 $port2
 
-cd ../end-to-end-tests/.buildkite
+cd "$orig_dir"/.buildkite
 
 set -x
 
-python3 drawing_wrapper.py ../../lmcache-tests/outputs/
-mv ../../lmcache-tests/outputs/*.{csv,pdf} ../
+python3 drawing_wrapper.py /home/shaotingf/lmcache-tests/outputs/
+mv /home/shaotingf/lmcache-tests/outputs/*.{csv,pdf} ../
