@@ -39,6 +39,5 @@ LMCACHE_TRACK_USAGE="false" python3 main.py tests/tests.py -f test_local -o outp
 
 set -x
 
-cd "$orig_dir"/.buildkite
-python3 drawing_wrapper.py /home/shaotingf/lmcache-tests/outputs/
-mv /home/shaotingf/lmcache-tests/outputs/*.{csv,pdf} ../
+python3 outputs/drawing_wrapper.py outputs/
+mv outputs/*.{csv,pdf} "$orig_dir"/../
