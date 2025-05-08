@@ -87,7 +87,7 @@ class KVCacheManager:
         # NOTE(Shaoting): policy related variables define here
         self.method = method
         self.rate = rate
-        self.cpu_size = 5368709120 * 8 # 40 GB
+        self.cpu_size = 5368709120 * 9 # 45 GB
 
         self.hot_cache = hot_cache
         logger.info(f"KVCacheManager initialized with self.method: {self.method} and self.rate: {self.rate}")
@@ -151,7 +151,8 @@ class KVCacheManager:
                     new_kv_rate,
                     update_total_tokens
                 )
-                if new_drop * len(first_update_key.metadata.emerge_id) < min_quality_drop:
+                # if new_drop * len(first_update_key.metadata.emerge_id) < min_quality_drop:
+                if new_drop < min_quality_drop:
                     min_quality_drop = new_drop
                     drop_list[-1] = new_best
 
@@ -179,11 +180,13 @@ class KVCacheManager:
                         total_tokens
                     )
                     # compare against the running minimum
-                    if drop_r * len(rep.metadata.emerge_id) < min_quality_drop:
+                    # if drop_r * len(rep.metadata.emerge_id) < min_quality_drop:
+                    if drop_r < min_quality_drop:
                         min_quality_drop = drop_r
                         # assign to all keys in this group
                         drop_list = {k: best_r for k in keys}
-                    elif drop_r * len(rep.metadata.emerge_id) == min_quality_drop:
+                    # elif drop_r * len(rep.metadata.emerge_id) == min_quality_drop:
+                    elif drop_r == min_quality_drop:
                         for k in keys:
                             drop_list[k] = best_r
 

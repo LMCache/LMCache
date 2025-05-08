@@ -1,8 +1,8 @@
 chunk_size: 1024
-local_disk: "file:///home/shaotingf/shaotingf/kvcache/engine1/"
+local_disk: "file:///home/ubuntu/st-prodstack-v/kvcache/engine1/"
 max_local_disk_size: 550
 local_cpu: True
-max_local_cpu_size: 50 # actually 40 + 5, set to 60 to avoid bubble
-alpha: 0.4
+max_local_cpu_size: 65 # actually 45 + 5, set to 65 to avoid bubble
+alpha: 0.01
 policy: "ours"
 rate: 1

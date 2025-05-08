@@ -3,7 +3,7 @@ import csv
 import sys
 
 # Default reference CSV path
-default_reference_csv = 'dataset/samsum_processed.csv'
+default_reference_csv = 'dataset/samsum_processed_v3.csv'
 
 def extract_token_numbers(input_file, output_csv, reference_csv=default_reference_csv):
     # Parse log input for tokens and rates
