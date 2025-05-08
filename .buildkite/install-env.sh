@@ -1,5 +1,8 @@
 #!/bin/bash
 
+# ← source the global minconda init
+. /etc/profile.d/miniconda.sh
+
 CONDA_ENV_NAME="buildkite"
 PYTHON_VERSION=3.10
 
