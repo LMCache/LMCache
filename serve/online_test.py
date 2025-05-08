@@ -15,7 +15,7 @@ import argparse
 
 MODEL = "meta-llama/Llama-3.1-8B-Instruct"
 FILES = [
-    'dataset/samsum_processed.csv'
+    'dataset/samsum_processed_v3.csv'
 ]
 
 # Sends each CSV entry as a separate request
@@ -102,7 +102,6 @@ def main():
 
     # Load the workload trace
     workload_trace = pd.read_csv(FILES[0])
-    workload_trace = workload_trace.head(5)
 
     # Initialize OpenAI client
     client = create_openai_client(args.port, MODEL)

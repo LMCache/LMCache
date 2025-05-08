@@ -3,15 +3,13 @@ import pandas as pd
 from our_metrics import evaluate_answer, f1_score
 import os
 
-INPUT02       = 'results/May_7/baseline/02.csv'
-INPUT03       = 'results/May_7/baseline/03.csv'
-INPUT06       = 'results/May_7/baseline/06.csv'
-INPUT0        = 'results/May_7_2/prefill/0.csv'
-INPUT_OURS01 = 'results/May_7/ours/01.csv'
-INPUT_OURS04 = 'results/May_7/ours/04.csv'
-INPUT_OURS07 = 'results/May_7/ours/07.csv'
-INPUT_OURS1   = 'results/May_7/ours/1.csv'
-
+INPUT02       = 'results/May_7_5/baseline/02.csv'
+INPUT03       = 'results/May_7_5/baseline/03.csv'
+INPUT0        = 'results/May_7_3/prefill/0.csv'
+INPUT_OURS01 = 'results/May_7_5/ours/01.csv'
+INPUT_OURS1 = 'results/May_7_5/ours/1.csv'
+INPUT_OURS001 = 'results/May_7_5/ours/001.csv'
+INPUT_OURS10 = 'results/May_7_5/ours/10.csv'
 
 def main():
     # Load & filter the reference answers, then reset its index
@@ -30,17 +28,23 @@ def main():
         for path in input_paths
     ]
 
+    # before your loop, build a dict from df0
+    ref_map = df0.set_index('index_in_dataset')['answer'].to_dict()
+
     # Process each CSV in turn
     for path, fname in zip(input_paths, filenames):
         # Load & filter this CSV, then reset its index
         df = pd.read_csv(path)
         df = df[df['occurrence_number'] != 1].reset_index(drop=True)
 
-        # Compute ROUGE‑L by zipping answers row‑wise
-        df['ROUGEL'] = [
-            evaluate_answer(hyp, ref)
-            for hyp, ref in zip(df['answer'], df0['answer'])
-        ]
+        # Compute ROUGE‑L by looking up the reference answer via index_in_dataset
+        df['ROUGEL'] = df.apply(
+            lambda row: evaluate_answer(
+                row['answer'],
+                ref_map[row['index_in_dataset']]
+            ),
+            axis=1
+        )
 
         # Save
         df.to_csv(fname, index=False)

@@ -16,20 +16,19 @@ args = parser.parse_args()
 
 # List of file paths for baseline, ours, and prefill
 file_paths = [
-    'results/May_7/baseline/02_processed.csv',
-    'results/May_7/baseline/03_processed.csv',
-    'results/May_7/baseline/06_processed.csv'
+    'results/May_7_5/baseline/02_processed.csv',
+    'results/May_7_5/baseline/03_processed.csv',
 ]
 
 file_paths_ours = [
-    'results/May_7/ours/01_processed.csv',
-    'results/May_7/ours/04_processed.csv',
-    'results/May_7/ours/07_processed.csv',
-    'results/May_7/ours/1_processed.csv',
+    'results/May_7_5/ours/01_processed.csv',
+    'results/May_7_5/ours/001_processed.csv',
+    'results/May_7_5/ours/1_processed.csv',
+    'results/May_7_5/ours/10_processed.csv',
 ]
 
 file_path_prefill = [
-    'results/May_7_2/prefill/0_processed.csv'
+    'results/May_7_3/prefill/0_processed.csv'
 ]
 
 # --- Process baseline files ---
@@ -130,6 +129,8 @@ plt.ylabel("Average ROUGEL")
 plt.title("Average ROUGEL vs. Average ttft")
 plt.grid(True)
 plt.legend()
+plt.xlim(xmin=0)
+plt.ylim(ymax=1)
 
 # Save the figure using the provided filename argument
 plt.savefig(args.plot_filename, dpi=300, bbox_inches="tight")

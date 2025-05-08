@@ -1,38 +1,49 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Cleanup function: kill all engine sessions on SIGINT/SIGTERM
+cleanup() {
+  echo
+  echo "Caught interrupt signal! Cleaning up…"
+  for pgid in "${PIDS[@]}"; do
+    if kill -0 -- -"${pgid}" 2>/dev/null; then
+      echo "  Killing engine session PGID ${pgid}"
+      kill -TERM -- -"${pgid}" 2>/dev/null || true
+    fi
+  done
+  exit 1
+}
+trap cleanup SIGINT SIGTERM
+
 # --- Configuration arrays (must all be the same length) ---
-ports=(8000 8001 8002 8003 8004 8005 8006 8007)
+ports=(8000 8001 8002 8003 8004 8005)
 configs=(
-  ../config/qmsum.yaml
-  ../config/qmsum2.yaml
-  ../config/qmsum3.yaml
-  ../config/qmsum4.yaml
-  ../config/qmsum5.yaml
-  ../config/qmsum6.yaml
   ../config/qmsum7.yaml
   ../config/qmsum8.yaml
+  ../config/qmsum3.yaml
+  ../config/qmsum5.yaml
+  ../config/qmsum.yaml
+  ../config/qmsum2.yaml
 )
 logs=(
-  results/May_7_2/ours/tokens/04.log
-  results/May_7_2/ours/tokens/07.log
-  results/May_7_2/baseline/tokens/03.log
-  results/May_7_2/baseline/tokens/06.log
-  results/May_7_2/baseline/tokens/02.log
-  results/May_7_2/prefill/tokens/0.log
-  results/May_7_2/ours/tokens/1.log
-  results/May_7_2/ours/tokens/01.log
+  results/May_7_6/ours/tokens/1.log
+  results/May_7_6/ours/tokens/01.log
+  results/May_7_6/baseline/tokens/03.log
+  results/May_7_6/baseline/tokens/02.log
+  results/May_7_6/ours/tokens/001.log
+  results/May_7_6/ours/tokens/10.log
 )
 outputs=(
-  results/May_7_2/ours/04.csv
-  results/May_7_2/ours/07.csv
-  results/May_7_2/baseline/03.csv
-  results/May_7_2/baseline/06.csv
-  results/May_7_2/baseline/02.csv
-  results/May_7_2/prefill/0.csv
-  results/May_7_2/ours/1.csv
-  results/May_7_2/ours/01.csv
+  results/May_7_6/ours/1.csv
+  results/May_7_6/ours/01.csv
+  results/May_7_6/baseline/03.csv
+  results/May_7_6/baseline/02.csv
+  results/May_7_6/ours/001.csv
+  results/May_7_6/ours/10.csv
 )
+
+# Array to track running PGIDs
+PIDS=()
 
 # Verify arrays are aligned
 if [ "${#ports[@]}" -ne "${#configs[@]}" ] || \
@@ -50,11 +61,12 @@ for i in "${!ports[@]}"; do
 
   echo "=== Instance $((i+1)) on port $port ==="
 
-  # Start the engine, redirect all its stdout+stderr into the log file
-  bash start_engine.sh -p "$port" -c "$cfg" -l "$logf" >"$logf" 2>&1 &
+  # Start engine in its own session/process-group (PGID = PID)
+  setsid bash start_engine.sh -p "$port" -c "$cfg" -l "$logf" >"$logf" 2>&1 &
   engine_pid=$!
+  PIDS+=("$engine_pid")
 
-  # Wait until the health endpoint returns HTTP 2xx
+  # Wait for health endpoint
   echo -n "Waiting for http://localhost:$port/health … "
   until curl -s -o /dev/null -w '%{http_code}' "http://localhost:$port/health" | grep -q '^2'; do
     sleep 1
@@ -62,14 +74,21 @@ for i in "${!ports[@]}"; do
   done
   echo " OK"
 
-  # Run the test; append its stdout+stderr into the same log file
+  # Run the test
   echo "Running test: python3 online_test.py --output $out --port $port"
   python3 online_test.py --output "$out" --port "$port" >>"$logf" 2>&1
 
-  # Tear down
-  echo "Test finished; killing engine (PID $engine_pid)"
-  kill "$engine_pid"
-  echo
+  # Tear down this engine session
+  echo "Test finished; tearing down engine session PGID $engine_pid"
+  kill -TERM -- -"${engine_pid}"
+  # Wait until no processes remain in that group
+  while kill -0 -- -"${engine_pid}" 2>/dev/null; do
+    sleep 0.1
+  done
+  echo "Engine session $engine_pid has exited."
+
+  # Remove this PGID from the list
+  PIDS=( "${PIDS[@]/$engine_pid}" )
 done
 
 echo "All done!"
