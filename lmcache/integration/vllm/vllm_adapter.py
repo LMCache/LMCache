@@ -115,9 +115,6 @@ def init_lmcache_engine(
             chunk_size=chunk_size,
             dtype=kv_dtype,
             device=device)
-        engine = LMCacheEngineBuilder.get_or_create(ENGINE_NAME, config,
-                                                    metadata,
-                                                    vllm_gpu_connector)
     else:
         vllm_gpu_connector = VLLMPagedMemGPUConnectorV2(hidden_dim_size,
                                                         num_layer,
@@ -125,9 +122,9 @@ def init_lmcache_engine(
                                                         chunk_size=chunk_size,
                                                         dtype=kv_dtype,
                                                         device=device)
-        engine = LMCacheEngineBuilder.get_or_create(ENGINE_NAME, config,
-                                                    metadata,
-                                                    vllm_gpu_connector)
+    engine = LMCacheEngineBuilder.get_or_create(ENGINE_NAME, config, metadata,
+                                                vllm_gpu_connector,
+                                                use_layerwise)
 
     return engine
 

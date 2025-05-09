@@ -453,6 +453,12 @@ class LayerwiseLMCacheEngine(LMCacheEngine):
                 tokens, mask):
             assert isinstance(key, CacheEngineKey)
 
+            keys_multi_layer = key.split_layers(self.num_layers)
+
+            # Only check the first layer
+            if self.storage_manager.contains(keys_multi_layer[0]):
+                continue
+
             # Allocate the memory object
             num_tokens = end - start
             kv_shape_single_layer = self.gpu_connector.get_shape(num_tokens)
@@ -476,8 +482,6 @@ class LayerwiseLMCacheEngine(LMCacheEngine):
             if no_space_left:
                 break
 
-            keys_multi_layer = key.split_layers(self.num_layers)
-
             starts.append(start)
             ends.append(end)
             keys.append(keys_multi_layer)
@@ -487,34 +491,42 @@ class LayerwiseLMCacheEngine(LMCacheEngine):
             if self.lookup_server is not None:
                 self.lookup_server.batched_insert(keys_multi_layer)
 
-        # Transpose the keys and memory objects into layer major format
-        memory_objs = [list(row) for row in zip(*memory_objs)]
-        keys = [list(row) for row in zip(*keys)]
+        if keys:
+            # Transpose the keys and memory objects into layer major format
+            memory_objs = [list(row) for row in zip(*memory_objs)]
+            keys = [list(row) for row in zip(*keys)]
 
-        assert isinstance(self.gpu_connector,
-                          VLLMPagedMemLayerwiseGPUConnector)
-        mem_obj_generator = self.gpu_connector.batched_from_gpu(
-            memory_objs, starts, ends, **kwargs)
+            assert isinstance(self.gpu_connector,
+                              VLLMPagedMemLayerwiseGPUConnector)
+            mem_obj_generator = self.gpu_connector.batched_from_gpu(
+                memory_objs, starts, ends, **kwargs)
 
-        put_genertor = self.storage_manager.layerwise_batched_put(
-            keys, memory_objs)
+            put_genertor = self.storage_manager.layerwise_batched_put(
+                keys, memory_objs)
 
-        for layer_id in range(self.num_layers):
+            for layer_id in range(self.num_layers):
 
-            next(mem_obj_generator)
-            yield
-            next(put_genertor)
+                next(mem_obj_generator)
+                yield
+                next(put_genertor)
+        else:
+            # If no cache are found, we still need to yield to avoid
+            # `StopIteration`
+            for layer_id in range(self.num_layers):
+                yield
 
         self.stats_monitor.on_store_finished(monitor_req_id)
         logger.debug(f"Stored {num_stored_tokens} "
                      f"out of total {len(tokens)} tokens")
+        yield
 
     @_lmcache_nvtx_annotate
     @torch.inference_mode()
-    def retrieve_layer(self,
-                       tokens: torch.Tensor,
-                       mask: Optional[torch.Tensor] = None,
-                       **kwargs) -> Generator[None, None, torch.Tensor]:
+    def retrieve_layer(
+            self,
+            tokens: torch.Tensor,
+            mask: Optional[torch.Tensor] = None,
+            **kwargs) -> Generator[Optional[torch.Tensor], None, None]:
         """
         Retrieve the KV cache in a layerwise manner.
         """
@@ -537,36 +549,47 @@ class LayerwiseLMCacheEngine(LMCacheEngine):
 
             keys_multi_layer = key.split_layers(self.num_layers)
 
+            # NOTE: Only check the first layer
+            if not self.storage_manager.contains(keys_multi_layer[0]):
+                break
+
             starts.append(start)
             ends.append(end)
             keys.append(keys_multi_layer)
 
             ret_mask[start:end] = True
 
-        # Transpose the keys into layer major format
-        keys = [list(row) for row in zip(*keys)]
+        if keys:
+            # Transpose the keys into layer major format
+            keys = [list(row) for row in zip(*keys)]
 
-        get_generator = self.storage_manager.layerwise_batched_get(keys)
+            get_generator = self.storage_manager.layerwise_batched_get(keys)
 
-        assert isinstance(self.gpu_connector,
-                          VLLMPagedMemLayerwiseGPUConnector)
-        mem_obj_consumer = self.gpu_connector.batched_to_gpu(
-            starts, ends, **kwargs)
+            assert isinstance(self.gpu_connector,
+                              VLLMPagedMemLayerwiseGPUConnector)
+            mem_obj_consumer = self.gpu_connector.batched_to_gpu(
+                starts, ends, **kwargs)
+            next(mem_obj_consumer)
 
-        for layer_id in range(self.num_layers):
+            for layer_id in range(self.num_layers):
 
-            tasks = next(get_generator)
+                tasks = next(get_generator)
 
-            assert None not in tasks
+                assert None not in tasks
 
-            yield
+                yield None
 
-            mem_objs_layer = [task.result() for task in tasks]
-            mem_obj_consumer.send(mem_objs_layer)
+                mem_objs_layer = [task.result() for task in tasks]
+                mem_obj_consumer.send(mem_objs_layer)
 
-        # TODO(Jiayi): Need to be done in a modular way
-        for keys_layer in keys:
-            self.storage_manager.batched_untouch(keys_layer)
+            # TODO(Jiayi): Need to be done in a modular way
+            for keys_layer in keys:
+                self.storage_manager.batched_untouch(keys_layer)
+        else:
+            # If no cache are found, we still need to yield to avoid
+            # `StopIteration`
+            for layer_id in range(self.num_layers):
+                yield None
 
         retrieved_tokens = torch.sum(ret_mask)
         self.stats_monitor.on_retrieve_finished(monitor_req_id,
@@ -575,7 +598,7 @@ class LayerwiseLMCacheEngine(LMCacheEngine):
                      f"out of {num_required_tokens} "
                      f"out of total {len(tokens)} tokens")
 
-        return ret_mask
+        yield ret_mask
 
     def lookup(
         self,

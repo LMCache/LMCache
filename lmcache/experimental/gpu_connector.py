@@ -513,7 +513,7 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
             raise ValueError("'slot_mapping' should be provided in kwargs.")
 
         # TODO (Jiayi): Drop this when we support PD
-        assert self.gpu_buffer is not None
+        assert self.load_gpu_buffer is not None
 
         kvcaches: List[torch.Tensor] = kwargs["kvcaches"]
         slot_mapping: torch.Tensor = kwargs["slot_mapping"]
@@ -525,27 +525,28 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
         slot_mapping_full = torch.cat(slot_mapping_chunks, dim=0)
         num_tokens = len(slot_mapping_full)
         tmp_gpu_buffer = self.create_gpu_buffer(num_tokens, True)
+        offset = starts[0]
 
         for layer_id in range(self.num_layers):
 
             memory_objs_layer = yield
-            torch.cuda.current_stream.wait_stream(self.load_stream)
+            torch.cuda.current_stream().wait_stream(self.load_stream)
 
             # memobj -> gpu_buffer -> kvcaches
             with torch.cuda.stream(self.load_stream):
                 for start, end, memory_obj in zip(starts, ends,
                                                   memory_objs_layer):
                     assert memory_obj.metadata.fmt == MemoryFormat.LAYER_KV_BLOB
-                    tmp_gpu_buffer[start:end].copy_(memory_obj.tensor,
-                                                    non_blocking=True)
+                    tmp_gpu_buffer[start - offset:end - offset].copy_(
+                        memory_obj.tensor, non_blocking=True)
                 lmc_ops.single_layer_kv_transfer(
-                    tmp_gpu_buffer[0],
-                    tmp_gpu_buffer[1],
+                    tmp_gpu_buffer,
                     kvcaches[layer_id][0],
                     kvcaches[layer_id][1],
                     slot_mapping_full,
                     False,
                 )
+        yield
 
     @_lmcache_nvtx_annotate
     def batched_from_gpu(self, memory_objs: List[List[MemoryObj]],
@@ -558,7 +559,7 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
             raise ValueError("'slot_mapping' should be provided in kwargs.")
 
         # TODO (Jiayi): Drop this when we support PD
-        assert self.gpu_buffer is not None
+        assert self.store_gpu_buffer is not None
 
         kvcaches: List[torch.Tensor] = kwargs["kvcaches"]
         slot_mapping: torch.Tensor = kwargs["slot_mapping"]
@@ -567,17 +568,19 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
         for start, end in zip(starts, ends):
             slot_mapping_chunks.append(slot_mapping[start:end])
 
+        #import pdb; pdb.set_trace()
+
         slot_mapping_full = torch.cat(slot_mapping_chunks, dim=0)
         num_tokens = len(slot_mapping_full)
         tmp_gpu_buffer = self.create_gpu_buffer(num_tokens, True)
+        offset = starts[0]
 
         for layer_id in range(self.num_layers):
             memory_objs_layer = memory_objs[layer_id]
             # kvcaches -> gpu_buffer -> memobj
             with torch.cuda.stream(self.store_stream):
                 lmc_ops.single_layer_kv_transfer(
-                    tmp_gpu_buffer[0],
-                    tmp_gpu_buffer[1],
+                    tmp_gpu_buffer,
                     kvcaches[layer_id][0],
                     kvcaches[layer_id][1],
                     slot_mapping_full,
@@ -586,12 +589,14 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
                 for start, end, memory_obj in zip(starts, ends,
                                                   memory_objs_layer):
                     assert memory_obj.tensor is not None
-                    memory_obj.tensor.copy_(tmp_gpu_buffer[start:end],
+                    memory_obj.tensor.copy_(tmp_gpu_buffer[start - offset:end -
+                                                           offset],
                                             non_blocking=True)
                     memory_obj.metadata.fmt = MemoryFormat.LAYER_KV_BLOB
 
             yield
             torch.cuda.current_stream().wait_stream(self.store_stream)
+        yield
 
     def get_shape(self, num_tokens: int) -> torch.Size:
         return torch.Size([num_tokens, 2, self.hidden_dim_size])

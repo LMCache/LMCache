@@ -33,9 +33,7 @@ void multi_layer_kv_transfer(
 );
 
 void single_layer_kv_transfer(
-    torch::Tensor& lmc_key_cache,
-    torch::Tensor& lmc_value_cache,
-
+    torch::Tensor& lmc_key_value_cache,
     torch::Tensor& vllm_key_cache,
     torch::Tensor&
         vllm_value_cache,

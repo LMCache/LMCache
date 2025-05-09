@@ -248,3 +248,49 @@ def test_multi_layer_kernel(num_tokens):
         num_tokens,
         slot_mapping,
     )
+
+
+@pytest.mark.parametrize("num_tokens", [256, 500, 1024, 8000])
+def test_single_layer_kernel(num_tokens):
+    device = "cuda"
+
+    num_layers = 32
+    num_blocks = 1000
+    block_size = 16
+    num_heads = 8
+    head_size = 128
+    hidden_dim_size = num_heads * head_size
+    dtype = torch.bfloat16
+    kv_cache = generate_kv_cache_paged_list_tensors(num_blocks, device,
+                                                    block_size, dtype)
+    kv_cache_new = generate_kv_cache_paged_list_tensors(
+        num_blocks, device, block_size, dtype)
+    slot_mapping = random.sample(range(0, num_blocks * block_size), num_tokens)
+    slot_mapping = torch.tensor(slot_mapping, device=device)
+
+    tmp_gpu_buffer = torch.empty((num_tokens, 2, hidden_dim_size),
+                                 dtype=dtype,
+                                 device=device)
+
+    for layer_id in range(num_layers):
+        lmc_ops.single_layer_kv_transfer(
+            tmp_gpu_buffer,
+            kv_cache[layer_id][0],
+            kv_cache[layer_id][1],
+            slot_mapping,
+            True,
+        )
+        lmc_ops.single_layer_kv_transfer(
+            tmp_gpu_buffer,
+            kv_cache_new[layer_id][0],
+            kv_cache_new[layer_id][1],
+            slot_mapping,
+            False,
+        )
+
+    check_paged_kv_cache_equal(
+        kv_cache,
+        kv_cache_new,
+        num_tokens,
+        slot_mapping,
+    )

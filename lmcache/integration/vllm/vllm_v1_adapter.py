@@ -316,7 +316,6 @@ class LMCacheConnectorV1Impl:
             # FIXME(Jiayi): support non-environ config
             use_layerwise = os.getenv("LMCACHE_USE_LAYERWISE", "False")
             self.use_layerwise = use_layerwise.lower() in ["true", "1"]
-
             self.lmcache_engine = init_lmcache_engine(
                 vllm_config.model_config, vllm_config.parallel_config,
                 vllm_config.cache_config, self.use_layerwise)
@@ -386,6 +385,7 @@ class LMCacheConnectorV1Impl:
             The number of elements in kv_caches and layer_names should be 
             the same.
         """
+
         if len(self.kv_caches) == 0:
             self._init_kv_caches_from_forward_context(forward_context)
 
@@ -401,9 +401,7 @@ class LMCacheConnectorV1Impl:
                 "In connector.start_load_kv, but the attn_metadata is None")
             return
 
-        # HACK: getting chunk size to correctly calculate retrieve mask
         assert self.lmcache_engine is not None
-        lmcache_chunk_size = self._lmcache_chunk_size
 
         self.layerwise_retrievers = []
         for request in metadata.requests:
@@ -417,7 +415,7 @@ class LMCacheConnectorV1Impl:
 
             token_mask = torch.ones_like(tokens, dtype=torch.bool)
             masked_token_count = request.load_spec.vllm_cached_tokens // \
-                lmcache_chunk_size * lmcache_chunk_size
+                self._lmcache_chunk_size * self._lmcache_chunk_size
             token_mask[:masked_token_count] = False
 
             if self.skip_last_n_tokens > 0:
@@ -426,13 +424,14 @@ class LMCacheConnectorV1Impl:
 
             if self.use_layerwise:
                 assert isinstance(self.lmcache_engine, LayerwiseLMCacheEngine)
-                self.layerwise_retrievers.append(
-                    self.lmcache_engine.retrieve_layer(
-                        tokens,
-                        token_mask,
-                        kvcaches=kvcaches,
-                        slot_mapping=slot_mapping,
-                    ))
+                layerwise_retriever = self.lmcache_engine.retrieve_layer(
+                    tokens,
+                    token_mask,
+                    kvcaches=kvcaches,
+                    slot_mapping=slot_mapping,
+                )
+                next(layerwise_retriever)
+                self.layerwise_retrievers.append(layerwise_retriever)
             else:
                 ret_token_mask = self.lmcache_engine.retrieve(
                     tokens,
@@ -483,8 +482,6 @@ class LMCacheConnectorV1Impl:
         """
 
         if not self.use_layerwise:
-            #if layer_name not in self.kv_caches:
-            #    self.kv_caches[layer_name] = kv_layer
             return
 
         if self.kv_role == "kv_consumer":
@@ -536,13 +533,14 @@ class LMCacheConnectorV1Impl:
                     "Storing KV cache for %d out of %d tokens for request %s",
                     len(token_ids) - skip_leading_tokens, len(token_ids),
                     request.req_id)
-                self.layerwise_storers.append(
-                    self.lmcache_engine.store_layer(
-                        token_ids,
-                        mask=store_mask,
-                        kvcaches=kvcaches,
-                        slot_mapping=slot_mapping,
-                        offset=skip_leading_tokens))
+                layerwise_storer = self.lmcache_engine.store_layer(
+                    token_ids,
+                    mask=store_mask,
+                    kvcaches=kvcaches,
+                    slot_mapping=slot_mapping,
+                    offset=skip_leading_tokens)
+                self.layerwise_storers.append(layerwise_storer)
+                next(layerwise_storer)
         else:
             for layerwise_storer in self.layerwise_storers:
                 next(layerwise_storer)
@@ -566,7 +564,6 @@ class LMCacheConnectorV1Impl:
         assert len(self.kv_caches) > 0
         kvcaches = list(self.kv_caches.values())
 
-        # HACK: getting chunk size to correctly calculate store mask
         assert self.lmcache_engine is not None
 
         for request in connector_metadata.requests:
