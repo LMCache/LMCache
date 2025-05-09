@@ -38,7 +38,7 @@ class RemoteBackend(StorageBackendInterface):
         assert config.remote_url is not None
         # Initialize connection
         self.connection = CreateConnector(config.remote_url, loop,
-                                          memory_allocator)
+                                          memory_allocator, config)
 
         self.remote_url = config.remote_url
 

@@ -175,6 +175,7 @@ class StorageManager:
             logger.debug(f"Submitted tasks for storing layer {layer_id}")
             yield
 
+
     def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         """
         Blocking function to get the memory object from the storages.
@@ -334,6 +335,7 @@ class StorageManager:
             if search_range is not None and \
                 backend_name not in search_range:
                 continue
+            
             if backend.contains(key, touch):
                 return True
 

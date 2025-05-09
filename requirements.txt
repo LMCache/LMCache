@@ -1,5 +1,5 @@
 torch==2.7.0
-numpy==2.2.5
+numpy
 aiofiles
 pyyaml
 redis

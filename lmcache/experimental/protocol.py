@@ -48,7 +48,7 @@ INT_TO_DTYPE = {
 
 
 @dataclass
-class RedisMetadata:
+class RemoteMetadata:
     length: int
     shape: torch.Size
     dtype: Optional[torch.dtype]
@@ -89,12 +89,12 @@ class RedisMetadata:
         return packed_bytes
 
     @staticmethod
-    def deserialize(s: bytes) -> "RedisMetadata":
+    def deserialize(s: bytes) -> "RemoteMetadata":
         length, fmt, dtype, shape0, shape1, shape2, shape3 = \
             struct.unpack_from("iiiiiii", s)
-        return RedisMetadata(length,
-                             torch.Size([shape0, shape1, shape2, shape3]),
-                             INT_TO_DTYPE[dtype], MemoryFormat(fmt))
+        return RemoteMetadata(length,
+                              torch.Size([shape0, shape1, shape2, shape3]),
+                              INT_TO_DTYPE[dtype], MemoryFormat(fmt))
 
 
 @dataclass

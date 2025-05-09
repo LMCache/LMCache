@@ -41,28 +41,32 @@ class WorkerMsg(MsgBase):
 
 class RegisterMsg(WorkerMsg):
     """Message for Registration"""
-    # TODO(Jiayi): instance_id can be replaced with url
     instance_id: str
     worker_id: int
-    url: str
+    ip: str
+    port: int
 
     def describe(self) -> str:
-        return f"Registering instance {self.instance_id}"
+        return (f"Registering instance {self.instance_id}, "
+                f"worker {self.worker_id} "
+                f"at {self.ip}:{self.port}")
 
 
 class DeRegisterMsg(WorkerMsg):
     """Message for Deregistration"""
-    # TODO(Jiayi): instance_id can be replaced with url
     instance_id: str
     worker_id: int
+    ip: str
+    port: int
 
     def describe(self) -> str:
-        return f"Deregistering instance {self.instance_id}"
+        return (f"Deregistering instance {self.instance_id}, "
+                f"worker {self.worker_id} "
+                f"at {self.ip}:{self.port}")
 
 
 class KVAdmitMsg(WorkerMsg):
     """Message for KV chunk admission"""
-    # TODO(Jiayi): instance_id can be replaced with url
     instance_id: str
     worker_id: int
     key: str
@@ -74,7 +78,6 @@ class KVAdmitMsg(WorkerMsg):
 
 class KVEvictMsg(WorkerMsg):
     """Message for KV chunk eviction"""
-    # TODO(Jiayi): instance_id can be replaced with url
     instance_id: str
     worker_id: int
     key: str
@@ -127,6 +130,14 @@ class OrchMsg(MsgBase):
         return ""
 
 
+class QueryInstMsg(OrchMsg):
+    """Query instance message"""
+    ip: str
+
+    def describe(self) -> str:
+        return f"Query instance id of ip {self.ip}"
+
+
 class LookupMsg(OrchMsg):
     """Lookup message"""
     tokens: list[int]
@@ -151,6 +162,14 @@ class OrchRetMsg(MsgBase):
 
     def describe(self) -> str:
         return ""
+
+
+class QueryInstRetMsg(OrchRetMsg):
+    """Query instance return message"""
+    instance_id: Optional[str]
+
+    def describe(self) -> str:
+        return f"The instance id is {self.instance_id}"
 
 
 class LookupRetMsg(OrchRetMsg):
@@ -179,4 +198,4 @@ class ErrorMsg(MsgBase):
 
 Msg = Union[RegisterMsg, DeRegisterMsg, KVAdmitMsg, KVEvictMsg, ClearWorkerMsg,
             ClearWorkerRetMsg, LookupMsg, LookupRetMsg, ClearMsg, ClearRetMsg,
-            ErrorMsg]
+            ErrorMsg, QueryInstMsg, QueryInstRetMsg]

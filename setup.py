@@ -8,7 +8,7 @@ ROOT_DIR = Path(__file__).parent
 
 
 def get_version():
-    version_file = ROOT_DIR / "lmcache" / "_version.py"
+    version_file = ROOT_DIR / "lmcache" / "__init__.py"
     with open(version_file) as f:
         version_ns = {}
         exec(f.read(), version_ns)
@@ -48,12 +48,13 @@ if not BUILDING_SDIST:
         cpp_extension.CUDAExtension(
             'lmcache.c_ops',
             [
-                'csrc/pybind.cpp',
-                'csrc/mem_kernels.cu',
-                'csrc/cal_cdf.cu',
-                'csrc/ac_enc.cu',
-                'csrc/ac_dec.cu',
+                'csrc/pybind.cpp', 'csrc/mem_kernels.cu', 'csrc/cal_cdf.cu',
+                'csrc/ac_enc.cu', 'csrc/ac_dec.cu', 'csrc/pos_kernels.cu'
             ],
+            extra_compile_args={
+                'cxx': ['-D_GLIBCXX_USE_CXX11_ABI=0'],
+                'nvcc': ['-D_GLIBCXX_USE_CXX11_ABI=0']
+            },
         ),
     ]
     cmdclass = {'build_ext': cpp_extension.BuildExtension}
@@ -95,4 +96,5 @@ setup(
             "lmcache_controller=lmcache.experimental.api_server.__main__:main",
         ],
     },
+    include_package_data=True,
 )
