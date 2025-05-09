@@ -1,7 +1,7 @@
 [build-system]
 # Should be mirrored in requirements-build.txt
 requires = [
-    "setuptools >= 49.4.0",
+    "setuptools >=70.1.0",
     "wheel",
     "packaging",
     "torch",

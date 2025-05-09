@@ -6,9 +6,9 @@ Installation
 Prerequisites
 -------------
 
-- Python 3.10 - 3.12
-- CUDA 12.4 (minimal)
-- PyTorch 2.6.0
+- Python 3.10+
+- CUDA 12.4+
+- PyTorch 2.6+
 
 Setup using Python
 ------------------
@@ -36,11 +36,11 @@ To install from source, clone the repository and install in editable mode:
 LMCache with vLLM v1
 ~~~~~~~~~~~~~~~~~~~~
 
-LMCache is integrated with latest vLLM v1. To use it, install the latest vLLM main branch:
+LMCache is integrated with the latest vLLM (vLLM v1). To use it, install the latest vLLM package:
 
 .. code-block:: bash
 
-    pip install vllm --pre --extra-index-url https://wheels.vllm.ai/nightly
+    pip install vllm
 
 Test whether LMCache works with vLLM v1 by running:
 
@@ -52,7 +52,8 @@ LMCache with vLLM v0
 ~~~~~~~~~~~~~~~~~~~~
 
 .. note::
-    LMCache is also integrated with vLLM v0. The documentation is right now work in progress, but you can refer to `this example in vLLM <https://github.com/vllm-project/vllm/blob/main/examples/lmcache/cpu_offload_lmcache_v0.py>`__.
+    LMCache is also integrated with vLLM v0. Refer to `the example in vLLM <https://github.com/vllm-project/vllm/blob/main/examples/lmcache/cpu_offload_lmcache.py>`__.
+    See the `examples README <https://github.com/vllm-project/vllm/tree/main/examples/lmcache#2-cpu-offload-examples>`_ to understand how to run the script for vLLM v0.
 
 Setup using Docker
 ------------------
