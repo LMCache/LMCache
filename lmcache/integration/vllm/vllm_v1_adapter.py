@@ -385,6 +385,7 @@ class LMCacheConnectorV1Impl:
             The number of elements in kv_caches and layer_names should be 
             the same.
         """
+        self.current_layer = 0
 
         if len(self.kv_caches) == 0:
             self._init_kv_caches_from_forward_context(forward_context)
@@ -430,6 +431,8 @@ class LMCacheConnectorV1Impl:
                     kvcaches=kvcaches,
                     slot_mapping=slot_mapping,
                 )
+                # NOTE: retrieve for two layers at the first layer
+                next(layerwise_retriever)
                 next(layerwise_retriever)
                 self.layerwise_retrievers.append(layerwise_retriever)
             else:
@@ -463,9 +466,20 @@ class LMCacheConnectorV1Impl:
         Args:
             layer_name: the name of that layer
         """
+        if self.layerwise_retrievers:
+            logger.debug(
+                f"Waiting for layer {self.current_layer} to be loaded")
+
+        # Wait for the layer to be loaded
         for layerwise_retriever in self.layerwise_retrievers:
-            # Wait for the layer to be loaded
-            next(layerwise_retriever)
+
+            ret_token_mask = next(layerwise_retriever)
+
+            if self.current_layer == self.num_layers - 1:
+                assert ret_token_mask is not None
+                num_retrieved_tokens = ret_token_mask.sum().item()
+                logger.info(f"Retrieved {num_retrieved_tokens} tokens")
+
         return
 
     def save_kv_layer(self, layer_name: str, kv_layer: torch.Tensor,
@@ -540,12 +554,11 @@ class LMCacheConnectorV1Impl:
                     slot_mapping=slot_mapping,
                     offset=skip_leading_tokens)
                 self.layerwise_storers.append(layerwise_storer)
+
+        for layerwise_storer in self.layerwise_storers:
+            next(layerwise_storer)
+            if self.current_layer == self.num_layers - 1:
                 next(layerwise_storer)
-        else:
-            for layerwise_storer in self.layerwise_storers:
-                next(layerwise_storer)
-                if self.current_layer == self.num_layers - 1:
-                    next(layerwise_storer)
         self.current_layer += 1
 
     def wait_for_save(self):
@@ -555,7 +568,6 @@ class LMCacheConnectorV1Impl:
             return
 
         if self.use_layerwise:
-            self.current_layer = 0
             return
 
         connector_metadata = self._parent._get_connector_metadata()

@@ -168,10 +168,11 @@ class StorageManager:
         Do not store if the same object is being stored (handled here by
         storage manager) or has been stored (handled by storage backend).
         """
-        for keys_multi_chunk, objs_multi_chunk in zip(keys, memory_objs):
+        for layer_id, (keys_multi_chunk, objs_multi_chunk) in \
+            enumerate(zip(keys, memory_objs)):
             # Store all chunks for one layer
-            for key, obj in zip(keys_multi_chunk, objs_multi_chunk):
-                self.put(key, obj)
+            self.batched_put(keys_multi_chunk, objs_multi_chunk)
+            logger.debug(f"Submitted tasks for storing layer {layer_id}")
             yield
 
     def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:

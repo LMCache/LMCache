@@ -5,7 +5,10 @@ import torch
 
 import lmcache.c_ops as lmc_ops
 from lmcache.experimental.memory_management import MemoryFormat, MemoryObj
+from lmcache.logging import init_logger
 from lmcache.utils import _lmcache_nvtx_annotate
+
+logger = init_logger(__name__)
 
 
 class GPUConnectorInterface(metaclass=abc.ABCMeta):
@@ -466,6 +469,7 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
 
             num_elements = shape.numel()
 
+            # TODO (Jiayi): The double buffers can be reduced to one
             self.store_gpu_buffer = torch.empty(num_elements,
                                                 dtype=dtype,
                                                 device=device)
@@ -477,6 +481,9 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
             self.load_stream = torch.cuda.Stream()
             self.store_stream = torch.cuda.Stream()
 
+    # FIXME(Jiayi): multiple retrievers shouldn't reuse the same part
+    # of the buffer. Need a buffer allocator. Consider moving this part
+    # to memory allocator.
     def create_gpu_buffer(self, num_tokens: int,
                           direction: bool) -> torch.Tensor:
         """
@@ -524,13 +531,15 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
 
         slot_mapping_full = torch.cat(slot_mapping_chunks, dim=0)
         num_tokens = len(slot_mapping_full)
-        tmp_gpu_buffer = self.create_gpu_buffer(num_tokens, True)
+        tmp_gpu_buffer = self.create_gpu_buffer(num_tokens, False)
         offset = starts[0]
 
         for layer_id in range(self.num_layers):
 
             memory_objs_layer = yield
             torch.cuda.current_stream().wait_stream(self.load_stream)
+            if layer_id > 0:
+                logger.debug(f"Finished loading layer {layer_id-1}")
 
             # memobj -> gpu_buffer -> kvcaches
             with torch.cuda.stream(self.load_stream):
@@ -539,6 +548,7 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
                     assert memory_obj.metadata.fmt == MemoryFormat.LAYER_KV_BLOB
                     tmp_gpu_buffer[start - offset:end - offset].copy_(
                         memory_obj.tensor, non_blocking=True)
+
                 lmc_ops.single_layer_kv_transfer(
                     tmp_gpu_buffer,
                     kvcaches[layer_id][0],
@@ -546,6 +556,11 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
                     slot_mapping_full,
                     False,
                 )
+        yield
+
+        # synchronize the last layer
+        torch.cuda.current_stream().wait_stream(self.load_stream)
+        logger.debug(f"Finished loading layer {layer_id}")
         yield
 
     @_lmcache_nvtx_annotate
@@ -568,17 +583,17 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
         for start, end in zip(starts, ends):
             slot_mapping_chunks.append(slot_mapping[start:end])
 
-        #import pdb; pdb.set_trace()
-
         slot_mapping_full = torch.cat(slot_mapping_chunks, dim=0)
         num_tokens = len(slot_mapping_full)
         tmp_gpu_buffer = self.create_gpu_buffer(num_tokens, True)
         offset = starts[0]
+        current_stream = torch.cuda.current_stream()
 
         for layer_id in range(self.num_layers):
             memory_objs_layer = memory_objs[layer_id]
             # kvcaches -> gpu_buffer -> memobj
             with torch.cuda.stream(self.store_stream):
+                self.store_stream.wait_stream(current_stream)
                 lmc_ops.single_layer_kv_transfer(
                     tmp_gpu_buffer,
                     kvcaches[layer_id][0],
@@ -595,7 +610,8 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
                     memory_obj.metadata.fmt = MemoryFormat.LAYER_KV_BLOB
 
             yield
-            torch.cuda.current_stream().wait_stream(self.store_stream)
+            self.store_stream.synchronize()
+            logger.debug(f"Finished offloading layer {layer_id}")
         yield
 
     def get_shape(self, num_tokens: int) -> torch.Size:

@@ -503,11 +503,11 @@ class LayerwiseLMCacheEngine(LMCacheEngine):
 
             put_genertor = self.storage_manager.layerwise_batched_put(
                 keys, memory_objs)
+            next(mem_obj_generator)
 
             for layer_id in range(self.num_layers):
-
-                next(mem_obj_generator)
                 yield
+                next(mem_obj_generator)
                 next(put_genertor)
         else:
             # If no cache are found, we still need to yield to avoid
@@ -561,9 +561,10 @@ class LayerwiseLMCacheEngine(LMCacheEngine):
 
         if keys:
             # Transpose the keys into layer major format
-            keys = [list(row) for row in zip(*keys)]
+            keys_layer_major = [list(row) for row in zip(*keys)]
 
-            get_generator = self.storage_manager.layerwise_batched_get(keys)
+            get_generator = self.storage_manager.layerwise_batched_get(
+                keys_layer_major)
 
             assert isinstance(self.gpu_connector,
                               VLLMPagedMemLayerwiseGPUConnector)
@@ -583,13 +584,18 @@ class LayerwiseLMCacheEngine(LMCacheEngine):
                 mem_obj_consumer.send(mem_objs_layer)
 
             # TODO(Jiayi): Need to be done in a modular way
-            for keys_layer in keys:
+            for keys_layer in keys_layer_major:
                 self.storage_manager.batched_untouch(keys_layer)
         else:
             # If no cache are found, we still need to yield to avoid
             # `StopIteration`
             for layer_id in range(self.num_layers):
                 yield None
+
+        yield None
+
+        # synchronize the last layer
+        next(mem_obj_consumer)
 
         retrieved_tokens = torch.sum(ret_mask)
         self.stats_monitor.on_retrieve_finished(monitor_req_id,
