@@ -1,3 +1,17 @@
+# Copyright 2024-2025 LMCache Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import abc
 from collections import OrderedDict
 from enum import Enum
@@ -43,10 +57,13 @@ class BaseEvictor(metaclass=abc.ABCMeta):
 
         Input:
             cache_dict: a dict consists of current cache
-            kv_obj: the new kv cache to be injected
+            cache_size: the size of the cache to be injected
         
         Return:
-            return a key to be evicted
+            evict_keys: a list of keys to be evicted
+            status: 
+                PutStatus.LEGAL if the cache is legal, 
+                PutStatus.ILLEGAL if the cache is illegal
         """
         raise NotImplementedError
 

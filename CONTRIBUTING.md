@@ -55,7 +55,6 @@ The first step is to install the necessary Python packages required for developm
 pip install -e .
 pip install -r requirements-lint.txt
 pip install -r requirements-test.txt
-pip install -r requirements.txt
 ```
 
 Before pushing changes to GitHub, you need to run the tests and coding style as shown below.
