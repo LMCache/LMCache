@@ -31,7 +31,7 @@ LMCache is an **LLM** serving engine extension to **reduce TTFT** and **increase
 
 By combining LMCache with vLLM, LMCache achieves 3-10x delay savings and GPU cycle reduction in many LLM use cases, including multi-round QA and RAG.
 
-Try LMCache with pre-built vllm docker images [here](https://docs.lmcache.ai/getting_started/docker.html).
+Try LMCache with pre-built vllm docker images [here](https://docs.lmcache.ai/developer_guide/docker_file.html).
 
 # 🚀 Performance snapshot
 ![image](https://github.com/user-attachments/assets/7db9510f-0104-4fb3-9976-8ad5d7fafe26)
