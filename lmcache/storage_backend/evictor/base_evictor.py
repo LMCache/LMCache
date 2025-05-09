@@ -57,10 +57,13 @@ class BaseEvictor(metaclass=abc.ABCMeta):
 
         Input:
             cache_dict: a dict consists of current cache
-            kv_obj: the new kv cache to be injected
+            cache_size: the size of the cache to be injected
         
         Return:
-            return a key to be evicted
+            evict_keys: a list of keys to be evicted
+            status: 
+                PutStatus.LEGAL if the cache is legal, 
+                PutStatus.ILLEGAL if the cache is illegal
         """
         raise NotImplementedError
 

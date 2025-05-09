@@ -54,10 +54,13 @@ class LRUEvictor(BaseEvictor):
 
         Input:
             cache_dict: a dict consists of current cache
-            kv_obj: the new kv cache to be injected
+            cache_size: the size of the cache to be injected
         
         Return:
             evict_keys: a list of keys to be evicted
+            status: 
+                PutStatus.LEGAL if the cache is legal, 
+                PutStatus.ILLEGAL if the cache is illegal
         """
         evict_keys = []
         iter_cache_dict = iter(cache_dict)
