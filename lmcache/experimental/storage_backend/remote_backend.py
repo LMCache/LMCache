@@ -96,6 +96,8 @@ class RemoteBackend(StorageBackendInterface):
             self.connection = CreateConnector(self.config.remote_url,
                                               self.loop, self.memory_allocator,
                                               self.config)
+            logger.info("Connection initialized/re-established "
+                        f"at {self.config.remote_url}")
         except Exception as e:
             with self.lock:
                 self.failure_time = time.time()
@@ -109,7 +111,7 @@ class RemoteBackend(StorageBackendInterface):
         @wraps(func)
         def wrapper(self, *args, **kwargs):
             self._init_connection()
-            result = func(*args, **kwargs)
+            result = func(self, *args, **kwargs)
             return result
 
         return wrapper
