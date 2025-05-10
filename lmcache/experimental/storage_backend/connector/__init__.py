@@ -120,7 +120,7 @@ def CreateConnector(
     loop: asyncio.AbstractEventLoop,
     memory_allocator: MemoryAllocatorInterface,
     config: Optional[LMCacheEngineConfig] = None,
-) -> RemoteConnector:
+) -> Optional[RemoteConnector]:
     """
     Creates the corresponding remote connector from the given URL.
     """
@@ -185,6 +185,7 @@ def CreateConnector(
                 'verify') is not None
             logger.info(f"Creating audit connector for {real_url}")
             real_connector = CreateConnector(real_url, loop, memory_allocator)
+            assert real_connector is not None
             return AuditConnector(real_connector=real_connector,
                                   verify_checksum=verify_checksum)
         case _:
