@@ -17,15 +17,11 @@ from typing import Optional
 import zmq
 import zmq.asyncio
 
-from lmcache.experimental.cache_controller.message import (DeRegisterMsg,
-                                                           HealthMsg,
-                                                           HealthRetMsg,
-                                                           QueryInstMsg,
-                                                           QueryInstRetMsg,
-                                                           RegisterMsg)
-from lmcache.experimental.cache_controller.rpc_utils import (close_zmq_socket,
-                                                             get_zmq_context,
-                                                             get_zmq_socket)
+from lmcache.experimental.cache_controller.message import (  # noqa: E501
+    DeRegisterMsg, HealthMsg, HealthRetMsg, QueryInstMsg, QueryInstRetMsg,
+    RegisterMsg)
+from lmcache.experimental.cache_controller.rpc_utils import (  # noqa: E501
+    close_zmq_socket, get_zmq_context, get_zmq_socket)
 from lmcache.logging import init_logger
 
 logger = init_logger(__name__)

@@ -25,10 +25,9 @@ from lmcache.experimental.cache_controller.executor import \
 from lmcache.experimental.cache_controller.message import (  # noqa: E501
     CheckFinishMsg, ClearMsg, CompressMsg, DeRegisterMsg, HealthMsg,
     KVAdmitMsg, KVEvictMsg, LookupMsg, MoveMsg, Msg, MsgBase, OrchMsg,
-    OrchRetMsg, PinMsg, RegisterMsg, WorkerMsg, QueryInstMsg)
-
-from lmcache.experimental.cache_controller.rpc_utils import (get_zmq_context,
-                                                             get_zmq_socket)
+    OrchRetMsg, PinMsg, QueryInstMsg, RegisterMsg, WorkerMsg)
+from lmcache.experimental.cache_controller.rpc_utils import (  # noqa: E501
+    get_zmq_context, get_zmq_socket)
 from lmcache.logging import init_logger
 
 logger = init_logger(__name__)
