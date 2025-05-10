@@ -1,3 +1,17 @@
+# Copyright 2024-2025 LMCache Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import abc
 import ctypes
 import threading
@@ -76,6 +90,31 @@ class MemoryObjMetadata:
         element_size = self.dtype.itemsize
         size_in_bytes = num_elements * element_size
         return size_in_bytes
+
+    def to_dict(self):
+        # Note(Kuntai): this is used for serializing MemoryObjMetadata via
+        # msgpack.
+        return {
+            "__type__": "MemoryObjMetadata",
+            "shape": list(self.shape),  # torch.Size -> list
+            "dtype": str(self.dtype) if self.dtype is not None else None,
+            "address": self.address,
+            "phy_size": self.phy_size,
+            "ref_count": self.ref_count,
+            "fmt": self.fmt.value
+        }
+
+    @staticmethod
+    def from_dict(d):
+        dtype_str = d["dtype"]
+        dtype = (getattr(torch, dtype_str.replace("torch.", ""))
+                 if dtype_str else None)
+        return MemoryObjMetadata(shape=torch.Size(d["shape"]),
+                                 dtype=dtype,
+                                 address=d["address"],
+                                 phy_size=d["phy_size"],
+                                 ref_count=d["ref_count"],
+                                 fmt=MemoryFormat(d["fmt"]))
 
 
 class MemoryObj(metaclass=abc.ABCMeta):

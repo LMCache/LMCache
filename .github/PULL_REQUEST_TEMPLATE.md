@@ -38,7 +38,7 @@ FIX #xxxx (*link existing issues this PR will resolve*)
 
 To trigger a new pip version of lmcache, follow the steps:
 `git tag vx.x.x`
-match the same `__version__=“x.x.x”` as above in `lmcache/_version`
+match the same `__version__=“x.x.x”` as above in `lmcache/__init__`
 `git push origin x.x.x` (same version again)
 In case the workflow fails, delete the tag and try again:
 `git tag -d x.x.x`

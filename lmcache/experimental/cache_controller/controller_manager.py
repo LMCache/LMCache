@@ -25,7 +25,8 @@ from lmcache.experimental.cache_controller.executor import \
 from lmcache.experimental.cache_controller.message import (  # noqa: E501
     CheckFinishMsg, ClearMsg, CompressMsg, DeRegisterMsg, HealthMsg,
     KVAdmitMsg, KVEvictMsg, LookupMsg, MoveMsg, Msg, MsgBase, OrchMsg,
-    OrchRetMsg, PinMsg, RegisterMsg, WorkerMsg)
+    OrchRetMsg, PinMsg, RegisterMsg, WorkerMsg, QueryInstMsg)
+
 from lmcache.experimental.cache_controller.rpc_utils import (get_zmq_context,
                                                              get_zmq_socket)
 from lmcache.logging import init_logger
@@ -61,6 +62,7 @@ class LMCacheControllerManager:
             self.controller_url,
             protocol="tcp",
             role=zmq.PULL,  # type: ignore[attr-defined]
+            bind_or_connect="bind",
         )
         self.kv_controller = KVController()
         self.reg_controller = RegistrationController()
@@ -98,6 +100,8 @@ class LMCacheControllerManager:
             return await self.kv_controller.lookup(msg)
         elif isinstance(msg, HealthMsg):
             return await self.reg_controller.health(msg)
+        elif isinstance(msg, QueryInstMsg):
+            return await self.reg_controller.get_instance_id(msg)
         elif isinstance(msg, ClearMsg):
             return await self.kv_controller.clear(msg)
         elif isinstance(msg, PinMsg):

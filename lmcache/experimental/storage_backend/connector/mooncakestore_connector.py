@@ -25,7 +25,7 @@ import torch
 from lmcache.experimental.memory_management import (MemoryAllocatorInterface,
                                                     MemoryObj)
 # reuse
-from lmcache.experimental.protocol import RedisMetadata
+from lmcache.experimental.protocol import RemoteMetadata
 from lmcache.experimental.storage_backend.connector.base_connector import \
     RemoteConnector
 from lmcache.logging import init_logger
@@ -131,7 +131,7 @@ class MooncakestoreConnector(RemoteConnector):
         if metadata_bytes is None or len(metadata_bytes) != METADATA_BYTES_LEN:
             return None
 
-        metadata = RedisMetadata.deserialize(metadata_bytes)
+        metadata = RemoteMetadata.deserialize(metadata_bytes)
 
         memory_obj = self.memory_allocator.allocate(
             metadata.shape,
@@ -165,8 +165,8 @@ class MooncakestoreConnector(RemoteConnector):
         kv_dtype = memory_obj.get_dtype()
         memory_format = memory_obj.get_memory_format()
 
-        metadata_bytes = RedisMetadata(len(kv_bytes), kv_shape, kv_dtype,
-                                       memory_format).serialize()
+        metadata_bytes = RemoteMetadata(len(kv_bytes), kv_shape, kv_dtype,
+                                        memory_format).serialize()
         assert len(metadata_bytes) == METADATA_BYTES_LEN
         key_str = key.to_string()
 
