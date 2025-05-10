@@ -20,7 +20,9 @@ import zmq
 import zmq.asyncio
 
 from lmcache.experimental.cache_controller.message import (  # noqa: E501
-    ClearMsg, ClearRetMsg, ClearWorkerMsg, ErrorMsg, Msg, MsgBase)
+    CheckFinishMsg, CheckFinishRetMsg, ClearMsg, ClearRetMsg, ClearWorkerMsg,
+    CompressMsg, CompressRetMsg, ErrorMsg, HealthMsg, HealthRetMsg, MoveMsg,
+    MoveRetMsg, Msg, MsgBase, PinMsg, PinRetMsg)
 from lmcache.logging import init_logger
 
 logger = init_logger(__name__)
@@ -49,11 +51,9 @@ class LMCacheClusterExecutor:
         Execute a cache operation with error handling.
         """
         instance_id = msg.instance_id
-        worker_ids = msg.worker_ids
         tokens = msg.tokens
 
-        if worker_ids is None or len(worker_ids) == 0:
-            worker_ids = self.reg_controller.get_workers(instance_id)
+        worker_ids = self.reg_controller.get_workers(instance_id)
         assert worker_ids is not None
         sockets = []
         serialized_msgs = []
@@ -77,6 +77,23 @@ class LMCacheClusterExecutor:
             if success:
                 success = result.success
         return ClearRetMsg(success=success)
+
+    async def pin(self, msg: PinMsg) -> Union[PinRetMsg, ErrorMsg]:
+        raise NotImplementedError
+
+    async def compress(self,
+                       msg: CompressMsg) -> Union[CompressRetMsg, ErrorMsg]:
+        raise NotImplementedError
+
+    async def move(self, msg: MoveMsg) -> Union[MoveRetMsg, ErrorMsg]:
+        raise NotImplementedError
+
+    async def health(self, msg: HealthMsg) -> Union[HealthRetMsg, ErrorMsg]:
+        raise NotImplementedError
+
+    async def check_finish(
+            self, msg: CheckFinishMsg) -> Union[CheckFinishRetMsg, ErrorMsg]:
+        raise NotImplementedError
 
     # TODO(Jiayi): need to make the types more specific
     async def execute(self, operation: str, msg: MsgBase) -> MsgBase:
