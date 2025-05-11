@@ -13,7 +13,7 @@
 # limitations under the License.
 
 import asyncio
-from typing import Optional, Union
+from typing import Optional
 
 import msgspec
 import zmq
@@ -23,11 +23,11 @@ from lmcache.experimental.cache_controller.controllers import (
 from lmcache.experimental.cache_controller.executor import \
     LMCacheClusterExecutor
 from lmcache.experimental.cache_controller.message import (  # noqa: E501
-    ClearMsg, ClearRetMsg, ControlMsg, ControlRetMsg, DeRegisterMsg,
-    KVAdmitMsg, KVEvictMsg, LookupMsg, Msg, MsgBase, OrchMsg, OrchRetMsg,
-    QueryInstMsg, RegisterMsg, WorkerMsg)
-from lmcache.experimental.cache_controller.rpc_utils import (get_zmq_context,
-                                                             get_zmq_socket)
+    CheckFinishMsg, ClearMsg, CompressMsg, DeRegisterMsg, HealthMsg,
+    KVAdmitMsg, KVEvictMsg, LookupMsg, MoveMsg, Msg, MsgBase, OrchMsg,
+    OrchRetMsg, PinMsg, QueryInstMsg, RegisterMsg, WorkerMsg)
+from lmcache.experimental.cache_controller.rpc_utils import (  # noqa: E501
+    get_zmq_context, get_zmq_socket)
 from lmcache.logging import init_logger
 
 logger = init_logger(__name__)
@@ -81,17 +81,6 @@ class LMCacheControllerManager:
         #self.thread.start()
         #asyncio.run_coroutine_threadsafe(self.start_all(), self.loop)
 
-    # FIXME(Jiayi): the input and return type are weird
-    async def issue_control_message(
-        self, msg: Union[OrchMsg, ControlMsg]
-    ) -> Optional[Union[OrchRetMsg, ControlRetMsg]]:
-        if isinstance(msg, ClearMsg):
-            return await self.kv_controller.clear(msg)
-        else:
-            logger.error("Unknown control or orchestration"
-                         f"message type: {msg}")
-            return None
-
     async def handle_worker_message(self, msg: WorkerMsg) -> None:
         if isinstance(msg, RegisterMsg):
             await self.reg_controller.register(msg)
@@ -108,12 +97,22 @@ class LMCacheControllerManager:
             self, msg: OrchMsg) -> Optional[OrchRetMsg]:
         if isinstance(msg, LookupMsg):
             return await self.kv_controller.lookup(msg)
+        elif isinstance(msg, HealthMsg):
+            return await self.reg_controller.health(msg)
         elif isinstance(msg, QueryInstMsg):
             return await self.reg_controller.get_instance_id(msg)
         elif isinstance(msg, ClearMsg):
-            ret_msg = await self.issue_control_message(msg)
-            assert isinstance(ret_msg, ClearRetMsg)
-            return ret_msg
+            return await self.kv_controller.clear(msg)
+        elif isinstance(msg, PinMsg):
+            return await self.kv_controller.pin(msg)
+        elif isinstance(msg, CompressMsg):
+            return await self.kv_controller.compress(msg)
+        elif isinstance(msg, MoveMsg):
+            return await self.kv_controller.move(msg)
+        elif isinstance(msg, CheckFinishMsg):
+            # FIXME(Jiayi): This `check_finish` thing
+            # shouldn't be implemented in kv_controller.
+            return await self.kv_controller.check_finish(msg)
         else:
             logger.error(f"Unknown ochestration message type: {msg}")
             return None
@@ -128,8 +127,11 @@ class LMCacheControllerManager:
                     logger.info(f"Received msg type: {type(msg)}")
                     if isinstance(msg, WorkerMsg):
                         await self.handle_worker_message(msg)
-                    elif isinstance(msg, ControlMsg):
-                        await self.issue_control_message(msg)
+
+                    # FIXME(Jiayi): The abstraction of control messages
+                    # might not be necessary.
+                    #elif isinstance(msg, ControlMsg):
+                    #    await self.issue_control_message(msg)
                     elif isinstance(msg, OrchMsg):
                         await self.handle_orchestration_message(msg)
                     else:

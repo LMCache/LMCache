@@ -1,16 +1,29 @@
 #!/bin/bash
 
-pip install -e .
+VENV_DIR=".venv"
+PYTHON_BIN="/usr/bin/python3.10"
+if [[ -d "$VENV_DIR" ]]; then
+  echo "⟳ Using existing venv: $(pwd)/$VENV_DIR"
+else
+  echo "⚙️  Creating venv with Python 3.10 at: $(pwd)/$VENV_DIR"
+  # use uv for fast venv creation
+  uv venv --python "$PYTHON_BIN" "$VENV_DIR"
+fi
+
+uv pip install -e .
+uv pip install matplotlib
+uv pip install pandas
+uv pip install --upgrade vllm
+
+# List installed packages for debugging
+echo "📦 Installed packages in venv:"
+uv pip freeze
 
 set -x
 
-cd ../lmcache-vllm
-git pull
-
-pip install matplotlib
-
-cd ../lmcache-tests
-git pull
+source .venv/bin/activate
+orig_dir="$(pwd)"
+cd "$LM_CACHE_TEST_DIR"
 
 set +x
 
@@ -38,18 +51,8 @@ while [ $port2 -le $max_port ]; do
     fi
 done
 
-LMCACHE_TRACK_USAGE="false" python3 main.py tests/tests.py -f test_lmcache_local_gpu -o outputs/ -p $port1 $port2
-# If the previous command fails, skip the next two commands.
-if [ -d "outputs/" ] && find outputs/ -type f -name "*.csv" | grep .; then
-    LMCACHE_TRACK_USAGE="false" python3 main.py tests/tests.py -f test_lmcache_local_distributed -o outputs/ -p $port1 $port2
-    LMCACHE_TRACK_USAGE="false" python3 main.py tests/tests.py -f test_lmcache_remote_cachegen -o outputs/ -p $port1 $port2
-else
-    echo "Error in test_lmcache_local_gpu, skipping next two commands."
-fi
-
-cd ../end-to-end-tests/.buildkite
-
 set -x
 
-python3 drawing_wrapper.py ../../lmcache-tests/outputs/
-mv ../../lmcache-tests/outputs/*.{csv,pdf} ../
+LMCACHE_TRACK_USAGE="false" python3 main.py tests/tests.py -f test_local -o outputs/ -p $port1 $port2
+python3 outputs/drawing_wrapper.py ./
+mv outputs/*.{csv,pdf} "$orig_dir"/
