@@ -28,6 +28,8 @@ from lmcache.experimental.memory_management import (MemoryAllocatorInterface,
                                                     MemoryFormat, MemoryObj)
 from lmcache.experimental.protocol import (ClientMetaMessage, Constants,
                                            ServerMetaMessage)
+from lmcache.experimental.storage_backend.local_cpu_backend import \
+    LocalCPUBackend
 from lmcache.experimental.storage_backend.storage_manager import StorageManager
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
@@ -52,6 +54,7 @@ class NaiveDistributedServer(DistributedServerInterface):
         storage_manager: StorageManager,
         lookup_server: LookupServerInterface,
         memory_allocator: MemoryAllocatorInterface,
+        local_cpu_backend: LocalCPUBackend,
         loop: asyncio.AbstractEventLoop,
         config: LMCacheEngineConfig,
     ):
@@ -59,6 +62,7 @@ class NaiveDistributedServer(DistributedServerInterface):
         self.storage_manager = storage_manager
         self.lookup_server = lookup_server
         self.memory_allocator = memory_allocator
+        self.local_cpu_backend = local_cpu_backend
 
         self.url = config.distributed_url
         assert self.url is not None
@@ -94,7 +98,7 @@ class NaiveDistributedServer(DistributedServerInterface):
 
         # TODO(Jiayi): Format will be used once we support
         # compressed memory format
-        memory_obj = self.memory_allocator.allocate(
+        memory_obj = self.local_cpu_backend.allocate(
             meta.shape,
             meta.dtype,
             meta.fmt,
@@ -200,7 +204,7 @@ class NaiveDistributedServer(DistributedServerInterface):
 
                             writer.write(memory_obj.byte_array)
                             await writer.drain()
-                            self.memory_allocator.ref_count_down(memory_obj)
+                            memory_obj.ref_count_down()
 
                             t3 = time.perf_counter()
                             logger.info(f"Time to get data: {t1 - t0}, "

@@ -21,9 +21,7 @@ from typing import List, Optional, Union, no_type_check
 import infinistore
 import torch
 
-from lmcache.experimental.memory_management import (CopyLessMemoryObj,
-                                                    MemoryAllocatorInterface,
-                                                    MemoryObj)
+from lmcache.experimental.memory_management import CopyLessMemoryObj, MemoryObj
 # reuse
 from lmcache.experimental.protocol import RemoteMetadata
 from lmcache.experimental.storage_backend.connector.base_connector import \
@@ -45,8 +43,7 @@ def _get_ptr(mv: Union[bytearray, memoryview]) -> int:
 class InfinistoreConnector(RemoteConnector):
 
     def __init__(self, host: str, port: int, dev_name,
-                 loop: asyncio.AbstractEventLoop,
-                 memory_allocator: MemoryAllocatorInterface):
+                 loop: asyncio.AbstractEventLoop):
         config = infinistore.ClientConfig(
             host_addr=host,
             service_port=port,

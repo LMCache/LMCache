@@ -22,13 +22,14 @@ from typing import List, Optional
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.experimental.config import LMCacheEngineConfig
 from lmcache.experimental.lookup_server import LookupServerInterface
-from lmcache.experimental.memory_management import (MemoryAllocatorInterface,
-                                                    MemoryObj)
+from lmcache.experimental.memory_management import MemoryObj
 from lmcache.experimental.storage_backend.abstract_backend import \
     StorageBackendInterface
 from lmcache.experimental.storage_backend.connector import CreateConnector
 from lmcache.experimental.storage_backend.connector.base_connector import \
     RemoteConnector
+from lmcache.experimental.storage_backend.local_cpu_backend import \
+    LocalCPUBackend
 from lmcache.experimental.storage_backend.naive_serde import CreateSerde
 from lmcache.logging import init_logger
 from lmcache.observability import LMCStatsMonitor
@@ -44,7 +45,7 @@ class RemoteBackend(StorageBackendInterface):
         config: LMCacheEngineConfig,
         metadata: LMCacheEngineMetadata,
         loop: asyncio.AbstractEventLoop,
-        memory_allocator: MemoryAllocatorInterface,
+        local_cpu_backend: LocalCPUBackend,
         dst_device: str = "cuda",
         lookup_server: Optional[LookupServerInterface] = None,
     ):
@@ -56,7 +57,7 @@ class RemoteBackend(StorageBackendInterface):
 
         self.remote_url = config.remote_url
 
-        self.memory_allocator = memory_allocator
+        self.local_cpu_backend = local_cpu_backend
 
         self.loop = loop
         self.config = config
@@ -70,7 +71,7 @@ class RemoteBackend(StorageBackendInterface):
 
         assert config.remote_serde is not None
         self.serializer, self.deserializer = CreateSerde(
-            config.remote_serde, memory_allocator, metadata, config)
+            config.remote_serde, metadata, config)
 
         logger.info(f"Connected to remote storage at {config.remote_url}")
 
@@ -94,7 +95,8 @@ class RemoteBackend(StorageBackendInterface):
         try:
             assert self.config.remote_url is not None
             self.connection = CreateConnector(self.config.remote_url,
-                                              self.loop, self.memory_allocator,
+                                              self.loop,
+                                              self.local_cpu_backend,
                                               self.config)
             logger.info("Connection initialized/re-established "
                         f"at {self.config.remote_url}")
@@ -158,14 +160,14 @@ class RemoteBackend(StorageBackendInterface):
                 "Connection is None in submit_put_task, returning None")
             return None
 
-        self.memory_allocator.ref_count_up(memory_obj)
+        memory_obj.ref_count_up()
 
         self.lock.acquire()
         self.put_tasks.append(key)
         self.lock.release()
 
         compressed_memory_obj = self.serializer.serialize(memory_obj)
-        self.memory_allocator.ref_count_down(memory_obj)
+        memory_obj.ref_count_down()
 
         # NOTE: No need to do error handling here
         # since the `future` is never waited
