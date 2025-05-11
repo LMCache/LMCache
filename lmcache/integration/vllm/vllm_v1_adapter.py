@@ -97,16 +97,16 @@ class LMCacheLookupServer:
 
         def process_request():
             while self.running:
-                try:
-                    #request = self.socket.recv()
-                    frames = self.socket.recv_multipart(copy=False)
-                    token_ids = self.decoder.decode(frames)
-                    result = self.lmcache_engine.lookup(token_ids)
-                    response = result.to_bytes(4, "big")
-                    self.socket.send(response)
-                except Exception as e:
-                    logger.error("Error in LMCache lookup server: %s", e)
-                    break
+                #try:
+                #request = self.socket.recv()
+                frames = self.socket.recv_multipart(copy=False)
+                token_ids = self.decoder.decode(frames)
+                result = self.lmcache_engine.lookup(token_ids)
+                response = result.to_bytes(4, "big")
+                self.socket.send(response)
+                #except Exception as e:
+                #    logger.error("Error in LMCache lookup server: %s", e)
+                #    break
                 #continue
 
         self.thread = threading.Thread(target=process_request, daemon=True)

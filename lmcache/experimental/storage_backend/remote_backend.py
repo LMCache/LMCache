@@ -16,6 +16,7 @@ import asyncio
 import threading
 import time
 from concurrent.futures import Future
+from functools import wraps
 from typing import List, Optional
 
 from lmcache.config import LMCacheEngineMetadata
@@ -26,6 +27,8 @@ from lmcache.experimental.memory_management import (MemoryAllocatorInterface,
 from lmcache.experimental.storage_backend.abstract_backend import \
     StorageBackendInterface
 from lmcache.experimental.storage_backend.connector import CreateConnector
+from lmcache.experimental.storage_backend.connector.base_connector import \
+    RemoteConnector
 from lmcache.experimental.storage_backend.naive_serde import CreateSerde
 from lmcache.logging import init_logger
 from lmcache.observability import LMCStatsMonitor
@@ -47,18 +50,23 @@ class RemoteBackend(StorageBackendInterface):
     ):
 
         self.put_tasks: List[CacheEngineKey] = []
-        self.put_tasks_lock = threading.Lock()
+        self.lock = threading.Lock()
 
         assert config.remote_url is not None
-        # Initialize connection
-        self.connection = CreateConnector(config.remote_url, loop,
-                                          memory_allocator, config)
 
         self.remote_url = config.remote_url
 
         self.memory_allocator = memory_allocator
 
         self.loop = loop
+        self.config = config
+
+        # Re-establish connection only when the connection
+        # has been lost for 10 secs
+        self.connection: Optional[RemoteConnector] = None
+        self.min_reconnect_interval = 10
+        self.failure_time = -1000000.0
+        self._init_connection()
 
         assert config.remote_serde is not None
         self.serializer, self.deserializer = CreateSerde(
@@ -74,22 +82,70 @@ class RemoteBackend(StorageBackendInterface):
     def __str__(self):
         return self.__class__.__name__
 
+    def _init_connection(self):
+        # Initialize connection
+        if self.connection is not None:
+            return
+        if (time.time() - self.failure_time) < self.min_reconnect_interval:
+            logger.warning("Connection will not be re-established yet "
+                           "since it has not been long enough since "
+                           "the last failure")
+            return
+        try:
+            assert self.config.remote_url is not None
+            self.connection = CreateConnector(self.config.remote_url,
+                                              self.loop, self.memory_allocator,
+                                              self.config)
+            logger.info("Connection initialized/re-established "
+                        f"at {self.config.remote_url}")
+        except Exception as e:
+            with self.lock:
+                self.failure_time = time.time()
+            logger.warning(
+                f"Failed to initialize/re-establish remote connection: {e}")
+            self.connection = None
+
+    @staticmethod
+    def _init_connection_wrapper(func):
+
+        @wraps(func)
+        def wrapper(self, *args, **kwargs):
+            self._init_connection()
+            result = func(self, *args, **kwargs)
+            return result
+
+        return wrapper
+
+    @_init_connection_wrapper
     def contains(self, key: CacheEngineKey) -> bool:
+        if self.connection is None:
+            logger.warning("Connection is None in contains, returning False")
+            return False
+
         future = asyncio.run_coroutine_threadsafe(self.connection.exists(key),
                                                   self.loop)
-        return future.result()
+        try:
+            res = future.result()
+            return res
+        except Exception as e:
+            with self.lock:
+                self.connection = None
+                self.failure_time = time.time()
+            logger.warning(f"Remote connection failed in contains: {e}")
+            logger.warning("Returning False")
+            return False
 
     def exists_in_put_tasks(self, key: CacheEngineKey) -> bool:
-        with self.put_tasks_lock:
+        with self.lock:
             return key in self.put_tasks
 
     def put_callback(self, future: Future, key: CacheEngineKey):
         """
         Callback function for put tasks.
         """
-        self.put_tasks_lock.acquire()
+        self.lock.acquire()
         self.put_tasks.remove(key)
-        self.put_tasks_lock.release()
+        self.lock.release()
 
     def submit_put_task(
         self,
@@ -97,23 +153,27 @@ class RemoteBackend(StorageBackendInterface):
         memory_obj: MemoryObj,
     ) -> Optional[Future]:
 
+        if self.connection is None:
+            logger.warning(
+                "Connection is None in submit_put_task, returning None")
+            return None
+
         self.memory_allocator.ref_count_up(memory_obj)
 
-        self.put_tasks_lock.acquire()
+        self.lock.acquire()
         self.put_tasks.append(key)
-        self.put_tasks_lock.release()
+        self.lock.release()
 
         compressed_memory_obj = self.serializer.serialize(memory_obj)
-
-        future = asyncio.run_coroutine_threadsafe(
-            self.connection_put_wrapper(key, compressed_memory_obj), self.loop)
-
         self.memory_allocator.ref_count_down(memory_obj)
 
+        # NOTE: No need to do error handling here
+        # since the `future` is never waited
+        future = asyncio.run_coroutine_threadsafe(
+            self.connection_put_wrapper(key, compressed_memory_obj), self.loop)
         lambda_callback = lambda f: \
                 self.put_callback(f, key)
         future.add_done_callback(lambda_callback)
-
         return future
 
     def submit_prefetch_task(
@@ -130,10 +190,25 @@ class RemoteBackend(StorageBackendInterface):
         """
         Blocking get function.
         """
+
+        if self.connection is None:
+            logger.warning(
+                "Connection is None in get_blocking, returning None")
+            return None
         t1 = time.perf_counter()
         future = asyncio.run_coroutine_threadsafe(
             self.connection_get_wrapper(key), self.loop)
-        memory_obj = future.result()
+
+        try:
+            memory_obj = future.result()
+        except Exception as e:
+            with self.lock:
+                self.connection = None
+                self.failure_time = time.time()
+            logger.warning(f"Error occurred in get_blocking: {e}")
+            logger.warning("Returning None")
+            return None
+
         t2 = time.perf_counter()
         self.stats_monitor.update_interval_remote_time_to_get_sync(
             (t2 - t1) * 1000)
@@ -149,6 +224,7 @@ class RemoteBackend(StorageBackendInterface):
                                      memory_obj: MemoryObj):
         obj_size = memory_obj.get_size()
         begin = time.perf_counter()
+        assert self.connection is not None
         await self.connection.put(key, memory_obj)
         end = time.perf_counter()
         self.stats_monitor.update_interval_remote_time_to_put(
@@ -158,6 +234,7 @@ class RemoteBackend(StorageBackendInterface):
 
     async def connection_get_wrapper(self, key: CacheEngineKey):
         begin = time.perf_counter()
+        assert self.connection is not None
         memory_obj = await self.connection.get(key)
         end = time.perf_counter()
         self.stats_monitor.update_interval_remote_time_to_get(
@@ -169,7 +246,12 @@ class RemoteBackend(StorageBackendInterface):
         return memory_obj
 
     def close(self):
-        future = asyncio.run_coroutine_threadsafe(self.connection.close(),
-                                                  self.loop)
-        future.result()
-        logger.info("Remote backend closed.")
+        try:
+            assert self.connection is not None
+            future = asyncio.run_coroutine_threadsafe(self.connection.close(),
+                                                      self.loop)
+            future.result()
+            logger.info("Remote backend closed.")
+        except Exception as e:
+            logger.warning(
+                f"Error occurred when closing remote connection: {e}")
