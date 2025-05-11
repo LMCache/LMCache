@@ -332,7 +332,7 @@ class StorageManager:
         num_cleared = 0
         for backend_name, backend in self.storage_backends.items():
             # TODO(Jiayi): need to handle remove in non-cpu backends
-            if locations is None or "LocalCPUBackend" in locations:
+            if locations is None or backend_name in locations:
                 if hasattr(backend, "clear"):
                     num_cleared += backend.clear()
                 else:
