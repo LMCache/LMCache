@@ -236,6 +236,7 @@ class LocalDiskBackend(StorageBackendInterface):
             await f.write(byte_array)
 
         self.insert_key(key, memory_obj)
+
         memory_obj.ref_count_down()
 
         self.disk_lock.acquire()

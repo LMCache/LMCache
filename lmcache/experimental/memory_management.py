@@ -235,7 +235,6 @@ class TensorMemoryObj(MemoryObj):
         self.lock = threading.Lock()
         self.parent_allocator = parent_allocator
 
-    # `valid` is only used for testing purpose so no need to lock
     def invalidate(self):
         self.valid = False
 
@@ -243,28 +242,23 @@ class TensorMemoryObj(MemoryObj):
         return self.valid
 
     def get_size(self) -> int:
-        with self.lock:
-            num_elements = self.raw_data.numel()
-            element_size = self.raw_data.element_size()
+        num_elements = self.raw_data.numel()
+        element_size = self.raw_data.element_size()
         size_in_bytes = num_elements * element_size
         return size_in_bytes
 
     def get_shape(self) -> torch.Size:
-        with self.lock:
-            return self.meta.shape
+        return self.meta.shape
 
     def get_dtype(self) -> torch.dtype:
-        with self.lock:
-            assert self.meta.dtype is not None
-            return self.meta.dtype
+        return self.meta.dtype
 
     def get_memory_format(self) -> MemoryFormat:
         with self.lock:
             return self.meta.fmt
 
     def get_physical_size(self) -> int:
-        with self.lock:
-            return self.meta.phy_size
+        return self.meta.phy_size
 
     def ref_count_up(self):
         with self.lock:
@@ -288,25 +282,23 @@ class TensorMemoryObj(MemoryObj):
 
     @property
     def tensor(self) -> Optional[torch.Tensor]:
-        with self.lock:
-            if not self.valid:
-                logger.warning("Trying to access an invalidated MemoryObj")
-                return None
-            assert self.meta.dtype is not None
-            return self.raw_data.view(self.meta.dtype)\
-                                .view(self.meta.shape)
+        if not self.valid:
+            logger.warning("Trying to access an invalidated MemoryObj")
+            return None
+        assert self.meta.dtype is not None
+        return self.raw_data.view(self.meta.dtype)\
+                            .view(self.meta.shape)
 
     @property
     def byte_array(self) -> bytes:
-        with self.lock:
-            kv_chunk = self.tensor
-            assert kv_chunk is not None
-            num_bytes = kv_chunk.numel() * kv_chunk.element_size()
-            ptr = kv_chunk.data_ptr()
-            ubyte_ptr = ctypes.cast(ptr, ctypes.POINTER(ctypes.c_ubyte))
-            byte_array = (ctypes.c_ubyte * num_bytes).from_address(
-                ctypes.addressof(ubyte_ptr.contents))
-            return memoryview(byte_array)
+        kv_chunk = self.tensor
+        assert kv_chunk is not None
+        num_bytes = kv_chunk.numel() * kv_chunk.element_size()
+        ptr = kv_chunk.data_ptr()
+        ubyte_ptr = ctypes.cast(ptr, ctypes.POINTER(ctypes.c_ubyte))
+        byte_array = (ctypes.c_ubyte * num_bytes).from_address(
+            ctypes.addressof(ubyte_ptr.contents))
+        return memoryview(byte_array)
 
 
 class CopyLessMemoryObj(TensorMemoryObj):
@@ -501,6 +493,7 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         shape: Union[torch.Size, Tuple[int, ...]],
         dtype: Optional[torch.dtype],
         fmt: MemoryFormat = MemoryFormat.KV_BLOB,
+        parent_allocator: Optional["MemoryAllocatorInterface"] = None,
     ) -> Optional[TensorMemoryObj]:
         if not isinstance(shape, torch.Size):
             shape = torch.Size(shape)
@@ -539,7 +532,7 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
             raw_data=self.buffer[block.start:block.start + raw_size],
             metadata=MemoryObjMetadata(shape, dtype, block.start, aligned_size,
                                        1, fmt),
-            parent_allocator=self)
+            parent_allocator=parent_allocator)
 
     def dry_allocate(
         self,
@@ -710,7 +703,7 @@ class PinMemoryAllocator(MemoryAllocatorInterface):
         fmt: MemoryFormat = MemoryFormat.KV_BLOB,
     ) -> Optional[MemoryObj]:
         with self.host_mem_lock:
-            return self.allocator.allocate(shape, dtype, fmt)
+            return self.allocator.allocate(shape, dtype, fmt, self)
 
     def free(self, memory_obj: MemoryObj):
         with self.host_mem_lock:
@@ -757,7 +750,7 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
             return self.buffer_allocator.allocate(shape, dtype, fmt)
         elif fmt == MemoryFormat.KV_BLOB:
             with self.host_mem_lock:
-                return self.pin_allocator.allocate(shape, dtype, fmt)
+                return self.pin_allocator.allocate(shape, dtype, fmt, self)
         else:
             raise ValueError(f"Unsupported memory format: {fmt}")
 
@@ -770,7 +763,7 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
         raise NotImplementedError
 
     def free(self, memory_obj: MemoryObj):
-        fmt = memory_obj.get_memory_format()
+        fmt = memory_obj.meta.fmt
         if fmt == MemoryFormat.BINARY_BUFFER:
             self.buffer_allocator.free(memory_obj)
         elif fmt == MemoryFormat.KV_BLOB:
