@@ -122,6 +122,9 @@ class MemoryObj(metaclass=abc.ABCMeta):
     MemoryObj interface.
     """
 
+    def __init__(self, metadata: MemoryObjMetadata):
+        self.meta = metadata
+
     @abc.abstractmethod
     def invalidate(self):
         """
@@ -232,13 +235,12 @@ class TensorMemoryObj(MemoryObj):
         self.lock = threading.Lock()
         self.parent_allocator = parent_allocator
 
+    # `valid` is only used for testing purpose so no need to lock
     def invalidate(self):
-        with self.lock:
-            self.valid = False
+        self.valid = False
 
     def is_valid(self):
-        with self.lock:
-            return self.valid
+        return self.valid
 
     def get_size(self) -> int:
         with self.lock:
@@ -249,35 +251,35 @@ class TensorMemoryObj(MemoryObj):
 
     def get_shape(self) -> torch.Size:
         with self.lock:
-            return self.metadata.shape
+            return self.meta.shape
 
     def get_dtype(self) -> torch.dtype:
         with self.lock:
-            assert self.metadata.dtype is not None
-            return self.metadata.dtype
+            assert self.meta.dtype is not None
+            return self.meta.dtype
 
     def get_memory_format(self) -> MemoryFormat:
         with self.lock:
-            return self.metadata.fmt
+            return self.meta.fmt
 
     def get_physical_size(self) -> int:
         with self.lock:
-            return self.metadata.phy_size
+            return self.meta.phy_size
 
     def ref_count_up(self):
         with self.lock:
-            self.metadata.ref_count += 1
+            self.meta.ref_count += 1
 
     def ref_count_down(self):
         with self.lock:
-            self.metadata.ref_count -= 1
-            if self.metadata.ref_count == 0 and \
+            self.meta.ref_count -= 1
+            if self.meta.ref_count == 0 and \
                 self.parent_allocator is not None:
                 self.parent_allocator.free(self)
 
     def get_ref_count(self) -> int:
         with self.lock:
-            return self.metadata.ref_count
+            return self.meta.ref_count
 
     @property
     def metadata(self) -> MemoryObjMetadata:
@@ -290,9 +292,9 @@ class TensorMemoryObj(MemoryObj):
             if not self.valid:
                 logger.warning("Trying to access an invalidated MemoryObj")
                 return None
-            assert self.metadata.dtype is not None
-            return self.raw_data.view(self.metadata.dtype)\
-                                .view(self.metadata.shape)
+            assert self.meta.dtype is not None
+            return self.raw_data.view(self.meta.dtype)\
+                                .view(self.meta.shape)
 
     @property
     def byte_array(self) -> bytes:
@@ -555,8 +557,8 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         if not memory_obj.is_valid():
             return
 
-        new_free_block = FreeBlock(start=memory_obj.metadata.address,
-                                   size=memory_obj.metadata.phy_size)
+        new_free_block = FreeBlock(start=memory_obj.meta.address,
+                                   size=memory_obj.meta.phy_size)
         index = self.explicit_list.bisect_right(new_free_block)
         prev_block = self.explicit_list[index - 1] if index > 0 else None
         succ_block = self.explicit_list[index] \
@@ -569,7 +571,7 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         memory_obj.invalidate()
 
         # Update debug status
-        self.total_allocated_size -= memory_obj.metadata.phy_size
+        self.total_allocated_size -= memory_obj.meta.phy_size
         self.num_active_allocations = max(0, self.num_active_allocations - 1)
         self.stats_monitor.update_local_cache_usage(self.total_allocated_size)
 
