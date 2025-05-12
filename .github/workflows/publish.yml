@@ -1,6 +1,8 @@
 name: Build and Publish to PyPI
 
 on:
+    # Trigger the workflow on push or pull request,
+    # for the dev and any release branches
     push:
         branches:
             - dev
@@ -11,6 +13,7 @@ on:
         branches:
             - dev
             - "release-**"
+    # Trigger the workflow for when a release is created
     release:
         types:
             - published
@@ -109,9 +112,9 @@ jobs:
                 name: release-artifacts
                 path: dist/
 
-    # push to Test PyPI on
+    # Push to Test PyPI when:
     # - a new GitHub release is published
-    # - a PR is merged into dev branch
+    # - a PR is merged into dev branch (push only trigger)
     publish-test-pypi:
         name: Publish packages to test.pypi.org
         if: |
@@ -127,7 +130,7 @@ jobs:
         needs: build-artifacts
 
         steps:
-            - name: "Harden Runner"
+            - name: Harden Runner
               uses: step-security/harden-runner@0634a2670c59f64b4a01f0f96f84700a4088b9f0 # v2.12.0
               with:
                   egress-policy: audit # TODO: change to 'egress-policy: block' after couple of runs
@@ -144,8 +147,8 @@ jobs:
                   repository-url: https://test.pypi.org/legacy/
                   verbose: true
 
-    # push to Production PyPI on
-    # - a new GitHub release is published
+    # Push to PyPI (production) when:
+    # - a new GitHub release is created
     publish-pypi:
         name: Publish release to pypi.org
         if: |
@@ -160,7 +163,7 @@ jobs:
         needs: build-artifacts
 
         steps:
-            - name: "Harden Runner"
+            - name: Harden Runner
               uses: step-security/harden-runner@0634a2670c59f64b4a01f0f96f84700a4088b9f0 # v2.12.0
               with:
                   egress-policy: audit # TODO: change to 'egress-policy: block' after couple of runs

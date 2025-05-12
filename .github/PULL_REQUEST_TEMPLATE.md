@@ -36,11 +36,31 @@ FIX #xxxx (*link existing issues this PR will resolve*)
 
 <h3>What to Expect for the Reviews</h3>
 
-To trigger a new version of lmcache, follow the steps:
+To create a new tag for lmcache (Note: `v` prefix is required):
 `git tag vx.x.x`
 `git push origin vx.x.x` (same version again)
+
+For example:
+`git tag v0.3.0`
+`git push origin v0.3.0`
+
 In case the workflow fails, delete the tag and try again:
 `git tag -d vx.x.x`
 `git push origin :refs/tags/vx.x.x`
+
+For example:
+`git tag -d v0.3.0`
+`git push origin :refs/tags/v0.3.0`
+
+To create a new release and publish `lmcache` Python package to PyPi:
+`git remote add upstream git@github.com:LMCache/LMCache.git`
+`gh release create vx.x.x --repo LMCache/LMCache --title "vx.x.x" --notes "<Add decsription>"`
+
+For example:
+`git remote add upstream git@github.com:LMCache/LMCache.git`
+`gh release create v0.3.0 --repo LMCache/LMCache --title "v0.3.0" --notes "LMCache v0.3.0 is a feature realease. Users are encouraged to upgrade for the best experience."`
+
+> [!TIP]
+> The creation of a release and subsequent tag generation can be done alternatively from the LMCache [releases](https://github.com/LMCache/LMCache/releases) page.
 
 We aim to address all PRs in a timely manner. If no one reviews your PR within 5 days, please @-mention one of KuntaiDu, ApostaC or YaoJiayi.
