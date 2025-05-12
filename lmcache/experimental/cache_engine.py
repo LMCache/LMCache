@@ -109,7 +109,6 @@ class LMCacheEngine:
             self.distributed_server: DistributedServerInterface = \
                 NaiveDistributedServer(self.storage_manager,
                                        self.lookup_server,
-                                       self.memory_allocator,
                                        self.distributed_loop,
                                        config)
 

@@ -24,12 +24,9 @@ from lmcache.experimental.config import LMCacheEngineConfig
 from lmcache.experimental.distributed_server.abstract_server import \
     DistributedServerInterface  # noqa: E501
 from lmcache.experimental.lookup_server import LookupServerInterface
-from lmcache.experimental.memory_management import (MemoryAllocatorInterface,
-                                                    MemoryFormat, MemoryObj)
+from lmcache.experimental.memory_management import MemoryFormat, MemoryObj
 from lmcache.experimental.protocol import (ClientMetaMessage, Constants,
                                            ServerMetaMessage)
-from lmcache.experimental.storage_backend.local_cpu_backend import \
-    LocalCPUBackend
 from lmcache.experimental.storage_backend.storage_manager import StorageManager
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
@@ -53,16 +50,12 @@ class NaiveDistributedServer(DistributedServerInterface):
         self,
         storage_manager: StorageManager,
         lookup_server: LookupServerInterface,
-        memory_allocator: MemoryAllocatorInterface,
-        local_cpu_backend: LocalCPUBackend,
         loop: asyncio.AbstractEventLoop,
         config: LMCacheEngineConfig,
     ):
 
         self.storage_manager = storage_manager
         self.lookup_server = lookup_server
-        self.memory_allocator = memory_allocator
-        self.local_cpu_backend = local_cpu_backend
 
         self.url = config.distributed_url
         assert self.url is not None
@@ -98,7 +91,7 @@ class NaiveDistributedServer(DistributedServerInterface):
 
         # TODO(Jiayi): Format will be used once we support
         # compressed memory format
-        memory_obj = self.local_cpu_backend.allocate(
+        memory_obj = self.storage_manager.allocate(
             meta.shape,
             meta.dtype,
             meta.fmt,
