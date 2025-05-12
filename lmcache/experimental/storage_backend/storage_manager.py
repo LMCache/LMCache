@@ -153,7 +153,7 @@ class StorageManager:
 
         A default implementation using "put"
         """
-        for key, obj in zip(keys, memory_objs):
+        for key, obj in zip(keys, memory_objs, strict=False):
             self.put(key, obj)
 
     def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:

@@ -125,7 +125,9 @@ class LMCacheClusterExecutor:
         :return: A list of serialized results received from the sockets.
         """
         tasks = []
-        for socket, serialized_msg in zip(sockets, serialized_msgs):
+        for socket, serialized_msg in zip(sockets,
+                                          serialized_msgs,
+                                          strict=False):
 
             async def send_and_receive(s, msg):
                 await s.send(msg)

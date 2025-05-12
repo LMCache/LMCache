@@ -70,7 +70,7 @@ def send_and_measure_throughput(backend: NixlBackend,
 
     backend.register_put_tasks(keys, [obj.metadata for obj in objs])
     start_time = time.time()
-    for key, obj in zip(keys, objs):
+    for key, obj in zip(keys, objs, strict=False):
         backend.submit_put_task(key, obj)
     backend.flush_put_tasks()
     end_time = time.time()

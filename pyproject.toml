@@ -1,12 +1,58 @@
 [build-system]
 # Should be mirrored in docker/requirements-build.txt
-requires = ["ninja", "packaging>=24.2", "setuptools>=77.0.3,<80.0.0", "setuptools_scm>=8", "torch==2.7.0", "wheel"]
+requires = [
+    "ninja",
+    "packaging>=24.2",
+    "setuptools>=77.0.3,<80.0.0",
+    "setuptools_scm>=8",
+    "torch==2.6.0",
+    "wheel",
+]
 build-backend = "setuptools.build_meta"
+
+[project]
+name = "lmcache"
+authors = [{name = "LMCache Team", email = "lmcacheteam@gmail.com"}]
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+readme = "README.md"
+description = "A LLM serving engine extension to reduce TTFT and increase throughput, especially under long-context scenarios."
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Operating System :: POSIX :: Linux",
+    "Environment :: GPU",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: Implementation :: CPython",
+]
+requires-python = ">=3.10,<3.13"
+dynamic = ["version"]
+
+[project.scripts]
+lmcache_server="lmcache.server.__main__:main"
+lmcache_experimental_server="lmcache.experimental.server.__main__:main"
+lmcache_controller="lmcache.experimental.api_server.__main__:main"
+
+[project.urls]
+homepage = "https://docs.lmcache.ai"
+source = "https://github.com/LMCache/LMCache"
+issues = "https://github.com/LMCache/LMCache"
+
+[tool.setuptools_scm]
+version_file = "lmcache/_version.py"
+# do not include +gREV local version, required for Test PyPI upload
+local_scheme = "no-local-version"
+
+[tool.setuptools.packages.find]
+where = [""]
+include = ["lmcache", "lmcache*"]
 
 [tool.ruff]
 # Allow lines to be as long as 80.
 line-length = 80
-
 
 [tool.ruff.lint]
 select = [
@@ -31,7 +77,6 @@ ignore = [
     # f-string format
     "UP032",
 ]
-
 
 [tool.mypy]
 python_version = "3.10"

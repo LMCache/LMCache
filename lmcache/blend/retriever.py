@@ -110,7 +110,9 @@ class SPTBlendRetrieverTask(BlendRetrieverTask):
             dtype = kv.dtype
             device = kv.device
 
-        for token_segment, task in zip(self.token_segments, self.tasks):
+        for token_segment, task in zip(self.token_segments,
+                                       self.tasks,
+                                       strict=False):
             kv, ret_mask = task.result()
             length = int(torch.sum(ret_mask))
             if length > 0:
@@ -153,7 +155,7 @@ class SPTBlendRetrieverTask(BlendRetrieverTask):
                 raise ValueError(f"Unknown KV format {self.fmt}")
 
         # Update the shape of the None tensors
-        for i, (k, v) in enumerate(zip(keys, values)):
+        for i, (k, v) in enumerate(zip(keys, values, strict=False)):
             shape_placeholder[token_dim] = len(self.token_segments[i])
             if k is None:
                 keys[i] = torch.empty(shape_placeholder,

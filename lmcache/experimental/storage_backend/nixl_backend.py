@@ -202,7 +202,7 @@ class BasicNixlObserver(NixlObserverInterface):
         """
         clone_time = 0.0
         add_time = 0.0
-        for key, value in zip(keys, objs):
+        for key, value in zip(keys, objs, strict=False):
             assert value.tensor is not None, \
                     "The tensor in the MemoryObj is None."
             if is_view:

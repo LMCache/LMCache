@@ -117,8 +117,8 @@ def generate_tokens(num_tokens, device, fixed=False):
 def concatenate_kv_caches(kv_chunks, fmt):
     dim = 1 if fmt == "huggingface" else 0
     ret = []
-    for kv_layer in zip(*kv_chunks):
-        klist, vlist = zip(*kv_layer)
+    for kv_layer in zip(*kv_chunks, strict=False):
+        klist, vlist = zip(*kv_layer, strict=False)
         klayer = torch.cat(klist, dim=dim)
         vlayer = torch.cat(vlist, dim=dim)
         ret.append((klayer, vlayer))
@@ -130,7 +130,7 @@ def check_kv_cache_equal(left, right, num_tokens, fmt, offset=0):
     check if the first num_tokens of left and right kv cache are the same
     """
     dim = 0 if fmt == "vllm" else 1
-    for left_kv, right_kv in zip(left, right):
+    for left_kv, right_kv in zip(left, right, strict=False):
         left_k, left_v = left_kv
         right_k, right_v = right_kv
         right_k = right_k.to(left_k.device)
@@ -161,7 +161,7 @@ def check_mem_obj_equal(left, right, offset=0):
     """
     check whether two memory objects are the same
     """
-    for left_mem_obj, right_mem_obj in zip(left, right):
+    for left_mem_obj, right_mem_obj in zip(left, right, strict=False):
         left_kv, right_kv = left_mem_obj.tensor, right_mem_obj.tensor
         left_k, left_v = left_kv[0], left_kv[1]
         right_k, right_v = right_kv[0], right_kv[1]
@@ -187,7 +187,7 @@ def check_paged_kv_cache_equal(left,
     check whether two paged kv caches are the same at slot_mapping
     """
     token_dim = 0
-    for left_kv, right_kv in zip(left, right):
+    for left_kv, right_kv in zip(left, right, strict=False):
         left_k = left_kv[0].reshape(-1, num_heads, head_size)
         left_v = left_kv[1].reshape(-1, num_heads, head_size)
         right_k = right_kv[0].reshape(-1, num_heads, head_size)

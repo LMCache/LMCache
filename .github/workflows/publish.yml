@@ -7,7 +7,6 @@ on:
 # example:
 # git tag v1.0.0
 # git push origin v1.0.0
-# version must be manually updated in lmcache/_version.py
 
 jobs:
   build-and-publish:
@@ -33,15 +32,6 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-
-      - name: Verify tag matches setup.py version
-        run: |
-          TAG_VERSION="${GITHUB_REF#refs/tags/v}"
-          SETUP_VERSION=$(grep '__version__' lmcache/_version.py | cut -d'"' -f2)
-          if [ "$TAG_VERSION" != "$SETUP_VERSION" ]; then
-            echo "Git tag version ($TAG_VERSION) does not match setup.py version ($SETUP_VERSION)"
-            exit 1
-          fi
 
       - name: Install packaging tools
         run: |

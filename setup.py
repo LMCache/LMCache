@@ -7,14 +7,6 @@ from setuptools import find_packages, setup
 ROOT_DIR = Path(__file__).parent
 
 
-def get_version():
-    version_file = ROOT_DIR / "lmcache" / "__init__.py"
-    with open(version_file) as f:
-        version_ns = {}
-        exec(f.read(), version_ns)
-        return version_ns["__version__"]
-
-
 # Taken from https://github.com/vllm-project/vllm/blob/main/setup.py
 def get_requirements() -> list[str]:
     """Get Python package dependencies from requirements.txt."""
@@ -65,36 +57,9 @@ else:
     cmdclass = {}
 
 setup(
-    name="lmcache",
-    version=get_version(),
-    description="LMCache: prefill your long contexts only once",
-    author="LMCache team",
-    author_email="lmcacheteam@gmail.com",
-    long_description=open("README.md").read(),
-    long_description_content_type="text/markdown",
     packages=find_packages(exclude=("csrc")),
     install_requires=get_requirements(),
     ext_modules=ext_modules,
     cmdclass=cmdclass,
-    classifiers=[
-        # Trove classifiers
-        # Full list at https://pypi.org/classifiers/
-        "Development Status :: 3 - Alpha",
-        "Environment :: GPU",
-        "Programming Language :: Python :: 3",
-        "License :: OSI Approved :: Apache Software License",
-    ],
-    license="Apache-2.0",
-    license_files=["LICENSE"],
-    python_requires=">=3.10",
-    entry_points={
-        "console_scripts": [
-            # Add command-line scripts here
-            # e.g., "my_command=my_package.module:function"
-            "lmcache_server=lmcache.server.__main__:main",
-            "lmcache_experimental_server=lmcache.experimental.server.__main__:main",
-            "lmcache_controller=lmcache.experimental.api_server.__main__:main",
-        ],
-    },
     include_package_data=True,
 )

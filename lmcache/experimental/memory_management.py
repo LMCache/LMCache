@@ -571,7 +571,9 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
             clear = False
 
         # Check if the blocks are coalesced
-        for prev, succ in zip(self.explicit_list[:-1], self.explicit_list[1:]):
+        for prev, succ in zip(self.explicit_list[:-1],
+                              self.explicit_list[1:],
+                              strict=False):
             if prev.can_be_coalesced(succ):
                 logger.error("Memory allocator has non-coalesced blocks")
                 logger.error("This implies a bug in the memory allocator")
