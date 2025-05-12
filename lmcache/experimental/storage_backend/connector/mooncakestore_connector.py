@@ -144,7 +144,7 @@ class MooncakestoreConnector(RemoteConnector):
             logger.warning("Failed to allocate memory during remote receive")
             return None
 
-        if memory_obj.tensor:
+        if memory_obj.tensor is not None:
             assert metadata.dtype is not None
             num_elements = reduce(operator.mul, metadata.shape)
             temp_tensor = torch.frombuffer(buffer,
