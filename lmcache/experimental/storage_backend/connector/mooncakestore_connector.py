@@ -22,12 +22,12 @@ from typing import List, Optional, no_type_check
 
 import torch
 
-from lmcache.experimental.memory_management import (MemoryAllocatorInterface,
-                                                    MemoryObj)
-# reuse
+from lmcache.experimental.memory_management import MemoryObj
 from lmcache.experimental.protocol import RemoteMetadata
 from lmcache.experimental.storage_backend.connector.base_connector import \
     RemoteConnector
+from lmcache.experimental.storage_backend.local_cpu_backend import \
+    LocalCPUBackend
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
 
@@ -73,9 +73,14 @@ class MooncakeStoreConfig:
 
 class MooncakestoreConnector(RemoteConnector):
 
-    def __init__(self, host: str, port: int, dev_name,
-                 loop: asyncio.AbstractEventLoop,
-                 memory_allocator: MemoryAllocatorInterface):
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        dev_name,
+        loop: asyncio.AbstractEventLoop,
+        local_cpu_backend: LocalCPUBackend,
+    ):
         try:
             from mooncake.store import MooncakeDistributedStore
         except ImportError as e:
@@ -109,8 +114,8 @@ class MooncakestoreConnector(RemoteConnector):
                 "An error occurred while loading the configuration: %s", exc)
             raise
 
-        self.memory_allocator = memory_allocator
         self.loop = loop
+        self.local_cpu_backend = local_cpu_backend
 
     async def exists(self, key: CacheEngineKey) -> bool:
         return self.store.is_exist(key.to_string())
@@ -133,7 +138,7 @@ class MooncakestoreConnector(RemoteConnector):
 
         metadata = RemoteMetadata.deserialize(metadata_bytes)
 
-        memory_obj = self.memory_allocator.allocate(
+        memory_obj = self.local_cpu_backend.allocate(
             metadata.shape,
             metadata.dtype,
             metadata.fmt,
@@ -177,7 +182,7 @@ class MooncakestoreConnector(RemoteConnector):
                          f"meta type: {type(metadata_bytes)},"
                          f"data: {type(kv_bytes)}: {e}")
 
-        self.memory_allocator.ref_count_down(memory_obj)
+        memory_obj.ref_count_down()
 
     @no_type_check
     async def list(self) -> List[str]:

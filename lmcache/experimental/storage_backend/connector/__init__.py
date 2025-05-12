@@ -18,13 +18,14 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 from lmcache.experimental.config import LMCacheEngineConfig
-from lmcache.experimental.memory_management import MemoryAllocatorInterface
 from lmcache.experimental.storage_backend.connector.base_connector import \
     RemoteConnector
 from lmcache.experimental.storage_backend.connector.lm_connector import \
     LMCServerConnector
 from lmcache.experimental.storage_backend.connector.redis_connector import (
     RedisConnector, RedisSentinelConnector)
+from lmcache.experimental.storage_backend.local_cpu_backend import \
+    LocalCPUBackend
 from lmcache.logging import init_logger
 
 from .audit_connector import AuditConnector
@@ -118,7 +119,7 @@ def parse_remote_url(url: str) -> ParsedRemoteURL:
 def CreateConnector(
     url: str,
     loop: asyncio.AbstractEventLoop,
-    memory_allocator: MemoryAllocatorInterface,
+    local_cpu_backend: LocalCPUBackend,
     config: Optional[LMCacheEngineConfig] = None,
 ) -> Optional[RemoteConnector]:
     """
@@ -137,7 +138,7 @@ def CreateConnector(
         case "redis":
             if num_hosts == 1:
                 host, port = parsed_url.hosts[0], parsed_url.ports[0]
-                connector = RedisConnector(host, port, loop, memory_allocator)
+                connector = RedisConnector(host, port, loop, local_cpu_backend)
             else:
                 raise ValueError(
                     f"Redis connector only supports a single host, but got url:"
@@ -150,14 +151,14 @@ def CreateConnector(
                         map(int, parsed_url.ports),
                         strict=False)),
                 loop,
-                memory_allocator,
+                local_cpu_backend,
             )
 
         case "lm":
             if num_hosts == 1:
                 host, port = parsed_url.hosts[0], parsed_url.ports[0]
                 connector = LMCServerConnector(host, port, loop,
-                                               memory_allocator)
+                                               local_cpu_backend)
             else:
                 raise ValueError(
                     f"LM connector only supports a single host, but got url:"
@@ -165,15 +166,14 @@ def CreateConnector(
         case "infinistore":
             host, port = parsed_url.hosts[0], parsed_url.ports[0]
             device_name = parsed_url.query_params[0].get("device", "mlx5_0")
-            connector = InfinistoreConnector(host, port, device_name, loop,
-                                             memory_allocator)
+            connector = InfinistoreConnector(host, port, device_name, loop)
         case "mooncakestore":
             host, port = parsed_url.hosts[0], parsed_url.ports[0]
             device_name = parsed_url.query_params[0].get("device", "")
             connector = MooncakestoreConnector(host, port, device_name, loop,
-                                               memory_allocator)
+                                               local_cpu_backend)
         case "blackhole":
-            connector = BlackholeConnector(memory_allocator)
+            connector = BlackholeConnector()
         case "audit":
             if num_hosts != 1:
                 raise ValueError(
@@ -187,7 +187,7 @@ def CreateConnector(
             verify_checksum = parsed_url.query_params[0].get(
                 'verify') is not None
             logger.info(f"Creating audit connector for {real_url}")
-            real_connector = CreateConnector(real_url, loop, memory_allocator)
+            real_connector = CreateConnector(real_url, loop, local_cpu_backend)
             assert real_connector is not None
             return AuditConnector(real_connector=real_connector,
                                   verify_checksum=verify_checksum)

@@ -84,7 +84,9 @@ class NixlBufferAllocator(MemoryAllocatorInterface):
         # allocate the memory
         raw_tensor = self.buffer[self.allocated_size : self.allocated_size\
                 + required_size]
-        ret = TensorMemoryObj(raw_data=raw_tensor, metadata=metadata)
+        ret = TensorMemoryObj(raw_data=raw_tensor,
+                              metadata=metadata,
+                              parent_allocator=self)
         self.allocated_size += required_size
         return ret
 
@@ -111,21 +113,6 @@ class NixlBufferAllocator(MemoryAllocatorInterface):
         """Free the memory object.
         """
         pass
-
-    def ref_count_up(self, obj: MemoryObj):
-        """Increase the reference count of the memory object.
-        """
-        pass
-
-    def ref_count_down(self, obj: MemoryObj):
-        """Decrease the reference count of the memory object.
-        """
-        pass
-
-    def get_ref_count(self, obj: MemoryObj) -> int:
-        """Get the reference count of the memory object.
-        """
-        raise NotImplementedError
 
     ### For NIXL Pipe to call
     def num_bytes_allocated(self) -> int:
@@ -396,7 +383,7 @@ class NixlPipe:
             if offset + obj_size > self.nixl_config.buffer_size:
                 break
             obj = TensorMemoryObj(self._buffer[offset:offset + obj_size],
-                                  metadata)
+                                  metadata, self._allocator)
             ret.append(obj)
             offset += obj_size
         return ret  # type: ignore

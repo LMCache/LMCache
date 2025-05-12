@@ -109,7 +109,6 @@ class LMCacheEngine:
             self.distributed_server: DistributedServerInterface = \
                 NaiveDistributedServer(self.storage_manager,
                                        self.lookup_server,
-                                       self.memory_allocator,
                                        self.distributed_loop,
                                        config)
 
@@ -318,7 +317,7 @@ class LMCacheEngine:
             # For example, disk->gpu is faster than disk->cpu->gpu.
             # RDMA is another example.
             self.gpu_connector.to_gpu(memory_obj, start, end, **kwargs)
-            self.memory_allocator.ref_count_down(memory_obj)
+            memory_obj.ref_count_down()
 
             # NOTE (ApostaC): This is only for the current implementation:
             # When the object is retrieved back to vLLM, the storage backend

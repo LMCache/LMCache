@@ -65,6 +65,7 @@ class StorageManager:
                 config, metadata,
                 self.loop, allocator, dst_device,
                 lmcache_worker, lookup_server)
+        self.local_cpu_backend = self.storage_backends["LocalCPUBackend"]
         self.prefetch_tasks: Dict[CacheEngineKey, Future] = {}
         self.put_tasks: Dict[str, Dict[CacheEngineKey, Tuple[Future,
                                                              MemoryObj]]] = {}
@@ -92,11 +93,10 @@ class StorageManager:
         Allocate memory object with memory allocator.
         Use LRU evictor if eviction is enabled.
         """
-        local_cpu_backend = self.storage_backends["LocalCPUBackend"]
+        assert isinstance(self.local_cpu_backend, LocalCPUBackend)
         # TODO (Jiayi): We might need to pre-allocate and management
         # disk in a similar way as CPU.
-        assert isinstance(local_cpu_backend, LocalCPUBackend)
-        return local_cpu_backend.allocate(shape, dtype)
+        return self.local_cpu_backend.allocate(shape, dtype, eviction=eviction)
 
     def dry_allocate(
         self,
@@ -129,7 +129,7 @@ class StorageManager:
         for storage_backend in self.storage_backends.values():
             if storage_backend.exists_in_put_tasks(key) or \
                 storage_backend.contains(key):
-                self.memory_allocator.ref_count_down(memory_obj)
+                memory_obj.ref_count_down()
                 return
 
         #ever_put = False
@@ -139,7 +139,7 @@ class StorageManager:
             if put_task is None:
                 continue
 
-        self.memory_allocator.ref_count_down(memory_obj)
+        memory_obj.ref_count_down()
 
     def batched_put(
         self,
@@ -208,7 +208,7 @@ class StorageManager:
         kv_chunk = buffer_memory_obj.tensor
         kv_shape = kv_chunk.shape
         kv_dtype = kv_chunk.dtype
-        memory_obj = self.memory_allocator.allocate(kv_shape, kv_dtype)
+        memory_obj = self.allocate(kv_shape, kv_dtype)
         if memory_obj is None:
             logger.warning("Memory allocation failed in prefetch_callback")
             return
@@ -332,7 +332,7 @@ class StorageManager:
         num_cleared = 0
         for backend_name, backend in self.storage_backends.items():
             # TODO(Jiayi): need to handle remove in non-cpu backends
-            if locations is None or "LocalCPUBackend" in locations:
+            if locations is None or backend_name in locations:
                 if hasattr(backend, "clear"):
                     num_cleared += backend.clear()
                 else:

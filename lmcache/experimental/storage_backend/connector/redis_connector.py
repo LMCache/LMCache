@@ -19,11 +19,12 @@ from typing import List, Optional, Tuple, no_type_check
 
 import redis
 
-from lmcache.experimental.memory_management import (MemoryAllocatorInterface,
-                                                    MemoryObj)
+from lmcache.experimental.memory_management import MemoryObj
 from lmcache.experimental.protocol import RemoteMetadata
 from lmcache.experimental.storage_backend.connector.base_connector import \
     RemoteConnector
+from lmcache.experimental.storage_backend.local_cpu_backend import \
+    LocalCPUBackend
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
 
@@ -41,13 +42,13 @@ class RedisConnector(RemoteConnector):
     """
 
     def __init__(self, host: str, port: int, loop: asyncio.AbstractEventLoop,
-                 memory_allocator: MemoryAllocatorInterface):
+                 local_cpu_backend: LocalCPUBackend):
         self.connection = redis.Redis(host=host,
                                       port=port,
                                       decode_responses=False)
 
-        self.memory_allocator = memory_allocator
         self.loop = loop
+        self.local_cpu_backend = local_cpu_backend
 
     async def exists(self, key: CacheEngineKey) -> bool:
         return bool(self.connection.exists(key.to_string() + "metadata"))
@@ -63,7 +64,7 @@ class RedisConnector(RemoteConnector):
 
         metadata = RemoteMetadata.deserialize(memoryview(metadata_bytes))
 
-        memory_obj = self.memory_allocator.allocate(
+        memory_obj = self.local_cpu_backend.allocate(
             metadata.shape,
             metadata.dtype,
             metadata.fmt,
@@ -107,7 +108,7 @@ class RedisConnector(RemoteConnector):
         self.connection.set(key_str + "metadata", metadata_bytes)
         self.connection.set(key_str + "kv_bytes", kv_bytes)
 
-        self.memory_allocator.ref_count_down(memory_obj)
+        memory_obj.ref_count_down()
 
     # TODO
     @no_type_check
@@ -136,9 +137,12 @@ class RedisSentinelConnector(RemoteConnector):
     ENV_REDIS_TIMEOUT = "REDIS_TIMEOUT"
     ENV_REDIS_SERVICE_NAME = "REDIS_SERVICE_NAME"
 
-    def __init__(self, hosts_and_ports: List[Tuple[str, int]],
-                 loop: asyncio.AbstractEventLoop,
-                 memory_allocator: MemoryAllocatorInterface):
+    def __init__(
+        self,
+        hosts_and_ports: List[Tuple[str, int]],
+        loop: asyncio.AbstractEventLoop,
+        local_cpu_backend: LocalCPUBackend,
+    ):
         # Get service name
         match os.environ.get(self.ENV_REDIS_SERVICE_NAME):
             case None:
@@ -165,7 +169,7 @@ class RedisSentinelConnector(RemoteConnector):
         self.slave = self.sentinel.slave_for(service_name,
                                              socket_timeout=timeout)
 
-        self.memory_allocator = memory_allocator
+        self.local_cpu_backend = local_cpu_backend
 
     async def exists(self, key: CacheEngineKey) -> bool:
         return bool(self.slave.exists(key.to_string() + "metadata"))
@@ -181,7 +185,7 @@ class RedisSentinelConnector(RemoteConnector):
 
         metadata = RemoteMetadata.deserialize(metadata_bytes)
 
-        memory_obj = self.memory_allocator.allocate(
+        memory_obj = self.local_cpu_backend.allocate(
             metadata.shape,
             metadata.dtype,
             metadata.fmt,
@@ -225,7 +229,7 @@ class RedisSentinelConnector(RemoteConnector):
         self.master.set(key_str + "metadata", metadata_bytes)
         self.master.set(key_str + "kv_bytes", kv_bytes)
 
-        self.memory_allocator.ref_count_down(memory_obj)
+        memory_obj.ref_count_down()
 
     # TODO
     @no_type_check
