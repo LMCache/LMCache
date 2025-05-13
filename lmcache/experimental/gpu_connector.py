@@ -533,7 +533,6 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
         if "slot_mapping" not in kwargs:
             raise ValueError("'slot_mapping' should be provided in kwargs.")
 
-
         kvcaches: List[torch.Tensor] = kwargs["kvcaches"]
         slot_mapping: torch.Tensor = kwargs["slot_mapping"]
 
