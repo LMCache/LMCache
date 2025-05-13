@@ -109,7 +109,6 @@ class LMCacheEngine:
             self.distributed_server: DistributedServerInterface = \
                 NaiveDistributedServer(self.storage_manager,
                                        self.lookup_server,
-                                       self.memory_allocator,
                                        self.distributed_loop,
                                        config)
 
@@ -158,7 +157,10 @@ class LMCacheEngine:
         put_time = 0.
         tot_kv_size = 0
         # Offload the KV cache and write to remote
-        for key, memobj_meta, (start, end) in zip(keys, metadatas, steds):
+        for key, memobj_meta, (start, end) in zip(keys,
+                                                  metadatas,
+                                                  steds,
+                                                  strict=False):
             assert memobj_meta.dtype is not None
             kv_shape = memobj_meta.shape
             kv_dtype = memobj_meta.dtype
@@ -315,7 +317,7 @@ class LMCacheEngine:
             # For example, disk->gpu is faster than disk->cpu->gpu.
             # RDMA is another example.
             self.gpu_connector.to_gpu(memory_obj, start, end, **kwargs)
-            self.memory_allocator.ref_count_down(memory_obj)
+            memory_obj.ref_count_down()
 
             # NOTE (ApostaC): This is only for the current implementation:
             # When the object is retrieved back to vLLM, the storage backend
@@ -362,10 +364,32 @@ class LMCacheEngine:
         :return: An int indicating how many prefix tokens are cached.
         """
         end = 0
+        search_local = True  # we always lookup local storage_manager first
+        # secondary lookup on p2p (via lookup_server) if enabled
+        search_p2p = (self.enable_p2p
+                      and (search_range is None or "p2p" in search_range))
+
         for start, end, key in self.token_database.process_tokens(tokens):
             assert isinstance(key, CacheEngineKey)
-            if not self.storage_manager.contains(key, search_range):
-                return start
+            if search_local:
+                if self.storage_manager.contains(key, search_range):
+                    # found in storage manager, no need to search p2p
+                    continue
+                else:
+                    # key not found in storage_manager
+                    # search only p2p from now on
+                    search_local = False
+            if search_p2p:
+                assert self.lookup_server is not None
+                if self.lookup_server.lookup(key):
+                    # found in p2p
+                    # continue loop to ensure a maximal prefix match
+                    continue
+            # not found in both storage_manager and p2p,
+            # return start, which equals last iteration's end
+            return start
+
+        # all tokens where found, return the maximal end
         return end
 
     def clear(

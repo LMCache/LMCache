@@ -8,7 +8,6 @@ Prerequisites
 
 - Python 3.10+
 - CUDA 12.4+
-- PyTorch 2.6+
 
 Setup using Python
 ------------------
@@ -32,6 +31,21 @@ To install from source, clone the repository and install in editable mode:
     git clone https://github.com/LMCache/LMCache.git
     cd LMCache
     pip install -e .
+
+Install LMCache with uv
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+We recommend developers to use `uv` for a better package management:
+
+.. code-block:: bash
+
+    git clone https://github.com/LMCache/LMCache.git
+    cd LMCache
+    
+    uv venv --python 3.12
+    source .venv/bin/activate
+    uv pip install -e .
+
 
 LMCache with vLLM v1
 ~~~~~~~~~~~~~~~~~~~~

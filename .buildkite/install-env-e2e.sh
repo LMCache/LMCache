@@ -1,29 +1,32 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -euo pipefail
 
-CONDA_ENV_NAME="buildkite-e2e"
-PYTHON_VERSION=3.10
+# ─── Configuration ────────────────────────────────────────────────────────────
+VENV_DIR="buildkite-e2e"
+CUDA_VERSION=12.1
 
-exist_env="$(conda env list | grep ${CONDA_ENV_NAME})"
-if [[ -n $exist_env ]]; then
-    echo "Skipping env creation"
+# ─── Create venv if not exists ────────────────────────────────────────────────
+if [[ -d "${VENV_DIR}" ]]; then
+    echo "Skipping venv creation: '${VENV_DIR}' already exists."
 else
-    conda create -n ${CONDA_ENV_NAME} python=${PYTHON_VERSION} -y
+    uv venv "${VENV_DIR}"
 fi
 
-cuda_version=12.1
-export CUDA_HOME=/usr/local/cuda-${cuda_version}
-export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
-export PATH=$CUDA_HOME/bin:$PATH
+# ─── CUDA Environment Variables ───────────────────────────────────────────────
+export CUDA_HOME="/usr/local/cuda-${CUDA_VERSION}"
+export LD_LIBRARY_PATH="${CUDA_HOME}/lib64:${LD_LIBRARY_PATH:-}"
+export PATH="${CUDA_HOME}/bin:${PATH}"
 
-eval "$(conda shell.bash hook)"
-conda activate ${CONDA_ENV_NAME}
+# ─── Activate venv ────────────────────────────────────────────────────────────
+source "${VENV_DIR}/bin/activate"
 
-set -xe 
+# ─── Install packages using regular pip ───────────────────────────────────────
+set -xe
 
 pip install -r requirements.txt
 pip install -r requirements-test.txt
 pip install coverage
 
 set +x
-echo "Current env:"
-pip freeze 
+echo "Current environment packages:"
+pip freeze

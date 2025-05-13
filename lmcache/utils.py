@@ -1,3 +1,17 @@
+# Copyright 2024-2025 LMCache Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import hashlib
 import threading
 from dataclasses import dataclass
@@ -60,6 +74,25 @@ class CacheEngineKey:
             raise ValueError(f"Invalid key string: {s}")
         return CacheEngineKey(parts[0], parts[1], int(parts[2]), int(parts[3]),
                               parts[4])
+
+    def to_dict(self):
+        # Note(Kuntai): this is used for serializing CacheEngineKey via msgpack.
+        return {
+            "__type__": "CacheEngineKey",
+            "fmt": self.fmt,
+            "model_name": self.model_name,
+            "world_size": self.world_size,
+            "worker_id": self.worker_id,
+            "chunk_hash": self.chunk_hash
+        }
+
+    @staticmethod
+    def from_dict(d):
+        return CacheEngineKey(fmt=d["fmt"],
+                              model_name=d["model_name"],
+                              world_size=d["world_size"],
+                              worker_id=d["worker_id"],
+                              chunk_hash=d["chunk_hash"])
 
 
 ##### NVTX annotation #####

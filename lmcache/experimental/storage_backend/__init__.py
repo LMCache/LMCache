@@ -1,3 +1,17 @@
+# Copyright 2024-2025 LMCache Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import asyncio
 from collections import OrderedDict
 from typing import TYPE_CHECKING, Optional
@@ -49,7 +63,7 @@ def CreateStorageBackends(
     storage_backends[backend_name] = local_cpu_backend
 
     if config.local_disk and config.max_local_disk_size > 0:
-        local_disk_backend = LocalDiskBackend(config, loop, memory_allocator,
+        local_disk_backend = LocalDiskBackend(config, loop, local_cpu_backend,
                                               dst_device, lmcache_worker,
                                               lookup_server)
         backend_name = str(local_disk_backend)
@@ -57,7 +71,7 @@ def CreateStorageBackends(
 
     if config.remote_url is not None:
         remote_backend = RemoteBackend(config, metadata, loop,
-                                       memory_allocator, dst_device,
+                                       local_cpu_backend, dst_device,
                                        lookup_server)
         backend_name = str(remote_backend)
         storage_backends[backend_name] = remote_backend

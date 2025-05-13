@@ -17,7 +17,6 @@ import torch
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.experimental.config import LMCacheEngineConfig
 from lmcache.experimental.memory_management import (BytesBufferMemoryObj,
-                                                    MemoryAllocatorInterface,
                                                     MemoryObj)
 from lmcache.experimental.storage_backend.naive_serde.cachegen_basics import \
     CacheGenConfig
@@ -32,8 +31,7 @@ logger = init_logger(__name__)
 class CacheGenSerializer(Serializer):
 
     def __init__(self, config: LMCacheEngineConfig,
-                 metadata: LMCacheEngineMetadata,
-                 memory_allocator: MemoryAllocatorInterface):
+                 metadata: LMCacheEngineMetadata):
         self.cachegen_config = CacheGenConfig.from_model_name(
             metadata.model_name)
         self.chunk_size = config.chunk_size
@@ -42,8 +40,6 @@ class CacheGenSerializer(Serializer):
         self.value_bins = self.make_value_bins(self.cachegen_config)
 
         self.kv_shape = metadata.kv_shape
-
-        self.memory_allocator = memory_allocator
 
     def make_key_bins(self, config: CacheGenConfig) -> torch.Tensor:
         ret = torch.zeros(config.nlayers)

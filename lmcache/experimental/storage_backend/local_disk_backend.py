@@ -1,3 +1,17 @@
+# Copyright 2024-2025 LMCache Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import asyncio
 import os
 import threading
@@ -12,11 +26,12 @@ from lmcache.experimental.cache_controller.message import (KVAdmitMsg,
                                                            KVEvictMsg)
 from lmcache.experimental.config import LMCacheEngineConfig
 from lmcache.experimental.lookup_server import LookupServerInterface
-from lmcache.experimental.memory_management import (MemoryAllocatorInterface,
-                                                    MemoryObj)
+from lmcache.experimental.memory_management import MemoryObj
 from lmcache.experimental.storage_backend.abstract_backend import \
     StorageBackendInterface
 from lmcache.experimental.storage_backend.evictor import LRUEvictor, PutStatus
+from lmcache.experimental.storage_backend.local_cpu_backend import \
+    LocalCPUBackend
 from lmcache.logging import init_logger
 from lmcache.observability import LMCStatsMonitor
 from lmcache.utils import (CacheEngineKey, DiskCacheMetadata,
@@ -34,7 +49,7 @@ class LocalDiskBackend(StorageBackendInterface):
         self,
         config: LMCacheEngineConfig,
         loop: asyncio.AbstractEventLoop,
-        memory_allocator: MemoryAllocatorInterface,
+        local_cpu_backend: LocalCPUBackend,
         dst_device: str = "cuda",
         lmcache_worker: Optional["LMCacheWorker"] = None,
         lookup_server: Optional[LookupServerInterface] = None,
@@ -42,6 +57,8 @@ class LocalDiskBackend(StorageBackendInterface):
         self.dict: OrderedDict[CacheEngineKey,
                                DiskCacheMetadata] = OrderedDict()
         self.dst_device = dst_device
+
+        self.local_cpu_backend = local_cpu_backend
 
         self.disk_lock = threading.Lock()
         assert config.local_disk is not None
@@ -57,8 +74,6 @@ class LocalDiskBackend(StorageBackendInterface):
 
         self.loop = loop
         self.put_tasks: List[CacheEngineKey] = []
-
-        self.memory_allocator = memory_allocator
 
         self.lmcache_worker = lmcache_worker
         self.instance_id = config.lmcache_instance_id
@@ -140,7 +155,7 @@ class LocalDiskBackend(StorageBackendInterface):
         if self.lookup_server is not None:
             self.lookup_server.batched_remove(evict_keys)
 
-        self.memory_allocator.ref_count_up(memory_obj)
+        memory_obj.ref_count_up()
 
         self.disk_lock.acquire()
         self.put_tasks.append(key)
@@ -221,7 +236,8 @@ class LocalDiskBackend(StorageBackendInterface):
             await f.write(byte_array)
 
         self.insert_key(key, memory_obj)
-        self.memory_allocator.ref_count_down(memory_obj)
+
+        memory_obj.ref_count_down()
 
         self.disk_lock.acquire()
         self.put_tasks.remove(key)
@@ -238,7 +254,7 @@ class LocalDiskBackend(StorageBackendInterface):
         """
         Async load bytearray from disk.
         """
-        memory_obj = self.memory_allocator.allocate(shape, dtype)
+        memory_obj = self.local_cpu_backend.allocate(shape, dtype)
         if memory_obj is None:
             logger.debug("Memory allocation failed during async disk load.")
             return None
@@ -259,7 +275,7 @@ class LocalDiskBackend(StorageBackendInterface):
         """
         Load bytearray from disk.
         """
-        memory_obj = self.memory_allocator.allocate(shape, dtype)
+        memory_obj = self.local_cpu_backend.allocate(shape, dtype)
         if memory_obj is None:
             logger.debug("Memory allocation failed during async disk load.")
             return None

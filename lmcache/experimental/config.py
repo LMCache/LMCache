@@ -1,3 +1,17 @@
+# Copyright 2024-2025 LMCache Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import os
 import re
 from dataclasses import dataclass
@@ -66,6 +80,9 @@ class LMCacheEngineConfig:
     # HACK: explicit option to enable/disable nixl GC before it's mature enough
     nixl_enable_gc: Optional[bool] = False
 
+    # The url of the actual remote lmcache instance for auditing
+    audit_actual_remote_url: Optional[str] = None
+
     @staticmethod
     def from_defaults(
         chunk_size: int = 256,
@@ -95,6 +112,7 @@ class LMCacheEngineConfig:
         nixl_buffer_size: Optional[int] = None,
         nixl_buffer_device: Optional[str] = None,
         nixl_enable_gc: Optional[bool] = False,
+        audit_actual_remote_url: Optional[str] = None,
     ) -> "LMCacheEngineConfig":
         # TODO (ApostaC): Add nixl config
         return LMCacheEngineConfig(
@@ -105,7 +123,8 @@ class LMCacheEngineConfig:
             error_handling, enable_controller, lmcache_instance_id,
             controller_url, lmcache_worker_port, enable_nixl, nixl_role,
             nixl_peer_host, nixl_peer_port, nixl_buffer_size,
-            nixl_buffer_device, nixl_enable_gc).validate()
+            nixl_buffer_device, nixl_enable_gc,
+            audit_actual_remote_url).validate()
 
     @staticmethod
     def from_legacy(
@@ -217,6 +236,8 @@ class LMCacheEngineConfig:
         nixl_buffer_device = config.get("nixl_buffer_device", None)
         nixl_enable_gc = config.get("nixl_enable_gc", False)
 
+        audit_actual_remote_url = config.get("audit_actual_remote_url", None)
+
         match local_disk:
             case None:
                 local_disk_path = None
@@ -260,6 +281,7 @@ class LMCacheEngineConfig:
             nixl_buffer_size,
             nixl_buffer_device,
             nixl_enable_gc,
+            audit_actual_remote_url,
         ).validate().log_config()
 
     @staticmethod
@@ -369,6 +391,9 @@ class LMCacheEngineConfig:
             get_env_name("nixl_buffer_device"), config.nixl_buffer_device)
         config.nixl_enable_gc = to_bool(
             parse_env(get_env_name("nixl_enable_gc"), config.nixl_enable_gc))
+        config.audit_actual_remote_url = parse_env(
+            get_env_name("audit_actual_remote_url"),
+            config.audit_actual_remote_url)
         return config.validate().log_config()
 
     def to_original_config(self) -> orig_config.LMCacheEngineConfig:

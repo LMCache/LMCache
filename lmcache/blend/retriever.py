@@ -1,3 +1,17 @@
+# Copyright 2024-2025 LMCache Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import List, Optional, Tuple
 
@@ -96,7 +110,9 @@ class SPTBlendRetrieverTask(BlendRetrieverTask):
             dtype = kv.dtype
             device = kv.device
 
-        for token_segment, task in zip(self.token_segments, self.tasks):
+        for token_segment, task in zip(self.token_segments,
+                                       self.tasks,
+                                       strict=False):
             kv, ret_mask = task.result()
             length = int(torch.sum(ret_mask))
             if length > 0:
@@ -139,7 +155,7 @@ class SPTBlendRetrieverTask(BlendRetrieverTask):
                 raise ValueError(f"Unknown KV format {self.fmt}")
 
         # Update the shape of the None tensors
-        for i, (k, v) in enumerate(zip(keys, values)):
+        for i, (k, v) in enumerate(zip(keys, values, strict=False)):
             shape_placeholder[token_dim] = len(self.token_segments[i])
             if k is None:
                 keys[i] = torch.empty(shape_placeholder,

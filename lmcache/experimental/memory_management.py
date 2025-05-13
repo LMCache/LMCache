@@ -1,3 +1,17 @@
+# Copyright 2024-2025 LMCache Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import abc
 import ctypes
 import threading
@@ -77,11 +91,39 @@ class MemoryObjMetadata:
         size_in_bytes = num_elements * element_size
         return size_in_bytes
 
+    def to_dict(self):
+        # Note(Kuntai): this is used for serializing MemoryObjMetadata via
+        # msgpack.
+        return {
+            "__type__": "MemoryObjMetadata",
+            "shape": list(self.shape),  # torch.Size -> list
+            "dtype": str(self.dtype) if self.dtype is not None else None,
+            "address": self.address,
+            "phy_size": self.phy_size,
+            "ref_count": self.ref_count,
+            "fmt": self.fmt.value
+        }
+
+    @staticmethod
+    def from_dict(d):
+        dtype_str = d["dtype"]
+        dtype = (getattr(torch, dtype_str.replace("torch.", ""))
+                 if dtype_str else None)
+        return MemoryObjMetadata(shape=torch.Size(d["shape"]),
+                                 dtype=dtype,
+                                 address=d["address"],
+                                 phy_size=d["phy_size"],
+                                 ref_count=d["ref_count"],
+                                 fmt=MemoryFormat(d["fmt"]))
+
 
 class MemoryObj(metaclass=abc.ABCMeta):
     """
     MemoryObj interface.
     """
+
+    def __init__(self, metadata: MemoryObjMetadata):
+        self.meta = metadata
 
     @abc.abstractmethod
     def invalidate(self):
@@ -131,6 +173,27 @@ class MemoryObj(metaclass=abc.ABCMeta):
         """
         raise NotImplementedError
 
+    @abc.abstractmethod
+    def ref_count_up(self):
+        """
+        Increase ref count for the given MemoryObj by one.
+        """
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    def ref_count_down(self):
+        """
+        Decrease ref count for the given MemoryObj by one.
+        """
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    def get_ref_count(self) -> int:
+        """
+        Get ref count for the given MemoryObj.
+        """
+        raise NotImplementedError
+
     @property
     @abc.abstractmethod
     def metadata(self) -> MemoryObjMetadata:
@@ -161,10 +224,16 @@ class TensorMemoryObj(MemoryObj):
     Wraps a raw flat tensor with some metadata
     """
 
-    def __init__(self, raw_data: torch.Tensor, metadata: MemoryObjMetadata):
+    def __init__(
+            self,
+            raw_data: torch.Tensor,
+            metadata: MemoryObjMetadata,
+            parent_allocator: Optional["MemoryAllocatorInterface"] = None):
         self.raw_data = raw_data
         self.meta = metadata
         self.valid = True
+        self.lock = threading.Lock()
+        self.parent_allocator = parent_allocator
 
     def invalidate(self):
         self.valid = False
@@ -179,30 +248,46 @@ class TensorMemoryObj(MemoryObj):
         return size_in_bytes
 
     def get_shape(self) -> torch.Size:
-        return self.metadata.shape
+        return self.meta.shape
 
     def get_dtype(self) -> torch.dtype:
-        assert self.metadata.dtype is not None
-        return self.metadata.dtype
+        return self.meta.dtype
 
     def get_memory_format(self) -> MemoryFormat:
-        return self.metadata.fmt
+        with self.lock:
+            return self.meta.fmt
 
     def get_physical_size(self) -> int:
-        return self.metadata.phy_size
+        return self.meta.phy_size
+
+    def ref_count_up(self):
+        with self.lock:
+            self.meta.ref_count += 1
+
+    def ref_count_down(self):
+        with self.lock:
+            self.meta.ref_count -= 1
+            if self.meta.ref_count == 0 and \
+                self.parent_allocator is not None:
+                self.parent_allocator.free(self)
+
+    def get_ref_count(self) -> int:
+        with self.lock:
+            return self.meta.ref_count
 
     @property
     def metadata(self) -> MemoryObjMetadata:
-        return self.meta
+        with self.lock:
+            return self.meta
 
     @property
     def tensor(self) -> Optional[torch.Tensor]:
         if not self.valid:
             logger.warning("Trying to access an invalidated MemoryObj")
             return None
-        assert self.metadata.dtype is not None
-        return self.raw_data.view(self.metadata.dtype)\
-                            .view(self.metadata.shape)
+        assert self.meta.dtype is not None
+        return self.raw_data.view(self.meta.dtype)\
+                            .view(self.meta.shape)
 
     @property
     def byte_array(self) -> bytes:
@@ -218,8 +303,8 @@ class TensorMemoryObj(MemoryObj):
 
 class CopyLessMemoryObj(TensorMemoryObj):
 
-    def __init__(self, raw_data, metadata, callback):
-        super().__init__(raw_data, metadata)
+    def __init__(self, raw_data, metadata, callback, parent_allocator=None):
+        super().__init__(raw_data, metadata, parent_allocator)
         self.callback = callback
 
     def __del__(self):
@@ -267,6 +352,15 @@ class BytesBufferMemoryObj(MemoryObj):
 
     def get_physical_size(self) -> int:
         return self.metadata.phy_size
+
+    def ref_count_up(self):
+        pass
+
+    def ref_count_down(self):
+        pass
+
+    def get_ref_count(self) -> int:
+        return 1
 
     @property
     def metadata(self) -> MemoryObjMetadata:
@@ -327,33 +421,6 @@ class MemoryAllocatorInterface(metaclass=abc.ABCMeta):
         Instead, use `ref_count_down` to decrease ref count.
 
         :param MemoryObj memory_obj: The MemoryObj to free.
-        """
-        raise NotImplementedError
-
-    @abc.abstractmethod
-    def ref_count_up(self, memory_obj: MemoryObj):
-        """
-        Increase ref count for the given MemoryObj.
-
-        :param MemoryObj memory_obj.
-        """
-        raise NotImplementedError
-
-    @abc.abstractmethod
-    def ref_count_down(self, memory_obj: MemoryObj):
-        """
-        Decrease ref count for the given MemoryObj.
-
-        :param MemoryObj memory_obj.
-        """
-        raise NotImplementedError
-
-    @abc.abstractmethod
-    def get_ref_count(self, memory_obj: MemoryObj):
-        """
-        Get ref count for the given MemoryObj.
-
-        :param MemoryObj memory_obj.
         """
         raise NotImplementedError
 
@@ -426,6 +493,7 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         shape: Union[torch.Size, Tuple[int, ...]],
         dtype: Optional[torch.dtype],
         fmt: MemoryFormat = MemoryFormat.KV_BLOB,
+        parent_allocator: Optional["MemoryAllocatorInterface"] = None,
     ) -> Optional[TensorMemoryObj]:
         if not isinstance(shape, torch.Size):
             shape = torch.Size(shape)
@@ -463,7 +531,8 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         return TensorMemoryObj(
             raw_data=self.buffer[block.start:block.start + raw_size],
             metadata=MemoryObjMetadata(shape, dtype, block.start, aligned_size,
-                                       1, fmt))
+                                       1, fmt),
+            parent_allocator=parent_allocator)
 
     def dry_allocate(
         self,
@@ -481,8 +550,8 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         if not memory_obj.is_valid():
             return
 
-        new_free_block = FreeBlock(start=memory_obj.metadata.address,
-                                   size=memory_obj.metadata.phy_size)
+        new_free_block = FreeBlock(start=memory_obj.meta.address,
+                                   size=memory_obj.meta.phy_size)
         index = self.explicit_list.bisect_right(new_free_block)
         prev_block = self.explicit_list[index - 1] if index > 0 else None
         succ_block = self.explicit_list[index] \
@@ -495,20 +564,9 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         memory_obj.invalidate()
 
         # Update debug status
-        self.total_allocated_size -= memory_obj.metadata.phy_size
+        self.total_allocated_size -= memory_obj.meta.phy_size
         self.num_active_allocations = max(0, self.num_active_allocations - 1)
         self.stats_monitor.update_local_cache_usage(self.total_allocated_size)
-
-    def ref_count_up(self, memory_obj: MemoryObj):
-        memory_obj.metadata.ref_count += 1
-
-    def ref_count_down(self, memory_obj: MemoryObj):
-        memory_obj.metadata.ref_count -= 1
-        if memory_obj.metadata.ref_count == 0:
-            self.free(memory_obj)
-
-    def get_ref_count(self, memory_obj: MemoryObj):
-        return memory_obj.metadata.ref_count
 
     def memcheck(self):
         """For debug purposes.
@@ -532,7 +590,9 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
             clear = False
 
         # Check if the blocks are coalesced
-        for prev, succ in zip(self.explicit_list[:-1], self.explicit_list[1:]):
+        for prev, succ in zip(self.explicit_list[:-1],
+                              self.explicit_list[1:],
+                              strict=False):
             if prev.can_be_coalesced(succ):
                 logger.error("Memory allocator has non-coalesced blocks")
                 logger.error("This implies a bug in the memory allocator")
@@ -580,15 +640,6 @@ class BufferAllocator(MemoryAllocatorInterface):
     def free(self, memory_obj: MemoryObj):
         return
 
-    def ref_count_up(self, memory_obj: MemoryObj):
-        pass
-
-    def ref_count_down(self, memory_obj: MemoryObj):
-        pass
-
-    def get_ref_count(self, memory_obj: MemoryObj):
-        pass
-
     def memcheck(self):
         return True
 
@@ -623,18 +674,6 @@ class HostMemoryAllocator(MemoryAllocatorInterface):
         with self.host_mem_lock:
             return self.allocator.memcheck()
 
-    def ref_count_up(self, memory_obj: MemoryObj):
-        with self.host_mem_lock:
-            self.allocator.ref_count_up(memory_obj)
-
-    def ref_count_down(self, memory_obj: MemoryObj):
-        with self.host_mem_lock:
-            self.allocator.ref_count_down(memory_obj)
-
-    def get_ref_count(self, memory_obj: MemoryObj):
-        with self.host_mem_lock:
-            return self.allocator.get_ref_count(memory_obj)
-
     def dry_allocate(
         self,
         shape: Union[torch.Size, Tuple[int, ...]],
@@ -666,23 +705,11 @@ class PinMemoryAllocator(MemoryAllocatorInterface):
         fmt: MemoryFormat = MemoryFormat.KV_BLOB,
     ) -> Optional[MemoryObj]:
         with self.host_mem_lock:
-            return self.allocator.allocate(shape, dtype, fmt)
+            return self.allocator.allocate(shape, dtype, fmt, self)
 
     def free(self, memory_obj: MemoryObj):
         with self.host_mem_lock:
             self.allocator.free(memory_obj)
-
-    def ref_count_up(self, memory_obj: MemoryObj):
-        with self.host_mem_lock:
-            self.allocator.ref_count_up(memory_obj)
-
-    def ref_count_down(self, memory_obj: MemoryObj):
-        with self.host_mem_lock:
-            self.allocator.ref_count_down(memory_obj)
-
-    def get_ref_count(self, memory_obj: MemoryObj):
-        with self.host_mem_lock:
-            return self.allocator.get_ref_count(memory_obj)
 
     def memcheck(self):
         with self.host_mem_lock:
@@ -725,7 +752,7 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
             return self.buffer_allocator.allocate(shape, dtype, fmt)
         elif fmt == MemoryFormat.KV_BLOB:
             with self.host_mem_lock:
-                return self.pin_allocator.allocate(shape, dtype, fmt)
+                return self.pin_allocator.allocate(shape, dtype, fmt, self)
         else:
             raise ValueError(f"Unsupported memory format: {fmt}")
 
@@ -738,42 +765,12 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
         raise NotImplementedError
 
     def free(self, memory_obj: MemoryObj):
-        fmt = memory_obj.get_memory_format()
+        fmt = memory_obj.meta.fmt
         if fmt == MemoryFormat.BINARY_BUFFER:
             self.buffer_allocator.free(memory_obj)
         elif fmt == MemoryFormat.KV_BLOB:
             with self.host_mem_lock:
                 self.pin_allocator.free(memory_obj)
-        else:
-            raise ValueError(f"Unsupported memory format: {fmt}")
-
-    def ref_count_up(self, memory_obj: MemoryObj):
-        fmt = memory_obj.get_memory_format()
-        if fmt == MemoryFormat.BINARY_BUFFER:
-            self.buffer_allocator.ref_count_up(memory_obj)
-        elif fmt == MemoryFormat.KV_BLOB:
-            with self.host_mem_lock:
-                self.pin_allocator.ref_count_up(memory_obj)
-        else:
-            raise ValueError(f"Unsupported memory format: {fmt}")
-
-    def ref_count_down(self, memory_obj: MemoryObj):
-        fmt = memory_obj.get_memory_format()
-        if fmt == MemoryFormat.BINARY_BUFFER:
-            self.buffer_allocator.ref_count_down(memory_obj)
-        elif fmt == MemoryFormat.KV_BLOB:
-            with self.host_mem_lock:
-                self.pin_allocator.ref_count_down(memory_obj)
-        else:
-            raise ValueError(f"Unsupported memory format: {fmt}")
-
-    def get_ref_count(self, memory_obj: MemoryObj):
-        fmt = memory_obj.get_memory_format()
-        if fmt == MemoryFormat.BINARY_BUFFER:
-            return self.buffer_allocator.get_ref_count(memory_obj)
-        elif fmt == MemoryFormat.KV_BLOB:
-            with self.host_mem_lock:
-                return self.pin_allocator.get_ref_count(memory_obj)
         else:
             raise ValueError(f"Unsupported memory format: {fmt}")
 
@@ -803,15 +800,6 @@ class GPUMemoryAllocator(MemoryAllocatorInterface):
 
     def free(self, memory_obj: MemoryObj):
         self.allocator.free(memory_obj)
-
-    def ref_count_up(self, memory_obj: MemoryObj):
-        self.allocator.ref_count_up(memory_obj)
-
-    def ref_count_down(self, memory_obj: MemoryObj):
-        self.allocator.ref_count_down(memory_obj)
-
-    def get_ref_count(self, memory_obj: MemoryObj):
-        return self.allocator.get_ref_count(memory_obj)
 
     def memcheck(self):
         return self.allocator.memcheck()
@@ -860,7 +848,8 @@ class AdHocMemoryAllocator(MemoryAllocatorInterface):
                                                           address=0,
                                                           phy_size=0,
                                                           ref_count=1,
-                                                          fmt=fmt))
+                                                          fmt=fmt),
+                               parent_allocator=self)
 
     def dry_allocate(
         self,

@@ -16,7 +16,6 @@ from typing import Optional, Tuple
 
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.experimental.config import LMCacheEngineConfig
-from lmcache.experimental.memory_management import MemoryAllocatorInterface
 from lmcache.experimental.storage_backend.naive_serde.cachegen_decoder import \
     CacheGenDeserializer
 from lmcache.experimental.storage_backend.naive_serde.cachegen_encoder import \
@@ -31,7 +30,6 @@ from lmcache.experimental.storage_backend.naive_serde.serde import (
 
 def CreateSerde(
     serde_type: str,
-    memory_allocator: MemoryAllocatorInterface,
     metadata: LMCacheEngineMetadata,
     config: LMCacheEngineConfig,
 ) -> Tuple[Serializer, Deserializer]:
@@ -39,16 +37,16 @@ def CreateSerde(
     d: Optional[Deserializer] = None
 
     if serde_type == "naive":
-        s, d = NaiveSerializer(memory_allocator), \
+        s, d = NaiveSerializer(), \
             NaiveDeserializer()
     elif serde_type == "kivi":
-        s, d = KIVISerializer(memory_allocator), \
-            KIVIDeserializer(memory_allocator)
+        s, d = KIVISerializer(), \
+            KIVIDeserializer()
     elif serde_type == "cachegen":
         s, d = CacheGenSerializer(
-                config, metadata, memory_allocator), \
+                config, metadata), \
             CacheGenDeserializer(
-                config, metadata, memory_allocator)
+                config, metadata)
     else:
         raise ValueError(f"Invalid type: {serde_type}")
 
