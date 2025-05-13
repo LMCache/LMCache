@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
 import threading
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
@@ -313,12 +312,11 @@ class LMCacheConnectorV1Impl:
         if role == KVConnectorRole.SCHEDULER:
             self.lookup_client = LMCacheLookupClient(role, is_tp, vllm_config)
         else:
-            # FIXME(Jiayi): support non-environ config
-            use_layerwise = os.getenv("LMCACHE_USE_LAYERWISE", "False")
-            self.use_layerwise = use_layerwise.lower() in ["true", "1"]
             self.lmcache_engine = init_lmcache_engine(
                 vllm_config.model_config, vllm_config.parallel_config,
-                vllm_config.cache_config, self.use_layerwise)
+                vllm_config.cache_config)
+            self.use_layerwise = isinstance(self.lmcache_engine,
+                                            LayerwiseLMCacheEngine)
 
             # NOTE: Only create the KV lookup API server on worker rank 0
             # when there are multiple workers

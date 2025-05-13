@@ -525,6 +525,24 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
     @_lmcache_nvtx_annotate
     def batched_to_gpu(self, starts: List[int], ends: List[int], **kwargs):
         """
+        This function is a generator that moves the KV cache from the memory 
+        objects to paged GPU memory. The first iteration will prepare some 
+        related metadata. In each of the following iterations, it will first 
+        wait until the loading of the previous layer finish, and then load
+        one layer of KV cache from the memory objects -> GPU buffer -> 
+        paged GPU memory. The last iteration simply waits for the last layer 
+        to finish. 
+        In total, this the generator will yield num_layers + 2 times.
+        
+        :param starts: The starting indices of the KV cache in the corresponding
+            token sequence.
+        
+        :param ends: The ending indices of the KV cache in the corresponding
+            token sequence.
+        
+        :raises ValueError: If 'kvcaches' is not provided in kwargs.
+        
+        :raises ValueError: If 'slot_mapping' is not provided in kwargs.
         """
 
         if "kvcaches" not in kwargs:
@@ -580,6 +598,31 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
     @_lmcache_nvtx_annotate
     def batched_from_gpu(self, memory_objs: List[List[MemoryObj]],
                          starts: List[int], ends: List[int], **kwargs):
+        """
+        This function is a generator that moves the KV cache from the paged GPU 
+        memory to the memory objects. The first iteration will prepare some 
+        related metadata and initiate the transfer in the first layer. In each 
+        of the following iterations, it will first wait until the storing of 
+        previous layer finishes, and then initiate string the KV cache of the
+        current layer one. The storing process of the KV cache is paged GPU 
+        memory -> GPU buffer -> memory objects. The last iteration simply waits 
+        for the last layer to finish. 
+        In total, this the generator will yield num_layers + 1 times.
+        
+        :param memory_objs: The memory objects to store the KV cache. The first 
+            dimension is the number of layers, and the second dimension is the
+            number of memory objects (i.e., number of chunks) for each layer.
+        
+        :param starts: The starting indices of the KV cache in the corresponding
+            token sequence.
+        
+        :param ends: The ending indices of the KV cache in the corresponding
+            token sequence.
+        
+        :raises ValueError: If 'kvcaches' is not provided in kwargs.
+        
+        :raises ValueError: If 'slot_mapping' is not provided in kwargs.
+        """
 
         if "kvcaches" not in kwargs:
             raise ValueError("'kvcaches' should be provided in kwargs.")

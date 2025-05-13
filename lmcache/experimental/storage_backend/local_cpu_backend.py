@@ -44,7 +44,7 @@ class LocalCPUBackend(StorageBackendInterface):
     left in the allocator so we cannot use LRUEvictor().
     (max_local_cpu_size > 0 initializes the memory_allocator)
     Even if local_cpu is False (the hot_cache is not used), contains(),
-    insert_key(), remove(), touch(), get_blocking(), get_keys(), and clear()
+    insert_key(), remove(), get_blocking(), get_keys(), and clear()
     are still callable by the storage manager.
     """
 
@@ -69,11 +69,11 @@ class LocalCPUBackend(StorageBackendInterface):
     def __str__(self):
         return self.__class__.__name__
 
-    def contains(self, key: CacheEngineKey, touch: bool = False) -> bool:
+    def contains(self, key: CacheEngineKey, pin: bool = False) -> bool:
         with self.cpu_lock:
             if key not in self.hot_cache:
                 return False
-            if touch:
+            if pin:
                 self.hot_cache[key].pin()
             return True
 

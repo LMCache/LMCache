@@ -116,9 +116,9 @@ class RemoteBackend(StorageBackendInterface):
 
         return wrapper
 
-    # TODO(Jiayi): handle `touch` semantics
+    # TODO(Jiayi): handle `pin` semantics
     @_init_connection_wrapper
-    def contains(self, key: CacheEngineKey, touch: bool = False) -> bool:
+    def contains(self, key: CacheEngineKey, pin: bool = False) -> bool:
         if self.connection is None:
             logger.warning("Connection is None in contains, returning False")
             return False

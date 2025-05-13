@@ -144,7 +144,7 @@ class StorageManager:
 
     def batched_put(
         self,
-        keys: List[CacheEngineKey],
+        keys: Sequence[CacheEngineKey],
         memory_objs: List[MemoryObj],
     ) -> None:
         """
@@ -156,24 +156,6 @@ class StorageManager:
         """
         for key, obj in zip(keys, memory_objs):
             self.put(key, obj)
-
-    def layerwise_batched_put(
-        self,
-        keys: List[List[CacheEngineKey]],
-        memory_objs: List[List[MemoryObj]],
-    ) -> Generator[None, None, None]:
-        """
-        Non-blocking function to put the memory objects into the storages
-        in a layerwise manner.
-        Do not store if the same object is being stored (handled here by
-        storage manager) or has been stored (handled by storage backend).
-        """
-        for layer_id, (keys_multi_chunk, objs_multi_chunk) in \
-            enumerate(zip(keys, memory_objs)):
-            # Store all chunks for one layer
-            self.batched_put(keys_multi_chunk, objs_multi_chunk)
-            logger.debug(f"Submitted tasks for storing layer {layer_id}")
-            yield
 
     def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         """
@@ -235,6 +217,12 @@ class StorageManager:
         in a layerwise manner.
         Do not store if the same object is being stored (handled here by
         storage manager) or has been stored (handled by storage backend).
+        
+        :param List[List[CacheEngineKey]] keys: The keys to get. The first
+            dimension corresponds to the number of layers, and the second 
+            dimension corresponds to the number of chunks.
+        
+        :return: A generator that yields a list of futures for each layer.
         """
         for keys_multi_chunk in keys:
             # Store all chunks for one layer
@@ -315,7 +303,7 @@ class StorageManager:
         self,
         key: CacheEngineKey,
         search_range: Optional[List[str]] = None,
-        touch: bool = False,
+        pin: bool = False,
     ) -> bool:
         """
         Check whether the key exists in the storage backend.
@@ -326,6 +314,8 @@ class StorageManager:
         to search in. Should be a subset of ["LocalCPUBackend", 
         "LocalDiskBackend"] for now.
         If None, search in all backends.
+        
+        :param bool pin: Whether to pin the key.
 
         return: True if the key exists in the specified storage backends.
         """
@@ -335,7 +325,7 @@ class StorageManager:
                 backend_name not in search_range:
                 continue
 
-            if backend.contains(key, touch):
+            if backend.contains(key, pin):
                 return True
 
         return False
@@ -369,23 +359,22 @@ class StorageManager:
 
         return num_removed
 
-    def batched_untouch(
+    def batched_unpin(
         self,
         keys: List[CacheEngineKey],
         locations: Optional[List[str]] = None,
     ) -> None:
         """
-        Untouch the keys in the specified locations.
+        Unpin the keys in the specified locations.
 
-        :param List[CacheEngineKey] keys: The keys to untouch.
+        :param List[CacheEngineKey] keys: The keys to unpin.
 
         :param Optional[List[str]] locations: The range of storage backends
-        to perform `untouch` in.
+        to perform `unpin` in.
         Should be a subset of ["LocalCPUBackend", "LocalDiskBackend"] for now.
-        If None, perform `untouch` in all backends.
+        If None, perform `unpin` in all backends.
         """
         for backend_name, backend in self.storage_backends.items():
-            # TODO(Jiayi): need to handle untouch in non-cpu backends
             if locations is None or backend_name in locations:
                 for key in keys:
                     backend.unpin(key)
@@ -506,11 +495,11 @@ class DistributedStorageManager:
         # NOTE: For zero-copy, we should not use put anymore
         raise NotImplementedError
 
-    def layerwise_batched_put(
+    def batched_put(
         self,
-        keys: Sequence[Sequence[CacheEngineKey]],
-        memory_objs: List[List[MemoryObj]],
-    ) -> Generator[None, None, None]:
+        keys: Sequence[CacheEngineKey],
+        memory_objs: List[MemoryObj],
+    ) -> None:
         raise NotImplementedError
 
     @_lmcache_nvtx_annotate
@@ -530,7 +519,7 @@ class DistributedStorageManager:
     ) -> Generator[List[Future], None, None]:
         raise NotImplementedError
 
-    def batched_untouch(
+    def batched_unpin(
         self,
         keys: Sequence[CacheEngineKey],
         locations: Optional[List[str]] = None,
@@ -551,7 +540,7 @@ class DistributedStorageManager:
         self,
         key: CacheEngineKey,
         search_range: Optional[List[str]] = None,
-        touch: bool = False,
+        pin: bool = False,
     ) -> bool:
         return self.storage_backend.contains(key)
 

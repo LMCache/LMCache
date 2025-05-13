@@ -78,7 +78,7 @@ class MemoryObjMetadata:
     # Reference count
     ref_count: int
 
-    # TODO(Jiayi): Need to differentiate between temporary pin/touch
+    # TODO(Jiayi): Need to differentiate between temporary pin
     # and persistent pin. Or maybe it's better to use only
     # `ref_count` to manage these semantics.
     # Whether the object is pinned and cannot be evicted
@@ -298,7 +298,7 @@ class TensorMemoryObj(MemoryObj):
         return self.metadata.is_pin
 
 
-# TODO(Jiayi): Need to make this compatible with touch/untouch semantics
+# TODO(Jiayi): Need to make this compatible with pin/unpin semantics
 class CopyLessMemoryObj(TensorMemoryObj):
 
     def __init__(self, raw_data, metadata, callback):

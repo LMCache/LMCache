@@ -263,12 +263,14 @@ class NixlBackend(StorageBackendInterface):
         self._registered_metadatas: list[MemoryObjMetadata] = []
         self._num_payload_added = 0
 
-    # TODO(Jiayi): handle `touch` smantics
-    def contains(self, key: CacheEngineKey, touch: bool = False) -> bool:
+    # TODO(Jiayi): handle `pin` smantics
+    def contains(self, key: CacheEngineKey, pin: bool = False) -> bool:
         """
         Check whether key is in the storage backend.
         
         :param key: The key to check
+        :param pin: Whether to pin the object in the backend.
+        
         :return: True if the key exists, False otherwise
         """
         return self._obj_pool.contains(key)

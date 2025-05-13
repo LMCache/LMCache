@@ -137,9 +137,6 @@ class ChunkedTokenDatabase(TokenDatabase):
         :param bool make_key: Whether to make the cache engine key or not.
             If False, the hash value will be returned instead.
         
-        :param Optional[int] split_layers: Split the keys by layers. If None,
-            the keys will not be split by layers.
-        
         :returns: A iterable of tuples with three elements. The first element
             is the start index of the tokens for the key. The second element
             is the end index of the tokens for the key. The third element is

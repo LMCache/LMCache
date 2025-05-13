@@ -88,11 +88,11 @@ class LocalDiskBackend(StorageBackendInterface):
     ) -> str:
         return self.path + key.to_string().replace("/", "-") + ".pt"
 
-    def contains(self, key: CacheEngineKey, touch: bool = False) -> bool:
+    def contains(self, key: CacheEngineKey, pin: bool = False) -> bool:
         with self.disk_lock:
             if key not in self.dict:
                 return False
-            if touch:
+            if pin:
                 self.dict[key].pin()
             return True
 

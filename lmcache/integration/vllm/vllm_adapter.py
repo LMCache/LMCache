@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import dataclasses
+import os
 from copy import deepcopy
 from enum import Enum
 from typing import TYPE_CHECKING, List, Optional, Tuple, Union
@@ -74,7 +75,6 @@ def init_lmcache_engine(
     model_config: ModelConfig,
     parallel_config: ParallelConfig,
     cache_config: CacheConfig,
-    use_layerwise: bool = False,
 ) -> Optional[LMCacheEngine]:
     """Initialize the LMCache engine by the given model config and parallel
     config. This function will check the environment variable
@@ -121,6 +121,11 @@ def init_lmcache_engine(
 
     vllm_gpu_connector: Union[VLLMPagedMemGPUConnectorV2,
                               VLLMPagedMemLayerwiseGPUConnector]
+
+    # FIXME(Jiayi): support non-environ config
+    env_layerwise = os.getenv("LMCACHE_USE_LAYERWISE", "False")
+    use_layerwise = env_layerwise.lower() in ["true", "1"]
+
     if use_layerwise:
         vllm_gpu_connector = VLLMPagedMemLayerwiseGPUConnector(
             hidden_dim_size,

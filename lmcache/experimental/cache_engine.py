@@ -350,6 +350,7 @@ class LMCacheEngine:
         self,
         tokens: Union[torch.Tensor, List[int]],
         search_range: Optional[List[str]] = None,
+        pin: bool = False,
     ) -> int:
         """
         Checks the existence of KV cache of the tokens from the cache engine.
@@ -360,6 +361,8 @@ class LMCacheEngine:
         to search in. Should be a subset of 
         ["LocalCPUBackend", "LocalDiskBackend"] for now.
         If None, search in all backends.
+        
+        :param bool pin: If True, pin the KV cache in the storage.
 
         :return: An int indicating how many prefix tokens are cached.
         """
@@ -372,7 +375,7 @@ class LMCacheEngine:
         for start, end, key in self.token_database.process_tokens(tokens):
             assert isinstance(key, CacheEngineKey)
             if search_local:
-                if self.storage_manager.contains(key, search_range):
+                if self.storage_manager.contains(key, search_range, pin):
                     # found in storage manager, no need to search p2p
                     continue
                 else:
@@ -431,8 +434,8 @@ class LayerwiseLMCacheEngine(LMCacheEngine):
     
     This class is used to store the layerwise cache engine. It is a
     subclass of LMCacheEngine and inherits all the methods and attributes
-    from it. The only difference is that it uses a different token database
-    and memory allocator.
+    from it. However, it retrieves the KV cache in a layerwise manner 
+    instead of chunkwise manner.
     """
 
     def __init__(
@@ -458,6 +461,23 @@ class LayerwiseLMCacheEngine(LMCacheEngine):
                     **kwargs) -> Generator[None, None, None]:
         """
         Store the KV cache in a layerwise manner.
+        
+        :param torch.Tensor tokens: The tokens of the corresponding KV caches.
+        
+        :param Optional[torch.Tensor] mask: The mask for the tokens. Should
+            have the same length as tokens. And the mask should ALWAYS be like
+            FFFFFTTTTTTT, where True means the tokens needs to be matched.
+        
+        :param **kwargs: The additional arguments for the storage backend which
+            will be passed into the gpu_connector.
+        
+        return: A generator that yields None. In the first iteration, the 
+            generator allocates the memory objects for all layers and moves 
+            the KV cache of the first layer from GPU to CPU. In the next 
+            iterations, it moves the KV cache of layer i from GPU to the memory 
+            objects (on CPU) and puts the memory objects of layer i-1 to the 
+            storage backends. In the last iteration, it puts the memory objects 
+            of the last layer to the storage backends.
         """
 
         if mask is not None:
@@ -523,14 +543,13 @@ class LayerwiseLMCacheEngine(LMCacheEngine):
             mem_obj_generator = self.gpu_connector.batched_from_gpu(
                 memory_objs, starts, ends, **kwargs)
 
-            put_genertor = self.storage_manager.layerwise_batched_put(
-                keys, memory_objs)
             next(mem_obj_generator)
 
             for layer_id in range(self.num_layers):
                 yield
                 next(mem_obj_generator)
-                next(put_genertor)
+                self.storage_manager.batched_put(keys[layer_id],
+                                                 memory_objs[layer_id])
         else:
             # If no cache are found, we still need to yield to avoid
             # `StopIteration`
@@ -551,6 +570,25 @@ class LayerwiseLMCacheEngine(LMCacheEngine):
             **kwargs) -> Generator[Optional[torch.Tensor], None, None]:
         """
         Retrieve the KV cache in a layerwise manner.
+        
+        :param torch.Tensor tokens: The tokens of the corresponding KV caches.
+        
+        :param Optional[torch.Tensor] mask: The mask for the tokens. Should
+            have the same length as tokens. And the mask should ALWAYS be like
+            FFFFFTTTTTTT, where True means the tokens needs to be matched.
+        
+        :param **kwargs: The additional arguments for the storage backend which
+            will be passed into the gpu_connector.
+        
+        return: A generator that yields Optional[torch.Tensor]. The tensor will
+            be the boolean mask indicating which tokens are retrieved and will
+            only be returned in the last iteration. In the first iteration, 
+            the generator retrieve the memory objects of the first layer from
+            the storage backends. In the next iterations, it moves the KV cache 
+            of layer i from the memory objects (on CPU) to GPU and retrieves
+            the memory objects of layer i+1 from the storage backends. In the 
+            last iteration, it moves the memory objects of the last layer to
+            the GPU.
         """
 
         if mask is not None:
@@ -607,7 +645,7 @@ class LayerwiseLMCacheEngine(LMCacheEngine):
 
             # TODO(Jiayi): Need to be done in a modular way
             for keys_layer in keys_layer_major:
-                self.storage_manager.batched_untouch(keys_layer)
+                self.storage_manager.batched_unpin(keys_layer)
         else:
             # If no cache are found, we still need to yield to avoid
             # `StopIteration`
@@ -632,7 +670,7 @@ class LayerwiseLMCacheEngine(LMCacheEngine):
         self,
         tokens: Union[torch.Tensor, List[int]],
         search_range: Optional[List[str]] = None,
-        touch: bool = False,
+        pin: bool = False,
     ) -> int:
         """
         Checks the existence of KV cache of the tokens from the cache engine.
@@ -644,7 +682,7 @@ class LayerwiseLMCacheEngine(LMCacheEngine):
         ["LocalCPUBackend", "LocalDiskBackend"] for now.
         If None, search in all backends.
         
-        :param bool touch: If True, temporarily pin the KV cache in the storage.
+        :param bool pin: If True, pin the KV cache in the storage.
 
         :return: An int indicating how many prefix tokens are cached.
         """
@@ -657,7 +695,7 @@ class LayerwiseLMCacheEngine(LMCacheEngine):
             key_all_layers = key.split_layers(self.num_layers)
             for key_single_layer in key_all_layers:
                 if not self.storage_manager.contains(key_single_layer,
-                                                     search_range, touch):
+                                                     search_range, pin):
                     return start
         return end
 
