@@ -1,4 +1,19 @@
+# Copyright 2024-2025 LMCache Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import dataclasses
+import os
 from copy import deepcopy
 from enum import Enum
 from typing import TYPE_CHECKING, List, Optional, Tuple, Union
@@ -19,7 +34,8 @@ from lmcache.config import LMCacheEngineMetadata
 from lmcache.experimental.cache_engine import (LMCacheEngine,
                                                LMCacheEngineBuilder)
 from lmcache.experimental.config import LMCacheEngineConfig
-from lmcache.experimental.gpu_connector import VLLMPagedMemGPUConnectorV2
+from lmcache.experimental.gpu_connector import (
+    VLLMPagedMemGPUConnectorV2, VLLMPagedMemLayerwiseGPUConnector)
 from lmcache.integration.vllm.utils import ENGINE_NAME, lmcache_get_config
 from lmcache.logging import init_logger
 from lmcache.utils import _lmcache_nvtx_annotate
@@ -60,8 +76,8 @@ def init_lmcache_engine(
     parallel_config: ParallelConfig,
     cache_config: CacheConfig,
 ) -> Optional[LMCacheEngine]:
-    """Initialize the LMCache engine by the given model config and parallel 
-    config. This function will check the environment variable 
+    """Initialize the LMCache engine by the given model config and parallel
+    config. This function will check the environment variable
     `LMCACHE_CONFIG_FILE` to load the configuration file. If that environment
     variable is not set, this function will return None.
 
@@ -102,14 +118,32 @@ def init_lmcache_engine(
                                      kv_shape)
     hidden_dim_size = num_kv_head * head_size
     use_gpu = need_gpu_interm_buffer(config)
-    vllm_gpu_connector = VLLMPagedMemGPUConnectorV2(hidden_dim_size,
-                                                    num_layer,
-                                                    use_gpu=use_gpu,
-                                                    chunk_size=chunk_size,
-                                                    dtype=kv_dtype,
-                                                    device=device)
+
+    vllm_gpu_connector: Union[VLLMPagedMemGPUConnectorV2,
+                              VLLMPagedMemLayerwiseGPUConnector]
+
+    # FIXME(Jiayi): support non-environ config
+    env_layerwise = os.getenv("LMCACHE_USE_LAYERWISE", "False")
+    use_layerwise = env_layerwise.lower() in ["true", "1"]
+
+    if use_layerwise:
+        vllm_gpu_connector = VLLMPagedMemLayerwiseGPUConnector(
+            hidden_dim_size,
+            num_layer,
+            use_gpu=use_gpu,
+            chunk_size=chunk_size,
+            dtype=kv_dtype,
+            device=device)
+    else:
+        vllm_gpu_connector = VLLMPagedMemGPUConnectorV2(hidden_dim_size,
+                                                        num_layer,
+                                                        use_gpu=use_gpu,
+                                                        chunk_size=chunk_size,
+                                                        dtype=kv_dtype,
+                                                        device=device)
     engine = LMCacheEngineBuilder.get_or_create(ENGINE_NAME, config, metadata,
-                                                vllm_gpu_connector)
+                                                vllm_gpu_connector,
+                                                use_layerwise)
 
     return engine
 
@@ -123,7 +157,7 @@ def broadcast_seq_group_list(
     :param model_input: The model input for the current request.
     :type model_input: ModelInputForGPUWithSamplingMetadata
 
-    :param is_driver_worker: Whether the code is executed in driver worker. 
+    :param is_driver_worker: Whether the code is executed in driver worker.
     :type is_driver_worker: bool
 
     : return: Original `model_input` if driver_worker.
@@ -238,7 +272,7 @@ def lmcache_should_store(
 
 
     :return: A list of StoreStatus.
-             StoreStatus.PREFILL/DECODE/CHUNK_PREFILL if 
+             StoreStatus.PREFILL/DECODE/CHUNK_PREFILL if
              we should store KV after PREFILL/DECODE.
              StoreStatus.NONE if no storing is required.
     """
@@ -357,7 +391,7 @@ def lmcache_store_kv(
 
     :param kv_caches: The paged memory to get KV from
     :type kv_caches: List[torch.Tensor]
-    
+
     :param store_status: Indicate whether and how KV cache of each req is stored
     :type store_status: List[StoreStatus]
     """
@@ -489,7 +523,7 @@ def lmcache_retrieve_kv(
     retrieve_status: List[RetrieveStatus],
 ) -> Tuple["ModelInputForGPUWithSamplingMetadata", bool, Union[
         torch.Tensor, IntermediateTensors]]:
-    """Retrieve the KV caches from LMCache for the current model_input. And 
+    """Retrieve the KV caches from LMCache for the current model_input. And
     rebuild the model_input to reflect the changes in KV if necessary.
 
     :param model_executable: The model executable for the current request.
@@ -501,12 +535,12 @@ def lmcache_retrieve_kv(
     :param kv_caches: The paged memory to put KV to
     :type kv_caches: List[torch.Tensor]
 
-    :param retrieve_status: Indicate whether and how 
+    :param retrieve_status: Indicate whether and how
                             KV cache of each req is retrieved
     :type retrieve_status: List[RetrieveStatus]
-    
+
     :return: The rebuilt model_input to reflect the changes in KV.
-    :return: The boolean value to indicate whether the 
+    :return: The boolean value to indicate whether the
              entire execute_model should be skipped
     """
 

@@ -86,7 +86,7 @@ if __name__ == "__main__":
         receiver_host=args.host,
         receiver_port=args.port,
         buffer_size=2**32,  # 4GB
-        buffer_device='cuda',
+        buffer_device='cuda:0',
         enable_gc=False,
     )
 
@@ -176,8 +176,8 @@ if __name__ == "__main__":
             assert len(received_objs) == len(objs), \
                 "Number of received objects does not match the number of " \
                 "original objects"
-            for i, (received_obj,
-                    original_obj) in enumerate(zip(received_objs, objs)):
+            for i, (received_obj, original_obj) in enumerate(
+                    zip(received_objs, objs, strict=False)):
                 assert torch.allclose(received_obj.tensor,
                                       original_obj.tensor), \
                     f"Data mismatch at index {i}: received " \

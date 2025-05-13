@@ -160,8 +160,10 @@ class NixlPipe:
             obj_size = metadata.get_size()
             if offset + obj_size > self.nixl_config.buffer_size:
                 break
-            obj = TensorMemoryObj(self._buffer[offset:offset + obj_size],
-                                  metadata)
+            obj = TensorMemoryObj(
+                self._buffer[offset:offset + obj_size],
+                metadata,
+            )
             ret.append(obj)
             offset += obj_size
         return ret  # type: ignore

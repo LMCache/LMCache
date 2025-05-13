@@ -1,108 +1,85 @@
+.. _installation_guide:
 
-.. _installation:
+Installation
+============
 
-Installation Guide
-====================
+Prerequisites
+-------------
 
-LMCache is a Python library that also contains pre-compiled C++ and CUDA (12.4) binaries.
+- Python 3.10+
+- CUDA 12.4+
 
-Requirements
-------------
+Setup using Python
+------------------
 
-* OS: Linux
-* Python: 3.10 or higher
-* CUDA: 12.4
+Install LMCache from PyPI
+~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. note::
-    LMCache requires CUDA 12.4. You can check ``nvcc --version`` to see if you loaded CUDA 12. Following, please add the following to your ``~/.bashrc`` file:
+The simplest way to install LMCache is through PyPI:
 
 .. code-block:: bash
 
-    cuda_version=12.4
-    export CUDA_HOME=/usr/local/cuda-${cuda_version}
-    export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
-    export PATH=$CUDA_HOME/bin:$PATH
+    pip install lmcache
+
+Install LMCache from Source
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+To install from source, clone the repository and install in editable mode:
+
+.. code-block:: bash
+
+    git clone https://github.com/LMCache/LMCache.git
+    cd LMCache
+    pip install -e .
+
+Install LMCache with uv
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+We recommend developers to use `uv` for a better package management:
+
+.. code-block:: bash
+
+    git clone https://github.com/LMCache/LMCache.git
+    cd LMCache
+    
+    uv venv --python 3.12
+    source .venv/bin/activate
+    uv pip install -e .
 
 
-Install from source (v1)
-----------------------------
+LMCache with vLLM v1
+~~~~~~~~~~~~~~~~~~~~
 
-You can install the latest code from the GitHub repository:
+LMCache is integrated with the latest vLLM (vLLM v1). To use it, install the latest vLLM package:
 
-.. code-block:: console
+.. code-block:: bash
 
-    # vLLM version: 0.7.4.dev160+g28943d36
-    # NOTE: Run the below script in a virtual environment to avoid mess up the default env
-    $ pip install vllm --pre --extra-index-url https://wheels.vllm.ai/nightly
-    $ git clone https://github.com/LMCache/LMCache.git
-    $ cd LMCache
-    $ pip install -e .
+    pip install vllm
 
-.. note::
-    For LMCache v1, LMCACHE_USE_EXPERIMENTAL=True is required to use the experimental features. The
-    relevant source code is in the ``lmcache/experimental`` directory in the ``dev`` branch of the
-    LMCache repository. Source installation is the same for v0 and v1 but v0 doesn't require
-    LMCACHE_USE_EXPERIMENTAL=True.
+Test whether LMCache works with vLLM v1 by running:
 
-.. note::
-    For LMCache v1, please refer to the examples in the :ref:`v1_index` section.
-    LMCache v1 can be directly run with the ``vllm serve`` command.
+.. code-block:: bash
 
-Install from source (v0)
-----------------------------
+    python3 -c "import vllm.distributed.kv_transfer.kv_connector.v1.lmcache_connector"
 
-You can install the latest code from the GitHub repository:
-
-.. code-block:: console
-
-    # Install vLLM version
-    $ pip install vllm==0.6.2
-
-    # Clone and install LMCache
-    $ git clone git@github.com:LMCache/LMCache.git
-    $ cd LMCache
-    $ pip install -e .
-    $ cd ..
-
-    # Clone and install LMCache-vLLM
-    $ git clone git@github:LMCache/lmcache-vllm.git
-    $ cd lmcache-vllm
-    $ pip install -e .
-    $ cd ..
-
-Version Compatibility Matrix
-------------------------------
-
-+--------------------+------------------------+---------------+
-| LMCache            | LMCache_vLLM           | vLLM          |
-+--------------------+------------------------+---------------+
-| v1                 |     N/A                | 0.7.3         |
-+--------------------+------------------------+---------------+
-| 0.1.4 (v0)         | 0.6.2.3                | 0.6.2         |
-+--------------------+------------------------+---------------+
-| 0.1.3 (v0)         | 0.6.2.2                | 0.6.1.post2   |
-+--------------------+------------------------+---------------+
-
-Install pip released versions (v0)
------------------------------------
-
-You can install LMCache using pip:
-
-.. code-block:: console
-
-    $ # (Recommended) Create a new conda environment.
-    $ conda create -n venv python=3.10 -y
-    $ conda activate venv
-
-    $ # Install vLLM with CUDA 12.1.
-    $ pip install lmcache==0.1.4 lmcache_vllm==0.6.2.3
+LMCache with vLLM v0
+~~~~~~~~~~~~~~~~~~~~
 
 .. note::
+    LMCache is also integrated with vLLM v0. Refer to `the example in vLLM <https://github.com/vllm-project/vllm/blob/main/examples/lmcache/cpu_offload_lmcache.py>`__.
+    See the `examples README <https://github.com/vllm-project/vllm/tree/main/examples/lmcache#2-cpu-offload-examples>`_ to understand how to run the script for vLLM v0.
 
-    Although we recommend using ``conda`` to create and manage Python environments, it is highly recommended to use ``pip`` to install LMCache. This is because ``pip`` can install ``torch`` with separate library packages like ``NCCL``, while ``conda`` installs ``torch`` with statically linked ``NCCL``. This can cause issues when vLLM tries to use ``NCCL``.
-    As LMCache depends on vLLM as a backend, it is necessary to install vLLM correctly.
+Setup using Docker
+------------------
 
+Pre-built vLLM + LMCache Images
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+We provide pre-built Docker images that include vLLM integration:
+
+.. code-block:: bash
+
+    docker pull lmcache/vllm-openai:2025-04-18
+    
 .. note::
-
-    pip install for LMCache v1 is not available yet (will be released soon).
-    Please install LMCache v1 from source for now.
+    Currently, we build and release Docker images manually. An automated Docker build/release GitHub workflow will be set up soon. Contributions to this effort are welcomed!

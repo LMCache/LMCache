@@ -1,3 +1,17 @@
+# Copyright 2024-2025 LMCache Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import asyncio
 import socket
 import threading
@@ -10,8 +24,7 @@ from lmcache.experimental.config import LMCacheEngineConfig
 from lmcache.experimental.distributed_server.abstract_server import \
     DistributedServerInterface  # noqa: E501
 from lmcache.experimental.lookup_server import LookupServerInterface
-from lmcache.experimental.memory_management import (MemoryAllocatorInterface,
-                                                    MemoryFormat, MemoryObj)
+from lmcache.experimental.memory_management import MemoryFormat, MemoryObj
 from lmcache.experimental.protocol import (ClientMetaMessage, Constants,
                                            ServerMetaMessage)
 from lmcache.experimental.storage_backend.storage_manager import StorageManager
@@ -37,14 +50,12 @@ class NaiveDistributedServer(DistributedServerInterface):
         self,
         storage_manager: StorageManager,
         lookup_server: LookupServerInterface,
-        memory_allocator: MemoryAllocatorInterface,
         loop: asyncio.AbstractEventLoop,
         config: LMCacheEngineConfig,
     ):
 
         self.storage_manager = storage_manager
         self.lookup_server = lookup_server
-        self.memory_allocator = memory_allocator
 
         self.url = config.distributed_url
         assert self.url is not None
@@ -80,7 +91,7 @@ class NaiveDistributedServer(DistributedServerInterface):
 
         # TODO(Jiayi): Format will be used once we support
         # compressed memory format
-        memory_obj = self.memory_allocator.allocate(
+        memory_obj = self.storage_manager.allocate(
             meta.shape,
             meta.dtype,
             meta.fmt,
@@ -186,7 +197,7 @@ class NaiveDistributedServer(DistributedServerInterface):
 
                             writer.write(memory_obj.byte_array)
                             await writer.drain()
-                            self.memory_allocator.ref_count_down(memory_obj)
+                            memory_obj.ref_count_down()
 
                             t3 = time.perf_counter()
                             logger.info(f"Time to get data: {t1 - t0}, "

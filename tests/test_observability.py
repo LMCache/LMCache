@@ -12,7 +12,7 @@ def stats_monitor():
 def test_on_retrieve_request(stats_monitor):
     stats_monitor.on_retrieve_request(num_tokens=100)
     stats = stats_monitor.get_stats_and_clear()
-    assert stats.num_retrieve_requests == 1
+    assert stats.interval_retrieve_requests == 1
     assert stats.cache_hit_rate == 0
     assert stats.local_cache_usage_bytes == 0
     assert stats.remote_cache_usage_bytes == 0
@@ -26,7 +26,7 @@ def test_on_retrieve_finished(stats_monitor):
         retrieved_tokens=100,
     )
     stats = stats_monitor.get_stats_and_clear()
-    assert stats.num_retrieve_requests == 1
+    assert stats.interval_retrieve_requests == 1
     assert stats.cache_hit_rate == 1.0
     assert len(stats.time_to_retrieve) == 1
 
@@ -35,7 +35,7 @@ def test_on_store_request_and_finished(stats_monitor):
     request_id = stats_monitor.on_store_request(num_tokens=50)
     stats_monitor.on_store_finished(request_id=request_id)
     stats = stats_monitor.get_stats_and_clear()
-    assert stats.num_store_requests == 1
+    assert stats.interval_store_requests == 1
     assert len(stats.time_to_store) == 1
 
 
@@ -65,8 +65,8 @@ def test_combined_operations(stats_monitor):
     stats_monitor2 = LMCStatsMonitor.GetOrCreate()
     stats = stats_monitor2.get_stats_and_clear()
 
-    assert stats.num_retrieve_requests == 1
-    assert stats.num_store_requests == 1
+    assert stats.interval_retrieve_requests == 1
+    assert stats.interval_store_requests == 1
     assert stats.cache_hit_rate == 1.0
     assert stats.local_cache_usage_bytes == 512
     assert stats.remote_cache_usage_bytes == 1024

@@ -21,11 +21,9 @@ from typing import List, Optional, Union, no_type_check
 import infinistore
 import torch
 
-from lmcache.experimental.memory_management import (CopyLessMemoryObj,
-                                                    MemoryAllocatorInterface,
-                                                    MemoryObj)
+from lmcache.experimental.memory_management import CopyLessMemoryObj, MemoryObj
 # reuse
-from lmcache.experimental.protocol import RedisMetadata
+from lmcache.experimental.protocol import RemoteMetadata
 from lmcache.experimental.storage_backend.connector.base_connector import \
     RemoteConnector
 from lmcache.logging import init_logger
@@ -45,8 +43,7 @@ def _get_ptr(mv: Union[bytearray, memoryview]) -> int:
 class InfinistoreConnector(RemoteConnector):
 
     def __init__(self, host: str, port: int, dev_name,
-                 loop: asyncio.AbstractEventLoop,
-                 memory_allocator: MemoryAllocatorInterface):
+                 loop: asyncio.AbstractEventLoop):
         config = infinistore.ClientConfig(
             host_addr=host,
             service_port=port,
@@ -102,7 +99,7 @@ class InfinistoreConnector(RemoteConnector):
             self.recv_queue.put_nowait(buf_idx)
             return None
 
-        metadata = RedisMetadata.deserialize(buffer)
+        metadata = RemoteMetadata.deserialize(buffer)
 
         def callback():
             self.recv_queue.put_nowait(buf_idx)
@@ -134,8 +131,8 @@ class InfinistoreConnector(RemoteConnector):
         buf_idx = await self.send_queue.get()
         buffer = self.send_buffers[buf_idx]
 
-        RedisMetadata(len(kv_bytes), kv_shape, kv_dtype,
-                      memory_format).serialize_into(buffer)
+        RemoteMetadata(len(kv_bytes), kv_shape, kv_dtype,
+                       memory_format).serialize_into(buffer)
 
         buffer[METADATA_BYTES_LEN:METADATA_BYTES_LEN +
                len(kv_bytes)] = kv_bytes

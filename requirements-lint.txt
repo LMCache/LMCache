@@ -1,15 +1,15 @@
 # formatting
-yapf==0.40.0
-toml==0.10.2
-tomli==2.0.1
-ruff==0.6.5
+clang-format==18.1.5
 codespell==2.3.0
 isort==5.13.2
-clang-format==18.1.5
+ruff==0.6.5
+toml==0.10.2
+tomli==2.0.1
+yapf==0.40.0
 
 # type checking
-mypy==1.11.2
+mypy==1.15.0
+types-aiofiles
 types-PyYAML
 types-requests
 types-setuptools
-types-aiofiles

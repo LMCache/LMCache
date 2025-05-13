@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Optional, Union
+from typing import Dict, Optional, Tuple, Union
 
 import msgspec
 
@@ -41,28 +41,32 @@ class WorkerMsg(MsgBase):
 
 class RegisterMsg(WorkerMsg):
     """Message for Registration"""
-    # TODO(Jiayi): instance_id can be replaced with url
     instance_id: str
     worker_id: int
-    url: str
+    ip: str
+    port: int
 
     def describe(self) -> str:
-        return f"Registering instance {self.instance_id}"
+        return (f"Registering instance {self.instance_id}, "
+                f"worker {self.worker_id} "
+                f"at {self.ip}:{self.port}")
 
 
 class DeRegisterMsg(WorkerMsg):
     """Message for Deregistration"""
-    # TODO(Jiayi): instance_id can be replaced with url
     instance_id: str
     worker_id: int
+    ip: str
+    port: int
 
     def describe(self) -> str:
-        return f"Deregistering instance {self.instance_id}"
+        return (f"Deregistering instance {self.instance_id}, "
+                f"worker {self.worker_id} "
+                f"at {self.ip}:{self.port}")
 
 
 class KVAdmitMsg(WorkerMsg):
     """Message for KV chunk admission"""
-    # TODO(Jiayi): instance_id can be replaced with url
     instance_id: str
     worker_id: int
     key: str
@@ -74,7 +78,6 @@ class KVAdmitMsg(WorkerMsg):
 
 class KVEvictMsg(WorkerMsg):
     """Message for KV chunk eviction"""
-    # TODO(Jiayi): instance_id can be replaced with url
     instance_id: str
     worker_id: int
     key: str
@@ -96,10 +99,62 @@ class ControlMsg(MsgBase):
 
 class ClearWorkerMsg(ControlMsg):
     """Clear message for a single lmcache worker"""
+    locations: Optional[list[str]] = None
     tokens: Optional[list[int]] = None
 
     def describe(self) -> str:
-        return f"Clear tokens {self.tokens}"
+        return (f"Clear tokens {self.tokens} "
+                f"in locations {self.locations}")
+
+
+class PinWorkerMsg(ControlMsg):
+    """Pin message for a single lmcache worker"""
+    locations: Optional[list[str]] = None
+    tokens: Optional[list[int]] = None
+
+    def describe(self) -> str:
+        return (f"Pin tokens {self.tokens} "
+                f"in locations {self.locations}")
+
+
+class CompressWorkerMsg(ControlMsg):
+    """Compress message for a single lmcache worker"""
+    method: str
+    locations: Optional[list[str]] = None
+    tokens: Optional[list[int]] = None
+
+    def describe(self) -> str:
+        return (f"Compress tokens {self.tokens} in "
+                f"locations {self.locations} with "
+                f"method {self.method}")
+
+
+class MoveWorkerMsg(ControlMsg):
+    """Move message for a single lmcache worker"""
+    old_position: Tuple[str, str]
+    new_position: Tuple[str, str]
+    tokens: Optional[list[int]] = None
+
+    def describe(self) -> str:
+        return (f"Move tokens {self.tokens} from "
+                f"{self.old_position} to "
+                f"{self.new_position}")
+
+
+class HealthWorkerMsg(ControlMsg):
+    """Health message for a single lmcache worker"""
+
+    def describe(self) -> str:
+        return "Health check"
+
+
+class CheckFinishWorkerMsg(ControlMsg):
+    """Check finish message for a single lmcache worker"""
+    worker_event_id: str
+
+    def describe(self) -> str:
+        return ("Checking finish for worker event "
+                f"{self.worker_event_id}")
 
 
 class ControlRetMsg(MsgBase):
@@ -117,6 +172,47 @@ class ClearWorkerRetMsg(ControlRetMsg):
         return f"Clear success: {self.success}"
 
 
+class PinWorkerRetMsg(ControlRetMsg):
+    """Pin return message for a single lmcache worker"""
+    success: bool
+
+    def describe(self) -> str:
+        return (f"Pin success: {self.success}")
+
+
+class CompressWorkerRetMsg(ControlRetMsg):
+    """Compress return message for a single lmcache worker"""
+    worker_event_id: str
+
+    def describe(self) -> str:
+        return f"Compress worker event id: {self.worker_event_id}"
+
+
+class MoveWorkerRetMsg(ControlRetMsg):
+    """Move return message for a single lmcache worker"""
+    worker_event_id: str
+
+    def describe(self) -> str:
+        return f"Move worker event id: {self.worker_event_id}"
+
+
+class HealthWorkerRetMsg(ControlRetMsg):
+    """Health return message for a single lmcache worker"""
+    alive: bool
+
+    def describe(self) -> str:
+        return (f"Health check alive: {self.alive}")
+
+
+class CheckFinishWorkerRetMsg(ControlRetMsg):
+    """Check finish return message for a single lmcache worker"""
+    worker_event_id: str
+
+    def describe(self) -> str:
+        return ("Checking finish for worker event "
+                f"{self.worker_event_id}")
+
+
 """Orchestration Message from Ochestrator to LMCache"""
 
 
@@ -125,6 +221,14 @@ class OrchMsg(MsgBase):
 
     def describe(self) -> str:
         return ""
+
+
+class QueryInstMsg(OrchMsg):
+    """Query instance message"""
+    ip: str
+
+    def describe(self) -> str:
+        return f"Query instance id of ip {self.ip}"
 
 
 class LookupMsg(OrchMsg):
@@ -138,35 +242,140 @@ class LookupMsg(OrchMsg):
 class ClearMsg(OrchMsg):
     """Clear message"""
     instance_id: str
-    worker_ids: Optional[list[int]] = None
+    locations: Optional[list[str]] = None
     tokens: Optional[list[int]] = None
 
     def describe(self) -> str:
         return (f"Clear tokens {self.tokens} in instance "
-                f"{self.instance_id} on workers {self.worker_ids}")
+                f"{self.instance_id} and "
+                f"locations {self.locations}")
+
+
+class PinMsg(OrchMsg):
+    """Pin message"""
+    instance_id: str
+    locations: Optional[list[str]] = None
+    tokens: Optional[list[int]] = None
+
+    def describe(self) -> str:
+        return (f"Pin tokens {self.tokens} in instance "
+                f"{self.instance_id} and "
+                f"locations {self.locations}")
+
+
+class CompressMsg(OrchMsg):
+    """Compress message"""
+    instance_id: str
+    method: str
+    locations: Optional[list[str]] = None
+    tokens: Optional[list[int]] = None
+
+    def describe(self) -> str:
+        return (f"Compress tokens {self.tokens} in instance "
+                f"{self.instance_id} and "
+                f"locations {self.locations} with "
+                f"method {self.method}")
+
+
+class MoveMsg(OrchMsg):
+    """Move message"""
+    old_position: Tuple[str, str]
+    new_position: Tuple[str, str]
+    tokens: Optional[list[int]] = None
+
+    def describe(self) -> str:
+        return (f"Move tokens {self.tokens} from "
+                f"{self.old_position} to "
+                f"{self.new_position}")
+
+
+class HealthMsg(OrchMsg):
+    """Health message"""
+    instance_id: str
+
+    def describe(self) -> str:
+        return (f"Health check for instance "
+                f"{self.instance_id}")
+
+
+class CheckFinishMsg(OrchMsg):
+    """Check finish message"""
+    event_id: str
+
+    def describe(self) -> str:
+        return ("Checking finish for event "
+                f"{self.event_id}")
 
 
 class OrchRetMsg(MsgBase):
-    """Return message from  Controller to Ochestrator"""
+    """Return message from Controller to Ochestrator"""
 
     def describe(self) -> str:
         return ""
 
 
-class LookupRetMsg(OrchRetMsg):
-    """Lookup message"""
-    best_instance_id: Optional[str]
+class QueryInstRetMsg(OrchRetMsg):
+    """Query instance return message"""
+    instance_id: Optional[str]
 
     def describe(self) -> str:
-        return f"The best instance is {self.best_instance_id}"
+        return f"The instance id is {self.instance_id}"
+
+
+class LookupRetMsg(OrchRetMsg):
+    """Lookup return message"""
+    layout_info: Dict[str, Tuple[str, int]]
+
+    def describe(self) -> str:
+        return f"The layout info is {self.layout_info}"
 
 
 class ClearRetMsg(OrchRetMsg):
-    """Clear message"""
+    """Clear return message"""
     success: bool
 
     def describe(self) -> str:
         return f"Clear success: {self.success}"
+
+
+class PinRetMsg(OrchRetMsg):
+    """Pin return message"""
+    success: bool
+
+    def describe(self) -> str:
+        return f"Pin success: {self.success}"
+
+
+class CompressRetMsg(OrchRetMsg):
+    """Compress return message"""
+    event_id: str
+
+    def describe(self) -> str:
+        return f"Compress event id: {self.event_id}"
+
+
+class MoveRetMsg(OrchRetMsg):
+    """Move return message"""
+    event_id: str
+
+    def describe(self) -> str:
+        return f"Move event id: {self.event_id}"
+
+
+class HealthRetMsg(OrchRetMsg):
+    """Health return message"""
+    alive: bool
+
+    def describe(self) -> str:
+        return f"Alive: {self.alive}"
+
+
+class CheckFinishRetMsg(OrchRetMsg):
+    """Check finish return message"""
+    finished: str
+
+    def describe(self) -> str:
+        return f"Event finished: {self.finished}"
 
 
 class ErrorMsg(MsgBase):
@@ -178,5 +387,11 @@ class ErrorMsg(MsgBase):
 
 
 Msg = Union[RegisterMsg, DeRegisterMsg, KVAdmitMsg, KVEvictMsg, ClearWorkerMsg,
-            ClearWorkerRetMsg, LookupMsg, LookupRetMsg, ClearMsg, ClearRetMsg,
-            ErrorMsg]
+            ClearWorkerRetMsg, PinWorkerMsg, PinWorkerRetMsg,
+            CompressWorkerMsg, CompressWorkerRetMsg, MoveWorkerMsg,
+            MoveWorkerRetMsg, HealthWorkerMsg, HealthWorkerRetMsg,
+            CheckFinishWorkerMsg, CheckFinishWorkerRetMsg, LookupMsg,
+            LookupRetMsg, ClearMsg, ClearRetMsg, PinMsg, PinRetMsg,
+            CompressMsg, CompressRetMsg, MoveMsg, MoveRetMsg, HealthMsg,
+            HealthRetMsg, CheckFinishMsg, CheckFinishRetMsg, ErrorMsg,
+            QueryInstMsg, QueryInstRetMsg]

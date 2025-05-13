@@ -1,3 +1,17 @@
+# Copyright 2024-2025 LMCache Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import os
 import re
 from dataclasses import dataclass
@@ -48,7 +62,7 @@ class LMCacheEngineConfig:
     controller_url: Optional[str] = None
     # lmcache worker url
     # NOTE: port number will add `worker_id`
-    lmcache_worker_url: Optional[str] = None
+    lmcache_worker_port: Optional[int] = None
 
     # (Optional) Nixl configurations
     # whether to enable Nixl
@@ -66,6 +80,9 @@ class LMCacheEngineConfig:
     nixl_buffer_device: Optional[str] = None
     # HACK: explicit option to enable/disable nixl GC before it's mature enough
     nixl_enable_gc: Optional[bool] = False
+
+    # The url of the actual remote lmcache instance for auditing
+    audit_actual_remote_url: Optional[str] = None
 
     @staticmethod
     def from_defaults(
@@ -88,7 +105,7 @@ class LMCacheEngineConfig:
         enable_controller: Optional[bool] = False,
         lmcache_instance_id: str = "lmcache_default_instance",
         controller_url: Optional[str] = None,
-        lmcache_worker_url: Optional[str] = None,
+        lmcache_worker_port: Optional[int] = None,
         enable_nixl: Optional[bool] = False,
         nixl_role: Optional[str] = None,
         nixl_receiver_host: Optional[str] = None,
@@ -96,6 +113,7 @@ class LMCacheEngineConfig:
         nixl_buffer_size: Optional[int] = None,
         nixl_buffer_device: Optional[str] = None,
         nixl_enable_gc: Optional[bool] = False,
+        audit_actual_remote_url: Optional[str] = None,
     ) -> "LMCacheEngineConfig":
         # TODO (ApostaC): Add nixl config
         return LMCacheEngineConfig(
@@ -104,9 +122,10 @@ class LMCacheEngineConfig:
             enable_blending, blend_recompute_ratio, blend_min_tokens,
             blend_special_str, enable_p2p, lookup_url, distributed_url,
             error_handling, enable_controller, lmcache_instance_id,
-            controller_url, lmcache_worker_url, enable_nixl, nixl_role,
-            nixl_receiver_host, nixl_receiver_port, nixl_buffer_size,
-            nixl_buffer_device, nixl_enable_gc).validate()
+            controller_url, lmcache_worker_port, enable_nixl, nixl_role,
+            nixl_peer_host, nixl_peer_port, nixl_buffer_size,
+            nixl_buffer_device, nixl_enable_gc,
+            audit_actual_remote_url).validate()
 
     @staticmethod
     def from_legacy(
@@ -170,7 +189,7 @@ class LMCacheEngineConfig:
                                    enable_blending, blend_recompute_ratio,
                                    blend_min_tokens, blend_special_str,
                                    enable_p2p, lookup_url, distributed_url,
-                                   error_handling).validate()
+                                   error_handling).validate().log_config()
 
     @staticmethod
     def from_file(file_path: str) -> "LMCacheEngineConfig":
@@ -208,7 +227,7 @@ class LMCacheEngineConfig:
         lmcache_instance_id = config.get("lmcache_instance_id",
                                          "lmcache_default_instance")
         controller_url = config.get("controller_url", None)
-        lmcache_worker_url = config.get("lmcache_worker_url", None)
+        lmcache_worker_port = config.get("lmcache_worker_port", None)
 
         enable_nixl = config.get("enable_nixl", False)
         nixl_role = config.get("nixl_role", None)
@@ -230,6 +249,8 @@ class LMCacheEngineConfig:
             if nixl_receiver_port is not None:
                 logger.warning("nixl_peer_port is deprecated, please use "
                                "nixl_receiver_port in the config file instead")
+
+        audit_actual_remote_url = config.get("audit_actual_remote_url", None)
 
         match local_disk:
             case None:
@@ -266,7 +287,7 @@ class LMCacheEngineConfig:
             enable_controller,
             lmcache_instance_id,
             controller_url,
-            lmcache_worker_url,
+            lmcache_worker_port,
             enable_nixl,
             nixl_role,
             nixl_receiver_host,
@@ -274,7 +295,8 @@ class LMCacheEngineConfig:
             nixl_buffer_size,
             nixl_buffer_device,
             nixl_enable_gc,
-        ).validate()
+            audit_actual_remote_url,
+        ).validate().log_config()
 
     @staticmethod
     def from_env() -> "LMCacheEngineConfig":
@@ -364,8 +386,9 @@ class LMCacheEngineConfig:
         config.lmcache_instance_id = lmcache_instance_id
         config.controller_url = parse_env(get_env_name("controller_url"),
                                           config.controller_url)
-        config.lmcache_worker_url = parse_env(
-            get_env_name("lmcache_worker_url"), config.lmcache_worker_url)
+        config.lmcache_worker_port = to_int(
+            parse_env(get_env_name("lmcache_worker_port"),
+                      config.lmcache_worker_port))
 
         config.enable_nixl = to_bool(
             parse_env(get_env_name("enable_nixl"), config.enable_nixl))
@@ -401,7 +424,11 @@ class LMCacheEngineConfig:
                 logger.warning(
                     "LMCACHE_NIXL_PEER_PORT is deprecated, please use "
                     "LMCACHE_NIXL_RECEIVER_PORT environment variable instead")
-        return config.validate()
+
+        config.audit_actual_remote_url = parse_env(
+            get_env_name("audit_actual_remote_url"),
+            config.audit_actual_remote_url)
+        return config.validate().log_config()
 
     def to_original_config(self) -> orig_config.LMCacheEngineConfig:
         # NOTE: This function is purely for UsageContext compatibility
@@ -450,5 +477,38 @@ class LMCacheEngineConfig:
                     "Nixl only supports save_decode_cache=False"
             assert self.enable_p2p is False, \
                     "Nixl only supports enable_p2p=False"
+
+        return self
+
+    def log_config(self) -> 'LMCacheEngineConfig':
+        """log the configuration in LMCache
+        """
+        config_dict = {
+            'chunk_size': self.chunk_size,
+            'local_cpu': self.local_cpu,
+            'max_local_cpu_size': f"{self.max_local_cpu_size} GB",
+            'local_disk': self.local_disk,
+            'max_local_disk_size': f"{self.max_local_disk_size} GB",
+            'remote_url': self.remote_url,
+            'remote_serde': self.remote_serde,
+            'save_decode_cache': self.save_decode_cache,
+            'enable_blending': self.enable_blending,
+            'blend_recompute_ratio': self.blend_recompute_ratio,
+            'blend_min_tokens': self.blend_min_tokens,
+            'enable_p2p': self.enable_p2p,
+            'lookup_url': self.lookup_url,
+            'distributed_url': self.distributed_url,
+            'error_handling': self.error_handling,
+            'enable_controller': self.enable_controller,
+            'lmcache_instance_id': self.lmcache_instance_id,
+            'enable_nixl': self.enable_nixl,
+            'nixl_role': self.nixl_role,
+            'nixl_peer_host': self.nixl_peer_host,
+            'nixl_peer_port': self.nixl_peer_port,
+            'nixl_buffer_size': self.nixl_buffer_size,
+            'nixl_buffer_device': self.nixl_buffer_device,
+            'nixl_enable_gc': self.nixl_enable_gc
+        }
+        logger.info(f"LMCache Configuration: {config_dict}")
 
         return self

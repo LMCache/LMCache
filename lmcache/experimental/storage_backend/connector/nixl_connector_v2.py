@@ -13,13 +13,13 @@
 # limitations under the License.
 
 import abc
-import pickle
 import threading
 import time
 import uuid
 from dataclasses import dataclass
 from typing import Callable, Optional, Union
 
+import msgpack
 import torch
 import zmq
 from nixl._api import nixl_agent
@@ -84,7 +84,9 @@ class NixlBufferAllocator(MemoryAllocatorInterface):
         # allocate the memory
         raw_tensor = self.buffer[self.allocated_size : self.allocated_size\
                 + required_size]
-        ret = TensorMemoryObj(raw_data=raw_tensor, metadata=metadata)
+        ret = TensorMemoryObj(raw_data=raw_tensor,
+                              metadata=metadata,
+                              parent_allocator=self)
         self.allocated_size += required_size
         return ret
 
@@ -112,21 +114,6 @@ class NixlBufferAllocator(MemoryAllocatorInterface):
         """
         pass
 
-    def ref_count_up(self, obj: MemoryObj):
-        """Increase the reference count of the memory object.
-        """
-        pass
-
-    def ref_count_down(self, obj: MemoryObj):
-        """Decrease the reference count of the memory object.
-        """
-        pass
-
-    def get_ref_count(self, obj: MemoryObj) -> int:
-        """Get the reference count of the memory object.
-        """
-        raise NotImplementedError
-
     ### For NIXL Pipe to call
     def num_bytes_allocated(self) -> int:
         """Get the number of bytes allocated.
@@ -151,12 +138,46 @@ class NixlRequest:
     keys: list[CacheEngineKey]
     metadatas: list[MemoryObjMetadata]
 
+    @staticmethod
+    def encode_custom(obj):
+        if hasattr(obj, "to_dict"):
+            return obj.to_dict()
+        raise TypeError(
+            f"Object of type {type(obj).__name__} is not serializable")
+
+    @staticmethod
+    def decode_custom(d):
+        if "__type__" not in d:
+            return d
+        t = d["__type__"]
+        if t == "CacheEngineKey":
+            return CacheEngineKey.from_dict(d)
+        elif t == "MemoryObjMetadata":
+            return MemoryObjMetadata.from_dict(d)
+        elif t == "NixlRequest":
+            return NixlRequest.from_dict(d)
+        else:
+            return d
+
+    def to_dict(self):
+        return {
+            "__type__": "NixlRequest",
+            "keys": [k.to_dict() for k in self.keys],
+            "metadatas": [m.to_dict() for m in self.metadatas]
+        }
+
+    @staticmethod
+    def from_dict(d):
+        # Note(Kuntai): msgpack will automatically deserialize internal objects,
+        # meaning d["keys"] and d["metadatas"] are already deserialized.
+        return NixlRequest(keys=d["keys"], metadatas=d["metadatas"])
+
     def serialize(self) -> bytes:
-        return pickle.dumps(self)
+        return msgpack.packb(self, default=NixlRequest.encode_custom)
 
     @staticmethod
     def deserialize(s: bytes) -> "NixlRequest":
-        return pickle.loads(s)
+        return msgpack.unpackb(s, object_hook=NixlRequest.decode_custom)
 
 
 class NixlPipe:
@@ -385,7 +406,7 @@ class NixlPipe:
             if offset + obj_size > self.nixl_config.buffer_size:
                 break
             obj = TensorMemoryObj(self._buffer[offset:offset + obj_size],
-                                  metadata)
+                                  metadata, self._allocator)
             ret.append(obj)
             offset += obj_size
         return ret  # type: ignore

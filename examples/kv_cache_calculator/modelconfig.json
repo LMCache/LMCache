@@ -70,5 +70,29 @@
     "num_attention_heads": 16,
     "num_hidden_layers": 36,
     "num_key_value_heads": 2
+  },
+  "Qwen/Qwen3-4B": {
+    "hidden_size": 2560,
+    "num_attention_heads": 32,
+    "num_hidden_layers": 36,
+    "num_key_value_heads": 8
+  },
+  "Qwen/Qwen3-8B": {
+    "hidden_size": 4096,
+    "num_attention_heads": 32,
+    "num_hidden_layers": 36,
+    "num_key_value_heads": 8
+  },
+  "Qwen/Qwen3-14B": {
+    "hidden_size": 5120,
+    "num_attention_heads": 40,
+    "num_hidden_layers": 40,
+    "num_key_value_heads": 8
+  },
+  "Qwen/Qwen3-32B": {
+    "hidden_size": 5120,
+    "num_attention_heads": 64,
+    "num_hidden_layers": 64,
+    "num_key_value_heads": 8
   }
 }

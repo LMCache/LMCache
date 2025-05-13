@@ -19,7 +19,6 @@ import torch
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.experimental.config import LMCacheEngineConfig
 from lmcache.experimental.memory_management import (BytesBufferMemoryObj,
-                                                    MemoryAllocatorInterface,
                                                     MemoryFormat, MemoryObj,
                                                     MemoryObjMetadata,
                                                     TensorMemoryObj)
@@ -39,8 +38,7 @@ logger = init_logger(__name__)
 class CacheGenDeserializer(Deserializer):
 
     def __init__(self, config: LMCacheEngineConfig,
-                 metadata: LMCacheEngineMetadata,
-                 memory_allocator: MemoryAllocatorInterface):
+                 metadata: LMCacheEngineMetadata):
         self.dtype = metadata.kv_dtype
         self.cachegen_config = CacheGenConfig.from_model_name(
             metadata.model_name)
@@ -49,8 +47,6 @@ class CacheGenDeserializer(Deserializer):
         self.fmt = metadata.fmt
         self.key_bins = self.make_key_bins(self.cachegen_config)
         self.value_bins = self.make_value_bins(self.cachegen_config)
-
-        self.memory_allocator = memory_allocator
 
     def make_key_bins(self, config: CacheGenConfig) -> torch.Tensor:
         ret = torch.zeros(config.nlayers)
@@ -144,16 +140,3 @@ class CacheGenDeserializer(Deserializer):
                 fmt=MemoryFormat.KV_BLOB))
 
         return memory_obj
-
-        #memory_obj = self.memory_allocator.allocate(kv_chunk.shape,
-        #                                            kv_chunk.dtype,
-        #                                            fmt=MemoryFormat.KV_BLOB)
-
-        #if memory_obj is None:
-        #    logger.warning("Memory allocation failed in cachegen deserializer")
-        #    return None
-
-        #assert memory_obj.tensor is not None
-        #memory_obj.tensor.copy_(kv_chunk)
-
-        #return memory_obj

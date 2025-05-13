@@ -36,7 +36,7 @@ def test_lm_connector(url, autorelease_experimental,
     mem_obj_shape = [2, 32, num_tokens, 1024]
     dtype = torch.bfloat16
     memory_obj = memory_allocator.allocate(mem_obj_shape, dtype)
-    memory_allocator.ref_count_up(memory_obj)
+    memory_obj.ref_count_up()
 
     future = asyncio.run_coroutine_threadsafe(
         connector.put(random_key, memory_obj), async_loop)
@@ -45,7 +45,7 @@ def test_lm_connector(url, autorelease_experimental,
     future = asyncio.run_coroutine_threadsafe(connector.exists(random_key),
                                               async_loop)
     assert future.result()
-    assert memory_allocator.get_ref_count(memory_obj) == 1
+    assert memory_obj.get_ref_count() == 1
 
     future = asyncio.run_coroutine_threadsafe(connector.get(random_key),
                                               async_loop)
