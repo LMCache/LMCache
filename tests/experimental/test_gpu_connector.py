@@ -38,7 +38,7 @@ def test_vllm_nested_gpu_connector():
         shape = connector.get_shape(num_slice_tokens)
         memory_obj = allocator.allocate(shape, gpu_kv_src[0][0].dtype)
         connector.from_gpu(memory_obj, st, ed, kvcaches=gpu_kv_src)
-        assert memory_obj.metadata.fmt == MemoryFormat.KV_BLOB
+        assert memory_obj.metadata.fmt == MemoryFormat.KV_2LTD
         connector.to_gpu(memory_obj, st, ed, kvcaches=gpu_kv_dst)
         allocator.free(memory_obj)
         assert allocator.memcheck()
@@ -85,7 +85,7 @@ def test_vllm_paged_connector_v2():
                            kvcaches=gpu_kv_src,
                            slot_mapping=slot_mapping,
                            offset=0)
-        assert memory_obj.metadata.fmt == MemoryFormat.KV_BLOB
+        assert memory_obj.metadata.fmt == MemoryFormat.KV_2LTD
         connector2.to_gpu(memory_obj,
                           start,
                           end,
@@ -148,7 +148,7 @@ def test_vllm_paged_connector_v2_with_gpu(use_gpu):
                            kvcaches=gpu_kv_src,
                            slot_mapping=slot_mapping,
                            offset=0)
-        assert memory_obj.metadata.fmt == MemoryFormat.KV_BLOB
+        assert memory_obj.metadata.fmt == MemoryFormat.KV_2LTD
         connector2.to_gpu(memory_obj,
                           start,
                           end,

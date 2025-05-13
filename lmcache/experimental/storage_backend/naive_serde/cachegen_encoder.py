@@ -57,7 +57,7 @@ class CacheGenSerializer(Serializer):
     @_lmcache_nvtx_annotate
     def serialize(self, memory_obj: MemoryObj) -> BytesBufferMemoryObj:
         """
-        Serialize a KV_BLOB MemoryObj to CACHEGEN_BINARY MemoryObj.
+        Serialize a KV_2LTD MemoryObj to CACHEGEN_BINARY MemoryObj.
 
         Input:
             memory_obj: the memory object to be serialized.

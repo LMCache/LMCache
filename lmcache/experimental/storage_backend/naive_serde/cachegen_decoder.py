@@ -137,6 +137,6 @@ class CacheGenDeserializer(Deserializer):
                 address=-1,
                 phy_size=kv_chunk.numel() * kv_chunk.element_size(),
                 ref_count=-1,  # HACK: avoid mis-free
-                fmt=MemoryFormat.KV_BLOB))
+                fmt=MemoryFormat.KV_2LTD))
 
         return memory_obj

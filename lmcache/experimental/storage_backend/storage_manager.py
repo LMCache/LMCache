@@ -88,6 +88,7 @@ class StorageManager:
         self,
         shape: torch.Size,
         dtype: torch.dtype,
+        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
         eviction=True,
     ) -> Optional[MemoryObj]:
         """
@@ -97,7 +98,10 @@ class StorageManager:
         assert isinstance(self.local_cpu_backend, LocalCPUBackend)
         # TODO (Jiayi): We might need to pre-allocate and management
         # disk in a similar way as CPU.
-        return self.local_cpu_backend.allocate(shape, dtype, eviction=eviction)
+        return self.local_cpu_backend.allocate(shape,
+                                               dtype,
+                                               fmt,
+                                               eviction=eviction)
 
     def dry_allocate(
         self,
@@ -263,8 +267,6 @@ class StorageManager:
         with torch.cuda.stream(prefetch_stream):
             memory_obj.tensor.copy_(kv_chunk, non_blocking=True)
         prefetch_stream.synchronize()
-        # TODO(Jiayi): please remove this hardcode
-        memory_obj.metadata.fmt = MemoryFormat.KV_BLOB
 
         # NOTE: no need to ref_count_up here because
         # the memory_obj's ref_count is already 1
@@ -458,6 +460,7 @@ class DistributedStorageManager:
         self,
         shape: torch.Size,
         dtype: torch.dtype,
+        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
         eviction=True,
     ) -> Optional[MemoryObj]:
         """
@@ -465,7 +468,7 @@ class DistributedStorageManager:
         Use LRU evictor if eviction is enabled.
         """
         return self.storage_backend.allocate_zero_copy_write_object(
-            shape, dtype)
+            shape, dtype, fmt)
 
     def dry_allocate(
         self,

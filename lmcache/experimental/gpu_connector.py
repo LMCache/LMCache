@@ -78,7 +78,7 @@ class VLLMNestedTupleGPUConnector(GPUConnectorInterface):
     The token dimension is specified by `token_dim` when constructing the
     connector.
 
-    It will produce / consume memory object with KV_BLOB format
+    It will produce / consume memory object with KV_2LTD format
     """
 
     def __init__(self, hidden_dim_size: int, num_layers: int):
@@ -100,9 +100,9 @@ class VLLMNestedTupleGPUConnector(GPUConnectorInterface):
         """
         assert memory_obj.tensor is not None
 
-        if memory_obj.metadata.fmt != MemoryFormat.KV_BLOB:
+        if memory_obj.metadata.fmt != MemoryFormat.KV_2LTD:
             raise ValueError(
-                "The memory object should be in KV_BLOB format in"
+                "The memory object should be in KV_2LTD format in"
                 " order to be processed by NestedTupleGPUConnector")
 
         if "kvcaches" not in kwargs:
@@ -126,7 +126,7 @@ class VLLMNestedTupleGPUConnector(GPUConnectorInterface):
         The kvcaches should correspond to the "WHOLE token sequence".
 
         :raises ValueError: If 'kvcaches' is not provided in kwargs, or the 
-            memory object is not in KV_BLOB format.
+            memory object is not in KV_2LTD format.
         :raises AssertionError: If the memory object does not have a tensor.
         """
         assert memory_obj.tensor is not None
@@ -156,7 +156,6 @@ class VLLMNestedTupleGPUConnector(GPUConnectorInterface):
                     -1, self.hidden_dim_size).contiguous(),
                                                      non_blocking=True)
         put_stream.synchronize()
-        memory_obj.metadata.fmt = MemoryFormat.KV_BLOB
 
     def get_shape(self, num_tokens: int) -> torch.Size:
         return torch.Size(
@@ -171,7 +170,7 @@ class VLLMPagedMemGPUConnector(GPUConnectorInterface):
     - KVLayer = Tuple[Tensor, Tensor]
     - Tensor: [num_blocks, block_size, num_heads, head_size]
 
-    It will produce / consume memory object with KV_BLOB format
+    It will produce / consume memory object with KV_2LTD format
     """
 
     def __init__(self, hidden_dim_size: int, num_layers: int):
@@ -193,9 +192,9 @@ class VLLMPagedMemGPUConnector(GPUConnectorInterface):
         """
         assert memory_obj.tensor is not None
 
-        if memory_obj.metadata.fmt != MemoryFormat.KV_BLOB:
+        if memory_obj.metadata.fmt != MemoryFormat.KV_2LTD:
             raise ValueError(
-                "The memory object should be in KV_BLOB format in"
+                "The memory object should be in KV_2LTD format in"
                 " order to be processed by VLLMPagedMemGPUConnector")
 
         if "kvcaches" not in kwargs:
@@ -223,7 +222,7 @@ class VLLMPagedMemGPUConnector(GPUConnectorInterface):
         The kvcaches should correspond to the "WHOLE token sequence".
 
         :raises ValueError: If 'kvcaches' is not provided in kwargs, or the 
-            memory object is not in KV_BLOB format.
+            memory object is not in KV_2LTD format.
         :raises AssertionError: If the memory object does not have a tensor.
         :raises ValueError: If 'slot_mapping' is not provided in kwargs.
         """
@@ -248,7 +247,6 @@ class VLLMPagedMemGPUConnector(GPUConnectorInterface):
                                            slot_mapping[start:end], layer_id)
 
         torch.cuda.synchronize()
-        memory_obj.metadata.fmt = MemoryFormat.KV_BLOB
 
     def get_shape(self, num_tokens: int) -> torch.Size:
         return torch.Size(
@@ -263,7 +261,7 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
     - KVLayer = Tuple[Tensor, Tensor]
     - Tensor: [num_blocks, block_size, num_heads, head_size]
 
-    It will produce / consume memory object with KV_BLOB format
+    It will produce / consume memory object with KV_2LTD format
     """
 
     def __init__(self,
@@ -343,9 +341,9 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
         """
         assert memory_obj.tensor is not None
 
-        if memory_obj.metadata.fmt != MemoryFormat.KV_BLOB:
+        if memory_obj.metadata.fmt != MemoryFormat.KV_2LTD:
             raise ValueError(
-                "The memory object should be in KV_BLOB format in"
+                "The memory object should be in KV_2LTD format in"
                 " order to be processed by VLLMPagedMemGPUConnector")
 
         if "kvcaches" not in kwargs:
@@ -393,7 +391,7 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
         """Expect a kwarg 'kvcaches' which is a nested tuple of K and V tensors.
         The kvcaches should correspond to the "WHOLE token sequence".
 
-        Will set the memory_obj.metadata.fmt to MemoryFormat.KV_BLOB.
+        Will set the memory_obj.metadata.fmt to MemoryFormat.KV_2LTD.
 
         Note: 
           1. This function expects the 'slot_mapping' is a "full slot mapping"
@@ -445,7 +443,6 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
             # NOTE: for better performance, we may not want to sync for every
             # memory object
             torch.cuda.synchronize()
-        memory_obj.metadata.fmt = MemoryFormat.KV_BLOB
 
     def get_shape(self, num_tokens: int) -> torch.Size:
         return torch.Size(
@@ -579,7 +576,7 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
                                                   ends,
                                                   memory_objs_layer,
                                                   strict=False):
-                    assert memory_obj.metadata.fmt == MemoryFormat.LAYER_KV_BLOB
+                    assert memory_obj.metadata.fmt == MemoryFormat.KV_T2D
                     tmp_gpu_buffer[start - offset:end - offset].copy_(
                         memory_obj.tensor, non_blocking=True)
 
@@ -668,7 +665,6 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
                     memory_obj.tensor.copy_(tmp_gpu_buffer[start - offset:end -
                                                            offset],
                                             non_blocking=True)
-                    memory_obj.metadata.fmt = MemoryFormat.LAYER_KV_BLOB
 
             yield
             self.store_stream.synchronize()
