@@ -1,0 +1,960 @@
+INFO 05-13 22:07:07 __init__.py:186] Automatically detected platform cuda.
+INFO 05-13 22:07:09 api_server.py:840] vLLM API server version 0.1.dev4433+geb5db26
+INFO 05-13 22:07:09 api_server.py:841] args: Namespace(subparser='serve', model_tag='meta-llama/Llama-3.1-8B-Instruct', config='', host=None, port=8006, uvicorn_log_level='info', allow_credentials=False, allowed_origins=['*'], allowed_methods=['*'], allowed_headers=['*'], api_key=None, lora_modules=None, prompt_adapters=None, chat_template=None, chat_template_content_format='auto', response_role='assistant', ssl_keyfile=None, ssl_certfile=None, ssl_ca_certs=None, ssl_cert_reqs=0, root_path=None, middleware=[], return_tokens_as_token_ids=False, disable_frontend_multiprocessing=False, enable_request_id_headers=False, enable_auto_tool_choice=False, enable_reasoning=False, reasoning_parser=None, tool_call_parser=None, tool_parser_plugin='', model='meta-llama/Llama-3.1-8B-Instruct', task='auto', tokenizer=None, skip_tokenizer_init=False, revision=None, code_revision=None, tokenizer_revision=None, tokenizer_mode='auto', trust_remote_code=True, allowed_local_media_path=None, download_dir=None, load_format='auto', config_format=<ConfigFormat.AUTO: 'auto'>, dtype='auto', kv_cache_dtype='auto', max_model_len=50000, guided_decoding_backend='xgrammar', logits_processor_pattern=None, model_impl='auto', distributed_executor_backend=None, pipeline_parallel_size=1, tensor_parallel_size=1, max_parallel_loading_workers=None, ray_workers_use_nsight=False, block_size=None, enable_prefix_caching=None, disable_sliding_window=False, use_v2_block_manager=True, num_lookahead_slots=0, seed=0, swap_space=4, cpu_offload_gb=0, gpu_memory_utilization=0.9, num_gpu_blocks_override=None, max_num_batched_tokens=None, max_num_seqs=None, max_logprobs=20, disable_log_stats=True, quantization=None, rope_scaling=None, rope_theta=None, hf_overrides=None, enforce_eager=False, max_seq_len_to_capture=8192, disable_custom_all_reduce=False, tokenizer_pool_size=0, tokenizer_pool_type='ray', tokenizer_pool_extra_config=None, limit_mm_per_prompt=None, mm_processor_kwargs=None, disable_mm_preprocessor_cache=False, enable_lora=False, enable_lora_bias=False, max_loras=1, max_lora_rank=16, lora_extra_vocab_size=256, lora_dtype='auto', long_lora_scaling_factors=None, max_cpu_loras=None, fully_sharded_loras=False, enable_prompt_adapter=False, max_prompt_adapters=1, max_prompt_adapter_token=0, device='auto', num_scheduler_steps=1, multi_step_stream_outputs=True, scheduler_delay_factor=0.0, enable_chunked_prefill=False, speculative_model=None, speculative_model_quantization=None, num_speculative_tokens=None, speculative_disable_mqa_scorer=False, speculative_draft_tensor_parallel_size=None, speculative_max_model_len=None, speculative_disable_by_batch_size=None, ngram_prompt_lookup_max=None, ngram_prompt_lookup_min=None, spec_decoding_acceptance_method='rejection_sampler', typical_acceptance_sampler_posterior_threshold=None, typical_acceptance_sampler_posterior_alpha=None, disable_logprobs_during_spec_decoding=None, model_loader_extra_config=None, ignore_patterns=[], preemption_mode=None, served_model_name=None, qlora_adapter_name_or_path=None, otlp_traces_endpoint=None, collect_detailed_traces=None, disable_async_output_proc=False, scheduling_policy='fcfs', override_neuron_config=None, override_pooler_config=None, compilation_config=None, kv_transfer_config=KVTransferConfig(kv_connector='LMCacheConnector', kv_buffer_device='cuda', kv_buffer_size=1000000000.0, kv_role='kv_both', kv_rank=None, kv_parallel_size=1, kv_ip='127.0.0.1', kv_port=14579), worker_cls='auto', generation_config=None, override_generation_config=None, enable_sleep_mode=False, calculate_kv_scales=False, disable_log_requests=False, max_log_len=None, disable_fastapi_docs=False, enable_prompt_tokens_details=False, dispatch_function=<function serve at 0x753fb1bf7ba0>)
+INFO 05-13 22:07:09 api_server.py:206] Started engine process with PID 1255058
+INFO 05-13 22:07:13 __init__.py:186] Automatically detected platform cuda.
+INFO 05-13 22:07:16 config.py:542] This model supports multiple tasks: {'reward', 'generate', 'embed', 'classify', 'score'}. Defaulting to 'generate'.
+WARNING 05-13 22:07:16 arg_utils.py:1145] The model has a long context length (50000). This may cause OOM errors during the initial memory profiling phase, or result in low performance due to small KV cache space. Consider setting --max-model-len to a smaller value.
+INFO 05-13 22:07:21 config.py:542] This model supports multiple tasks: {'generate', 'classify', 'score', 'reward', 'embed'}. Defaulting to 'generate'.
+WARNING 05-13 22:07:21 arg_utils.py:1145] The model has a long context length (50000). This may cause OOM errors during the initial memory profiling phase, or result in low performance due to small KV cache space. Consider setting --max-model-len to a smaller value.
+INFO 05-13 22:07:21 llm_engine.py:234] Initializing a V0 LLM engine (v0.1.dev4433+geb5db26) with config: model='meta-llama/Llama-3.1-8B-Instruct', speculative_config=None, tokenizer='meta-llama/Llama-3.1-8B-Instruct', skip_tokenizer_init=False, tokenizer_mode=auto, revision=None, override_neuron_config=None, tokenizer_revision=None, trust_remote_code=True, dtype=torch.bfloat16, max_seq_len=50000, download_dir=None, load_format=LoadFormat.AUTO, tensor_parallel_size=1, pipeline_parallel_size=1, disable_custom_all_reduce=False, quantization=None, enforce_eager=False, kv_cache_dtype=auto,  device_config=cuda, decoding_config=DecodingConfig(guided_decoding_backend='xgrammar'), observability_config=ObservabilityConfig(otlp_traces_endpoint=None, collect_model_forward_time=False, collect_model_execute_time=False), seed=0, served_model_name=meta-llama/Llama-3.1-8B-Instruct, num_scheduler_steps=1, multi_step_stream_outputs=True, enable_prefix_caching=False, chunked_prefill_enabled=False, use_async_output_proc=True, disable_mm_preprocessor_cache=False, mm_processor_kwargs=None, pooler_config=None, compilation_config={"splitting_ops":[],"compile_sizes":[],"cudagraph_capture_sizes":[256,248,240,232,224,216,208,200,192,184,176,168,160,152,144,136,128,120,112,104,96,88,80,72,64,56,48,40,32,24,16,8,4,2,1],"max_capture_size":256}, use_cached_outputs=True, 
+INFO 05-13 22:07:23 cuda.py:230] Using Flash Attention backend.
+INFO 05-13 22:07:24 lmcache_connector.py:42] Initializing LMCacheConfig under kv_transfer_config kv_connector='LMCacheConnector' kv_buffer_device='cuda' kv_buffer_size=1000000000.0 kv_role='kv_both' kv_rank=None kv_parallel_size=1 kv_ip='127.0.0.1' kv_port=14579
+[33mINFO LMCache: [0mLoading LMCache config file ../config/May_13_2/prefill/0.yaml [2025-05-13 22:07:24,336] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/utils.py:32
+[33mINFO LMCache: [0mCreating LMCacheEngine instance vllm-instance [2025-05-13 22:07:24,342] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/cache_engine.py:268
+[33mINFO LMCache: [0mChunkedTokenDatabase initialized with alpha 0.01. [2025-05-13 22:08:27,282] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/token_database.py:121
+[33mINFO LMCache: [0mKVCacheManager initialized with self.method: prefill and self.rate: 0.485714286 [2025-05-13 22:08:27,284] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:113
+[33mINFO LMCache: [0mInitializing usage context. [2025-05-13 22:08:27,284] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/usage_context.py:235
+[33mDEBUG LMCache: [0mcontext message updated [2025-05-13 22:08:28,538] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/usage_context.py:98
+[33mDEBUG LMCache: [0mcontext message updated [2025-05-13 22:08:28,778] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/usage_context.py:98
+[33mDEBUG LMCache: [0mcontext message updated [2025-05-13 22:08:29,016] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/usage_context.py:98
+INFO 05-13 22:08:29 model_runner.py:1115] Starting to load model meta-llama/Llama-3.1-8B-Instruct...
+INFO 05-13 22:08:29 weight_utils.py:252] Using model weights format ['*.safetensors']
+Loading safetensors checkpoint shards:   0% Completed | 0/4 [00:00<?, ?it/s]
+Loading safetensors checkpoint shards:  25% Completed | 1/4 [00:00<00:02,  1.41it/s]
+Loading safetensors checkpoint shards:  50% Completed | 2/4 [00:01<00:01,  1.87it/s]
+Loading safetensors checkpoint shards:  75% Completed | 3/4 [00:01<00:00,  1.61it/s]
+Loading safetensors checkpoint shards: 100% Completed | 4/4 [00:02<00:00,  1.33it/s]
+Loading safetensors checkpoint shards: 100% Completed | 4/4 [00:02<00:00,  1.43it/s]
+
+INFO 05-13 22:08:32 model_runner.py:1120] Loading model weights took 14.9888 GB
+INFO 05-13 22:08:36 worker.py:267] Memory profiling takes 3.30 seconds
+INFO 05-13 22:08:36 worker.py:267] the current vLLM instance can use total_gpu_memory (39.49GiB) x gpu_memory_utilization (0.90) = 35.55GiB
+INFO 05-13 22:08:36 worker.py:267] model weights take 14.99GiB; non_torch_memory takes 0.25GiB; PyTorch activation peak memory takes 5.16GiB; the rest of the memory reserved for KV Cache is 15.14GiB.
+INFO 05-13 22:08:36 executor_base.py:110] # CUDA blocks: 7754, # CPU blocks: 2048
+INFO 05-13 22:08:36 executor_base.py:115] Maximum concurrency for 50000 tokens per request: 2.48x
+INFO 05-13 22:08:39 model_runner.py:1439] Capturing cudagraphs for decoding. This may lead to unexpected consequences if the model is not static. To run the model in eager mode, set 'enforce_eager=True' or use '--enforce-eager' in the CLI. If out-of-memory error occurs during cudagraph capture, consider decreasing `gpu_memory_utilization` or switching to eager mode. You can also reduce the `max_num_seqs` as needed to decrease memory usage.
+Capturing CUDA graph shapes:   0%|          | 0/35 [00:00<?, ?it/s]Capturing CUDA graph shapes:   3%|▎         | 1/35 [00:00<00:16,  2.10it/s]Capturing CUDA graph shapes:   6%|▌         | 2/35 [00:00<00:15,  2.14it/s]Capturing CUDA graph shapes:   9%|▊         | 3/35 [00:01<00:15,  2.10it/s]Capturing CUDA graph shapes:  11%|█▏        | 4/35 [00:01<00:14,  2.14it/s]Capturing CUDA graph shapes:  14%|█▍        | 5/35 [00:02<00:13,  2.18it/s]Capturing CUDA graph shapes:  17%|█▋        | 6/35 [00:02<00:13,  2.18it/s]Capturing CUDA graph shapes:  20%|██        | 7/35 [00:03<00:13,  2.14it/s]Capturing CUDA graph shapes:  23%|██▎       | 8/35 [00:03<00:12,  2.14it/s]Capturing CUDA graph shapes:  26%|██▌       | 9/35 [00:04<00:12,  2.09it/s]Capturing CUDA graph shapes:  29%|██▊       | 10/35 [00:04<00:11,  2.14it/s]Capturing CUDA graph shapes:  31%|███▏      | 11/35 [00:05<00:10,  2.25it/s]Capturing CUDA graph shapes:  34%|███▍      | 12/35 [00:05<00:09,  2.34it/s]Capturing CUDA graph shapes:  37%|███▋      | 13/35 [00:05<00:09,  2.29it/s]Capturing CUDA graph shapes:  40%|████      | 14/35 [00:06<00:09,  2.26it/s]Capturing CUDA graph shapes:  43%|████▎     | 15/35 [00:06<00:09,  2.20it/s]Capturing CUDA graph shapes:  46%|████▌     | 16/35 [00:07<00:08,  2.20it/s]Capturing CUDA graph shapes:  49%|████▊     | 17/35 [00:07<00:08,  2.23it/s]Capturing CUDA graph shapes:  51%|█████▏    | 18/35 [00:08<00:07,  2.24it/s]Capturing CUDA graph shapes:  54%|█████▍    | 19/35 [00:08<00:07,  2.28it/s]Capturing CUDA graph shapes:  57%|█████▋    | 20/35 [00:09<00:06,  2.28it/s]Capturing CUDA graph shapes:  60%|██████    | 21/35 [00:09<00:06,  2.31it/s]Capturing CUDA graph shapes:  63%|██████▎   | 22/35 [00:09<00:05,  2.25it/s]Capturing CUDA graph shapes:  66%|██████▌   | 23/35 [00:10<00:05,  2.20it/s]Capturing CUDA graph shapes:  69%|██████▊   | 24/35 [00:10<00:04,  2.25it/s]Capturing CUDA graph shapes:  71%|███████▏  | 25/35 [00:11<00:04,  2.27it/s]Capturing CUDA graph shapes:  74%|███████▍  | 26/35 [00:11<00:03,  2.30it/s]Capturing CUDA graph shapes:  77%|███████▋  | 27/35 [00:12<00:03,  2.33it/s]Capturing CUDA graph shapes:  80%|████████  | 28/35 [00:12<00:02,  2.36it/s]Capturing CUDA graph shapes:  83%|████████▎ | 29/35 [00:12<00:02,  2.35it/s]Capturing CUDA graph shapes:  86%|████████▌ | 30/35 [00:13<00:02,  2.34it/s]Capturing CUDA graph shapes:  89%|████████▊ | 31/35 [00:13<00:01,  2.34it/s]Capturing CUDA graph shapes:  91%|█████████▏| 32/35 [00:14<00:01,  2.30it/s]Capturing CUDA graph shapes:  94%|█████████▍| 33/35 [00:14<00:00,  2.39it/s]Capturing CUDA graph shapes:  97%|█████████▋| 34/35 [00:15<00:00,  2.47it/s]Capturing CUDA graph shapes: 100%|██████████| 35/35 [00:15<00:00,  2.50it/s]Capturing CUDA graph shapes: 100%|██████████| 35/35 [00:15<00:00,  2.27it/s]
+INFO 05-13 22:08:55 model_runner.py:1567] Graph capturing finished in 15 secs, took 0.24 GiB
+INFO 05-13 22:08:55 llm_engine.py:431] init engine (profile, create kv cache, warmup model) took 22.64 seconds
+INFO 05-13 22:08:55 api_server.py:756] Using supplied chat template:
+INFO 05-13 22:08:55 api_server.py:756] None
+INFO 05-13 22:08:55 launcher.py:21] Available routes are:
+INFO 05-13 22:08:55 launcher.py:29] Route: /openapi.json, Methods: HEAD, GET
+INFO 05-13 22:08:55 launcher.py:29] Route: /docs, Methods: HEAD, GET
+INFO 05-13 22:08:55 launcher.py:29] Route: /docs/oauth2-redirect, Methods: HEAD, GET
+INFO 05-13 22:08:55 launcher.py:29] Route: /redoc, Methods: HEAD, GET
+INFO 05-13 22:08:55 launcher.py:29] Route: /health, Methods: GET
+INFO 05-13 22:08:55 launcher.py:29] Route: /ping, Methods: GET, POST
+INFO 05-13 22:08:55 launcher.py:29] Route: /tokenize, Methods: POST
+INFO 05-13 22:08:55 launcher.py:29] Route: /detokenize, Methods: POST
+INFO 05-13 22:08:55 launcher.py:29] Route: /v1/models, Methods: GET
+INFO 05-13 22:08:55 launcher.py:29] Route: /version, Methods: GET
+INFO 05-13 22:08:55 launcher.py:29] Route: /v1/chat/completions, Methods: POST
+INFO 05-13 22:08:55 launcher.py:29] Route: /v1/completions, Methods: POST
+INFO 05-13 22:08:55 launcher.py:29] Route: /v1/embeddings, Methods: POST
+INFO 05-13 22:08:55 launcher.py:29] Route: /pooling, Methods: POST
+INFO 05-13 22:08:55 launcher.py:29] Route: /score, Methods: POST
+INFO 05-13 22:08:55 launcher.py:29] Route: /v1/score, Methods: POST
+INFO 05-13 22:08:55 launcher.py:29] Route: /rerank, Methods: POST
+INFO 05-13 22:08:55 launcher.py:29] Route: /v1/rerank, Methods: POST
+INFO 05-13 22:08:55 launcher.py:29] Route: /v2/rerank, Methods: POST
+INFO 05-13 22:08:55 launcher.py:29] Route: /invocations, Methods: POST
+INFO:     Started server process [1254974]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8006 (Press CTRL+C to quit)
+INFO:     127.0.0.1:49128 - "GET /health HTTP/1.1" 200 OK
+INFO 05-13 22:08:57 chat_utils.py:332] Detected the chat template content format to be 'string'. You can set `--chat-template-content-format` to override this.
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:08:57 engine.py:275] Added request chatcmpl-d6e82574f0b04830b6d425a2d582e3e1.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:08:57,472] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:08:57,472] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 5600 tokens [2025-05-13 22:08:58,038] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:08:58 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:08:58 engine.py:275] Added request chatcmpl-9edc339b5a9142918df919a4f82b884e.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:08:58,167] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:08:58,167] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 16532 tokens [2025-05-13 22:08:59,979] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:09:00 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:09:00 engine.py:275] Added request chatcmpl-cbea77a7af304017a8428d2a578525db.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:09:00,133] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:09:00,133] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 13323 tokens [2025-05-13 22:09:01,547] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:09:01 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:09:01 engine.py:275] Added request chatcmpl-a96e8862d2ea4cdbbacbd7b3be55fd96.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:09:01,710] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:09:01,710] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 20989 tokens [2025-05-13 22:09:04,108] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:09:04 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:09:04 engine.py:275] Added request chatcmpl-83ea9e6b3be64665b48929887d9c143e.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:09:04,268] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:09:04,268] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 11840 tokens [2025-05-13 22:09:05,503] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:09:05 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:09:05 engine.py:275] Added request chatcmpl-197cd232c4dd486d8bb00ba2c21eaa8c.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:09:05,668] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:09:05,668] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 11675 tokens [2025-05-13 22:09:06,887] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:09:06 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:09:06 engine.py:275] Added request chatcmpl-a8950b8972134647901486d11bb4feb1.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:09:06,997] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:09:06,997] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 8164 tokens [2025-05-13 22:09:07,817] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:09:07 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:09:07 engine.py:275] Added request chatcmpl-629606e3342d4639b0510f26ead70833.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:09:07,887] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:09:07,887] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 3759 tokens [2025-05-13 22:09:08,256] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:09:08 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:09:08 engine.py:275] Added request chatcmpl-f203946774ca4548a2fe76a67213af24.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:09:08,324] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:09:08,324] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 4612 tokens [2025-05-13 22:09:08,783] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:09:08 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:09:08 engine.py:275] Added request chatcmpl-94c6bc059aa3426fb278ff9ba40db01c.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:09:08,893] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:09:08,893] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 9619 tokens [2025-05-13 22:09:09,879] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:09:09 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:09:10 engine.py:275] Added request chatcmpl-fd7671421ac94687844f8ab8dbede75a.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:09:10,021] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:09:10,021] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 20125 tokens [2025-05-13 22:09:12,314] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:09:12 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:09:12 engine.py:275] Added request chatcmpl-85a3e03893934d7dad5970a8f0c11d7c.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:09:12,425] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:09:12,425] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 10215 tokens [2025-05-13 22:09:13,466] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:09:13 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:09:13 engine.py:275] Added request chatcmpl-380bb3abfb0c4ff88456e0940e58f80f.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:09:13,643] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:09:13,643] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 4677 tokens [2025-05-13 22:09:14,105] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:09:14 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:09:14 engine.py:275] Added request chatcmpl-64f2349317f8499e83c7706cfd75a1bd.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:09:14,225] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:09:14,225] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 12756 tokens [2025-05-13 22:09:15,568] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:09:15 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:09:15 engine.py:275] Added request chatcmpl-e2520bd8353c4307b963ab258b071919.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:09:15,711] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:09:15,711] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 5001 tokens [2025-05-13 22:09:16,197] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:09:16 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:09:16 engine.py:275] Added request chatcmpl-2345450943ed43a6910aee45aa9640d0.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:09:16,267] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:09:16,268] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 5473 tokens [2025-05-13 22:09:16,808] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:09:16 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:09:16 engine.py:275] Added request chatcmpl-df094fcb533b442a96ae9b21ced44ef2.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:09:16,945] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:09:16,945] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 17774 tokens [2025-05-13 22:09:18,923] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:09:18 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:09:18 engine.py:275] Added request chatcmpl-5132718573a34f4a94ccdbd4ce14cc55.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:09:18,992] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:09:18,992] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 2598 tokens [2025-05-13 22:09:19,248] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:09:19 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:09:19 engine.py:275] Added request chatcmpl-9cad26a6efff4de28ad42b8d1b8d488e.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:09:19,353] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:09:19,353] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 16692 tokens [2025-05-13 22:09:21,197] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:09:21 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:09:21 engine.py:275] Added request chatcmpl-002c812feeab40208442fde3d9f83678.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:09:21,314] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:09:21,314] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 16947 tokens [2025-05-13 22:09:23,187] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:09:23 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:09:23 engine.py:275] Added request chatcmpl-e75e41d57c7b4570ac163213fac74031.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:09:23,310] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:09:23,310] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 13014 tokens [2025-05-13 22:09:24,691] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:09:24 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:09:24 engine.py:275] Added request chatcmpl-36cf966a1f674a688e6b3e58f49e0bb1.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:09:24,802] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:09:24,802] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 5104 tokens [2025-05-13 22:09:25,295] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:09:25 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:09:25 engine.py:275] Added request chatcmpl-4cad18b44592435bbeda43d10f0e0c37.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:09:25,380] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:09:25,380] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 9253 tokens [2025-05-13 22:09:26,325] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:09:26 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:09:26 engine.py:275] Added request chatcmpl-e0b52fac26e941368f89e3fcf2797eda.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:09:26,496] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:09:26,496] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 12493 tokens [2025-05-13 22:09:27,813] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:09:27 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:09:27 engine.py:275] Added request chatcmpl-3641cc7194824a4ea66b1b9219f18e6c.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:09:27,955] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:09:27,955] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 18488 tokens [2025-05-13 22:09:30,036] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:09:30 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:09:30 engine.py:275] Added request chatcmpl-2ff0a76997984f26b3f99e61663e77d3.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:09:30,240] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:09:30,240] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 14026 tokens [2025-05-13 22:09:31,750] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:09:31 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:09:31 engine.py:275] Added request chatcmpl-296b4aa537db4857935a2c685d84fb22.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:09:31,900] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:09:31,900] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 19456 tokens [2025-05-13 22:09:34,097] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:09:34 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:09:34 engine.py:275] Added request chatcmpl-45f93c7d6a0c470cbee7c301143bf107.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:09:34,178] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:09:34,179] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 5698 tokens [2025-05-13 22:09:34,744] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:09:34 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:09:34 engine.py:275] Added request chatcmpl-98a531f4678c4c3e806780f8e7239e4e.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:09:34,812] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:09:34,813] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 3277 tokens [2025-05-13 22:09:35,125] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:09:35 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:09:35 engine.py:275] Added request chatcmpl-60f862d3296f43ac82d04c71a1182ab7.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:09:35,194] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:09:35,194] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 12709 tokens [2025-05-13 22:09:36,539] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:09:36 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:09:36 engine.py:275] Added request chatcmpl-128c5bbc414943348b48a67bfde50fd4.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:09:36,653] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:09:36,653] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 11107 tokens [2025-05-13 22:09:37,808] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:09:37 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:09:37 engine.py:275] Added request chatcmpl-ea161b3566a44c7e8b10a166ab35aebf.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:09:37,944] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:09:37,944] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 3445 tokens [2025-05-13 22:09:38,270] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:09:38 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:09:38 engine.py:275] Added request chatcmpl-05f365702a0944d7b0725aa00ddc070e.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:09:38,369] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:09:38,369] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 16700 tokens [2025-05-13 22:09:40,217] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:09:40 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:09:40 engine.py:275] Added request chatcmpl-301888dc9c16429380e186a6616f4a38.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:09:40,371] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:09:40,371] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 7078 tokens [2025-05-13 22:09:41,083] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:09:41 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:09:41 engine.py:275] Added request chatcmpl-f91ebfb21ce343ea979ba2647eccbdfb.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:09:41,204] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:09:41,205] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 14301 tokens [2025-05-13 22:09:42,743] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:09:42 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:09:42 engine.py:275] Added request chatcmpl-d9c947f5fe60440388b2911354b246a7.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:09:42,902] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:09:42,902] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 21846 tokens [2025-05-13 22:09:45,446] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:09:45 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:09:45 engine.py:275] Added request chatcmpl-81a002b50a0748ada870474f5eebf789.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:09:45,534] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:09:45,534] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 1599 tokens [2025-05-13 22:09:45,686] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:09:45 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:09:45 engine.py:275] Added request chatcmpl-9e552b4ad06140568383f7b42d24a9b0.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:09:45,809] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:09:45,809] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 22197 tokens [2025-05-13 22:09:48,397] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:09:48 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:09:48 engine.py:275] Added request chatcmpl-9249652c63fd483880b5a65ce31056ea.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:09:48,556] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:09:48,556] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 20094 tokens [2025-05-13 22:09:50,855] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:09:50 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:09:50 engine.py:275] Added request chatcmpl-87851375a8514153844333cd8bf55cbe.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:09:50,965] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:09:50,965] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 12083 tokens [2025-05-13 22:09:52,245] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:09:52 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:09:52 engine.py:275] Added request chatcmpl-4eb2d571eda143a98b61a8556f23dbce.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:09:52,369] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:09:52,369] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 8420 tokens [2025-05-13 22:09:53,217] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:09:53 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:09:53 engine.py:275] Added request chatcmpl-9f9f8eee12fd4a1c9997aabde9ee3e8a.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:09:53,317] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:09:53,317] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 7685 tokens [2025-05-13 22:09:54,102] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:09:54 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:09:54 engine.py:275] Added request chatcmpl-1eff00d1778a491e9ee02ab955bb60b1.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:09:54,185] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:09:54,185] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 3590 tokens [2025-05-13 22:09:54,544] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:09:54 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:09:54 engine.py:275] Added request chatcmpl-cb6c64b9b29349019480c27d3e294b6f.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:09:54,622] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:09:54,622] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 6828 tokens [2025-05-13 22:09:55,298] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:09:55 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:09:55 engine.py:275] Added request chatcmpl-e4eee4724c0a49418a71c69ec99c8f71.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:09:55,372] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:09:55,372] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 13119 tokens [2025-05-13 22:09:56,778] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:09:56 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:09:56 engine.py:275] Added request chatcmpl-b0ed1223f75f45899f5a54ef420f16fb.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:09:56,896] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:09:56,896] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 11216 tokens [2025-05-13 22:09:58,071] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:09:58 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:09:58 engine.py:275] Added request chatcmpl-cae7cb75bcdb4963a2671b5f66cd702a.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:09:58,160] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:09:58,160] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 9334 tokens [2025-05-13 22:09:59,113] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:09:59 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:09:59 engine.py:275] Added request chatcmpl-42531597cc0245f59ef760d1ed631608.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:09:59,239] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:09:59,239] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 15443 tokens [2025-05-13 22:10:00,927] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:10:01 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:10:01 engine.py:275] Added request chatcmpl-8ca4a0c192b74805b712a5db0cc9c882.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:10:01,070] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:10:01,070] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 14693 tokens [2025-05-13 22:10:02,671] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:10:02 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:10:02 engine.py:275] Added request chatcmpl-842a3075ed714a85818446dc0394bf6c.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:10:02,787] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:10:02,788] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 11968 tokens [2025-05-13 22:10:04,044] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:10:04 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:10:04 engine.py:275] Added request chatcmpl-7c1a48bdd75943bf985fd5dab70cbf92.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:10:04,138] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:10:04,138] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 10547 tokens [2025-05-13 22:10:05,239] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:10:05 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:10:05 engine.py:275] Added request chatcmpl-d124ac907b074a1182acdabb7af06213.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:10:05,325] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:10:05,325] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 11598 tokens [2025-05-13 22:10:06,545] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:10:06 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:10:06 engine.py:275] Added request chatcmpl-64ecc144191341c089a9bc1c56d0aec7.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:10:06,631] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:10:06,632] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 7029 tokens [2025-05-13 22:10:07,342] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:10:07 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:10:07 engine.py:275] Added request chatcmpl-47728b4248444690ad08b6a9d8c28d0d.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:10:07,475] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:10:07,476] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 16205 tokens [2025-05-13 22:10:09,260] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:10:09 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:10:09 engine.py:275] Added request chatcmpl-90ca307d24bf48daa666065307a2b85d.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:10:09,371] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:10:09,371] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 2632 tokens [2025-05-13 22:10:09,628] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:10:09 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:10:09 engine.py:275] Added request chatcmpl-5ed10c79b7fb4bfa91844146925c99e0.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:10:09,734] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:10:09,734] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 19775 tokens [2025-05-13 22:10:11,996] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:10:12 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:10:12 engine.py:275] Added request chatcmpl-ae54c3e760584544941409437fc372e4.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:10:12,113] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:10:12,113] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 11925 tokens [2025-05-13 22:10:13,367] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:10:13 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:10:13 engine.py:275] Added request chatcmpl-862ab62126b5458bad22974316d95c47.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:10:13,457] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:10:13,457] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 14565 tokens [2025-05-13 22:10:15,031] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:10:15 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:10:15 engine.py:275] Added request chatcmpl-8a5f898cefaa47ae9dc64d51223bc826.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:10:15,174] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:10:15,174] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 18599 tokens [2025-05-13 22:10:17,279] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:10:17 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:10:17 engine.py:275] Added request chatcmpl-0551cf0b7d30478d9eac64fc9148eed4.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:10:17,402] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:10:17,402] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 13780 tokens [2025-05-13 22:10:18,878] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:10:18 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:10:19 engine.py:275] Added request chatcmpl-201831627d45468888379c0159aeeafc.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:10:19,012] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:10:19,013] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 10470 tokens [2025-05-13 22:10:20,099] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:10:20 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:10:20 engine.py:275] Added request chatcmpl-c4a389c3fba541beb0de0a54e99f841c.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:10:20,231] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:10:20,231] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 7183 tokens [2025-05-13 22:10:20,959] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:10:20 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:10:21 engine.py:275] Added request chatcmpl-012ffa59c4cf4b85afc2d76561b4fc05.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:10:21,059] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:10:21,059] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 18064 tokens [2025-05-13 22:10:23,098] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:10:23 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:10:23 engine.py:275] Added request chatcmpl-f22bec043e84431fac17cf3daab8eccc.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:10:23,269] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:10:23,269] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 21685 tokens [2025-05-13 22:10:25,799] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:10:25 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:10:25 engine.py:275] Added request chatcmpl-609651073cc24991a867333ac90094e5.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:10:25,910] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:10:25,910] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 11775 tokens [2025-05-13 22:10:27,144] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:10:27 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:10:27 engine.py:275] Added request chatcmpl-94be2e1e6109443783f4a46e4985b3b0.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:10:27,282] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:10:27,283] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 2151 tokens [2025-05-13 22:10:27,491] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:10:27 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:10:27 engine.py:275] Added request chatcmpl-17eaeab151c04712964895909341e804.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:10:27,556] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:10:27,556] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 7473 tokens [2025-05-13 22:10:28,311] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:10:28 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:10:28 engine.py:275] Added request chatcmpl-8037993dc59e49868f26bbcba962b891.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:10:28,408] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:10:28,409] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 8155 tokens [2025-05-13 22:10:29,233] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:10:29 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:10:29 engine.py:275] Added request chatcmpl-63bc494f3dc44018b275788dce6b5f05.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:10:29,321] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:10:29,321] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 9996 tokens [2025-05-13 22:10:30,356] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:10:30 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:10:30 engine.py:275] Added request chatcmpl-f22ec55782fb4fa39cb260d0b816c972.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:10:30,482] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:10:30,482] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 14763 tokens [2025-05-13 22:10:32,091] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:10:32 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:10:32 engine.py:275] Added request chatcmpl-1ef19d48595d4c5394de8aff08ea5ed7.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:10:32,232] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:10:32,232] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 11405 tokens [2025-05-13 22:10:33,433] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:10:33 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:10:33 engine.py:275] Added request chatcmpl-5e59b4295e7d4dc6a3a6852cb3ab07ea.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:10:33,521] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:10:33,521] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 1949 tokens [2025-05-13 22:10:33,712] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:10:33 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:10:33 engine.py:275] Added request chatcmpl-b46eb6dd78b84a6b92d7d83948c55e6b.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:10:33,753] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:10:33,753] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 3810 tokens [2025-05-13 22:10:34,127] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:10:34 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:10:34 engine.py:275] Added request chatcmpl-8cbdea8b22cd46b28ba261dc45a5680a.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:10:34,266] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:10:34,266] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 13589 tokens [2025-05-13 22:10:35,728] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:10:35 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:10:35 engine.py:275] Added request chatcmpl-cb90432fbe4548a284e1f5eb7f632071.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:10:35,868] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:10:35,868] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 19694 tokens [2025-05-13 22:10:38,112] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:10:38 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:10:38 engine.py:275] Added request chatcmpl-c6301a916c2d45b1b6f18fd44767f8be.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:10:38,279] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:10:38,279] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 14077 tokens [2025-05-13 22:10:39,798] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:10:39 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:10:39 engine.py:275] Added request chatcmpl-2e74c96608a1413f893fd2d99452aa45.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:10:39,876] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:10:39,876] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 9519 tokens [2025-05-13 22:10:40,863] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:10:40 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:10:40 engine.py:275] Added request chatcmpl-3396b08d576d49debc869b55f9175fbf.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:10:40,999] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:10:40,999] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 21053 tokens [2025-05-13 22:10:43,441] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:10:43 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:10:43 engine.py:275] Added request chatcmpl-a482319a581a4e9ca705bb067b7cfdda.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:10:43,510] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:10:43,511] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 7264 tokens [2025-05-13 22:10:44,241] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:10:44 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:10:44 engine.py:275] Added request chatcmpl-63d0eb9686ac44a488902caaa0b6479a.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:10:44,342] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:10:44,342] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 13952 tokens [2025-05-13 22:10:45,855] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:10:45 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:10:45 engine.py:275] Added request chatcmpl-2226052a653c416fa88fd13f3347d654.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:10:45,928] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:10:45,928] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 7818 tokens [2025-05-13 22:10:46,725] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:10:46 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:10:46 engine.py:275] Added request chatcmpl-284204bc231c435f854a246d06bcc197.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:10:46,921] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:10:46,921] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 15299 tokens [2025-05-13 22:10:48,591] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:10:48 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:10:48 engine.py:275] Added request chatcmpl-29fae551d6ea4aee931113a189f03911.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:10:48,802] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:10:48,802] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 14776 tokens [2025-05-13 22:10:50,415] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:10:50 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:10:50 engine.py:275] Added request chatcmpl-97e7abfa9d094bac816f58b7811f4784.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:10:50,509] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:10:50,509] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 3420 tokens [2025-05-13 22:10:50,835] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:10:50 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:10:50 engine.py:275] Added request chatcmpl-c7a8f6cf54c64b39bb32ef283522d71d.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:10:50,917] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:10:50,917] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 4274 tokens [2025-05-13 22:10:51,343] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:10:51 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:10:51 engine.py:275] Added request chatcmpl-aecc8a2874194eccba92a6abf1d08f79.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:10:51,467] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:10:51,467] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 18174 tokens [2025-05-13 22:10:53,515] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:10:53 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:10:53 engine.py:275] Added request chatcmpl-4847a9914ccc4a39882e65b08a9df209.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:10:53,718] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:10:53,718] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 4737 tokens [2025-05-13 22:10:54,188] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:10:54 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:10:54 engine.py:275] Added request chatcmpl-5ea4a322c40946aeb627fed0881a3995.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:10:54,250] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:10:54,250] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 7199 tokens [2025-05-13 22:10:54,981] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:10:55 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:10:55 engine.py:275] Added request chatcmpl-52098ed37b0049c4b3e9dccb05707602.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:10:55,064] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:10:55,064] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 11668 tokens [2025-05-13 22:10:56,293] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:10:56 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:10:56 engine.py:275] Added request chatcmpl-45784b736e3c4bf9896f3e694f7aed24.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:10:56,467] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:10:56,467] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 13127 tokens [2025-05-13 22:10:57,877] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:10:57 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:10:57 engine.py:275] Added request chatcmpl-fce9031e8cce415eb12354bd86ca2408.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:10:57,981] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:10:57,981] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 4436 tokens [2025-05-13 22:10:58,422] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:10:58 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:10:58 engine.py:275] Added request chatcmpl-4f858a47fe9c4b0d92263de1ecb95d0a.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:10:58,511] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:10:58,511] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 10082 tokens [2025-05-13 22:10:59,553] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:10:59 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:10:59 engine.py:275] Added request chatcmpl-2c910eb403be485d8303b7a4fc0b3d71.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:10:59,701] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:10:59,701] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 16560 tokens [2025-05-13 22:11:01,539] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:11:01 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:11:01 engine.py:275] Added request chatcmpl-fe91b45f62534a78bdf2e30a8b2eb819.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:11:01,667] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:11:01,668] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 9079 tokens [2025-05-13 22:11:02,599] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:11:02 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:11:02 engine.py:275] Added request chatcmpl-7ca348c9a83f4d14b3f8568b674c24d8.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:11:02,704] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:11:02,704] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 15728 tokens [2025-05-13 22:11:04,434] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:11:04 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:11:04 engine.py:275] Added request chatcmpl-6727eaa3301b4b71b0a1f3dfdefea63a.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:11:04,556] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:11:04,556] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 19398 tokens [2025-05-13 22:11:06,765] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:11:06 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:11:06 engine.py:275] Added request chatcmpl-8efb2dba705d44e18a5582693c61ee85.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:11:06,889] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:11:06,889] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 17810 tokens [2025-05-13 22:11:08,894] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:11:08 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:11:08 engine.py:275] Added request chatcmpl-973b57594960416486fef2d2ed15fae6.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:11:08,985] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:11:08,985] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 8262 tokens [2025-05-13 22:11:09,827] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:11:09 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:11:09 engine.py:275] Added request chatcmpl-c44304ae2edb41eda82cd8aa60797eed.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:11:09,961] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:11:09,962] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 16495 tokens [2025-05-13 22:11:11,793] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:11:11 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:11:11 engine.py:275] Added request chatcmpl-ff6e1c01cfa54e69acbd015d6edb7655.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:11:11,920] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:11:11,920] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 12596 tokens [2025-05-13 22:11:13,263] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:11:13 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:11:13 engine.py:275] Added request chatcmpl-97ca4f210c5e4fca83c9dbd4c739ae03.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:11:13,378] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:11:13,378] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 18239 tokens [2025-05-13 22:11:15,438] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:11:15 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:11:15 engine.py:275] Added request chatcmpl-a758372e1a3d43a6bf539c112819400f.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:11:15,611] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:11:15,611] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 18393 tokens [2025-05-13 22:11:17,684] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:11:17 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:11:17 engine.py:275] Added request chatcmpl-5a8728bd7c444dda8100a30764ee1811.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:11:17,809] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:11:17,809] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 18688 tokens [2025-05-13 22:11:19,916] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:11:19 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:11:20 engine.py:275] Added request chatcmpl-0cab9ae1a2174ec8bda4ce68cd0bde31.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:11:20,039] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:11:20,039] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 16448 tokens [2025-05-13 22:11:21,865] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:11:21 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:11:21 engine.py:275] Added request chatcmpl-d60f6ec9fc1540b38f764989bae4cf80.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:11:22,010] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:11:22,010] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 21782 tokens [2025-05-13 22:11:24,564] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:11:24 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:11:24 engine.py:275] Added request chatcmpl-62158b049a3245849ad0d89dbbb9bf26.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:11:24,711] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:11:24,711] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 19364 tokens [2025-05-13 22:11:26,915] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:11:26 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:11:27 engine.py:275] Added request chatcmpl-4eee173eb04f4d269df7db3327b05900.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:11:27,052] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:11:27,052] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 23280 tokens [2025-05-13 22:11:29,796] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:11:29 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:11:29 engine.py:275] Added request chatcmpl-1dbdff50da4f45dba8be1cb76051fd8a.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:11:29,922] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:11:29,922] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 11097 tokens [2025-05-13 22:11:31,083] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:11:31 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:11:31 engine.py:275] Added request chatcmpl-44b115d1d36a4fa7bd4fbf33b92e6039.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:11:31,205] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:11:31,205] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 7351 tokens [2025-05-13 22:11:31,946] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:11:31 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:11:32 engine.py:275] Added request chatcmpl-57db86c16b3c4ec994ae9b11d2b3eff3.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:11:32,047] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:11:32,047] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 17128 tokens [2025-05-13 22:11:33,949] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:11:34 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:11:34 engine.py:275] Added request chatcmpl-098b54b13eae4d7ba12c2b05565ac025.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:11:34,068] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:11:34,068] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 11890 tokens [2025-05-13 22:11:35,321] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:11:35 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:11:35 engine.py:275] Added request chatcmpl-513946dfca58479aad1b878d00c541e6.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:11:35,396] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:11:35,396] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 3425 tokens [2025-05-13 22:11:35,721] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:11:35 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:11:35 engine.py:275] Added request chatcmpl-3eb0eff99c574ec890f548f871f8ea68.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:11:35,847] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:11:35,848] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 16732 tokens [2025-05-13 22:11:37,708] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:11:37 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:11:37 engine.py:275] Added request chatcmpl-e36f6a5519b146158bc6323b1eabc360.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:11:37,815] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:11:37,816] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 5466 tokens [2025-05-13 22:11:38,359] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:11:38 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:11:38 engine.py:275] Added request chatcmpl-1f42a10b2fd645eb9cac440bab534870.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:11:38,436] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:11:38,437] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 11251 tokens [2025-05-13 22:11:39,615] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:11:39 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:11:39 engine.py:275] Added request chatcmpl-e1a9b07cbb874f44a7e5b1eabaae7d76.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:11:39,756] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:11:39,756] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 12584 tokens [2025-05-13 22:11:41,099] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:11:41 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:11:41 engine.py:275] Added request chatcmpl-300485627d64479e8b31b723a0896985.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:11:41,269] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:11:41,269] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 16802 tokens [2025-05-13 22:11:43,137] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:11:43 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:11:43 engine.py:275] Added request chatcmpl-ae55ce823b9344598799d1fc744ed317.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:11:43,279] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:11:43,279] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 16949 tokens [2025-05-13 22:11:45,164] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:11:45 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:11:45 engine.py:275] Added request chatcmpl-85aba80a318a4a20b1403c6c729653f4.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:11:45,246] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:11:45,246] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 4496 tokens [2025-05-13 22:11:45,692] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:11:45 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:11:45 engine.py:275] Added request chatcmpl-61cbe57d865a4ba4aeceb27ed2a374a9.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:11:45,769] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:11:45,769] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 2062 tokens [2025-05-13 22:11:45,974] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:11:46 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:11:46 engine.py:275] Added request chatcmpl-2804d36994ad4084a4fbfbfc05068b82.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:11:46,119] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:11:46,120] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 19822 tokens [2025-05-13 22:11:48,386] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:11:48 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:11:48 engine.py:275] Added request chatcmpl-5ddaee5005334587a6ff9102b68168f9.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:11:48,543] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:11:48,543] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 17857 tokens [2025-05-13 22:11:50,550] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:11:50 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:11:50 engine.py:275] Added request chatcmpl-5af9324da0934a52b3dc486428251489.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:11:50,682] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:11:50,682] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 10132 tokens [2025-05-13 22:11:51,726] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:11:51 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:11:51 engine.py:275] Added request chatcmpl-feb5204543cb477ea69f1c10ae043819.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:11:51,910] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:11:51,911] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 6830 tokens [2025-05-13 22:11:52,589] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:11:52 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:11:52 engine.py:275] Added request chatcmpl-8c79a903bc0740e5988d8f2eb85522d5.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:11:52,722] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:11:52,723] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 13377 tokens [2025-05-13 22:11:54,161] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:11:54 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:11:54 engine.py:275] Added request chatcmpl-38184810c5984388a5a4985af3c4620d.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:11:54,246] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:11:54,246] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 2651 tokens [2025-05-13 22:11:54,505] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:11:54 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:11:54 engine.py:275] Added request chatcmpl-b7d0cd81233f47b9958d8ed3f86dac2e.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:11:54,728] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:11:54,729] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 16383 tokens [2025-05-13 22:11:56,530] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:11:56 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:11:56 engine.py:275] Added request chatcmpl-161d6fdc67804df9b6975f13c3756424.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:11:56,687] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:11:56,687] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 20776 tokens [2025-05-13 22:11:59,100] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:11:59 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:11:59 engine.py:275] Added request chatcmpl-ba20e66310a94790bd83f13aadacef83.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:11:59,241] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:11:59,241] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 8667 tokens [2025-05-13 22:12:00,126] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:12:00 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:12:00 engine.py:275] Added request chatcmpl-e9d711e841df4c46a85970de1050e4aa.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:12:00,281] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:12:00,281] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 20985 tokens [2025-05-13 22:12:02,708] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:12:02 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:12:02 engine.py:275] Added request chatcmpl-022f623483e5473699f76bbc2aa97229.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:12:02,801] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:12:02,801] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 3359 tokens [2025-05-13 22:12:03,124] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:12:03 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:12:03 engine.py:275] Added request chatcmpl-070cc6025f13456c8113bb10a0b57823.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:12:03,187] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:12:03,187] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 2571 tokens [2025-05-13 22:12:03,443] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:12:03 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:12:03 engine.py:275] Added request chatcmpl-8da3b3e0df824673be578483a7be26e0.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:12:03,517] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:12:03,517] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 4962 tokens [2025-05-13 22:12:04,005] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:12:04 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:12:04 engine.py:275] Added request chatcmpl-a818145d22194eb88c9e63c4c13e2b77.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:12:04,096] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:12:04,096] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 6580 tokens [2025-05-13 22:12:04,752] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:12:04 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:12:04 engine.py:275] Added request chatcmpl-c2008ea9334344f49aaa5295f224acfc.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:12:04,821] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:12:04,821] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 9192 tokens [2025-05-13 22:12:05,759] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:12:05 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:12:05 engine.py:275] Added request chatcmpl-f6fb1aacaf8e48eb955257609df6a918.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:12:05,929] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:12:05,929] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 23421 tokens [2025-05-13 22:12:08,835] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:12:08 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:12:08 engine.py:275] Added request chatcmpl-fbbff73617364c34ab97a605ae7dedc7.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:12:08,995] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:12:08,995] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 18195 tokens [2025-05-13 22:12:11,056] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:12:11 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:12:11 engine.py:275] Added request chatcmpl-f592106976ef4081a08f12da1939ac39.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:12:11,163] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:12:11,163] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 19158 tokens [2025-05-13 22:12:13,343] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:12:13 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:12:13 engine.py:275] Added request chatcmpl-17d1617d0f3f49cfb6dd37e39b663ddf.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:12:13,441] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:12:13,441] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 3211 tokens [2025-05-13 22:12:13,753] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:12:13 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:12:13 engine.py:275] Added request chatcmpl-3b73d62a9e4e48a8bb9c30aa01baf89b.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:12:13,885] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:12:13,885] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 13870 tokens [2025-05-13 22:12:15,393] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:12:15 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:12:15 engine.py:275] Added request chatcmpl-d0c1afe22c8b49ab9415e7e560763f09.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:12:15,523] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:12:15,523] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 20890 tokens [2025-05-13 22:12:17,950] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:12:18 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:12:18 engine.py:275] Added request chatcmpl-a36e415837f34ac08660b09e924dc9de.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:12:18,085] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:12:18,085] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 11906 tokens [2025-05-13 22:12:19,340] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:12:19 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:12:19 engine.py:275] Added request chatcmpl-b9c53f94d66c4086899b4910c9c29df8.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:12:19,459] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:12:19,459] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 12281 tokens [2025-05-13 22:12:20,762] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:12:20 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:12:20 engine.py:275] Added request chatcmpl-ba291eb54d884009b2d10a4ac561a086.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:12:20,855] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:12:20,855] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 7832 tokens [2025-05-13 22:12:21,652] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:12:21 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:12:21 engine.py:275] Added request chatcmpl-4f62b515d3c94f81a314fae74868eb81.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:12:21,734] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:12:21,734] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 7530 tokens [2025-05-13 22:12:22,495] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:12:22 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:12:22 engine.py:275] Added request chatcmpl-ef06227bfdb84f79a00e486dd81d5bef.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:12:22,590] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:12:22,590] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 12413 tokens [2025-05-13 22:12:23,909] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:12:23 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:12:23 engine.py:275] Added request chatcmpl-9d8dd4c56b98445d89ab2da7a7135c97.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:12:24,001] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:12:24,001] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 9007 tokens [2025-05-13 22:12:24,929] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:12:24 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:12:25 engine.py:275] Added request chatcmpl-304b39c5b0d143199a31ed8c020d1521.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:12:25,043] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:12:25,043] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
+[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 16931 tokens [2025-05-13 22:12:26,928] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
+INFO 05-13 22:12:26 llm_engine.py:1143] Start updating memory
+INFO:     127.0.0.1:49142 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 05-13 22:12:27 engine.py:275] Added request chatcmpl-71096fd12a564f0280cb359befee06f3.
+[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-13 22:12:27,055] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
+[33mDEBUG LMCache: [0mReturning the original input! [2025-05-13 22:12:27,056] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
