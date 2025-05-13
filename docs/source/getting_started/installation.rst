@@ -31,7 +31,7 @@ These wheels are continually built from the latest LMCache source code (not offi
     pip install --index-url https://test.pypi.org/simple --extra-index-url https://pypi.org/simple lmcache
 
 Install Latest LMCache from Source
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 To install from source, clone the repository and install in editable mode:
 
@@ -42,7 +42,7 @@ To install from source, clone the repository and install in editable mode:
     pip install -e .
 
 Install LMCache with uv
-~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~
 
 We recommend developers to use `uv` for a better package management:
 
