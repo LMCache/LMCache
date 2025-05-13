@@ -6,6 +6,9 @@ from typing import Any, Optional
 import yaml
 
 import lmcache.config as orig_config
+from lmcache.logging import init_logger
+
+logger = init_logger(__name__)
 
 
 @dataclass
@@ -215,6 +218,19 @@ class LMCacheEngineConfig:
         nixl_buffer_device = config.get("nixl_buffer_device", None)
         nixl_enable_gc = config.get("nixl_enable_gc", False)
 
+        # Try getting "legacy" nixl config
+        if nixl_receiver_host is None:
+            nixl_receiver_host = config.get("nixl_peer_host", None)
+            if nixl_receiver_host is not None:
+                logger.warning("nixl_peer_host is deprecated, please use "
+                               "nixl_receiver_host in the config file instead")
+
+        if nixl_receiver_port is None:
+            nixl_receiver_port = config.get("nixl_peer_port", None)
+            if nixl_receiver_port is not None:
+                logger.warning("nixl_peer_port is deprecated, please use "
+                               "nixl_receiver_port in the config file instead")
+
         match local_disk:
             case None:
                 local_disk_path = None
@@ -367,6 +383,24 @@ class LMCacheEngineConfig:
             get_env_name("nixl_buffer_device"), config.nixl_buffer_device)
         config.nixl_enable_gc = to_bool(
             parse_env(get_env_name("nixl_enable_gc"), config.nixl_enable_gc))
+
+        # Try getting "legacy" nixl config
+        if config.nixl_receiver_host is None:
+            config.nixl_receiver_host = parse_env(
+                get_env_name("nixl_peer_host"), config.nixl_receiver_host)
+            if config.nixl_receiver_host is not None:
+                logger.warning(
+                    "LMCACHE_NIXL_PEER_HOST is deprecated, please use "
+                    "LMCACHE_NIXL_RECEIVER_HOST environment variable instead")
+
+        if config.nixl_receiver_port is None:
+            config.nixl_receiver_port = to_int(
+                parse_env(get_env_name("nixl_peer_port"),
+                          config.nixl_receiver_port))
+            if config.nixl_receiver_port is not None:
+                logger.warning(
+                    "LMCACHE_NIXL_PEER_PORT is deprecated, please use "
+                    "LMCACHE_NIXL_RECEIVER_PORT environment variable instead")
         return config.validate()
 
     def to_original_config(self) -> orig_config.LMCacheEngineConfig:
