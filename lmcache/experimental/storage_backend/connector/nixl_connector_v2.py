@@ -859,7 +859,7 @@ class NixlChannel:
         self,
         shape: torch.Size,
         dtype: Optional[torch.dtype],
-        fmt: MemoryFormat = MemoryFormat.KV_BLOB,
+        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
     ) -> MemoryObjMetadata:
         """Dry allocate the memory and return the metadata."""
         sender = self._check_sender()
@@ -877,7 +877,7 @@ class NixlChannel:
         self,
         shape: torch.Size,
         dtype: Optional[torch.dtype],
-        fmt: MemoryFormat = MemoryFormat.KV_BLOB,
+        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
     ) -> Optional[MemoryObj]:
         """Allocate the memory for send."""
         sender = self._check_sender()
