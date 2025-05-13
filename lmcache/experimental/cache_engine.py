@@ -28,7 +28,7 @@ from lmcache.experimental.gpu_connector import (
 from lmcache.experimental.lookup_server import (LookupServerInterface,
                                                 RedisLookupServer)
 from lmcache.experimental.memory_management import (  # noqa: E501
-    AdHocMemoryAllocator, MemoryAllocatorInterface, MemoryObj,
+    AdHocMemoryAllocator, MemoryAllocatorInterface, MemoryFormat, MemoryObj,
     MixedMemoryAllocator)
 from lmcache.experimental.storage_backend.storage_manager import (
     DistributedStorageManager, StorageManager)
@@ -512,7 +512,7 @@ class LayerwiseLMCacheEngine(LMCacheEngine):
             no_space_left = False
             for layer_id in range(self.num_layers):
                 mem_obj_single_layer = self.storage_manager.allocate(
-                    kv_shape_single_layer, kv_dtype)
+                    kv_shape_single_layer, kv_dtype, fmt=MemoryFormat.KV_T2D)
 
                 if mem_obj_single_layer is None:
                     logger.warning(

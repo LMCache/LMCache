@@ -186,7 +186,7 @@ class LocalCPUBackend(StorageBackendInterface):
     def allocate(self,
                  shape: torch.Size,
                  dtype: torch.dtype,
-                 fmt: MemoryFormat = MemoryFormat.KV_BLOB,
+                 fmt: MemoryFormat = MemoryFormat.KV_2LTD,
                  eviction: bool = True) -> Optional[MemoryObj]:
         """
         allocate a memory object of shape and dtype
