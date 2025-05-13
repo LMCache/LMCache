@@ -24,6 +24,11 @@ def quant_and_pack_kcache(k: torch.FloatTensor, group_size: int, bits: int):
 	data = data.clamp_(0, max_int).round_().to(torch.int32)
 	data = data.view(shape)
 	code = pack_tensor(data, bits, pack_dim=2)
+
+	code = code.permute(0, 1, 3, 2)
+	scale = scale.squeeze(-2).permute(0, 1, 3, 2)
+	mn = mn.squeeze(-2).permute(0, 1, 3, 2)
+
 	return code, scale, mn
 
 
@@ -45,6 +50,10 @@ def quant_and_pack_vcache(v: torch.FloatTensor, group_size: int, bits: int):
 	data = data.view(shape)
 	# Pack
 	code = pack_tensor(data, bits, pack_dim=3)
+
+	scale = scale.squeeze(-1)
+	mn = mn.squeeze(-1)
+
 	return code, scale, mn
 
 
@@ -233,8 +242,6 @@ def triton_quantize_and_pack_along_last_dim(data: torch.Tensor, group_size: int,
 		_minmax_along_last_dim[grid](data, mn, mx,
 							 data.numel(), data.shape[0], num_groups, group_size,
 							 BLOCK_SIZE_N=BLOCK_SIZE_N, num_warps=8) 
-	# mn = torch.min(data, dim=-1, keepdim=True)[0].squeeze(-1)
-	# mx = torch.max(data, dim=-1, keepdim=True)[0].squeeze(-1)
 	scale = (mx - mn) / (2 ** bit - 1)
 	data = data - mn.unsqueeze(-1)
 	data.div_(scale.unsqueeze(-1))

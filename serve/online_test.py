@@ -15,7 +15,7 @@ import argparse
 
 MODEL = "meta-llama/Llama-3.1-8B-Instruct"
 FILES = [
-    'dataset/samsum_processed_v3.csv'
+    'dataset/samsum_processed_v2.csv',
 ]
 
 # Sends each CSV entry as a separate request

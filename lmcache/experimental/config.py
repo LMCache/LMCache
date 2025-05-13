@@ -30,6 +30,7 @@ class LMCacheEngineConfig:
     alpha: float
     policy: str
     rate: float
+    compression: str
 
     @staticmethod
     def from_defaults(
@@ -47,12 +48,13 @@ class LMCacheEngineConfig:
         alpha: float = 1.0,
         policy: str = "ours",
         rate: float = 1.0,
+        compression: str = "kivi",
     ) -> "LMCacheEngineConfig":
         return LMCacheEngineConfig(chunk_size, local_cpu, max_local_cpu_size,
                                    local_disk, max_local_disk_size, remote_url,
                                    remote_serde, save_decode_cache,
                                    enable_blending, blend_recompute_ratio,
-                                   blend_min_tokens, alpha, policy, rate)
+                                   blend_min_tokens, alpha, policy, rate, compression)
 
     @staticmethod
     def from_legacy(
@@ -68,6 +70,7 @@ class LMCacheEngineConfig:
         alpha: float = 1.0,
         policy: str = "ours",
         rate: float = 1.0,
+        compression: str = "kivi",
     ) -> "LMCacheEngineConfig":
         if backend == "cpu":
             local_cpu = True
@@ -111,7 +114,7 @@ class LMCacheEngineConfig:
                                    local_disk, max_local_disk_size, remote_url,
                                    remote_serde, save_decode_cache,
                                    enable_blending, blend_recompute_ratio,
-                                   blend_min_tokens, alpha, policy, rate)
+                                   blend_min_tokens, alpha, policy, rate, compression)
 
     @staticmethod
     def from_file(file_path: str) -> "LMCacheEngineConfig":
@@ -140,6 +143,7 @@ class LMCacheEngineConfig:
         alpha = config.get("alpha", 1.0)
         policy = config.get("policy", "ours")
         rate = config.get("rate", 1.0)
+        compression = config.get("compression", "kivi")
 
         match local_disk:
             case None:
@@ -170,7 +174,8 @@ class LMCacheEngineConfig:
             blend_min_tokens,
             alpha,
             policy,
-            rate
+            rate,
+            compression,
         )
 
     @staticmethod
@@ -239,6 +244,8 @@ class LMCacheEngineConfig:
         config.alpha = to_float(parse_env(get_env_name("alpha"), config.alpha))
         config.policy = parse_env(get_env_name("policy"), config.policy)
         config.rate = to_float(parse_env(get_env_name("rate"), config.rate))
+        config.compression = parse_env(get_env_name("compression"),
+                                        config.compression)
         return config
 
     def to_original_config(self) -> orig_config.LMCacheEngineConfig:

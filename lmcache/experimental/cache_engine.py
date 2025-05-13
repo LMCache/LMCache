@@ -113,7 +113,10 @@ class LMCacheEngine:
             # self.put_queue.put((key, memory_obj, start, end, kwargs))
 
             self.gpu_connector.from_gpu(memory_obj, start, end, **kwargs)
-            self.storage_manager.put_in_queue(key, memory_obj, self.emerge_id)
+            key.metadata.emerge_id.append(self.emerge_id)
+            size_in_bytes = memory_obj.get_size()
+            key.metadata.length = size_in_bytes
+            self.storage_manager.put_in_queue(key, memory_obj)
         self.stats_monitor.on_store_finished(monitor_req_id)
 
     def update(self) -> None:

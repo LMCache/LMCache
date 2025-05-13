@@ -1,13 +1,14 @@
 from lmcache.experimental.memory_management import (MemoryAllocatorInterface,
-                                                    MemoryObj, MemoryFormat)
+                                                    MemoryObj, MemoryFormat, TensorMemoryObj)
 from lmcache.experimental.storage_backend.naive_serde.serde import (
     Deserializer, Serializer)
-from lmcache.experimental.storage_backend.naive_serde.new_pack import triton_quantize_and_pack_along_last_dim
+from lmcache.experimental.storage_backend.naive_serde.new_pack import (triton_quantize_and_pack_along_last_dim, quant_and_pack_kcache, quant_and_pack_vcache)
 import torch
 from torch import Tensor
 from lmcache.utils import _lmcache_nvtx_annotate
 from lmcache.logging import init_logger
 from typing import Union
+import time
 
 logger = init_logger(__name__)
 
@@ -186,6 +187,7 @@ class KIVISerializer(Serializer):
             t = memory_obj
         else:
             t = memory_obj.tensor.cuda()
+            # t = memory_obj.tensor
 
         compressed_dict = []
         for layer in range(t.shape[1]):
@@ -195,8 +197,12 @@ class KIVISerializer(Serializer):
             if rounded_len > 0:
                 rounded_k = k[..., :rounded_len, :]
                 rounded_v = v[..., :rounded_len, :]
+                
                 quant_k_triton, k_scale_triton, k_min_triton = triton_quantize_and_pack_along_last_dim(rounded_k.transpose(2, 3).contiguous(), self.group_size, bits)
                 quant_v_triton, v_scale_triton, v_min_triton = triton_quantize_and_pack_along_last_dim(rounded_v.contiguous(), self.group_size, bits)
+                
+                # quant_k_triton, k_scale_triton, k_min_triton = quant_and_pack_kcache(rounded_k.transpose(2, 3).contiguous(), self.group_size, bits)
+                # quant_v_triton, v_scale_triton, v_min_triton = quant_and_pack_vcache(rounded_v.contiguous(), self.group_size, bits)
                 
                 quant_k = quant_k_triton.permute(0, 1, 3, 2)
                 k_scale  = k_scale_triton.permute(0, 1, 3, 2).reshape((k_scale_triton.shape[0], k_scale_triton.shape[1], k_scale_triton.shape[-1], 1, k_scale_triton.shape[2])) 
@@ -237,6 +243,7 @@ class KIVISerializer(Serializer):
             "big_tensor_dtype": big_tensor.dtype,            
             "quant_tensor_dtype": quant_big_tensor.dtype          
         }
+
         allocated_obj = self.memory_allocator.allocate(saved_tensor.shape, saved_tensor.dtype, fmt=MemoryFormat.KV_BLOB2)
         allocated_obj.tensor.copy_(saved_tensor)
         return allocated_obj, metadata, entry_offsets, split_metadata, quant_metadata, quant_entry_offsets
@@ -312,6 +319,10 @@ class KIVIDeserializer(Deserializer):
 
         big_tensor_bytes_rec = memory_obj.tensor[:split_metadata["num_big_bytes"]]
         quant_tensor_bytes_rec = memory_obj.tensor[split_metadata["num_big_bytes"]:]
+
+        if type(memory_obj) == TensorMemoryObj:
+             self.memory_allocator.ref_count_down(memory_obj)
+
         big_tensor_rec = big_tensor_bytes_rec.view(split_metadata["big_tensor_dtype"])
         quant_tensor_rec = quant_tensor_bytes_rec.view(split_metadata["quant_tensor_dtype"])
         with torch.cuda.stream(self.non_quant_stream):

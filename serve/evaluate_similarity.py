@@ -3,13 +3,13 @@ import pandas as pd
 from our_metrics import evaluate_answer, f1_score
 import os
 
-INPUT02       = 'results/May_7_5/baseline/02.csv'
-INPUT03       = 'results/May_7_5/baseline/03.csv'
-INPUT0        = 'results/May_7_3/prefill/0.csv'
-INPUT_OURS01 = 'results/May_7_5/ours/01.csv'
-INPUT_OURS1 = 'results/May_7_5/ours/1.csv'
-INPUT_OURS001 = 'results/May_7_5/ours/001.csv'
-INPUT_OURS10 = 'results/May_7_5/ours/10.csv'
+INPUT02       = 'results/May_12_1/baseline/02.csv'
+INPUT03       = 'results/May_12_1/baseline/03.csv'
+INPUT06       = 'results/May_12_1/baseline/06.csv'
+INPUT0        = 'results/May_10_3/prefill/0.csv'
+INPUT_OURS01  = 'results/May_12_1/ours/01.csv'
+INPUT_OURS1   = 'results/May_12_1/ours/1.csv'
+INPUT_OURS10  = 'results/May_12_1/ours/10.csv'
 
 def main():
     # Load & filter the reference answers, then reset its index

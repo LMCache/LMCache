@@ -2,7 +2,8 @@ chunk_size: 1024
 local_disk: "file:///home/ubuntu/st-prodstack-v/kvcache/engine1/"
 max_local_disk_size: 550
 local_cpu: True
-max_local_cpu_size: 65 # actually 45 + 5, set to 65 to avoid bubble
-alpha: 0.01
+max_local_cpu_size: 20 # actually 40 + 5, set to 60 to avoid bubble
+alpha: 1
 policy: "ours"
-rate: 1
+rate: 0.728571429
+compression: "streaming"

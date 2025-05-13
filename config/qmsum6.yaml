@@ -1,8 +1,0 @@
-chunk_size: 1024
-local_disk: "file:///home/ubuntu/st-prodstack-v/kvcache/engine6/"
-max_local_disk_size: 550
-local_cpu: True
-max_local_cpu_size: 70 # actually 50 + 5, set to 70 to avoid bubble
-alpha: 0.7
-policy: "prefill"
-rate: 0.371428571
