@@ -32,10 +32,12 @@ class MemoryFormat(Enum):
     UNDEFINED = 0
     """[2, num_layers, num_tokens, hidden_dim]
     """
-    KV_BLOB = 1
+    #KV_BLOB = 1
+    KV_2LTD = 1
     """[num_tokens, 2, hidden_dim]
     """
-    LAYER_KV_BLOB = 2
+    #LAYER_KV_BLOB = 2
+    KV_T2D = 2
     """Compressed binary array format
     """
     BINARY = 3
@@ -43,7 +45,7 @@ class MemoryFormat(Enum):
     BINARY_BUFFER = 4
 
     def token_dim(self) -> int:
-        if self == MemoryFormat.KV_BLOB:
+        if self == MemoryFormat.KV_2LTD:
             return 2
         elif self == MemoryFormat.BINARY:
             return 0
@@ -550,7 +552,7 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         self,
         shape: Union[torch.Size, Tuple[int, ...]],
         dtype: Optional[torch.dtype],
-        fmt: MemoryFormat = MemoryFormat.KV_BLOB,
+        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
         parent_allocator: Optional["MemoryAllocatorInterface"] = None,
     ) -> Optional[TensorMemoryObj]:
         if not isinstance(shape, torch.Size):
@@ -596,7 +598,7 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         self,
         shape: Union[torch.Size, Tuple[int, ...]],
         dtype: Optional[torch.dtype],
-        fmt: MemoryFormat = MemoryFormat.KV_BLOB,
+        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
     ) -> MemoryObjMetadata:
         """
         A 'dry run' allocation that returns the metadata of the
@@ -720,7 +722,7 @@ class HostMemoryAllocator(MemoryAllocatorInterface):
         self,
         shape: Union[torch.Size, Tuple[int, ...]],
         dtype: Optional[torch.dtype],
-        fmt: MemoryFormat = MemoryFormat.KV_BLOB,
+        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
     ) -> Optional[MemoryObj]:
         with self.host_mem_lock:
             return self.allocator.allocate(shape, dtype, fmt)
@@ -737,7 +739,7 @@ class HostMemoryAllocator(MemoryAllocatorInterface):
         self,
         shape: Union[torch.Size, Tuple[int, ...]],
         dtype: Optional[torch.dtype],
-        fmt: MemoryFormat = MemoryFormat.KV_BLOB,
+        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
     ) -> MemoryObjMetadata:
         with self.host_mem_lock:
             return self.allocator.dry_allocate(shape, dtype, fmt)
@@ -761,7 +763,7 @@ class PinMemoryAllocator(MemoryAllocatorInterface):
         self,
         shape: Union[torch.Size, Tuple[int, ...]],
         dtype: Optional[torch.dtype],
-        fmt: MemoryFormat = MemoryFormat.KV_BLOB,
+        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
     ) -> Optional[MemoryObj]:
         with self.host_mem_lock:
             return self.allocator.allocate(shape, dtype, fmt, self)
@@ -778,7 +780,7 @@ class PinMemoryAllocator(MemoryAllocatorInterface):
         self,
         shape: Union[torch.Size, Tuple[int, ...]],
         dtype: Optional[torch.dtype],
-        fmt: MemoryFormat = MemoryFormat.KV_BLOB,
+        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
     ) -> MemoryObjMetadata:
         with self.host_mem_lock:
             return self.allocator.dry_allocate(shape, dtype, fmt)
@@ -805,11 +807,11 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
         self,
         shape: Union[torch.Size, Tuple[int, ...]],
         dtype: Optional[torch.dtype],
-        fmt: MemoryFormat = MemoryFormat.KV_BLOB,
+        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
     ) -> Optional[MemoryObj]:
         if fmt == MemoryFormat.BINARY_BUFFER:
             return self.buffer_allocator.allocate(shape, dtype, fmt)
-        elif fmt in [MemoryFormat.KV_BLOB, MemoryFormat.LAYER_KV_BLOB]:
+        elif fmt in [MemoryFormat.KV_2LTD, MemoryFormat.KV_T2D]:
             with self.host_mem_lock:
                 return self.pin_allocator.allocate(shape, dtype, fmt, self)
         else:
@@ -819,7 +821,7 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
         self,
         shape: Union[torch.Size, Tuple[int, ...]],
         dtype: Optional[torch.dtype],
-        fmt: MemoryFormat = MemoryFormat.KV_BLOB,
+        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
     ) -> MemoryObjMetadata:
         raise NotImplementedError
 
@@ -827,7 +829,7 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
         fmt = memory_obj.meta.fmt
         if fmt == MemoryFormat.BINARY_BUFFER:
             self.buffer_allocator.free(memory_obj)
-        elif fmt in [MemoryFormat.KV_BLOB, MemoryFormat.LAYER_KV_BLOB]:
+        elif fmt in [MemoryFormat.KV_2LTD, MemoryFormat.KV_T2D]:
             with self.host_mem_lock:
                 self.pin_allocator.free(memory_obj)
         else:
@@ -839,35 +841,41 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
 
 
 class GPUMemoryAllocator(MemoryAllocatorInterface):
-    """Allocates memory in the pre-allocated Host memory.
+    """Allocates memory in the pre-allocated GPU memory.
     """
 
     def __init__(self, size: int, device="cuda"):
         """
-        :param int size: The size of the pinned memory in bytes.
+        :param int size: The size of the GPU memory in bytes.
         """
         buffer = torch.empty(size, dtype=torch.uint8, device=device)
+
         self.allocator = TensorMemoryAllocator(buffer)
+
+        self.device_mem_lock = threading.Lock()
 
     def allocate(
         self,
         shape: Union[torch.Size, Tuple[int, ...]],
         dtype: Optional[torch.dtype],
-        fmt: MemoryFormat = MemoryFormat.KV_BLOB,
+        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
     ) -> Optional[MemoryObj]:
-        return self.allocator.allocate(shape, dtype, fmt)
+        with self.device_mem_lock:
+            return self.allocator.allocate(shape, dtype, fmt)
 
     def free(self, memory_obj: MemoryObj):
-        self.allocator.free(memory_obj)
+        with self.device_mem_lock:
+            self.allocator.free(memory_obj)
 
     def memcheck(self):
-        return self.allocator.memcheck()
+        with self.device_mem_lock:
+            return self.allocator.memcheck()
 
     def dry_allocate(
         self,
         shape: Union[torch.Size, Tuple[int, ...]],
         dtype: Optional[torch.dtype],
-        fmt: MemoryFormat = MemoryFormat.KV_BLOB,
+        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
     ) -> MemoryObjMetadata:
         return self.allocator.dry_allocate(shape, dtype, fmt)
 
@@ -888,7 +896,7 @@ class AdHocMemoryAllocator(MemoryAllocatorInterface):
         self,
         shape: Union[torch.Size, Tuple[int, ...]],
         dtype: Optional[torch.dtype],
-        fmt: MemoryFormat = MemoryFormat.KV_BLOB,
+        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
     ) -> Optional[MemoryObj]:
         """
         Returns a dummy MemoryObj for testing purposes.
@@ -915,7 +923,7 @@ class AdHocMemoryAllocator(MemoryAllocatorInterface):
         self,
         shape: Union[torch.Size, Tuple[int, ...]],
         dtype: Optional[torch.dtype],
-        fmt: MemoryFormat = MemoryFormat.KV_BLOB,
+        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
     ) -> MemoryObjMetadata:
         """
         Returns a dummy MemoryObjMetadata for testing purposes.

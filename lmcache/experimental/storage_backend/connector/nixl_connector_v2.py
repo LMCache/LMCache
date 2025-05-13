@@ -55,7 +55,7 @@ class NixlBufferAllocator(MemoryAllocatorInterface):
         self,
         shape: Union[torch.Size, tuple[int, ...]],
         dtype: Optional[torch.dtype],
-        fmt: MemoryFormat = MemoryFormat.KV_BLOB,
+        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
     ) -> Optional[MemoryObj]:
         """
         Allocates the memory to hold a tensor of the given shape.
@@ -94,7 +94,7 @@ class NixlBufferAllocator(MemoryAllocatorInterface):
         self,
         shape: torch.Size,
         dtype: Optional[torch.dtype],
-        fmt: MemoryFormat = MemoryFormat.KV_BLOB,
+        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
     ) -> MemoryObjMetadata:
         """Dry allocate the memory and return the metadata.
 
@@ -363,7 +363,7 @@ class NixlPipe:
             self,
             shape: torch.Size,
             dtype: Optional[torch.dtype],
-            fmt: MemoryFormat = MemoryFormat.KV_BLOB) -> Optional[MemoryObj]:
+            fmt: MemoryFormat = MemoryFormat.KV_2LTD) -> Optional[MemoryObj]:
         """Allocate the memory for write.
 
         If the buffer is full, it will trigger a flush and then allocate
@@ -509,7 +509,7 @@ class NixlSender:
         self,
         shape: torch.Size,
         dtype: Optional[torch.dtype],
-        fmt: MemoryFormat = MemoryFormat.KV_BLOB,
+        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
     ) -> MemoryObjMetadata:
         """Dry allocate the memory and return the metadata."""
         return self._pipe._allocator.dry_allocate(shape, dtype, fmt)
@@ -539,7 +539,7 @@ class NixlSender:
         self,
         shape: torch.Size,
         dtype: Optional[torch.dtype],
-        fmt: MemoryFormat = MemoryFormat.KV_BLOB,
+        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
     ) -> Optional[MemoryObj]:
         """Allocate the memory for send.
 

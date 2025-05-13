@@ -33,7 +33,7 @@ def generate_test_data(
                            world_size=1,
                            worker_id=0,
                            chunk_hash=f"test_{i}"))
-        obj = allocator.allocate(shape, dtype, fmt=MemoryFormat.KV_BLOB)
+        obj = allocator.allocate(shape, dtype, fmt=MemoryFormat.KV_2LTD)
         obj.tensor.fill_(i + 1)  # Fill with some test data, e.g., the index
         objs.append(obj)
     return keys, objs
