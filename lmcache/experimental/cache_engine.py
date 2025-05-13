@@ -27,9 +27,9 @@ from lmcache.experimental.gpu_connector import (
     GPUConnectorInterface, VLLMPagedMemLayerwiseGPUConnector)
 from lmcache.experimental.lookup_server import (LookupServerInterface,
                                                 RedisLookupServer)
-from lmcache.experimental.memory_management import (AdHocMemoryAllocator,
-                                                    MemoryAllocatorInterface,
-                                                    MixedMemoryAllocator)
+from lmcache.experimental.memory_management import (  # noqa: E501
+    AdHocMemoryAllocator, MemoryAllocatorInterface, MemoryObj,
+    MixedMemoryAllocator)
 from lmcache.experimental.storage_backend.storage_manager import (
     DistributedStorageManager, StorageManager)
 from lmcache.experimental.token_database import (ChunkedTokenDatabase,
@@ -508,7 +508,7 @@ class LayerwiseLMCacheEngine(LMCacheEngine):
             kv_shape_single_layer = self.gpu_connector.get_shape(num_tokens)
 
             # TODO(Jiayi): Optimize with batched allocation
-            memory_objs_multi_layer = []
+            memory_objs_multi_layer: List[MemoryObj] = []
             no_space_left = False
             for layer_id in range(self.num_layers):
                 mem_obj_single_layer = self.storage_manager.allocate(
@@ -519,6 +519,8 @@ class LayerwiseLMCacheEngine(LMCacheEngine):
                         "Failed to allocate memory for the KV cache.\n"
                         "The KV cache will not be stored.")
                     no_space_left = True
+                    for mem_obj_prev_layer in memory_objs_multi_layer:
+                        mem_obj_prev_layer.ref_count_down()
                     break
 
                 memory_objs_multi_layer.append(mem_obj_single_layer)
