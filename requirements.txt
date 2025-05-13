@@ -12,10 +12,5 @@ pyzmq >= 25.0.0
 redis
 safetensors
 sortedcontainers
-
-# Should correspond to the version used by latest vLLM package
-# This may not be the version as specified in vLLM `main` branch
-# Check using `pip show vllm` command
-torch==2.6.0
-
+torch==2.7.0  # Should correspond to the version used by vLLM main branch
 transformers >= 4.51.1
