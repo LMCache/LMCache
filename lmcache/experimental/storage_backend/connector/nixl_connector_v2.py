@@ -195,6 +195,7 @@ class NixlPipe:
                 f"Buffer size must be a multiple of "\
                 f"{NixlPipe.TRANSFER_BUFFER_SIZE}"
 
+        torch.cuda.set_device(nixl_config.buffer_device)
         self._buffer = torch.empty(nixl_config.buffer_size,
                                    device=nixl_config.buffer_device,
                                    dtype=torch.uint8)
@@ -206,7 +207,8 @@ class NixlPipe:
         # allocator (should be initialized after self._buffer)
         self._allocator = NixlBufferAllocator(self)
 
-        self._agent = nixl_agent(str(nixl_config.role))
+        self._agent = nixl_agent(str(nixl_config.role) +\
+                str(nixl_config.buffer_device))
         self._reg_descs = self._agent.register_memory(self._transfer_buffers)
         self._local_xfer_descs = self._reg_descs.trim()
         self._remote_xfer_descs = None
