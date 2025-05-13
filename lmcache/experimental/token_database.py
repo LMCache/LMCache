@@ -57,6 +57,57 @@ def load_linear_coefficients(csv_path: str) -> dict:
             coefficients[row["filename"]] = (float(row["a"]), float(row["b"]))
     return coefficients
 
+def compute_score_table(
+    threshold_map: dict[float, str],
+    token_len: float,
+    alpha: float,
+    coefficients: dict[str, tuple[float, float]],
+    score_lookup: dict[float, float],
+) -> list[tuple[float, float]]:
+    """
+    Compute a list of (threshold, score) pairs.
+
+    For each threshold:
+    1. Load (a, b) from coefficients by filename.
+    2. Compute base_value = a * token_len + b.
+    3. Subtract weighted base_value and the preset score from 1.
+    """
+    table: list[tuple[float, float]] = []
+    for threshold, filename in threshold_map.items():
+        a, b = coefficients[filename]
+        base_value = a * token_len + b
+        preset_score = score_lookup.get(threshold, 0.0)
+        final_score = 1.0 - base_value * alpha - preset_score
+        table.append((threshold, final_score))
+    return table
+
+def streaming_compute_score_table(
+    threshold_map: dict[float, str],
+    token_len: float,
+    alpha: float,
+    coefficients: dict[str, tuple[float, float]],
+    score_lookup: dict[float, float],
+) -> list[tuple[float, float]]:
+    """
+    Compute a list of (threshold, score) pairs.
+
+    For each threshold:
+    1. Load (a, b) from coefficients by filename.
+    2. Compute base_value = a * token_len + b.
+    3. Subtract weighted base_value and the preset score from 1.
+    """
+    table: list[tuple[float, float]] = []
+    for threshold, filename in threshold_map.items():
+        a, b = coefficients[filename]
+        if threshold != 1.0 and threshold != 0.0:
+            base_value = a * token_len * threshold + b
+        else:
+            base_value = a * token_len + b
+        preset_score = score_lookup.get(threshold, 0.0)
+        final_score = 1.0 - base_value * alpha - preset_score
+        table.append((threshold, final_score))
+    return table
+
 class ChunkedTokenDatabase(TokenDatabase):
 
     def __init__(self, config: LMCacheEngineConfig,
@@ -64,47 +115,75 @@ class ChunkedTokenDatabase(TokenDatabase):
         self.chunk_size = config.chunk_size
         self.metadata = metadata
         # Load the coefficients once during initialization.
-        self.coefficients = load_linear_coefficients("linear_coefficients.csv")
+        self.coefficients = load_linear_coefficients("linear_coefficients3.csv")
         self.alpha = config.alpha
+        self.compression = config.compression
         logger.info(f"ChunkedTokenDatabase initialized with alpha {self.alpha}.")
 
-    # TODO(Shaoting): Add real score table
-    # NOTE(Shaoting): For 7006 tokens, TTFT: prefill (1.511s), cpu (0.0876s), disk (0.2814s)
     def _make_key_by_hash(self, chunk_hash: str, total_hashes: str, token_len: int) -> CacheEngineKey:
-        # Mapping of thresholds to the corresponding score file paths.
-        threshold_file_mapping = [
-            (1,   "/home/ubuntu/ShaotingFS2/LMCache/serve/results/Apr_1/test/test_ttft_10_1.csv"),
-            (0.728571429, "/home/ubuntu/ShaotingFS2/LMCache/serve/results/Apr_1/test/test_ttft_10_06.csv"),
-            (0.485714286, "/home/ubuntu/ShaotingFS2/LMCache/serve/results/Apr_1/test/test_ttft_10_03.csv"),
-            (0.371428571, "/home/ubuntu/ShaotingFS2/LMCache/serve/results/Apr_1/test/test_ttft_10_02.csv"),
-            (0,   "/home/ubuntu/ShaotingFS2/LMCache/serve/results/Apr_1/test/test_ttft_10_0.csv")
-        ]
-
-        score_mapping = [
-            (1, 0.04712764415),
-            (0.728571429, 0.04728688579),
-            (0.485714286, 0.10989075498),
-            (0.371428571, 0.35417149795),
-            (0, 0)
-        ]
-        score_dict = dict(score_mapping)
-
-        score_table = []
-        for threshold, filename in threshold_file_mapping:
-            # Retrieve coefficients for the given file.
-            a, b = self.coefficients[filename]
-            # Compute the score using a * token_len + b.
-            computed_value = a * token_len + b
-            # Score value
-            score_value = score_dict[threshold]
-            # NOTE(Shaoting): alpha=1 defined here
-            computed_value = 1 - computed_value * self.alpha - score_value
-            score_table.append((threshold, computed_value))
+        if self.compression == "kivi":
+            threshold_file_mapping = {
+                1.0:   "cpu_1.csv",
+                0.728571429: "cpu_06.csv",
+                0.485714286: "cpu_03.csv",
+                0.371428571: "cpu_02.csv",
+                0.0:   "prefill.csv",
+            }
+            disk_threshold_file_mapping = {
+                1.0:   "1.csv",
+                0.728571429: "06.csv",
+                0.485714286: "03.csv",
+                0.371428571: "02.csv",
+            }
+            score_dict = {
+                1.0: 0.04712764415,
+                0.728571429: 0.04728688579,
+                0.485714286: 0.10989075498,
+                0.371428571: 0.35417149795,
+                0.0:  0.0,
+            }
+            score_table = compute_score_table(
+                threshold_file_mapping, token_len, self.alpha,
+                self.coefficients, score_dict
+            )
+            disk_score_table = compute_score_table(
+                disk_threshold_file_mapping, token_len, self.alpha,
+                self.coefficients, score_dict
+            )
+        elif self.compression == "streaming":
+            threshold_file_mapping = {
+                1.0:   "cpu_1.csv",
+                0.728571429: "cpu_1.csv",
+                0.485714286: "cpu_1.csv",
+                0.371428571: "cpu_1.csv",
+                0.0:   "prefill.csv",
+            }
+            disk_threshold_file_mapping = {
+                1.0:   "1.csv",
+                0.728571429: "1.csv",
+                0.485714286: "1.csv",
+                0.371428571: "1.csv",
+            }
+            score_dict = {
+                1.0: 0.04712764415,
+                0.728571429: 0.3007,
+                0.485714286: 0.3566,
+                0.371428571: 0.3691,
+                0.0:  0.0,
+            }
+            score_table = streaming_compute_score_table(
+                threshold_file_mapping, token_len, self.alpha,
+                self.coefficients, score_dict
+            )
+            disk_score_table = streaming_compute_score_table(
+                disk_threshold_file_mapping, token_len, self.alpha,
+                self.coefficients, score_dict
+            )
 
         return CacheEngineKey(self.metadata.fmt, self.metadata.model_name,
                               self.metadata.world_size,
                               self.metadata.worker_id, chunk_hash,
-                              CacheManagerMetadata([total_hashes], ["kivi"], 1, 0.0, token_len, [score_table], []))
+                              CacheManagerMetadata([total_hashes], ["kivi"], 1, 0.0, token_len, [score_table], [], [disk_score_table]))
 
     def _get_init_hash(self) -> str:
         return ""

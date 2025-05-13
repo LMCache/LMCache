@@ -25,7 +25,7 @@ from lmcache.experimental.storage_backend.naive_serde.kivi_serde import (
 
 logger = init_logger(__name__)
 
-def compute_best_rate_and_drop(score_tables, orig_rate, length):
+def compute_best_rate_and_drop(score_tables, orig_rate, length, disk_score_tables):
     """
     Given:
       - score_tables: list of lists [(rate, score), …] for each context
@@ -34,7 +34,7 @@ def compute_best_rate_and_drop(score_tables, orig_rate, length):
     Returns:
       (best_rate, min_total_drop)
     """
-    if orig_rate == 0:
+    if orig_rate <= 0:
         return 0, float('inf')
 
     # 1) collect all candidate rates < orig_rate
@@ -48,9 +48,11 @@ def compute_best_rate_and_drop(score_tables, orig_rate, length):
     for r_cand in candidate_rates:
         total_drop = 0.0
 
+        table_idx = 0
+        recorded_rate = []
         for table in score_tables:
             # pick the largest r_sel < r_cand, else the table’s min rate
-            elig = [(r, s) for r, s in table if r < r_cand]
+            elig = [(r, s) for r, s in table if r <= r_cand]
             if elig:
                 r_sel, s_sel = max(elig, key=lambda x: x[0])
             else:
@@ -63,15 +65,32 @@ def compute_best_rate_and_drop(score_tables, orig_rate, length):
             else:
                 baseline_rate, baseline_score = max(table, key=lambda x: x[0])
 
+            if r_sel == 0:
+                max_score = float('-inf')
+                for rate, score in disk_score_tables[table_idx]:
+                    if rate > baseline_rate:
+                        continue
+                    if score > max_score:
+                        max_score = score
+                        tmp_recorded_rate = rate
+                if max_score > s_sel:
+                    s_sel = max_score
+                    recorded_rate.append(tmp_recorded_rate)
+
             # accumulate drop
             total_drop += (
                 (baseline_score - s_sel) /
                 (length * (baseline_rate - r_sel))
-            ) * 1e9
+            )
+
+            table_idx += 1
 
         if total_drop < min_total_drop:
             min_total_drop = total_drop
-            best_rate = r_cand
+            if r_cand == 0 and len(recorded_rate) > 0:
+                best_rate = -max(recorded_rate)
+            else:
+                best_rate = r_cand
 
     return best_rate, min_total_drop
 
@@ -87,7 +106,8 @@ class KVCacheManager:
         # NOTE(Shaoting): policy related variables define here
         self.method = method
         self.rate = rate
-        self.cpu_size = 5368709120 * 9 # 45 GB
+        self.cpu_size = 5368709120 * 8 # 40 GB
+        # self.cpu_size = 5368709120 * 0.48 # 2.4 GB
 
         self.hot_cache = hot_cache
         logger.info(f"KVCacheManager initialized with self.method: {self.method} and self.rate: {self.rate}")
@@ -96,8 +116,6 @@ class KVCacheManager:
 
         size = 0
         for key, memory_obj in to_save_list.items():
-            size_in_bytes = memory_obj.get_size()
-            key.metadata.length = size_in_bytes
             size += key.metadata.length
         
         # TODO(Shaoting): add other manager logics
@@ -127,7 +145,15 @@ class KVCacheManager:
                     size_kv_cpu -= k.metadata.length
 
             # 4) 返回 “把 new_key 放到 CPU 上并走 LRU” 的决策，以及这次真正丢弃的列表
-            return KVDecision("cpu", "kivi", self.rate), final_drop_list #hahaha
+            final_update_dict = {
+                key: KVDecision(
+                    device="disk",
+                    compression_method="kivi",
+                    compression_rate=self.rate
+                )
+                for key, rate in final_drop_list.items()
+            }
+            return KVDecision("cpu", "kivi", self.rate), final_update_dict
             
         elif self.method == "ours":
             # TODO(Shaoting): save unit quality drop to speed up decisions. Also need to update the storage when retrieval.
@@ -149,7 +175,8 @@ class KVCacheManager:
                 new_best, new_drop = compute_best_rate_and_drop(
                     first_update_key.metadata.score_table,
                     new_kv_rate,
-                    update_total_tokens
+                    update_total_tokens,
+                    first_update_key.metadata.disk_score_table
                 )
                 # if new_drop * len(first_update_key.metadata.emerge_id) < min_quality_drop:
                 if new_drop < min_quality_drop:
@@ -177,7 +204,8 @@ class KVCacheManager:
                     best_r, drop_r = compute_best_rate_and_drop(
                         rep.metadata.score_table,
                         curr_rate,
-                        total_tokens
+                        total_tokens,
+                        rep.metadata.disk_score_table
                     )
                     # compare against the running minimum
                     # if drop_r * len(rep.metadata.emerge_id) < min_quality_drop:
@@ -193,14 +221,37 @@ class KVCacheManager:
                 # 3) apply whichever entry(s) we’ve decided to drop/rate‐reduce
                 for idx, chosen_r in drop_list.items():
                     if idx == -1:
-                        size_kv_cpu -= size * (new_kv_rate - chosen_r)
+                        size_kv_cpu -= size * (new_kv_rate - max(chosen_r, 0))
                         new_kv_rate = chosen_r
                     else:
-                        size_kv_cpu -= idx.metadata.length / idx.metadata.rate * (final_drop_list.get(idx, idx.metadata.rate) - chosen_r)
+                        size_kv_cpu -= idx.metadata.length / idx.metadata.rate * (final_drop_list.get(idx, idx.metadata.rate) - max(chosen_r, 0))
                         final_drop_list[idx] = chosen_r
 
             first_update_key = next(iter(to_save_list))
-            return KVDecision("cpu", first_update_key.metadata.method[0], new_kv_rate), final_drop_list
+            final_update_dict = {
+                key: KVDecision(
+                    device="cpu" if rate >= 0 else "disk",
+                    compression_method="kivi",
+                    compression_rate=(rate if rate >= 0 else -rate)
+                )
+                for key, rate in final_drop_list.items()
+            }
+
+            if new_kv_rate >= 0:
+                return KVDecision("cpu", first_update_key.metadata.method[0], new_kv_rate), final_update_dict
+            else:
+                return KVDecision("disk", first_update_key.metadata.method[0], -new_kv_rate), final_update_dict
+        
+        elif self.method == "disk":
+            return KVDecision("disk", "kivi", self.rate), {}
+        
+        elif self.method == "random_KIVI":
+            size_kv_cpu = sum(key.metadata.length for key in self.hot_cache.keys())
+            if size_kv_cpu + size > self.cpu_size:
+                return KVDecision("cpu", "kivi", 0), {}
+            else:
+                return KVDecision("cpu", "kivi", self.rate), {}
+        
         else:
             return KVDecision("cpu", "kivi", 0), {}
 
@@ -241,7 +292,7 @@ class StorageManager:
         self.stream = torch.cuda.Stream()
 
         self.manager = KVCacheManager(self.hot_cache, config.policy, config.rate)
-
+        self.policy = config.policy
         self.update_queue: OrderedDict[CacheEngineKey, MemoryObj] = OrderedDict()
 
     def allocate(
@@ -291,12 +342,10 @@ class StorageManager:
         self,
         key: CacheEngineKey,
         memory_obj: MemoryObj,
-        emerge_id: int,
     ) -> None:
         """
         Put the memory object into the queue.
         """
-        key.metadata.emerge_id.append(emerge_id)
         self.update_queue[key] = memory_obj
 
     def update(self) -> None:  
@@ -312,7 +361,7 @@ class StorageManager:
         self,
         to_save_list: OrderedDict[CacheEngineKey, MemoryObj],
         current_kv_decision: KVDecision,
-        update_decision: Dict[CacheEngineKey, float],
+        update_decision: Dict[CacheEngineKey, KVDecision],
     ) -> None:
         """
         Non-blocking function to put the memory object into the storages.
@@ -325,68 +374,78 @@ class StorageManager:
         # TODO(Shaoting): update_decision should be in a separate thread: thread 1, decode; thread 2, update and store
         for update_key in update_decision:
             update_memory_obj = self.hot_cache.pop(update_key)
-            update_rate = update_decision[update_key]
+            ud = update_decision[update_key]
+            update_rate = ud.compression_rate
+            update_device = ud.device
+            update_method = ud.compression_method
 
-            if update_rate == 0:
-                # Move to disk
-                # self.manager_lock.release()
-                # for backend_name, backend in self.storage_backends.items():
-                #     put_task = backend.submit_put_task(update_key, update_memory_obj)
-
-                #     if put_task is None:
-                #         continue
-                # self.manager_lock.acquire() #hahaha
+            if update_device == "cpu" and update_rate == 0:
                 self.memory_allocator.ref_count_down(update_memory_obj)
                 continue
 
-            # KIVI mapping defined here
-            if update_rate == 0.728571429:
-                BITS = 8
-            elif update_rate == 0.485714286:
-                BITS = 4
-            elif update_rate == 0.371428571:
-                BITS = 2
-
-            # Need to deserialize first
-            if update_key.metadata.rate != 1:
+            if update_method == "kivi":
                 # KIVI mapping defined here
-                if update_key.metadata.rate == 0.728571429:
-                    DE_BITS = 8
-                elif update_key.metadata.rate == 0.485714286:
-                    DE_BITS = 4
-                elif update_key.metadata.rate == 0.371428571:
-                    DE_BITS = 2
-                update_memory_kv_cache = self.kivi_de.deserialize(update_memory_obj, DE_BITS, self.kivi_cache[update_key][0], self.kivi_cache[update_key][1], self.kivi_cache[update_key][2], self.kivi_cache[update_key][3], self.kivi_cache[update_key][4])
-                self.memory_allocator.ref_count_down(update_memory_obj)
-                update_memory_obj = update_memory_kv_cache
-        
-            compressed_update_memory_obj, metadata, entry_offsets, split_metadata, quant_metadata, quant_entry_offsets = self.kivi_ser.serialize(update_memory_obj, BITS)
-            if type(update_memory_obj) != Tensor:
-                self.memory_allocator.ref_count_down(update_memory_obj)
+                if update_rate == 0.728571429:
+                    BITS = 8
+                elif update_rate == 0.485714286:
+                    BITS = 4
+                elif update_rate == 0.371428571:
+                    BITS = 2
 
-            # Move memory obj from tmp buffer to real location
-            self.manager_lock.release()
-            compressed_blank_memory_obj = self.allocate(
-                compressed_update_memory_obj.get_shape(),
-                compressed_update_memory_obj.get_dtype())
-            self.manager_lock.acquire()
-            # NOTE(Shaoting): Extra memory copy here
-            compressed_blank_memory_obj.tensor.copy_(compressed_update_memory_obj.tensor)
-            self.memory_allocator.ref_count_down(compressed_update_memory_obj)
-            compressed_update_memory_obj = compressed_blank_memory_obj 
-
-            # Update key
-            update_key.metadata.rate = update_decision[update_key]
-            update_key.metadata.length = compressed_update_memory_obj.get_physical_size()
+                # Need to deserialize first
+                if update_key.metadata.rate != 1 and update_key.metadata.rate != update_rate:
+                    # KIVI mapping defined here
+                    if update_key.metadata.rate == 0.728571429:
+                        DE_BITS = 8
+                    elif update_key.metadata.rate == 0.485714286:
+                        DE_BITS = 4
+                    elif update_key.metadata.rate == 0.371428571:
+                        DE_BITS = 2
+                    update_memory_kv_cache = self.kivi_de.deserialize(update_memory_obj, DE_BITS, self.kivi_cache[update_key][0], self.kivi_cache[update_key][1], self.kivi_cache[update_key][2], self.kivi_cache[update_key][3], self.kivi_cache[update_key][4])
+                    update_memory_obj = update_memory_kv_cache
             
-            self.hot_cache[update_key] = compressed_update_memory_obj
-            self.kivi_cache[update_key] = (metadata, entry_offsets, split_metadata, quant_metadata, quant_entry_offsets)
+                # Need to serialize
+                if update_key.metadata.rate != update_rate:
+                    compressed_update_memory_obj, metadata, entry_offsets, split_metadata, quant_metadata, quant_entry_offsets = self.kivi_ser.serialize(update_memory_obj, BITS)
+                    if type(update_memory_obj) != Tensor:
+                        self.memory_allocator.ref_count_down(update_memory_obj)
+                    update_memory_obj = compressed_update_memory_obj
+                    
+                    # Update key
+                    update_key.metadata.rate = update_rate
+                    update_key.metadata.length = update_memory_obj.get_physical_size()
+                    self.kivi_cache[update_key] = (metadata, entry_offsets, split_metadata, quant_metadata, quant_entry_offsets)      
+
+            if update_device == "cpu":
+                # Move memory obj from tmp buffer to real location
+                self.manager_lock.release()
+                compressed_blank_memory_obj = self.allocate(
+                    update_memory_obj.get_shape(),
+                    update_memory_obj.get_dtype())
+                self.manager_lock.acquire()
+                # NOTE(Shaoting): Extra memory copy here
+                compressed_blank_memory_obj.tensor.copy_(update_memory_obj.tensor)
+                self.memory_allocator.ref_count_down(update_memory_obj)
+                update_memory_obj = compressed_blank_memory_obj 
+                self.hot_cache[update_key] = update_memory_obj
+            
+            elif update_device == "disk":
+                # Move to disk
+                self.manager_lock.release()
+                for backend_name, backend in self.storage_backends.items():
+                    put_task = backend.submit_put_task(update_key, update_memory_obj)
+                    if put_task is None:
+                        continue
+                self.manager_lock.acquire()
+                self.memory_allocator.ref_count_down(update_memory_obj)
+
 
         for key, memory_obj in to_save_list.items():
             # TODO(Shaoting): compress memory_obj with cachegen and streamingllm
             if current_kv_decision.compression_method == "cachegen":
                 pass
-            elif current_kv_decision.compression_method == "kivi" and current_kv_decision.compression_rate != 1 and current_kv_decision.compression_rate != 0:
+            
+            elif current_kv_decision.compression_method == "kivi" and current_kv_decision.compression_rate != 1 and current_kv_decision.compression_rate != 0 and current_kv_decision.compression_rate != key.metadata.rate:
 
                 # KIVI mapping defined here
                 if current_kv_decision.compression_rate == 0.728571429:
@@ -396,7 +455,6 @@ class StorageManager:
                 elif current_kv_decision.compression_rate == 0.371428571:
                     BITS = 2
             
-                # NOTE(Shaoting): KV Cache that's less than 256 tokens will have no compression
                 # Update memory obj
                 compressed_memory_obj, metadata, entry_offsets, split_metadata, quant_metadata, quant_entry_offsets = self.kivi_ser.serialize(memory_obj, BITS)
                 self.memory_allocator.ref_count_down(memory_obj)
@@ -406,6 +464,7 @@ class StorageManager:
                 key.metadata.rate = current_kv_decision.compression_rate
                 key.metadata.length = memory_obj.get_physical_size()
                 self.kivi_cache[key] = (metadata, entry_offsets, split_metadata, quant_metadata, quant_entry_offsets)
+            
             elif current_kv_decision.compression_method == "streamingllm":
                 pass
 
@@ -440,19 +499,16 @@ class StorageManager:
                     self.memory_allocator.ref_count_down(memory_obj)
                     self.manager_lock.release()
                     return
-            self.manager_lock.release()
 
             # TODO(Shaoting): add third tier storage (remote ssd)
-            # if current_kv_decision.device == "disk" or (current_kv_decision.device == "cpu" and current_kv_decision.compression_rate == 0): #hahaha
-            if current_kv_decision.device == "disk":
-                #ever_put = False
+            if current_kv_decision.device == "disk" and current_kv_decision.compression_rate != 0:
+                self.manager_lock.release()
                 for backend_name, backend in self.storage_backends.items():
                     put_task = backend.submit_put_task(key, memory_obj)
-
                     if put_task is None:
                         continue
-
-            self.manager_lock.acquire()
+                self.manager_lock.acquire()
+            
             self.memory_allocator.ref_count_down(memory_obj)
         
         self.manager_lock.release()
@@ -539,6 +595,7 @@ class StorageManager:
         # Search in hot_cache
         self.manager_lock.acquire()
 
+        # From CPU
         # Customed get function
         memory_obj = None
         for old_key, value in self.hot_cache.items():
@@ -554,6 +611,7 @@ class StorageManager:
                 old_key.metadata.context_id.append(key.metadata.context_id[0])
                 old_key.metadata.method.append(key.metadata.method[0])
                 old_key.metadata.score_table.append(key.metadata.score_table[0])
+                old_key.metadata.disk_score_table.append(key.metadata.disk_score_table[0])
             # Record request pattern
             old_key.metadata.emerge_id.append(emerge_id)
             # Also for LRU
@@ -574,21 +632,24 @@ class StorageManager:
 
                 memory_obj = self.kivi_de.deserialize(memory_obj, BITS, self.kivi_cache[old_key][0], self.kivi_cache[old_key][1], self.kivi_cache[old_key][2], self.kivi_cache[old_key][3], self.kivi_cache[old_key][4]) 
 
-                logger.info(f"Decompressed memory object from hot cache, rate: {old_key.metadata.rate}.\n")
+            logger.info(f"Decompressed memory object from hot cache, rate: {old_key.metadata.rate}.\n")
 
             return memory_obj
 
         self.manager_lock.release()
 
+
         # Search all backends for blocking get
         for backend_name, backend in self.storage_backends.items():
-            # Avoid read-write contention
-            #if key in self.put_tasks[backend_name]:
-            #    continue
 
-            # NOTE(Jiayi): bypass the allocator for now
-            memory_obj, new_key = backend.get_blocking(key)
+            memory_obj, new_key = backend.get_blocking(key, emerge_id)
+            
             if memory_obj is not None:
+
+                # Make baseline worse
+                if self.policy == "baseline_KIVI":
+                    self.put_in_queue(new_key, memory_obj)
+                    self.memory_allocator.ref_count_up(memory_obj)
 
                 # De-compress memory_obj
                 if new_key.metadata.method[0] == "kivi" and new_key.metadata.rate != 1:  
@@ -601,7 +662,9 @@ class StorageManager:
                     elif new_key.metadata.rate == 0.371428571:
                         BITS = 2
 
-                    memory_obj = self.kivi_de.deserialize(memory_obj, BITS)            
+                    memory_obj = self.kivi_de.deserialize(memory_obj, BITS, self.kivi_cache[new_key][0], self.kivi_cache[new_key][1], self.kivi_cache[new_key][2], self.kivi_cache[new_key][3], self.kivi_cache[new_key][4])       
+
+                logger.info(f"Decompressed memory object from disk, rate: {new_key.metadata.rate}.\n")
 
                 return memory_obj
 

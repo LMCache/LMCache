@@ -20,26 +20,25 @@ os.environ["LMCACHE_USE_EXPERIMENTAL"] = "True"
 os.environ["LMCACHE_CONFIG_FILE"] = "../config/qmsum.yaml"
 
 # This example script runs two requests with a shared prefix.
-shared_prompt = "Hello, how are you?" * 1000
-shared_prompt2 = "You are dead." * 1000
-shared_prompt3 = "I like to eat." * 1000
+shared_prompt = "Hi " * 8000
+shared_prompt2 = "Hi " * 10000
+shared_prompt3 = "Hi " * 12000
+shared_prompt4 = "Hi " * 14000
+shared_prompt5 = "Hi " * 16000
 first_prompt = [
-    shared_prompt + "Hello, my name is",
-]
-fourth_prompt = [
-    shared_prompt + "Tell me a very long story",
+    "1" + shared_prompt,
 ]
 second_prompt = [
-    shared_prompt2 + "Hello, my name is",
-]
-fifth_prompt = [
-    shared_prompt2 + "Tell me a very long story",
+    "2" + shared_prompt2,
 ]
 third_prompt = [
-    shared_prompt3 + "Hello, my name is",
+    "3" + shared_prompt3,
 ]
-sixth_prompt = [
-    shared_prompt3 + "Tell me a very long story",
+fourth_prompt = [
+    "4" + shared_prompt4,
+]
+fifth_prompt = [
+    "5" + shared_prompt5,
 ]
 
 sampling_params = SamplingParams(temperature=0, max_tokens=100)
@@ -49,49 +48,44 @@ ktc = KVTransferConfig.from_cli(
 # Set GPU memory utilization to 0.8 for an A40 GPU with 40GB
 # memory. Reduce the value if your GPU has less memory.
 # Note that LMCache is not compatible with chunked prefill for now.
-llm = LLM(model="mistralai/Mistral-7B-Instruct-v0.2",
+llm = LLM(model="meta-llama/Llama-3.1-8b-Instruct",
           kv_transfer_config=ktc,
-          max_model_len=8000,
+          max_model_len=30000,
           enable_chunked_prefill=False,
           gpu_memory_utilization=0.8,
           enforce_eager=True
           )
 
-outputs = llm.generate(first_prompt, sampling_params)
-for output in outputs:
-    generated_text = output.outputs[0].text
-    print(f"Generated text: {generated_text!r}")
-print("First request done.")
+for i in range(2):
+    outputs = llm.generate(first_prompt, sampling_params)
+    for output in outputs:
+        generated_text = output.outputs[0].text
+        print(f"Generated text: {generated_text!r}")
+    print("First request done.")
 
-outputs = llm.generate(second_prompt, sampling_params)
-for output in outputs:
-    generated_text = output.outputs[0].text
-    print(f"Generated text: {generated_text!r}")
-print("Second request done.")
+    outputs = llm.generate(second_prompt, sampling_params)
+    for output in outputs:
+        generated_text = output.outputs[0].text
+        print(f"Generated text: {generated_text!r}")
+    print("Second request done.")
 
-outputs = llm.generate(third_prompt, sampling_params)
-for output in outputs:
-    generated_text = output.outputs[0].text
-    print(f"Generated text: {generated_text!r}")
-print("Third request done.")
+    outputs = llm.generate(third_prompt, sampling_params)
+    for output in outputs:
+        generated_text = output.outputs[0].text
+        print(f"Generated text: {generated_text!r}")
+    print("Third request done.")
 
-outputs = llm.generate(first_prompt, sampling_params)
-for output in outputs:
-    generated_text = output.outputs[0].text
-    print(f"Generated text: {generated_text!r}")
-print("Fourth request done.")
+    outputs = llm.generate(fourth_prompt, sampling_params)
+    for output in outputs:
+        generated_text = output.outputs[0].text
+        print(f"Generated text: {generated_text!r}")
+    print("Fourth request done.")
 
-outputs = llm.generate(second_prompt, sampling_params)
-for output in outputs:
-    generated_text = output.outputs[0].text
-    print(f"Generated text: {generated_text!r}")
-print("Fifth request done.")
-
-outputs = llm.generate(third_prompt, sampling_params)
-for output in outputs:
-    generated_text = output.outputs[0].text
-    print(f"Generated text: {generated_text!r}")
-print("Sixth request done.")
+    outputs = llm.generate(fifth_prompt, sampling_params)
+    for output in outputs:
+        generated_text = output.outputs[0].text
+        print(f"Generated text: {generated_text!r}")
+    print("Fifth request done.")
 
 # Clean up lmcache backend
 LMCacheEngineBuilder.destroy(ENGINE_NAME)

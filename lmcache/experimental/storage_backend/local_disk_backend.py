@@ -4,7 +4,7 @@ import threading
 from collections import OrderedDict
 from concurrent.futures import Future
 from typing import List, Optional, Tuple, Union
-
+import time
 import aiofiles
 import torch
 
@@ -138,7 +138,7 @@ class LocalDiskBackend(StorageBackendInterface):
 
     def get_blocking(
         self,
-        key: CacheEngineKey,
+        key: CacheEngineKey, emerge_id
     ) -> Tuple[Union[MemoryObj, str], CacheEngineKey]:
         """
         Blocking get function.
@@ -158,7 +158,10 @@ class LocalDiskBackend(StorageBackendInterface):
             old_key.metadata.context_id.append(key.metadata.context_id[0])
             old_key.metadata.method.append(key.metadata.method[0])
             old_key.metadata.score_table.append(key.metadata.score_table[0])
+            old_key.metadata.disk_score_table.append(key.metadata.disk_score_table[0])
             self.dict[old_key] = self.dict.pop(key)
+        # Record request pattern
+            old_key.metadata.emerge_id.append(emerge_id)
 
         # # Update cache recency
         # self.evictor.update_on_hit(key, self.dict)
@@ -247,9 +250,62 @@ class LocalDiskBackend(StorageBackendInterface):
             if memory_obj is None:
                 logger.debug("Memory allocation failed during async disk load.")
                 return None
-            buffer = memory_obj.byte_array
-            with open(path, 'rb') as f:
-                f.readinto(buffer)
+            
+            ##### 1
+            # buffer = memory_obj.byte_array
+            # start = time.perf_counter()
+            # with open(path, 'rb') as f:
+            #     f.readinto(buffer)
+            # duration = time.perf_counter() - start
+            # logger.info(
+            #     "Async disk load: read %d bytes into buffer in %.3f seconds",
+            #     len(buffer), duration
+            # )
+
+            ##### 2
+            # # Linux 下绕过页缓存打开标志
+            # O_DIRECT = os.O_DIRECT
+            # # 根据你的需求也可以加 O_SYNC、O_DSYNC
+            # flags = os.O_RDONLY | O_DIRECT
+
+            # # fd 打开时就带上 O_DIRECT
+            # fd = os.open(path, flags)
+
+            # # 用无缓冲的 FileIO
+            # f = os.fdopen(fd, 'rb', buffering=0)
+
+            # # 注意：O_DIRECT 要求 buffer 和读长度都与磁盘块大小（通常 4096 字节）对齐
+            # # memory_obj.byte_array 必须满足对齐，否则会报 Invalid argument。
+            # start = time.perf_counter()
+            # f.readinto(memory_obj.byte_array)
+            # duration = time.perf_counter() - start
+
+            # logger.info(
+            #     "Direct I/O: read %d bytes from %s in %.3f s (≈ %.2f GiB/s)",
+            #     len(memory_obj.byte_array), path, duration,
+            #     len(memory_obj.byte_array) / duration / (1024**3)
+            # )
+
+            # f.close()
+
+            ##### 3
+            TARGET_RATE = 1000 * 1024**2  # 1 GiB/s
+
+            fd = os.open(path, os.O_RDONLY | os.O_DIRECT)
+            f  = os.fdopen(fd, 'rb', buffering=0)
+
+            while True:
+                t0 = time.perf_counter()
+                n = f.readinto(memory_obj.byte_array)
+                if n <= 0:
+                    break
+                elapsed = time.perf_counter() - t0
+                expected = n / TARGET_RATE
+                to_sleep = expected - elapsed
+                if to_sleep > 0:
+                    time.sleep(to_sleep)
+            f.close()
+
             return memory_obj
 
     @_lmcache_nvtx_annotate

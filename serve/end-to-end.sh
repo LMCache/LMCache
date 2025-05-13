@@ -16,30 +16,18 @@ cleanup() {
 trap cleanup SIGINT SIGTERM
 
 # --- Configuration arrays (must all be the same length) ---
-ports=(8000 8001 8002 8003 8004 8005)
+ports=(8000 8001)
 configs=(
-  ../config/qmsum7.yaml
-  ../config/qmsum8.yaml
-  ../config/qmsum3.yaml
-  ../config/qmsum5.yaml
-  ../config/qmsum.yaml
-  ../config/qmsum2.yaml
+  ../config/May_13_1/ours/04.yaml
+  ../config/May_13_1/ours/07.yaml
 )
 logs=(
-  results/May_7_6/ours/tokens/1.log
-  results/May_7_6/ours/tokens/01.log
-  results/May_7_6/baseline/tokens/03.log
-  results/May_7_6/baseline/tokens/02.log
-  results/May_7_6/ours/tokens/001.log
-  results/May_7_6/ours/tokens/10.log
+  results/May_13_1/ours/tokens/04.log
+  results/May_13_1/ours/tokens/07.log
 )
 outputs=(
-  results/May_7_6/ours/1.csv
-  results/May_7_6/ours/01.csv
-  results/May_7_6/baseline/03.csv
-  results/May_7_6/baseline/02.csv
-  results/May_7_6/ours/001.csv
-  results/May_7_6/ours/10.csv
+  results/May_13_1/ours/04.csv
+  results/May_13_1/ours/07.csv
 )
 
 # Array to track running PGIDs
@@ -86,6 +74,8 @@ for i in "${!ports[@]}"; do
     sleep 0.1
   done
   echo "Engine session $engine_pid has exited."
+
+  rm -rf /home/ubuntu/kvcache/*
 
   # Remove this PGID from the list
   PIDS=( "${PIDS[@]/$engine_pid}" )
