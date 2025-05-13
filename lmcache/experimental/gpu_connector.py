@@ -480,15 +480,6 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
 
             num_elements = shape.numel()
 
-            # TODO (Jiayi): The double buffers can be reduced to one
-            self.store_gpu_buffer = torch.empty(num_elements,
-                                                dtype=self.dtype,
-                                                device=self.device)
-
-            self.load_gpu_buffer = torch.empty(num_elements,
-                                               dtype=self.dtype,
-                                               device=self.device)
-
             # All sizes are in bytes
             element_size = torch.tensor([], dtype=self.dtype).element_size()
             gpu_buffer_size = num_elements * element_size
@@ -542,8 +533,6 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
         if "slot_mapping" not in kwargs:
             raise ValueError("'slot_mapping' should be provided in kwargs.")
 
-        # TODO (Jiayi): Drop this when we support PD
-        assert self.load_gpu_buffer is not None
 
         kvcaches: List[torch.Tensor] = kwargs["kvcaches"]
         slot_mapping: torch.Tensor = kwargs["slot_mapping"]
@@ -635,9 +624,6 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
 
         if "slot_mapping" not in kwargs:
             raise ValueError("'slot_mapping' should be provided in kwargs.")
-
-        # TODO (Jiayi): Drop this when we support PD
-        assert self.store_gpu_buffer is not None
 
         kvcaches: List[torch.Tensor] = kwargs["kvcaches"]
         slot_mapping: torch.Tensor = kwargs["slot_mapping"]
