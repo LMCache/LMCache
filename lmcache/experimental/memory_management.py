@@ -841,15 +841,18 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
 
 
 class GPUMemoryAllocator(MemoryAllocatorInterface):
-    """Allocates memory in the pre-allocated Host memory.
+    """Allocates memory in the pre-allocated GPU memory.
     """
 
     def __init__(self, size: int, device="cuda"):
         """
-        :param int size: The size of the pinned memory in bytes.
+        :param int size: The size of the GPU memory in bytes.
         """
         buffer = torch.empty(size, dtype=torch.uint8, device=device)
+
         self.allocator = TensorMemoryAllocator(buffer)
+
+        self.device_mem_lock = threading.Lock()
 
     def allocate(
         self,
@@ -857,13 +860,16 @@ class GPUMemoryAllocator(MemoryAllocatorInterface):
         dtype: Optional[torch.dtype],
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
     ) -> Optional[MemoryObj]:
-        return self.allocator.allocate(shape, dtype, fmt)
+        with self.device_mem_lock:
+            return self.allocator.allocate(shape, dtype, fmt)
 
     def free(self, memory_obj: MemoryObj):
-        self.allocator.free(memory_obj)
+        with self.device_mem_lock:
+            self.allocator.free(memory_obj)
 
     def memcheck(self):
-        return self.allocator.memcheck()
+        with self.device_mem_lock:
+            return self.allocator.memcheck()
 
     def dry_allocate(
         self,
