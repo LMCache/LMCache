@@ -13,7 +13,7 @@
 # limitations under the License.
 
 import inspect
-from typing import List, Optional, Tuple
+from typing import Optional, Sequence, Tuple
 
 import redis
 
@@ -66,6 +66,17 @@ class RedisLookupServer(LookupServerInterface):
         logger.debug("Call to insert in lookup server")
         self.connection.set(key.to_string(), self.distributed_url)
 
+    def batched_insert(self, keys: Sequence[CacheEngineKey]):
+        """
+        Perform batched insert in the lookup server.
+        """
+        assert self.distributed_url is not None
+        logger.debug("Call to batched insert in lookup server")
+
+        # TODO(Jiayi): Optimize this with redis pipe
+        for key in keys:
+            self.connection.set(key.to_string(), self.distributed_url)
+
     def remove(self, key: CacheEngineKey):
         """
         Perform remove in the lookup server.
@@ -73,7 +84,7 @@ class RedisLookupServer(LookupServerInterface):
         logger.debug("Call to remove in lookup server")
         self.connection.delete(key.to_string())
 
-    def batched_remove(self, keys: List[CacheEngineKey]):
+    def batched_remove(self, keys: Sequence[CacheEngineKey]):
         """
         Perform batched remove in the lookup server.
         """

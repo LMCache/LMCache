@@ -89,13 +89,39 @@ class LocalDiskBackend(StorageBackendInterface):
     ) -> str:
         return self.path + key.to_string().replace("/", "-") + ".pt"
 
-    def contains(self, key: CacheEngineKey) -> bool:
+    def contains(self, key: CacheEngineKey, pin: bool = False) -> bool:
         with self.disk_lock:
-            return key in self.dict
+            if key not in self.dict:
+                return False
+            if pin:
+                self.dict[key].pin()
+            return True
 
     def exists_in_put_tasks(self, key: CacheEngineKey) -> bool:
         with self.disk_lock:
             return key in self.put_tasks
+
+    def pin(
+        self,
+        key: CacheEngineKey,
+    ) -> bool:
+        with self.disk_lock:
+            if key in self.dict:
+                self.dict[key].pin()
+                return True
+            else:
+                return False
+
+    def unpin(
+        self,
+        key: CacheEngineKey,
+    ) -> bool:
+        with self.disk_lock:
+            if key in self.dict:
+                self.dict[key].unpin()
+                return True
+            else:
+                return False
 
     def remove(
         self,
@@ -129,7 +155,7 @@ class LocalDiskBackend(StorageBackendInterface):
                 self.dict.pop(key)
                 has_stored = True
 
-            self.dict[key] = DiskCacheMetadata(path, size, shape, dtype)
+            self.dict[key] = DiskCacheMetadata(path, size, shape, dtype, False)
 
         # push kv admit msg
         if self.lmcache_worker is not None and not has_stored:
@@ -212,6 +238,17 @@ class LocalDiskBackend(StorageBackendInterface):
         memory_obj = self.load_bytes_from_disk(path, dtype=dtype, shape=shape)
         self.disk_lock.release()
         return memory_obj
+
+    def get_non_blocking(
+        self,
+        key: CacheEngineKey,
+    ) -> Optional[Future]:
+        """
+        Non-blocking get function.
+        Using a dummy wrapper around prefetch for now. 
+        """
+        # TODO(Jiayi): Need to align prefetch and get_non_blocking
+        return self.submit_prefetch_task(key)
 
     @_lmcache_nvtx_annotate
     @torch.inference_mode()

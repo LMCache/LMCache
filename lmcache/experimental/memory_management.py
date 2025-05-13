@@ -33,11 +33,14 @@ class MemoryFormat(Enum):
     """[2, num_layers, num_tokens, hidden_dim]
     """
     KV_BLOB = 1
+    """[num_tokens, 2, hidden_dim]
+    """
+    LAYER_KV_BLOB = 2
     """Compressed binary array format
     """
-    BINARY = 2
+    BINARY = 3
 
-    BINARY_BUFFER = 3
+    BINARY_BUFFER = 4
 
     def token_dim(self) -> int:
         if self == MemoryFormat.KV_BLOB:
@@ -74,6 +77,12 @@ class MemoryObjMetadata:
 
     # Reference count
     ref_count: int
+
+    # TODO(Jiayi): Need to differentiate between temporary pin
+    # and persistent pin. Or maybe it's better to use only
+    # `ref_count` to manage these semantics.
+    # Whether the object is pinned and cannot be evicted
+    is_pin: bool = False
 
     # The 'logical' format of the tensor
     fmt: MemoryFormat = MemoryFormat.UNDEFINED
@@ -174,9 +183,23 @@ class MemoryObj(metaclass=abc.ABCMeta):
         raise NotImplementedError
 
     @abc.abstractmethod
+    def pin(self) -> bool:
+        """
+        Pin the memory obj so that it will not be evicted.
+        """
+        raise NotImplementedError
+
+    @abc.abstractmethod
     def ref_count_up(self):
         """
         Increase ref count for the given MemoryObj by one.
+        """
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    def unpin(self) -> bool:
+        """
+        Unpin the memory obj so that it can be evicted.
         """
         raise NotImplementedError
 
@@ -215,6 +238,14 @@ class MemoryObj(metaclass=abc.ABCMeta):
     def byte_array(self) -> bytes:
         """
         Get the byte array from the MemoryObj.
+        """
+        raise NotImplementedError
+
+    @property
+    @abc.abstractmethod
+    def is_pinned(self) -> bool:
+        """
+        Check whether the memory obj is pinned.
         """
         raise NotImplementedError
 
@@ -268,12 +299,21 @@ class TensorMemoryObj(MemoryObj):
         with self.lock:
             self.meta.ref_count -= 1
             if self.meta.ref_count == 0 and \
-                self.parent_allocator is not None:
+                self.parent_allocator is not None and \
+                self.meta.is_pin is False:
                 self.parent_allocator.free(self)
 
     def get_ref_count(self) -> int:
         with self.lock:
             return self.meta.ref_count
+
+    def pin(self) -> bool:
+        self.metadata.is_pin = True
+        return True
+
+    def unpin(self) -> bool:
+        self.metadata.is_pin = False
+        return True
 
     @property
     def metadata(self) -> MemoryObjMetadata:
@@ -300,7 +340,12 @@ class TensorMemoryObj(MemoryObj):
             ctypes.addressof(ubyte_ptr.contents))
         return memoryview(byte_array)
 
+    @property
+    def is_pinned(self) -> bool:
+        return self.metadata.is_pin
 
+
+# TODO(Jiayi): Need to make this compatible with pin/unpin semantics
 class CopyLessMemoryObj(TensorMemoryObj):
 
     def __init__(self, raw_data, metadata, callback, parent_allocator=None):
@@ -327,6 +372,7 @@ class BytesBufferMemoryObj(MemoryObj):
                                           address=0,
                                           phy_size=0,
                                           ref_count=1,
+                                          is_pin=False,
                                           fmt=MemoryFormat.BINARY_BUFFER)
         else:
             self.meta = metadata
@@ -353,6 +399,14 @@ class BytesBufferMemoryObj(MemoryObj):
     def get_physical_size(self) -> int:
         return self.metadata.phy_size
 
+    def pin(self) -> bool:
+        self.metadata.is_pin = True
+        return True
+
+    def unpin(self) -> bool:
+        self.metadata.is_pin = False
+        return True
+
     def ref_count_up(self):
         pass
 
@@ -376,6 +430,10 @@ class BytesBufferMemoryObj(MemoryObj):
     @property
     def byte_array(self) -> bytes:
         return self.raw_data
+
+    @property
+    def is_pinned(self) -> bool:
+        return self.metadata.is_pin
 
 
 class MemoryAllocatorInterface(metaclass=abc.ABCMeta):
@@ -531,7 +589,7 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         return TensorMemoryObj(
             raw_data=self.buffer[block.start:block.start + raw_size],
             metadata=MemoryObjMetadata(shape, dtype, block.start, aligned_size,
-                                       1, fmt),
+                                       1, False, fmt),
             parent_allocator=parent_allocator)
 
     def dry_allocate(
@@ -635,6 +693,7 @@ class BufferAllocator(MemoryAllocatorInterface):
                                  address=0,
                                  phy_size=0,
                                  ref_count=1,
+                                 is_pin=False,
                                  fmt=MemoryFormat.BINARY_BUFFER)
 
     def free(self, memory_obj: MemoryObj):
@@ -750,7 +809,7 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
     ) -> Optional[MemoryObj]:
         if fmt == MemoryFormat.BINARY_BUFFER:
             return self.buffer_allocator.allocate(shape, dtype, fmt)
-        elif fmt == MemoryFormat.KV_BLOB:
+        elif fmt in [MemoryFormat.KV_BLOB, MemoryFormat.LAYER_KV_BLOB]:
             with self.host_mem_lock:
                 return self.pin_allocator.allocate(shape, dtype, fmt, self)
         else:
@@ -768,7 +827,7 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
         fmt = memory_obj.meta.fmt
         if fmt == MemoryFormat.BINARY_BUFFER:
             self.buffer_allocator.free(memory_obj)
-        elif fmt == MemoryFormat.KV_BLOB:
+        elif fmt in [MemoryFormat.KV_BLOB, MemoryFormat.LAYER_KV_BLOB]:
             with self.host_mem_lock:
                 self.pin_allocator.free(memory_obj)
         else:
@@ -848,6 +907,7 @@ class AdHocMemoryAllocator(MemoryAllocatorInterface):
                                                           address=0,
                                                           phy_size=0,
                                                           ref_count=1,
+                                                          is_pin=False,
                                                           fmt=fmt),
                                parent_allocator=self)
 
@@ -870,6 +930,7 @@ class AdHocMemoryAllocator(MemoryAllocatorInterface):
                                  address=0,
                                  phy_size=0,
                                  ref_count=1,
+                                 is_pin=False,
                                  fmt=fmt)
 
     def free(self, memory_obj: MemoryObj):

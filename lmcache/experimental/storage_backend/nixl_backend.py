@@ -173,6 +173,12 @@ class RecvObjPool:
 
             return ret
 
+    def pin(self, key: CacheEngineKey) -> bool:
+        raise NotImplementedError
+
+    def unpin(self, key: CacheEngineKey) -> bool:
+        raise NotImplementedError
+
 
 class BasicNixlObserver(NixlObserverInterface):
     """
@@ -257,11 +263,14 @@ class NixlBackend(StorageBackendInterface):
         self._registered_metadatas: list[MemoryObjMetadata] = []
         self._num_payload_added = 0
 
-    def contains(self, key: CacheEngineKey) -> bool:
+    # TODO(Jiayi): handle `pin` smantics
+    def contains(self, key: CacheEngineKey, pin: bool = False) -> bool:
         """
         Check whether key is in the storage backend.
         
         :param key: The key to check
+        :param pin: Whether to pin the object in the backend.
+        
         :return: True if the key exists, False otherwise
         """
         return self._obj_pool.contains(key)
@@ -375,6 +384,12 @@ class NixlBackend(StorageBackendInterface):
         """
         return self._obj_pool.get(key)
 
+    def get_non_blocking(
+        self,
+        key: CacheEngineKey,
+    ) -> Optional[Future]:
+        raise NotImplementedError
+
     def remove(self, key: CacheEngineKey) -> None:
         """
         Remove the key from the storage backend.
@@ -394,6 +409,12 @@ class NixlBackend(StorageBackendInterface):
         Get the underlying allocator from Nixl channel.
         """
         return self._nixl_channel.get_allocator()
+
+    def pin(self, key: CacheEngineKey) -> bool:
+        raise NotImplementedError
+
+    def unpin(self, key: CacheEngineKey) -> bool:
+        raise NotImplementedError
 
     @staticmethod
     def CreateNixlBackend(config: LMCacheEngineConfig,

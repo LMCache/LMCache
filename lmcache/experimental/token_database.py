@@ -70,7 +70,9 @@ class ChunkedTokenDatabase(TokenDatabase):
             self.chunk_size = config.chunk_size
         self.metadata = metadata
 
-    def _make_key_by_hash(self, chunk_hash: str):
+    def _make_key_by_hash(self,
+                          chunk_hash: str,
+                          layer_id: Optional[int] = None):
         assert self.metadata is not None
         return CacheEngineKey(self.metadata.fmt, self.metadata.model_name,
                               self.metadata.world_size,
@@ -132,6 +134,9 @@ class ChunkedTokenDatabase(TokenDatabase):
             FFFFFTTTTTTT, where True means the tokens needs to be matched, 
             and the Falses will ALWAYS be at the PREFIX of the tensor.
 
+        :param bool make_key: Whether to make the cache engine key or not.
+            If False, the hash value will be returned instead.
+        
         :returns: A iterable of tuples with three elements. The first element
             is the start index of the tokens for the key. The second element
             is the end index of the tokens for the key. The third element is

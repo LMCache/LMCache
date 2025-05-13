@@ -44,9 +44,17 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
         self.dst_device = dst_device
 
     @abc.abstractmethod
-    def contains(self, key: CacheEngineKey) -> bool:
+    def contains(self, key: CacheEngineKey, pin: bool = False) -> bool:
         """
         Check whether key is in the storage backend. 
+        
+        :param CacheEngineKey key: The key of the MemoryObj.
+        
+        :param bool pin: Whether to pin the key. 
+            If True, the corresponding KV cache will be
+            pinned in the storage backend.
+        
+        :return: True if the key exists, False otherwise.
         """
         raise NotImplementedError
 
@@ -95,6 +103,48 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
         :param CacheEngineKey key: The key of the MemoryObj.
         
         :return: MemoryObj. None if the key does not exist.
+        """
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    def get_non_blocking(
+        self,
+        key: CacheEngineKey,
+    ) -> Optional[Future]:
+        """
+        A non-blcocking function to get the kv cache from the storage backend.
+        
+        :param CacheEngineKey key: The key of the MemoryObj.
+        
+        :return: a future object. None if the key does not exist.
+        """
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    def pin(
+        self,
+        key: CacheEngineKey,
+    ) -> bool:
+        """
+        Pin a memory object so it will not be evicted.
+        
+        :param CacheEngineKey key: The key of the MemoryObj.
+        
+        :return: a bool indicates whether pin is successful.
+        """
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    def unpin(
+        self,
+        key: CacheEngineKey,
+    ) -> bool:
+        """
+        Unpin a memory object so it can be evicted.
+        
+        :param CacheEngineKey key: The key of the MemoryObj.
+        
+        :return: a bool indicates whether unpin is successful.
         """
         raise NotImplementedError
 

@@ -203,9 +203,6 @@ def check_paged_kv_cache_equal(left,
         assert right_k.shape[token_dim] >= num_tokens
         assert right_v.shape[token_dim] >= num_tokens
 
-        if not (left_k[slot_mapping, :, :]
-                == right_k[slot_mapping, :, :]).all():
-            breakpoint()
         assert (
             left_k[slot_mapping, :, :] == right_k[slot_mapping, :, :]).all()
         assert (

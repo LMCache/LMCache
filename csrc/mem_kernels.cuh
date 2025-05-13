@@ -32,6 +32,15 @@ void multi_layer_kv_transfer(
     const bool direction
 );
 
+void single_layer_kv_transfer(
+    torch::Tensor& lmc_key_value_cache,
+    torch::Tensor& vllm_key_cache,
+    torch::Tensor&
+        vllm_value_cache,
+    torch::Tensor& slot_mapping,
+    const bool direction
+);
+
 void load_and_reshape_flash(
     torch::Tensor& key_value,
     torch::Tensor& key_cache,

@@ -15,7 +15,7 @@
 import asyncio
 import multiprocessing
 import time
-from typing import Dict, List, Optional, Union
+from typing import Dict, Generator, List, Optional, Union
 
 import torch
 
@@ -23,12 +23,13 @@ from lmcache.config import LMCacheEngineMetadata
 from lmcache.experimental.config import LMCacheEngineConfig
 from lmcache.experimental.distributed_server import (
     DistributedServerInterface, NaiveDistributedServer)
-from lmcache.experimental.gpu_connector import GPUConnectorInterface
+from lmcache.experimental.gpu_connector import (
+    GPUConnectorInterface, VLLMPagedMemLayerwiseGPUConnector)
 from lmcache.experimental.lookup_server import (LookupServerInterface,
                                                 RedisLookupServer)
-from lmcache.experimental.memory_management import (AdHocMemoryAllocator,
-                                                    MemoryAllocatorInterface,
-                                                    MixedMemoryAllocator)
+from lmcache.experimental.memory_management import (  # noqa: E501
+    AdHocMemoryAllocator, MemoryAllocatorInterface, MemoryObj,
+    MixedMemoryAllocator)
 from lmcache.experimental.storage_backend.storage_manager import (
     DistributedStorageManager, StorageManager)
 from lmcache.experimental.token_database import (ChunkedTokenDatabase,
@@ -327,7 +328,7 @@ class LMCacheEngine:
 
         retrieved_tokens = torch.sum(ret_mask)
         self.stats_monitor.on_retrieve_finished(monitor_req_id,
-                                                torch.sum(ret_mask))
+                                                retrieved_tokens)
         logger.debug(f"Retrieved {retrieved_tokens} "
                      f"out of {num_required_tokens} "
                      f"out of total {len(tokens)} tokens")
@@ -351,6 +352,7 @@ class LMCacheEngine:
         self,
         tokens: Union[torch.Tensor, List[int]],
         search_range: Optional[List[str]] = None,
+        pin: bool = False,
     ) -> int:
         """
         Checks the existence of KV cache of the tokens from the cache engine.
@@ -358,8 +360,11 @@ class LMCacheEngine:
         :param tokens: the input tokens, with shape [seq_len]
         
         :param Optional[List[str]] search_range: The range of storage backends
-        to search in. Should be a subset of ["Hot", "LocalDiskBackend"] for now.
+        to search in. Should be a subset of 
+        ["LocalCPUBackend", "LocalDiskBackend"] for now.
         If None, search in all backends.
+        
+        :param bool pin: If True, pin the KV cache in the storage.
 
         :return: An int indicating how many prefix tokens are cached.
         """
@@ -372,7 +377,7 @@ class LMCacheEngine:
         for start, end, key in self.token_database.process_tokens(tokens):
             assert isinstance(key, CacheEngineKey)
             if search_local:
-                if self.storage_manager.contains(key, search_range):
+                if self.storage_manager.contains(key, search_range, pin):
                     # found in storage manager, no need to search p2p
                     continue
                 else:
@@ -424,6 +429,283 @@ class LMCacheEngine:
         logger.info("LMCacheEngine closed.")
 
 
+# TODO(Jiayi): Using a separate class here.
+# Should use the same class once the code is stable.
+class LayerwiseLMCacheEngine(LMCacheEngine):
+    """A specialized LMCacheEngine for layerwise cache engine.
+    
+    This class is used to store the layerwise cache engine. It is a
+    subclass of LMCacheEngine and inherits all the methods and attributes
+    from it. However, it retrieves the KV cache in a layerwise manner 
+    instead of chunkwise manner.
+    """
+
+    def __init__(
+        self,
+        config: LMCacheEngineConfig,
+        metadata: LMCacheEngineMetadata,
+        memory_allocator: MemoryAllocatorInterface,
+        token_database: TokenDatabase,
+        layerwise_gpu_connector: GPUConnectorInterface,
+    ):
+        super().__init__(config, metadata, memory_allocator, token_database,
+                         layerwise_gpu_connector)
+        assert isinstance(self.gpu_connector,
+                          VLLMPagedMemLayerwiseGPUConnector)
+
+        self.num_layers = metadata.kv_shape[0]
+
+    @_lmcache_nvtx_annotate
+    @torch.inference_mode()
+    def store_layer(self,
+                    tokens: torch.Tensor,
+                    mask: Optional[torch.Tensor] = None,
+                    **kwargs) -> Generator[None, None, None]:
+        """
+        Store the KV cache in a layerwise manner.
+        
+        :param torch.Tensor tokens: The tokens of the corresponding KV caches.
+        
+        :param Optional[torch.Tensor] mask: The mask for the tokens. Should
+            have the same length as tokens. And the mask should ALWAYS be like
+            FFFFFTTTTTTT, where True means the tokens needs to be matched.
+        
+        :param **kwargs: The additional arguments for the storage backend which
+            will be passed into the gpu_connector.
+        
+        return: A generator that yields None. In the first iteration, the 
+            generator allocates the memory objects for all layers and moves 
+            the KV cache of the first layer from GPU to CPU. In the next 
+            iterations, it moves the KV cache of layer i from GPU to the memory 
+            objects (on CPU) and puts the memory objects of layer i-1 to the 
+            storage backends. In the last iteration, it puts the memory objects 
+            of the last layer to the storage backends.
+        """
+
+        if mask is not None:
+            num_stored_tokens = torch.sum(mask).item()
+        else:
+            num_stored_tokens = len(tokens)
+        monitor_req_id = self.stats_monitor.on_store_request(num_stored_tokens)
+
+        starts = []
+        ends = []
+        keys = []
+        memory_objs = []
+        kv_dtype = self.metadata.kv_dtype
+        for start, end, key in self.token_database.process_tokens(
+                tokens, mask):
+            assert isinstance(key, CacheEngineKey)
+
+            keys_multi_layer = key.split_layers(self.num_layers)
+
+            # Only check the first layer
+            if self.storage_manager.contains(keys_multi_layer[0]):
+                continue
+
+            # Allocate the memory object
+            num_tokens = end - start
+            kv_shape_single_layer = self.gpu_connector.get_shape(num_tokens)
+
+            # TODO(Jiayi): Optimize with batched allocation
+            memory_objs_multi_layer: List[MemoryObj] = []
+            no_space_left = False
+            for layer_id in range(self.num_layers):
+                mem_obj_single_layer = self.storage_manager.allocate(
+                    kv_shape_single_layer, kv_dtype)
+
+                if mem_obj_single_layer is None:
+                    logger.warning(
+                        "Failed to allocate memory for the KV cache.\n"
+                        "The KV cache will not be stored.")
+                    no_space_left = True
+                    for mem_obj_prev_layer in memory_objs_multi_layer:
+                        mem_obj_prev_layer.ref_count_down()
+                    break
+
+                memory_objs_multi_layer.append(mem_obj_single_layer)
+
+            if no_space_left:
+                break
+
+            starts.append(start)
+            ends.append(end)
+            keys.append(keys_multi_layer)
+            memory_objs.append(memory_objs_multi_layer)
+
+            # Update lookup server
+            if self.lookup_server is not None:
+                self.lookup_server.batched_insert(keys_multi_layer)
+
+        if keys:
+            # Transpose the keys and memory objects into layer major format
+            memory_objs = [
+                list(row) for row in zip(*memory_objs, strict=False)
+            ]
+            keys = [list(row) for row in zip(*keys, strict=False)]
+
+            assert isinstance(self.gpu_connector,
+                              VLLMPagedMemLayerwiseGPUConnector)
+            mem_obj_generator = self.gpu_connector.batched_from_gpu(
+                memory_objs, starts, ends, **kwargs)
+
+            next(mem_obj_generator)
+
+            for layer_id in range(self.num_layers):
+                yield
+                next(mem_obj_generator)
+                self.storage_manager.batched_put(keys[layer_id],
+                                                 memory_objs[layer_id])
+        else:
+            # If no cache are found, we still need to yield to avoid
+            # `StopIteration`
+            for layer_id in range(self.num_layers):
+                yield
+
+        self.stats_monitor.on_store_finished(monitor_req_id)
+        logger.debug(f"Stored {num_stored_tokens} "
+                     f"out of total {len(tokens)} tokens")
+        yield
+
+    @_lmcache_nvtx_annotate
+    @torch.inference_mode()
+    def retrieve_layer(
+            self,
+            tokens: torch.Tensor,
+            mask: Optional[torch.Tensor] = None,
+            **kwargs) -> Generator[Optional[torch.Tensor], None, None]:
+        """
+        Retrieve the KV cache in a layerwise manner.
+        
+        :param torch.Tensor tokens: The tokens of the corresponding KV caches.
+        
+        :param Optional[torch.Tensor] mask: The mask for the tokens. Should
+            have the same length as tokens. And the mask should ALWAYS be like
+            FFFFFTTTTTTT, where True means the tokens needs to be matched.
+        
+        :param **kwargs: The additional arguments for the storage backend which
+            will be passed into the gpu_connector.
+        
+        return: A generator that yields Optional[torch.Tensor]. The tensor will
+            be the boolean mask indicating which tokens are retrieved and will
+            only be returned in the last iteration. In the first iteration, 
+            the generator retrieve the memory objects of the first layer from
+            the storage backends. In the next iterations, it moves the KV cache 
+            of layer i from the memory objects (on CPU) to GPU and retrieves
+            the memory objects of layer i+1 from the storage backends. In the 
+            last iteration, it moves the memory objects of the last layer to
+            the GPU.
+        """
+
+        if mask is not None:
+            num_required_tokens = torch.sum(mask).item()
+        else:
+            num_required_tokens = len(tokens)
+        monitor_req_id = self.stats_monitor.on_retrieve_request(
+            num_required_tokens)
+
+        ret_mask = torch.zeros_like(tokens, dtype=torch.bool, device="cpu")
+
+        starts = []
+        ends = []
+        keys = []
+        for start, end, key in self.token_database.process_tokens(
+                tokens, mask):
+            assert isinstance(key, CacheEngineKey)
+
+            keys_multi_layer = key.split_layers(self.num_layers)
+
+            # NOTE: Only check the first layer
+            if not self.storage_manager.contains(keys_multi_layer[0]):
+                break
+
+            starts.append(start)
+            ends.append(end)
+            keys.append(keys_multi_layer)
+
+            ret_mask[start:end] = True
+
+        if keys:
+            # Transpose the keys into layer major format
+            keys_layer_major = [list(row) for row in zip(*keys, strict=False)]
+
+            get_generator = self.storage_manager.layerwise_batched_get(
+                keys_layer_major)
+
+            assert isinstance(self.gpu_connector,
+                              VLLMPagedMemLayerwiseGPUConnector)
+            mem_obj_consumer = self.gpu_connector.batched_to_gpu(
+                starts, ends, **kwargs)
+            next(mem_obj_consumer)
+
+            for layer_id in range(self.num_layers):
+
+                tasks = next(get_generator)
+
+                assert None not in tasks
+
+                yield None
+
+                mem_objs_layer = [task.result() for task in tasks]
+                mem_obj_consumer.send(mem_objs_layer)
+
+            # TODO(Jiayi): Need to be done in a modular way
+            for keys_layer in keys_layer_major:
+                self.storage_manager.batched_unpin(keys_layer)
+        else:
+            # If no cache are found, we still need to yield to avoid
+            # `StopIteration`
+            for layer_id in range(self.num_layers):
+                yield None
+
+        yield None
+
+        # synchronize the last layer
+        next(mem_obj_consumer)
+
+        retrieved_tokens = torch.sum(ret_mask)
+        self.stats_monitor.on_retrieve_finished(monitor_req_id,
+                                                retrieved_tokens)
+        logger.debug(f"Retrieved {retrieved_tokens} "
+                     f"out of {num_required_tokens} "
+                     f"out of total {len(tokens)} tokens")
+
+        yield ret_mask
+
+    def lookup(
+        self,
+        tokens: Union[torch.Tensor, List[int]],
+        search_range: Optional[List[str]] = None,
+        pin: bool = False,
+    ) -> int:
+        """
+        Checks the existence of KV cache of the tokens from the cache engine.
+
+        :param tokens: the input tokens, with shape [seq_len]
+        
+        :param Optional[List[str]] search_range: The range of storage backends
+        to search in. Should be a subset of 
+        ["LocalCPUBackend", "LocalDiskBackend"] for now.
+        If None, search in all backends.
+        
+        :param bool pin: If True, pin the KV cache in the storage.
+
+        :return: An int indicating how many prefix tokens are cached.
+        """
+        end = 0
+        for start, end, key in self.token_database.process_tokens(tokens):
+            assert isinstance(key, CacheEngineKey)
+
+            # TODO(Jiayi): Optimize by checking only the existence of the key
+            # of one layer
+            key_all_layers = key.split_layers(self.num_layers)
+            for key_single_layer in key_all_layers:
+                if not self.storage_manager.contains(key_single_layer,
+                                                     search_range, pin):
+                    return start
+        return end
+
+
 class LMCacheEngineBuilder:
     _instances: Dict[str, LMCacheEngine] = {}
     _cfgs: Dict[str, LMCacheEngineConfig] = {}
@@ -451,12 +733,12 @@ class LMCacheEngineBuilder:
 
     @classmethod
     def get_or_create(
-            cls,
-            instance_id: str,
-            config: LMCacheEngineConfig,
-            metadata: LMCacheEngineMetadata,
-            gpu_connector:
-        GPUConnectorInterface,  # gpu connectors is from outside
+        cls,
+        instance_id: str,
+        config: LMCacheEngineConfig,
+        metadata: LMCacheEngineMetadata,
+        gpu_connector: GPUConnectorInterface,
+        use_layerwise_engine: bool = False,
     ) -> LMCacheEngine:
         """
         Builds a new LMCacheEngine instance if it doesn't already exist for the
@@ -470,8 +752,16 @@ class LMCacheEngineBuilder:
             memory_allocator = cls._Create_memory_allocator(config, metadata)
             token_database = cls._Create_token_database(config, metadata)
             stat_logger = LMCacheStatsLogger(metadata, log_interval=10)
-            engine = LMCacheEngine(config, metadata, memory_allocator,
-                                   token_database, gpu_connector)
+
+            # HACK(Jiayi): Merge two types of engine into one in the future
+            engine: Union[LayerwiseLMCacheEngine, LMCacheEngine]
+            if use_layerwise_engine:
+                engine = LayerwiseLMCacheEngine(config, metadata,
+                                                memory_allocator,
+                                                token_database, gpu_connector)
+            else:
+                engine = LMCacheEngine(config, metadata, memory_allocator,
+                                       token_database, gpu_connector)
             cls._instances[instance_id] = engine
             cls._cfgs[instance_id] = config
             cls._metadatas[instance_id] = metadata
