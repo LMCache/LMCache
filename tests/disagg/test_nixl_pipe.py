@@ -145,7 +145,9 @@ if __name__ == "__main__":
             logger.info(f"Transfer throughput: {transfer_throughput:.2f} GB/s")
 
             # Check if the received objects are the same as the original objects
-            for received_obj, original_obj in zip(received_objs, objs):
+            for received_obj, original_obj in zip(received_objs,
+                                                  objs,
+                                                  strict=False):
                 assert torch.allclose(received_obj.tensor,
                                       original_obj.tensor), \
                         f"Data mismatch: received {received_obj.tensor.mean()}"\

@@ -125,8 +125,10 @@ class LMCHybridBackend(LMCBackendInterface):
                 remote_query_idxs.append(idx)
 
         remote_query_results = self.remote_store.batched_get(remote_queries)
-        for idx, key, result in zip(remote_query_idxs, remote_queries,
-                                    remote_query_results):
+        for idx, key, result in zip(remote_query_idxs,
+                                    remote_queries,
+                                    remote_query_results,
+                                    strict=False):
             if result is not None:
                 self.local_store.put(key, result)
                 ret[idx] = result

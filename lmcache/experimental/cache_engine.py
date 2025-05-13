@@ -110,7 +110,6 @@ class LMCacheEngine:
             self.distributed_server: DistributedServerInterface = \
                 NaiveDistributedServer(self.storage_manager,
                                        self.lookup_server,
-                                       self.memory_allocator,
                                        self.distributed_loop,
                                        config)
 
@@ -159,7 +158,10 @@ class LMCacheEngine:
         put_time = 0.
         tot_kv_size = 0
         # Offload the KV cache and write to remote
-        for key, memobj_meta, (start, end) in zip(keys, metadatas, steds):
+        for key, memobj_meta, (start, end) in zip(keys,
+                                                  metadatas,
+                                                  steds,
+                                                  strict=False):
             assert memobj_meta.dtype is not None
             kv_shape = memobj_meta.shape
             kv_dtype = memobj_meta.dtype
@@ -316,7 +318,7 @@ class LMCacheEngine:
             # For example, disk->gpu is faster than disk->cpu->gpu.
             # RDMA is another example.
             self.gpu_connector.to_gpu(memory_obj, start, end, **kwargs)
-            self.memory_allocator.ref_count_down(memory_obj)
+            memory_obj.ref_count_down()
 
             # NOTE (ApostaC): This is only for the current implementation:
             # When the object is retrieved back to vLLM, the storage backend
@@ -535,8 +537,10 @@ class LayerwiseLMCacheEngine(LMCacheEngine):
 
         if keys:
             # Transpose the keys and memory objects into layer major format
-            memory_objs = [list(row) for row in zip(*memory_objs)]
-            keys = [list(row) for row in zip(*keys)]
+            memory_objs = [
+                list(row) for row in zip(*memory_objs, strict=False)
+            ]
+            keys = [list(row) for row in zip(*keys, strict=False)]
 
             assert isinstance(self.gpu_connector,
                               VLLMPagedMemLayerwiseGPUConnector)
@@ -621,7 +625,7 @@ class LayerwiseLMCacheEngine(LMCacheEngine):
 
         if keys:
             # Transpose the keys into layer major format
-            keys_layer_major = [list(row) for row in zip(*keys)]
+            keys_layer_major = [list(row) for row in zip(*keys, strict=False)]
 
             get_generator = self.storage_manager.layerwise_batched_get(
                 keys_layer_major)

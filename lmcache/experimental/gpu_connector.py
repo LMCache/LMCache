@@ -558,7 +558,7 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
         slot_mapping: torch.Tensor = kwargs["slot_mapping"]
 
         slot_mapping_chunks = []
-        for start, end in zip(starts, ends):
+        for start, end in zip(starts, ends, strict=False):
             slot_mapping_chunks.append(slot_mapping[start:end])
 
         slot_mapping_full = torch.cat(slot_mapping_chunks, dim=0)
@@ -575,8 +575,10 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
 
             # memobj -> gpu_buffer -> kvcaches
             with torch.cuda.stream(self.load_stream):
-                for start, end, memory_obj in zip(starts, ends,
-                                                  memory_objs_layer):
+                for start, end, memory_obj in zip(starts,
+                                                  ends,
+                                                  memory_objs_layer,
+                                                  strict=False):
                     assert memory_obj.metadata.fmt == MemoryFormat.LAYER_KV_BLOB
                     tmp_gpu_buffer[start - offset:end - offset].copy_(
                         memory_obj.tensor, non_blocking=True)
@@ -637,7 +639,7 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
         slot_mapping: torch.Tensor = kwargs["slot_mapping"]
 
         slot_mapping_chunks = []
-        for start, end in zip(starts, ends):
+        for start, end in zip(starts, ends, strict=False):
             slot_mapping_chunks.append(slot_mapping[start:end])
 
         slot_mapping_full = torch.cat(slot_mapping_chunks, dim=0)
@@ -658,8 +660,10 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
                     slot_mapping_full,
                     True,
                 )
-                for start, end, memory_obj in zip(starts, ends,
-                                                  memory_objs_layer):
+                for start, end, memory_obj in zip(starts,
+                                                  ends,
+                                                  memory_objs_layer,
+                                                  strict=False):
                     assert memory_obj.tensor is not None
                     memory_obj.tensor.copy_(tmp_gpu_buffer[start - offset:end -
                                                            offset],

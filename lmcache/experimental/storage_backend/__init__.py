@@ -63,7 +63,7 @@ def CreateStorageBackends(
     storage_backends[backend_name] = local_cpu_backend
 
     if config.local_disk and config.max_local_disk_size > 0:
-        local_disk_backend = LocalDiskBackend(config, loop, memory_allocator,
+        local_disk_backend = LocalDiskBackend(config, loop, local_cpu_backend,
                                               dst_device, lmcache_worker,
                                               lookup_server)
         backend_name = str(local_disk_backend)
@@ -71,7 +71,7 @@ def CreateStorageBackends(
 
     if config.remote_url is not None:
         remote_backend = RemoteBackend(config, metadata, loop,
-                                       memory_allocator, dst_device,
+                                       local_cpu_backend, dst_device,
                                        lookup_server)
         backend_name = str(remote_backend)
         storage_backends[backend_name] = remote_backend

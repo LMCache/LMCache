@@ -220,17 +220,18 @@ class LMCacheEngine:
         start_token_idx = None
         start_chunk_idx = 0
         for chunk_hash, idx in zip(chunk_hashes,
-                                   range(0, num_tokens, self.chunk_size)):
+                                   range(0, num_tokens, self.chunk_size),
+                                   strict=False):
             if not self.engine_.contains(self._make_key(chunk_hash, fmt)):
                 start_token_idx = idx
                 break
             start_chunk_idx += 1
 
         if start_token_idx is None:
-            return zip([], [])
+            return zip([], [], strict=False)
         chunk_kvs = self._slice_kv_at(start_token_idx, kv_tensors, fmt)
         chunk_hashes = chunk_hashes[start_chunk_idx:]
-        return zip(chunk_hashes, chunk_kvs)
+        return zip(chunk_hashes, chunk_kvs, strict=False)
 
     def _make_chunks(
         self,
@@ -250,6 +251,7 @@ class LMCacheEngine:
             return zip(
                 self._prefix_hash(self._chunk_tokens(tokens)),
                 self._chunk_kv(kv_tensors, fmt),
+                strict=False,
             )
 
     @_lmcache_nvtx_annotate

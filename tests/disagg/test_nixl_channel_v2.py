@@ -209,14 +209,15 @@ def receive_and_verify_data(observer: TestObserver,
             # Verify the received data
             success = True
             for i, (received_tensor, original_tensor) in enumerate(
-                    zip(observer.received_tensors, expected_objs)):
+                    zip(observer.received_tensors, expected_objs,
+                        strict=False)):
                 if not torch.allclose(received_tensor, original_tensor.tensor):
                     logger.error(f"Data mismatch at index {i}")
                     success = False
                     break
 
             for i, (received_key, original_key) in enumerate(
-                    zip(observer.received_keys, expected_keys)):
+                    zip(observer.received_keys, expected_keys, strict=False)):
                 if received_key != original_key:
                     logger.error(f"Key mismatch at index {i}")
                     success = False
