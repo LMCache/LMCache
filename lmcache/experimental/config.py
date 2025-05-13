@@ -123,7 +123,7 @@ class LMCacheEngineConfig:
             blend_special_str, enable_p2p, lookup_url, distributed_url,
             error_handling, enable_controller, lmcache_instance_id,
             controller_url, lmcache_worker_port, enable_nixl, nixl_role,
-            nixl_peer_host, nixl_peer_port, nixl_buffer_size,
+            nixl_receiver_host, nixl_receiver_port, nixl_buffer_size,
             nixl_buffer_device, nixl_enable_gc,
             audit_actual_remote_url).validate()
 
@@ -503,8 +503,8 @@ class LMCacheEngineConfig:
             'lmcache_instance_id': self.lmcache_instance_id,
             'enable_nixl': self.enable_nixl,
             'nixl_role': self.nixl_role,
-            'nixl_peer_host': self.nixl_peer_host,
-            'nixl_peer_port': self.nixl_peer_port,
+            'nixl_receiver_host': self.nixl_receiver_host,
+            'nixl_receiver_port': self.nixl_receiver_port,
             'nixl_buffer_size': self.nixl_buffer_size,
             'nixl_buffer_device': self.nixl_buffer_device,
             'nixl_enable_gc': self.nixl_enable_gc
