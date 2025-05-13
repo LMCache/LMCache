@@ -16,18 +16,33 @@ cleanup() {
 trap cleanup SIGINT SIGTERM
 
 # --- Configuration arrays (must all be the same length) ---
-ports=(8000 8001)
+ports=(8000 8001 8002 8003 8004 8005 8006)
 configs=(
-  ../config/May_13_1/ours/04.yaml
-  ../config/May_13_1/ours/07.yaml
+  ../config/May_13_2/kivi/02.yaml
+  ../config/May_13_2/kivi/03.yaml
+  ../config/May_13_2/kivi/06.yaml
+  ../config/May_13_2/streaming/02.yaml
+  ../config/May_13_2/streaming/03.yaml
+  ../config/May_13_2/streaming/06.yaml
+  ../config/May_13_2/prefill/0.yaml
 )
 logs=(
-  results/May_13_1/ours/tokens/04.log
-  results/May_13_1/ours/tokens/07.log
+  results/May_13_2/kivi/tokens/02.log
+  results/May_13_2/kivi/tokens/03.log
+  results/May_13_2/kivi/tokens/06.log
+  results/May_13_2/streaming/tokens/02.log
+  results/May_13_2/streaming/tokens/03.log
+  results/May_13_2/streaming/tokens/06.log
+  results/May_13_2/prefill/tokens/0.log
 )
 outputs=(
-  results/May_13_1/ours/04.csv
-  results/May_13_1/ours/07.csv
+  results/May_13_2/kivi/02.csv
+  results/May_13_2/kivi/03.csv
+  results/May_13_2/kivi/06.csv
+  results/May_13_2/streaming/02.csv
+  results/May_13_2/streaming/03.csv
+  results/May_13_2/streaming/06.csv
+  results/May_13_2/prefill/0.csv
 )
 
 # Array to track running PGIDs
@@ -64,7 +79,7 @@ for i in "${!ports[@]}"; do
 
   # Run the test
   echo "Running test: python3 online_test.py --output $out --port $port"
-  python3 online_test.py --output "$out" --port "$port" >>"$logf" 2>&1
+  python3 triviaqa.py --output "$out" --port "$port" >>"$logf" 2>&1
 
   # Tear down this engine session
   echo "Test finished; tearing down engine session PGID $engine_pid"

@@ -9,66 +9,43 @@ import numpy as np
 def main():
     parser = argparse.ArgumentParser(
         description="""
-        将输入 CSV 中的所有记录循环两遍输出，第一遍 occurrence_number=1（原始顺序），
-        第二遍 occurrence_number=2（随机顺序）。
-        数据集长度变为原来的两倍。
-        接口参数与原 Polya Urn 脚本保持一致，仅替换采样逻辑。
+        将输入 CSV 中的所有记录循环两遍输出，
+        第一遍保持原始顺序，occurrence_number=1；
+        第二遍按随机抽样（可重复），使用固定随机种子42，occurrence_number根据实际出现次数动态计算。
+        最终输出长度为输入长度的两倍。
         """
     )
     parser.add_argument(
         "-i", "--input-csv", required=True,
-        help="输入 CSV 文件路径 (包含 title 和若干行数据)。"
+        help="输入 CSV 文件路径（包含标题和数据行）。"
     )
     parser.add_argument(
         "-o", "--output-csv", required=True,
         help="输出 CSV 文件路径。"
     )
-    parser.add_argument(
-        "-n", "--sequence-length", type=int, required=True,
-        help="（可选）序列长度参数，将被忽略，实际长度为输入行数的两倍。"
-    )
-    parser.add_argument(
-        "--alpha", type=float, default=1.0,
-        help="（可选）浓度参数 α，将被忽略，仅保留原接口一致性。"
-    )
-    parser.add_argument(
-        "-s", "--seed", type=int, default=42,
-        help="随机数种子（可选），用于第二遍顺序的可复现性。"
-    )
     args = parser.parse_args()
 
-    # 可复现设置（仅影响第二遍打乱顺序）
-    if args.seed is not None:
-        np.random.seed(args.seed)
-
-    # 读取原始数据
+    # 读取原始数据并记录原始索引
     df = pd.read_csv(args.input_csv)
-    n_items = len(df)
+    df['index_in_dataset'] = df.index
+    n = len(df)
 
-    # --- 第一遍：原始顺序，occurrence_number = 1 ---
-    df_first = df.copy().reset_index(drop=True)
-    df_first["index_in_dataset"] = df_first.index
-    df_first["occurrence_number"] = 1
+    # 第一遍：按原始顺序
+    first = df.copy()
 
-    # --- 第二遍：随机顺序，occurrence_number = 2 ---
-    df_second = df.copy().reset_index(drop=True)
-    df_second["index_in_dataset"] = df_second.index
-    df_second["occurrence_number"] = 2
-    # 随机打乱行顺序
-    df_second = df_second.sample(frac=1, random_state=args.seed).reset_index(drop=True)
+    # 第二遍：随机抽样（可重复），保留原索引列
+    second = df.sample(n=n, replace=True, random_state=42).reset_index(drop=True)
 
-    # 合并两遍数据
-    result_df = pd.concat([df_first, df_second], ignore_index=True)
+    # 合并两遍
+    combined = pd.concat([first, second], ignore_index=True)
 
-    # 输出到新的 CSV
-    result_df.to_csv(args.output_csv, index=False)
-    total = len(result_df)
-    print(f"Doubling complete: wrote {total} rows to {args.output_csv}")
+    # 动态计算 occurrence_number：统计每条记录的出现次数
+    combined['occurrence_number'] = combined.groupby('index_in_dataset').cumcount() + 1
 
-    # 统计未被选中的请求数量（固定为 0）
-    never_selected = 0
-    print(f"{never_selected} of the {n_items} requests were never selected in the simulation.")
+    # 输出
+    combined.to_csv(args.output_csv, index=False)
+    print(f"Doubling complete: wrote {len(combined)} rows to {args.output_csv}")
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
