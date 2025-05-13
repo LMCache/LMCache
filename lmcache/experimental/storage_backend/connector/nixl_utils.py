@@ -24,6 +24,7 @@ def get_correct_nixl_device(nixl_device: str, worker_id: int) -> str:
     else:
         raise ValueError(f"Invalid Nixl device: {nixl_device}")
 
+
 class NixlRole(enum.Enum):
     """
     Enum to represent the role of the Nixl connection.
@@ -67,8 +68,8 @@ class NixlConfig:
         assert config.nixl_buffer_device is not None
         assert config.nixl_enable_gc is not None
 
-        corrected_device = get_correct_nixl_device(
-                config.nixl_buffer_device, metadata.worker_id)
+        corrected_device = get_correct_nixl_device(config.nixl_buffer_device,
+                                                   metadata.worker_id)
 
         return NixlConfig(role=nixl_role,
                           receiver_host=config.nixl_receiver_host,
