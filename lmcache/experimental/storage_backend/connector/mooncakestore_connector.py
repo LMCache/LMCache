@@ -147,7 +147,7 @@ class MooncakestoreConnector(RemoteConnector):
                                        count=num_elements).reshape(
                                            metadata.shape)
 
-        def callback(memory_obj): 
+        def callback(memory_obj):
             ...
 
         memory_obj = CopyLessMemoryObj(raw_data=temp_tensor,
