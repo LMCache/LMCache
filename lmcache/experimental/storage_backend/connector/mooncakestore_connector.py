@@ -22,7 +22,7 @@ from typing import List, Optional, no_type_check
 
 import torch
 
-from lmcache.experimental.memory_management import MemoryObj, CopyLessMemoryObj
+from lmcache.experimental.memory_management import CopyLessMemoryObj, MemoryObj
 from lmcache.experimental.protocol import RemoteMetadata
 from lmcache.experimental.storage_backend.connector.base_connector import \
     RemoteConnector
