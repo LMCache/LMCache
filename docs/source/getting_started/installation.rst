@@ -12,17 +12,26 @@ Prerequisites
 Setup using Python
 ------------------
 
-Install LMCache from PyPI
-~~~~~~~~~~~~~~~~~~~~~~~~~
+Install Stable LMCache from PyPI
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The simplest way to install LMCache is through PyPI:
+The simplest way to install the latest stable release of LMCache is through PyPI:
 
 .. code-block:: bash
 
     pip install lmcache
 
-Install LMCache from Source
-~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Install Latest LMCache from TestPyPI
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+These wheels are continually built from the latest LMCache source code (not officially stable release).
+
+.. code-block:: bash
+
+    pip install --index-url https://test.pypi.org/simple --extra-index-url https://pypi.org/simple lmcache
+
+Install Latest LMCache from Source
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 To install from source, clone the repository and install in editable mode:
 
@@ -33,7 +42,7 @@ To install from source, clone the repository and install in editable mode:
     pip install -e .
 
 Install LMCache with uv
-~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~
 
 We recommend developers to use `uv` for a better package management:
 
@@ -41,7 +50,7 @@ We recommend developers to use `uv` for a better package management:
 
     git clone https://github.com/LMCache/LMCache.git
     cd LMCache
-    
+
     uv venv --python 3.12
     source .venv/bin/activate
     uv pip install -e .
@@ -80,6 +89,6 @@ We provide pre-built Docker images that include vLLM integration:
 .. code-block:: bash
 
     docker pull lmcache/vllm-openai:2025-04-18
-    
+
 .. note::
     Currently, we build and release Docker images manually. An automated Docker build/release GitHub workflow will be set up soon. Contributions to this effort are welcomed!
