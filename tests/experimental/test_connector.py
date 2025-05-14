@@ -84,6 +84,7 @@ def test_fs_connector(lmserver_experimental_process, autorelease_experimental):
         memory_obj = memory_allocator.allocate([2, 32, 1000, 1024],
                                                torch.bfloat16)
         memory_obj.ref_count_up()
+        # Fill with deterministic test data
         torch.manual_seed(42)
         test_tensor = torch.randint(0,
                                     100,
@@ -113,7 +114,7 @@ def test_fs_connector(lmserver_experimental_process, autorelease_experimental):
 
         # Test 6: Verify file existence and format
         files = list(Path(temp_dir).glob("*.data"))
-        assert len(
-            files) == 1 and files[0].name == f"{random_key.to_string()}.data"
+        assert len(files) == 1
+        assert files[0].name == f"{random_key.to_string()}.data"
 
         close_asyncio_loop(async_loop, async_thread)
