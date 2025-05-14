@@ -22,7 +22,7 @@ from typing import List, Optional, no_type_check
 
 import torch
 
-from lmcache.experimental.memory_management import MemoryObj
+from lmcache.experimental.memory_management import MemoryObj, CopyLessMemoryObj
 from lmcache.experimental.protocol import RemoteMetadata
 from lmcache.experimental.storage_backend.connector.base_connector import \
     RemoteConnector
@@ -138,31 +138,23 @@ class MooncakestoreConnector(RemoteConnector):
 
         metadata = RemoteMetadata.deserialize(metadata_bytes)
 
-        memory_obj = self.local_cpu_backend.allocate(
-            metadata.shape,
-            metadata.dtype,
-            metadata.fmt,
-        )
         assert len(retrieved_view) == metadata.length + METADATA_BYTES_LEN
 
-        if memory_obj is None:
-            logger.warning("Failed to allocate memory during remote receive")
-            return None
+        num_elements = reduce(operator.mul, metadata.shape)
+        temp_tensor = torch.frombuffer(buffer,
+                                       dtype=metadata.dtype,
+                                       offset=METADATA_BYTES_LEN,
+                                       count=num_elements).reshape(
+                                       metadata.shape)
 
-        if memory_obj.tensor is not None:
-            assert metadata.dtype is not None
-            num_elements = reduce(operator.mul, metadata.shape)
-            temp_tensor = torch.frombuffer(buffer,
-                                           dtype=metadata.dtype,
-                                           offset=METADATA_BYTES_LEN,
-                                           count=num_elements).reshape(
-                                               metadata.shape)
-
-            memory_obj.tensor.copy_(temp_tensor)
+        def callback(memory_obj): ...
+        memory_obj = CopyLessMemoryObj(raw_data=temp_tensor,
+                                       metadata=metadata,
+                                       callback=callback)
+        if memory_obj.is_valid():
             return memory_obj
         else:
             return None
-
     async def put(self, key: CacheEngineKey, memory_obj: MemoryObj):
         # Please use a function like `memory_obj.to_meta()`.
         kv_bytes = memory_obj.byte_array
