@@ -861,7 +861,7 @@ class GPUMemoryAllocator(MemoryAllocatorInterface):
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
     ) -> Optional[MemoryObj]:
         with self.device_mem_lock:
-            return self.allocator.allocate(shape, dtype, fmt)
+            return self.allocator.allocate(shape, dtype, fmt, self)
 
     def free(self, memory_obj: MemoryObj):
         with self.device_mem_lock:

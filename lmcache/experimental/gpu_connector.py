@@ -671,7 +671,6 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
 
         # free the buffer memory
         tmp_gpu_buffer_obj.ref_count_down()
-
         yield
 
     def get_shape(self, num_tokens: int) -> torch.Size:
