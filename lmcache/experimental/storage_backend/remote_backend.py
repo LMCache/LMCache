@@ -118,8 +118,9 @@ class RemoteBackend(StorageBackendInterface):
 
         return wrapper
 
+    # TODO(Jiayi): handle `pin` semantics
     @_init_connection_wrapper
-    def contains(self, key: CacheEngineKey) -> bool:
+    def contains(self, key: CacheEngineKey, pin: bool = False) -> bool:
         if self.connection is None:
             logger.warning("Connection is None in contains, returning False")
             return False
@@ -182,7 +183,7 @@ class RemoteBackend(StorageBackendInterface):
         self,
         key: CacheEngineKey,
     ) -> Optional[Future]:
-        pass
+        raise NotImplementedError
 
     @_lmcache_nvtx_annotate
     def get_blocking(
@@ -222,6 +223,12 @@ class RemoteBackend(StorageBackendInterface):
                      f"deserialization takes {(t3 - t2) * 1000:.6f} msec")
         return decompressed_memory_obj
 
+    def get_non_blocking(
+        self,
+        key: CacheEngineKey,
+    ) -> Optional[Future]:
+        raise NotImplementedError
+
     async def connection_put_wrapper(self, key: CacheEngineKey,
                                      memory_obj: MemoryObj):
         obj_size = memory_obj.get_size()
@@ -246,6 +253,12 @@ class RemoteBackend(StorageBackendInterface):
             self.stats_monitor.update_interval_remote_read_metrics(obj_size)
             logger.debug(f"Bytes loaded: {obj_size / 1e6:.4f} MBytes, ")
         return memory_obj
+
+    def pin(self, key: CacheEngineKey) -> bool:
+        raise NotImplementedError
+
+    def unpin(self, key: CacheEngineKey) -> bool:
+        raise NotImplementedError
 
     def close(self):
         try:

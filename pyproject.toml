@@ -5,7 +5,7 @@ requires = [
     "packaging>=24.2",
     "setuptools>=77.0.3,<80.0.0",
     "setuptools_scm>=8",
-    "torch==2.6.0",
+    "torch==2.7.0",
     "wheel",
 ]
 build-backend = "setuptools.build_meta"
@@ -29,7 +29,7 @@ classifiers = [
     "Programming Language :: Python :: Implementation :: CPython",
 ]
 requires-python = ">=3.10,<3.13"
-dynamic = ["version"]
+dynamic = ["dependencies", "version"]
 
 [project.scripts]
 lmcache_server="lmcache.server.__main__:main"
@@ -45,6 +45,9 @@ issues = "https://github.com/LMCache/LMCache"
 version_file = "lmcache/_version.py"
 # do not include +gREV local version, required for Test PyPI upload
 local_scheme = "no-local-version"
+
+[tool.setuptools.dynamic]
+dependencies = { file = ["requirements.txt"] }
 
 [tool.setuptools.packages.find]
 where = [""]

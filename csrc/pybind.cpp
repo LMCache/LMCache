@@ -25,6 +25,7 @@ namespace py = pybind11;
 
 PYBIND11_MODULE(c_ops, m) {
     m.def("multi_layer_kv_transfer", &multi_layer_kv_transfer);
+    m.def("single_layer_kv_transfer", &single_layer_kv_transfer);
     m.def("load_and_reshape_flash", &load_and_reshape_flash);
     m.def("reshape_and_cache_back_flash", &reshape_and_cache_back_flash);
     m.def("encode_fast_new", &encode_cuda_new);

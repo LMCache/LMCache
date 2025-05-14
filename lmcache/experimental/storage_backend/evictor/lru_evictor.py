@@ -54,7 +54,10 @@ class LRUEvictor(BaseEvictor):
         while cache_size + self.current_cache_size > \
             self.MAX_CACHE_SIZE:
             evict_key = next(iter_cache_dict)
-            evict_cache_size = cache_dict[evict_key].size
+            evict_metadata = cache_dict[evict_key]
+            if evict_metadata.is_pinned:
+                continue
+            evict_cache_size = evict_metadata.size
             self.current_cache_size -= evict_cache_size
             evict_keys.append(evict_key)
 

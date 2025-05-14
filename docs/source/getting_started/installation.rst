@@ -14,7 +14,10 @@ Setup using Python
 
 Install Stable LMCache from PyPI
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Install Stable LMCache from PyPI
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
+The simplest way to install the latest stable release of LMCache is through PyPI:
 The simplest way to install the latest stable release of LMCache is through PyPI:
 
 .. code-block:: bash
@@ -34,7 +37,7 @@ See the latest pre-release of LMCache: `latest LMCache pre-releases <https://tes
 
 This will install all dependencies from the real PyPI and only LMCache itself from TestPyPI.
 
-Confirm that you have the pre-release:
+Confirm that you have the latest pre-release:
 
 .. code-block:: bash
 
@@ -42,7 +45,7 @@ Confirm that you have the pre-release:
     >>> import lmcache
     >>> from importlib.metadata import version
     >>> print(version("lmcache"))
-    0.2.2.dev57
+    0.2.2.dev57 # should be the latest pre-release version you installed
 
 Install Latest LMCache from Source
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -56,7 +59,7 @@ To install from source, clone the repository and install in editable mode:
     pip install -e .
 
 Install LMCache with uv
-~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~
 
 We recommend developers to use `uv` for a better package management:
 

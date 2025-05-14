@@ -25,6 +25,17 @@ from lmcache.logging import init_logger
 logger = init_logger(__name__)
 
 
+def _parse_local_disk(local_disk) -> Optional[str]:
+    match local_disk:
+        case None:
+            local_disk_path = None
+        case path if re.match(r"file://(.*)/", path):
+            local_disk_path = path[7:]
+        case _:
+            local_disk_path = local_disk
+    return local_disk_path
+
+
 @dataclass
 class LMCacheEngineConfig:
     chunk_size: int
@@ -238,12 +249,7 @@ class LMCacheEngineConfig:
 
         audit_actual_remote_url = config.get("audit_actual_remote_url", None)
 
-        match local_disk:
-            case None:
-                local_disk_path = None
-            case path if re.match(r"file://(.*)/",
-                                  path):  # local disk directory
-                local_disk_path = path[7:]
+        local_disk_path = _parse_local_disk(local_disk)
 
         match remote_url:
             case None:
@@ -327,8 +333,8 @@ class LMCacheEngineConfig:
         config.max_local_cpu_size = to_float(
             parse_env(get_env_name("max_local_cpu_size"),
                       config.max_local_cpu_size))
-        config.local_disk = parse_env(get_env_name("local_disk"),
-                                      config.local_disk)
+        config.local_disk = _parse_local_disk(
+            parse_env(get_env_name("local_disk"), config.local_disk))
         config.max_local_disk_size = to_float(
             parse_env(get_env_name("max_local_disk_size"),
                       config.max_local_disk_size))
