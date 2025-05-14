@@ -81,8 +81,8 @@ def test_fs_connector(lmserver_experimental_process, autorelease_experimental):
         assert not future.result()
 
         # Test 2: Create and store test data
-        memory_obj = memory_allocator.allocate([2, 32, 1000, 1024],
-                                               torch.bfloat16)
+        dtype = torch.bfloat16
+        memory_obj = memory_allocator.allocate([2, 32, 1000, 1024], dtype)
         memory_obj.ref_count_up()
         # Fill with deterministic test data
         torch.manual_seed(42)
@@ -90,8 +90,7 @@ def test_fs_connector(lmserver_experimental_process, autorelease_experimental):
                                     100,
                                     memory_obj.raw_data.shape,
                                     dtype=torch.int64)
-        memory_obj.raw_data.copy_(
-            test_tensor.to(torch.float32).to(torch.bfloat16))
+        memory_obj.raw_data.copy_(test_tensor.to(torch.float32).to(dtype))
 
         future = asyncio.run_coroutine_threadsafe(
             connector.put(random_key, memory_obj), async_loop)
