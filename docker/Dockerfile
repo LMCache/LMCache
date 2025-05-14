@@ -85,18 +85,4 @@ RUN --mount=type=bind,from=build,src=/workspace/LMCache/dist_lmcache,target=/vll
 --mount=type=cache,target=/root/.cache/pip \
 pip install dist_lmcache/*.whl --verbose
 
-# Copy lmc_connector patch into vllm
-COPY patch/factory.py \
-    /usr/local/lib/python3.12/dist-packages/vllm/distributed/kv_transfer/kv_connector/
-COPY patch/lmcache_connector.py \
-    /usr/local/lib/python3.12/dist-packages/vllm/distributed/kv_transfer/kv_connector/
-
-# Use diff if file is too large
-COPY patch/parallel_state.patch \
-    /usr/local/lib/python3.12/dist-packages/vllm/distributed/
-
-RUN patch /usr/local/lib/python3.12/dist-packages/vllm/distributed/parallel_state.py \
-    /usr/local/lib/python3.12/dist-packages/vllm/distributed/parallel_state.patch
-
-
 ENTRYPOINT ["vllm", "serve"]
