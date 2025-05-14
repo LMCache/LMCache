@@ -14,10 +14,7 @@ Setup using Python
 
 Install Stable LMCache from PyPI
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Install Stable LMCache from PyPI
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The simplest way to install the latest stable release of LMCache is through PyPI:
 The simplest way to install the latest stable release of LMCache is through PyPI:
 
 .. code-block:: bash
