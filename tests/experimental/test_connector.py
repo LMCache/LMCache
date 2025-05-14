@@ -65,64 +65,46 @@ def test_lm_connector(url, autorelease_experimental,
 @pytest.mark.parametrize("lmserver_experimental_process", ["cpu"],
                          indirect=True)
 def test_fs_connector(lmserver_experimental_process, autorelease_experimental):
-    """Test the filesystem connector implementation for storage backend.
-    Tests basic operations: exists, put, and get."""
+    """Test filesystem connector: exists, put, get, list, and file persistence."""
     
     with tempfile.TemporaryDirectory() as temp_dir:
-        # Configure filesystem URL with temporary directory
+        # Setup
         url = f"fs://host:0/{temp_dir}/"
-
-        # Create mock config for testing
-        mock_config = LMCacheEngineConfig.from_defaults(
-            chunk_size=256,
-            local_device="cpu",
-            max_local_cache_size=10,  # max_local_cpu_size in bytes
-            remote_url=url,
-            remote_serde="naive",
-            pipelined_backend=False
-        )
-        
-        # Initialize async event loop and memory management
         async_loop, async_thread = init_asyncio_loop()
-        memory_allocator = PinMemoryAllocator(1024 * 1024 * 1024)  # 1GB allocation
-        connector = autorelease_experimental(
-            CreateConnector(url, async_loop, memory_allocator))
-        
-        # Test 1: Verify key doesn't exist initially
+        memory_allocator = PinMemoryAllocator(1024 * 1024 * 1024)
+        connector = autorelease_experimental(CreateConnector(url, async_loop, memory_allocator))
         random_key = dumb_cache_engine_key()
-        future = asyncio.run_coroutine_threadsafe(connector.exists(random_key),
-                                              async_loop)
-        assert not future.result(), "Key should not exist before putting data"
+
+        # Test 1: Verify key doesn't exist initially
+        future = asyncio.run_coroutine_threadsafe(connector.exists(random_key), async_loop)
+        assert not future.result()
 
         # Test 2: Create and store test data
-        num_tokens = 1000
-        mem_obj_shape = [2, 32, num_tokens, 1024]  # [batch, heads, seq_len, hidden_dim]
-        dtype = torch.bfloat16
-        memory_obj = memory_allocator.allocate(mem_obj_shape, dtype)
+        memory_obj = memory_allocator.allocate([2, 32, 1000, 1024], torch.bfloat16)
         memory_obj.ref_count_up()
+        torch.manual_seed(42)
+        test_tensor = torch.randint(0, 100, memory_obj.raw_data.shape, dtype=torch.int64)
+        memory_obj.raw_data.copy_(test_tensor.to(torch.float32).to(torch.bfloat16))
 
-        # Put data into storage
-        future = asyncio.run_coroutine_threadsafe(
-            connector.put(random_key, memory_obj), async_loop)
+        future = asyncio.run_coroutine_threadsafe(connector.put(random_key, memory_obj), async_loop)
         future.result()
 
         # Test 3: Verify key exists after putting data
-        future = asyncio.run_coroutine_threadsafe(connector.exists(random_key),
-                                                async_loop)
-        assert future.result(), "Key should exist after putting data"
-        assert memory_obj.get_ref_count() == 1, "Reference count should be 1"
+        future = asyncio.run_coroutine_threadsafe(connector.exists(random_key), async_loop)
+        assert future.result()
+        assert memory_obj.get_ref_count() == 1
 
         # Test 4: Retrieve and verify data
-        future = asyncio.run_coroutine_threadsafe(connector.get(random_key),
-                                                async_loop)
-        retrieved_memory_obj = future.result()
+        future = asyncio.run_coroutine_threadsafe(connector.get(random_key), async_loop)
+        check_mem_obj_equal([future.result()], [memory_obj])
 
-        # Verify retrieved data matches original
-        check_mem_obj_equal(
-            [retrieved_memory_obj],
-            [memory_obj],
-        )
+        # Test 5: List the keys
+        future = asyncio.run_coroutine_threadsafe(connector.list(), async_loop)
+        assert future.result() == [random_key.to_string()]
 
-        # Clean up resources
+        # Test 6: Verify file existence and format
+        files = list(Path(temp_dir).glob("*.data"))
+        assert len(files) == 1 and files[0].name == f"{random_key.to_string()}.data"
+
         close_asyncio_loop(async_loop, async_thread)
 
