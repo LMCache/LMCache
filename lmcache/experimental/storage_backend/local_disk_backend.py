@@ -87,7 +87,8 @@ class LocalDiskBackend(StorageBackendInterface):
         self,
         key: CacheEngineKey,
     ) -> str:
-        return self.path + key.to_string().replace("/", "-") + ".pt"
+        return os.path.join(self.path,
+                            key.to_string().replace("/", "-") + ".pt")
 
     def contains(self, key: CacheEngineKey, pin: bool = False) -> bool:
         with self.disk_lock:
