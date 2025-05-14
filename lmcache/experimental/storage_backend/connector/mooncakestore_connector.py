@@ -145,9 +145,11 @@ class MooncakestoreConnector(RemoteConnector):
                                        dtype=metadata.dtype,
                                        offset=METADATA_BYTES_LEN,
                                        count=num_elements).reshape(
-                                       metadata.shape)
+                                           metadata.shape)
 
-        def callback(memory_obj): ...
+        def callback(memory_obj): 
+            ...
+
         memory_obj = CopyLessMemoryObj(raw_data=temp_tensor,
                                        metadata=metadata,
                                        callback=callback)
@@ -155,6 +157,7 @@ class MooncakestoreConnector(RemoteConnector):
             return memory_obj
         else:
             return None
+
     async def put(self, key: CacheEngineKey, memory_obj: MemoryObj):
         # Please use a function like `memory_obj.to_meta()`.
         kv_bytes = memory_obj.byte_array
