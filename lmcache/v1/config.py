@@ -142,6 +142,16 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "default": None,
         "env_converter": int,
     },
+    "lmcache_worker_heartbeat_delay_time": {
+        "type": int,
+        "default": 10,
+        "env_converter": int,
+    },
+    "lmcache_worker_heartbeat_time": {
+        "type": Optional[int],
+        "default": None,
+        "env_converter": int,
+    },
     # Nixl configurations
     "enable_nixl": {
         "type": bool,

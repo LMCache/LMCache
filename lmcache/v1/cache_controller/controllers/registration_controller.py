@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from dataclasses import dataclass
 from typing import Optional
+import time
 
 # Third Party
 import zmq
@@ -12,6 +14,7 @@ from lmcache.v1.cache_controller.message import (
     DeRegisterMsg,
     HealthMsg,
     HealthRetMsg,
+    HeartbeatMsg,
     QueryInstMsg,
     QueryInstRetMsg,
     RegisterMsg,
@@ -24,6 +27,17 @@ from lmcache.v1.rpc_utils import (
 
 logger = init_logger(__name__)
 
+
+@dataclass
+class WorkerInfo:
+    # TODO(chunxiaozheng): add more worker info in heartbeat
+    instance_id: str
+    worker_id: int
+    ip: str
+    port: int
+    distributed_url: str
+    registration_time: float
+    last_heartbeat_time: float
 
 class RegistrationController:
     def __init__(self):
@@ -40,6 +54,9 @@ class RegistrationController:
 
         # Mapping from `ip` -> `instance_id`
         self.instance_mapping: dict[str, str] = {}
+
+        # Mapping from `(instance_id, worker_id)` -> `WorkerInfo`
+        self.worker_info_mapping: dict[tuple[str, int], WorkerInfo] = {}
 
     def post_init(self, kv_controller, cluster_executor):
         """
@@ -109,6 +126,9 @@ class RegistrationController:
         )
 
         self.socket_mapping[(instance_id, worker_id)] = socket
+        self.worker_info_mapping[(instance_id, worker_id)] = WorkerInfo(
+            instance_id, worker_id, ip, port, distributed_url, time.time(), time.time()
+        )
         if instance_id not in self.worker_mapping:
             self.worker_mapping[instance_id] = []
 
@@ -145,7 +165,12 @@ class RegistrationController:
             self.kv_controller.deregister(instance_id, worker_id)
             logger.info(f"Deregistered instance-worker {(instance_id, worker_id)}")
         else:
-            logger.warning(f"Instance-worker {(instance_id, worker_id)}not registered")
+            logger.warning(f"Instance-worker {(instance_id, worker_id)} not registered")
+
+        if (instance_id, worker_id) in self.worker_info_mapping:
+            self.worker_info_mapping.pop((instance_id, worker_id))
+        else:
+            logger.warning(f"Instance-worker {(instance_id, worker_id)} not registered")
 
     async def health(self, msg: HealthMsg) -> HealthRetMsg:
         """
@@ -155,3 +180,20 @@ class RegistrationController:
             "health",
             msg,
         )
+
+    async def heartbeat(self, msg: HeartbeatMsg) -> None:
+        """
+        Heartbeat from lmcache worker.
+        """
+        instance_id = msg.instance_id
+        worker_id = msg.worker_id
+        worker_key = (instance_id, worker_id)
+        if worker_key not in self.worker_info_mapping:
+            logger.warning(
+                f"{worker_key} has not been registered, re-register the worker."
+            )
+            # re-register the worker
+            await self.register(msg)
+        else:
+            # update worker info
+            self.worker_info_mapping[worker_key].last_heartbeat_time = time.time()

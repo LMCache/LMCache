@@ -86,6 +86,18 @@ class KVEvictMsg(WorkerMsg):
         return f"kv_evict {self.key} from {self.instance_id}"
 
 
+class HeartbeatMsg(RegisterMsg):
+    """Message for heartbeat, include register info for re-register"""
+
+    # TODO: add more heartbeat info
+
+    def describe(self) -> str:
+        return (
+            f"Heartbeat from instance {self.instance_id}, "
+            f"worker {self.worker_id}"
+        )
+
+
 """Control Message from Controller to LMCache"""
 
 
@@ -525,4 +537,5 @@ Msg = Union[
     ErrorMsg,
     QueryInstMsg,
     QueryInstRetMsg,
+    HeartbeatMsg,
 ]

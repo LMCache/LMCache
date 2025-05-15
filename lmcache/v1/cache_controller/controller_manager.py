@@ -24,6 +24,7 @@ from lmcache.v1.cache_controller.message import (  # isort: skip
     DecompressMsg,
     DeRegisterMsg,
     HealthMsg,
+    HeartbeatMsg,
     KVAdmitMsg,
     KVEvictMsg,
     LookupMsg,
@@ -99,6 +100,8 @@ class LMCacheControllerManager:
             await self.kv_controller.admit(msg)
         elif isinstance(msg, KVEvictMsg):
             await self.kv_controller.evict(msg)
+        elif isinstance(msg, HeartbeatMsg):
+            await self.reg_controller.heartbeat(msg)
         else:
             logger.error(f"Unknown worker message type: {msg}")
 
