@@ -229,8 +229,9 @@ class ReqMeta:
         # 1. has already been saved before (num_saved_tokens > 0)
         # 2. number of unsaved tokens is not reached the chunk boundary
         skip_leading_tokens = tracker.num_saved_tokens
-        chunk_boundary = cdiv(tracker.num_saved_tokens, lmcache_chunk_size) * \
-                lmcache_chunk_size
+        chunk_boundary = (
+            cdiv(tracker.num_saved_tokens + 1, lmcache_chunk_size) *
+            lmcache_chunk_size)
         skip_save = skip_save or (tracker.num_saved_tokens > 0 and \
                 input_token_len < chunk_boundary)
 
