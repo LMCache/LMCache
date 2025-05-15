@@ -30,6 +30,7 @@ from .audit_connector import AuditConnector
 from .blackhole_connector import BlackholeConnector
 from .fs_connector import FSConnector
 from .infinistore_connector import InfinistoreConnector
+from .instrumented_connector import InstrumentedRemoteConnector
 from .mooncakestore_connector import MooncakestoreConnector
 
 logger = init_logger(__name__)
@@ -206,4 +207,4 @@ def CreateConnector(
                              f"(url is: {url})")
 
     logger.info(f"Created connector {connector} for {connector_type}")
-    return connector
+    return InstrumentedRemoteConnector(connector)

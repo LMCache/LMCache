@@ -129,8 +129,6 @@ class FSConnector(RemoteConnector):
             if temp_path.exists():
                 temp_path.unlink()  # Remove corrupted file
             raise
-        finally:
-            memory_obj.ref_count_down()
 
     @no_type_check
     async def list(self) -> List[str]:

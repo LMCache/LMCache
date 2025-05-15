@@ -35,7 +35,7 @@ class BlackholeConnector(RemoteConnector):
         return None
 
     async def put(self, key: CacheEngineKey, memory_obj: MemoryObj):
-        memory_obj.ref_count_down()
+        pass
 
     @no_type_check
     async def list(self) -> List[str]:

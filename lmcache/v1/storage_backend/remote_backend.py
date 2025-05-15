@@ -170,7 +170,7 @@ class RemoteBackend(StorageBackendInterface):
         # NOTE: No need to do error handling here
         # since the `future` is never waited
         future = asyncio.run_coroutine_threadsafe(
-            self.connection_put_wrapper(key, compressed_memory_obj), self.loop)
+            self.connection.put(key, compressed_memory_obj), self.loop)
         lambda_callback = lambda f: \
                 self.put_callback(f, key)
         future.add_done_callback(lambda_callback)
@@ -196,8 +196,8 @@ class RemoteBackend(StorageBackendInterface):
                 "Connection is None in get_blocking, returning None")
             return None
         t1 = time.perf_counter()
-        future = asyncio.run_coroutine_threadsafe(
-            self.connection_get_wrapper(key), self.loop)
+        future = asyncio.run_coroutine_threadsafe(self.connection.get(key),
+                                                  self.loop)
 
         try:
             memory_obj = future.result()
@@ -225,31 +225,6 @@ class RemoteBackend(StorageBackendInterface):
         key: CacheEngineKey,
     ) -> Optional[Future]:
         raise NotImplementedError
-
-    async def connection_put_wrapper(self, key: CacheEngineKey,
-                                     memory_obj: MemoryObj):
-        obj_size = memory_obj.get_size()
-        begin = time.perf_counter()
-        assert self.connection is not None
-        await self.connection.put(key, memory_obj)
-        end = time.perf_counter()
-        self.stats_monitor.update_interval_remote_time_to_put(
-            (end - begin) * 1000)
-        self.stats_monitor.update_interval_remote_write_metrics(obj_size)
-        logger.debug(f"Bytes offloaded: {obj_size / 1e6:.4f} MBytes, ")
-
-    async def connection_get_wrapper(self, key: CacheEngineKey):
-        begin = time.perf_counter()
-        assert self.connection is not None
-        memory_obj = await self.connection.get(key)
-        end = time.perf_counter()
-        self.stats_monitor.update_interval_remote_time_to_get(
-            (end - begin) * 1000)
-        if memory_obj is not None:
-            obj_size = memory_obj.get_size()
-            self.stats_monitor.update_interval_remote_read_metrics(obj_size)
-            logger.debug(f"Bytes loaded: {obj_size / 1e6:.4f} MBytes, ")
-        return memory_obj
 
     def pin(self, key: CacheEngineKey) -> bool:
         raise NotImplementedError

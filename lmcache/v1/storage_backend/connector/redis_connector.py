@@ -110,8 +110,6 @@ class RedisConnector(RemoteConnector):
         self.connection.set(key_str + "metadata", metadata_bytes)
         self.connection.set(key_str + "kv_bytes", kv_bytes)
 
-        memory_obj.ref_count_down()
-
     # TODO
     @no_type_check
     async def list(self) -> List[str]:

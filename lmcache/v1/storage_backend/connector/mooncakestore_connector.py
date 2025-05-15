@@ -180,8 +180,6 @@ class MooncakestoreConnector(RemoteConnector):
                          f"meta type: {type(metadata_bytes)},"
                          f"data: {type(kv_bytes)}: {e}")
 
-        memory_obj.ref_count_down()
-
     @no_type_check
     async def list(self) -> List[str]:
         pass

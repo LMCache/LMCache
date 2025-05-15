@@ -116,8 +116,6 @@ class LMCServerConnector(RemoteConnector):
 
             await self.loop.sock_sendall(self.client_socket, kv_bytes)
 
-        memory_obj.ref_count_down()
-
     # TODO(Jiayi): This should be an async function
     @_lmcache_nvtx_annotate
     async def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
