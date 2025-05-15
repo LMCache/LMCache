@@ -15,7 +15,9 @@
 from dataclasses import dataclass
 
 from lmcache.experimental.cache_controller.message import (  # noqa: E501
-    ClearMsg, ClearRetMsg, KVAdmitMsg, KVEvictMsg, LookupMsg, LookupRetMsg)
+    CheckFinishMsg, CheckFinishRetMsg, ClearMsg, ClearRetMsg, CompressMsg,
+    CompressRetMsg, KVAdmitMsg, KVEvictMsg, LookupMsg, LookupRetMsg, MoveMsg,
+    MoveRetMsg, PinMsg, PinRetMsg)
 from lmcache.experimental.token_database import ChunkedTokenDatabase
 
 
@@ -37,6 +39,10 @@ class KVChunkMetadata:
 class KVController:
 
     def __init__(self):
+        # NOTE (Jiayi): Even if we offload kv_pool to
+        # redis. We might need a local cache for handling
+        # messages like `check_finish`. Or everything should be
+        # written to redis.
         self.kv_pool: dict[str, list[KVChunkMetadata]] = {}
 
         # TODO(Jiayi): remove this hardcode
@@ -87,9 +93,33 @@ class KVController:
 
     async def clear(self, msg: ClearMsg) -> ClearRetMsg:
         """
-        Clear all kv chunks of instance-worker(s).
+        Clear kv chunks of instance-worker(s).
         """
         return await self.cluster_executor.execute("clear", msg)
+
+    async def pin(self, msg: PinMsg) -> PinRetMsg:
+        """
+        Pin kv chunks of instance-worker(s).
+        """
+        return await self.cluster_executor.execute("pin", msg)
+
+    async def compress(self, msg: CompressMsg) -> CompressRetMsg:
+        """
+        Compress kv chunks of instance-worker(s).
+        """
+        return await self.cluster_executor.execute("compress", msg)
+
+    async def move(self, msg: MoveMsg) -> MoveRetMsg:
+        """
+        Move kv chunks of instance-worker(s).
+        """
+        return await self.cluster_executor.execute("move", msg)
+
+    async def check_finish(self, msg: CheckFinishMsg) -> CheckFinishRetMsg:
+        """
+        Check if an event is finished.
+        """
+        return await self.cluster_executor.execute("check_finish", msg)
 
     async def deregister(self, instance_id: str, worker_id: int) -> None:
         """
@@ -112,12 +142,14 @@ class KVController:
     # `instance_id` with longest prefix.
     # TODO(Jiayi): Need to get rid of the hash somehow
     async def lookup(self, msg: LookupMsg) -> LookupRetMsg:
-        target_instance = None
         tokens = msg.tokens
+        layout_info = {}
         for start, end, key in self.token_database.process_tokens(
                 tokens, make_key=False):
             assert isinstance(key, str)
             if key not in self.kv_pool:
                 break
-            target_instance = self.kv_pool[key][0].instance_id
-        return LookupRetMsg(target_instance)
+            matched_instance = self.kv_pool[key][0].instance_id
+            matched_location = self.kv_pool[key][0].location
+            layout_info[matched_instance] = (matched_location, end)
+        return LookupRetMsg(layout_info=layout_info)

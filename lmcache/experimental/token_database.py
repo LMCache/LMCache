@@ -1,3 +1,17 @@
+# Copyright 2024-2025 LMCache Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import abc
 import array
 import hashlib
@@ -56,7 +70,9 @@ class ChunkedTokenDatabase(TokenDatabase):
             self.chunk_size = config.chunk_size
         self.metadata = metadata
 
-    def _make_key_by_hash(self, chunk_hash: str):
+    def _make_key_by_hash(self,
+                          chunk_hash: str,
+                          layer_id: Optional[int] = None):
         assert self.metadata is not None
         return CacheEngineKey(self.metadata.fmt, self.metadata.model_name,
                               self.metadata.world_size,
@@ -118,6 +134,9 @@ class ChunkedTokenDatabase(TokenDatabase):
             FFFFFTTTTTTT, where True means the tokens needs to be matched, 
             and the Falses will ALWAYS be at the PREFIX of the tensor.
 
+        :param bool make_key: Whether to make the cache engine key or not.
+            If False, the hash value will be returned instead.
+        
         :returns: A iterable of tuples with three elements. The first element
             is the start index of the tokens for the key. The second element
             is the end index of the tokens for the key. The third element is

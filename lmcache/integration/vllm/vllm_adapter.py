@@ -1,4 +1,19 @@
+# Copyright 2024-2025 LMCache Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import dataclasses
+import os
 from copy import deepcopy
 from enum import Enum
 from typing import TYPE_CHECKING, List, Optional, Tuple, Union
@@ -19,7 +34,8 @@ from lmcache.config import LMCacheEngineMetadata
 from lmcache.experimental.cache_engine import (LMCacheEngine,
                                                LMCacheEngineBuilder)
 from lmcache.experimental.config import LMCacheEngineConfig
-from lmcache.experimental.gpu_connector import VLLMPagedMemGPUConnectorV2
+from lmcache.experimental.gpu_connector import (
+    VLLMPagedMemGPUConnectorV2, VLLMPagedMemLayerwiseGPUConnector)
 from lmcache.integration.vllm.utils import ENGINE_NAME, lmcache_get_config
 from lmcache.logging import init_logger
 from lmcache.utils import _lmcache_nvtx_annotate
@@ -102,14 +118,32 @@ def init_lmcache_engine(
                                      kv_shape)
     hidden_dim_size = num_kv_head * head_size
     use_gpu = need_gpu_interm_buffer(config)
-    vllm_gpu_connector = VLLMPagedMemGPUConnectorV2(hidden_dim_size,
-                                                    num_layer,
-                                                    use_gpu=use_gpu,
-                                                    chunk_size=chunk_size,
-                                                    dtype=kv_dtype,
-                                                    device=device)
+
+    vllm_gpu_connector: Union[VLLMPagedMemGPUConnectorV2,
+                              VLLMPagedMemLayerwiseGPUConnector]
+
+    # FIXME(Jiayi): support non-environ config
+    env_layerwise = os.getenv("LMCACHE_USE_LAYERWISE", "False")
+    use_layerwise = env_layerwise.lower() in ["true", "1"]
+
+    if use_layerwise:
+        vllm_gpu_connector = VLLMPagedMemLayerwiseGPUConnector(
+            hidden_dim_size,
+            num_layer,
+            use_gpu=use_gpu,
+            chunk_size=chunk_size,
+            dtype=kv_dtype,
+            device=device)
+    else:
+        vllm_gpu_connector = VLLMPagedMemGPUConnectorV2(hidden_dim_size,
+                                                        num_layer,
+                                                        use_gpu=use_gpu,
+                                                        chunk_size=chunk_size,
+                                                        dtype=kv_dtype,
+                                                        device=device)
     engine = LMCacheEngineBuilder.get_or_create(ENGINE_NAME, config, metadata,
-                                                vllm_gpu_connector)
+                                                vllm_gpu_connector,
+                                                use_layerwise)
 
     return engine
 

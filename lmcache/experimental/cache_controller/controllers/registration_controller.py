@@ -17,13 +17,11 @@ from typing import Optional
 import zmq
 import zmq.asyncio
 
-from lmcache.experimental.cache_controller.message import (DeRegisterMsg,
-                                                           QueryInstMsg,
-                                                           QueryInstRetMsg,
-                                                           RegisterMsg)
-from lmcache.experimental.cache_controller.rpc_utils import (close_zmq_socket,
-                                                             get_zmq_context,
-                                                             get_zmq_socket)
+from lmcache.experimental.cache_controller.message import (  # noqa: E501
+    DeRegisterMsg, HealthMsg, HealthRetMsg, QueryInstMsg, QueryInstRetMsg,
+    RegisterMsg)
+from lmcache.experimental.cache_controller.rpc_utils import (  # noqa: E501
+    close_zmq_socket, get_zmq_context, get_zmq_socket)
 from lmcache.logging import init_logger
 
 logger = init_logger(__name__)
@@ -130,3 +128,12 @@ class RegistrationController:
         else:
             logger.warning(f"Instance-worker {(instance_id, worker_id)}"
                            "not registered")
+
+    async def health(self, msg: HealthMsg) -> HealthRetMsg:
+        """
+        Check the health of the lmcache worker.
+        """
+        return await self.cluster_executor.execute(
+            "health",
+            msg,
+        )

@@ -1,7 +1,21 @@
+# Copyright 2024-2025 LMCache Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import hashlib
 import threading
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 import torch
 from nvtx import annotate  # type: ignore
@@ -16,6 +30,19 @@ class DiskCacheMetadata:
     size: int  # in bytes
     shape: Optional[torch.Size] = None
     dtype: Optional[torch.dtype] = None
+    is_pin: bool = False
+
+    def pin(self) -> bool:
+        self.is_pin = True
+        return True
+
+    def unpin(self) -> bool:
+        self.is_pin = False
+        return True
+
+    @property
+    def is_pinned(self) -> bool:
+        return self.is_pin
 
 
 TORCH_DTYPE_TO_STR_DTYPE = {
@@ -53,6 +80,21 @@ class CacheEngineKey:
         return f"{self.fmt}@{self.model_name}@{self.world_size}"\
             f"@{self.worker_id}@{self.chunk_hash}"
 
+    def split_layers(self, num_layers: int) -> List["LayerCacheEngineKey"]:
+        """ Split the key into multiple keys for each layer """
+        keys = []
+        for layer_id in range(num_layers):
+            keys.append(
+                LayerCacheEngineKey(self.fmt, self.model_name, self.world_size,
+                                    self.worker_id, self.chunk_hash, layer_id))
+        return keys
+
+    def get_first_layer(self) -> "LayerCacheEngineKey":
+        """ Return the key for the first layer """
+        key = LayerCacheEngineKey(self.fmt, self.model_name, self.world_size,
+                                  self.worker_id, self.chunk_hash, 0)
+        return key
+
     @staticmethod
     def from_string(s):
         parts = s.split("@")
@@ -60,6 +102,53 @@ class CacheEngineKey:
             raise ValueError(f"Invalid key string: {s}")
         return CacheEngineKey(parts[0], parts[1], int(parts[2]), int(parts[3]),
                               parts[4])
+
+    def to_dict(self):
+        # Note(Kuntai): this is used for serializing CacheEngineKey via msgpack.
+        return {
+            "__type__": "CacheEngineKey",
+            "fmt": self.fmt,
+            "model_name": self.model_name,
+            "world_size": self.world_size,
+            "worker_id": self.worker_id,
+            "chunk_hash": self.chunk_hash
+        }
+
+    @staticmethod
+    def from_dict(d):
+        return CacheEngineKey(fmt=d["fmt"],
+                              model_name=d["model_name"],
+                              world_size=d["world_size"],
+                              worker_id=d["worker_id"],
+                              chunk_hash=d["chunk_hash"])
+
+
+@dataclass(order=True)
+class LayerCacheEngineKey(CacheEngineKey):
+    """ A key for the layer cache engine """
+    layer_id: int
+
+    def __hash__(self):
+        return hash((
+            self.fmt,
+            self.model_name,
+            self.world_size,
+            self.worker_id,
+            self.chunk_hash,
+            self.layer_id,
+        ))
+
+    def to_string(self):
+        return f"{self.fmt}@{self.model_name}@{self.world_size}"\
+            f"@{self.worker_id}@{self.chunk_hash}@{self.layer_id}"
+
+    @staticmethod
+    def from_string(s):
+        parts = s.split("@")
+        if len(parts) != 6:
+            raise ValueError(f"Invalid key string: {s}")
+        return LayerCacheEngineKey(parts[0], parts[1], int(parts[2]),
+                                   int(parts[3]), parts[4], int(parts[5]))
 
 
 ##### NVTX annotation #####

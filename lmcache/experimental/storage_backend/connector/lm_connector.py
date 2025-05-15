@@ -18,12 +18,13 @@ from typing import List, Optional, no_type_check
 
 import torch
 
-from lmcache.experimental.memory_management import (MemoryAllocatorInterface,
-                                                    MemoryFormat, MemoryObj)
+from lmcache.experimental.memory_management import MemoryFormat, MemoryObj
 from lmcache.experimental.protocol import (ClientMetaMessage, Constants,
                                            ServerMetaMessage)
 from lmcache.experimental.storage_backend.connector.base_connector import \
     RemoteConnector
+from lmcache.experimental.storage_backend.local_cpu_backend import \
+    LocalCPUBackend
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey, _lmcache_nvtx_annotate
 
@@ -35,7 +36,7 @@ logger = init_logger(__name__)
 class LMCServerConnector(RemoteConnector):
 
     def __init__(self, host: str, port: int, loop: asyncio.AbstractEventLoop,
-                 memory_allocator: MemoryAllocatorInterface):
+                 local_cpu_backend: LocalCPUBackend):
         # NOTE(Jiayi): According to Python documentation:
         # https://docs.python.org/3/library/asyncio-eventloop.html
         # In general, protocol implementations that use transport-based APIs
@@ -48,8 +49,9 @@ class LMCServerConnector(RemoteConnector):
         self.client_socket.connect((host, port))
         #loop.sock_recv_into(sock, buf)
 
-        self.memory_allocator = memory_allocator
         self.loop = loop
+        self.local_cpu_backend = local_cpu_backend
+
         self.async_socket_lock = asyncio.Lock()
 
     # TODO(Jiayi): This should be an async function
@@ -59,7 +61,7 @@ class LMCServerConnector(RemoteConnector):
 
         # TODO(Jiayi): Format will be used once we support
         # compressed memory format
-        memory_obj = self.memory_allocator.allocate(
+        memory_obj = self.local_cpu_backend.allocate(
             meta.shape,
             meta.dtype,
             meta.fmt,
@@ -117,7 +119,7 @@ class LMCServerConnector(RemoteConnector):
 
             await self.loop.sock_sendall(self.client_socket, kv_bytes)
 
-        self.memory_allocator.ref_count_down(memory_obj)
+        memory_obj.ref_count_down()
 
     # TODO(Jiayi): This should be an async function
     @_lmcache_nvtx_annotate

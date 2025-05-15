@@ -1,3 +1,17 @@
+# Copyright 2024-2025 LMCache Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import threading
 from collections import OrderedDict
 from concurrent.futures import Future
@@ -10,7 +24,7 @@ from lmcache.experimental.cache_controller.message import (KVAdmitMsg,
 from lmcache.experimental.config import LMCacheEngineConfig
 from lmcache.experimental.lookup_server import LookupServerInterface
 from lmcache.experimental.memory_management import (MemoryAllocatorInterface,
-                                                    MemoryObj,
+                                                    MemoryFormat, MemoryObj,
                                                     MixedMemoryAllocator)
 from lmcache.experimental.storage_backend.abstract_backend import \
     StorageBackendInterface
@@ -30,7 +44,7 @@ class LocalCPUBackend(StorageBackendInterface):
     left in the allocator so we cannot use LRUEvictor().
     (max_local_cpu_size > 0 initializes the memory_allocator)
     Even if local_cpu is False (the hot_cache is not used), contains(),
-    insert_key(), remove(), touch(), get_blocking(), get_keys(), and clear()
+    insert_key(), remove(), get_blocking(), get_keys(), and clear()
     are still callable by the storage manager.
     """
 
@@ -55,9 +69,13 @@ class LocalCPUBackend(StorageBackendInterface):
     def __str__(self):
         return self.__class__.__name__
 
-    def contains(self, key: CacheEngineKey) -> bool:
+    def contains(self, key: CacheEngineKey, pin: bool = False) -> bool:
         with self.cpu_lock:
-            return key in self.hot_cache
+            if key not in self.hot_cache:
+                return False
+            if pin:
+                self.hot_cache[key].pin()
+            return True
 
     def exists_in_put_tasks(self, key: CacheEngineKey) -> bool:
         """
@@ -76,9 +94,9 @@ class LocalCPUBackend(StorageBackendInterface):
         with self.cpu_lock:
             if key in self.hot_cache:
                 old_memory_obj = self.hot_cache.pop(key)
-                self.memory_allocator.ref_count_down(old_memory_obj)
+                old_memory_obj.ref_count_down()
             self.hot_cache[key] = memory_obj
-            self.memory_allocator.ref_count_up(memory_obj)
+            memory_obj.ref_count_up()
 
             self.usage += memory_obj.get_size()
             self.stats_monitor.update_local_cache_usage(self.usage)
@@ -109,16 +127,49 @@ class LocalCPUBackend(StorageBackendInterface):
             # ref count up for caller to avoid situation where the memory_obj
             # is evicted from the local cpu backend before the caller calls
             # ref count up themselves
-            self.memory_allocator.ref_count_up(memory_obj)
+            memory_obj.ref_count_up()
             self.hot_cache.move_to_end(key)
             return memory_obj
+
+    def get_non_blocking(
+        self,
+        key: CacheEngineKey,
+    ) -> Optional[Future]:
+        """
+        Return the dummy future object.
+        """
+        with self.cpu_lock:
+            if key not in self.hot_cache:
+                return None
+            memory_obj = self.hot_cache[key]
+            memory_obj.ref_count_up()
+            self.hot_cache.move_to_end(key)
+            f: Future = Future()
+            f.set_result(memory_obj)
+            return f
+
+    def pin(self, key: CacheEngineKey) -> bool:
+        with self.cpu_lock:
+            if key not in self.hot_cache:
+                return False
+            memory_obj = self.hot_cache[key]
+            memory_obj.pin()
+            return True
+
+    def unpin(self, key: CacheEngineKey) -> bool:
+        with self.cpu_lock:
+            if key not in self.hot_cache:
+                return False
+            memory_obj = self.hot_cache[key]
+            memory_obj.unpin()
+            return True
 
     def remove(self, key: CacheEngineKey) -> bool:
         with self.cpu_lock:
             if key not in self.hot_cache:
                 return False
             memory_obj = self.hot_cache.pop(key)
-            self.memory_allocator.ref_count_down(memory_obj)
+            memory_obj.ref_count_down()
 
             self.usage -= memory_obj.get_size()
             self.stats_monitor.update_local_cache_usage(self.usage)
@@ -135,6 +186,7 @@ class LocalCPUBackend(StorageBackendInterface):
     def allocate(self,
                  shape: torch.Size,
                  dtype: torch.dtype,
+                 fmt: MemoryFormat = MemoryFormat.KV_2LTD,
                  eviction: bool = True) -> Optional[MemoryObj]:
         """
         allocate a memory object of shape and dtype
@@ -142,7 +194,7 @@ class LocalCPUBackend(StorageBackendInterface):
         local_cpu_backend.allocate() to get memory objects
         regardless of whether local_cpu is True or False
         """
-        memory_obj = self.memory_allocator.allocate(shape, dtype)
+        memory_obj = self.memory_allocator.allocate(shape, dtype, fmt)
         if memory_obj is not None or not eviction:
             return memory_obj
 
@@ -151,15 +203,15 @@ class LocalCPUBackend(StorageBackendInterface):
         evict_keys = []
         with self.cpu_lock:
             for evict_key in self.hot_cache:
+                old_mem_obj = self.hot_cache[evict_key]
                 # If the ref_count > 1, we cannot evict it as the cpu memory
                 # might be used as buffers by other storage backends
-                if self.memory_allocator.get_ref_count(
-                        self.hot_cache[evict_key]) > 1:
+                if old_mem_obj.get_ref_count() > 1:
                     continue
                 evict_keys.append(evict_key)
 
-                self.memory_allocator.ref_count_down(self.hot_cache[evict_key])
-                memory_obj = self.memory_allocator.allocate(shape, dtype)
+                old_mem_obj.ref_count_down()
+                memory_obj = self.memory_allocator.allocate(shape, dtype, fmt)
                 logger.debug("Evicting 1 chunk from cpu memory")
                 if memory_obj is not None:
                     break
@@ -202,7 +254,7 @@ class LocalCPUBackend(StorageBackendInterface):
             # Update the hot cache
             self.cpu_lock.acquire()
             self.hot_cache[key] = cpu_memory_obj
-            self.memory_allocator.ref_count_up(cpu_memory_obj)
+            cpu_memory_obj.ref_count_up()
             self.cpu_lock.release()
 
             # Push kv msg
@@ -216,7 +268,7 @@ class LocalCPUBackend(StorageBackendInterface):
             self.cpu_lock.acquire()
             if self.use_hot and key not in self.hot_cache:
                 self.hot_cache[key] = memory_obj
-                self.memory_allocator.ref_count_up(memory_obj)
+                memory_obj.ref_count_up()
                 self.cpu_lock.release()
 
                 # Push kv msg
@@ -244,10 +296,10 @@ class LocalCPUBackend(StorageBackendInterface):
         with self.cpu_lock:
             for key in self.hot_cache:
                 memory_obj = self.hot_cache[key]
-                if self.memory_allocator.get_ref_count(memory_obj) > 1:
+                if memory_obj.get_ref_count() > 1:
                     continue
                 clear_keys.append(key)
-                self.memory_allocator.ref_count_down(memory_obj)
+                memory_obj.ref_count_down()
 
         for key in clear_keys:
             self.remove(key)

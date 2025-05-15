@@ -13,16 +13,15 @@ Example run command
     docker run --runtime nvidia --gpus all \
         --env "HF_TOKEN=<YOUR_HUGGINGFACE_TOKEN>" \
         --env "LMCACHE_USE_EXPERIMENTAL=True" \
-        --env "chunk_size=256" \
-        --env "local_cpu=True" \
-        --env "max_local_cpu_size=5" \
+        --env "LMCACHE_CHUNK_SIZE=256" \
+        --env "LMCACHE_LOCAL_CPU=True" \
+        --env "LMCACHE_MAX_LOCAL_CPU_SIZE=5" \
         -v ~/.cache/huggingface:/root/.cache/huggingface \
         --network host \
         --entrypoint "/usr/local/bin/vllm" \
         $IMAGE \
         serve mistralai/Mistral-7B-Instruct-v0.2 --kv-transfer-config \
-        '{"kv_connector":"LMCacheConnector","kv_role":"kv_both"}' \
-        --enable-chunked-prefill false
+        '{"kv_connector":"LMCacheConnectorv1","kv_role":"kv_both"}'
 
 
 The Image Name and Tag can be found on Docker Hub - `LMCache <https://hub.docker.com/r/lmcache/vllm-openai>`_.

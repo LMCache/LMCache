@@ -20,7 +20,7 @@ First, we need to start the lmcache controller at port 9000 and the monitor at p
 
 .. code-block:: bash
 
-    python -m lmcache.controller --port 9000 --monitor_port 9001
+    python -m lmcache.experimental.api_server --port 9000 --monitor-port 9001
 
 Second, we need a yaml file ``example.yaml`` to properly configure the lmcache instance:
 

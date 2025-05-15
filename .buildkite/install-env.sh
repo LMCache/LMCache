@@ -1,29 +1,26 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
-CONDA_ENV_NAME="buildkite"
-PYTHON_VERSION=3.10
+set -euo pipefail
 
-exist_env="$(conda env list | grep ${CONDA_ENV_NAME})"
-if [[ -n $exist_env ]]; then
-    echo "Skipping env creation"
+VENV_DIR=".venv"
+PYTHON_BIN="/usr/bin/python3.10"
+if [[ -d "$VENV_DIR" ]]; then
+  echo "⟳ Using existing venv: $(pwd)/$VENV_DIR"
 else
-    conda create -n ${CONDA_ENV_NAME} python=${PYTHON_VERSION} -y
+  echo "⚙️  Creating venv with Python 3.10 at: $(pwd)/$VENV_DIR"
+  # use uv for fast venv creation
+  uv venv --python "$PYTHON_BIN" "$VENV_DIR"
 fi
 
-cuda_version=12.1
-export CUDA_HOME=/usr/local/cuda-${cuda_version}
-export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
-export PATH=$CUDA_HOME/bin:$PATH
+# CUDA version
+CUDA_VERSION="12.1"
 
-eval "$(conda shell.bash hook)"
-conda activate ${CONDA_ENV_NAME}
+uv pip install --upgrade pip setuptools wheel
+uv pip install -r requirements.txt
+uv pip install -r requirements-test.txt
+uv pip install coverage
 
-set -xe 
-
-pip install -r requirements.txt
-pip install -r requirements-test.txt
-pip install coverage
-
-set +x
-echo "Current env:"
-pip freeze 
+# Export CUDA variables
+export CUDA_HOME="/usr/local/cuda-${CUDA_VERSION}"
+export LD_LIBRARY_PATH="${CUDA_HOME}/lib64:${LD_LIBRARY_PATH:-}"
+export PATH="${CUDA_HOME}/bin:${PATH}"
