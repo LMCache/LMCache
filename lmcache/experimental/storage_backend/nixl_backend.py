@@ -29,8 +29,8 @@ from lmcache.experimental.storage_backend.abstract_backend import \
     StorageBackendInterface
 from lmcache.experimental.storage_backend.connector.nixl_connector_v2 import (
     NixlChannel, NixlObserverInterface)
-from lmcache.experimental.storage_backend.connector.nixl_utils import \
-    NixlConfig
+from lmcache.experimental.storage_backend.connector.nixl_utils import (
+    NixlConfig, NixlRole)
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey, _lmcache_nvtx_annotate
 
@@ -254,10 +254,10 @@ class NixlBackend(StorageBackendInterface):
 
         self._nixl_channel = NixlChannel(nixl_config)
 
-        self._nixl_observer = BasicNixlObserver(self._obj_pool)
-
-        self._nixl_channel.register_receive_observer(
-            observer=self._nixl_observer)
+        if nixl_config.role == NixlRole.RECEIVER:
+            self._nixl_observer = BasicNixlObserver(self._obj_pool)
+            self._nixl_channel.register_receive_observer(
+                observer=self._nixl_observer)
 
         self._registered_keys: list[CacheEngineKey] = []
         self._registered_metadatas: list[MemoryObjMetadata] = []

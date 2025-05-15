@@ -20,6 +20,25 @@ from lmcache.config import LMCacheEngineMetadata
 from lmcache.experimental.config import LMCacheEngineConfig
 
 
+def get_correct_nixl_device(nixl_device: str, worker_id: int) -> str:
+    """
+    Get the correct Nixl device based on the given device string.
+
+    Args:
+        nixl_device (str): The device string, could be cpu or cuda
+
+    Returns:
+        str: The correct device string for Nixl -- with correct 
+          device id.
+    """
+    if nixl_device == "cpu":
+        return "cpu"
+    elif nixl_device.startswith("cuda"):
+        return f"cuda:{worker_id}"
+    else:
+        raise ValueError(f"Invalid Nixl device: {nixl_device}")
+
+
 class NixlRole(enum.Enum):
     """
     Enum to represent the role of the Nixl connection.
@@ -31,8 +50,8 @@ class NixlRole(enum.Enum):
 @dataclass
 class NixlConfig:
     role: Union[NixlRole, str]
-    peer_host_name: str
-    peer_port: int
+    receiver_host: str
+    receiver_port: int
     buffer_size: int
     buffer_device: str
     enable_gc: bool
@@ -57,15 +76,18 @@ class NixlConfig:
                 f"Invalid role: {config.nixl_role}, must be either "\
                 f"{NixlRole.SENDER} or {NixlRole.RECEIVER}"
 
-        assert config.nixl_peer_host is not None
-        assert config.nixl_peer_port is not None
+        assert config.nixl_receiver_host is not None
+        assert config.nixl_receiver_port is not None
         assert config.nixl_buffer_size is not None
         assert config.nixl_buffer_device is not None
         assert config.nixl_enable_gc is not None
 
+        corrected_device = get_correct_nixl_device(config.nixl_buffer_device,
+                                                   metadata.worker_id)
+
         return NixlConfig(role=nixl_role,
-                          peer_host_name=config.nixl_peer_host,
-                          peer_port=config.nixl_peer_port + worker_id,
+                          receiver_host=config.nixl_receiver_host,
+                          receiver_port=config.nixl_receiver_port + worker_id,
                           buffer_size=config.nixl_buffer_size,
-                          buffer_device=config.nixl_buffer_device,
+                          buffer_device=corrected_device,
                           enable_gc=config.nixl_enable_gc)

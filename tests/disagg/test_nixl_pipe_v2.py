@@ -83,10 +83,10 @@ if __name__ == "__main__":
     # Common configuration
     config = NixlConfig(
         role=NixlRole(args.role),
-        peer_host_name=args.host,
-        peer_port=args.port,
+        receiver_host=args.host,
+        receiver_port=args.port,
         buffer_size=2**32,  # 4GB
-        buffer_device='cuda',
+        buffer_device='cuda:0',
         enable_gc=False,
     )
 

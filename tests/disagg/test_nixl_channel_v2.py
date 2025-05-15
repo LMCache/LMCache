@@ -50,58 +50,63 @@ def calculate_throughput(total_bytes: int, elapsed_time: float) -> float:
 class TestObserver(NixlObserverInterface):
 
     def __init__(self):
-        self.received_keys = []
-        self.received_tensors = []
-        self.received_objs = []
+        self.key_to_tensors = {}  # Map keys to received tensors
         self.received_event = threading.Event()
         self.expected_count = None
+        self.num_expected_senders = 1  # Default to 1 sender
         self.reset()
 
     def set_expected_count(self, count: int):
         self.expected_count = count
 
+    def set_num_expected_senders(self, num_senders: int):
+        self.num_expected_senders = num_senders
+
     def __call__(self, keys, objs, is_view=True):
         logger.info(
             f"Observer received {len(keys)} keys and {len(objs)} objects")
 
-        # Clear previous data if we're starting a new batch
-        if len(self.received_keys) == 0:
-            self.reset()
-
-        self.received_keys.extend(keys)
-
         # If these are views, we need to make copies
         if is_view:
-            for obj in objs:
+            for i, obj in enumerate(objs):
                 copied_tensor = obj.tensor.clone().detach()
-                self.received_tensors.append(copied_tensor)
-        else:
-            self.received_objs.extend(objs)
 
-        if self.expected_count and len(
-                self.received_keys) >= self.expected_count:
+                # Store tensor by key for verification
+                key = keys[i]
+                if key not in self.key_to_tensors:
+                    self.key_to_tensors[key] = []
+                self.key_to_tensors[key].append(copied_tensor)
+        else:
+            # For non-view objects, still store them by key
+            for i, obj in enumerate(objs):
+                key = keys[i]
+                if key not in self.key_to_tensors:
+                    self.key_to_tensors[key] = []
+                self.key_to_tensors[key].append(obj.tensor)
+
+        # Calculate total received tensors
+        total_received = sum(
+            len(tensors) for tensors in self.key_to_tensors.values())
+
+        if self.expected_count and total_received >= \
+                self.expected_count * self.num_expected_senders:
             self.received_event.set()
 
     def summarize(self):
-        logger.info(f"Received {len(self.received_keys)} keys and "
-                    f"{len(self.received_tensors)} tensors")
+        total_tensors = sum(
+            len(tensors) for tensors in self.key_to_tensors.values())
+        logger.info(f"Received {len(self.key_to_tensors)} unique keys and "
+                    f"{total_tensors} total tensors")
 
     def reset(self):
         # Explicitly free any existing tensors
-        if hasattr(self, 'received_objs'):
-            for obj in self.received_objs:
-                del obj
-            del self.received_objs
+        if hasattr(self, 'key_to_tensors'):
+            for tensors in self.key_to_tensors.values():
+                for tensor in tensors:
+                    del tensor
+            del self.key_to_tensors
 
-        if hasattr(self, 'received_keys'):
-            del self.received_keys
-
-        if hasattr(self, 'received_tensors'):
-            del self.received_tensors
-
-        self.received_keys = []
-        self.received_tensors = []
-        self.received_objs = []
+        self.key_to_tensors = {}
         self.received_event = threading.Event()
         self.expected_count = None
         torch.cuda.empty_cache()  # Force CUDA memory cleanup
@@ -177,6 +182,7 @@ def send_and_measure_throughput_v2(channel: NixlChannel,
 def receive_and_verify_data(observer: TestObserver,
                             expected_keys: List[CacheEngineKey],
                             expected_objs: List[MemoryObj],
+                            num_expected_senders: int = 1,
                             timeout: int = 60) -> bool:
     """Receive data through the channel and verify it matches expected data.
     
@@ -184,6 +190,7 @@ def receive_and_verify_data(observer: TestObserver,
         observer: The TestObserver that receives data
         expected_keys: List of expected cache engine keys
         expected_objs: List of expected memory objects
+        num_expected_senders: Number of senders expected to send the same data
         timeout: Maximum time to wait for data in seconds
     
     Returns:
@@ -193,40 +200,70 @@ def receive_and_verify_data(observer: TestObserver,
         # Wait for all data to be received
         logger.info("Waiting to receive data...")
         start_time = time.time()
+        expected_total = len(expected_keys) * num_expected_senders
 
-        while len(observer.received_tensors) < len(expected_keys):
+        # Calculate total received tensors
+        total_received = sum(
+            len(tensors) for tensors in observer.key_to_tensors.values())
+
+        while total_received < expected_total:
             if time.time() - start_time > timeout:
                 logger.error("Timed out waiting for data")
                 return False
-            logger.info(f"Received {len(observer.received_tensors)}/"
-                        f"{len(expected_keys)} tensors so far...")
+            logger.info(
+                f"Received {total_received}/{expected_total} tensors so far..."
+            )
             time.sleep(1)
+            # Update total received count
+            total_received = sum(
+                len(tensors) for tensors in observer.key_to_tensors.values())
 
-        if len(observer.received_tensors) == len(expected_keys):
-            logger.info(f"Received all {len(observer.received_keys)} keys and "
-                        f"{len(observer.received_tensors)} tensors")
+        if total_received >= expected_total:
+            logger.info(
+                f"Received all {len(observer.key_to_tensors)} unique keys and "
+                f"{total_received} total tensors")
 
             # Verify the received data
             success = True
-            for i, (received_tensor, original_tensor) in enumerate(
-                    zip(observer.received_tensors, expected_objs,
-                        strict=False)):
-                if not torch.allclose(received_tensor, original_tensor.tensor):
-                    logger.error(f"Data mismatch at index {i}")
-                    success = False
-                    break
 
-            for i, (received_key, original_key) in enumerate(
-                    zip(observer.received_keys, expected_keys, strict=False)):
-                if received_key != original_key:
-                    logger.error(f"Key mismatch at index {i}")
+            # Check that we received the expected number of tensors for each key
+            for key in expected_keys:
+                if key not in observer.key_to_tensors:
+                    logger.error(f"Missing key: {key}")
                     success = False
-                    break
+                    continue
+
+                if len(observer.key_to_tensors[key]) != num_expected_senders:
+                    logger.error(
+                        f"Expected {num_expected_senders} objs for key {key}, "
+                        f"but got {len(observer.key_to_tensors[key])}")
+                    success = False
+                    continue
+
+                # Extract the index from the chunk_hash (format is "test_{i}")
+                chunk_hash = key.chunk_hash
+                try:
+                    idx = int(chunk_hash.split('_')[1])
+                    expected_value = (idx + 1) / len(
+                        expected_keys)  # Match the value in generate_test_data
+
+                    # Verify the data for this key
+                    for tensor in observer.key_to_tensors[key]:
+                        # Check if tensor values match expected value
+                        if not torch.allclose(
+                                tensor, torch.full_like(
+                                    tensor, expected_value)):
+                            logger.error(f"Data mismatch for key {key}. "
+                                         f"Expected value: {expected_value}")
+                            success = False
+                except (IndexError, ValueError) as e:
+                    logger.error(f"Error parsing chunk_hash {chunk_hash}: {e}")
+                    success = False
 
             return success
         else:
-            logger.error(f"Only received {len(observer.received_tensors)}/"
-                         f"{len(expected_keys)} tensors before timeout")
+            logger.error(f"Only received {total_received}/{expected_total} "
+                         "tensors before timeout")
             return False
     finally:
         # Always cleanup, even if verification fails
@@ -297,6 +334,11 @@ def main():
         '--simulate-workload',
         action='store_true',
         help='Simulate workload by sleeping 50ms between batches')
+    parser.add_argument(
+        '--num-expected-senders',
+        type=int,
+        default=1,
+        help='Number of senders expected to connect (receiver only)')
     args = parser.parse_args()
 
     # Generate test data
@@ -309,10 +351,10 @@ def main():
     # Common configuration
     config = NixlConfig(
         role=NixlRole(args.role),
-        peer_host_name=args.host,
-        peer_port=args.port,
+        receiver_host=args.host,
+        receiver_port=args.port,
         buffer_size=2**32,  # 4GB
-        buffer_device='cuda',
+        buffer_device='cuda:0',
         enable_gc=False,
     )
 
@@ -331,8 +373,10 @@ def main():
     else:  # receiver
         observer = TestObserver()
         observer.set_expected_count(len(keys))
+        observer.set_num_expected_senders(args.num_expected_senders)
         channel.register_receive_observer(observer)
-        success = receive_and_verify_data(observer, keys, objs)
+        success = receive_and_verify_data(observer, keys, objs,
+                                          args.num_expected_senders)
         if not success:
             logger.error("Data verification failed")
 

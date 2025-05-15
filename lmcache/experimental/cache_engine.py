@@ -130,10 +130,10 @@ class LMCacheEngine:
         """
         st = time.perf_counter()
         if mask is not None:
-            monitor_req_id = self.stats_monitor.on_store_request(
-                torch.sum(mask))
+            num_store_tokens = torch.sum(mask)
         else:
-            monitor_req_id = self.stats_monitor.on_store_request(len(tokens))
+            num_store_tokens = len(tokens)
+        monitor_req_id = self.stats_monitor.on_store_request(num_store_tokens)
 
         # Register the put request
         keys = []
@@ -188,11 +188,9 @@ class LMCacheEngine:
         put_time += time.perf_counter() - t
         ed = time.perf_counter()
 
-        assert mask is not None
-
         logger.info(
             "Store %d tokens takes: %.4f ms, throughput: %.4f GB/s; "
-            "offload_time: %.4f ms, put_time: %.4f ms", torch.sum(mask),
+            "offload_time: %.4f ms, put_time: %.4f ms", num_store_tokens,
             (ed - st) * 1000, tot_kv_size / (ed - st) / 1024**3,
             offload_time * 1000, put_time * 1000)
 

@@ -307,11 +307,11 @@ class NixlChannel:
 
         if nixl_config.role == NixlRole.SENDER:
             self._side_channel.connect("tcp://{}:{}".format(
-                nixl_config.peer_host_name, nixl_config.peer_port))
+                nixl_config.receiver_host, nixl_config.receiver_port))
             self._side_channel.setsockopt(zmq.LINGER, 0)  # type: ignore
         else:
             self._side_channel.bind("tcp://{}:{}".format(
-                nixl_config.peer_host_name, nixl_config.peer_port))
+                nixl_config.receiver_host, nixl_config.receiver_port))
             self._side_channel.setsockopt(zmq.LINGER, 0)  # type: ignore
             self._side_channel.setsockopt(
                 zmq.RCVTIMEO,  # type: ignore

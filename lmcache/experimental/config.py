@@ -80,10 +80,11 @@ class LMCacheEngineConfig:
     enable_nixl: Optional[bool] = False
     # Role: sender or receiver
     nixl_role: Optional[str] = None
-    # The url of the nixl peer
-    nixl_peer_host: Optional[str] = None
-    # The BASE port of the nixl peer, real port is nixl_peer_port + WORKER_RANK
-    nixl_peer_port: Optional[int] = None
+    # The host of the nixl receiver
+    nixl_receiver_host: Optional[str] = None
+    # The BASE port of the nixl receiver,
+    # real port is nixl_receiver_port + WORKER_RANK
+    nixl_receiver_port: Optional[int] = None
     # The transport buffer size of nixl in bytes
     nixl_buffer_size: Optional[int] = None
     # The device that nixl uses
@@ -118,8 +119,8 @@ class LMCacheEngineConfig:
         lmcache_worker_port: Optional[int] = None,
         enable_nixl: Optional[bool] = False,
         nixl_role: Optional[str] = None,
-        nixl_peer_host: Optional[str] = None,
-        nixl_peer_port: Optional[int] = None,
+        nixl_receiver_host: Optional[str] = None,
+        nixl_receiver_port: Optional[int] = None,
         nixl_buffer_size: Optional[int] = None,
         nixl_buffer_device: Optional[str] = None,
         nixl_enable_gc: Optional[bool] = False,
@@ -133,7 +134,7 @@ class LMCacheEngineConfig:
             blend_special_str, enable_p2p, lookup_url, distributed_url,
             error_handling, enable_controller, lmcache_instance_id,
             controller_url, lmcache_worker_port, enable_nixl, nixl_role,
-            nixl_peer_host, nixl_peer_port, nixl_buffer_size,
+            nixl_receiver_host, nixl_receiver_port, nixl_buffer_size,
             nixl_buffer_device, nixl_enable_gc,
             audit_actual_remote_url).validate()
 
@@ -241,11 +242,24 @@ class LMCacheEngineConfig:
 
         enable_nixl = config.get("enable_nixl", False)
         nixl_role = config.get("nixl_role", None)
-        nixl_peer_host = config.get("nixl_peer_host", None)
-        nixl_peer_port = config.get("nixl_peer_port", None)
+        nixl_receiver_host = config.get("nixl_receiver_host", None)
+        nixl_receiver_port = config.get("nixl_receiver_port", None)
         nixl_buffer_size = config.get("nixl_buffer_size", None)
         nixl_buffer_device = config.get("nixl_buffer_device", None)
         nixl_enable_gc = config.get("nixl_enable_gc", False)
+
+        # Try getting "legacy" nixl config
+        if nixl_receiver_host is None:
+            nixl_receiver_host = config.get("nixl_peer_host", None)
+            if nixl_receiver_host is not None:
+                logger.warning("nixl_peer_host is deprecated, please use "
+                               "nixl_receiver_host in the config file instead")
+
+        if nixl_receiver_port is None:
+            nixl_receiver_port = config.get("nixl_peer_port", None)
+            if nixl_receiver_port is not None:
+                logger.warning("nixl_peer_port is deprecated, please use "
+                               "nixl_receiver_port in the config file instead")
 
         audit_actual_remote_url = config.get("audit_actual_remote_url", None)
 
@@ -282,8 +296,8 @@ class LMCacheEngineConfig:
             lmcache_worker_port,
             enable_nixl,
             nixl_role,
-            nixl_peer_host,
-            nixl_peer_port,
+            nixl_receiver_host,
+            nixl_receiver_port,
             nixl_buffer_size,
             nixl_buffer_device,
             nixl_enable_gc,
@@ -386,10 +400,11 @@ class LMCacheEngineConfig:
             parse_env(get_env_name("enable_nixl"), config.enable_nixl))
         config.nixl_role = parse_env(get_env_name("nixl_role"),
                                      config.nixl_role)
-        config.nixl_peer_host = parse_env(get_env_name("nixl_peer_host"),
-                                          config.nixl_peer_host)
-        config.nixl_peer_port = to_int(
-            parse_env(get_env_name("nixl_peer_port"), config.nixl_peer_port))
+        config.nixl_receiver_host = parse_env(
+            get_env_name("nixl_receiver_host"), config.nixl_receiver_host)
+        config.nixl_receiver_port = to_int(
+            parse_env(get_env_name("nixl_receiver_port"),
+                      config.nixl_receiver_port))
         config.nixl_buffer_size = to_int(
             parse_env(get_env_name("nixl_buffer_size"),
                       config.nixl_buffer_size))
@@ -397,6 +412,25 @@ class LMCacheEngineConfig:
             get_env_name("nixl_buffer_device"), config.nixl_buffer_device)
         config.nixl_enable_gc = to_bool(
             parse_env(get_env_name("nixl_enable_gc"), config.nixl_enable_gc))
+
+        # Try getting "legacy" nixl config
+        if config.nixl_receiver_host is None:
+            config.nixl_receiver_host = parse_env(
+                get_env_name("nixl_peer_host"), config.nixl_receiver_host)
+            if config.nixl_receiver_host is not None:
+                logger.warning(
+                    "LMCACHE_NIXL_PEER_HOST is deprecated, please use "
+                    "LMCACHE_NIXL_RECEIVER_HOST environment variable instead")
+
+        if config.nixl_receiver_port is None:
+            config.nixl_receiver_port = to_int(
+                parse_env(get_env_name("nixl_peer_port"),
+                          config.nixl_receiver_port))
+            if config.nixl_receiver_port is not None:
+                logger.warning(
+                    "LMCACHE_NIXL_PEER_PORT is deprecated, please use "
+                    "LMCACHE_NIXL_RECEIVER_PORT environment variable instead")
+
         config.audit_actual_remote_url = parse_env(
             get_env_name("audit_actual_remote_url"),
             config.audit_actual_remote_url)
@@ -428,8 +462,8 @@ class LMCacheEngineConfig:
 
         if self.enable_nixl:
             assert self.nixl_role is not None
-            assert self.nixl_peer_host is not None
-            assert self.nixl_peer_port is not None
+            assert self.nixl_receiver_host is not None
+            assert self.nixl_receiver_port is not None
             assert self.nixl_buffer_size is not None
             assert self.nixl_buffer_device is not None
             assert self.nixl_enable_gc is not None
@@ -475,8 +509,8 @@ class LMCacheEngineConfig:
             'lmcache_instance_id': self.lmcache_instance_id,
             'enable_nixl': self.enable_nixl,
             'nixl_role': self.nixl_role,
-            'nixl_peer_host': self.nixl_peer_host,
-            'nixl_peer_port': self.nixl_peer_port,
+            'nixl_receiver_host': self.nixl_receiver_host,
+            'nixl_receiver_port': self.nixl_receiver_port,
             'nixl_buffer_size': self.nixl_buffer_size,
             'nixl_buffer_device': self.nixl_buffer_device,
             'nixl_enable_gc': self.nixl_enable_gc

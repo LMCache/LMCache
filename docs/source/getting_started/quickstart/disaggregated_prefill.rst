@@ -54,8 +54,8 @@ Configuration
        # NIXL configuration for KV cache transfer
        enable_nixl: True
        nixl_role: "sender"          # Prefiller acts as KV cache sender
-       nixl_peer_host: "localhost"  # Host where decoder is running
-       nixl_peer_port: 55555        # Port where decoder is listening
+       nixl_receiver_host: "localhost"  # Host where decoder is running
+       nixl_receiver_port: 55555        # Port where decoder is listening
        nixl_buffer_size: 1073741824  # 1GB buffer for KV cache transfer
        nixl_buffer_device: "cuda"   # Use GPU memory for buffer
        nixl_enable_gc: True         # Enable garbage collection
@@ -73,8 +73,8 @@ Configuration
        # NIXL configuration for KV cache transfer
        enable_nixl: True
        nixl_role: "receiver"        # Decoder acts as KV cache receiver
-       nixl_peer_host: "localhost"  # Host where decoder is listening
-       nixl_peer_port: 55555        # Port where decoder is listening
+       nixl_receiver_host: "localhost"  # Host where decoder is listening
+       nixl_receiver_port: 55555        # Port where decoder is listening
        nixl_buffer_size: 1073741824  # 1GB buffer for KV cache transfer
        nixl_buffer_device: "cuda"   # Use GPU memory for buffer
        nixl_enable_gc: True         # Enable garbage collection

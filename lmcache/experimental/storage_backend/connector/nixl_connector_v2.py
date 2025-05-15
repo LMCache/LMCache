@@ -28,7 +28,7 @@ from lmcache.experimental.memory_management import (MemoryAllocatorInterface,
                                                     MemoryFormat, MemoryObj,
                                                     MemoryObjMetadata,
                                                     TensorMemoryObj)
-from lmcache.experimental.storage_backend.connector.nixl_connector import (
+from lmcache.experimental.storage_backend.connector.nixl_utils import (
     NixlConfig, NixlRole)
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey, _lmcache_nvtx_annotate
@@ -185,8 +185,28 @@ class NixlPipe:
     """
     TRANSFER_BUFFER_SIZE = 128 * 1024 * 1024
 
-    def __init__(self, nixl_config: NixlConfig,
-                 side_channel: zmq.Socket):  # type: ignore
+    def __init__(
+            self,
+            nixl_config: NixlConfig,
+            side_channel: Union[zmq.sugar.socket.Socket,
+                                "SenderSpecificSocket"],  # type: ignore
+            sender_meta: Optional[bytes] = None):
+        """
+        Initialize the NixlPipe.
+
+        Args:
+            nixl_config: The NixlConfig object containing the configuration
+                for the NIXL pipe.
+            side_channel: The ZeroMQ socket used for communication.
+            sender_meta: Optional metadata, will have values when the pipe
+                it created on the receiver side and is connected by a 
+                sender.
+
+        Note:
+            We make sure that the receiver will not receive any other messages
+            from the sender during __init__, so it will not disturb the main
+            receiving loop on the receiver side.
+        """
         self.nixl_config = nixl_config
         self.side_channel = side_channel
 
@@ -196,6 +216,7 @@ class NixlPipe:
                 f"Buffer size must be a multiple of "\
                 f"{NixlPipe.TRANSFER_BUFFER_SIZE}"
 
+        torch.cuda.set_device(nixl_config.buffer_device)
         self._buffer = torch.empty(nixl_config.buffer_size,
                                    device=nixl_config.buffer_device,
                                    dtype=torch.uint8)
@@ -207,7 +228,8 @@ class NixlPipe:
         # allocator (should be initialized after self._buffer)
         self._allocator = NixlBufferAllocator(self)
 
-        self._agent = nixl_agent(str(nixl_config.role))
+        self._agent = nixl_agent(str(nixl_config.role) +\
+                str(nixl_config.buffer_device))
         self._reg_descs = self._agent.register_memory(self._transfer_buffers)
         self._local_xfer_descs = self._reg_descs.trim()
         self._remote_xfer_descs = None
@@ -221,8 +243,9 @@ class NixlPipe:
             self.peer_name = self._agent.add_remote_agent(remote_meta).decode(
                 "utf-8")
         else:
-            remote_meta = self.side_channel.recv()
-            self.peer_name = self._agent.add_remote_agent(remote_meta).decode(
+            assert sender_meta is not None, \
+                "The sender_meta should be provided on the receiver side"
+            self.peer_name = self._agent.add_remote_agent(sender_meta).decode(
                 "utf-8")
             self.side_channel.send(local_meta)
 
@@ -450,47 +473,26 @@ class NixlObserverInterface(metaclass=abc.ABCMeta):
         raise NotImplementedError
 
 
-class NixlChannel:
-    """Provides the primitives to send the data and process the received data.
-    It will have some internal threads to handle the data receiving.
-    """
+class NixlSender:
+    """Handles sending data through a NixlPipe."""
 
     def __init__(self, nixl_config: NixlConfig):
         self.nixl_config = nixl_config
 
-        # Initialize the ZeroMQ context
+        # Initialize the ZeroMQ context and side channel
         self._context = zmq.Context()  # type: ignore
-        self._side_channel = self._context.socket(zmq.PAIR)  # type: ignore
-
-        if nixl_config.role == NixlRole.SENDER:
-            self._side_channel.connect("tcp://{}:{}".format(
-                nixl_config.peer_host_name, nixl_config.peer_port))
-            self._side_channel.setsockopt(zmq.LINGER, 0)  # type: ignore
-        else:
-            self._side_channel.bind("tcp://{}:{}".format(
-                nixl_config.peer_host_name, nixl_config.peer_port))
-            self._side_channel.setsockopt(zmq.LINGER, 0)  # type: ignore
+        # Change from PAIR to DEALER socket
+        self._side_channel = self._context.socket(zmq.DEALER)  # type: ignore
+        # Set an identity for this DEALER socket
+        self._side_channel.setsockopt(
+            zmq.IDENTITY,  # type: ignore
+            f"sender-{uuid.uuid4().hex}".encode())  # type: ignore
+        self._side_channel.connect("tcp://{}:{}".format(
+            nixl_config.receiver_host, nixl_config.receiver_port))
+        self._side_channel.setsockopt(zmq.LINGER, 0)  # type: ignore
 
         # Create NIXL Pipe
         self._pipe = NixlPipe(nixl_config, self._side_channel)
-
-        # Add a timeout for the side channel
-        if nixl_config.role == NixlRole.RECEIVER:
-            self._side_channel.setsockopt(
-                zmq.RCVTIMEO,  # type: ignore
-                5000  # Set a timeout for receiving to avoid blocking 
-            )
-
-        # Observers
-        self._observers: list[NixlObserverInterface] = []
-
-        # Start the receiver thread for the receiver side
-        self._running = True
-        self._receiver_thread: Optional[threading.Thread] = None
-        if nixl_config.role == NixlRole.RECEIVER:
-            self._receiver_thread = threading.Thread(
-                target=self._receiver_loop, daemon=True)
-            self._receiver_thread.start()
 
         # Send state tracker
         self._during_send = False
@@ -499,83 +501,8 @@ class NixlChannel:
         # How many objects are added to the payload
         self._added_payload_count = 0
 
-    def _process_receive_transaction(self, keys: list[CacheEngineKey],
-                                     metadatas: list[MemoryObjMetadata]):
-        """Process the receive transaction and notifying all observers.
-
-        Args:
-            keys: the list of CacheEngineKey
-            metadatas: the list of MemoryObjMetadata
-        """
-        if not self._observers:
-            logger.warning(
-                "No observers registered to process the received data")
-
-        num_received_object = 0
-        offset = 0
-        while num_received_object < len(keys):
-            self._pipe.wait_read()
-            objs_read = self._pipe.read_buffer(metadatas[offset:])
-
-            # Notify the observers
-            start = time.perf_counter()
-            for observer in self._observers:
-                observer(
-                    keys=keys[offset:offset + len(objs_read)],
-                    objs=objs_read,
-                    is_view=True  # indicate these are views 
-                )
-            end = time.perf_counter()
-            logger.debug("Observers processing in %.4f ms",
-                         1000 * (end - start))
-
-            # Acknowledge the remote side that the transfer was processed
-            self._pipe.ack_receive()
-
-            # Update the offset
-            num_received_object += len(objs_read)
-            offset += len(objs_read)
-
-    def _receiver_loop(self):
-        poller = zmq.Poller()  # type: ignore
-        poller.register(self._side_channel, zmq.POLLIN)  # type: ignore
-        # Use a shorter timeout to be more responsive to shutdown
-        POLL_TIMEOUT_MS = 1000  # 1s timeout
-
-        while self._running:
-            try:
-                # Wait for a request from the side channel with shorter timeout
-                evts = poller.poll(timeout=POLL_TIMEOUT_MS)
-                if not evts:
-                    continue
-
-                msg = self._side_channel.recv()
-                if not msg:
-                    logger.warn("Received empty message on the side channel")
-                    time.sleep(0.1)  # Avoid busy waiting
-                    continue
-
-                request = NixlRequest.deserialize(msg)
-                logger.debug("Received request with %d keys",
-                             len(request.keys))
-
-                self._process_receive_transaction(keys=request.keys,
-                                                  metadatas=request.metadatas)
-
-            except zmq.Again as e:  # type: ignore
-                # Handle the timeout when waiting for a message
-                logger.debug(
-                    "Timeout waiting for a message on the side channel: %s",
-                    str(e))
-                continue
-            except Exception as e:
-                logger.error("Failed to process receiver loop: %s", str(e))
-                if self._running:
-                    time.sleep(0.01)
-
     def get_allocator(self) -> MemoryAllocatorInterface:
-        """Get the underlying allocator for the NIXL pipe
-        """
+        """Get the underlying allocator for the NIXL pipe"""
         return self._pipe.get_allocator()
 
     def dry_allocate(
@@ -584,8 +511,7 @@ class NixlChannel:
         dtype: Optional[torch.dtype],
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
     ) -> MemoryObjMetadata:
-        """Dry allocate the memory and return the metadata.
-        """
+        """Dry allocate the memory and return the metadata."""
         return self._pipe._allocator.dry_allocate(shape, dtype, fmt)
 
     def prepare_send(self, keys: list[CacheEngineKey],
@@ -635,8 +561,7 @@ class NixlChannel:
         return self._pipe.allocate_for_write(shape, dtype, fmt)
 
     def _flush_send(self):
-        """Flush the underlying pipe
-        """
+        """Flush the underlying pipe"""
         if not self._during_send:
             logger.error("No send transaction is prepared")
             raise RuntimeError("No send transaction is prepared")
@@ -644,8 +569,7 @@ class NixlChannel:
         self._pipe.flush()
 
     def finish_send(self):
-        """Finish the send transaction by flushing the buffer.
-        """
+        """Finish the send transaction by flushing the buffer."""
         assert self._during_send, \
             "No send transaction is prepared"
 
@@ -682,6 +606,159 @@ class NixlChannel:
             callback(obj, index)
         self.finish_send()
 
+    def close(self):
+        """Close the sender resources."""
+        self._side_channel.close()
+        self._context.term()
+        self._pipe.close()
+
+
+class NixlReceiver:
+    """Handles receiving data through a NixlPipe."""
+
+    def __init__(self, nixl_config: NixlConfig):
+        self.nixl_config = nixl_config
+
+        # Initialize the ZeroMQ context and side channel
+        self._context = zmq.Context()  # type: ignore
+        # Change from PAIR to ROUTER socket
+        self._side_channel = self._context.socket(zmq.ROUTER)  # type: ignore
+        self._side_channel.bind("tcp://{}:{}".format(
+            nixl_config.receiver_host, nixl_config.receiver_port))
+        self._side_channel.setsockopt(zmq.LINGER, 0)  # type: ignore
+        # Add a timeout for the side channel
+        self._side_channel.setsockopt(
+            zmq.RCVTIMEO,  # type: ignore
+            5000  # Set a timeout for receiving to avoid blocking 
+        )
+
+        # Track pipes for each sender
+        self._sender_pipes: dict[bytes, NixlPipe] = {}
+
+        # Observers
+        self._observers: list[NixlObserverInterface] = []
+
+        # Start the receiver thread
+        self._running = True
+        self._receiver_thread = threading.Thread(target=self._receiver_loop,
+                                                 daemon=True)
+        self._receiver_thread.start()
+
+    def _initialize_pipe_for_sender(self, sender_id: bytes,
+                                    sender_meta: bytes) -> NixlPipe:
+        """Initialize a NixlPipe for a specific sender.
+        
+        Args:
+            sender_id: The ZMQ identity of the sender
+            
+        Returns:
+            A new NixlPipe instance for the sender
+        """
+        logger.info(f"Initializing NixlPipe for sender: {sender_id.decode()}")
+
+        # Create a wrapper socket for this specific sender
+        sender_socket = SenderSpecificSocket(self._side_channel, sender_id)
+
+        # Create a pipe for this sender
+        pipe = NixlPipe(self.nixl_config, sender_socket, sender_meta)
+
+        # Store the pipe
+        self._sender_pipes[sender_id] = pipe
+
+        logger.info("NixlPipe initialized successfully for sender: %s",
+                    sender_id.decode())
+        return pipe
+
+    def _process_receive_transaction(self, sender_id: bytes,
+                                     keys: list[CacheEngineKey],
+                                     metadatas: list[MemoryObjMetadata]):
+        """Process the receive transaction and notifying all observers.
+
+        Args:
+            sender_id: The ZMQ identity of the sender
+            keys: the list of CacheEngineKey
+            metadatas: the list of MemoryObjMetadata
+        """
+        if not self._observers:
+            logger.warning(
+                "No observers registered to process the received data")
+
+        # Get pipe for this sender
+        assert sender_id in self._sender_pipes
+        pipe = self._sender_pipes[sender_id]
+
+        num_received_object = 0
+        offset = 0
+        while num_received_object < len(keys):
+            pipe.wait_read()
+            objs_read = pipe.read_buffer(metadatas[offset:])
+
+            # Notify the observers
+            start = time.perf_counter()
+            for observer in self._observers:
+                observer(
+                    keys=keys[offset:offset + len(objs_read)],
+                    objs=objs_read,
+                    is_view=True  # indicate these are views 
+                )
+            end = time.perf_counter()
+            logger.debug("Observers processing in %.4f ms",
+                         1000 * (end - start))
+
+            # Acknowledge the remote side that the transfer was processed
+            pipe.ack_receive()
+
+            # Update the offset
+            num_received_object += len(objs_read)
+            offset += len(objs_read)
+
+    def _receiver_loop(self):
+        poller = zmq.Poller()  # type: ignore
+        poller.register(self._side_channel, zmq.POLLIN)  # type: ignore
+        # Use a shorter timeout to be more responsive to shutdown
+        POLL_TIMEOUT_MS = 1000  # 1s timeout
+
+        while self._running:
+            try:
+                # Wait for a request from the side channel with shorter timeout
+                evts = poller.poll(timeout=POLL_TIMEOUT_MS)
+                if not evts:
+                    continue
+
+                sender_id, msg = self._side_channel.recv_multipart()
+                if not msg:
+                    logger.warn("Received empty message on the side channel")
+                    time.sleep(0.1)  # Avoid busy waiting
+                    continue
+
+                # New sender connection
+                if sender_id not in self._sender_pipes:
+                    # Now, msg should be the sender metadata
+                    # Initialize a new pipe for this sender
+                    self._initialize_pipe_for_sender(sender_id, msg)
+                    logger.info(
+                        f"New sender connected with ID: {sender_id.decode()}")
+                    continue
+
+                request = NixlRequest.deserialize(msg)
+                logger.debug("Received request with %d keys from sender %s",
+                             len(request.keys), sender_id.decode())
+
+                self._process_receive_transaction(sender_id=sender_id,
+                                                  keys=request.keys,
+                                                  metadatas=request.metadatas)
+
+            except zmq.Again as e:  # type: ignore
+                # Handle the timeout when waiting for a message
+                logger.debug(
+                    "Timeout waiting for a message on the side channel: %s",
+                    str(e))
+                continue
+            except Exception as e:
+                logger.error("Failed to process receiver loop: %s", str(e))
+                if self._running:
+                    time.sleep(0.01)
+
     def register_receive_observer(self, observer: NixlObserverInterface):
         """Register a new receive observer
         
@@ -691,16 +768,147 @@ class NixlChannel:
         self._observers.append(observer)
 
     def close(self):
+        """Close the receiver resources."""
         self._running = False
-        if self._receiver_thread is not None:
-            # Wait for the receiver thread to finish with timeout
-            self._receiver_thread.join(timeout=3.0)  # 1 second timeout
-            if self._receiver_thread.is_alive():
-                logger.warning(
-                    "Receiver thread did not shut down cleanly within timeout")
+        # Wait for the receiver thread to finish with timeout
+        self._receiver_thread.join(timeout=3.0)  # 3 second timeout
+        if self._receiver_thread.is_alive():
+            logger.warning(
+                "Receiver thread did not shut down cleanly within timeout")
+
+        # Close all pipes
+        for sender_id, pipe in self._sender_pipes.items():
+            logger.info(f"Closing pipe for sender: {sender_id.decode()}")
+            pipe.close()
+
         self._side_channel.close()
         self._context.term()
-        self._pipe.close()
+
+
+# Helper class to route messages to specific senders
+class SenderSpecificSocket:
+    """A wrapper around a ROUTER socket that only communicates with a specific 
+    sender.
+    """
+
+    def __init__(
+            self,
+            router_socket: zmq.Socket,  # type: ignore
+            sender_id: bytes):
+        self.router_socket = router_socket
+        self.sender_id = sender_id
+
+    def send(self, data: bytes):
+        """Send data to the specific sender."""
+        self.router_socket.send_multipart([self.sender_id, data])
+
+    def recv(self) -> bytes:
+        """Receive data from the specific sender.
+        
+        This is a simplified implementation that assumes messages are only
+        coming from the specific sender. In a real implementation, you would
+        need to filter messages by sender_id.
+        """
+        frames = self.router_socket.recv_multipart()
+        if frames[0] == self.sender_id:
+            return frames[1]
+        else:
+            logger.warning(
+                f"Received message for wrong sender: {frames[0].decode()}")
+            return b""
+
+
+class NixlChannel:
+    """Provides the primitives to send the data and process the received data.
+    It will have some internal threads to handle the data receiving.
+    """
+
+    def __init__(self, nixl_config: NixlConfig):
+        self.nixl_config = nixl_config
+        self.role = nixl_config.role
+
+        # Create sender or receiver based on role
+        self._sender = None
+        self._receiver = None
+
+        if nixl_config.role == NixlRole.SENDER:
+            self._sender = NixlSender(nixl_config)
+        else:
+            self._receiver = NixlReceiver(nixl_config)
+
+    def _check_sender(self):
+        """Check if this channel is configured as a sender."""
+        if self._sender is None:
+            raise RuntimeError(
+                f"Cannot perform sender operation with role {self.role}")
+        return self._sender
+
+    def _check_receiver(self):
+        """Check if this channel is configured as a receiver."""
+        if self._receiver is None:
+            raise RuntimeError(
+                f"Cannot perform receiver operation with role {self.role}")
+        return self._receiver
+
+    def get_allocator(self) -> MemoryAllocatorInterface:
+        """Get the underlying allocator for the NIXL pipe"""
+        sender = self._check_sender()
+        return sender.get_allocator()
+
+    def dry_allocate(
+        self,
+        shape: torch.Size,
+        dtype: Optional[torch.dtype],
+        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
+    ) -> MemoryObjMetadata:
+        """Dry allocate the memory and return the metadata."""
+        sender = self._check_sender()
+        return sender.dry_allocate(shape, dtype, fmt)
+
+    def prepare_send(self, keys: list[CacheEngineKey],
+                     metadatas: list[MemoryObjMetadata]):
+        """Prepare a send transaction by sending the request using 
+        the side channel.
+        """
+        sender = self._check_sender()
+        sender.prepare_send(keys, metadatas)
+
+    def allocate_for_send(
+        self,
+        shape: torch.Size,
+        dtype: Optional[torch.dtype],
+        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
+    ) -> Optional[MemoryObj]:
+        """Allocate the memory for send."""
+        sender = self._check_sender()
+        return sender.allocate_for_send(shape, dtype, fmt)
+
+    def finish_send(self):
+        """Finish the send transaction by flushing the buffer."""
+        sender = self._check_sender()
+        sender.finish_send()
+
+    def zero_copy_send_with_callback(
+        self,
+        keys: list[CacheEngineKey],
+        metadatas: list[MemoryObjMetadata],
+        callback: Callable[[MemoryObj, int], None],
+    ):
+        """Send the data with a zero-copy callback."""
+        sender = self._check_sender()
+        sender.zero_copy_send_with_callback(keys, metadatas, callback)
+
+    def register_receive_observer(self, observer: NixlObserverInterface):
+        """Register a new receive observer"""
+        receiver = self._check_receiver()
+        receiver.register_receive_observer(observer)
+
+    def close(self):
+        """Close all resources."""
+        if self._sender:
+            self._sender.close()
+        if self._receiver:
+            self._receiver.close()
 
 
 ############################################################

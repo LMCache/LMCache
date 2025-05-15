@@ -288,11 +288,13 @@ void multi_layer_kv_transfer(
         lmc::load_and_reshape_multi_layer_kernel<int64_t, false><<<grid, block, 0, stream>>>(
             key_value_ptr, page_buffer_ptrs, slot_mapping_ptr,
             num_qwords, num_tokens, num_layers, page_buffer_size);
+        C10_CUDA_KERNEL_LAUNCH_CHECK();
     }
     else {
         lmc::load_and_reshape_multi_layer_kernel<int64_t, true><<<grid, block, 0, stream>>>(
             key_value_ptr, page_buffer_ptrs, slot_mapping_ptr,
             num_qwords, num_tokens, num_layers, page_buffer_size);
+        C10_CUDA_KERNEL_LAUNCH_CHECK();
     }
 }
 
