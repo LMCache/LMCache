@@ -29,43 +29,60 @@ set +x
 
 port1=8000
 max_port=9000
-while [ $port1 -le $max_port ]; do
-    if ! netstat -tuln 2>/dev/null | grep -q ":$port1 "; then
-        echo "Port $port1 is available."
-        break
-    else
-        echo "Port $port1 is in use. Killing process(es)..."
-        pids=$(lsof -t -i tcp:$port1)
-        if [ -n "$pids" ]; then
-            echo "→ Killing PID(s): $pids"
-            kill $pids
-            sleep 1
-            echo "→ Processes on port $port1 terminated."
-        else
-            echo "→ No PIDs found, but port is still reported in use."
-        fi
-        break
+
+find_free_port() {
+  local port=$1
+
+  while [ $port -le $max_port ]; do
+    # 1) If it’s already free, we’re done
+    if ! netstat -tuln 2>/dev/null | grep -q ":$port "; then
+      echo "Port $port is available."
+      printf "%s" "$port"
+      return 0
     fi
-done
-port2=$((port1 + 1))
-while [ $port2 -le $max_port ]; do
-    if ! netstat -tuln 2>/dev/null | grep -q ":$port2 "; then
-        echo "Port $port2 is available."
-        break
+
+    # 2) Otherwise try killing any listener
+    echo "Port $port is in use. Killing process(es)..."
+    local pids
+    pids=$(lsof -t -i tcp:$port)
+    if [ -n "$pids" ]; then
+      echo "→ Killing PID(s): $pids"
+      kill $pids
+      sleep 1
+      # 3) Re‑check after kill
+      if ! netstat -tuln 2>/dev/null | grep -q ":$port "; then
+        echo "→ Port $port freed after killing processes."
+        printf "%s" "$port"
+        return 0
+      else
+        echo "→ Port $port still in use after kill. Continuing search..."
+      fi
     else
-        echo "Port $port2 is in use. Killing process(es)..."
-        pids=$(lsof -t -i tcp:$port2)
-        if [ -n "$pids" ]; then
-            echo "→ Killing PID(s): $pids"
-            kill $pids
-            sleep 1
-            echo "→ Processes on port $port2 terminated."
-        else
-            echo "→ No PIDs found, but port is still reported in use."
-        fi
-        break
+      echo "→ No PIDs found listening on $port. Continuing search..."
     fi
-done
+
+    # 4) Next port
+    port=$((port + 1))
+  done
+
+  # 5) No port found in range
+  return 1
+}
+
+# Find port1
+port1=$(find_free_port $start_port) || {
+  echo "❌ Could not find any free port between $start_port and $max_port."
+  exit 1
+}
+
+# Find port2, starting just after port1
+port2=$(find_free_port $((port1 + 1))) || {
+  echo "❌ Could not find a second free port between $((port1+1)) and $max_port."
+  exit 1
+}
+
+echo
+echo "🎉 Selected ports: port1=$port1, port2=$port2"
 
 set -x
 
