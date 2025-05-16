@@ -30,8 +30,7 @@ jobs:
         pip install redis
         pip install setuptools
         pip install pyzmq
-        pip uninstall -y types-setuptools
-        python3 -m pip install types-setuptools
+        pip install --no-cache-dir --force-reinstall types-setuptools
     - name: Mypy
       run: |
         mypy
