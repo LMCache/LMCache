@@ -15,7 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ["3.11"]
+        python-version: ["3.12"]
     steps:
     - uses: actions/checkout@v2
     - name: Set up Python ${{ matrix.python-version }}
@@ -29,7 +29,7 @@ jobs:
         pip install redis
         pip install setuptools
         pip install pyzmq
-        pip install --no-cache-dir --force-reinstall types-setuptools
+        pip install --no-cache-dir --force-reinstall types-setuptools setuptools-stubs
     - name: Mypy
       run: |
         mypy
