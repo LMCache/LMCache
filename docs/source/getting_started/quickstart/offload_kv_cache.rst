@@ -49,8 +49,10 @@ Next, configure vLLM with LMCache integration:
     from vllm.config import KVTransferConfig
 
     # Configure KV cache transfer to use LMCache
-    ktc = KVTransferConfig.from_cli(
-        '{"kv_connector":"LMCacheConnectorV1", "kv_role":"kv_both"}')
+    ktc = KVTransferConfig(
+        kv_connector="LMCacheConnectorV1",
+        kv_role="kv_both",
+    )
 
     # Initialize LLM with LMCache configuration
     # Adjust gpu_memory_utilization based on your GPU memory
@@ -273,8 +275,10 @@ Save the following script as ``cpu-offloading.py``:
         Returns:
             LLM: Configured LLM instance
         """
-        ktc = KVTransferConfig.from_cli(
-            '{"kv_connector":"LMCacheConnectorV1", "kv_role":"kv_both"}') if enable_lmcache else None
+        ktc = KVTransferConfig(
+            kv_connector="LMCacheConnectorV1",
+            kv_role="kv_both",
+        ) if enable_lmcache else None
         
         return LLM(
             model=model_name,
