@@ -81,8 +81,8 @@ if __name__ == '__main__':
     prompts = gen_prompts(tokenizer, context_messages, user_inputs_batch)
 
     kv_transfer_config = KVTransferConfig(
-        kv_connector: "LMCacheConnectorV1",
-        kv_role: "kv_both",
+        kv_connector="LMCacheConnectorV1",
+        kv_role="kv_both",
     )
     # Create an LLM.
     llm = LLM(model=model_name,
