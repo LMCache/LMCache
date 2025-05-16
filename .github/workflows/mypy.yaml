@@ -30,9 +30,10 @@ jobs:
         pip install redis
         pip install setuptools
         pip install pyzmq
-        pip install --no-cache-dir --force-reinstall types-setuptools types-pyOpenSSL
+        pip install --no-cache-dir --force-reinstall types-setuptools
+        python3 -m pip install types-setuptools
     - name: Mypy
       run: |
-        mypy --install-types
+        mypy
         mypy tests --follow-imports skip
         mypy lmcache --follow-imports skip
