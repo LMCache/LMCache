@@ -193,7 +193,11 @@ class RequestTracker:
         scheduled again
         """
         self.token_ids.extend(cached_request.new_token_ids)
-        self.allocated_block_ids.extend(cached_request.new_block_ids)
+        if not isinstance(cached_request.new_block_ids[0], list):
+            self.allocated_block_ids.extend(cached_request.new_block_ids)
+        else:
+            for ids in cached_request.new_block_ids:
+                self.allocated_block_ids.extend(ids)
 
 
 @dataclass
