@@ -259,14 +259,16 @@ T* get_kernel_ptr(TENSOR_TYPE& tensor) {
  *  - direction: false  means LMCache to PagedBuffer, true  means PagedBuffer to LMCache
  */
 void multi_layer_kv_transfer(
-    torch::Tensor& key_value,  // [2, num_layer, num_tokens, num_heads*head_size]
+    torch::Tensor& key_value,  // [2, num_layer, num_tokens, num_heads*head_size] for flash_attn
+                               // [1, num_layer, num_tokens, aligned_head_size] for MLA
                                // key/value must be on gpu/pinned cpu
 
     const torch::Tensor& key_value_ptrs, // [num_layers]
     const torch::Tensor& slot_mapping,  // [num_tokens],
     const torch::Device& paged_memory_device, 
     const int page_buffer_size,
-    const bool direction
+    const bool direction,
+    const bool use_mla
 ) {
     int64_t *key_value_ptr = get_kernel_ptr<int64_t, torch::Tensor>(key_value);
     int64_t **page_buffer_ptrs = get_kernel_ptr<int64_t*, const torch::Tensor>(key_value_ptrs);
@@ -278,7 +280,12 @@ void multi_layer_kv_transfer(
     int elements_per_qword = 8 / key_value.element_size();
     int num_qwords = num_origin_elements / elements_per_qword;
 
-    dim3 grid(key_value.size(2), key_value.size(1), 2);
+    int k_or_v_size = 2;
+    if (use_mla) {
+        k_or_v_size = 1;
+    }
+
+    dim3 grid(key_value.size(2), key_value.size(1), k_or_v_size);
     dim3 block(std::min(num_qwords, 128));
 
     const at::cuda::OptionalCUDAGuard device_guard(paged_memory_device);

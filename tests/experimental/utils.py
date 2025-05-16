@@ -106,6 +106,25 @@ def generate_kv_cache_paged_list_tensors(num_blocks,
     return ret
 
 
+def generate_mla_kv_cache_paged_list_tensors(num_blocks,
+                                             device,
+                                             block_size=64,
+                                             dtype=torch.bfloat16,
+                                             num_layers=32):
+    """
+    return KV cache of MLA
+    """
+    ret = []
+    head_size = 576
+    shape = [num_blocks, block_size, head_size]
+
+    for i in range(num_layers):
+        kv = torch.rand(shape, dtype=dtype, device=device)
+        ret.append(kv)
+
+    return ret
+
+
 def generate_tokens(num_tokens, device, fixed=False):
     if fixed:
         return torch.tensor([-1] * num_tokens).to(device)

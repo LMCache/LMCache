@@ -44,6 +44,10 @@ class MemoryFormat(Enum):
 
     BINARY_BUFFER = 4
 
+    KV_MLA_FMT = 5
+    """[1, num_layers, num_tokens, aligned_head_size]
+    """
+
     def token_dim(self) -> int:
         if self == MemoryFormat.KV_2LTD:
             return 2

@@ -167,11 +167,21 @@ class RequestTracker:
                 local cache hit) and new tokens that will be scheduled.
 
         """
+        # vLLM 0.9.0 update: request.block_ids changed from list[int] to
+        # list[list[int]]
+        # Need to check the type of request.block_ids
+        unfolded_block_ids = []
+        if not isinstance(new_request.block_ids[0], list):
+            unfolded_block_ids = new_request.block_ids.copy()
+        else:
+            for ids in new_request.block_ids:
+                unfolded_block_ids.extend(ids)
+
         return RequestTracker(
             req_id=new_request.req_id,
             token_ids=new_request.prompt_token_ids[:num_tokens_to_compute].
             copy(),
-            allocated_block_ids=new_request.block_ids.copy(),
+            allocated_block_ids=unfolded_block_ids,
             num_saved_tokens=0,
         )
 
@@ -229,8 +239,9 @@ class ReqMeta:
         # 1. has already been saved before (num_saved_tokens > 0)
         # 2. number of unsaved tokens is not reached the chunk boundary
         skip_leading_tokens = tracker.num_saved_tokens
-        chunk_boundary = cdiv(tracker.num_saved_tokens, lmcache_chunk_size) * \
-                lmcache_chunk_size
+        chunk_boundary = (
+            cdiv(tracker.num_saved_tokens + 1, lmcache_chunk_size) *
+            lmcache_chunk_size)
         skip_save = skip_save or (tracker.num_saved_tokens > 0 and \
                 input_token_len < chunk_boundary)
 
@@ -314,7 +325,7 @@ class LMCacheConnectorV1Impl:
         else:
             self.lmcache_engine = init_lmcache_engine(
                 vllm_config.model_config, vllm_config.parallel_config,
-                vllm_config.cache_config)
+                vllm_config.cache_config, vllm_config.scheduler_config)
             self.use_layerwise = isinstance(self.lmcache_engine,
                                             LayerwiseLMCacheEngine)
 
