@@ -1,5 +1,19 @@
+# Copyright 2024-2025 LMCache Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import inspect
-from typing import List, Optional, Tuple
+from typing import Optional, Sequence, Tuple
 
 import redis
 
@@ -25,8 +39,8 @@ class RedisLookupServer(LookupServerInterface):
         self.host = host
         self.port = int(port)
 
-        self.connection = redis.Redis(host=host,
-                                      port=port,
+        self.connection = redis.Redis(host=self.host,
+                                      port=self.port,
                                       decode_responses=True)
         logger.info(f"Connected to Redis lookup server at {host}:{port}")
         #decode_responses=False)
@@ -52,6 +66,17 @@ class RedisLookupServer(LookupServerInterface):
         logger.debug("Call to insert in lookup server")
         self.connection.set(key.to_string(), self.distributed_url)
 
+    def batched_insert(self, keys: Sequence[CacheEngineKey]):
+        """
+        Perform batched insert in the lookup server.
+        """
+        assert self.distributed_url is not None
+        logger.debug("Call to batched insert in lookup server")
+
+        # TODO(Jiayi): Optimize this with redis pipe
+        for key in keys:
+            self.connection.set(key.to_string(), self.distributed_url)
+
     def remove(self, key: CacheEngineKey):
         """
         Perform remove in the lookup server.
@@ -59,7 +84,7 @@ class RedisLookupServer(LookupServerInterface):
         logger.debug("Call to remove in lookup server")
         self.connection.delete(key.to_string())
 
-    def batched_remove(self, keys: List[CacheEngineKey]):
+    def batched_remove(self, keys: Sequence[CacheEngineKey]):
         """
         Perform batched remove in the lookup server.
         """

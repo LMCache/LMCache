@@ -1,3 +1,17 @@
+# Copyright 2024-2025 LMCache Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import os
 import re
 from dataclasses import dataclass
@@ -5,6 +19,10 @@ from typing import Any, Optional, Tuple
 
 import torch
 import yaml
+
+from lmcache.logging import init_logger
+
+logger = init_logger(__name__)
 
 
 @dataclass
@@ -22,6 +40,8 @@ class LMCacheEngineMetadata:
     """ the shape of kv tensors """
     """ (num_layer, 2, chunk_size, num_kv_head, head_size) """
     kv_shape: tuple[int, int, int, int, int]
+    """ whether use MLA"""
+    use_mla: bool = False
 
 
 @dataclass
@@ -114,7 +134,7 @@ class LMCacheEngineConfig:
             blend_min_tokens=256,
             blend_separator=blend_default_separator,
             blend_add_special_in_precomp=False,
-        )
+        ).log_config()
 
     @staticmethod
     def from_file(file_path: str) -> "LMCacheEngineConfig":
@@ -170,7 +190,7 @@ class LMCacheEngineConfig:
             blend_min_tokens,
             blend_separator,
             blend_add_special_in_precomp,
-        )
+        ).log_config()
 
     @staticmethod
     def from_env() -> "LMCacheEngineConfig":
@@ -227,7 +247,28 @@ class LMCacheEngineConfig:
             parse_env(get_env_name("blend_add_special_in_precomp"),
                       config.blend_add_special_in_precomp))
 
-        return config
+        return config.log_config()
+
+    def log_config(self) -> 'LMCacheEngineConfig':
+        """Log all configuration settings
+        """
+        config_dict = {
+            'chunk_size': self.chunk_size,
+            'local_device': self.local_device,
+            'max_local_cache_size': f"{self.max_local_cache_size} GB",
+            'remote_url': self.remote_url,
+            'remote_serde': self.remote_serde,
+            'pipelined_backend': self.pipelined_backend,
+            'save_decode_cache': self.save_decode_cache,
+            'enable_blending': self.enable_blending,
+            'blend_recompute_ratio': self.blend_recompute_ratio,
+            'blend_min_tokens': self.blend_min_tokens,
+            'blend_separator': self.blend_separator,
+            'blend_add_special_in_precomp': self.blend_add_special_in_precomp
+        }
+        logger.info(f"LMCache Configuration: {config_dict}")
+
+        return self
 
 
 ### SOME GLOBAL CONFIGS

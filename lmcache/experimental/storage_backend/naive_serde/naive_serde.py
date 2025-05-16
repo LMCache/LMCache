@@ -19,11 +19,11 @@ from lmcache.experimental.storage_backend.naive_serde.serde import (
 
 class NaiveSerializer(Serializer):
 
-    def __init__(self, memory_allocator):
-        self.memory_allocator = memory_allocator
+    def __init__(self):
+        pass
 
     def serialize(self, memory_obj: MemoryObj) -> MemoryObj:
-        self.memory_allocator.ref_count_up(memory_obj)
+        memory_obj.ref_count_up()
         return memory_obj
 
 

@@ -145,10 +145,10 @@ def test_backends(backend_type, dst_device, autorelease, lmserver_process):
 
     random_tensors = [torch.rand(kv_shape, dtype=torch.half) for i in range(N)]
 
-    for key, value in zip(keys, random_tensors):
+    for key, value in zip(keys, random_tensors, strict=False):
         backend.put(key, value)
 
-    for key, value in zip(keys, random_tensors):
+    for key, value in zip(keys, random_tensors, strict=False):
         assert backend.contains(key)
         retrieved = backend.get(key)
         assert retrieved.shape == value.shape
@@ -173,7 +173,7 @@ def test_nonblocking_put(backend_type, autorelease, lmserver_process):
         torch.rand(kv_shape, dtype=torch.half, device="cuda") for i in range(N)
     ]
 
-    for key, value in zip(keys, random_tensors):
+    for key, value in zip(keys, random_tensors, strict=False):
         start = time.perf_counter()
         backend.put(key, value, blocking=False)
         end = time.perf_counter()
@@ -185,7 +185,7 @@ def test_nonblocking_put(backend_type, autorelease, lmserver_process):
         # assert _elapsed < 0.005
 
     time.sleep(7)
-    for key, value in zip(keys, random_tensors):
+    for key, value in zip(keys, random_tensors, strict=False):
         assert backend.contains(key)
         retrieved = backend.get(key)
         assert retrieved.shape == value.shape
@@ -207,12 +207,12 @@ def test_restart(autorelease, lmserver_process):
     keys = [generate_random_key() for i in range(N)]
     random_tensors = [torch.rand(kv_shape, dtype=torch.half) for i in range(N)]
 
-    for key, value in zip(keys, random_tensors):
+    for key, value in zip(keys, random_tensors, strict=False):
         backend.put(key, value)
 
     _new_backend = autorelease(CreateStorageBackend(config, metadata))
     # it should be able to automatically fetch existing keys
-    for key, value in zip(keys, random_tensors):
+    for key, value in zip(keys, random_tensors, strict=False):
         assert backend.contains(key)
         retrieved = backend.get(key)
         assert value.shape == retrieved.shape

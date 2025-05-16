@@ -12,16 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from lmcache.experimental.memory_management import (MemoryAllocatorInterface,
-                                                    MemoryObj)
+from lmcache.experimental.memory_management import MemoryObj
 from lmcache.experimental.storage_backend.naive_serde.serde import (
     Deserializer, Serializer)
 
 
 class KIVISerializer(Serializer):
 
-    def __init__(self, memory_allocator: MemoryAllocatorInterface):
-        self.memory_allocator = memory_allocator
+    def __init__(self):
+        pass
 
     def serialize(self, memory_obj: MemoryObj) -> MemoryObj:
         # TODO(Yuhan)
@@ -30,8 +29,8 @@ class KIVISerializer(Serializer):
 
 class KIVIDeserializer(Deserializer):
 
-    def __init__(self, memory_allocator: MemoryAllocatorInterface):
-        self.memory_allocator = memory_allocator
+    def __init__(self):
+        pass
 
     def deserialize(self, memory_obj: MemoryObj) -> MemoryObj:
         # TODO(Yuhan)

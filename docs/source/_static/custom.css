@@ -1,0 +1,45 @@
+/* Hide extra buttons if multiple are showing */
+div.highlight button.copybtn + button.copybtn {
+    display: none;
+  }
+  
+  /* Remove unwanted "Copy code" text from clipboard (for older versions) */
+  .copybtn::before {
+    content: none !important;
+  }
+  
+  /* Style the copy button */
+  button.copybtn {
+    background-color: #4a90e2;
+    color: white;
+    border: none;
+    border-radius: 5px;
+    font-size: 12px;
+    padding: 4px 8px;
+    cursor: pointer;
+    position: absolute;
+    top: 0.4em;
+    right: 0.6em;
+    opacity: 0.8;
+    transition: opacity 0.2s ease-in-out;
+    z-index: 3;
+  }
+  
+  button.copybtn:hover {
+    opacity: 1;
+  }
+  
+  /* Optional: Hide the copied tooltip or style it */
+  .copybtn:after {
+    content: "Copied!";
+    display: none;
+    position: absolute;
+    top: -1.5em;
+    right: 0;
+    background: #333;
+    color: #fff;
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-size: 10px;
+  }
+  

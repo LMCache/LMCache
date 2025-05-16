@@ -15,15 +15,16 @@
 import asyncio
 import inspect
 import os
-from typing import List, Optional, Tuple, Union, no_type_check
+from typing import List, Optional, Tuple, no_type_check
 
 import redis
 
-from lmcache.experimental.memory_management import (MemoryAllocatorInterface,
-                                                    MemoryObj)
-from lmcache.experimental.protocol import RedisMetadata
+from lmcache.experimental.memory_management import MemoryObj
+from lmcache.experimental.protocol import RemoteMetadata
 from lmcache.experimental.storage_backend.connector.base_connector import \
     RemoteConnector
+from lmcache.experimental.storage_backend.local_cpu_backend import \
+    LocalCPUBackend
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
 
@@ -41,33 +42,32 @@ class RedisConnector(RemoteConnector):
     """
 
     def __init__(self, host: str, port: int, loop: asyncio.AbstractEventLoop,
-                 memory_allocator: MemoryAllocatorInterface):
+                 local_cpu_backend: LocalCPUBackend):
         self.connection = redis.Redis(host=host,
                                       port=port,
                                       decode_responses=False)
 
-        self.memory_allocator = memory_allocator
         self.loop = loop
+        self.local_cpu_backend = local_cpu_backend
 
     async def exists(self, key: CacheEngineKey) -> bool:
         return bool(self.connection.exists(key.to_string() + "metadata"))
 
     async def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         key_str = key.to_string()
-        redis_metadata_bytes = self.connection.get(key_str + "metadata")
+        metadata_bytes = self.connection.get(key_str + "metadata")
 
-        if redis_metadata_bytes is None:
+        if metadata_bytes is None:
             return None
 
-        assert not inspect.isawaitable(redis_metadata_bytes)
+        assert not inspect.isawaitable(metadata_bytes)
 
-        redis_metadata = RedisMetadata.deserialize(
-            memoryview(redis_metadata_bytes))
+        metadata = RemoteMetadata.deserialize(memoryview(metadata_bytes))
 
-        memory_obj = self.memory_allocator.allocate(
-            redis_metadata.shape,
-            redis_metadata.dtype,
-            redis_metadata.fmt,
+        memory_obj = self.local_cpu_backend.allocate(
+            metadata.shape,
+            metadata.dtype,
+            metadata.fmt,
         )
         if memory_obj is None:
             logger.warning("Failed to allocate memory during remote receive")
@@ -95,6 +95,7 @@ class RedisConnector(RemoteConnector):
         else:
             view = memoryview(memory_obj.byte_array)
         view[:redis_metadata.length] = kv_bytes
+        view[:metadata.length] = kv_bytes
 
         return memory_obj
 
@@ -106,14 +107,14 @@ class RedisConnector(RemoteConnector):
         kv_dtype = memory_obj.get_dtype()
         memory_format = memory_obj.get_memory_format()
 
-        redis_metadata_bytes = RedisMetadata(len(kv_bytes), kv_shape, kv_dtype,
-                                             memory_format).serialize()
+        metadata_bytes = RemoteMetadata(len(kv_bytes), kv_shape, kv_dtype,
+                                        memory_format).serialize()
 
         key_str = key.to_string()
-        self.connection.set(key_str + "metadata", redis_metadata_bytes)
+        self.connection.set(key_str + "metadata", metadata_bytes)
         self.connection.set(key_str + "kv_bytes", kv_bytes)
 
-        self.memory_allocator.ref_count_down(memory_obj)
+        memory_obj.ref_count_down()
 
     # TODO
     @no_type_check
@@ -128,9 +129,9 @@ class RedisConnector(RemoteConnector):
 class RedisSentinelConnector(RemoteConnector):
     """
     Uses redis.Sentinel to connect to a Redis cluster.
-    The hosts are specified in the config file, started with "redis-sentinel://" 
+    The hosts are specified in the config file, started with "redis-sentinel://"
     and separated by commas.
-    
+
     Example:
         remote_url: "redis-sentinel://localhost:26379,localhost:26380,localhost:26381"
 
@@ -142,9 +143,12 @@ class RedisSentinelConnector(RemoteConnector):
     ENV_REDIS_TIMEOUT = "REDIS_TIMEOUT"
     ENV_REDIS_SERVICE_NAME = "REDIS_SERVICE_NAME"
 
-    def __init__(self, hosts_and_ports: List[Tuple[str, Union[str, int]]],
-                 loop: asyncio.AbstractEventLoop,
-                 memory_allocator: MemoryAllocatorInterface):
+    def __init__(
+        self,
+        hosts_and_ports: List[Tuple[str, int]],
+        loop: asyncio.AbstractEventLoop,
+        local_cpu_backend: LocalCPUBackend,
+    ):
         # Get service name
         match os.environ.get(self.ENV_REDIS_SERVICE_NAME):
             case None:
@@ -165,32 +169,32 @@ class RedisSentinelConnector(RemoteConnector):
                 timeout = float(value)
 
         logger.info(f"Host and ports: {hosts_and_ports}")
-        self.sentinel = redis.Sentinel(hosts_and_ports, timeout)
+        self.sentinel = redis.Sentinel(hosts_and_ports, socket_timeout=timeout)
         self.master = self.sentinel.master_for(service_name,
                                                socket_timeout=timeout)
         self.slave = self.sentinel.slave_for(service_name,
                                              socket_timeout=timeout)
 
-        self.memory_allocator = memory_allocator
+        self.local_cpu_backend = local_cpu_backend
 
     async def exists(self, key: CacheEngineKey) -> bool:
-        return self.slave.exists(key.to_string() + "metadata")
+        return bool(self.slave.exists(key.to_string() + "metadata"))
 
     async def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         key_str = key.to_string()
-        redis_metadata_bytes = self.slave.get(key_str + "metadata")
+        metadata_bytes = self.slave.get(key_str + "metadata")
 
-        if redis_metadata_bytes is None:
+        if metadata_bytes is None:
             return None
 
-        assert not inspect.isawaitable(redis_metadata_bytes)
+        assert not inspect.isawaitable(metadata_bytes)
 
-        redis_metadata = RedisMetadata.deserialize(redis_metadata_bytes)
+        metadata = RemoteMetadata.deserialize(metadata_bytes)
 
-        memory_obj = self.memory_allocator.allocate(
-            redis_metadata.shape,
-            redis_metadata.dtype,
-            redis_metadata.fmt,
+        memory_obj = self.local_cpu_backend.allocate(
+            metadata.shape,
+            metadata.dtype,
+            metadata.fmt,
         )
         if memory_obj is None:
             logger.warning("Failed to allocate memory during remote receive")
@@ -212,7 +216,7 @@ class RedisSentinelConnector(RemoteConnector):
             return None
 
         view = memoryview(memory_obj.byte_array)
-        view[0:redis_metadata.length] = kv_bytes
+        view[0:metadata.length] = kv_bytes
 
         return memory_obj
 
@@ -224,14 +228,14 @@ class RedisSentinelConnector(RemoteConnector):
         kv_dtype = memory_obj.get_dtype()
         memory_format = memory_obj.get_memory_format()
 
-        redis_metadata_bytes = RedisMetadata(len(kv_bytes), kv_shape, kv_dtype,
-                                             memory_format).serialize()
+        metadata_bytes = RemoteMetadata(len(kv_bytes), kv_shape, kv_dtype,
+                                        memory_format).serialize()
 
         key_str = key.to_string()
-        self.master.set(key_str + "metadata", redis_metadata_bytes)
+        self.master.set(key_str + "metadata", metadata_bytes)
         self.master.set(key_str + "kv_bytes", kv_bytes)
 
-        self.memory_allocator.ref_count_down(memory_obj)
+        memory_obj.ref_count_down()
 
     # TODO
     @no_type_check

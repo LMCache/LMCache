@@ -14,8 +14,7 @@
 
 from typing import List, Optional, no_type_check
 
-from lmcache.experimental.memory_management import (MemoryAllocatorInterface,
-                                                    MemoryObj)
+from lmcache.experimental.memory_management import MemoryObj
 # reuse
 from lmcache.experimental.storage_backend.connector.base_connector import \
     RemoteConnector
@@ -27,8 +26,8 @@ logger = init_logger(__name__)
 
 class BlackholeConnector(RemoteConnector):
 
-    def __init__(self, memory_allocator: MemoryAllocatorInterface):
-        self.memory_allocator = memory_allocator
+    def __init__(self):
+        pass
 
     async def exists(self, key: CacheEngineKey) -> bool:
         return False
@@ -37,7 +36,7 @@ class BlackholeConnector(RemoteConnector):
         return None
 
     async def put(self, key: CacheEngineKey, memory_obj: MemoryObj):
-        self.memory_allocator.ref_count_down(memory_obj)
+        memory_obj.ref_count_down()
 
     @no_type_check
     async def list(self) -> List[str]:
