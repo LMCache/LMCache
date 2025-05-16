@@ -25,7 +25,13 @@ from torch.nn.utils.rnn import pad_sequence
 if TYPE_CHECKING:
     from vllm.worker.model_runner import ModelInputForGPUWithSamplingMetadata
 
-from vllm.attention.backends.flash_attn import FlashAttentionMetadata
+#from vllm.attention.backends.flash_attn import FlashAttentionMetadata
+try:
+    from vllm.attention.backends.flash_attn import FlashAttentionMetadata
+except (ModuleNotFoundError, ImportError):
+    # vllm_flash_attn is not installed, try the ROCm FA metadata
+    from vllm.attention.backends.rocm_flash_attn import (
+        ROCmFlashAttentionMetadata as FlashAttentionMetadata)
 from vllm.config import CacheConfig, ModelConfig, ParallelConfig
 from vllm.sequence import IntermediateTensors
 from vllm.utils import get_kv_cache_torch_dtype
