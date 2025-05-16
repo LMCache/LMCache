@@ -29,7 +29,7 @@ jobs:
         pip install redis
         pip install setuptools
         pip install pyzmq
-        pip install --no-cache-dir --force-reinstall types-setuptools setuptools-stubs
+        pip install --no-cache-dir --force-reinstall types-setuptools==80.4.0.20250511
     - name: Mypy
       run: |
         mypy
