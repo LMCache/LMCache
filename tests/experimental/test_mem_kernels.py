@@ -5,7 +5,8 @@ import pytest
 import torch
 from utils import (check_mem_obj_equal, check_paged_kv_cache_equal,
                    generate_kv_cache_paged,
-                   generate_kv_cache_paged_list_tensors)
+                   generate_kv_cache_paged_list_tensors,
+                   generate_mla_kv_cache_paged_list_tensors)
 
 import lmcache.c_ops as lmc_ops
 from lmcache.experimental.memory_management import PinMemoryAllocator
@@ -208,7 +209,7 @@ def test_multi_layer_kernel(num_tokens):
         lmc_ops.multi_layer_kv_transfer(memory_obj_new.tensor,
                                         kv_cache_pointers, slot_mapping_temp,
                                         kv_cache[0].device, page_buffer_size,
-                                        True)
+                                        True, False)
         memory_obj_new_list.append(memory_obj_new)
 
     end_event.record()
@@ -240,7 +241,7 @@ def test_multi_layer_kernel(num_tokens):
                                         kv_cache_pointers_new,
                                         slot_mapping_temp,
                                         kv_cache_new[0].device,
-                                        page_buffer_size, False)
+                                        page_buffer_size, False, False)
 
     check_paged_kv_cache_equal(
         kv_cache,
@@ -248,6 +249,123 @@ def test_multi_layer_kernel(num_tokens):
         num_tokens,
         slot_mapping,
     )
+
+
+@pytest.mark.parametrize("num_tokens", [256, 500, 1024, 8000])
+def test_multi_layer_kernel_use_mla(num_tokens):
+    device = "cuda"
+
+    num_blocks = 1000
+    block_size = 64
+    head_size = 576
+    chunk_size = 256
+    dtype = torch.bfloat16
+    num_layers = 32
+    kv_cache = generate_mla_kv_cache_paged_list_tensors(
+        num_blocks, device, block_size, dtype, num_layers)
+
+    slot_mapping = random.sample(range(0, num_blocks * block_size), num_tokens)
+    slot_mapping = torch.tensor(slot_mapping, device=device)
+
+    pinned_cpu_size = 4 * 1024 * 1024 * 1024  # 4GB
+    mem_allocator = PinMemoryAllocator(pinned_cpu_size)
+
+    # layer by layer extract
+    memory_obj_old_list = []
+    start_event = torch.cuda.Event(enable_timing=True)
+    end_event = torch.cuda.Event(enable_timing=True)
+    start_event.record()
+    slot_mapping_chunked = torch.split(slot_mapping, chunk_size)
+    for chunk_id, slot_mapping_temp in enumerate(slot_mapping_chunked):
+        mem_obj_shape = [1, num_layers, len(slot_mapping_temp), head_size]
+        memory_obj_old = mem_allocator.allocate(mem_obj_shape, dtype)
+
+        for layer_id in range(num_layers):
+            for token_idx, slot_idx in enumerate(slot_mapping_temp):
+                slot_idx = slot_idx.item()
+
+                block_idx = slot_idx // block_size
+                block_offset = slot_idx % block_size
+
+                memory_obj_old.tensor[0][layer_id][token_idx] = kv_cache[
+                    layer_id][block_idx][block_offset]
+
+        memory_obj_old_list.append(memory_obj_old)
+    end_event.record()
+    # wait for all the operations to finish
+    torch.cuda.synchronize()
+    elapsed_time_ms = start_event.elapsed_time(end_event)
+    print("Old extract time: ", elapsed_time_ms / 1000)
+
+    # New extract with multi layer kernel
+    kv_cache_pointers = torch.empty(num_layers,
+                                    dtype=torch.int64,
+                                    device='cpu',
+                                    pin_memory=True)
+    for i in range(num_layers):
+        kv_cache_pointers[i] = kv_cache[i].data_ptr()
+
+    memory_obj_new_list = []
+    start_event = torch.cuda.Event(enable_timing=True)
+    end_event = torch.cuda.Event(enable_timing=True)
+    start_event.record()
+    slot_mapping_chunked = torch.split(slot_mapping, chunk_size)
+    for chunk_id, slot_mapping_temp in enumerate(slot_mapping_chunked):
+        mem_obj_shape = [1, num_layers, len(slot_mapping_temp), head_size]
+
+        memory_obj_new = mem_allocator.allocate(mem_obj_shape, dtype)
+        lmc_ops.multi_layer_kv_transfer(memory_obj_new.tensor,
+                                        kv_cache_pointers, slot_mapping_temp,
+                                        kv_cache[0].device, 0, True, True)
+        memory_obj_new_list.append(memory_obj_new)
+
+    end_event.record()
+    # wait for all the operations to finish
+    torch.cuda.synchronize()
+    elapsed_time_ms = start_event.elapsed_time(end_event)
+    print("New extract time: ", elapsed_time_ms / 1000)
+
+    for left_mem_obj, right_mem_obj in zip(memory_obj_old_list,
+                                           memory_obj_new_list,
+                                           strict=False):
+        left_kv, right_kv = left_mem_obj.tensor[0], right_mem_obj.tensor[0]
+        right_kv = right_kv.to(left_kv.device)
+
+        assert len(left_kv.shape) == 3
+        assert len(right_kv.shape) == 3
+
+        assert (left_kv[:, :, :] == right_kv[:, :, :]).all()
+
+    # Generate new paged kv_cache
+    kv_cache_new = generate_mla_kv_cache_paged_list_tensors(
+        num_blocks, device, block_size, dtype, num_layers)
+
+    kv_cache_pointers_new = torch.empty(num_layers,
+                                        dtype=torch.int64,
+                                        device='cpu',
+                                        pin_memory=True)
+    for i in range(num_layers):
+        kv_cache_pointers_new[i] = kv_cache_new[i].data_ptr()
+
+    for chunk_id, slot_mapping_temp in enumerate(slot_mapping_chunked):
+        memory_obj_new = memory_obj_new_list[chunk_id]
+        lmc_ops.multi_layer_kv_transfer(memory_obj_new.tensor,
+                                        kv_cache_pointers_new,
+                                        slot_mapping_temp,
+                                        kv_cache_new[0].device, 0, False, True)
+
+    for left_kv, right_kv in zip(kv_cache, kv_cache_new, strict=False):
+
+        assert len(left_kv.shape) == 3
+        assert len(right_kv.shape) == 3
+
+        left_reshaped = left_kv.reshape(left_kv.shape[0] * left_kv.shape[1],
+                                        left_kv.shape[2])
+        right_reshaped = right_kv.reshape(
+            right_kv.shape[0] * right_kv.shape[1], right_kv.shape[2])
+
+        assert (left_reshaped[slot_mapping, :] == right_reshaped[
+            slot_mapping, :]).all()
 
 
 @pytest.mark.parametrize("num_tokens", [256, 500, 1024, 8000])

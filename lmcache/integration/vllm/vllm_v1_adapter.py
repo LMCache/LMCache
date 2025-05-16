@@ -315,7 +315,7 @@ class LMCacheConnectorV1Impl:
         else:
             self.lmcache_engine = init_lmcache_engine(
                 vllm_config.model_config, vllm_config.parallel_config,
-                vllm_config.cache_config)
+                vllm_config.cache_config, vllm_config.scheduler_config)
             self.use_layerwise = isinstance(self.lmcache_engine,
                                             LayerwiseLMCacheEngine)
 

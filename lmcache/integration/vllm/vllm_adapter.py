@@ -25,17 +25,22 @@ from torch.nn.utils.rnn import pad_sequence
 if TYPE_CHECKING:
     from vllm.worker.model_runner import ModelInputForGPUWithSamplingMetadata
 
+from vllm.attention import AttentionMetadata
 from vllm.attention.backends.flash_attn import FlashAttentionMetadata
-from vllm.config import CacheConfig, ModelConfig, ParallelConfig
+from vllm.attention.backends.flashmla import FlashMLAMetadata
+from vllm.attention.backends.mla.common import MLACommonMetadata
+from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
+                         SchedulerConfig)
 from vllm.sequence import IntermediateTensors
-from vllm.utils import get_kv_cache_torch_dtype
+from vllm.utils import cdiv, get_kv_cache_torch_dtype, round_down
 
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.experimental.cache_engine import (LMCacheEngine,
                                                LMCacheEngineBuilder)
 from lmcache.experimental.config import LMCacheEngineConfig
 from lmcache.experimental.gpu_connector import (
-    VLLMPagedMemGPUConnectorV2, VLLMPagedMemLayerwiseGPUConnector)
+    VLLMPagedMemGPUConnectorMLA, VLLMPagedMemGPUConnectorV2,
+    VLLMPagedMemLayerwiseGPUConnector)
 from lmcache.integration.vllm.utils import ENGINE_NAME, lmcache_get_config
 from lmcache.logging import init_logger
 from lmcache.utils import _lmcache_nvtx_annotate
@@ -46,6 +51,14 @@ from lmcache.utils import _lmcache_nvtx_annotate
 logger = init_logger(__name__)
 
 LMCACHE_CUDA_STREAM = torch.cuda.Stream()
+
+SUPPORTED_BACKEND_METADATA = (FlashAttentionMetadata, FlashMLAMetadata,
+                              MLACommonMetadata)
+
+VLLM_CACHE_CONFIG: Optional[CacheConfig] = None
+VLLM_MODEL_CONFIG: Optional[ModelConfig] = None
+VLLM_PARALLEL_CONFIG: Optional[ParallelConfig] = None
+VLLM_SCHEDULER_CONFIG: Optional[SchedulerConfig] = None
 
 
 class StoreStatus(Enum):
@@ -75,6 +88,7 @@ def init_lmcache_engine(
     model_config: ModelConfig,
     parallel_config: ParallelConfig,
     cache_config: CacheConfig,
+    scheduler_config: SchedulerConfig,
 ) -> Optional[LMCacheEngine]:
     """Initialize the LMCache engine by the given model config and parallel
     config. This function will check the environment variable
@@ -87,6 +101,8 @@ def init_lmcache_engine(
     :type parallel_config: ParallelConfig
     :param cache_config: The KV cache configuration in vLLM.
     :type cache_config: CacheConfig
+    :param scheduler_config: The scheduler configuration in vLLM.
+    :type scheduler_config: SchedulerConfig
 
     :return: The initialized LMCache engine or None (if the environment variable
         `LMCACHE_CONFIG_FILE` is not set).
@@ -95,6 +111,15 @@ def init_lmcache_engine(
     if LMCacheEngineBuilder.get(ENGINE_NAME) is not None:
         return None
 
+    global VLLM_CACHE_CONFIG
+    global VLLM_PARALLEL_CONFIG
+    global VLLM_MODEL_CONFIG
+    global VLLM_SCHEDULER_CONFIG
+    VLLM_CACHE_CONFIG = cache_config
+    VLLM_PARALLEL_CONFIG = parallel_config
+    VLLM_MODEL_CONFIG = model_config
+    VLLM_SCHEDULER_CONFIG = scheduler_config
+
     config = lmcache_get_config()
     assert isinstance(config, LMCacheEngineConfig), \
         "LMCache experimental configuration is should be passed."
@@ -102,12 +127,23 @@ def init_lmcache_engine(
     kv_dtype = get_kv_cache_torch_dtype(cache_config.cache_dtype,
                                         model_config.dtype)
 
+    use_mla = False
+    if hasattr(model_config, "use_mla") and isinstance(
+            model_config.use_mla, bool) and model_config.use_mla:
+        use_mla = True
+
+    if use_mla and config.remote_serde != "naive":
+        raise ValueError("MLA only works with naive serde mode..")
+
     # construct kv shape (for mem pool)
     num_layer = model_config.get_num_layers(parallel_config)
     chunk_size = config.chunk_size
     num_kv_head = model_config.get_num_kv_heads(parallel_config)
     head_size = model_config.get_head_size()
-    kv_shape = (num_layer, 2, chunk_size, num_kv_head, head_size)
+    if use_mla:
+        kv_shape = (num_layer, 1, chunk_size, 1, head_size)
+    else:
+        kv_shape = (num_layer, 2, chunk_size, num_kv_head, head_size)
 
     # Change current device.
     torch.cuda.device(parallel_config.rank)
@@ -116,31 +152,44 @@ def init_lmcache_engine(
                                      parallel_config.world_size,
                                      parallel_config.rank, "vllm", kv_dtype,
                                      kv_shape)
-    hidden_dim_size = num_kv_head * head_size
-    use_gpu = need_gpu_interm_buffer(config)
 
+    use_gpu = need_gpu_interm_buffer(config)
     vllm_gpu_connector: Union[VLLMPagedMemGPUConnectorV2,
-                              VLLMPagedMemLayerwiseGPUConnector]
+                              VLLMPagedMemLayerwiseGPUConnector,
+                              VLLMPagedMemGPUConnectorMLA]
 
     # FIXME(Jiayi): support non-environ config
     env_layerwise = os.getenv("LMCACHE_USE_LAYERWISE", "False")
     use_layerwise = env_layerwise.lower() in ["true", "1"]
 
-    if use_layerwise:
-        vllm_gpu_connector = VLLMPagedMemLayerwiseGPUConnector(
-            hidden_dim_size,
-            num_layer,
-            use_gpu=use_gpu,
-            chunk_size=chunk_size,
-            dtype=kv_dtype,
-            device=device)
+    if use_mla:
+        if use_layerwise:
+            raise ValueError("layerwise MLA connector is not supported yet")
+        vllm_gpu_connector = VLLMPagedMemGPUConnectorMLA(head_size,
+                                                         num_layer,
+                                                         use_gpu=use_gpu,
+                                                         chunk_size=chunk_size,
+                                                         dtype=kv_dtype,
+                                                         device=device)
     else:
-        vllm_gpu_connector = VLLMPagedMemGPUConnectorV2(hidden_dim_size,
-                                                        num_layer,
-                                                        use_gpu=use_gpu,
-                                                        chunk_size=chunk_size,
-                                                        dtype=kv_dtype,
-                                                        device=device)
+        hidden_dim_size = num_kv_head * head_size
+
+        if use_layerwise:
+            vllm_gpu_connector = VLLMPagedMemLayerwiseGPUConnector(
+                hidden_dim_size,
+                num_layer,
+                use_gpu=use_gpu,
+                chunk_size=chunk_size,
+                dtype=kv_dtype,
+                device=device)
+        else:
+            vllm_gpu_connector = VLLMPagedMemGPUConnectorV2(
+                hidden_dim_size,
+                num_layer,
+                use_gpu=use_gpu,
+                chunk_size=chunk_size,
+                dtype=kv_dtype,
+                device=device)
     engine = LMCacheEngineBuilder.get_or_create(ENGINE_NAME, config, metadata,
                                                 vllm_gpu_connector,
                                                 use_layerwise)
@@ -212,8 +261,8 @@ def lmcache_should_retrieve(
     :return: RetrieveStatus.
     """
 
-    assert isinstance(model_input.attn_metadata, FlashAttentionMetadata), \
-        "Only FlashAttention backend is supported for now."
+    assert isinstance(model_input.attn_metadata, SUPPORTED_BACKEND_METADATA), \
+        f"Only backend with {SUPPORTED_BACKEND_METADATA} is supported for now."
 
     # model_input doesn't have seq_lens in tp
     # but attn_metadata does
@@ -286,8 +335,8 @@ def lmcache_should_store(
 
         return blend_metadata.processed_layer_count > 0
 
-    assert isinstance(model_input.attn_metadata, FlashAttentionMetadata), \
-        "Only FlashAttention backend is supported for now."
+    assert isinstance(model_input.attn_metadata, SUPPORTED_BACKEND_METADATA), \
+        f"Only backend with {SUPPORTED_BACKEND_METADATA} is supported for now."
 
     seq_lens = model_input.attn_metadata.seq_lens
     assert seq_lens is not None
@@ -398,8 +447,8 @@ def lmcache_store_kv(
     engine = LMCacheEngineBuilder.get(ENGINE_NAME)
     assert engine is not None, "LMCache engine is not initialized."
 
-    assert isinstance(model_input.attn_metadata, FlashAttentionMetadata), \
-        "Only FlashAttention backend is supported for now."
+    assert isinstance(model_input.attn_metadata, SUPPORTED_BACKEND_METADATA), \
+        f"Only backend with {SUPPORTED_BACKEND_METADATA} is supported for now."
 
     seq_lens = model_input.attn_metadata.seq_lens
     assert seq_lens is not None
@@ -543,19 +592,19 @@ def lmcache_retrieve_kv(
     :return: The boolean value to indicate whether the
              entire execute_model should be skipped
     """
-
     engine = LMCacheEngineBuilder.get(ENGINE_NAME)
     assert engine is not None, "LMCache engine is not initialized."
 
     if engine.config.enable_blending:
         return model_input, False, None
 
-    assert isinstance(model_input.attn_metadata, FlashAttentionMetadata), \
-        "Only FlashAttention backend is supported for now."
+    assert isinstance(model_input.attn_metadata, SUPPORTED_BACKEND_METADATA), \
+        f"Only backend with {SUPPORTED_BACKEND_METADATA} is supported for now."
 
     query_start_loc = model_input.attn_metadata.query_start_loc
     assert query_start_loc is not None
     slot_mapping = model_input.attn_metadata.slot_mapping.flatten()
+
     assert slot_mapping is not None
     seq_lens = model_input.attn_metadata.seq_lens
     assert seq_lens is not None
@@ -657,7 +706,9 @@ def lmcache_retrieve_kv(
                 full_token_tensor,
                 token_mask,
                 kvcaches=kv_caches,
-                slot_mapping=slot_mapping_req_full)
+                slot_mapping=slot_mapping_req_full,
+                use_mla=engine.metadata.use_mla,
+            )
             lmc_num_computed_tokens = max(
                     torch.sum(ret_token_mask).item() - \
                     (vllm_num_computed_tokens - vllm_num_computed_tokens_align),
@@ -754,8 +805,10 @@ def build_partial_prefill_input(
     """Helper function to rebuild the model input for the current request.
     """
     assert model_input.attn_metadata is not None
-    assert isinstance(model_input.attn_metadata, FlashAttentionMetadata), \
-        "Only FlashAttention backend is supported for now."
+
+    assert isinstance(model_input.attn_metadata, SUPPORTED_BACKEND_METADATA), \
+        f"Only backend with {SUPPORTED_BACKEND_METADATA} is supported for now."
+
     assert model_input.attn_metadata.context_lens_tensor is not None
     assert model_input.attn_metadata.block_tables is not None
     assert model_input.attn_metadata.query_start_loc is not None
@@ -781,10 +834,12 @@ def build_partial_prefill_input(
     for idx in range(len(full_tokens_list)):
         token_tensor = full_tokens_list[idx]
         num_token = len(token_tensor)
-        num_computed_token = num_computed_tokens_list[idx]
+        num_computed_token = num_computed_tokens_list[
+            idx] // cache_config.block_size * cache_config.block_size
         start_pos = start_pos_list[idx]
         is_prefill = is_prefill_list[idx]
-        lmc_num_computed_tokens = lmc_num_computed_tokens_list[idx]
+        lmc_num_computed_tokens = lmc_num_computed_tokens_list[
+            idx] // cache_config.block_size * cache_config.block_size
         rebuilt_input_tokens.append(token_tensor[num_computed_token:])
         q_len = num_token - num_computed_token
         assert q_len > 0
@@ -817,8 +872,8 @@ def build_partial_prefill_input(
         else:
             slot_mapping_req = slot_mapping_flat[start_pos:end_slot_idx]
             vllm_block_size = cache_config.block_size
-            rebuilt_block_table = slot_mapping_req[::16].to(torch.int32) \
-                // vllm_block_size
+            rebuilt_block_table = slot_mapping_req[::vllm_block_size].to(
+                torch.int32) // vllm_block_size
             rebuilt_block_tables.append(rebuilt_block_table)
 
         # Sampling metadata related
@@ -846,6 +901,20 @@ def build_partial_prefill_input(
     ).to(device)
 
     rebuilt_attn_metadata._cached_prefill_metadata = None
+
+    if isinstance(rebuilt_attn_metadata, MLACommonMetadata) \
+        or isinstance(rebuilt_attn_metadata, FlashMLAMetadata):
+        # use mla
+        rebuilt_input_positions_tensor = torch.cat(rebuilt_input_positions).to(
+            device=device,
+            dtype=model_input.attn_metadata.input_positions.dtype)
+        # New for MLA(compared to FlashAttentionMetadata)
+        build_mla_params(rebuilt_attn_metadata, device,
+                         rebuilt_input_positions_tensor)
+    else:
+        rebuilt_input_positions_tensor = torch.cat(rebuilt_input_positions).to(
+            device=device, dtype=model_input.input_positions.dtype)
+
     rebuilt_sampling_metadata = None
     # rebuilt sampling_metadata
     if model_input.sampling_metadata is not None:
@@ -863,7 +932,7 @@ def build_partial_prefill_input(
     from vllm.worker.model_runner import ModelInputForGPUWithSamplingMetadata
     rebuilt_model_input = ModelInputForGPUWithSamplingMetadata(
         input_tokens=torch.cat(rebuilt_input_tokens).to(device),
-        input_positions=torch.cat(rebuilt_input_positions).to(device),
+        input_positions=rebuilt_input_positions_tensor,
         seq_lens=model_input.seq_lens,
         query_lens=rebuilt_query_lens,
         lora_mapping=model_input.lora_mapping,
@@ -881,3 +950,93 @@ def build_partial_prefill_input(
     )
 
     return rebuilt_model_input
+
+
+def build_mla_params(attention_mata: "AttentionMetadata", device: torch.device,
+                     input_positions_tensor: torch.Tensor) -> None:
+    assert VLLM_CACHE_CONFIG is not None
+    assert VLLM_MODEL_CONFIG is not None
+    assert VLLM_SCHEDULER_CONFIG is not None
+    assert VLLM_PARALLEL_CONFIG is not None
+
+    # set context chunk params
+    context_chunk_workspace_size = min(
+        # Max sure there is enough for 8 full length request or at least
+        # 4 pages of cache per request
+        max(
+            8 * VLLM_MODEL_CONFIG.max_model_len, 4 *
+            VLLM_SCHEDULER_CONFIG.max_num_seqs * VLLM_CACHE_CONFIG.block_size),
+        # For long-context models try not to over-allocate limiting
+        # kv-cache space, limiting it to 64k tokens,
+        # which would result in the workspace being:
+        #   2*(576)*(64*1024) = 144mb
+        # (assuming 576 MLA head dim, and fp16)
+        # which would result in up-projected context being
+        #   2*(192*128)*(64*1024) = 3gb
+        # (assuming 192 QK head dim, 128 heads, and fp16)
+        128 * 1024)
+
+    context_chunk_cu_seq_lens = None
+    context_chunk_starts = None
+    context_chunk_seq_tot = None
+    context_chunk_max_seq_lens = None
+
+    num_prefills = attention_mata.num_prefills
+    context_lens_tensor = attention_mata.context_lens_tensor
+    if num_prefills > 0 \
+        and context_lens_tensor is not None \
+        and context_lens_tensor[:num_prefills].max() > 0:
+        num_prefills_with_context = \
+            (context_lens_tensor[:num_prefills] > 0).sum().item()
+
+        max_context_chunk = \
+            context_chunk_workspace_size // num_prefills_with_context
+
+        max_context_chunk = round_down(max_context_chunk,
+                                       VLLM_CACHE_CONFIG.block_size)
+        assert max_context_chunk > 0
+        num_chunks = cdiv(context_lens_tensor.max(), max_context_chunk)
+
+        context_chunk_starts = \
+            torch.arange(num_chunks, device=device, dtype=torch.int32) \
+                .unsqueeze(1).expand(-1, num_prefills) \
+            * max_context_chunk
+        chunk_ends = torch.min(context_lens_tensor[:num_prefills] \
+                 .unsqueeze(0), context_chunk_starts + max_context_chunk)
+        chunk_seq_lens = (chunk_ends - context_chunk_starts).clamp(min=0)
+        _context_chunk_cu_seq_lens = chunk_seq_lens.cumsum(dim=1).to(
+            torch.int32)
+        zero = torch.zeros(num_chunks, dtype=torch.int32, device=device) \
+            .unsqueeze(-1)
+        context_chunk_cu_seq_lens = torch.cat(
+            [zero, _context_chunk_cu_seq_lens], dim=1)
+        context_chunk_max_seq_lens = chunk_seq_lens.max(dim=1).values.tolist()
+        context_chunk_seq_tot = chunk_seq_lens.sum(dim=1).tolist()
+        assert max(context_chunk_seq_tot) <= context_chunk_workspace_size
+
+    attention_mata.context_chunk_seq_tot = context_chunk_seq_tot
+    attention_mata.context_chunk_cu_seq_lens = context_chunk_cu_seq_lens
+    attention_mata.context_chunk_starts = context_chunk_starts
+    attention_mata.context_chunk_max_seq_lens = context_chunk_max_seq_lens
+
+    if attention_mata.context_chunk_workspace is None:
+        attention_mata.context_chunk_workspace = torch.empty(
+            (context_chunk_workspace_size, VLLM_MODEL_CONFIG.get_head_size()),
+            dtype=VLLM_MODEL_CONFIG.dtype,
+            device=device,
+        )
+
+    # set decode params
+    if attention_mata.num_decode_tokens > 0:
+        from vllm.attention.ops.flashmla import get_mla_metadata
+        num_q_heads = VLLM_MODEL_CONFIG.get_num_attention_heads(
+            VLLM_PARALLEL_CONFIG)
+        attention_mata.decode_tile_scheduler_metadata, \
+        attention_mata.decode_num_splits = get_mla_metadata(
+            attention_mata.seq_lens_tensor[num_prefills:],
+            num_q_heads,
+            1,  # MQA for the decode path
+        )
+
+    # set input positions
+    attention_mata.input_positions = input_positions_tensor
