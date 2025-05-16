@@ -32,40 +32,33 @@ max_port=9000
 
 find_free_port() {
   local port=$1
-
   while [ $port -le $max_port ]; do
-    # 1) If it’s already free, we’re done
     if ! netstat -tuln 2>/dev/null | grep -q ":$port "; then
-      echo "Port $port is available."
+      >&2 echo "Port $port is available."
       printf "%s" "$port"
       return 0
     fi
 
-    # 2) Otherwise try killing any listener
-    echo "Port $port is in use. Killing process(es)..."
+    >&2 echo "Port $port is in use. Killing process(es)..."
     local pids
     pids=$(lsof -t -i tcp:$port)
     if [ -n "$pids" ]; then
-      echo "→ Killing PID(s): $pids"
+      >&2 echo "→ Killing PID(s): $pids"
       kill $pids
       sleep 1
-      # 3) Re‑check after kill
       if ! netstat -tuln 2>/dev/null | grep -q ":$port "; then
-        echo "→ Port $port freed after killing processes."
+        >&2 echo "→ Port $port freed after killing processes."
         printf "%s" "$port"
         return 0
       else
-        echo "→ Port $port still in use after kill. Continuing search..."
+        >&2 echo "→ Port $port still in use after kill. Continuing search..."
       fi
     else
-      echo "→ No PIDs found listening on $port. Continuing search..."
+      >&2 echo "→ No PIDs found listening on $port. Continuing search..."
     fi
 
-    # 4) Next port
     port=$((port + 1))
   done
-
-  # 5) No port found in range
   return 1
 }
 
