@@ -106,6 +106,25 @@ def generate_kv_cache_paged_list_tensors(num_blocks,
     return ret
 
 
+def generate_mla_kv_cache_paged_list_tensors(num_blocks,
+                                             device,
+                                             block_size=64,
+                                             dtype=torch.bfloat16,
+                                             num_layers=32):
+    """
+    return KV cache of MLA
+    """
+    ret = []
+    head_size = 576
+    shape = [num_blocks, block_size, head_size]
+
+    for i in range(num_layers):
+        kv = torch.rand(shape, dtype=dtype, device=device)
+        ret.append(kv)
+
+    return ret
+
+
 def generate_tokens(num_tokens, device, fixed=False):
     if fixed:
         return torch.tensor([-1] * num_tokens).to(device)
@@ -117,8 +136,8 @@ def generate_tokens(num_tokens, device, fixed=False):
 def concatenate_kv_caches(kv_chunks, fmt):
     dim = 1 if fmt == "huggingface" else 0
     ret = []
-    for kv_layer in zip(*kv_chunks):
-        klist, vlist = zip(*kv_layer)
+    for kv_layer in zip(*kv_chunks, strict=False):
+        klist, vlist = zip(*kv_layer, strict=False)
         klayer = torch.cat(klist, dim=dim)
         vlayer = torch.cat(vlist, dim=dim)
         ret.append((klayer, vlayer))
@@ -130,7 +149,7 @@ def check_kv_cache_equal(left, right, num_tokens, fmt, offset=0):
     check if the first num_tokens of left and right kv cache are the same
     """
     dim = 0 if fmt == "vllm" else 1
-    for left_kv, right_kv in zip(left, right):
+    for left_kv, right_kv in zip(left, right, strict=False):
         left_k, left_v = left_kv
         right_k, right_v = right_kv
         right_k = right_k.to(left_k.device)
@@ -161,7 +180,7 @@ def check_mem_obj_equal(left, right, offset=0):
     """
     check whether two memory objects are the same
     """
-    for left_mem_obj, right_mem_obj in zip(left, right):
+    for left_mem_obj, right_mem_obj in zip(left, right, strict=False):
         left_kv, right_kv = left_mem_obj.tensor, right_mem_obj.tensor
         left_k, left_v = left_kv[0], left_kv[1]
         right_k, right_v = right_kv[0], right_kv[1]
@@ -187,7 +206,7 @@ def check_paged_kv_cache_equal(left,
     check whether two paged kv caches are the same at slot_mapping
     """
     token_dim = 0
-    for left_kv, right_kv in zip(left, right):
+    for left_kv, right_kv in zip(left, right, strict=False):
         left_k = left_kv[0].reshape(-1, num_heads, head_size)
         left_v = left_kv[1].reshape(-1, num_heads, head_size)
         right_k = right_kv[0].reshape(-1, num_heads, head_size)
@@ -203,9 +222,6 @@ def check_paged_kv_cache_equal(left,
         assert right_k.shape[token_dim] >= num_tokens
         assert right_v.shape[token_dim] >= num_tokens
 
-        if not (left_k[slot_mapping, :, :]
-                == right_k[slot_mapping, :, :]).all():
-            breakpoint()
         assert (
             left_k[slot_mapping, :, :] == right_k[slot_mapping, :, :]).all()
         assert (

@@ -40,8 +40,8 @@ def generate_tokens(num_tokens, device):
 def concatenate_kv_caches(kv_chunks, fmt):
     dim = 1 if fmt == "huggingface" else 0
     ret = []
-    for kv_layer in zip(*kv_chunks):
-        klist, vlist = zip(*kv_layer)
+    for kv_layer in zip(*kv_chunks, strict=False):
+        klist, vlist = zip(*kv_layer, strict=False)
         klayer = torch.cat(klist, dim=dim)
         vlayer = torch.cat(vlist, dim=dim)
         ret.append((klayer, vlayer))
@@ -53,7 +53,7 @@ def check_kv_cache_equal(left, right, num_tokens, fmt):
     check if the first num_tokens of left and right kv cache are the same
     """
     dim = 0 if fmt == "vllm" else 1
-    for left_kv, right_kv in zip(left, right):
+    for left_kv, right_kv in zip(left, right, strict=False):
         left_k, left_v = left_kv
         right_k, right_v = right_kv
         right_k = right_k.to(left_k.device)

@@ -160,8 +160,10 @@ class NixlPipe:
             obj_size = metadata.get_size()
             if offset + obj_size > self.nixl_config.buffer_size:
                 break
-            obj = TensorMemoryObj(self._buffer[offset:offset + obj_size],
-                                  metadata)
+            obj = TensorMemoryObj(
+                self._buffer[offset:offset + obj_size],
+                metadata,
+            )
             ret.append(obj)
             offset += obj_size
         return ret  # type: ignore
@@ -305,11 +307,11 @@ class NixlChannel:
 
         if nixl_config.role == NixlRole.SENDER:
             self._side_channel.connect("tcp://{}:{}".format(
-                nixl_config.peer_host_name, nixl_config.peer_port))
+                nixl_config.receiver_host, nixl_config.receiver_port))
             self._side_channel.setsockopt(zmq.LINGER, 0)  # type: ignore
         else:
             self._side_channel.bind("tcp://{}:{}".format(
-                nixl_config.peer_host_name, nixl_config.peer_port))
+                nixl_config.receiver_host, nixl_config.receiver_port))
             self._side_channel.setsockopt(zmq.LINGER, 0)  # type: ignore
             self._side_channel.setsockopt(
                 zmq.RCVTIMEO,  # type: ignore

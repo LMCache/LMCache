@@ -3,17 +3,35 @@
 </a>
 </div>
 
-| [**Blog**](https://lmcache.github.io) | [**Documentation**](https://docs.lmcache.ai/) | [**Join Slack**](https://join.slack.com/t/lmcacheworkspace/shared_invite/zt-2viziwhue-5Amprc9k5hcIdXT7XevTaQ) | [**Interest Form**](https://forms.gle/mQfQDUXbKfp2St1z7) | [**Official Email**](contact@lmcache.ai) |
+<p align="center">
+  <a href="https://deepwiki.com/LMCache/LMCache">
+    <img src="https://deepwiki.com/badge.svg" alt="Ask DeepWiki">
+  </a>
+  <a href="https://docs.lmcache.ai/">
+    <img alt="Documentation" src="https://img.shields.io/badge/docs-blue?logo=readthedocs&logoColor=f0f8ff">
+  </a>
+  <a href="https://join.slack.com/t/lmcacheworkspace/shared_invite/zt-2viziwhue-5Amprc9k5hcIdXT7XevTaQ">
+    <img alt="Join Slack" src="https://img.shields.io/badge/LMCache-Join%20Slack-blue?logo=slack">
+  </a>
+  <img alt="GitHub commit activity" src="https://img.shields.io/github/commit-activity/w/LMCache/LMCache">
+  <img alt="PyPI - Downloads" src="https://img.shields.io/pypi/dm/LMCache">
+  <a href="https://www.youtube.com/channel/UC58zMz55n70rtf1Ak2PULJA">
+    <img alt="YouTube Channel Views" src="https://img.shields.io/youtube/channel/views/UC58zMz55n70rtf1Ak2PULJA">
+  </a>
+</p>
 
-# 💡 What is LMCache?
+<h3 align="center">
+    Redis for LLMs - Infinite and Ultra-Fast
+</h3>
 
-TL;DR - Redis for LLMs. 
+----
 
-LMCache is a **LLM** serving engine extension to **reduce TTFT** and **increase throughput**, especially under long-context scenarios. By storing the KV caches of reusable texts across various locations including (GPU, CPU DRAM, Local Disk), LMCache reuse the KV caches of **_any_** reused text (not necessarily prefix) in **_any_** serving engine instance. Thus, LMCache saves precious GPU cycles and reduces response delay for users.  
 
-By combining LMCache with vLLM, LMCaches achieves 3-10x delay savings and GPU cycle reduction in many LLM use cases, including multi-round QA and RAG.
+LMCache is an **LLM** serving engine extension to **reduce TTFT** and **increase throughput**, especially under long-context scenarios. By storing the KV caches of reusable texts across various locations, including (GPU, CPU DRAM, Local Disk), LMCache reuses the KV caches of **_any_** reused text (not necessarily prefix) in **_any_** serving engine instance. Thus, LMCache saves precious GPU cycles and reduces user response delay.  
 
-Try LMCache with pre-built vllm docker images [here](https://docs.lmcache.ai/getting_started/docker.html).
+By combining LMCache with vLLM, LMCache achieves 3-10x delay savings and GPU cycle reduction in many LLM use cases, including multi-round QA and RAG.
+
+Try LMCache with pre-built vllm docker images [here](https://docs.lmcache.ai/developer_guide/docker_file.html).
 
 # 🚀 Performance snapshot
 ![image](https://github.com/user-attachments/assets/7db9510f-0104-4fb3-9976-8ad5d7fafe26)
@@ -23,8 +41,8 @@ Try LMCache with pre-built vllm docker images [here](https://docs.lmcache.ai/get
 Please refer to our detailed documentation for [LMCache V1](https://docs.lmcache.ai/getting_started/installation.html#install-from-source-v1) and [LMCache V0](https://docs.lmcache.ai/getting_started/installation.html#install-from-source-v0)
 
 # Interested in Connecting?
-Fill out the interest form and our team will reach out to you!
-https://forms.gle/mQfQDUXbKfp2St1z7
+Fill out the interest form or [drop an email](contact@lmcache.ai), and our team will reach out to you!
+[Google Form](https://forms.gle/mQfQDUXbKfp2St1z7)
 
 # 🛣️ News and Milestones
 
@@ -45,15 +63,14 @@ Our latest [blog posts](https://lmcache.github.io) and the [documentation](https
 
 # Community meeting
 
-The community meeting for LMCache is co-hosted with the community meeting for the [vLLM production stack project](https://github.com/vllm-project/production-stack/tree/main). 
-
+The community meeting for LMCache is hosted weekly.
 Meeting Details:
 
-- Tuesdays at 4:00 PM PT – [Add to Calendar](https://drive.usercontent.google.com/u/0/uc?id=1j1gO2PcFQLBi98fq4djEEiqOK_oHgq9j&export=download)
+- Tuesdays at 9:00 AM PT – [Add to Calendar](https://drive.google.com/file/d/15Xz8-LtpBQ5QgR7KrorOOyfuohCFQmwn/view?usp=drive_link)
 
-- Tuesdays at 8:00 AM PT – [Add to Calendar](https://drive.usercontent.google.com/u/0/uc?id=1xdkxpg-OpxkuLqjegHQhihwBM9koFvSh&export=download)
+- Tuesdays at 6:30 PM PT – [Add to Calendar](https://drive.google.com/file/d/1WMZNFXV24kWzprDjvO-jQ7mOY7whqEdG/view?usp=drive_link)
 
-Meetings alternate weekly between the two times. All are welcome to join!
+Meetings **alternate weekly** between the two times. All are welcome to join!
 
 ## Contributing
 

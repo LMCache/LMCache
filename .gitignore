@@ -107,3 +107,7 @@ lmcache/experimental/tests
 
 # VSCode
 .vscode/
+
+# Setuptools scm version
+/lmcache/_version.py
+

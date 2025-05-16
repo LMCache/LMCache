@@ -15,7 +15,7 @@ def check_kv_cache_equal(left, right, num_tokens, fmt):
     check if the first num_tokens of left and right kv cache are the same
     """
     dim = 0 if fmt == "vllm" else 1
-    for left_kv, right_kv in zip(left, right):
+    for left_kv, right_kv in zip(left, right, strict=False):
         left_k, left_v = left_kv
         right_k, right_v = right_kv
         right_k = right_k.to(left_k.device)

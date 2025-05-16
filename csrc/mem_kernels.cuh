@@ -29,6 +29,15 @@ void multi_layer_kv_transfer(
     const torch::Tensor& slot_mapping,  
     const torch::Device& paged_memory_device, 
     const int page_buffer_size,
+    const bool direction,
+    const bool use_mla);
+
+void single_layer_kv_transfer(
+    torch::Tensor& lmc_key_value_cache,
+    torch::Tensor& vllm_key_cache,
+    torch::Tensor&
+        vllm_value_cache,
+    torch::Tensor& slot_mapping,
     const bool direction
 );
 

@@ -33,7 +33,7 @@ def generate_test_data(
                            world_size=1,
                            worker_id=0,
                            chunk_hash=f"test_{i}"))
-        obj = allocator.allocate(shape, dtype, fmt=MemoryFormat.KV_BLOB)
+        obj = allocator.allocate(shape, dtype, fmt=MemoryFormat.KV_2LTD)
         obj.tensor.fill_(i + 1)  # Fill with some test data, e.g., the index
         objs.append(obj)
     return keys, objs
@@ -83,10 +83,10 @@ if __name__ == "__main__":
     # Common configuration
     config = NixlConfig(
         role=NixlRole(args.role),
-        peer_host_name=args.host,
-        peer_port=args.port,
+        receiver_host=args.host,
+        receiver_port=args.port,
         buffer_size=2**32,  # 4GB
-        buffer_device='cuda',
+        buffer_device='cuda:0',
         enable_gc=False,
     )
 
@@ -176,8 +176,8 @@ if __name__ == "__main__":
             assert len(received_objs) == len(objs), \
                 "Number of received objects does not match the number of " \
                 "original objects"
-            for i, (received_obj,
-                    original_obj) in enumerate(zip(received_objs, objs)):
+            for i, (received_obj, original_obj) in enumerate(
+                    zip(received_objs, objs, strict=False)):
                 assert torch.allclose(received_obj.tensor,
                                       original_obj.tensor), \
                     f"Data mismatch at index {i}: received " \

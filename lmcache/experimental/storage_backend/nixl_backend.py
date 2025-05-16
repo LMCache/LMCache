@@ -29,8 +29,8 @@ from lmcache.experimental.storage_backend.abstract_backend import \
     StorageBackendInterface
 from lmcache.experimental.storage_backend.connector.nixl_connector_v2 import (
     NixlChannel, NixlObserverInterface)
-from lmcache.experimental.storage_backend.connector.nixl_utils import \
-    NixlConfig
+from lmcache.experimental.storage_backend.connector.nixl_utils import (
+    NixlConfig, NixlRole)
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey, _lmcache_nvtx_annotate
 
@@ -173,6 +173,12 @@ class RecvObjPool:
 
             return ret
 
+    def pin(self, key: CacheEngineKey) -> bool:
+        raise NotImplementedError
+
+    def unpin(self, key: CacheEngineKey) -> bool:
+        raise NotImplementedError
+
 
 class BasicNixlObserver(NixlObserverInterface):
     """
@@ -202,7 +208,7 @@ class BasicNixlObserver(NixlObserverInterface):
         """
         clone_time = 0.0
         add_time = 0.0
-        for key, value in zip(keys, objs):
+        for key, value in zip(keys, objs, strict=False):
             assert value.tensor is not None, \
                     "The tensor in the MemoryObj is None."
             if is_view:
@@ -248,20 +254,23 @@ class NixlBackend(StorageBackendInterface):
 
         self._nixl_channel = NixlChannel(nixl_config)
 
-        self._nixl_observer = BasicNixlObserver(self._obj_pool)
-
-        self._nixl_channel.register_receive_observer(
-            observer=self._nixl_observer)
+        if nixl_config.role == NixlRole.RECEIVER:
+            self._nixl_observer = BasicNixlObserver(self._obj_pool)
+            self._nixl_channel.register_receive_observer(
+                observer=self._nixl_observer)
 
         self._registered_keys: list[CacheEngineKey] = []
         self._registered_metadatas: list[MemoryObjMetadata] = []
         self._num_payload_added = 0
 
-    def contains(self, key: CacheEngineKey) -> bool:
+    # TODO(Jiayi): handle `pin` smantics
+    def contains(self, key: CacheEngineKey, pin: bool = False) -> bool:
         """
         Check whether key is in the storage backend.
         
         :param key: The key to check
+        :param pin: Whether to pin the object in the backend.
+        
         :return: True if the key exists, False otherwise
         """
         return self._obj_pool.contains(key)
@@ -294,7 +303,7 @@ class NixlBackend(StorageBackendInterface):
         self,
         shape: torch.Size,
         dtype: Optional[torch.dtype],
-        fmt: MemoryFormat = MemoryFormat.KV_BLOB,
+        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
     ) -> MemoryObj:
         """
         Allocate a zero-copy write object for the given shape and dtype.
@@ -375,6 +384,12 @@ class NixlBackend(StorageBackendInterface):
         """
         return self._obj_pool.get(key)
 
+    def get_non_blocking(
+        self,
+        key: CacheEngineKey,
+    ) -> Optional[Future]:
+        raise NotImplementedError
+
     def remove(self, key: CacheEngineKey) -> None:
         """
         Remove the key from the storage backend.
@@ -394,6 +409,12 @@ class NixlBackend(StorageBackendInterface):
         Get the underlying allocator from Nixl channel.
         """
         return self._nixl_channel.get_allocator()
+
+    def pin(self, key: CacheEngineKey) -> bool:
+        raise NotImplementedError
+
+    def unpin(self, key: CacheEngineKey) -> bool:
+        raise NotImplementedError
 
     @staticmethod
     def CreateNixlBackend(config: LMCacheEngineConfig,

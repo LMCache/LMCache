@@ -10,12 +10,6 @@ First run
 make clean
 ```
 
-To build latest developer docs from docstrings
-
-```
-sphinx-apidoc -o source/developer/ ../lmcache
-```
-
 To build HTML
 
 ```

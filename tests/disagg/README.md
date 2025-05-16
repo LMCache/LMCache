@@ -120,3 +120,17 @@ UCX_TLS=cuda_ipc,cuda_copy,tcp CUDA_VISIBLE_DEVICES=0 python3 test_nixl_channel_
 # Terminal 2 (Receiver)
 UCX_TLS=cuda_ipc,cuda_copy,tcp CUDA_VISIBLE_DEVICES=1 python3 test_nixl_channel_v2.py --role receiver --num-objs 1000 --batch-size 30 --simulate-workload
 ```
+## NIXL Channel v2 multiplexing testing
+
+Introduced a new option: `--num-expected-sender` to control the number of senders.
+
+```bash
+# Terminal 1 (Receiver)
+UCX_TLS=cuda_ipc,cuda_copy,tcp CUDA_VISIBLE_DEVICES=7 python3 test_nixl_channel_v2.py --role receiver --num-objs 500 --batch-size 30 --simulate-workload --num-expected-senders 2
+
+# Terminal 2 (Sender)
+UCX_TLS=cuda_ipc,cuda_copy,tcp CUDA_VISIBLE_DEVICES=6 python3 test_nixl_channel_v2.py --role sender --num-objs 500 --batch-size 30 --simulate-workload
+
+# Terminal 3 (Sender)
+UCX_TLS=cuda_ipc,cuda_copy,tcp CUDA_VISIBLE_DEVICES=3 python3 test_nixl_channel_v2.py --role sender --num-objs 500 --batch-size 30 --simulate-workload
+```
