@@ -27,7 +27,7 @@ cd "$LM_CACHE_TEST_DIR"
 
 set +x
 
-port1=8000
+start_port=8000
 max_port=9000
 
 find_free_port() {
