@@ -45,7 +45,9 @@
     "hidden_size": 7168,
     "num_attention_heads": 128,
     "num_hidden_layers": 61,
-    "num_key_value_heads": 128
+    "num_key_value_heads": 128,
+    "kv_lora_rank": 512,
+    "qk_rope_head_dim": 64
   },
   "meta-llama/Llama-3.1-405B": {
     "hidden_size": 16384,
