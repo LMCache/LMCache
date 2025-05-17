@@ -2,7 +2,6 @@ aiofiles
 aiohttp
 infinistore
 msgspec
-nixl==0.2.0
 numpy
 nvtx
 prometheus_client >= 0.18.0
