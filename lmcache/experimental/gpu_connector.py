@@ -280,9 +280,10 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
         self.num_layers = num_layers
         self.kv_cache_pointers = torch.empty(num_layers,
                                              dtype=torch.int64,
-                                             device='cpu',
-                                             pin_memory=True)
-        self.pointers_initialized = False
+                                             device='cpu')
+        # Not sure we need a dict here. Maybe a single GPU connector always
+        # works with a single device?
+        self.kv_cache_pointers_on_gpu: dict[int, torch.Tensor] = {}
         self.page_buffer_size = 0
 
         self.gpu_buffer: Optional[torch.Tensor] = None
@@ -298,29 +299,21 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
                                           dtype=kwargs["dtype"],
                                           device=kwargs["device"])
 
-    def _pointers_are_good(self, kv_caches: List[torch.Tensor]):
-        """
-        Check if the initialized pointers are the same as the pointers in 
-        the KV caches. 
-
-        Returns:
-            bool: True if the pointers are the same, False otherwise (
-                including uninitialized).
-        """
-        if not self.pointers_initialized:
-            return False
-
-        for i in range(self.num_layers):
-            if self.kv_cache_pointers[i] != kv_caches[i].data_ptr():
-                return False
-        return True
-
-    def _initialize_pointers(self, kv_caches: List[torch.Tensor]):
-        for i in range(self.num_layers):
-            self.kv_cache_pointers[i] = kv_caches[i].data_ptr()
-        self.pointers_initialized = True
+    def _initialize_pointers(self,
+                             kv_caches: List[torch.Tensor]) -> torch.Tensor:
+        self.kv_cache_pointers.numpy()[:] = [t.data_ptr() for t in kv_caches]
+        device = kv_caches[0].device
+        assert device.type == 'cuda', \
+                "The device should be CUDA."
+        idx = device.index
+        if idx not in self.kv_cache_pointers_on_gpu:
+            self.kv_cache_pointers_on_gpu[idx] = torch.empty(self.num_layers,
+                                                             dtype=torch.int64,
+                                                             device=device)
+        self.kv_cache_pointers_on_gpu[idx].copy_(self.kv_cache_pointers)
         # kv_caches[0].shape: [2, num_pages, page_size, num_heads, head_size]
         self.page_buffer_size = kv_caches[0].shape[1] * kv_caches[0].shape[2]
+        return self.kv_cache_pointers_on_gpu[idx]
 
     @_lmcache_nvtx_annotate
     def to_gpu(self, memory_obj: MemoryObj, start: int, end: int, **kwargs):
@@ -356,8 +349,7 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
         kvcaches: List[torch.Tensor] = kwargs["kvcaches"]
         slot_mapping: torch.Tensor = kwargs["slot_mapping"]
 
-        if not self._pointers_are_good(kvcaches):
-            self._initialize_pointers(kvcaches)
+        kv_cache_pointers = self._initialize_pointers(kvcaches)
 
         # NOTE(ApostaC): By default, detour from a GPU buffer is slower
         # than directly copying from the CPU.
@@ -366,7 +358,7 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
         #if self.gpu_buffer is None or \
         #        end - start != self.gpu_buffer.shape[2]:
         #    lmc_ops.multi_layer_kv_transfer(memory_obj.tensor,
-        #                                    self.kv_cache_pointers,
+        #                                    kv_cache_pointers,
         #                                    slot_mapping[start:end],
         #                                    kvcaches[0].device,
         #                                    self.page_buffer_size, False)
@@ -377,12 +369,11 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
         #    tmp_gpu_buffer.copy_(memory_obj.tensor, non_blocking=True)
         #    lmc_ops.multi_layer_kv_transfer(
         #        tmp_gpu_buffer,
-        #        self.kv_cache_pointers,
+        #        kv_cache_pointers,
         #        slot_mapping[start:end],
         #        kvcaches[0].device, self.page_buffer_size, False)
 
-        lmc_ops.multi_layer_kv_transfer(memory_obj.tensor,
-                                        self.kv_cache_pointers,
+        lmc_ops.multi_layer_kv_transfer(memory_obj.tensor, kv_cache_pointers,
                                         slot_mapping[start:end],
                                         kvcaches[0].device,
                                         self.page_buffer_size, False, False)
@@ -417,14 +408,12 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
         kvcaches: List[torch.Tensor] = kwargs["kvcaches"]
         slot_mapping: torch.Tensor = kwargs["slot_mapping"]
 
-        #if not self.pointers_initialized:
-        if not self._pointers_are_good(kvcaches):
-            self._initialize_pointers(kvcaches)
+        kv_cache_pointers = self._initialize_pointers(kvcaches)
 
         if self.gpu_buffer is None or \
                 end - start != self.gpu_buffer.shape[2]:
             lmc_ops.multi_layer_kv_transfer(memory_obj.tensor,
-                                            self.kv_cache_pointers,
+                                            kv_cache_pointers,
                                             slot_mapping[start:end],
                                             kvcaches[0].device,
                                             self.page_buffer_size, True, False)
@@ -432,8 +421,7 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
             # kvcaches -> gpu_buffer -> memobj
             assert self.gpu_buffer.device == kvcaches[0].device
             tmp_gpu_buffer = self.gpu_buffer[:, :, :end - start, :]
-            lmc_ops.multi_layer_kv_transfer(tmp_gpu_buffer,
-                                            self.kv_cache_pointers,
+            lmc_ops.multi_layer_kv_transfer(tmp_gpu_buffer, kv_cache_pointers,
                                             slot_mapping[start:end],
                                             kvcaches[0].device,
                                             self.page_buffer_size, True, False)
