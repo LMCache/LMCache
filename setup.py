@@ -54,6 +54,7 @@ if not BUILDING_SDIST:
         # e.g., CXX=hipcc python setup.py install
         define_macros = []
         define_macros.append(('__HIP_PLATFORM_HCC__', '1'))
+        define_macros.append(('USE_ROCM', '1'))
         ext_modules = [
             cpp_extension.CppExtension(
                 'lmcache.c_ops',
