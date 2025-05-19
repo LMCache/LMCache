@@ -74,7 +74,7 @@ class RetrieveStatus(Enum):
     # (2) chunk_prefill_last
     # (3) prefix_prefill
     CHUNK_PREFILL = 2  # not last chunk
-    NONE = 5
+    NONE = 4
 
 
 def need_gpu_interm_buffer(lmcache_config: LMCacheEngineConfig):
