@@ -15,9 +15,8 @@ docker run --runtime=$RUNTIME --gpus all \
     --env "chunk_size=256" \
     --env "local_cpu=True" \
     --env "max_local_cpu_size=5" \
-    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    --volume ~/.cache/huggingface:/root/.cache/huggingface \
     --network host \
-    --entrypoint "/usr/local/bin/vllm" \
     $IMAGE \
-    serve $HF_MODEL_NAME --kv-transfer-config \
+    $HF_MODEL_NAME --kv-transfer-config \
     '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}'

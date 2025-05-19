@@ -2,8 +2,7 @@
 # to run with vLLM OpenAI server.
 
 # Please update any changes made here to:
-# docs/source/developer_guide/docker_file.rst and
-# docs/source/production/docker_deployment.rst
+# docs/source/getting_started/installation.rst
 
 ARG CUDA_VERSION=12.8.1
 ARG VLLM_IMAGE_REPO='vllm/vllm-openai'
@@ -12,8 +11,6 @@ ARG UBUNTU_VERSION=22.04
 
 #################### BASE BUILD IMAGE ####################
 # Prepare basic build environment
-# -cudnn-devel-ubuntu20.04 is required for latest CUDA
-# -devel-ubuntu20.04 for previous
 
 FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu${UBUNTU_VERSION} AS base
 
