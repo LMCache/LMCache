@@ -78,9 +78,10 @@ class RetrieveStatus(Enum):
 
 
 def need_gpu_interm_buffer(lmcache_config: LMCacheEngineConfig):
-    # Always True because the local_cpu backend is always created
-    # regardless of lmcache_config.local_cpu.
-    return True
+    if lmcache_config.enable_nixl:
+        return False
+    else:
+        return True
 
 
 def init_lmcache_engine(

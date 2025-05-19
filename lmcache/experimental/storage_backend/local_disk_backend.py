@@ -18,6 +18,7 @@ import threading
 from collections import OrderedDict
 from concurrent.futures import Future
 from typing import TYPE_CHECKING, List, Optional
+from lmcache.experimental.memory_management import MemoryFormat
 
 import aiofiles
 import torch
@@ -292,7 +293,7 @@ class LocalDiskBackend(StorageBackendInterface):
         """
         Async load bytearray from disk.
         """
-        memory_obj = self.local_cpu_backend.allocate(shape, dtype)
+        memory_obj = self.local_cpu_backend.allocate(shape, dtype, MemoryFormat.KV_T2D)
         if memory_obj is None:
             logger.debug("Memory allocation failed during async disk load.")
             return None
