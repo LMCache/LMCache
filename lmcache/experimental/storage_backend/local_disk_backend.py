@@ -26,7 +26,7 @@ from lmcache.experimental.cache_controller.message import (KVAdmitMsg,
                                                            KVEvictMsg)
 from lmcache.experimental.config import LMCacheEngineConfig
 from lmcache.experimental.lookup_server import LookupServerInterface
-from lmcache.experimental.memory_management import MemoryFormat, MemoryObj
+from lmcache.experimental.memory_management import MemoryObj
 from lmcache.experimental.storage_backend.abstract_backend import \
     StorageBackendInterface
 from lmcache.experimental.storage_backend.evictor import LRUEvictor, PutStatus
@@ -292,8 +292,7 @@ class LocalDiskBackend(StorageBackendInterface):
         """
         Async load bytearray from disk.
         """
-        memory_obj = self.local_cpu_backend.allocate(shape, dtype,
-                                                     MemoryFormat.KV_T2D)
+        memory_obj = self.local_cpu_backend.allocate(shape, dtype)
         if memory_obj is None:
             logger.debug("Memory allocation failed during async disk load.")
             return None
