@@ -7,6 +7,36 @@ from setuptools import find_packages, setup
 # from torch.utils import cpp_extension
 
 ROOT_DIR = Path(__file__).parent
+HIPIFY_DIR = os.path.join(ROOT_DIR, "csrc/")
+HIPIFY_OUT_DIR =  os.path.join(ROOT_DIR, "csrc_hip/")
+
+
+
+def hipify_wrapper() -> None:
+    from torch.utils.hipify.hipify_python import hipify
+    import shutil
+    # Get absolute path for all source files.
+    includes =os.path.join(HIPIFY_DIR, '*')
+    extra_files = [
+            os.path.abspath(os.path.join(HIPIFY_DIR, item))
+            for item in os.listdir(HIPIFY_DIR)
+            if os.path.isfile(os.path.join(HIPIFY_DIR, item)) 
+    ]
+
+    # Copy sources from project directory to output directory.
+    # The directory might already exist to hold object files so we ignore that.
+    shutil.copytree(HIPIFY_DIR, HIPIFY_OUT_DIR, dirs_exist_ok=True)
+
+    hipify_result = hipify(project_directory=HIPIFY_DIR,
+                           output_directory=HIPIFY_OUT_DIR,
+                           header_include_dirs=[],
+                           includes=includes,
+                           extra_files=extra_files,
+                           show_detailed=True,
+                           is_pytorch_extension=True,
+                           hipify_extra_files_only=True)
+
+
 
 # Taken from https://github.com/vllm-project/vllm/blob/main/setup.py
 def get_requirements() -> list[str]:
@@ -40,6 +70,7 @@ if not BUILDING_SDIST:
     from torch.utils import cpp_extension # Import here
 
     if BUILD_WITH_HIP:
+        hipify_wrapper()
         print("Building HIP extensions")
         hip_sources = [
             'csrc/pybind_hip.cpp', # Use the hipified pybind

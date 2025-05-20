@@ -31,7 +31,7 @@ namespace lmc {
 namespace {
 
 template<typename scalar_t, typename index_t>
-__device__ scalar_t load_from_global_space(const scalar_t* ptr, const index_t index){
+__device__ scalar_t maybe_ldg(const scalar_t* ptr, const index_t index){
 #ifdef __HIP_PLATFORM_HCC__ 
   return ptr[index];
 #else
@@ -40,8 +40,6 @@ __device__ scalar_t load_from_global_space(const scalar_t* ptr, const index_t in
 }
 
 }
-
-
 
 template <typename scalar_t, bool IS_NEOX>
 inline __device__ void apply_token_rotary_embedding_fused(
@@ -58,20 +56,20 @@ inline __device__ void apply_token_rotary_embedding_fused(
     // GPT-NeoX style rotary embedding.
     x_index = rot_offset;
     y_index = embed_dim + rot_offset;
-    old_cos = load_from_global_space(old_cos_ptr, x_index);
-    old_sin = load_from_global_space(old_sin_ptr, x_index);
+    old_cos = maybe_ldg(old_cos_ptr, x_index);
+    old_sin = maybe_ldg(old_sin_ptr, x_index);
 
-    new_cos = load_from_global_space(new_cos_ptr, x_index);
-    new_sin = load_from_global_space(new_sin_ptr, x_index);
+    new_cos = maybe_ldg(new_cos_ptr, x_index);
+    new_sin = maybe_ldg(new_sin_ptr, x_index);
   } else {
     // GPT-J style rotary embedding.
     x_index = 2 * rot_offset;
     y_index = 2 * rot_offset + 1;
-    old_cos = load_from_global_space(old_cos_ptr, x_index / 2);
-    old_sin = load_from_global_space(old_sin_ptr, x_index / 2);
+    old_cos = maybe_ldg(old_cos_ptr, x_index / 2);
+    old_sin = maybe_ldg(old_sin_ptr, x_index / 2);
 
-    new_cos = load_from_global_space(new_cos_ptr, x_index / 2);
-    new_sin = load_from_global_space(new_sin_ptr, x_index / 2);
+    new_cos = maybe_ldg(new_cos_ptr, x_index / 2);
+    new_sin = maybe_ldg(new_sin_ptr, x_index / 2);
   }
 
   const scalar_t x = arr[x_index];
