@@ -567,9 +567,10 @@ class LMCacheConnectorV1Impl:
                 store_mask[:skip_leading_tokens] = False
 
                 logger.info(
-                    "Storing KV cache for %d out of %d tokens for request %s",
+                    "Storing KV cache for %d out of %d tokens "
+                    "(skip_leading_tokens=%d) for request %s",
                     len(token_ids) - skip_leading_tokens, len(token_ids),
-                    request.req_id)
+                    skip_leading_tokens, request.req_id)
                 layerwise_storer = self.lmcache_engine.store_layer(
                     token_ids,
                     mask=store_mask,
@@ -632,9 +633,10 @@ class LMCacheConnectorV1Impl:
             store_mask[:skip_leading_tokens] = False
 
             logger.info(
-                "Storing KV cache for %d out of %d tokens for request %s",
+                "Storing KV cache for %d out of %d tokens "
+                "(skip_leading_tokens=%d) for request %s",
                 len(token_ids) - skip_leading_tokens, len(token_ids),
-                request.req_id)
+                skip_leading_tokens, request.req_id)
             self.lmcache_engine.store(token_ids,
                                       mask=store_mask,
                                       kvcaches=kvcaches,
