@@ -21,7 +21,7 @@ Example run command
         --entrypoint "/usr/local/bin/vllm" \
         $IMAGE \
         serve mistralai/Mistral-7B-Instruct-v0.2 --kv-transfer-config \
-        '{"kv_connector":"LMCacheConnectorv1","kv_role":"kv_both"}'
+        '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}'
 
 
 The Image Name and Tag can be found on Docker Hub - `LMCache <https://hub.docker.com/r/lmcache/vllm-openai>`_.
