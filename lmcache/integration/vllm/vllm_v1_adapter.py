@@ -263,8 +263,18 @@ class ReqMeta:
         # OPTIMIZATION: pre-allocate the buffer for token ids and block
         # ids
         token_ids = torch.tensor(input_token_ids)[:num_tokens_to_save]
-        num_blocks = len(tracker.allocated_block_ids)
-        block_ids = torch.tensor(tracker.allocated_block_ids, dtype=torch.long)
+
+        flattened_list = []
+        for item in tracker.allocated_block_ids:
+            if isinstance(item, list):
+                flattened_list.extend(item)
+            elif isinstance(item, int):
+         
+                flattened_list.append(item)
+
+        num_blocks = len(flattened_list)
+
+        block_ids = torch.tensor(flattened_list, dtype=torch.long)
 
         if len(token_ids) > num_blocks * block_size:
             logger.error(
@@ -278,7 +288,6 @@ class ReqMeta:
                 block_ids.reshape((num_blocks, 1)) * block_size
 
         slot_mapping = slot_mapping.flatten()[:len(token_ids)]
-        assert slot_mapping.dtype == torch.long  # TODO: this could be removed
 
         # For load operation: check whether the request is scheduled to load
         if load_spec is not None and load_spec.can_load:
