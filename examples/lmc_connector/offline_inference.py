@@ -81,7 +81,10 @@ kv_transfer_config = '{\
     "kv_connector":"LMCacheConnector",\
     "kv_role":"kv_both"}'
 
-kv_transfer_config = KVTransferConfig.from_cli(kv_transfer_config)
+kv_transfer_config = KVTransferConfig(
+    kv_connector="LMCacheConnectorV1",
+    kv_role="kv_both",
+)
 # Create an LLM.
 llm = LLM(model=model_name,
           gpu_memory_utilization=0.8,
