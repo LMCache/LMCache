@@ -52,7 +52,8 @@ class StorageManager:
                  metadata: LMCacheEngineMetadata,
                  allocator: MemoryAllocatorInterface,
                  lmcache_worker: Optional["LMCacheWorker"] = None,
-                 lookup_server: Optional[LookupServerInterface] = None):
+                 lookup_server: Optional[LookupServerInterface] = None,
+                 layerwise: bool = False):
         self.memory_allocator = allocator
 
         self.loop = asyncio.new_event_loop()
@@ -65,7 +66,7 @@ class StorageManager:
             CreateStorageBackends(
                 config, metadata,
                 self.loop, allocator, dst_device,
-                lmcache_worker, lookup_server)
+                lmcache_worker, lookup_server, layerwise)
         self.local_cpu_backend = self.storage_backends["LocalCPUBackend"]
         self.prefetch_tasks: Dict[CacheEngineKey, Future] = {}
         self.put_tasks: Dict[str, Dict[CacheEngineKey, Tuple[Future,

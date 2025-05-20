@@ -52,7 +52,8 @@ class LocalCPUBackend(StorageBackendInterface):
                  config: LMCacheEngineConfig,
                  memory_allocator: MemoryAllocatorInterface,
                  lookup_server: Optional[LookupServerInterface] = None,
-                 lmcache_worker: Optional["LMCacheWorker"] = None):
+                 lmcache_worker: Optional["LMCacheWorker"] = None,
+                 layerwise: bool = False):
         self.hot_cache: OrderedDict[CacheEngineKey, MemoryObj] = OrderedDict()
         self.use_hot = config.local_cpu
         self.lookup_server = lookup_server
@@ -65,6 +66,7 @@ class LocalCPUBackend(StorageBackendInterface):
 
         self.stats_monitor = LMCStatsMonitor.GetOrCreate()
         self.usage = 0
+        self.layerwise = layerwise
 
     def __str__(self):
         return self.__class__.__name__
@@ -186,7 +188,7 @@ class LocalCPUBackend(StorageBackendInterface):
     def allocate(self,
                  shape: torch.Size,
                  dtype: torch.dtype,
-                 fmt: MemoryFormat = MemoryFormat.KV_2LTD,
+                 fmt: Optional[MemoryFormat] = None,
                  eviction: bool = True) -> Optional[MemoryObj]:
         """
         allocate a memory object of shape and dtype
@@ -194,6 +196,12 @@ class LocalCPUBackend(StorageBackendInterface):
         local_cpu_backend.allocate() to get memory objects
         regardless of whether local_cpu is True or False
         """
+        if fmt is None:
+            if self.layerwise:
+                fmt = MemoryFormat.KV_T2D
+            else:
+                fmt = MemoryFormat.KV_2LTD
+
         memory_obj = self.memory_allocator.allocate(shape, dtype, fmt)
         if memory_obj is not None or not eviction:
             return memory_obj
