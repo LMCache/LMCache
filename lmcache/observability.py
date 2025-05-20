@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 import threading
 import time
 from dataclasses import dataclass
@@ -318,6 +319,13 @@ class PrometheusLogger:
     _histogram_cls = prometheus_client.Histogram
 
     def __init__(self, metadata: LMCacheEngineMetadata):
+        # Ensure PROMETHEUS_MULTIPROC_DIR is set before any metric registration
+        if "PROMETHEUS_MULTIPROC_DIR" not in os.environ:
+            default_dir = "/tmp/lmcache_prometheus"
+            os.environ["PROMETHEUS_MULTIPROC_DIR"] = default_dir
+            if not os.path.exists(default_dir):
+                os.makedirs(default_dir, exist_ok=True)
+
         self.metadata = metadata
 
         self.labels = self._metadata_to_labels(metadata)
