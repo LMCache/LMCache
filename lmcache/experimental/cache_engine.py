@@ -638,6 +638,7 @@ class LayerwiseLMCacheEngine(LMCacheEngine):
                 starts, ends, **kwargs)
             next(mem_obj_consumer)
 
+            to_count_down = []
             for layer_id in range(self.num_layers):
 
                 tasks = next(get_generator)
@@ -648,10 +649,14 @@ class LayerwiseLMCacheEngine(LMCacheEngine):
 
                 mem_objs_layer = [task.result() for task in tasks]
                 mem_obj_consumer.send(mem_objs_layer)
+                to_count_down.extend(mem_objs_layer)
 
             # TODO(Jiayi): Need to be done in a modular way
             for keys_layer in keys_layer_major:
                 self.storage_manager.batched_unpin(keys_layer)
+
+            for mem_obj in to_count_down:
+                mem_obj.ref_count_down()
         else:
             # If no cache are found, we still need to yield to avoid
             # `StopIteration`
