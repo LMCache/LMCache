@@ -5,7 +5,7 @@
 # https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html
 
 # Set the following variables:
-IMAGE=lmcache/vllm-openai:2025-05-17-v1 # WARNING: Cannot use latest or omit the tag!!!
+IMAGE=<IMAGE_NAME>:<TAG>
 HF_MODEL_NAME='meta-llama/Llama-3.1-8B-Instruct'
 RUNTIME=nvidia
 
