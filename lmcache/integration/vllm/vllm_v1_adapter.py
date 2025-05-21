@@ -193,7 +193,11 @@ class RequestTracker:
         scheduled again
         """
         self.token_ids.extend(cached_request.new_token_ids)
-        self.allocated_block_ids.extend(cached_request.new_block_ids)
+        new_block_ids_list = cached_request.new_block_ids
+        for new_block_ids in new_block_ids_list:
+            if new_block_ids:
+                self.allocated_block_ids.extend(new_block_ids)
+
 
 
 @dataclass
@@ -264,17 +268,9 @@ class ReqMeta:
         # ids
         token_ids = torch.tensor(input_token_ids)[:num_tokens_to_save]
 
-        flattened_list = []
-        for item in tracker.allocated_block_ids:
-            if isinstance(item, list):
-                flattened_list.extend(item)
-            elif isinstance(item, int):
-         
-                flattened_list.append(item)
+        num_blocks = len(tracker.allocated_block_ids)
 
-        num_blocks = len(flattened_list)
-
-        block_ids = torch.tensor(flattened_list, dtype=torch.long)
+        block_ids = torch.tensor(tracker.allocated_block_ids, dtype=torch.long)
 
         if len(token_ids) > num_blocks * block_size:
             logger.error(
