@@ -16,33 +16,30 @@ cleanup() {
 trap cleanup SIGINT SIGTERM
 
 # --- Configuration arrays (must all be the same length) ---
-ports=(8000 8001 8002 8003 8004 8005 8006)
+ports=(8000)
 configs=(
-  ../config/May_13_2/kivi/02.yaml
-  ../config/May_13_2/kivi/03.yaml
-  ../config/May_13_2/kivi/06.yaml
-  ../config/May_13_2/streaming/02.yaml
-  ../config/May_13_2/streaming/03.yaml
-  ../config/May_13_2/streaming/06.yaml
-  ../config/May_13_2/prefill/0.yaml
+  ../config/May_13_2_triviaqa_rr/ours/kivi_1.yaml
+  # ../config/May_13_2_triviaqa_rr/ours/kivi_01.yaml
+  # ../config/May_13_2_triviaqa_rr/ours/kivi_10.yaml
+  # ../config/May_13_2_triviaqa_rr/ours/streaming_1.yaml
+  # ../config/May_13_2_triviaqa_rr/ours/streaming_04.yaml
+  # ../config/May_13_2_triviaqa_rr/ours/streaming_10.yaml
 )
 logs=(
-  results/May_13_2/kivi/tokens/02.log
-  results/May_13_2/kivi/tokens/03.log
-  results/May_13_2/kivi/tokens/06.log
-  results/May_13_2/streaming/tokens/02.log
-  results/May_13_2/streaming/tokens/03.log
-  results/May_13_2/streaming/tokens/06.log
-  results/May_13_2/prefill/tokens/0.log
+  results/May_13_2_triviaqa_rr/ours/tokens/kivi_1.log
+  # results/May_13_2_triviaqa_rr/ours/tokens/kivi_01.log
+  # results/May_13_2_triviaqa_rr/ours/tokens/kivi_10.log
+  # results/May_13_2_triviaqa_rr/ours/tokens/streaming_1.log
+  # results/May_13_2_triviaqa_rr/ours/tokens/streaming_04.log
+  # results/May_13_2_triviaqa_rr/ours/tokens/streaming_10.log
 )
 outputs=(
-  results/May_13_2/kivi/02.csv
-  results/May_13_2/kivi/03.csv
-  results/May_13_2/kivi/06.csv
-  results/May_13_2/streaming/02.csv
-  results/May_13_2/streaming/03.csv
-  results/May_13_2/streaming/06.csv
-  results/May_13_2/prefill/0.csv
+  results/May_13_2_triviaqa_rr/ours/kivi_1.csv
+  # results/May_13_2_triviaqa_rr/ours/kivi_01.csv
+  # results/May_13_2_triviaqa_rr/ours/kivi_10.csv
+  # results/May_13_2_triviaqa_rr/ours/streaming_1.csv
+  # results/May_13_2_triviaqa_rr/ours/streaming_04.csv
+  # results/May_13_2_triviaqa_rr/ours/streaming_10.csv
 )
 
 # Array to track running PGIDs
