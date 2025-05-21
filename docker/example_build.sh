@@ -6,7 +6,7 @@
 # The latest release version of vLLM imnage are on DockerHub: vllm/vllm-openai
 CUDA_VERSION=12.8.1
 DOCKERFILE_NAME='Dockerfile'
-DOCKER_BUILD_PATH='.'
+DOCKER_BUILD_PATH='../' # This path should point to the LMCache root for access to 'requirements' directory
 UBUNTU_VERSION=22.04
 VLLM_IMAGE_REPO='vllm/vllm-openai'
 VLLM_TAG='latest'
