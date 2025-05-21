@@ -25,21 +25,10 @@
 #include <c10/cuda/CUDAGuard.h>
 
 #include "dispatch_utils.h"
-
+#include "cuda_compat.h"
 namespace lmc {
 
-namespace {
 
-template<typename scalar_t, typename index_t>
-__device__ scalar_t maybe_ldg(const scalar_t* ptr, const index_t index){
-#ifdef __HIP_PLATFORM_HCC__ 
-  return ptr[index];
-#else
-  return __ldg(ptr + index);
-#endif
-}
-
-}
 
 template <typename scalar_t, bool IS_NEOX>
 inline __device__ void apply_token_rotary_embedding_fused(
@@ -56,20 +45,20 @@ inline __device__ void apply_token_rotary_embedding_fused(
     // GPT-NeoX style rotary embedding.
     x_index = rot_offset;
     y_index = embed_dim + rot_offset;
-    old_cos = maybe_ldg(old_cos_ptr, x_index);
-    old_sin = maybe_ldg(old_sin_ptr, x_index);
+    old_cos = LMCACHE_LDG(old_cos_ptr + x_index);
+    old_sin = LMCACHE_LDG(old_sin_ptr + x_index);
 
-    new_cos = maybe_ldg(new_cos_ptr, x_index);
-    new_sin = maybe_ldg(new_sin_ptr, x_index);
+    new_cos = LMCACHE_LDG(new_cos_ptr + x_index);
+    new_sin = LMCACHE_LDG(new_sin_ptr + x_index);
   } else {
     // GPT-J style rotary embedding.
     x_index = 2 * rot_offset;
     y_index = 2 * rot_offset + 1;
-    old_cos = maybe_ldg(old_cos_ptr, x_index / 2);
-    old_sin = maybe_ldg(old_sin_ptr, x_index / 2);
+    old_cos = LMCACHE_LDG(old_cos_ptr + x_index / 2);
+    old_sin = LMCACHE_LDG(old_sin_ptr + x_index / 2);
 
-    new_cos = maybe_ldg(new_cos_ptr, x_index / 2);
-    new_sin = maybe_ldg(new_sin_ptr, x_index / 2);
+    new_cos = LMCACHE_LDG(new_cos_ptr + x_index / 2);
+    new_sin = LMCACHE_LDG(new_sin_ptr + x_index / 2);
   }
 
   const scalar_t x = arr[x_index];

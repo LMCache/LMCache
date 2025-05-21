@@ -20,7 +20,7 @@
 #include "mem_kernels.cuh"
 #include <ATen/ATen.h>
 #include <ATen/cuda/CUDAContext.h>
-#ifdef __HIP_PLATFORM_HCC__ 
+#ifdef USE_ROCM
 #include <hip/hip_fp8.h>
 #else
 #include <cuda_fp8.h>
