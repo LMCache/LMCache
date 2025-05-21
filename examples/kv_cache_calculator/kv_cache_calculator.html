@@ -167,10 +167,15 @@
             }
 
             let hidden_size, num_attention_heads, num_hidden_layers, num_key_value_heads;
-            let kv_lora_rank, qk_rope_head_dim; // for deepseek-ai/DeepSeek-V3
+            let kv_lora_rank; // for deepseek-ai/DeepSeek-V3
             let head_size;
             if (model === "deepseek-ai/DeepSeek-V3") {
-                ({ hidden_size, num_attention_heads, num_hidden_layers, num_key_value_heads, kv_lora_rank, qk_rope_head_dim } = config);
+                ({ num_hidden_layers, kv_lora_rank } = config);
+            } else if (model === "Qwen/Qwen3-4B" || model === "Qwen/Qwen3-8B" || 
+                       model === "Qwen/Qwen3-14B" || model === "Qwen/Qwen3-32B") {
+                // The Qwen3 series use GQA, and `head_dim` needs to be read from config file.
+                ({ hidden_size, num_attention_heads, num_hidden_layers, num_key_value_heads, head_dim } = config);
+                console.log(config);
             } else {
                 ({ hidden_size, num_attention_heads, num_hidden_layers, num_key_value_heads } = config);
                 head_size = hidden_size / num_attention_heads;
@@ -193,7 +198,10 @@
             // Calculate KV cache size
             let total_elements;
             if (model === "deepseek-ai/DeepSeek-V3") {
-                total_elements = num_hidden_layers * tokens * (qk_rope_head_dim + kv_lora_rank);
+                total_elements = 2 * num_hidden_layers * tokens * kv_lora_rank;
+            } else if (model === "Qwen/Qwen3-4B" || model === "Qwen/Qwen3-8B" || 
+                       model === "Qwen/Qwen3-14B" || model === "Qwen/Qwen3-32B") {
+                total_elements = 2 * num_hidden_layers * tokens * num_key_value_heads * head_dim;
             } else {
                 total_elements = 2 * num_hidden_layers * tokens * num_key_value_heads * head_size;
             }
@@ -209,11 +217,23 @@
                 steps = `
                 <strong>Calculation Details:</strong><br><br>
                 <b>Selected Model:</b> ${model}<br>
-                <b>KV-LoRA Rank:</b> ${kv_lora_rank}<br>
-                <b>QK-RoPE Head Dim:</b> ${qk_rope_head_dim}<br>
-                <b>KV Cache Dimension:</b> ${qk_rope_head_dim + kv_lora_rank} (QK-RoPE Head Dim + KV-LoRA Rank)<br>
+                <b>Number of Hidden Layers:</b> ${num_hidden_layers}<br>
+                <b>KV-LoRA Rank(dimension of latent space):</b> ${kv_lora_rank}<br>
                 <b>Data Type Size:</b> ${dtype_size} bytes<br>
-                <b>Total Elements:</b> ${num_hidden_layers} × ${tokens} × ${qk_rope_head_dim + kv_lora_rank} = ${total_elements}<br>
+                <b>Total Elements:</b> 2 × ${num_hidden_layers} × ${tokens} × ${kv_lora_rank} = ${total_elements}<br>
+                <b>Total Bytes:</b> ${total_elements} × ${dtype_size} = ${total_bytes} bytes<br>
+                <b>KV Cache Size:</b> ${total_bytes} / (1024³) ≈ ${kvCacheSizeGB.toFixed(4)} GB
+                `;
+            } else if (model === "Qwen/Qwen3-4B" || model === "Qwen/Qwen3-8B" || 
+                       model === "Qwen/Qwen3-14B" || model === "Qwen/Qwen3-32B") {
+                steps = `
+                <strong>Calculation Details:</strong><br><br>
+                <b>Selected Model:</b> ${model}<br>
+                <b>Number of Hidden Layers:</b> ${num_hidden_layers}<br>
+                <b>Number of Key-Value Heads:</b> ${num_key_value_heads}<br>
+                <b>Head dim:</b> ${head_dim}<br>
+                <b>Data Type Size:</b> ${dtype_size} bytes<br>
+                <b>Total Elements:</b> 2 × ${num_hidden_layers} × ${tokens} × ${num_key_value_heads} × ${head_dim} = ${total_elements}<br>
                 <b>Total Bytes:</b> ${total_elements} × ${dtype_size} = ${total_bytes} bytes<br>
                 <b>KV Cache Size:</b> ${total_bytes} / (1024³) ≈ ${kvCacheSizeGB.toFixed(4)} GB
                 `;
