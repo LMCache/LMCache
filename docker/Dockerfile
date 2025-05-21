@@ -36,10 +36,10 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
 WORKDIR /workspace
 
 # install runtime dependencies
-COPY requirements.txt requirements.txt
-COPY requirements-cuda.txt requirements-cuda.txt
+COPY requirements/common.txt requirements/common.txt
+COPY requirements/cuda.txt requirements/cuda.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
-    python3 -m pip install -r requirements-cuda.txt
+    python3 -m pip install -r requirements/cuda.txt
 
 
 # cuda arch list used by torch
@@ -58,7 +58,7 @@ ENV VLLM_FA_CMAKE_GPU_ARCHES=${vllm_fa_cmake_gpu_arches}
 FROM base AS build
 
 # install build dependencies
-COPY requirements-build.txt requirements-build.txt
+COPY requirements/build.txt requirements/build.txt
 
 # max jobs used by Ninja to build extensions
 ARG max_jobs=2
@@ -69,7 +69,7 @@ ARG nvcc_threads=8
 ENV NVCC_THREADS=$nvcc_threads
 
 RUN --mount=type=cache,target=/root/.cache/pip \
-    python3 -m pip install -r requirements-build.txt
+    python3 -m pip install -r requirements/build.txt
 
 ARG LMCACHE_COMMIT_ID=1
 

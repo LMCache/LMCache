@@ -1,6 +1,5 @@
-# Mirrors build dependencies in pyproject.toml
+# This should mirror the build dependencies in pyproject.toml
 
-jinja2
 ninja
 packaging>=24.2
 setuptools>=77.0.3,<80.0.0

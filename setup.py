@@ -10,7 +10,7 @@ ROOT_DIR = Path(__file__).parent
 # Taken from https://github.com/vllm-project/vllm/blob/main/setup.py
 def get_requirements() -> list[str]:
     """Get Python package dependencies from requirements.txt."""
-    requirements_dir = ROOT_DIR
+    requirements_dir = ROOT_DIR / "requirements"
 
     def _read_requirements(filename: str) -> list[str]:
         with open(requirements_dir / filename) as f:
@@ -24,7 +24,7 @@ def get_requirements() -> list[str]:
                 resolved_requirements.append(line)
         return resolved_requirements
 
-    requirements = _read_requirements("requirements.txt")
+    requirements = _read_requirements("common.txt")
     return requirements
 
 

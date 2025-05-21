@@ -16,8 +16,8 @@ fi
 CUDA_VERSION="12.1"
 
 uv pip install --upgrade pip setuptools wheel
-uv pip install -r requirements.txt
-uv pip install -r requirements-test.txt
+uv pip install -r requirements/common.txt
+uv pip install -r requirements/test.txt
 uv pip install coverage
 
 # Export CUDA variables
