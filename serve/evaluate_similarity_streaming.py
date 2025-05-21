@@ -93,9 +93,9 @@ def main(args):
 if __name__ == "__main__":
     p = argparse.ArgumentParser(description="Compute ttft & ROUGEL for occurrence_number=2 rows")
     p.add_argument("input_csv",   help="Path to your input CSV")
-    p.add_argument("--prefill-dir",  default="results/May_10_3/prefill",
+    p.add_argument("--prefill-dir",  default="results/May_13_2_triviaqa_rr/prefill",
                    help="Directory containing 0.csv")
-    p.add_argument("--streaming-dir", default="results/May_13_streaming",
+    p.add_argument("--streaming-dir", default="results/May_14_1_triviaqa_press",
                    help="Base dir for results_rate_XX_processed.csv files")
     args = p.parse_args()
     main(args)

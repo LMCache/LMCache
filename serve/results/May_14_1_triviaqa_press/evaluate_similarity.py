@@ -3,13 +3,10 @@ import pandas as pd
 from our_metrics import evaluate_answer, f1_score
 import os
 
-INPUT02       = 'results/May_13_2_triviaqa_rr/kivi/02.csv'
-INPUT03       = 'results/May_13_2_triviaqa_rr/kivi/03.csv'
-INPUT06       = 'results/May_13_2_triviaqa_rr/kivi/06.csv'
-INPUT0        = 'results/May_13_2_triviaqa_rr/prefill/0.csv'
-INPUT_OURS01  = 'results/May_13_2_triviaqa_rr/ours/kivi_01.csv'
-INPUT_OURS1   = 'results/May_13_2_triviaqa_rr/ours/kivi_1.csv'
-INPUT_OURS10  = 'results/May_13_2_triviaqa_rr/ours/kivi_10.csv'
+INPUT06       = 'results_rate_06.csv'
+INPUT03       = 'results_rate_03.csv'
+INPUT02       = 'results_rate_02.csv'
+INPUT0        = '../May_13_2_triviaqa_rr/prefill/0.csv'
 
 def main():
     # Load & filter the reference answers, then reset its index
@@ -35,12 +32,11 @@ def main():
     for path, fname in zip(input_paths, filenames):
         # Load & filter this CSV, then reset its index
         df = pd.read_csv(path)
-        df = df[df['occurrence_number'] != 1].reset_index(drop=True)
 
         # Compute ROUGE‑L by looking up the reference answer via index_in_dataset
         df['ROUGEL'] = df.apply(
             lambda row: evaluate_answer(
-                row['answer'],
+                row['generated_text'],
                 ref_map[row['index_in_dataset']]
             ),
             axis=1
