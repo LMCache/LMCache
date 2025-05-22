@@ -61,8 +61,8 @@ def CreateStorageBackend(config: LMCacheEngineConfig,
                                                dst_device)
 
         case LMCacheEngineConfig(
-                _, local_device=str(p),
-                remote_url=str(q)) if p is not None and q is not None:
+            _, local_device=str(p),
+            remote_url=str(q)) if p is not None and q is not None:
             logger.info("Initializing hybrid backend")
             return LMCHybridBackend(config, metadata, mpool_metadata,
                                     dst_device)
