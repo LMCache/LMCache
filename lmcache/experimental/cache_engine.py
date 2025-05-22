@@ -371,7 +371,6 @@ class LMCacheEngine:
         # secondary lookup on p2p (via lookup_server) if enabled
         search_p2p = (self.enable_p2p
                       and (search_range is None or "p2p" in search_range))
-
         for start, end, key in self.token_database.process_tokens(tokens):
             assert isinstance(key, CacheEngineKey)
             if search_local:

@@ -17,6 +17,8 @@ import ctypes
 import operator
 from functools import reduce
 from typing import List, Optional, Union, no_type_check
+from lmcache.experimental.storage_backend.local_cpu_backend import \
+    LocalCPUBackend
 
 import infinistore
 import torch
@@ -43,7 +45,8 @@ def _get_ptr(mv: Union[bytearray, memoryview]) -> int:
 class InfinistoreConnector(RemoteConnector):
 
     def __init__(self, host: str, port: int, dev_name,
-                 loop: asyncio.AbstractEventLoop):
+                 loop: asyncio.AbstractEventLoop,
+                 local_cpu_backend: LocalCPUBackend):
         config = infinistore.ClientConfig(
             host_addr=host,
             service_port=port,
@@ -53,6 +56,7 @@ class InfinistoreConnector(RemoteConnector):
             link_type=infinistore.LINK_ETHERNET,
             dev_name=dev_name,
         )
+        self.local_cpu_backend = local_cpu_backend
 
         self.rdma_conn = infinistore.InfinityConnection(config)
 
@@ -82,7 +86,6 @@ class InfinistoreConnector(RemoteConnector):
 
         def blocking_io():
             return self.rdma_conn.check_exist(key.to_string())
-
         return await self.loop.run_in_executor(None, blocking_io)
 
     async def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
@@ -100,27 +103,28 @@ class InfinistoreConnector(RemoteConnector):
             return None
 
         metadata = RemoteMetadata.deserialize(buffer)
+        memory_obj = self.local_cpu_backend.allocate(
+            metadata.shape,
+            metadata.dtype,
+            metadata.fmt,
+        )
+        if memory_obj is None:
+            logger.warning("Failed to allocate memory during remote receive")
+            return None
 
-        def callback():
-            self.recv_queue.put_nowait(buf_idx)
+        if isinstance(memory_obj.byte_array, memoryview):
+            view = memory_obj.byte_array
+            if view.format == "<B":
+                view = view.cast("B")
+        else:
+            view = memoryview(memory_obj.byte_array)
+        
+        view[0:metadata.length] = bytearray(buffer[METADATA_BYTES_LEN:METADATA_BYTES_LEN+metadata.length])
+        self.recv_queue.put_nowait(buf_idx)
 
-        num_elements = reduce(operator.mul, metadata.shape)
-        assert metadata.dtype is not None
-        temp_tensor = torch.frombuffer(buffer,
-                                       dtype=metadata.dtype,
-                                       offset=METADATA_BYTES_LEN,
-                                       count=num_elements).reshape(
-                                           metadata.shape)
-
-        memory_obj = CopyLessMemoryObj(raw_data=temp_tensor,
-                                       metadata=metadata,
-                                       callback=callback)
-
-        logger.debug(f"get key: {key_str} done, {memory_obj.get_shape()}")
         return memory_obj
 
     async def put(self, key: CacheEngineKey, memory_obj: MemoryObj):
-
         key_str = key.to_string()
 
         kv_bytes = memory_obj.byte_array
@@ -140,6 +144,10 @@ class InfinistoreConnector(RemoteConnector):
         size = memory_obj.get_size()
 
         if size + METADATA_BYTES_LEN > self.buffer_size:
+            logger.warning(
+                f"Value size ({size + METADATA_BYTES_LEN} bytes)"
+                f"exceeds the maximum allowed size"
+                f"({self.buffer_size} bytes). Please decrease chunk_size.")
             raise ValueError(
                 f"Value size ({size + METADATA_BYTES_LEN} bytes)"
                 f"exceeds the maximum allowed size"

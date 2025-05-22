@@ -227,6 +227,13 @@ class RemoteBackend(StorageBackendInterface):
         self,
         key: CacheEngineKey,
     ) -> Optional[Future]:
+        if self.connection is None:
+            logger.warning(
+                "Connection is None in get_blocking, returning None")
+            return None
+        future = asyncio.run_coroutine_threadsafe(
+            self.connection_get_wrapper(key), self.loop)
+        return future
         raise NotImplementedError
 
     async def connection_put_wrapper(self, key: CacheEngineKey,
