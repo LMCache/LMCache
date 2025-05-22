@@ -75,7 +75,6 @@ class RedisConnector(RemoteConnector):
 
         # TODO(Jiayi): Find a way to do `get` inplace
         kv_bytes = self.connection.get(key_str + "kv_bytes")
-
         assert not inspect.isawaitable(kv_bytes)
 
         if kv_bytes is None:
