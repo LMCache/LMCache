@@ -54,8 +54,8 @@ where = [""]
 include = ["lmcache", "lmcache*"]
 
 [tool.ruff]
-# Allow lines to be as long as 80.
-line-length = 80
+# same as Black's default line length
+line-length = 88
 
 [tool.ruff.lint]
 select = [
@@ -67,8 +67,12 @@ select = [
     # "UP",
     # flake8-bugbear
     "B",
+    # flake8-simplify
+    #"SIM",
     # isort
     # "I",
+    # flake8-logging-format
+    #"G",
 ]
 ignore = [
     # star imports

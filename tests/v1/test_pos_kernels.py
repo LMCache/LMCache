@@ -22,8 +22,7 @@ def verify_rope():
         dtype=dtype,
     )
 
-    assert fused_rotary_emb is not None, \
-        "Failed to get fused rotary embedding"
+    assert fused_rotary_emb is not None, "Failed to get fused rotary embedding"
 
 
 if __name__ == "__main__":

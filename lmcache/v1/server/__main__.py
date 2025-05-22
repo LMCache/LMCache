@@ -27,7 +27,6 @@ logger = init_logger(__name__)
 
 
 class LMCacheServer:
-
     def __init__(self, host, port, device):
         self.host = host
         self.port = port
@@ -50,8 +49,7 @@ class LMCacheServer:
         try:
             while True:
                 logger.debug("Waiting for command")
-                header = self.receive_all(client_socket,
-                                          ClientMetaMessage.packlength())
+                header = self.receive_all(client_socket, ClientMetaMessage.packlength())
                 if not header:
                     break
                 meta = ClientMetaMessage.deserialize(header)
@@ -65,7 +63,8 @@ class LMCacheServer:
                         t2 = time.perf_counter()
                         logger.debug(
                             f"Time to receive data: {t1 - t0}, time to store "
-                            f"data: {t2 - t1}")
+                            f"data: {t2 - t1}"
+                        )
 
                     case Constants.CLIENT_GET:
                         t0 = time.perf_counter()
@@ -79,7 +78,8 @@ class LMCacheServer:
                                     lms_memory_obj.fmt,
                                     lms_memory_obj.dtype,
                                     lms_memory_obj.shape,
-                                ).serialize())
+                                ).serialize()
+                            )
                             t2 = time.perf_counter()
                             client_socket.sendall(lms_memory_obj.data)
                             t3 = time.perf_counter()
@@ -89,22 +89,31 @@ class LMCacheServer:
                             )
                         else:
                             client_socket.sendall(
-                                ServerMetaMessage(Constants.SERVER_FAIL, 0,
-                                                  MemoryFormat(1),
-                                                  torch.float16,
-                                                  torch.Size((0, 0, 0,
-                                                              0))).serialize())
+                                ServerMetaMessage(
+                                    Constants.SERVER_FAIL,
+                                    0,
+                                    MemoryFormat(1),
+                                    torch.float16,
+                                    torch.Size((0, 0, 0, 0)),
+                                ).serialize()
+                            )
 
                     case Constants.CLIENT_EXIST:
-                        code = (Constants.SERVER_SUCCESS
-                                if self.data_store.contains(meta.key) else
-                                Constants.SERVER_FAIL)
+                        code = (
+                            Constants.SERVER_SUCCESS
+                            if self.data_store.contains(meta.key)
+                            else Constants.SERVER_FAIL
+                        )
                         logger.debug(f"Key exists: {code}")
                         client_socket.sendall(
-                            ServerMetaMessage(code, 0, MemoryFormat(1),
-                                              torch.float16,
-                                              torch.Size(
-                                                  (0, 0, 0, 0))).serialize())
+                            ServerMetaMessage(
+                                code,
+                                0,
+                                MemoryFormat(1),
+                                torch.float16,
+                                torch.Size((0, 0, 0, 0)),
+                            ).serialize()
+                        )
 
                     # TODO(Jiayi): Implement List
                     # case Constants.CLIENT_LIST:
@@ -125,8 +134,9 @@ class LMCacheServer:
             while True:
                 client_socket, addr = self.server_socket.accept()
                 logger.info(f"Connected by {addr}")
-                threading.Thread(target=self.handle_client,
-                                 args=(client_socket, )).start()
+                threading.Thread(
+                    target=self.handle_client, args=(client_socket,)
+                ).start()
         finally:
             self.server_socket.close()
 
@@ -135,8 +145,7 @@ def main():
     import sys
 
     if len(sys.argv) not in [3, 4]:
-        logger.error(
-            f"Usage: {sys.argv[0]} <host> <port> <storage>(default:cpu)")
+        logger.error(f"Usage: {sys.argv[0]} <host> <port> <storage>(default:cpu)")
         exit(1)
 
     host = sys.argv[1]

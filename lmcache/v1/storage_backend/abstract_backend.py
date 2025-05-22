@@ -23,13 +23,12 @@ from lmcache.v1.memory_management import MemoryObj
 
 
 class StorageBackendInterface(metaclass=abc.ABCMeta):
-
     def __init__(
         self,
         dst_device: str = "cuda",
     ):
         """
-        Initialize the storage backend. 
+        Initialize the storage backend.
 
         :param dst_device: the device where the blocking retrieved KV is stored,
             could be either "cpu", "cuda", or "cuda:0", "cuda:1", etc.
@@ -46,14 +45,14 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
     @abc.abstractmethod
     def contains(self, key: CacheEngineKey, pin: bool = False) -> bool:
         """
-        Check whether key is in the storage backend. 
-        
+        Check whether key is in the storage backend.
+
         :param CacheEngineKey key: The key of the MemoryObj.
-        
-        :param bool pin: Whether to pin the key. 
+
+        :param bool pin: Whether to pin the key.
             If True, the corresponding KV cache will be
             pinned in the storage backend.
-        
+
         :return: True if the key exists, False otherwise.
         """
         raise NotImplementedError
@@ -61,19 +60,18 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
     @abc.abstractmethod
     def exists_in_put_tasks(self, key: CacheEngineKey) -> bool:
         """
-        Check whether key is in the ongoing put tasks. 
+        Check whether key is in the ongoing put tasks.
         """
         raise NotImplementedError
 
     @abc.abstractmethod
-    def submit_put_task(self, key: CacheEngineKey,
-                        obj: MemoryObj) -> Optional[Future]:
+    def submit_put_task(self, key: CacheEngineKey, obj: MemoryObj) -> Optional[Future]:
         """
         An async function to put the MemoryObj into the storage backend.
 
         :param CacheEngineKey key: The key of the MemoryObj.
         :param MemoryObj obj: The MemoryObj to be stored.
-        
+
         :return: a future object
         """
         raise NotImplementedError
@@ -99,9 +97,9 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
     ) -> Optional[MemoryObj]:
         """
         A blcocking function to get the kv cache from the storage backend.
-        
+
         :param CacheEngineKey key: The key of the MemoryObj.
-        
+
         :return: MemoryObj. None if the key does not exist.
         """
         raise NotImplementedError
@@ -113,9 +111,9 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
     ) -> Optional[Future]:
         """
         A non-blcocking function to get the kv cache from the storage backend.
-        
+
         :param CacheEngineKey key: The key of the MemoryObj.
-        
+
         :return: a future object. None if the key does not exist.
         """
         raise NotImplementedError
@@ -127,9 +125,9 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
     ) -> bool:
         """
         Pin a memory object so it will not be evicted.
-        
+
         :param CacheEngineKey key: The key of the MemoryObj.
-        
+
         :return: a bool indicates whether pin is successful.
         """
         raise NotImplementedError
@@ -141,15 +139,17 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
     ) -> bool:
         """
         Unpin a memory object so it can be evicted.
-        
+
         :param CacheEngineKey key: The key of the MemoryObj.
-        
+
         :return: a bool indicates whether unpin is successful.
         """
         raise NotImplementedError
 
     @abc.abstractmethod
-    def close(self, ) -> None:
+    def close(
+        self,
+    ) -> None:
         """
         Close the storage backend.
         """

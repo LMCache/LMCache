@@ -36,8 +36,9 @@ class CacheGenConfig:
     @staticmethod
     def from_model_name(model_name: str) -> "CacheGenConfig":
         family_7b = [
-            "mistralai/Mistral-7B-Instruct-v0.2", "lmsys/longchat-7b-16k",
-            "Qwen/Qwen-7B"
+            "mistralai/Mistral-7B-Instruct-v0.2",
+            "lmsys/longchat-7b-16k",
+            "Qwen/Qwen-7B",
         ]
         family_8b = ["meta-llama/Llama-3.1-8B-Instruct"]
         family_9b = ["THUDM/glm-4-9b-chat"]
@@ -96,7 +97,8 @@ class CacheGenConfig:
                 # Default name caught by num_hidden_layers
                 if config.num_hidden_layers is None:
                     raise ValueError(
-                        f"num_hidden_layers is None for model {model_name}")
+                        f"num_hidden_layers is None for model {model_name}"
+                    )
                 if config.num_hidden_layers < 10:
                     return CacheGenConfig(
                         nlayers=config.num_hidden_layers,
@@ -104,35 +106,35 @@ class CacheGenConfig:
                             QuantizationSpec(
                                 start_layer=0,
                                 end_layer=config.num_hidden_layers,
-                                bins=32),
+                                bins=32,
+                            ),
                         ],
                         vspecs=[
                             QuantizationSpec(
                                 start_layer=0,
                                 end_layer=config.num_hidden_layers,
-                                bins=32),
+                                bins=32,
+                            ),
                         ],
                     )
                 else:
                     return CacheGenConfig(
                         nlayers=config.num_hidden_layers,
                         kspecs=[
-                            QuantizationSpec(start_layer=0,
-                                             end_layer=10,
-                                             bins=32),
+                            QuantizationSpec(start_layer=0, end_layer=10, bins=32),
                             QuantizationSpec(
                                 start_layer=10,
                                 end_layer=config.num_hidden_layers,
-                                bins=16),
+                                bins=16,
+                            ),
                         ],
                         vspecs=[
-                            QuantizationSpec(start_layer=0,
-                                             end_layer=2,
-                                             bins=32),
+                            QuantizationSpec(start_layer=0, end_layer=2, bins=32),
                             QuantizationSpec(
                                 start_layer=2,
                                 end_layer=config.num_hidden_layers,
-                                bins=16),
+                                bins=16,
+                            ),
                         ],
                     )
             except Exception as e:

@@ -21,7 +21,6 @@ logger = init_logger(__name__)
 
 
 class FastSerializer(Serializer):
-
     def __init__(self):
         super().__init__()
 
@@ -32,7 +31,6 @@ class FastSerializer(Serializer):
 
 
 class FastDeserializer(Deserializer):
-
     def __init__(self, dtype):
         super().__init__(dtype)
 

@@ -24,7 +24,6 @@ logger = init_logger(__name__)
 
 
 class Serializer(metaclass=abc.ABCMeta):
-
     @abc.abstractmethod
     def to_bytes(self, t: torch.Tensor) -> bytes:
         """
@@ -42,7 +41,6 @@ class Serializer(metaclass=abc.ABCMeta):
 
 
 class SerializerDebugWrapper(Serializer):
-
     def __init__(self, s: Serializer):
         self.s = s
 
@@ -51,12 +49,11 @@ class SerializerDebugWrapper(Serializer):
         bs = self.s.to_bytes(t)
         end = time.perf_counter()
 
-        logger.debug(f"Serialization took {end-start:.2f} seconds")
+        logger.debug(f"Serialization took {end - start:.2f} seconds")
         return bs
 
 
 class Deserializer(metaclass=abc.ABCMeta):
-
     def __init__(self, dtype):
         self.dtype = dtype
 
@@ -75,7 +72,6 @@ class Deserializer(metaclass=abc.ABCMeta):
 
 
 class DeserializerDebugWrapper(Deserializer):
-
     def __init__(self, d: Deserializer):
         self.d = d
 
@@ -85,5 +81,5 @@ class DeserializerDebugWrapper(Deserializer):
         ret = self.d.from_bytes(t)
         end = time.perf_counter()
 
-        logger.debug(f"Deserialization took {(end-start)*1000:.2f} ms")
+        logger.debug(f"Deserialization took {(end - start) * 1000:.2f} ms")
         return ret

@@ -24,12 +24,11 @@ logger = init_logger(__name__)
 
 
 class LMCBackendInterface(metaclass=abc.ABCMeta):
-
     def __init__(
         self,
         dst_device: str = "cuda",
     ):
-        """Initialize the storage backend. 
+        """Initialize the storage backend.
 
         :param dst_device: the device where the retrieved KV be stored,
             could be either "cpu", "cuda", or "cuda:0", "cuda:1", etc.
@@ -53,7 +52,7 @@ class LMCBackendInterface(metaclass=abc.ABCMeta):
         """
         Store the KV cache of the tokens into the cache engine.
 
-        :param key: the key of the token chunk, in the format of 
+        :param key: the key of the token chunk, in the format of
                     CacheEngineKey
         :param kv_chunk: the kv cache of the token chunk, as a big tensor.
         :param blocking: to block the call before the operation is
@@ -84,10 +83,10 @@ class LMCBackendInterface(metaclass=abc.ABCMeta):
         """
         Retrieve the KV cache chunk by the given key
 
-        :param key: the key of the token chunk, including 
+        :param key: the key of the token chunk, including
          prefix hash and format
 
-        :return: the kv cache of the token chunk, in the format 
+        :return: the kv cache of the token chunk, in the format
             of a big tensor and None if the key is not found
         """
         raise NotImplementedError
@@ -101,11 +100,11 @@ class LMCBackendInterface(metaclass=abc.ABCMeta):
         Store the multiple keys and KV cache chunks into the cache engine in a
         batched manner.
 
-        :param keys: the iterable of keys of the token chunks, in the format of 
+        :param keys: the iterable of keys of the token chunks, in the format of
                 CacheEngineKey
-        :param kv_chunks: the iterable of kv cache of the token chunks, in the 
+        :param kv_chunks: the iterable of kv cache of the token chunks, in the
                 format of a big tensor
-        :param blocking: whether to block the call before the operation is 
+        :param blocking: whether to block the call before the operation is
                 completed
 
         :return: the number of chunks are stored
@@ -124,8 +123,8 @@ class LMCBackendInterface(metaclass=abc.ABCMeta):
         """
         Retrieve the kv cache chunks by the given keys in a batched manner
 
-        
-        :param keys: the iterator of keys of the token chunks, including prefix 
+
+        :param keys: the iterator of keys of the token chunks, including prefix
                 hash and format
 
         :return: the iterator of kv cache of the token chunks, in the format

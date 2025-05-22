@@ -45,7 +45,7 @@ class MooncakeStoreConfig:
     master_server_address: str
 
     @staticmethod
-    def from_file(file_path: str) -> 'MooncakeStoreConfig':
+    def from_file(file_path: str) -> "MooncakeStoreConfig":
         """Load the config from a JSON file."""
         with open(file_path) as fin:
             config = json.load(fin)
@@ -60,17 +60,17 @@ class MooncakeStoreConfig:
         )
 
     @staticmethod
-    def load_from_env() -> 'MooncakeStoreConfig':
+    def load_from_env() -> "MooncakeStoreConfig":
         """Load config from a file specified in the environment variable."""
-        config_file_path = os.getenv('MOONCAKE_CONFIG_PATH')
+        config_file_path = os.getenv("MOONCAKE_CONFIG_PATH")
         if config_file_path is None:
             raise ValueError(
-                "The environment variable 'MOONCAKE_CONFIG_PATH' is not set.")
+                "The environment variable 'MOONCAKE_CONFIG_PATH' is not set."
+            )
         return MooncakeStoreConfig.from_file(config_file_path)
 
 
 class MooncakestoreConnector(RemoteConnector):
-
     def __init__(
         self,
         host: str,
@@ -85,7 +85,8 @@ class MooncakestoreConnector(RemoteConnector):
             raise ImportError(
                 "Please install mooncake by following the instructions at "
                 "https://github.com/kvcache-ai/Mooncake/blob/main/doc/en/build.md "  # noqa: E501
-                "to run vLLM with MooncakeConnector.") from e
+                "to run vLLM with MooncakeConnector."
+            ) from e
 
         try:
             self.store = MooncakeDistributedStore()
@@ -94,22 +95,23 @@ class MooncakestoreConnector(RemoteConnector):
                 self.config.master_server_address = host + ":" + str(port)
             if dev_name != "":
                 self.config.device_name = dev_name
-            logger.info("Mooncake Configuration loaded. config: %s",
-                        self.config)
+            logger.info("Mooncake Configuration loaded. config: %s", self.config)
 
-            self.store.setup(self.config.local_hostname,
-                             self.config.metadata_server,
-                             self.config.global_segment_size,
-                             self.config.local_buffer_size,
-                             self.config.protocol, self.config.device_name,
-                             self.config.master_server_address)
+            self.store.setup(
+                self.config.local_hostname,
+                self.config.metadata_server,
+                self.config.global_segment_size,
+                self.config.local_buffer_size,
+                self.config.protocol,
+                self.config.device_name,
+                self.config.master_server_address,
+            )
 
         except ValueError as e:
             logger.error("Configuration loading failed: %s", e)
             raise
         except Exception as exc:
-            logger.error(
-                "An error occurred while loading the configuration: %s", exc)
+            logger.error("An error occurred while loading the configuration: %s", exc)
             raise
 
         self.loop = loop
@@ -150,11 +152,12 @@ class MooncakestoreConnector(RemoteConnector):
         if memory_obj.tensor is not None:
             assert metadata.dtype is not None
             num_elements = reduce(operator.mul, metadata.shape)
-            temp_tensor = torch.frombuffer(buffer,
-                                           dtype=metadata.dtype,
-                                           offset=METADATA_BYTES_LEN,
-                                           count=num_elements).reshape(
-                                               metadata.shape)
+            temp_tensor = torch.frombuffer(
+                buffer,
+                dtype=metadata.dtype,
+                offset=METADATA_BYTES_LEN,
+                count=num_elements,
+            ).reshape(metadata.shape)
 
             memory_obj.tensor.copy_(temp_tensor)
             return memory_obj
@@ -168,17 +171,20 @@ class MooncakestoreConnector(RemoteConnector):
         kv_dtype = memory_obj.get_dtype()
         memory_format = memory_obj.get_memory_format()
 
-        metadata_bytes = RemoteMetadata(len(kv_bytes), kv_shape, kv_dtype,
-                                        memory_format).serialize()
+        metadata_bytes = RemoteMetadata(
+            len(kv_bytes), kv_shape, kv_dtype, memory_format
+        ).serialize()
         assert len(metadata_bytes) == METADATA_BYTES_LEN
         key_str = key.to_string()
 
         try:
             self.store.put_parts(key_str, metadata_bytes, kv_bytes)
         except Exception as e:
-            logger.error(f"Failed to put key {key_str},"
-                         f"meta type: {type(metadata_bytes)},"
-                         f"data: {type(kv_bytes)}: {e}")
+            logger.error(
+                f"Failed to put key {key_str},"
+                f"meta type: {type(metadata_bytes)},"
+                f"data: {type(kv_bytes)}: {e}"
+            )
 
     @no_type_check
     async def list(self) -> List[str]:

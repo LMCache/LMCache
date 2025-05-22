@@ -9,19 +9,16 @@ from lmcache.v1.token_database import (ChunkedTokenDatabase,
                                        SegmentTokenDatabase)
 
 
-@pytest.mark.parametrize('chunk_length', [16, 64, 256])
+@pytest.mark.parametrize("chunk_length", [16, 64, 256])
 def test_chunked_token_database(chunk_length):
-    cfg = LMCacheEngineConfig.from_legacy(chunk_size=chunk_length,
-                                          backend="cpu")
+    cfg = LMCacheEngineConfig.from_legacy(chunk_size=chunk_length, backend="cpu")
     metadata = dumb_metadata()
 
     test_length = 2500
     tokens = generate_tokens(test_length, "cpu")
     mask = torch.full([test_length], True, dtype=torch.bool, device="cpu")
 
-    num_falses = [
-        i * chunk_length for i in range(0, test_length // chunk_length)
-    ]
+    num_falses = [i * chunk_length for i in range(0, test_length // chunk_length)]
 
     db = ChunkedTokenDatabase(cfg, metadata)
 
@@ -33,7 +30,7 @@ def test_chunked_token_database(chunk_length):
         assert ed == min(i + chunk_length, test_length)
 
     for i in range(0, test_length // chunk_length):
-        mask[:num_falses[i]] = False
+        mask[: num_falses[i]] = False
         new_results = list(db.process_tokens(tokens, mask))
         assert len(new_results) == len(original_results) - i
 
@@ -43,8 +40,8 @@ def test_chunked_token_database(chunk_length):
             assert ed == original_results[j + i][1]
 
 
-@pytest.mark.parametrize('prefix_length', [0, 16, 64, 256])
-@pytest.mark.parametrize('chunk_lengths', [[256, 512, 256], [1024, 512, 256]])
+@pytest.mark.parametrize("prefix_length", [0, 16, 64, 256])
+@pytest.mark.parametrize("chunk_lengths", [[256, 512, 256], [1024, 512, 256]])
 def test_segment_token_database(prefix_length, chunk_lengths):
     cfg = LMCacheEngineConfig.from_legacy(blend_special_str=" # # ")
     metadata = dumb_metadata_with_model_name("facebook/opt-125m")
@@ -104,5 +101,5 @@ def test_segment_token_database(prefix_length, chunk_lengths):
         assert st == starts[i]
         assert ed == ends[i]
         assert key.chunk_hash == hashes[i]
-        #print(st, starts[i])
-        #print(ed, ends[i])
+        # print(st, starts[i])
+        # print(ed, ends[i])

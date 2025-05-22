@@ -24,7 +24,6 @@ logger = init_logger(__name__)
 
 
 class LMSBackendInterface(metaclass=abc.ABCMeta):
-
     @abc.abstractmethod
     def put(
         self,
@@ -36,7 +35,7 @@ class LMSBackendInterface(metaclass=abc.ABCMeta):
 
         Args:
             key: the key of the token chunk, in the format of CacheEngineKey
-            client_meta: metadata sent by the client 
+            client_meta: metadata sent by the client
             kv_chunk_bytes: the kv cache (bytearray) of the token chunk
 
         Returns:
@@ -72,7 +71,9 @@ class LMSBackendInterface(metaclass=abc.ABCMeta):
         raise NotImplementedError
 
     @abc.abstractmethod
-    def list_keys(self, ) -> List[CacheEngineKey]:
+    def list_keys(
+        self,
+    ) -> List[CacheEngineKey]:
         """
         List all keys in the cache server
 

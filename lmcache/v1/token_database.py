@@ -29,7 +29,7 @@ class TokenDatabase(metaclass=abc.ABCMeta):
     """TokenDatabase is used to convert input tokens into list of
     cache engine keys. There are multiple ways to implement this:
 
-    - ChunkedTokenDatabase: It processes tokens into chunks and convert 
+    - ChunkedTokenDatabase: It processes tokens into chunks and convert
     each chunk into a cache engine key using prefix hash.
 
     - SegmentTokenDatabase: It processes tokens into segments based on
@@ -47,9 +47,9 @@ class TokenDatabase(metaclass=abc.ABCMeta):
 
         :param Union[torch.Tensor, List[int]] tokens: The tokens to process.
 
-        :param Optional[torch.Tensor] mask: The mask for the tokens. Should 
+        :param Optional[torch.Tensor] mask: The mask for the tokens. Should
             have the same length as tokens. And the mask should ALWAYS be like
-            FFFFFTTTTTTT, where True means the tokens needs to be matched, 
+            FFFFFTTTTTTT, where True means the tokens needs to be matched,
             and the Falses will ALWAYS be at the PREFIX of the tensor.
 
         :returns: A iterable of tuples with three elements. The first element
@@ -62,21 +62,24 @@ class TokenDatabase(metaclass=abc.ABCMeta):
 
 
 class ChunkedTokenDatabase(TokenDatabase):
-
-    def __init__(self,
-                 config: Optional[LMCacheEngineConfig] = None,
-                 metadata: Optional[LMCacheEngineMetadata] = None):
+    def __init__(
+        self,
+        config: Optional[LMCacheEngineConfig] = None,
+        metadata: Optional[LMCacheEngineMetadata] = None,
+    ):
         if config is not None:
             self.chunk_size = config.chunk_size
         self.metadata = metadata
 
-    def _make_key_by_hash(self,
-                          chunk_hash: str,
-                          layer_id: Optional[int] = None):
+    def _make_key_by_hash(self, chunk_hash: str, layer_id: Optional[int] = None):
         assert self.metadata is not None
-        return CacheEngineKey(self.metadata.fmt, self.metadata.model_name,
-                              self.metadata.world_size,
-                              self.metadata.worker_id, chunk_hash)
+        return CacheEngineKey(
+            self.metadata.fmt,
+            self.metadata.model_name,
+            self.metadata.world_size,
+            self.metadata.worker_id,
+            chunk_hash,
+        )
 
     def _get_init_hash(self) -> str:
         return ""
@@ -90,9 +93,8 @@ class ChunkedTokenDatabase(TokenDatabase):
         if isinstance(tokens, torch.Tensor):
             tokens_bytes = tokens.cpu().to(torch.uint32).numpy().tobytes()
         elif isinstance(tokens, list):
-            tokens_bytes = array.array('I', tokens).tobytes()
-        return hashlib.sha256(prefix_hash.encode("ascii") +
-                              tokens_bytes).hexdigest()
+            tokens_bytes = array.array("I", tokens).tobytes()
+        return hashlib.sha256(prefix_hash.encode("ascii") + tokens_bytes).hexdigest()
 
     def _chunk_tokens(
         self,
@@ -104,11 +106,11 @@ class ChunkedTokenDatabase(TokenDatabase):
         :param tokens: the input tokens, with shape [seq_len]
             device: the target device after chunking
 
-        :return: a generator of chunks of tokens, each with 
+        :return: a generator of chunks of tokens, each with
                 shape [chunk_size]
         """
         for i in range(0, len(tokens), self.chunk_size):
-            yield tokens[i:i + self.chunk_size]
+            yield tokens[i : i + self.chunk_size]
 
     def _prefix_hash(
         self,
@@ -129,20 +131,20 @@ class ChunkedTokenDatabase(TokenDatabase):
 
         :param Union[torch.Tensor, List[int]] tokens: The tokens to process.
 
-        :param Optional[torch.Tensor] mask: The mask for the tokens. Should 
+        :param Optional[torch.Tensor] mask: The mask for the tokens. Should
             have the same length as tokens. And the mask should ALWAYS be like
-            FFFFFTTTTTTT, where True means the tokens needs to be matched, 
+            FFFFFTTTTTTT, where True means the tokens needs to be matched,
             and the Falses will ALWAYS be at the PREFIX of the tensor.
 
         :param bool make_key: Whether to make the cache engine key or not.
             If False, the hash value will be returned instead.
-        
+
         :returns: A iterable of tuples with three elements. The first element
             is the start index of the tokens for the key. The second element
             is the end index of the tokens for the key. The third element is
             the cache engine key (or hash) for the tokens.
 
-        :raises: ValueError if the number of Falses in the mask is not a 
+        :raises: ValueError if the number of Falses in the mask is not a
             multiple of the chunk size.
         """
         if mask is not None:
@@ -151,8 +153,9 @@ class ChunkedTokenDatabase(TokenDatabase):
             num_falses = 0
 
         if num_falses % self.chunk_size != 0:
-            raise ValueError("The number of Falses in the mask is not a "
-                             "multiple of the chunk size.")
+            raise ValueError(
+                "The number of Falses in the mask is not a multiple of the chunk size."
+            )
         total_len = len(tokens)
 
         token_chunks = self._chunk_tokens(tokens)
@@ -177,8 +180,7 @@ class SegmentTokenDatabase(TokenDatabase):
     In the future, we might need to implement a fast substring match.
     """
 
-    def __init__(self, config: LMCacheEngineConfig,
-                 metadata: LMCacheEngineMetadata):
+    def __init__(self, config: LMCacheEngineConfig, metadata: LMCacheEngineMetadata):
         self.tokenizer = AutoTokenizer.from_pretrained(metadata.model_name)
 
         # TODO (Jiayi): figure out how to decide when
@@ -190,9 +192,13 @@ class SegmentTokenDatabase(TokenDatabase):
         self.metadata = metadata
 
     def _make_key_by_hash(self, chunk_hash: str):
-        return CacheEngineKey(self.metadata.fmt, self.metadata.model_name,
-                              self.metadata.world_size,
-                              self.metadata.worker_id, chunk_hash)
+        return CacheEngineKey(
+            self.metadata.fmt,
+            self.metadata.model_name,
+            self.metadata.world_size,
+            self.metadata.worker_id,
+            chunk_hash,
+        )
 
     def _hash(
         self,
@@ -202,11 +208,10 @@ class SegmentTokenDatabase(TokenDatabase):
         if isinstance(tokens, torch.Tensor):
             tokens_bytes = tokens.cpu().to(torch.uint32).numpy().tobytes()
         elif isinstance(tokens, list):
-            tokens_bytes = array.array('I', tokens).tobytes()
+            tokens_bytes = array.array("I", tokens).tobytes()
         return hashlib.sha256(tokens_bytes).hexdigest()
 
-    def _fast_split_by_subtensor(
-            self, tokens: torch.Tensor) -> Iterable[torch.Tensor]:
+    def _fast_split_by_subtensor(self, tokens: torch.Tensor) -> Iterable[torch.Tensor]:
         """Match the `sep_tokens` with sliding windows"""
 
         if self.sep_len == 0 or len(tokens) < self.sep_len:
@@ -217,8 +222,9 @@ class SegmentTokenDatabase(TokenDatabase):
         windows = tokens.unfold(0, self.sep_len, 1)
 
         # Compare each window with sep_tokens
-        matches = (windows == self.sep_tokens).all(dim=1).nonzero(
-            as_tuple=True)[0].tolist()
+        matches = (
+            (windows == self.sep_tokens).all(dim=1).nonzero(as_tuple=True)[0].tolist()
+        )
 
         # Split based on matches
         start = 0
@@ -236,9 +242,9 @@ class SegmentTokenDatabase(TokenDatabase):
 
         :param Union[torch.Tensor, List[int]] tokens: The tokens to process.
 
-        :param Optional[torch.Tensor] mask: The mask for the tokens. Should 
+        :param Optional[torch.Tensor] mask: The mask for the tokens. Should
             have the same length as tokens. And the mask should ALWAYS be like
-            FFFFFTTTTTTT, where True means the tokens needs to be matched, 
+            FFFFFTTTTTTT, where True means the tokens needs to be matched,
             and the Falses will ALWAYS be at the PREFIX of the tensor.
 
         :returns: A iterable of tuples with three elements. The first element
@@ -248,15 +254,17 @@ class SegmentTokenDatabase(TokenDatabase):
 
         """
 
-        assert isinstance(tokens, torch.Tensor), \
+        assert isinstance(tokens, torch.Tensor), (
             "Only tokens in tensor format are supported for now."
+        )
         if mask is not None:
             num_falses = mask.numel() - mask.long().sum().item()
         else:
             num_falses = 0
-        assert num_falses < len(tokens), \
-            ("The number of Falses in the mask shouldn't "
-            "be less than the length of tokens.")
+        assert num_falses < len(tokens), (
+            "The number of Falses in the mask shouldn't "
+            "be less than the length of tokens."
+        )
         token_chunks = self._fast_split_by_subtensor(tokens)
         start_idx = 0
         for idx, token_chunk in enumerate(token_chunks):
@@ -267,8 +275,11 @@ class SegmentTokenDatabase(TokenDatabase):
                 end_idx += self.sep_len
             if start_idx >= num_falses:
                 if make_key:
-                    yield start_idx, end_idx, self._make_key_by_hash(
-                        self._hash(token_chunk))
+                    yield (
+                        start_idx,
+                        end_idx,
+                        self._make_key_by_hash(self._hash(token_chunk)),
+                    )
                 else:
                     yield start_idx, end_idx, self._hash(token_chunk)
             start_idx = end_idx

@@ -19,8 +19,9 @@ from typing import List, Optional, Tuple
 import redis
 
 from lmcache.logging import init_logger
-from lmcache.storage_backend.connector.base_connector import \
-    RemoteBytesConnector
+from lmcache.storage_backend.connector.base_connector import (
+    RemoteBytesConnector,
+)
 
 logger = init_logger(__name__)
 
@@ -53,7 +54,8 @@ class RedisConnector(RemoteBytesConnector):
 
         while True:
             ret: Tuple[int, List[bytes]] = self.connection.scan(
-                cursor=cursor, match="*")  # type: ignore
+                cursor=cursor, match="*"
+            )  # type: ignore
             cursor, keys = ret
             all_keys.extend(keys)
             if cursor == 0:
@@ -88,7 +90,8 @@ class RedisSentinelConnector(RemoteBytesConnector):
             case None:
                 logger.warning(
                     f"Environment variable {self.ENV_REDIS_SERVICE_NAME} is not"
-                    f"found, using default value 'mymaster'")
+                    f"found, using default value 'mymaster'"
+                )
                 service_name = "mymaster"
             case value:
                 service_name = value
@@ -103,10 +106,8 @@ class RedisSentinelConnector(RemoteBytesConnector):
                 timeout = float(value)
 
         self.sentinel = redis.Sentinel(hosts_and_ports, socket_timeout=timeout)
-        self.master = self.sentinel.master_for(service_name,
-                                               socket_timeout=timeout)
-        self.slave = self.sentinel.slave_for(service_name,
-                                             socket_timeout=timeout)
+        self.master = self.sentinel.master_for(service_name, socket_timeout=timeout)
+        self.slave = self.sentinel.slave_for(service_name, socket_timeout=timeout)
 
     def exists(self, key: str) -> bool:
         return bool(self.slave.exists(key))

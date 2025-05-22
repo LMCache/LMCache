@@ -37,16 +37,14 @@ def CreateSerde(
     d: Optional[Deserializer] = None
 
     if serde_type == "naive":
-        s, d = NaiveSerializer(), \
-            NaiveDeserializer()
+        s, d = NaiveSerializer(), NaiveDeserializer()
     elif serde_type == "kivi":
-        s, d = KIVISerializer(), \
-            KIVIDeserializer()
+        s, d = KIVISerializer(), KIVIDeserializer()
     elif serde_type == "cachegen":
-        s, d = CacheGenSerializer(
-                config, metadata), \
-            CacheGenDeserializer(
-                config, metadata)
+        s, d = (
+            CacheGenSerializer(config, metadata),
+            CacheGenDeserializer(config, metadata),
+        )
     else:
         raise ValueError(f"Invalid type: {serde_type}")
 

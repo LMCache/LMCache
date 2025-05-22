@@ -36,8 +36,12 @@ class FSConnector(RemoteConnector):
     - File content: metadata (METADATA_BYTES_LEN bytes) + serialized data
     """
 
-    def __init__(self, base_path: str, loop: asyncio.AbstractEventLoop,
-                 local_cpu_backend: LocalCPUBackend):
+    def __init__(
+        self,
+        base_path: str,
+        loop: asyncio.AbstractEventLoop,
+        local_cpu_backend: LocalCPUBackend,
+    ):
         """
         Args:
             base_path: Root directory to store all cache files
@@ -71,14 +75,12 @@ class FSConnector(RemoteConnector):
 
         try:
             # Read file content
-            with open(file_path, 'rb') as f:
+            with open(file_path, "rb") as f:
                 data = f.read()
 
             # Split metadata and actual data
-            metadata = RemoteMetadata.deserialize(
-                memoryview(data[:METADATA_BYTES_LEN]))
-            kv_bytes = data[METADATA_BYTES_LEN:METADATA_BYTES_LEN +
-                            metadata.length]
+            metadata = RemoteMetadata.deserialize(memoryview(data[:METADATA_BYTES_LEN]))
+            kv_bytes = data[METADATA_BYTES_LEN : METADATA_BYTES_LEN + metadata.length]
 
             # Allocate memory and copy data
             memory_obj = self.local_cpu_backend.allocate(
@@ -96,7 +98,7 @@ class FSConnector(RemoteConnector):
                     view = view.cast("B")
             else:
                 view = memoryview(memory_obj.byte_array)
-            view[:metadata.length] = kv_bytes
+            view[: metadata.length] = kv_bytes
 
             return memory_obj
 
@@ -107,17 +109,19 @@ class FSConnector(RemoteConnector):
     async def put(self, key: CacheEngineKey, memory_obj: MemoryObj):
         """Store data to file system"""
         final_path = self._get_file_path(key)
-        temp_path = final_path.with_suffix('.tmp')
+        temp_path = final_path.with_suffix(".tmp")
 
         try:
             # Prepare metadata
-            metadata = RemoteMetadata(len(memory_obj.byte_array),
-                                      memory_obj.get_shape(),
-                                      memory_obj.get_dtype(),
-                                      memory_obj.get_memory_format())
+            metadata = RemoteMetadata(
+                len(memory_obj.byte_array),
+                memory_obj.get_shape(),
+                memory_obj.get_dtype(),
+                memory_obj.get_memory_format(),
+            )
 
             # Write to file (metadata + data)
-            with open(temp_path, 'wb') as f:
+            with open(temp_path, "wb") as f:
                 f.write(metadata.serialize())
                 f.write(memory_obj.byte_array)
 

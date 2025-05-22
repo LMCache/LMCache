@@ -88,8 +88,7 @@ class LMCacheWorker:
         )
 
         self.loop = asyncio.new_event_loop()
-        self.thread = threading.Thread(target=self.loop.run_forever,
-                                       daemon=True)
+        self.thread = threading.Thread(target=self.loop.run_forever, daemon=True)
         self.thread.start()
         asyncio.run_coroutine_threadsafe(self.start_all(), self.loop)
 
@@ -102,15 +101,18 @@ class LMCacheWorker:
         Register the lmcache worker with the controller.
         """
         assert self.lmcache_instance_id is not None
-        logger.info("Registering lmcache instance-worker: "
-                    f"{(self.lmcache_instance_id, self.worker_id)}")
+        logger.info(
+            "Registering lmcache instance-worker: "
+            f"{(self.lmcache_instance_id, self.worker_id)}"
+        )
         self.put_msg(
             RegisterMsg(
                 instance_id=self.lmcache_instance_id,
                 worker_id=self.worker_id,
                 ip=self.lmcache_worker_ip,
                 port=self.lmcache_worker_port,
-            ))
+            )
+        )
 
     def deregister(self):
         """
@@ -123,7 +125,8 @@ class LMCacheWorker:
                 worker_id=self.worker_id,
                 ip=self.lmcache_worker_ip,
                 port=self.lmcache_worker_port,
-            ))
+            )
+        )
 
     def put_msg(self, msg: WorkerMsg):
         """
@@ -158,7 +161,8 @@ class LMCacheWorker:
                 msgs = await self.batched_get_msg()
                 logger.debug(f"Sending {len(msgs)} messages")
                 self.push_socket.send_multipart(
-                    [msgspec.msgpack.encode(msg) for msg in msgs])
+                    [msgspec.msgpack.encode(msg) for msg in msgs]
+                )
 
             except Exception as e:
                 logger.error(f"Push error: {e}")
@@ -176,30 +180,37 @@ class LMCacheWorker:
                     tokens = request.tokens
                     result = self.lmcache_engine.clear(tokens)
                     serialized_ret_msg = msgspec.msgpack.encode(
-                        ClearWorkerRetMsg(success=result > 0))
+                        ClearWorkerRetMsg(success=result > 0)
+                    )
                 else:
                     logger.error(f"Unknown message: {request}")
                     serialized_ret_msg = msgspec.msgpack.encode(
-                        ErrorMsg(error=f"Unknown message: {request}"))
+                        ErrorMsg(error=f"Unknown message: {request}")
+                    )
 
                 await self.reply_socket.send(serialized_ret_msg)
             except Exception as e:
                 logger.error(f"Worker error: {e}")
                 serialized_ret_msg = msgspec.msgpack.encode(
-                    ErrorMsg(error=f"Worker error: {e}"))
+                    ErrorMsg(error=f"Worker error: {e}")
+                )
                 await self.reply_socket.send(serialized_ret_msg)
 
     async def start_all(self):
         try:
-            logger.info(f"Starting lmcache worker {self.worker_id}"
-                        f"for instance {self.lmcache_instance_id}")
+            logger.info(
+                f"Starting lmcache worker {self.worker_id}"
+                f"for instance {self.lmcache_instance_id}"
+            )
             await asyncio.gather(
                 self.push(),
                 self.handle_request(),
             )
         except Exception as e:
-            logger.error(f"Instance {self.lmcache_instance_id}, "
-                         f"worker {self.worker_id} error: {e}")
+            logger.error(
+                f"Instance {self.lmcache_instance_id}, "
+                f"worker {self.worker_id} error: {e}"
+            )
 
     def close(self):
         self.deregister()

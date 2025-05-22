@@ -4,8 +4,12 @@ from pathlib import Path
 
 import pytest
 import torch
-from utils import (check_mem_obj_equal, close_asyncio_loop,
-                   dumb_cache_engine_key, init_asyncio_loop)
+from utils import (
+    check_mem_obj_equal,
+    close_asyncio_loop,
+    dumb_cache_engine_key,
+    init_asyncio_loop,
+)
 
 from lmcache.v1.memory_management import PinMemoryAllocator
 from lmcache.v1.storage_backend.connector import CreateConnector
@@ -28,8 +32,7 @@ def test_lm_connector(url, autorelease_v1, lmserver_v1_process):
         CreateConnector(url, async_loop, memory_allocator))
 
     random_key = dumb_cache_engine_key()
-    future = asyncio.run_coroutine_threadsafe(connector.exists(random_key),
-                                              async_loop)
+    future = asyncio.run_coroutine_threadsafe(connector.exists(random_key), async_loop)
     assert not future.result()
 
     num_tokens = 1000
@@ -39,16 +42,15 @@ def test_lm_connector(url, autorelease_v1, lmserver_v1_process):
     memory_obj.ref_count_up()
 
     future = asyncio.run_coroutine_threadsafe(
-        connector.put(random_key, memory_obj), async_loop)
+        connector.put(random_key, memory_obj), async_loop
+    )
     future.result()
 
-    future = asyncio.run_coroutine_threadsafe(connector.exists(random_key),
-                                              async_loop)
+    future = asyncio.run_coroutine_threadsafe(connector.exists(random_key), async_loop)
     assert future.result()
     assert memory_obj.get_ref_count() == 1
 
-    future = asyncio.run_coroutine_threadsafe(connector.get(random_key),
-                                              async_loop)
+    future = asyncio.run_coroutine_threadsafe(connector.get(random_key), async_loop)
     retrieved_memory_obj = future.result()
 
     check_mem_obj_equal(
@@ -73,8 +75,9 @@ def test_fs_connector(lmserver_v1_process, autorelease_v1):
         random_key = dumb_cache_engine_key()
 
         # Test 1: Verify key doesn't exist initially
-        future = asyncio.run_coroutine_threadsafe(connector.exists(random_key),
-                                                  async_loop)
+        future = asyncio.run_coroutine_threadsafe(
+            connector.exists(random_key), async_loop
+        )
         assert not future.result()
 
         # Test 2: Create and store test data
@@ -83,25 +86,25 @@ def test_fs_connector(lmserver_v1_process, autorelease_v1):
         memory_obj.ref_count_up()
         # Fill with deterministic test data
         torch.manual_seed(42)
-        test_tensor = torch.randint(0,
-                                    100,
-                                    memory_obj.raw_data.shape,
-                                    dtype=torch.int64)
+        test_tensor = torch.randint(
+            0, 100, memory_obj.raw_data.shape, dtype=torch.int64
+        )
         memory_obj.raw_data.copy_(test_tensor.to(torch.float32).to(dtype))
 
         future = asyncio.run_coroutine_threadsafe(
-            connector.put(random_key, memory_obj), async_loop)
+            connector.put(random_key, memory_obj), async_loop
+        )
         future.result()
 
         # Test 3: Verify key exists after putting data
-        future = asyncio.run_coroutine_threadsafe(connector.exists(random_key),
-                                                  async_loop)
+        future = asyncio.run_coroutine_threadsafe(
+            connector.exists(random_key), async_loop
+        )
         assert future.result()
         assert memory_obj.get_ref_count() == 1
 
         # Test 4: Retrieve and verify data
-        future = asyncio.run_coroutine_threadsafe(connector.get(random_key),
-                                                  async_loop)
+        future = asyncio.run_coroutine_threadsafe(connector.get(random_key), async_loop)
         check_mem_obj_equal([future.result()], [memory_obj])
 
         # Test 5: List the keys

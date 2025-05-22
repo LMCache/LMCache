@@ -39,11 +39,14 @@ class RedisConnector(RemoteConnector):
     The remote url should start with "redis://" and only have one host-port pair
     """
 
-    def __init__(self, host: str, port: int, loop: asyncio.AbstractEventLoop,
-                 local_cpu_backend: LocalCPUBackend):
-        self.connection = redis.Redis(host=host,
-                                      port=port,
-                                      decode_responses=False)
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        loop: asyncio.AbstractEventLoop,
+        local_cpu_backend: LocalCPUBackend,
+    ):
+        self.connection = redis.Redis(host=host, port=port, decode_responses=False)
 
         self.loop = loop
         self.local_cpu_backend = local_cpu_backend
@@ -80,8 +83,10 @@ class RedisConnector(RemoteConnector):
             # consistency issues.
             # TODO (Jiayi): A better way is to aggregate metadata
             # and kv cache in one key.
-            logger.warning("Key exists but KV cache does not exist."
-                           "Might happen when the cache is evicted by redis.")
+            logger.warning(
+                "Key exists but KV cache does not exist."
+                "Might happen when the cache is evicted by redis."
+            )
             self.connection.delete(key_str + "metadata")
             return None
 
@@ -103,8 +108,9 @@ class RedisConnector(RemoteConnector):
         kv_dtype = memory_obj.get_dtype()
         memory_format = memory_obj.get_memory_format()
 
-        metadata_bytes = RemoteMetadata(len(kv_bytes), kv_shape, kv_dtype,
-                                        memory_format).serialize()
+        metadata_bytes = RemoteMetadata(
+            len(kv_bytes), kv_shape, kv_dtype, memory_format
+        ).serialize()
 
         key_str = key.to_string()
         self.connection.set(key_str + "metadata", metadata_bytes)
@@ -148,7 +154,8 @@ class RedisSentinelConnector(RemoteConnector):
             case None:
                 logger.warning(
                     f"Environment variable {self.ENV_REDIS_SERVICE_NAME} is "
-                    f"not found, using default value 'redismaster'")
+                    f"not found, using default value 'redismaster'"
+                )
                 service_name = "redismaster"
             case value:
                 service_name = value
@@ -164,10 +171,8 @@ class RedisSentinelConnector(RemoteConnector):
 
         logger.info(f"Host and ports: {hosts_and_ports}")
         self.sentinel = redis.Sentinel(hosts_and_ports, socket_timeout=timeout)
-        self.master = self.sentinel.master_for(service_name,
-                                               socket_timeout=timeout)
-        self.slave = self.sentinel.slave_for(service_name,
-                                             socket_timeout=timeout)
+        self.master = self.sentinel.master_for(service_name, socket_timeout=timeout)
+        self.slave = self.sentinel.slave_for(service_name, socket_timeout=timeout)
 
         self.local_cpu_backend = local_cpu_backend
 
@@ -204,13 +209,15 @@ class RedisSentinelConnector(RemoteConnector):
             # consistency issues.
             # TODO (Jiayi): A background sweeper might be better
             # for the sake of performance.
-            logger.warning("Key exists but KV cache does not exist."
-                           "Might happen when the cache is evicted by redis.")
+            logger.warning(
+                "Key exists but KV cache does not exist."
+                "Might happen when the cache is evicted by redis."
+            )
             self.master.delete(key_str + "metadata")
             return None
 
         view = memoryview(memory_obj.byte_array)
-        view[0:metadata.length] = kv_bytes
+        view[0 : metadata.length] = kv_bytes
 
         return memory_obj
 
@@ -222,8 +229,9 @@ class RedisSentinelConnector(RemoteConnector):
         kv_dtype = memory_obj.get_dtype()
         memory_format = memory_obj.get_memory_format()
 
-        metadata_bytes = RemoteMetadata(len(kv_bytes), kv_shape, kv_dtype,
-                                        memory_format).serialize()
+        metadata_bytes = RemoteMetadata(
+            len(kv_bytes), kv_shape, kv_dtype, memory_format
+        ).serialize()
 
         key_str = key.to_string()
         self.master.set(key_str + "metadata", metadata_bytes)

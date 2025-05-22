@@ -22,14 +22,12 @@ logger = init_logger(__name__)
 
 
 class LMCacheConnector(KVConnectorBase):
-
     def __init__(
         self,
         rank: int,
         local_rank: int,
         config: VllmConfig,
     ):
-
         self.transfer_config = config.kv_transfer_config
         self.vllm_config = config
 
@@ -43,10 +41,12 @@ class LMCacheConnector(KVConnectorBase):
                     self.transfer_config)
 
         # TODO (Jiayi): Find model_config, parallel_config, and cache_config
-        self.engine = init_lmcache_engine(config.model_config,
-                                          config.parallel_config,
-                                          config.cache_config,
-                                          config.scheduler_config)
+        self.engine = init_lmcache_engine(
+            config.model_config,
+            config.parallel_config,
+            config.cache_config,
+            config.scheduler_config,
+        )
         self.lmcache_engine_name = ENGINE_NAME
         self.lmcache_engine_builder = LMCacheEngineBuilder
 
@@ -61,21 +61,29 @@ class LMCacheConnector(KVConnectorBase):
         self.retrieve_status = RetrieveStatus
 
     def recv_kv_caches_and_hidden_states(
-        self, model_executable: torch.nn.Module,
+        self,
+        model_executable: torch.nn.Module,
         model_input: "ModelInputForGPUWithSamplingMetadata",
-        kv_caches: List[torch.Tensor]
-    ) -> Tuple[Union[torch.Tensor, IntermediateTensors], bool,
-               "ModelInputForGPUWithSamplingMetadata"]:
-
+        kv_caches: List[torch.Tensor],
+    ) -> Tuple[
+        Union[torch.Tensor, IntermediateTensors],
+        bool,
+        "ModelInputForGPUWithSamplingMetadata",
+    ]:
         hidden_or_intermediate_states = None
 
         # TODO (Jiayi): Need to support chunked prefill
         retrieve_status = self.lmcache_should_retrieve(model_input)
 
-        model_input, bypass_model_exec, hidden_or_intermediate_states = \
+        model_input, bypass_model_exec, hidden_or_intermediate_states = (
             self.lmcache_retrieve_kv(
-                model_executable, model_input, self.cache_config, kv_caches,
-                retrieve_status)
+                model_executable,
+                model_input,
+                self.cache_config,
+                kv_caches,
+                retrieve_status,
+            )
+        )
 
         return hidden_or_intermediate_states, bypass_model_exec, model_input
 
@@ -84,10 +92,8 @@ class LMCacheConnector(KVConnectorBase):
         model_executable: torch.nn.Module,
         model_input: "ModelInputForGPUWithSamplingMetadata",
         kv_caches: List[torch.Tensor],
-        hidden_or_intermediate_states: Union[torch.Tensor,
-                                             IntermediateTensors],
+        hidden_or_intermediate_states: Union[torch.Tensor, IntermediateTensors],
     ) -> None:
-
         # TODO (Jiayi): Only normal prefill is supported for now
         store_status = self.lmcache_should_store(model_input)
         self.lmcache_store_kv(

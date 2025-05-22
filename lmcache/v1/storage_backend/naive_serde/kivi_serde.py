@@ -18,7 +18,6 @@ from lmcache.v1.storage_backend.naive_serde.serde import (Deserializer,
 
 
 class KIVISerializer(Serializer):
-
     def __init__(self):
         pass
 
@@ -28,7 +27,6 @@ class KIVISerializer(Serializer):
 
 
 class KIVIDeserializer(Deserializer):
-
     def __init__(self):
         pass
 

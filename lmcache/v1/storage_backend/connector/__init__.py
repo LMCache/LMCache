@@ -86,20 +86,19 @@ def parse_remote_url(url: str) -> ParsedRemoteURL:
         match = re.match(host_pattern, host_def, re.VERBOSE)
 
         if not match:
-            raise ValueError(
-                f"Invalid host definition: {host_def} in URL: {url}")
+            raise ValueError(f"Invalid host definition: {host_def} in URL: {url}")
 
         host = match.group(1)
         port = int(match.group(2))
-        path = match.group(3).lstrip('/')
-        path = path.lstrip('/')
+        path = match.group(3).lstrip("/")
+        path = path.lstrip("/")
         query_str = match.group(4) or ""
 
         params_dict = {}
         if query_str:
-            for param in query_str.split('&'):
-                if '=' in param:
-                    key, value = param.split('=', 1)
+            for param in query_str.split("&"):
+                if "=" in param:
+                    key, value = param.split("=", 1)
                     params_dict[key] = value
                 elif param:
                     params_dict[param] = ""
@@ -109,11 +108,13 @@ def parse_remote_url(url: str) -> ParsedRemoteURL:
         paths.append(path)
         query_params.append(params_dict)
 
-    return ParsedRemoteURL(connector_type=connector_type,
-                           hosts=hosts,
-                           ports=ports,
-                           paths=paths,
-                           query_params=query_params)
+    return ParsedRemoteURL(
+        connector_type=connector_type,
+        hosts=hosts,
+        ports=ports,
+        paths=paths,
+        query_params=query_params,
+    )
 
 
 def CreateConnector(
@@ -141,15 +142,18 @@ def CreateConnector(
                 connector = RedisConnector(host, port, loop, local_cpu_backend)
             else:
                 raise ValueError(
-                    f"Redis connector only supports a single host, but got url:"
-                    f" {url}")
+                    f"Redis connector only supports a single host, but got url: {url}"
+                )
 
         case "redis-sentinel":
             connector = RedisSentinelConnector(
                 list(
-                    zip(parsed_url.hosts,
+                    zip(
+                        parsed_url.hosts,
                         map(int, parsed_url.ports),
-                        strict=False)),
+                        strict=False,
+                    )
+                ),
                 loop,
                 local_cpu_backend,
             )
@@ -157,12 +161,11 @@ def CreateConnector(
         case "lm":
             if num_hosts == 1:
                 host, port = parsed_url.hosts[0], parsed_url.ports[0]
-                connector = LMCServerConnector(host, port, loop,
-                                               local_cpu_backend)
+                connector = LMCServerConnector(host, port, loop, local_cpu_backend)
             else:
                 raise ValueError(
-                    f"LM connector only supports a single host, but got url:"
-                    f" {url}")
+                    f"LM connector only supports a single host, but got url: {url}"
+                )
         case "infinistore":
             host, port = parsed_url.hosts[0], parsed_url.ports[0]
             device_name = parsed_url.query_params[0].get("device", "mlx5_0")
@@ -170,41 +173,41 @@ def CreateConnector(
         case "mooncakestore":
             host, port = parsed_url.hosts[0], parsed_url.ports[0]
             device_name = parsed_url.query_params[0].get("device", "")
-            connector = MooncakestoreConnector(host, port, device_name, loop,
-                                               local_cpu_backend)
+            connector = MooncakestoreConnector(
+                host, port, device_name, loop, local_cpu_backend
+            )
         case "blackhole":
             connector = BlackholeConnector()
         case "fs":
             if num_hosts != 1:
                 raise ValueError(
-                    f"FS connector only supports a single path, but got url:"
-                    f"{url}")
+                    f"FS connector only supports a single path, but got url:{url}"
+                )
             # For fs connector path is the base path of the url
             base_path = parsed_url.paths[0]
             # Ensure path starts with '/'
-            if not base_path.startswith('/'):
-                base_path = '/' + base_path
+            if not base_path.startswith("/"):
+                base_path = "/" + base_path
             connector = FSConnector(base_path, loop, local_cpu_backend)
         case "audit":
             if num_hosts != 1:
                 raise ValueError(
-                    f"Audit connector only supports a single host, but got url:"
-                    f" {url}")
+                    f"Audit connector only supports a single host, but got url: {url}"
+                )
             if not config or not config.audit_actual_remote_url:
                 raise ValueError(
                     "Audit connector requires audit_actual_remote_url in config"
                 )
             real_url = config.audit_actual_remote_url
-            verify_checksum = parsed_url.query_params[0].get(
-                'verify') is not None
+            verify_checksum = parsed_url.query_params[0].get("verify") is not None
             logger.info(f"Creating audit connector for {real_url}")
             real_connector = CreateConnector(real_url, loop, local_cpu_backend)
             assert real_connector is not None
-            return AuditConnector(real_connector=real_connector,
-                                  verify_checksum=verify_checksum)
+            return AuditConnector(
+                real_connector=real_connector, verify_checksum=verify_checksum
+            )
         case _:
-            raise ValueError(f"Unknown connector type {connector_type} "
-                             f"(url is: {url})")
+            raise ValueError(f"Unknown connector type {connector_type} (url is: {url})")
 
     logger.info(f"Created connector {connector} for {connector_type}")
     return InstrumentedRemoteConnector(connector)

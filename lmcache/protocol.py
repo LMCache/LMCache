@@ -39,9 +39,9 @@ class ClientMetaMessage:
     length: int
 
     def serialize(self) -> bytes:
-        assert (
-            len(self.key) <= MAX_KEY_LENGTH
-        ), f"Key length {len(self.key)} exceeds maximum {MAX_KEY_LENGTH}"
+        assert len(self.key) <= MAX_KEY_LENGTH, (
+            f"Key length {len(self.key)} exceeds maximum {MAX_KEY_LENGTH}"
+        )
         packed_bytes = struct.pack(
             f"ii{MAX_KEY_LENGTH}s",
             self.command,

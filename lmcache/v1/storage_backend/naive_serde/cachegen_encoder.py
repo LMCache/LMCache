@@ -28,11 +28,8 @@ logger = init_logger(__name__)
 
 
 class CacheGenSerializer(Serializer):
-
-    def __init__(self, config: LMCacheEngineConfig,
-                 metadata: LMCacheEngineMetadata):
-        self.cachegen_config = CacheGenConfig.from_model_name(
-            metadata.model_name)
+    def __init__(self, config: LMCacheEngineConfig, metadata: LMCacheEngineMetadata):
+        self.cachegen_config = CacheGenConfig.from_model_name(metadata.model_name)
         self.chunk_size = config.chunk_size
         self.fmt = metadata.fmt
         self.key_bins = self.make_key_bins(self.cachegen_config)
@@ -43,13 +40,13 @@ class CacheGenSerializer(Serializer):
     def make_key_bins(self, config: CacheGenConfig) -> torch.Tensor:
         ret = torch.zeros(config.nlayers)
         for spec in config.kspecs:
-            ret[spec.start_layer:spec.end_layer] = spec.bins
+            ret[spec.start_layer : spec.end_layer] = spec.bins
         return ret.cuda()
 
     def make_value_bins(self, config: CacheGenConfig) -> torch.Tensor:
         ret = torch.zeros(config.nlayers)
         for spec in config.vspecs:
-            ret[spec.start_layer:spec.end_layer] = spec.bins
+            ret[spec.start_layer : spec.end_layer] = spec.bins
         return ret.cuda()
 
     # TODO(Jiayi): A lot of memory copies can be avoided in this function.
@@ -81,8 +78,7 @@ class CacheGenSerializer(Serializer):
             self.value_bins = self.value_bins.to(tensor.device)
 
         # tensor is [2, num_layers, num_tokens, hidden_size]
-        tensor = tensor.view(*tensor.shape[:-1], self.kv_shape[-2],
-                             self.kv_shape[-1])
+        tensor = tensor.view(*tensor.shape[:-1], self.kv_shape[-2], self.kv_shape[-1])
         tensor = tensor.permute([1, 0, 2, 3, 4])
 
         # TODO(Jiayi): remove hardcoded "2"

@@ -44,7 +44,6 @@ logger = init_logger(__name__)
 
 
 class NaiveDistributedServer(DistributedServerInterface):
-
     def __init__(
         self,
         storage_manager: StorageManager,
@@ -52,7 +51,6 @@ class NaiveDistributedServer(DistributedServerInterface):
         loop: asyncio.AbstractEventLoop,
         config: LMCacheEngineConfig,
     ):
-
         self.storage_manager = storage_manager
         self.lookup_server = lookup_server
 
@@ -103,7 +101,6 @@ class NaiveDistributedServer(DistributedServerInterface):
         view = memoryview(buffer)
 
         while received < n:
-
             num_bytes = client_socket.recv_into(view[received:], n - received)
             if num_bytes == 0:
                 return None
@@ -133,9 +130,15 @@ class NaiveDistributedServer(DistributedServerInterface):
 
         async with self.async_socket_lock:
             client_socket.sendall(
-                ClientMetaMessage(Constants.CLIENT_GET, key, 0,
-                                  MemoryFormat(1), torch.float16,
-                                  torch.Size([0, 0, 0, 0])).serialize())
+                ClientMetaMessage(
+                    Constants.CLIENT_GET,
+                    key,
+                    0,
+                    MemoryFormat(1),
+                    torch.float16,
+                    torch.Size([0, 0, 0, 0]),
+                ).serialize()
+            )
 
             data = client_socket.recv(ServerMetaMessage.packlength())
 
@@ -166,15 +169,14 @@ class NaiveDistributedServer(DistributedServerInterface):
         try:
             while True:
                 header = await self.receive_all_server(
-                    reader, ClientMetaMessage.packlength())
+                    reader, ClientMetaMessage.packlength()
+                )
                 if not header:
                     break
                 meta = ClientMetaMessage.deserialize(header)
 
                 match meta.command:
-
                     case Constants.CLIENT_GET:
-
                         t0 = time.perf_counter()
 
                         memory_obj = await self.handle_get(meta.key)
@@ -189,7 +191,8 @@ class NaiveDistributedServer(DistributedServerInterface):
                                     memory_obj.get_memory_format(),
                                     memory_obj.get_dtype(),
                                     memory_obj.get_shape(),
-                                ).serialize())
+                                ).serialize()
+                            )
                             await writer.drain()
 
                             t2 = time.perf_counter()
@@ -199,16 +202,21 @@ class NaiveDistributedServer(DistributedServerInterface):
                             memory_obj.ref_count_down()
 
                             t3 = time.perf_counter()
-                            logger.info(f"Time to get data: {t1 - t0}, "
-                                        f"time to send meta: {t2 - t1}, "
-                                        f"time to send data: {t3 - t2}")
+                            logger.info(
+                                f"Time to get data: {t1 - t0}, "
+                                f"time to send meta: {t2 - t1}, "
+                                f"time to send data: {t3 - t2}"
+                            )
                         else:
                             writer.write(
-                                ServerMetaMessage(Constants.SERVER_FAIL, 0,
-                                                  MemoryFormat(1),
-                                                  torch.float16,
-                                                  torch.Size((0, 0, 0,
-                                                              0))).serialize())
+                                ServerMetaMessage(
+                                    Constants.SERVER_FAIL,
+                                    0,
+                                    MemoryFormat(1),
+                                    torch.float16,
+                                    torch.Size((0, 0, 0, 0)),
+                                ).serialize()
+                            )
                             await writer.drain()
         finally:
             writer.close()
@@ -218,8 +226,7 @@ class NaiveDistributedServer(DistributedServerInterface):
         """
         Start the server.
         """
-        server = await asyncio.start_server(self.handle_client, self.host,
-                                            self.port)
+        server = await asyncio.start_server(self.handle_client, self.host, self.port)
         addr = server.sockets[0].getsockname()
         logger.info(f"Server started at {addr}")
 

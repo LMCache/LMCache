@@ -28,7 +28,6 @@ logger = init_logger(__name__)
 
 # TODO (Jiayi): Batching is needed for Redis lookup server.
 class RedisLookupServer(LookupServerInterface):
-
     def __init__(self, config: LMCacheEngineConfig):
         self.distributed_url = config.distributed_url
         assert self.distributed_url is not None
@@ -39,11 +38,11 @@ class RedisLookupServer(LookupServerInterface):
         self.host = host
         self.port = int(port)
 
-        self.connection = redis.Redis(host=self.host,
-                                      port=self.port,
-                                      decode_responses=True)
+        self.connection = redis.Redis(
+            host=self.host, port=self.port, decode_responses=True
+        )
         logger.info(f"Connected to Redis lookup server at {host}:{port}")
-        #decode_responses=False)
+        # decode_responses=False)
 
     def lookup(self, key: CacheEngineKey) -> Optional[Tuple[str, int]]:
         """

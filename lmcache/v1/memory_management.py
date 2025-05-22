@@ -32,11 +32,11 @@ class MemoryFormat(Enum):
     UNDEFINED = 0
     """[2, num_layers, num_tokens, hidden_dim]
     """
-    #KV_BLOB = 1
+    # KV_BLOB = 1
     KV_2LTD = 1
     """[num_tokens, 2, hidden_dim]
     """
-    #LAYER_KV_BLOB = 2
+    # LAYER_KV_BLOB = 2
     KV_T2D = 2
     """Compressed binary array format
     """
@@ -58,8 +58,8 @@ class MemoryFormat(Enum):
 
 @dataclass
 class FreeBlock:
-    """Metadata class used by the memory allocators
-    """
+    """Metadata class used by the memory allocators"""
+
     start: int
     size: int
 
@@ -95,7 +95,7 @@ class MemoryObjMetadata:
 
     def get_size(self):
         """
-        Calculate the size of the memory object in bytes 
+        Calculate the size of the memory object in bytes
         """
         if self.shape.numel() == 0:
             return 0
@@ -116,20 +116,21 @@ class MemoryObjMetadata:
             "address": self.address,
             "phy_size": self.phy_size,
             "ref_count": self.ref_count,
-            "fmt": self.fmt.value
+            "fmt": self.fmt.value,
         }
 
     @staticmethod
     def from_dict(d):
         dtype_str = d["dtype"]
-        dtype = (getattr(torch, dtype_str.replace("torch.", ""))
-                 if dtype_str else None)
-        return MemoryObjMetadata(shape=torch.Size(d["shape"]),
-                                 dtype=dtype,
-                                 address=d["address"],
-                                 phy_size=d["phy_size"],
-                                 ref_count=d["ref_count"],
-                                 fmt=MemoryFormat(d["fmt"]))
+        dtype = getattr(torch, dtype_str.replace("torch.", "")) if dtype_str else None
+        return MemoryObjMetadata(
+            shape=torch.Size(d["shape"]),
+            dtype=dtype,
+            address=d["address"],
+            phy_size=d["phy_size"],
+            ref_count=d["ref_count"],
+            fmt=MemoryFormat(d["fmt"]),
+        )
 
 
 class MemoryObj(metaclass=abc.ABCMeta):
@@ -262,10 +263,11 @@ class TensorMemoryObj(MemoryObj):
     """
 
     def __init__(
-            self,
-            raw_data: torch.Tensor,
-            metadata: MemoryObjMetadata,
-            parent_allocator: Optional["MemoryAllocatorInterface"] = None):
+        self,
+        raw_data: torch.Tensor,
+        metadata: MemoryObjMetadata,
+        parent_allocator: Optional["MemoryAllocatorInterface"] = None,
+    ):
         self.raw_data = raw_data
         self.meta = metadata
         self.valid = True
@@ -304,9 +306,11 @@ class TensorMemoryObj(MemoryObj):
     def ref_count_down(self):
         with self.lock:
             self.meta.ref_count -= 1
-            if self.meta.ref_count == 0 and \
-                self.parent_allocator is not None and \
-                self.meta.is_pin is False:
+            if (
+                self.meta.ref_count == 0
+                and self.parent_allocator is not None
+                and self.meta.is_pin is False
+            ):
                 self.parent_allocator.free(self)
 
     def get_ref_count(self) -> int:
@@ -332,8 +336,7 @@ class TensorMemoryObj(MemoryObj):
             logger.warning("Trying to access an invalidated MemoryObj")
             return None
         assert self.meta.dtype is not None
-        return self.raw_data.view(self.meta.dtype)\
-                            .view(self.meta.shape)
+        return self.raw_data.view(self.meta.dtype).view(self.meta.shape)
 
     @property
     def byte_array(self) -> bytes:
@@ -343,7 +346,8 @@ class TensorMemoryObj(MemoryObj):
         ptr = kv_chunk.data_ptr()
         ubyte_ptr = ctypes.cast(ptr, ctypes.POINTER(ctypes.c_ubyte))
         byte_array = (ctypes.c_ubyte * num_bytes).from_address(
-            ctypes.addressof(ubyte_ptr.contents))
+            ctypes.addressof(ubyte_ptr.contents)
+        )
         return memoryview(byte_array)
 
     @property
@@ -353,7 +357,6 @@ class TensorMemoryObj(MemoryObj):
 
 # TODO(Jiayi): Need to make this compatible with pin/unpin semantics
 class CopyLessMemoryObj(TensorMemoryObj):
-
     def __init__(self, raw_data, metadata, callback, parent_allocator=None):
         super().__init__(raw_data, metadata, parent_allocator)
         self.callback = callback
@@ -367,19 +370,19 @@ class BytesBufferMemoryObj(MemoryObj):
     Wraps a raw flat tensor with some metadata
     """
 
-    def __init__(self,
-                 raw_bytes: bytes,
-                 metadata: Optional[MemoryObjMetadata] = None):
+    def __init__(self, raw_bytes: bytes, metadata: Optional[MemoryObjMetadata] = None):
         self.raw_data = raw_bytes
         if metadata is None:
             bytes_shape = torch.Size([len(self.raw_data), 0, 0, 0])
-            self.meta = MemoryObjMetadata(shape=bytes_shape,
-                                          dtype=None,
-                                          address=0,
-                                          phy_size=0,
-                                          ref_count=1,
-                                          is_pin=False,
-                                          fmt=MemoryFormat.BINARY_BUFFER)
+            self.meta = MemoryObjMetadata(
+                shape=bytes_shape,
+                dtype=None,
+                address=0,
+                phy_size=0,
+                ref_count=1,
+                is_pin=False,
+                fmt=MemoryFormat.BINARY_BUFFER,
+            )
         else:
             self.meta = metadata
         self.valid = True
@@ -443,7 +446,6 @@ class BytesBufferMemoryObj(MemoryObj):
 
 
 class MemoryAllocatorInterface(metaclass=abc.ABCMeta):
-
     @abc.abstractmethod
     def allocate(
         self,
@@ -457,7 +459,7 @@ class MemoryAllocatorInterface(metaclass=abc.ABCMeta):
         :param torch.Size shape: The shape of the tensor to allocate.
         :param torch.dtype dtype: The dtype of the tensor to allocate.
         :param MemoryFormat fmt: The format of the memory to allocate.
-        
+
         :return: A MemoryObj wrapping the allocated memory. Returns
             None if the allocation failed.
 
@@ -466,8 +468,9 @@ class MemoryAllocatorInterface(metaclass=abc.ABCMeta):
         raise NotImplementedError
 
     @abc.abstractmethod
-    def dry_allocate(self, shape: torch.Size,
-                     dtype: Optional[torch.dtype]) -> MemoryObjMetadata:
+    def dry_allocate(
+        self, shape: torch.Size, dtype: Optional[torch.dtype]
+    ) -> MemoryObjMetadata:
         """
         A 'dry run' allocation that returns the metadata of the
         allocated memory without actually allocating it.
@@ -493,6 +496,7 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
     """
     Implements a "explicit list" memory allocator.
     """
+
     ALIGN_BYTES = 512
 
     def __init__(self, tensor: torch.Tensor):
@@ -517,22 +521,24 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         align = TensorMemoryAllocator.ALIGN_BYTES
         return (raw_size + align - 1) & ~(align - 1)
 
-    def _coalesce(self, curr_block: FreeBlock, prev_block: Optional[FreeBlock],
-                  succ_block: Optional[FreeBlock]):
+    def _coalesce(
+        self,
+        curr_block: FreeBlock,
+        prev_block: Optional[FreeBlock],
+        succ_block: Optional[FreeBlock],
+    ):
         """
         Coalesces the current block with the previous and/or successor block.
         This assumes the curr_block is NOT in self.explicit_list
 
         Returns True if the current block was coalesced, otherwise False.
         """
-        if prev_block is not None and \
-                prev_block.can_be_coalesced(curr_block):
+        if prev_block is not None and prev_block.can_be_coalesced(curr_block):
             merge_prev = True
         else:
             merge_prev = False
 
-        if succ_block is not None and \
-                curr_block.can_be_coalesced(succ_block):
+        if succ_block is not None and curr_block.can_be_coalesced(succ_block):
             merge_succ = True
         else:
             merge_succ = False
@@ -573,9 +579,11 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
             if block.size >= aligned_size:
                 break
         else:
-            logger.warning(f"Failed to allocate memory for "
-                           f"tensor({shape}, {dtype}) because "
-                           "no memory is available")
+            logger.warning(
+                f"Failed to allocate memory for "
+                f"tensor({shape}, {dtype}) because "
+                "no memory is available"
+            )
             return None
 
         # Do not add the block back if `block.size == aligned_size`
@@ -583,8 +591,11 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         # Update the explicit list
         if block.size > aligned_size:
             self.explicit_list.add(
-                FreeBlock(start=block.start + aligned_size,
-                          size=block.size - aligned_size))
+                FreeBlock(
+                    start=block.start + aligned_size,
+                    size=block.size - aligned_size,
+                )
+            )
 
         # Update debug status
         self.total_allocated_size += aligned_size
@@ -593,10 +604,12 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
 
         # Allocate the block
         return TensorMemoryObj(
-            raw_data=self.buffer[block.start:block.start + raw_size],
-            metadata=MemoryObjMetadata(shape, dtype, block.start, aligned_size,
-                                       1, False, fmt),
-            parent_allocator=parent_allocator)
+            raw_data=self.buffer[block.start : block.start + raw_size],
+            metadata=MemoryObjMetadata(
+                shape, dtype, block.start, aligned_size, 1, False, fmt
+            ),
+            parent_allocator=parent_allocator,
+        )
 
     def dry_allocate(
         self,
@@ -614,12 +627,14 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         if not memory_obj.is_valid():
             return
 
-        new_free_block = FreeBlock(start=memory_obj.meta.address,
-                                   size=memory_obj.meta.phy_size)
+        new_free_block = FreeBlock(
+            start=memory_obj.meta.address, size=memory_obj.meta.phy_size
+        )
         index = self.explicit_list.bisect_right(new_free_block)
         prev_block = self.explicit_list[index - 1] if index > 0 else None
-        succ_block = self.explicit_list[index] \
-                if index < len(self.explicit_list) else None
+        succ_block = (
+            self.explicit_list[index] if index < len(self.explicit_list) else None
+        )
 
         coalesced = self._coalesce(new_free_block, prev_block, succ_block)
 
@@ -638,10 +653,10 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         """
         clear = True
         logger.info("Checking memory allocator consistency")
+        logger.info(f" - Total active allocations: {self.num_active_allocations}")
         logger.info(
-            f" - Total active allocations: {self.num_active_allocations}")
-        logger.info(f" - Total allocated size: "
-                    f"{self.total_allocated_size / 1048576} MB")
+            f" - Total allocated size: {self.total_allocated_size / 1048576} MB"
+        )
 
         # Check the real total free size
         total_free_size = sum([block.size for block in self.explicit_list])
@@ -654,9 +669,9 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
             clear = False
 
         # Check if the blocks are coalesced
-        for prev, succ in zip(self.explicit_list[:-1],
-                              self.explicit_list[1:],
-                              strict=False):
+        for prev, succ in zip(
+            self.explicit_list[:-1], self.explicit_list[1:], strict=False
+        ):
             if prev.can_be_coalesced(succ):
                 logger.error("Memory allocator has non-coalesced blocks")
                 logger.error("This implies a bug in the memory allocator")
@@ -668,8 +683,7 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
 
 
 class BufferAllocator(MemoryAllocatorInterface):
-    """Allocates memory in the pre-allocated pinned memory.
-    """
+    """Allocates memory in the pre-allocated pinned memory."""
 
     def __init__(self, device="cpu"):
         """
@@ -694,13 +708,15 @@ class BufferAllocator(MemoryAllocatorInterface):
         fmt: MemoryFormat = MemoryFormat.BINARY_BUFFER,
     ) -> MemoryObjMetadata:
         n = shape[0]
-        return MemoryObjMetadata(shape=torch.Size([n, 0, 0, 0]),
-                                 dtype=None,
-                                 address=0,
-                                 phy_size=0,
-                                 ref_count=1,
-                                 is_pin=False,
-                                 fmt=MemoryFormat.BINARY_BUFFER)
+        return MemoryObjMetadata(
+            shape=torch.Size([n, 0, 0, 0]),
+            dtype=None,
+            address=0,
+            phy_size=0,
+            ref_count=1,
+            is_pin=False,
+            fmt=MemoryFormat.BINARY_BUFFER,
+        )
 
     def free(self, memory_obj: MemoryObj):
         return
@@ -710,8 +726,7 @@ class BufferAllocator(MemoryAllocatorInterface):
 
 
 class HostMemoryAllocator(MemoryAllocatorInterface):
-    """Allocates memory in the pre-allocated Host memory.
-    """
+    """Allocates memory in the pre-allocated Host memory."""
 
     def __init__(self, size: int):
         """
@@ -750,8 +765,7 @@ class HostMemoryAllocator(MemoryAllocatorInterface):
 
 
 class PinMemoryAllocator(MemoryAllocatorInterface):
-    """Allocates memory in the pre-allocated pinned memory.
-    """
+    """Allocates memory in the pre-allocated pinned memory."""
 
     def __init__(self, size: int):
         """
@@ -851,8 +865,7 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
 
 
 class GPUMemoryAllocator(MemoryAllocatorInterface):
-    """Allocates memory in the pre-allocated GPU memory.
-    """
+    """Allocates memory in the pre-allocated GPU memory."""
 
     def __init__(self, size: int, device="cuda"):
         """
@@ -892,7 +905,7 @@ class GPUMemoryAllocator(MemoryAllocatorInterface):
 
 class AdHocMemoryAllocator(MemoryAllocatorInterface):
     """
-    AdHocMemoryAllocator is a simple allocator that does not actually 
+    AdHocMemoryAllocator is a simple allocator that does not actually
     allocate memory. It is used for testing purposes only.
     """
 
@@ -917,17 +930,19 @@ class AdHocMemoryAllocator(MemoryAllocatorInterface):
         assert dtype is not None, "dtype must be specified"
 
         # Return a dummy object with no actual memory allocation
-        return TensorMemoryObj(raw_data=torch.empty(shape,
-                                                    dtype=dtype,
-                                                    device=self.device),
-                               metadata=MemoryObjMetadata(shape=shape,
-                                                          dtype=dtype,
-                                                          address=0,
-                                                          phy_size=0,
-                                                          ref_count=1,
-                                                          is_pin=False,
-                                                          fmt=fmt),
-                               parent_allocator=self)
+        return TensorMemoryObj(
+            raw_data=torch.empty(shape, dtype=dtype, device=self.device),
+            metadata=MemoryObjMetadata(
+                shape=shape,
+                dtype=dtype,
+                address=0,
+                phy_size=0,
+                ref_count=1,
+                is_pin=False,
+                fmt=fmt,
+            ),
+            parent_allocator=self,
+        )
 
     def dry_allocate(
         self,
@@ -943,13 +958,15 @@ class AdHocMemoryAllocator(MemoryAllocatorInterface):
 
         assert dtype is not None, "dtype must be specified"
 
-        return MemoryObjMetadata(shape=shape,
-                                 dtype=dtype,
-                                 address=0,
-                                 phy_size=0,
-                                 ref_count=1,
-                                 is_pin=False,
-                                 fmt=fmt)
+        return MemoryObjMetadata(
+            shape=shape,
+            dtype=dtype,
+            address=0,
+            phy_size=0,
+            ref_count=1,
+            is_pin=False,
+            fmt=fmt,
+        )
 
     def free(self, memory_obj: MemoryObj):
         pass

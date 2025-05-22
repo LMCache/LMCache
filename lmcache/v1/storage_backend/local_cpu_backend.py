@@ -83,8 +83,9 @@ class LocalCPUBackend(StorageBackendInterface):
         """
         return False
 
-    def submit_put_task(self, key: CacheEngineKey,
-                        memory_obj: MemoryObj) -> Optional[Future]:
+    def submit_put_task(
+        self, key: CacheEngineKey, memory_obj: MemoryObj
+    ) -> Optional[Future]:
         """
         Synchronously put the MemoryObj into the local cpu backend.
         """
@@ -104,8 +105,8 @@ class LocalCPUBackend(StorageBackendInterface):
             # push kv admit msg
             if self.lmcache_worker is not None:
                 self.lmcache_worker.put_msg(
-                    KVAdmitMsg(self.instance_id, key.worker_id, key.chunk_hash,
-                               "cpu"))
+                    KVAdmitMsg(self.instance_id, key.worker_id, key.chunk_hash, "cpu")
+                )
         return None
 
     # NOTE (Jiayi): prefetch might be deprecated in the future.
@@ -176,8 +177,8 @@ class LocalCPUBackend(StorageBackendInterface):
 
             if self.lmcache_worker is not None:
                 self.lmcache_worker.put_msg(
-                    KVEvictMsg(self.instance_id, key.worker_id, key.chunk_hash,
-                               "cpu"))
+                    KVEvictMsg(self.instance_id, key.worker_id, key.chunk_hash, "cpu")
+                )
             # NOTE (Jiayi): This `return True` might not accurately reflect
             # whether the key is removed from the actual memory because
             # other backends might still (temporarily) hold the memory object.
@@ -242,19 +243,18 @@ class LocalCPUBackend(StorageBackendInterface):
             cpu_memory_obj = self.memory_allocator.allocate(
                 memory_obj.get_shape(),
                 memory_obj.get_dtype(),
-                fmt=memory_obj.get_memory_format())
+                fmt=memory_obj.get_memory_format(),
+            )
 
             if cpu_memory_obj is None:
-                logger.warning(
-                    "Memory allocation failed in cachegen deserializer")
+                logger.warning("Memory allocation failed in cachegen deserializer")
                 return None
 
             # Copy the tensor to the cpu memory object
             assert cpu_memory_obj.tensor is not None
             self.stream.wait_stream(torch.cuda.default_stream())
             with torch.cuda.stream(self.stream):
-                cpu_memory_obj.tensor.copy_(memory_obj.tensor,
-                                            non_blocking=True)
+                cpu_memory_obj.tensor.copy_(memory_obj.tensor, non_blocking=True)
             memory_obj.tensor.record_stream(self.stream)
 
             # Update the hot cache
@@ -266,8 +266,8 @@ class LocalCPUBackend(StorageBackendInterface):
             # Push kv msg
             if self.lmcache_worker is not None:
                 self.lmcache_worker.put_msg(
-                    KVAdmitMsg(self.instance_id, key.worker_id, key.chunk_hash,
-                               "cpu"))
+                    KVAdmitMsg(self.instance_id, key.worker_id, key.chunk_hash, "cpu")
+                )
 
             logger.debug("Updated hot cache!")
         else:
@@ -280,8 +280,13 @@ class LocalCPUBackend(StorageBackendInterface):
                 # Push kv msg
                 if self.lmcache_worker is not None:
                     self.lmcache_worker.put_msg(
-                        KVAdmitMsg(self.instance_id, key.worker_id,
-                                   key.chunk_hash, "cpu"))
+                        KVAdmitMsg(
+                            self.instance_id,
+                            key.worker_id,
+                            key.chunk_hash,
+                            "cpu",
+                        )
+                    )
             else:
                 self.cpu_lock.release()
 

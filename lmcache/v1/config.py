@@ -128,15 +128,35 @@ class LMCacheEngineConfig:
     ) -> "LMCacheEngineConfig":
         # TODO (ApostaC): Add nixl config
         return LMCacheEngineConfig(
-            chunk_size, local_cpu, max_local_cpu_size, local_disk,
-            max_local_disk_size, remote_url, remote_serde, save_decode_cache,
-            enable_blending, blend_recompute_ratio, blend_min_tokens,
-            blend_special_str, enable_p2p, lookup_url, distributed_url,
-            error_handling, enable_controller, lmcache_instance_id,
-            controller_url, lmcache_worker_port, enable_nixl, nixl_role,
-            nixl_receiver_host, nixl_receiver_port, nixl_buffer_size,
-            nixl_buffer_device, nixl_enable_gc,
-            audit_actual_remote_url).validate()
+            chunk_size,
+            local_cpu,
+            max_local_cpu_size,
+            local_disk,
+            max_local_disk_size,
+            remote_url,
+            remote_serde,
+            save_decode_cache,
+            enable_blending,
+            blend_recompute_ratio,
+            blend_min_tokens,
+            blend_special_str,
+            enable_p2p,
+            lookup_url,
+            distributed_url,
+            error_handling,
+            enable_controller,
+            lmcache_instance_id,
+            controller_url,
+            lmcache_worker_port,
+            enable_nixl,
+            nixl_role,
+            nixl_receiver_host,
+            nixl_receiver_port,
+            nixl_buffer_size,
+            nixl_buffer_device,
+            nixl_enable_gc,
+            audit_actual_remote_url,
+        ).validate()
 
     @staticmethod
     def from_legacy(
@@ -194,13 +214,28 @@ class LMCacheEngineConfig:
             max_local_disk_size = 5
         else:
             raise ValueError(f"Invalid backend: {backend}")
-        return LMCacheEngineConfig(chunk_size, local_cpu, max_local_cpu_size,
-                                   local_disk, max_local_disk_size, remote_url,
-                                   remote_serde, save_decode_cache,
-                                   enable_blending, blend_recompute_ratio,
-                                   blend_min_tokens, blend_special_str,
-                                   enable_p2p, lookup_url, distributed_url,
-                                   error_handling).validate().log_config()
+        return (
+            LMCacheEngineConfig(
+                chunk_size,
+                local_cpu,
+                max_local_cpu_size,
+                local_disk,
+                max_local_disk_size,
+                remote_url,
+                remote_serde,
+                save_decode_cache,
+                enable_blending,
+                blend_recompute_ratio,
+                blend_min_tokens,
+                blend_special_str,
+                enable_p2p,
+                lookup_url,
+                distributed_url,
+                error_handling,
+            )
+            .validate()
+            .log_config()
+        )
 
     @staticmethod
     def from_file(file_path: str) -> "LMCacheEngineConfig":
@@ -235,8 +270,9 @@ class LMCacheEngineConfig:
         error_handling = config.get("error_handling", False)
 
         enable_controller = config.get("enable_controller", False)
-        lmcache_instance_id = config.get("lmcache_instance_id",
-                                         "lmcache_default_instance")
+        lmcache_instance_id = config.get(
+            "lmcache_instance_id", "lmcache_default_instance"
+        )
         controller_url = config.get("controller_url", None)
         lmcache_worker_port = config.get("lmcache_worker_port", None)
 
@@ -252,14 +288,18 @@ class LMCacheEngineConfig:
         if nixl_receiver_host is None:
             nixl_receiver_host = config.get("nixl_peer_host", None)
             if nixl_receiver_host is not None:
-                logger.warning("nixl_peer_host is deprecated, please use "
-                               "nixl_receiver_host in the config file instead")
+                logger.warning(
+                    "nixl_peer_host is deprecated, please use "
+                    "nixl_receiver_host in the config file instead"
+                )
 
         if nixl_receiver_port is None:
             nixl_receiver_port = config.get("nixl_peer_port", None)
             if nixl_receiver_port is not None:
-                logger.warning("nixl_peer_port is deprecated, please use "
-                               "nixl_receiver_port in the config file instead")
+                logger.warning(
+                    "nixl_peer_port is deprecated, please use "
+                    "nixl_receiver_port in the config file instead"
+                )
 
         audit_actual_remote_url = config.get("audit_actual_remote_url", None)
 
@@ -273,36 +313,40 @@ class LMCacheEngineConfig:
             case _:
                 raise ValueError(f"Invalid remote storage url: {remote_url}")
 
-        return LMCacheEngineConfig(
-            chunk_size,
-            local_cpu,
-            max_local_cpu_size,
-            local_disk_path,
-            max_local_disk_size,
-            remote_url,
-            remote_serde,
-            save_decode_cache,
-            enable_blending,
-            blend_recompute_ratio,
-            blend_min_tokens,
-            blend_special_str,
-            enable_p2p,
-            lookup_url,
-            distributed_url,
-            error_handling,
-            enable_controller,
-            lmcache_instance_id,
-            controller_url,
-            lmcache_worker_port,
-            enable_nixl,
-            nixl_role,
-            nixl_receiver_host,
-            nixl_receiver_port,
-            nixl_buffer_size,
-            nixl_buffer_device,
-            nixl_enable_gc,
-            audit_actual_remote_url,
-        ).validate().log_config()
+        return (
+            LMCacheEngineConfig(
+                chunk_size,
+                local_cpu,
+                max_local_cpu_size,
+                local_disk_path,
+                max_local_disk_size,
+                remote_url,
+                remote_serde,
+                save_decode_cache,
+                enable_blending,
+                blend_recompute_ratio,
+                blend_min_tokens,
+                blend_special_str,
+                enable_p2p,
+                lookup_url,
+                distributed_url,
+                error_handling,
+                enable_controller,
+                lmcache_instance_id,
+                controller_url,
+                lmcache_worker_port,
+                enable_nixl,
+                nixl_role,
+                nixl_receiver_host,
+                nixl_receiver_port,
+                nixl_buffer_size,
+                nixl_buffer_device,
+                nixl_enable_gc,
+                audit_actual_remote_url,
+            )
+            .validate()
+            .log_config()
+        )
 
     @staticmethod
     def from_env() -> "LMCacheEngineConfig":
@@ -338,102 +382,120 @@ class LMCacheEngineConfig:
                 return 0.0
             return float(value)
 
-        config = LMCacheEngineConfig.from_defaults(remote_url=None,
-                                                   remote_serde=None)
+        config = LMCacheEngineConfig.from_defaults(remote_url=None, remote_serde=None)
         config.chunk_size = to_int(
-            parse_env(get_env_name("chunk_size"), config.chunk_size))
+            parse_env(get_env_name("chunk_size"), config.chunk_size)
+        )
         config.local_cpu = to_bool(
-            parse_env(get_env_name("local_cpu"), config.local_cpu))
+            parse_env(get_env_name("local_cpu"), config.local_cpu)
+        )
         config.max_local_cpu_size = to_float(
-            parse_env(get_env_name("max_local_cpu_size"),
-                      config.max_local_cpu_size))
+            parse_env(get_env_name("max_local_cpu_size"), config.max_local_cpu_size)
+        )
         config.local_disk = _parse_local_disk(
-            parse_env(get_env_name("local_disk"), config.local_disk))
+            parse_env(get_env_name("local_disk"), config.local_disk)
+        )
         config.max_local_disk_size = to_float(
-            parse_env(get_env_name("max_local_disk_size"),
-                      config.max_local_disk_size))
-        config.remote_url = parse_env(get_env_name("remote_url"),
-                                      config.remote_url)
-        config.remote_serde = parse_env(get_env_name("remote_serde"),
-                                        config.remote_serde)
+            parse_env(get_env_name("max_local_disk_size"), config.max_local_disk_size)
+        )
+        config.remote_url = parse_env(get_env_name("remote_url"), config.remote_url)
+        config.remote_serde = parse_env(
+            get_env_name("remote_serde"), config.remote_serde
+        )
         config.save_decode_cache = to_bool(
-            parse_env(get_env_name("save_decode_cache"),
-                      config.save_decode_cache))
+            parse_env(get_env_name("save_decode_cache"), config.save_decode_cache)
+        )
 
         config.enable_blending = to_bool(
-            parse_env(get_env_name("enable_blending"), config.enable_blending))
+            parse_env(get_env_name("enable_blending"), config.enable_blending)
+        )
         config.blend_recompute_ratio = to_float(
-            parse_env(get_env_name("blend_recompute_ratio"),
-                      config.blend_recompute_ratio))
+            parse_env(
+                get_env_name("blend_recompute_ratio"),
+                config.blend_recompute_ratio,
+            )
+        )
         config.blend_min_tokens = to_int(
-            parse_env(get_env_name("blend_min_tokens"),
-                      config.blend_min_tokens))
-        blend_special_str = parse_env(get_env_name("blend_special_str"),
-                                      config.blend_special_str)
+            parse_env(get_env_name("blend_min_tokens"), config.blend_min_tokens)
+        )
+        blend_special_str = parse_env(
+            get_env_name("blend_special_str"), config.blend_special_str
+        )
         assert blend_special_str is not None
         config.blend_special_str = blend_special_str
 
         config.enable_p2p = to_bool(
-            parse_env(get_env_name("enable_p2p"), config.enable_p2p))
-        config.lookup_url = parse_env(get_env_name("lookup_url"),
-                                      config.lookup_url)
-        config.distributed_url = parse_env(get_env_name("distributed_url"),
-                                           config.distributed_url)
+            parse_env(get_env_name("enable_p2p"), config.enable_p2p)
+        )
+        config.lookup_url = parse_env(get_env_name("lookup_url"), config.lookup_url)
+        config.distributed_url = parse_env(
+            get_env_name("distributed_url"), config.distributed_url
+        )
 
         config.error_handling = to_bool(
-            parse_env(get_env_name("error_handling"), config.error_handling))
+            parse_env(get_env_name("error_handling"), config.error_handling)
+        )
 
         config.enable_controller = to_bool(
-            parse_env(get_env_name("enable_controller"),
-                      config.enable_controller))
-        lmcache_instance_id = parse_env(get_env_name("lmcache_instance_id"),
-                                        "lmcache_default_instance")
+            parse_env(get_env_name("enable_controller"), config.enable_controller)
+        )
+        lmcache_instance_id = parse_env(
+            get_env_name("lmcache_instance_id"), "lmcache_default_instance"
+        )
         assert lmcache_instance_id is not None
         config.lmcache_instance_id = lmcache_instance_id
-        config.controller_url = parse_env(get_env_name("controller_url"),
-                                          config.controller_url)
+        config.controller_url = parse_env(
+            get_env_name("controller_url"), config.controller_url
+        )
         config.lmcache_worker_port = to_int(
-            parse_env(get_env_name("lmcache_worker_port"),
-                      config.lmcache_worker_port))
+            parse_env(get_env_name("lmcache_worker_port"), config.lmcache_worker_port)
+        )
 
         config.enable_nixl = to_bool(
-            parse_env(get_env_name("enable_nixl"), config.enable_nixl))
-        config.nixl_role = parse_env(get_env_name("nixl_role"),
-                                     config.nixl_role)
+            parse_env(get_env_name("enable_nixl"), config.enable_nixl)
+        )
+        config.nixl_role = parse_env(get_env_name("nixl_role"), config.nixl_role)
         config.nixl_receiver_host = parse_env(
-            get_env_name("nixl_receiver_host"), config.nixl_receiver_host)
+            get_env_name("nixl_receiver_host"), config.nixl_receiver_host
+        )
         config.nixl_receiver_port = to_int(
-            parse_env(get_env_name("nixl_receiver_port"),
-                      config.nixl_receiver_port))
+            parse_env(get_env_name("nixl_receiver_port"), config.nixl_receiver_port)
+        )
         config.nixl_buffer_size = to_int(
-            parse_env(get_env_name("nixl_buffer_size"),
-                      config.nixl_buffer_size))
+            parse_env(get_env_name("nixl_buffer_size"), config.nixl_buffer_size)
+        )
         config.nixl_buffer_device = parse_env(
-            get_env_name("nixl_buffer_device"), config.nixl_buffer_device)
+            get_env_name("nixl_buffer_device"), config.nixl_buffer_device
+        )
         config.nixl_enable_gc = to_bool(
-            parse_env(get_env_name("nixl_enable_gc"), config.nixl_enable_gc))
+            parse_env(get_env_name("nixl_enable_gc"), config.nixl_enable_gc)
+        )
 
         # Try getting "legacy" nixl config
         if config.nixl_receiver_host is None:
             config.nixl_receiver_host = parse_env(
-                get_env_name("nixl_peer_host"), config.nixl_receiver_host)
+                get_env_name("nixl_peer_host"), config.nixl_receiver_host
+            )
             if config.nixl_receiver_host is not None:
                 logger.warning(
                     "LMCACHE_NIXL_PEER_HOST is deprecated, please use "
-                    "LMCACHE_NIXL_RECEIVER_HOST environment variable instead")
+                    "LMCACHE_NIXL_RECEIVER_HOST environment variable instead"
+                )
 
         if config.nixl_receiver_port is None:
             config.nixl_receiver_port = to_int(
-                parse_env(get_env_name("nixl_peer_port"),
-                          config.nixl_receiver_port))
+                parse_env(get_env_name("nixl_peer_port"), config.nixl_receiver_port)
+            )
             if config.nixl_receiver_port is not None:
                 logger.warning(
                     "LMCACHE_NIXL_PEER_PORT is deprecated, please use "
-                    "LMCACHE_NIXL_RECEIVER_PORT environment variable instead")
+                    "LMCACHE_NIXL_RECEIVER_PORT environment variable instead"
+                )
 
         config.audit_actual_remote_url = parse_env(
             get_env_name("audit_actual_remote_url"),
-            config.audit_actual_remote_url)
+            config.audit_actual_remote_url,
+        )
         return config.validate().log_config()
 
     def to_original_config(self) -> orig_config.LMCacheEngineConfig:
@@ -453,9 +515,8 @@ class LMCacheEngineConfig:
             blend_add_special_in_precomp=False,
         )
 
-    def validate(self) -> 'LMCacheEngineConfig':
-        """Validate the config
-        """
+    def validate(self) -> "LMCacheEngineConfig":
+        """Validate the config"""
         if self.enable_p2p:
             assert self.lookup_url is not None
             assert self.distributed_url is not None
@@ -468,52 +529,49 @@ class LMCacheEngineConfig:
             assert self.nixl_buffer_device is not None
             assert self.nixl_enable_gc is not None
 
-            assert self.local_cpu is False, \
-                    "Nixl only supports local_cpu=False"
-            assert self.max_local_cpu_size == 0, \
-                    "Nixl only supports max_local_cpu_size=0"
+            assert self.local_cpu is False, "Nixl only supports local_cpu=False"
+            assert self.max_local_cpu_size == 0, (
+                "Nixl only supports max_local_cpu_size=0"
+            )
 
-            assert self.local_disk is None, \
-                    "Nixl only supports local_disk=None"
+            assert self.local_disk is None, "Nixl only supports local_disk=None"
 
-            assert self.remote_url is None, \
-                    "Nixl only supports remote_url=None"
+            assert self.remote_url is None, "Nixl only supports remote_url=None"
 
-            assert self.save_decode_cache is False, \
-                    "Nixl only supports save_decode_cache=False"
-            assert self.enable_p2p is False, \
-                    "Nixl only supports enable_p2p=False"
+            assert self.save_decode_cache is False, (
+                "Nixl only supports save_decode_cache=False"
+            )
+            assert self.enable_p2p is False, "Nixl only supports enable_p2p=False"
 
         return self
 
-    def log_config(self) -> 'LMCacheEngineConfig':
-        """log the configuration in LMCache
-        """
+    def log_config(self) -> "LMCacheEngineConfig":
+        """log the configuration in LMCache"""
         config_dict = {
-            'chunk_size': self.chunk_size,
-            'local_cpu': self.local_cpu,
-            'max_local_cpu_size': f"{self.max_local_cpu_size} GB",
-            'local_disk': self.local_disk,
-            'max_local_disk_size': f"{self.max_local_disk_size} GB",
-            'remote_url': self.remote_url,
-            'remote_serde': self.remote_serde,
-            'save_decode_cache': self.save_decode_cache,
-            'enable_blending': self.enable_blending,
-            'blend_recompute_ratio': self.blend_recompute_ratio,
-            'blend_min_tokens': self.blend_min_tokens,
-            'enable_p2p': self.enable_p2p,
-            'lookup_url': self.lookup_url,
-            'distributed_url': self.distributed_url,
-            'error_handling': self.error_handling,
-            'enable_controller': self.enable_controller,
-            'lmcache_instance_id': self.lmcache_instance_id,
-            'enable_nixl': self.enable_nixl,
-            'nixl_role': self.nixl_role,
-            'nixl_receiver_host': self.nixl_receiver_host,
-            'nixl_receiver_port': self.nixl_receiver_port,
-            'nixl_buffer_size': self.nixl_buffer_size,
-            'nixl_buffer_device': self.nixl_buffer_device,
-            'nixl_enable_gc': self.nixl_enable_gc
+            "chunk_size": self.chunk_size,
+            "local_cpu": self.local_cpu,
+            "max_local_cpu_size": f"{self.max_local_cpu_size} GB",
+            "local_disk": self.local_disk,
+            "max_local_disk_size": f"{self.max_local_disk_size} GB",
+            "remote_url": self.remote_url,
+            "remote_serde": self.remote_serde,
+            "save_decode_cache": self.save_decode_cache,
+            "enable_blending": self.enable_blending,
+            "blend_recompute_ratio": self.blend_recompute_ratio,
+            "blend_min_tokens": self.blend_min_tokens,
+            "enable_p2p": self.enable_p2p,
+            "lookup_url": self.lookup_url,
+            "distributed_url": self.distributed_url,
+            "error_handling": self.error_handling,
+            "enable_controller": self.enable_controller,
+            "lmcache_instance_id": self.lmcache_instance_id,
+            "enable_nixl": self.enable_nixl,
+            "nixl_role": self.nixl_role,
+            "nixl_receiver_host": self.nixl_receiver_host,
+            "nixl_receiver_port": self.nixl_receiver_port,
+            "nixl_buffer_size": self.nixl_buffer_size,
+            "nixl_buffer_device": self.nixl_buffer_device,
+            "nixl_enable_gc": self.nixl_enable_gc,
         }
         logger.info(f"LMCache Configuration: {config_dict}")
 

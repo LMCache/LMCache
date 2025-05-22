@@ -27,8 +27,9 @@ logger = init_logger(__name__)
 
 
 class LMSLocalBackend(LMSBackendInterface):
-
-    def __init__(self, ):
+    def __init__(
+        self,
+    ):
         self.dict: OrderedDict[CacheEngineKey, LMSMemoryObj] = OrderedDict()
 
         self.lock = threading.Lock()
@@ -44,7 +45,6 @@ class LMSLocalBackend(LMSBackendInterface):
         self,
         key: CacheEngineKey,
     ) -> bool:
-
         with self.lock:
             return key in self.dict
 
@@ -53,7 +53,6 @@ class LMSLocalBackend(LMSBackendInterface):
         self,
         key: CacheEngineKey,
     ) -> None:
-
         with self.lock:
             self.dict.pop(key)
 
@@ -62,7 +61,6 @@ class LMSLocalBackend(LMSBackendInterface):
         client_meta: ClientMetaMessage,
         kv_chunk_bytes: bytearray,
     ) -> None:
-
         with self.lock:
             self.dict[client_meta.key] = LMSMemoryObj(
                 kv_chunk_bytes,
@@ -77,7 +75,6 @@ class LMSLocalBackend(LMSBackendInterface):
         self,
         key: CacheEngineKey,
     ) -> Optional[LMSMemoryObj]:
-
         with self.lock:
             return self.dict.get(key, None)
 
@@ -86,5 +83,5 @@ class LMSLocalBackend(LMSBackendInterface):
 
 
 # TODO(Jiayi): please implement the remote disk backend
-#class LMSLocalDiskBackend(LMSBackendInterface):
+# class LMSLocalDiskBackend(LMSBackendInterface):
 #    pass

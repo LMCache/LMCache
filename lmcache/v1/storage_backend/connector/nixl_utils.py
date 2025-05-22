@@ -28,7 +28,7 @@ def get_correct_nixl_device(nixl_device: str, worker_id: int) -> str:
         nixl_device (str): The device string, could be cpu or cuda
 
     Returns:
-        str: The correct device string for Nixl -- with correct 
+        str: The correct device string for Nixl -- with correct
           device id.
     """
     if nixl_device == "cpu":
@@ -43,6 +43,7 @@ class NixlRole(enum.Enum):
     """
     Enum to represent the role of the Nixl connection.
     """
+
     SENDER = "sender"
     RECEIVER = "receiver"
 
@@ -58,13 +59,13 @@ class NixlConfig:
 
     @staticmethod
     def from_cache_engine_config(
-            config: LMCacheEngineConfig,
-            metadata: LMCacheEngineMetadata) -> "NixlConfig":
-        """Convert the LMCacheEngineConfig to NixlConfig
-        """
+        config: LMCacheEngineConfig, metadata: LMCacheEngineMetadata
+    ) -> "NixlConfig":
+        """Convert the LMCacheEngineConfig to NixlConfig"""
         worker_id = metadata.worker_id
-        assert config.enable_nixl is True, \
+        assert config.enable_nixl is True, (
             "NIXL is not enabled in the LMCacheEngineConfig"
+        )
 
         if isinstance(config.nixl_role, str):
             nixl_role = NixlRole(config.nixl_role)
@@ -72,9 +73,10 @@ class NixlConfig:
             assert isinstance(config.nixl_role, NixlRole)
             nixl_role = config.nixl_role
 
-        assert nixl_role in [NixlRole.SENDER, NixlRole.RECEIVER], \
-                f"Invalid role: {config.nixl_role}, must be either "\
-                f"{NixlRole.SENDER} or {NixlRole.RECEIVER}"
+        assert nixl_role in [NixlRole.SENDER, NixlRole.RECEIVER], (
+            f"Invalid role: {config.nixl_role}, must be either "
+            f"{NixlRole.SENDER} or {NixlRole.RECEIVER}"
+        )
 
         assert config.nixl_receiver_host is not None
         assert config.nixl_receiver_port is not None
@@ -82,12 +84,15 @@ class NixlConfig:
         assert config.nixl_buffer_device is not None
         assert config.nixl_enable_gc is not None
 
-        corrected_device = get_correct_nixl_device(config.nixl_buffer_device,
-                                                   metadata.worker_id)
+        corrected_device = get_correct_nixl_device(
+            config.nixl_buffer_device, metadata.worker_id
+        )
 
-        return NixlConfig(role=nixl_role,
-                          receiver_host=config.nixl_receiver_host,
-                          receiver_port=config.nixl_receiver_port + worker_id,
-                          buffer_size=config.nixl_buffer_size,
-                          buffer_device=corrected_device,
-                          enable_gc=config.nixl_enable_gc)
+        return NixlConfig(
+            role=nixl_role,
+            receiver_host=config.nixl_receiver_host,
+            receiver_port=config.nixl_receiver_port + worker_id,
+            buffer_size=config.nixl_buffer_size,
+            buffer_device=corrected_device,
+            enable_gc=config.nixl_enable_gc,
+        )

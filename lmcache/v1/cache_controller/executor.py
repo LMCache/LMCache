@@ -61,11 +61,17 @@ class LMCacheClusterExecutor:
         for worker_id in worker_ids:
             socket = self.reg_controller.get_socket(instance_id, worker_id)
             if socket is None:
-                return ErrorMsg(error=(f"Worker {worker_id} not registered"
-                                       f"for instance {instance_id}"))
+                return ErrorMsg(
+                    error=(
+                        f"Worker {worker_id} not registeredfor instance {instance_id}"
+                    )
+                )
             sockets.append(socket)
             serialized_msg = msgspec.msgpack.encode(
-                ClearWorkerMsg(tokens=tokens, ))
+                ClearWorkerMsg(
+                    tokens=tokens,
+                )
+            )
             serialized_msgs.append(serialized_msg)
         serialized_results = await self.execute_workers(
             sockets=sockets,
@@ -82,8 +88,7 @@ class LMCacheClusterExecutor:
     async def pin(self, msg: PinMsg) -> Union[PinRetMsg, ErrorMsg]:
         raise NotImplementedError
 
-    async def compress(self,
-                       msg: CompressMsg) -> Union[CompressRetMsg, ErrorMsg]:
+    async def compress(self, msg: CompressMsg) -> Union[CompressRetMsg, ErrorMsg]:
         raise NotImplementedError
 
     async def move(self, msg: MoveMsg) -> Union[MoveRetMsg, ErrorMsg]:
@@ -93,7 +98,8 @@ class LMCacheClusterExecutor:
         raise NotImplementedError
 
     async def check_finish(
-            self, msg: CheckFinishMsg) -> Union[CheckFinishRetMsg, ErrorMsg]:
+        self, msg: CheckFinishMsg
+    ) -> Union[CheckFinishRetMsg, ErrorMsg]:
         raise NotImplementedError
 
     # TODO(Jiayi): need to make the types more specific
@@ -126,9 +132,7 @@ class LMCacheClusterExecutor:
         :return: A list of serialized results received from the sockets.
         """
         tasks = []
-        for socket, serialized_msg in zip(sockets,
-                                          serialized_msgs,
-                                          strict=False):
+        for socket, serialized_msg in zip(sockets, serialized_msgs, strict=False):
 
             async def send_and_receive(s, msg):
                 await s.send(msg)

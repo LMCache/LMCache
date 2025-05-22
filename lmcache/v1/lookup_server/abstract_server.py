@@ -19,7 +19,6 @@ from lmcache.utils import CacheEngineKey
 
 
 class LookupServerInterface(metaclass=abc.ABCMeta):
-
     @abc.abstractmethod
     def lookup(self, key: CacheEngineKey) -> Optional[Tuple[str, int]]:
         """

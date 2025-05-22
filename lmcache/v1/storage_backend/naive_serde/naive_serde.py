@@ -18,7 +18,6 @@ from lmcache.v1.storage_backend.naive_serde.serde import (Deserializer,
 
 
 class NaiveSerializer(Serializer):
-
     def __init__(self):
         pass
 
@@ -28,6 +27,5 @@ class NaiveSerializer(Serializer):
 
 
 class NaiveDeserializer(Deserializer):
-
     def deserialize(self, memory_obj: MemoryObj) -> MemoryObj:
         return memory_obj

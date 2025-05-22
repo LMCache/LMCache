@@ -29,6 +29,6 @@ def CreateStorageBackend(device: str) -> LMSBackendInterface:
         case _:
             raise ValueError(f"Unsupported device: {device}")
         # TODO(Jiayi): please implement hierarchical remote storage
-        #case _:
+        # case _:
         #    logger.info("Initializing disk-only cache server")
         #    return LMSLocalDiskBackend(path=device)

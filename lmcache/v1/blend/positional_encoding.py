@@ -15,8 +15,9 @@
 from typing import Any, Callable, Dict, Optional
 
 import torch
-from vllm.model_executor.layers.rotary_embedding import \
-    get_rope as vllm_get_rope
+from vllm.model_executor.layers.rotary_embedding import (
+    get_rope as vllm_get_rope,
+)
 
 import lmcache.c_ops as lmc_ops
 from lmcache.logging import init_logger
@@ -28,7 +29,6 @@ logger = init_logger(__name__)
 
 
 class BasicReverseRope:
-
     def __init__(self, rope, rotary_dim, is_neox_style):
         self.rope = rope
         self.rotary_dim = rotary_dim
@@ -63,7 +63,7 @@ class BasicReverseRope:
 
 class FusedRope:
     """
-    Directly use the fused kernel to ratate K cache from 
+    Directly use the fused kernel to ratate K cache from
     the old positions to the new positions.
     """
 
@@ -91,17 +91,18 @@ class FusedRope:
         return self.fused_encode(old_positions, new_positions, k)
 
 
-def validate_rope_params(head_size: int,
-                         rotary_dim: int,
-                         max_position: int,
-                         base: int,
-                         is_neox_style: bool = True,
-                         rope_scaling: Optional[Dict[str, Any]] = None,
-                         dtype: Optional[torch.dtype] = None,
-                         partial_rotary_factor: float = 1.0):
+def validate_rope_params(
+    head_size: int,
+    rotary_dim: int,
+    max_position: int,
+    base: int,
+    is_neox_style: bool = True,
+    rope_scaling: Optional[Dict[str, Any]] = None,
+    dtype: Optional[torch.dtype] = None,
+    partial_rotary_factor: float = 1.0,
+):
     if rotary_dim != head_size:
-        logger.error(
-            "Currently KV blending only support rotary_dim == head_size.")
+        logger.error("Currently KV blending only support rotary_dim == head_size.")
         return False
 
     if rope_scaling is not None:
@@ -109,24 +110,20 @@ def validate_rope_params(head_size: int,
         return False
 
     if partial_rotary_factor != 1.0:
-        logger.error("Currently KV blending do not support "
-                     "rotary factor other than 1.0.")
+        logger.error(
+            "Currently KV blending do not support rotary factor other than 1.0."
+        )
         return False
 
     return True
 
 
-def validate_reverse_correctness(rope, reverse_rope, fused_rope,
-                                 head_size) -> bool:
+def validate_reverse_correctness(rope, reverse_rope, fused_rope, head_size) -> bool:
     hidden_dim = head_size * 8
     num_tokens = 10
 
-    dumb_q = torch.rand((num_tokens, hidden_dim),
-                        device="cuda",
-                        dtype=torch.bfloat16)
-    dumb_k = torch.rand((num_tokens, hidden_dim),
-                        device="cuda",
-                        dtype=torch.bfloat16)
+    dumb_q = torch.rand((num_tokens, hidden_dim), device="cuda", dtype=torch.bfloat16)
+    dumb_k = torch.rand((num_tokens, hidden_dim), device="cuda", dtype=torch.bfloat16)
     positions = torch.arange(num_tokens, device="cuda")
 
     q1 = dumb_q.clone()
@@ -158,35 +155,50 @@ def validate_reverse_correctness(rope, reverse_rope, fused_rope,
 
 # Main interface
 def get_fused_rope(
-        head_size: int,
-        rotary_dim: int,
-        max_position: int,
-        base: int,
-        is_neox_style: bool = True,
-        rope_scaling: Optional[Dict[str, Any]] = None,
-        dtype: Optional[torch.dtype] = None,
-        partial_rotary_factor: float = 1.0) -> Optional[Callable[..., Any]]:
-
+    head_size: int,
+    rotary_dim: int,
+    max_position: int,
+    base: int,
+    is_neox_style: bool = True,
+    rope_scaling: Optional[Dict[str, Any]] = None,
+    dtype: Optional[torch.dtype] = None,
+    partial_rotary_factor: float = 1.0,
+) -> Optional[Callable[..., Any]]:
     # Validate the ROPE parameters
-    if not validate_rope_params(head_size, rotary_dim, max_position, base,
-                                is_neox_style, rope_scaling, dtype,
-                                partial_rotary_factor):
-        logger.warning("The rope parameters is not supported! "
-                       "Cannot use cacheblend in this case")
+    if not validate_rope_params(
+        head_size,
+        rotary_dim,
+        max_position,
+        base,
+        is_neox_style,
+        rope_scaling,
+        dtype,
+        partial_rotary_factor,
+    ):
+        logger.warning(
+            "The rope parameters is not supported! Cannot use cacheblend in this case"
+        )
         return None
 
-    rope = vllm_get_rope(head_size, rotary_dim, max_position, base,
-                         is_neox_style, rope_scaling, dtype,
-                         partial_rotary_factor)
+    rope = vllm_get_rope(
+        head_size,
+        rotary_dim,
+        max_position,
+        base,
+        is_neox_style,
+        rope_scaling,
+        dtype,
+        partial_rotary_factor,
+    )
 
     reverse_rope = BasicReverseRope(rope, rotary_dim, is_neox_style)
     fused_rope = FusedRope(rope, is_neox_style)
 
-    correct = validate_reverse_correctness(rope, reverse_rope, fused_rope,
-                                           head_size)
+    correct = validate_reverse_correctness(rope, reverse_rope, fused_rope, head_size)
     if not correct:
-        logger.error("Fused/reverse rotary encoding is not correct! "
-                     "Will disable blending!")
+        logger.error(
+            "Fused/reverse rotary encoding is not correct! Will disable blending!"
+        )
         return None
 
     return reverse_rope

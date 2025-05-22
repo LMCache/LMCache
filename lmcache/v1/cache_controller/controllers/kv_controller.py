@@ -29,6 +29,7 @@ class KVChunkMetadata:
     """
     A class representing a KV chunk metadata.
     """
+
     instance_id: str
     worker_id: int
     location: str
@@ -40,7 +41,6 @@ class KVChunkMetadata:
 
 
 class KVController:
-
     def __init__(self):
         # NOTE (Jiayi): Even if we offload kv_pool to
         # redis. We might need a local cache for handling
@@ -68,8 +68,7 @@ class KVController:
         location = msg.location
         if instance_id not in self.kv_pool:
             self.kv_pool[key] = []
-        self.kv_pool[key].append(
-            KVChunkMetadata(instance_id, worker_id, location))
+        self.kv_pool[key].append(KVChunkMetadata(instance_id, worker_id, location))
 
     async def evict(self, msg: KVEvictMsg) -> None:
         """
@@ -84,9 +83,13 @@ class KVController:
             return
 
         remaining = [
-            m for m in self.kv_pool[key]
-            if not (m.instance_id == instance_id and m.worker_id == worker_id
-                    and m.location == location)
+            m
+            for m in self.kv_pool[key]
+            if not (
+                m.instance_id == instance_id
+                and m.worker_id == worker_id
+                and m.location == location
+            )
         ]
 
         if remaining:
@@ -130,8 +133,9 @@ class KVController:
         """
         for key in self.kv_pool:
             self.kv_pool[key] = [
-                m for m in self.kv_pool[key] if not (
-                    m.instance_id == instance_id and m.worker_id == worker_id)
+                m
+                for m in self.kv_pool[key]
+                if not (m.instance_id == instance_id and m.worker_id == worker_id)
             ]
             if not self.kv_pool[key]:
                 del self.kv_pool[key]
@@ -148,7 +152,8 @@ class KVController:
         tokens = msg.tokens
         layout_info = {}
         for start, end, key in self.token_database.process_tokens(
-                tokens, make_key=False):
+            tokens, make_key=False
+        ):
             assert isinstance(key, str)
             if key not in self.kv_pool:
                 break

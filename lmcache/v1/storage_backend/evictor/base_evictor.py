@@ -34,8 +34,7 @@ class BaseEvictor(metaclass=abc.ABCMeta):
     """
 
     @abc.abstractmethod
-    def update_on_hit(self, key: CacheEngineKey,
-                      cache_dict: OrderedDict) -> None:
+    def update_on_hit(self, key: CacheEngineKey, cache_dict: OrderedDict) -> None:
         """
         Update cache_dict when a cache is used is used
 
@@ -47,15 +46,15 @@ class BaseEvictor(metaclass=abc.ABCMeta):
 
     @abc.abstractmethod
     def update_on_put(
-            self, cache_dict: OrderedDict,
-            cache_size: int) -> Tuple[List[CacheEngineKey], PutStatus]:
+        self, cache_dict: OrderedDict, cache_size: int
+    ) -> Tuple[List[CacheEngineKey], PutStatus]:
         """
         Evict cache when a new cache comes and the storage is full
 
         Input:
             cache_dict: a dict consists of current cache
             kv_obj: the new kv cache to be injected
-        
+
         Return:
             return a list of keys to be evicted and a PutStatus
             to indicate whether the put is allowed

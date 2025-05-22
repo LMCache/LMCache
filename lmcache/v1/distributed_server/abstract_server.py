@@ -20,7 +20,6 @@ from lmcache.v1.memory_management import MemoryObj
 
 
 class DistributedServerInterface(metaclass=abc.ABCMeta):
-
     @abc.abstractmethod
     async def handle_get(
         self,

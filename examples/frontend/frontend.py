@@ -41,8 +41,9 @@ with st.sidebar:
 
     session.set_context([system_prompt] + [context])
     num_tokens = tokenizer.encode(session.get_context())
-    container.header(f"The context given to LLM: ({len(num_tokens)} tokens)",
-                     divider="grey")
+    container.header(
+        f"The context given to LLM: ({len(num_tokens)} tokens)", divider="grey"
+    )
     container.text(session.get_context())
 
     messages = st.container(height=400)

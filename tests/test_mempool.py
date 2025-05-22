@@ -2,18 +2,22 @@ import pytest
 import torch
 
 from lmcache.config import LMCacheMemPoolMetadata
-from lmcache.storage_backend.mem_pool import (LocalCPUBufferPool, LocalCPUPool,
-                                              LocalGPUPool)
+from lmcache.storage_backend.mem_pool import (
+    LocalCPUBufferPool,
+    LocalCPUPool,
+    LocalGPUPool,
+)
 
 
 def dumb_metadata(
-        kv_shape=(32, 2, 256, 8, 128), kv_dtype=torch.bfloat16,
-        max_cache_size=10):
+    kv_shape=(32, 2, 256, 8, 128), kv_dtype=torch.bfloat16, max_cache_size=10
+):
     return LMCacheMemPoolMetadata(kv_shape, kv_dtype, max_cache_size)
 
 
-@pytest.mark.parametrize("mem_pool_type",
-                         [LocalCPUBufferPool, LocalCPUPool, LocalGPUPool])
+@pytest.mark.parametrize(
+    "mem_pool_type", [LocalCPUBufferPool, LocalCPUPool, LocalGPUPool]
+)
 def test_alloc_full(mem_pool_type):
     kv_shape = (32, 2, 256, 8, 128)
     kv_dtype = torch.bfloat16
@@ -38,8 +42,9 @@ def test_alloc_full(mem_pool_type):
         assert kv_obj_none is None
 
 
-@pytest.mark.parametrize("mem_pool_type",
-                         [LocalCPUBufferPool, LocalCPUPool, LocalGPUPool])
+@pytest.mark.parametrize(
+    "mem_pool_type", [LocalCPUBufferPool, LocalCPUPool, LocalGPUPool]
+)
 def test_alloc_partial(mem_pool_type):
     kv_shape = (32, 2, 256, 8, 128)
     kv_dtype = torch.bfloat16

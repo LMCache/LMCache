@@ -23,7 +23,6 @@ logger = init_logger(__name__)
 
 
 class TorchSerializer(Serializer):
-
     def __init__(self):
         super().__init__()
 
@@ -34,7 +33,6 @@ class TorchSerializer(Serializer):
 
 
 class TorchDeserializer(Deserializer):
-
     def __init__(self, dtype):
         super().__init__(dtype)
 

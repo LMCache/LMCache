@@ -39,9 +39,7 @@ logger = init_logger(__name__)
 
 
 class LMCacheControllerManager:
-
     def __init__(self, controller_url: str):
-
         self.zmq_context = get_zmq_context()
         self.controller_url = controller_url
         # TODO(Jiayi): We might need multiple sockets if there are more
@@ -69,18 +67,21 @@ class LMCacheControllerManager:
 
         # Cluster executor
         self.cluster_executor = LMCacheClusterExecutor(
-            reg_controller=self.reg_controller, )
+            reg_controller=self.reg_controller,
+        )
 
         # post initialization of controllers
         self.kv_controller.post_init(self.cluster_executor)
-        self.reg_controller.post_init(kv_controller=self.kv_controller,
-                                      cluster_executor=self.cluster_executor)
+        self.reg_controller.post_init(
+            kv_controller=self.kv_controller,
+            cluster_executor=self.cluster_executor,
+        )
 
-        #self.loop = asyncio.new_event_loop()
-        #self.thread = threading.Thread(target=self.loop.run_forever,
+        # self.loop = asyncio.new_event_loop()
+        # self.thread = threading.Thread(target=self.loop.run_forever,
         #                               daemon=True)
-        #self.thread.start()
-        #asyncio.run_coroutine_threadsafe(self.start_all(), self.loop)
+        # self.thread.start()
+        # asyncio.run_coroutine_threadsafe(self.start_all(), self.loop)
 
     async def handle_worker_message(self, msg: WorkerMsg) -> None:
         if isinstance(msg, RegisterMsg):
@@ -94,8 +95,7 @@ class LMCacheControllerManager:
         else:
             logger.error(f"Unknown worker message type: {msg}")
 
-    async def handle_orchestration_message(
-            self, msg: OrchMsg) -> Optional[OrchRetMsg]:
+    async def handle_orchestration_message(self, msg: OrchMsg) -> Optional[OrchRetMsg]:
         if isinstance(msg, LookupMsg):
             return await self.kv_controller.lookup(msg)
         elif isinstance(msg, HealthMsg):
@@ -131,7 +131,7 @@ class LMCacheControllerManager:
 
                     # FIXME(Jiayi): The abstraction of control messages
                     # might not be necessary.
-                    #elif isinstance(msg, ControlMsg):
+                    # elif isinstance(msg, ControlMsg):
                     #    await self.issue_control_message(msg)
                     elif isinstance(msg, OrchMsg):
                         await self.handle_orchestration_message(msg)
@@ -143,5 +143,5 @@ class LMCacheControllerManager:
     async def start_all(self):
         await asyncio.gather(
             self.handle_batched_request(self.controller_socket),
-            #self.handle_batched_request(other socket),
+            # self.handle_batched_request(other socket),
         )

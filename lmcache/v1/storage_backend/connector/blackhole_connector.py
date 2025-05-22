@@ -24,7 +24,6 @@ logger = init_logger(__name__)
 
 
 class BlackholeConnector(RemoteConnector):
-
     def __init__(self):
         pass
 

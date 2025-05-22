@@ -36,7 +36,6 @@ logger = init_logger(__name__)
 
 
 class RemoteBackend(StorageBackendInterface):
-
     def __init__(
         self,
         config: LMCacheEngineConfig,
@@ -46,7 +45,6 @@ class RemoteBackend(StorageBackendInterface):
         dst_device: str = "cuda",
         lookup_server: Optional[LookupServerInterface] = None,
     ):
-
         self.put_tasks: List[CacheEngineKey] = []
         self.lock = threading.Lock()
 
@@ -68,7 +66,8 @@ class RemoteBackend(StorageBackendInterface):
 
         assert config.remote_serde is not None
         self.serializer, self.deserializer = CreateSerde(
-            config.remote_serde, metadata, config)
+            config.remote_serde, metadata, config
+        )
 
         logger.info(f"Connected to remote storage at {config.remote_url}")
 
@@ -85,28 +84,31 @@ class RemoteBackend(StorageBackendInterface):
         if self.connection is not None:
             return
         if (time.time() - self.failure_time) < self.min_reconnect_interval:
-            logger.warning("Connection will not be re-established yet "
-                           "since it has not been long enough since "
-                           "the last failure")
+            logger.warning(
+                "Connection will not be re-established yet "
+                "since it has not been long enough since "
+                "the last failure"
+            )
             return
         try:
             assert self.config.remote_url is not None
-            self.connection = CreateConnector(self.config.remote_url,
-                                              self.loop,
-                                              self.local_cpu_backend,
-                                              self.config)
-            logger.info("Connection initialized/re-established "
-                        f"at {self.config.remote_url}")
+            self.connection = CreateConnector(
+                self.config.remote_url,
+                self.loop,
+                self.local_cpu_backend,
+                self.config,
+            )
+            logger.info(
+                f"Connection initialized/re-established at {self.config.remote_url}"
+            )
         except Exception as e:
             with self.lock:
                 self.failure_time = time.time()
-            logger.warning(
-                f"Failed to initialize/re-establish remote connection: {e}")
+            logger.warning(f"Failed to initialize/re-establish remote connection: {e}")
             self.connection = None
 
     @staticmethod
     def _init_connection_wrapper(func):
-
         @wraps(func)
         def wrapper(self, *args, **kwargs):
             self._init_connection()
@@ -122,8 +124,9 @@ class RemoteBackend(StorageBackendInterface):
             logger.warning("Connection is None in contains, returning False")
             return False
 
-        future = asyncio.run_coroutine_threadsafe(self.connection.exists(key),
-                                                  self.loop)
+        future = asyncio.run_coroutine_threadsafe(
+            self.connection.exists(key), self.loop
+        )
         try:
             res = future.result()
             return res
@@ -152,10 +155,8 @@ class RemoteBackend(StorageBackendInterface):
         key: CacheEngineKey,
         memory_obj: MemoryObj,
     ) -> Optional[Future]:
-
         if self.connection is None:
-            logger.warning(
-                "Connection is None in submit_put_task, returning None")
+            logger.warning("Connection is None in submit_put_task, returning None")
             return None
 
         memory_obj.ref_count_up()
@@ -192,8 +193,7 @@ class RemoteBackend(StorageBackendInterface):
         """
 
         if self.connection is None:
-            logger.warning(
-                "Connection is None in get_blocking, returning None")
+            logger.warning("Connection is None in get_blocking, returning None")
             return None
         t1 = time.perf_counter()
         future = asyncio.run_coroutine_threadsafe(self.connection.get(key),
@@ -210,14 +210,15 @@ class RemoteBackend(StorageBackendInterface):
             return None
 
         t2 = time.perf_counter()
-        self.stats_monitor.update_interval_remote_time_to_get_sync(
-            (t2 - t1) * 1000)
+        self.stats_monitor.update_interval_remote_time_to_get_sync((t2 - t1) * 1000)
         if memory_obj is None:
             return None
         decompressed_memory_obj = self.deserializer.deserialize(memory_obj)
         t3 = time.perf_counter()
-        logger.debug(f"Get takes {(t2 - t1) * 1000:.6f} msec, "
-                     f"deserialization takes {(t3 - t2) * 1000:.6f} msec")
+        logger.debug(
+            f"Get takes {(t2 - t1) * 1000:.6f} msec, "
+            f"deserialization takes {(t3 - t2) * 1000:.6f} msec"
+        )
         return decompressed_memory_obj
 
     def get_non_blocking(
@@ -235,10 +236,10 @@ class RemoteBackend(StorageBackendInterface):
     def close(self):
         try:
             assert self.connection is not None
-            future = asyncio.run_coroutine_threadsafe(self.connection.close(),
-                                                      self.loop)
+            future = asyncio.run_coroutine_threadsafe(
+                self.connection.close(), self.loop
+            )
             future.result()
             logger.info("Remote backend closed.")
         except Exception as e:
-            logger.warning(
-                f"Error occurred when closing remote connection: {e}")
+            logger.warning(f"Error occurred when closing remote connection: {e}")

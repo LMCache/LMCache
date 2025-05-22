@@ -13,15 +13,13 @@ from lmcache.v1.gpu_connector import (VLLMNestedTupleGPUConnector,
 
 
 def dumb_metadata(fmt="vllm", kv_shape=(32, 2, 256, 8, 128)):
-    return LMCacheEngineMetadata("test_model", 3, 123, fmt, torch.bfloat16,
-                                 kv_shape)
+    return LMCacheEngineMetadata("test_model", 3, 123, fmt, torch.bfloat16, kv_shape)
 
 
-def dumb_metadata_with_model_name(model_name: str,
-                                  fmt="vllm",
-                                  kv_shape=(32, 2, 256, 8, 128)):
-    return LMCacheEngineMetadata(model_name, 3, 123, fmt, torch.bfloat16,
-                                 kv_shape)
+def dumb_metadata_with_model_name(
+    model_name: str, fmt="vllm", kv_shape=(32, 2, 256, 8, 128)
+):
+    return LMCacheEngineMetadata(model_name, 3, 123, fmt, torch.bfloat16, kv_shape)
 
 
 def dumb_cache_engine_key():
@@ -51,8 +49,11 @@ def generate_kv_cache(num_tokens, fmt, device):
     num_layers = 32
     num_heads = 8
     head_size = 128
-    shape = ([num_tokens, num_heads, head_size]
-             if fmt == "vllm" else [num_heads, num_tokens, head_size])
+    shape = (
+        [num_tokens, num_heads, head_size]
+        if fmt == "vllm"
+        else [num_heads, num_tokens, head_size]
+    )
     dtype = torch.bfloat16 if fmt == "vllm" else torch.float16
 
     for i in range(num_layers):
@@ -63,14 +64,13 @@ def generate_kv_cache(num_tokens, fmt, device):
     return tuple(ret)
 
 
-def generate_kv_cache_paged(num_blocks,
-                            device,
-                            block_size=16,
-                            dtype=torch.bfloat16,
-                            use_list=False):
+def generate_kv_cache_paged(
+    num_blocks, device, block_size=16, dtype=torch.bfloat16, use_list=False
+):
     if use_list:
-        return generate_kv_cache_paged_list_tensors(num_blocks, device,
-                                                    block_size, dtype)
+        return generate_kv_cache_paged_list_tensors(
+            num_blocks, device, block_size, dtype
+        )
     ret = []
     num_layers = 32
     num_heads = 8
@@ -85,10 +85,9 @@ def generate_kv_cache_paged(num_blocks,
     return tuple(ret)
 
 
-def generate_kv_cache_paged_list_tensors(num_blocks,
-                                         device,
-                                         block_size=16,
-                                         dtype=torch.bfloat16):
+def generate_kv_cache_paged_list_tensors(
+    num_blocks, device, block_size=16, dtype=torch.bfloat16
+):
     """
     Instead of Tuple[Tuple[Tensor, Tensor]], return List[Tensor]
     where KV are in the same tensor
@@ -106,11 +105,9 @@ def generate_kv_cache_paged_list_tensors(num_blocks,
     return ret
 
 
-def generate_mla_kv_cache_paged_list_tensors(num_blocks,
-                                             device,
-                                             block_size=64,
-                                             dtype=torch.bfloat16,
-                                             num_layers=32):
+def generate_mla_kv_cache_paged_list_tensors(
+    num_blocks, device, block_size=64, dtype=torch.bfloat16, num_layers=32
+):
     """
     return KV cache of MLA
     """
@@ -196,12 +193,9 @@ def check_mem_obj_equal(left, right, offset=0):
         assert (left_v[:, :, :] == right_v[:, :, :]).all()
 
 
-def check_paged_kv_cache_equal(left,
-                               right,
-                               num_tokens,
-                               slot_mapping,
-                               num_heads=8,
-                               head_size=128):
+def check_paged_kv_cache_equal(
+    left, right, num_tokens, slot_mapping, num_heads=8, head_size=128
+):
     """
     check whether two paged kv caches are the same at slot_mapping
     """
@@ -222,10 +216,8 @@ def check_paged_kv_cache_equal(left,
         assert right_k.shape[token_dim] >= num_tokens
         assert right_v.shape[token_dim] >= num_tokens
 
-        assert (
-            left_k[slot_mapping, :, :] == right_k[slot_mapping, :, :]).all()
-        assert (
-            left_v[slot_mapping, :, :] == right_v[slot_mapping, :, :]).all()
+        assert (left_k[slot_mapping, :, :] == right_k[slot_mapping, :, :]).all()
+        assert (left_v[slot_mapping, :, :] == right_v[slot_mapping, :, :]).all()
 
 
 def check_kv_cache_device(kvs, device):
