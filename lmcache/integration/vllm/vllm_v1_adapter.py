@@ -170,12 +170,21 @@ class RequestTracker:
         # vLLM 0.9.0 update: request.block_ids changed from list[int] to
         # list[list[int]]
         # Need to check the type of request.block_ids
+
         unfolded_block_ids = []
+
         if not isinstance(new_request.block_ids[0], list):
             unfolded_block_ids = new_request.block_ids.copy()
         else:
-            for ids in new_request.block_ids:
-                unfolded_block_ids.extend(ids)
+            # According to the vLLM code
+            # (https://github.com/vllm-project/vllm/blob/main/vllm/v1/core/
+            # sched/scheduler.py#L943),
+            # only one KVCacheGroup is supported in connector for now.
+
+            # TODO: Please support multiple KVCacheGroup in connector.
+            # NOTE: Also, `update` method in RequestTracker should be
+            # updated accordingly.
+            unfolded_block_ids = new_request.block_ids[0].copy()
 
         return RequestTracker(
             req_id=new_request.req_id,
@@ -193,15 +202,12 @@ class RequestTracker:
         scheduled again
         """
         self.token_ids.extend(cached_request.new_token_ids)
-        if len(cached_request.new_block_ids) > 0:
-            unfolded_block_ids = []
-            if not isinstance(cached_request.new_block_ids[0], list):
-                unfolded_block_ids = cached_request.new_block_ids.copy()
-            else:
-                for ids in cached_request.new_block_ids:
-                    unfolded_block_ids.extend(ids)
-            self.allocated_block_ids.extend(unfolded_block_ids)
-
+        new_block_ids: list[int]
+        if not isinstance(cached_request.new_block_ids[0], list):
+            new_block_ids = cached_request.new_block_ids
+        else:
+            new_block_ids = cached_request.new_block_ids[0]
+        self.allocated_block_ids.extend(new_block_ids)
 
 @dataclass
 class ReqMeta:
@@ -560,9 +566,10 @@ class LMCacheConnectorV1Impl:
                 store_mask[:skip_leading_tokens] = False
 
                 logger.info(
-                    "Storing KV cache for %d out of %d tokens for request %s",
+                    "Storing KV cache for %d out of %d tokens "
+                    "(skip_leading_tokens=%d) for request %s",
                     len(token_ids) - skip_leading_tokens, len(token_ids),
-                    request.req_id)
+                    skip_leading_tokens, request.req_id)
                 layerwise_storer = self.lmcache_engine.store_layer(
                     token_ids,
                     mask=store_mask,
@@ -625,9 +632,10 @@ class LMCacheConnectorV1Impl:
             store_mask[:skip_leading_tokens] = False
 
             logger.info(
-                "Storing KV cache for %d out of %d tokens for request %s",
+                "Storing KV cache for %d out of %d tokens "
+                "(skip_leading_tokens=%d) for request %s",
                 len(token_ids) - skip_leading_tokens, len(token_ids),
-                request.req_id)
+                skip_leading_tokens, request.req_id)
             self.lmcache_engine.store(token_ids,
                                       mask=store_mask,
                                       kvcaches=kvcaches,

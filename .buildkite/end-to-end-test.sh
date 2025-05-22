@@ -13,7 +13,7 @@ fi
 uv pip install -e .
 uv pip install matplotlib
 uv pip install pandas
-uv pip install --upgrade vllm
+uv pip install -U vllm --pre --extra-index-url https://wheels.vllm.ai/nightly
 
 # List installed packages for debugging
 echo "📦 Installed packages in venv:"
@@ -27,29 +27,55 @@ cd "$LM_CACHE_TEST_DIR"
 
 set +x
 
-port1=8000
+start_port=8000
 max_port=9000
-while [ $port1 -le $max_port ]; do
-    netstat -tuln | grep ":$port1 " > /dev/null 2>&1
-    if [ $? -ne 0 ]; then
-        echo "Port $port1 is available."
-        break
-    else
-        echo "Port $port1 is in use, trying next..."
-        port1=$((port1 + 1))
+
+find_free_port() {
+  local port=$1
+  while [ $port -le $max_port ]; do
+    if ! netstat -tuln 2>/dev/null | grep -q ":$port "; then
+      >&2 echo "Port $port is available."
+      printf "%s" "$port"
+      return 0
     fi
-done
-port2=$((port1 + 1))
-while [ $port2 -le $max_port ]; do
-    netstat -tuln | grep ":$port2 " > /dev/null 2>&1
-    if [ $? -ne 0 ]; then
-        echo "Port $port2 is available."
-        break
+
+    >&2 echo "Port $port is in use. Killing process(es)..."
+    local pids
+    pids=$(lsof -t -i tcp:$port)
+    if [ -n "$pids" ]; then
+      >&2 echo "→ Killing PID(s): $pids"
+      kill $pids
+      sleep 1
+      if ! netstat -tuln 2>/dev/null | grep -q ":$port "; then
+        >&2 echo "→ Port $port freed after killing processes."
+        printf "%s" "$port"
+        return 0
+      else
+        >&2 echo "→ Port $port still in use after kill. Continuing search..."
+      fi
     else
-        echo "Port $port2 is in use, trying next..."
-        port2=$((port2 + 1))
+      >&2 echo "→ No PIDs found listening on $port. Continuing search..."
     fi
-done
+
+    port=$((port + 1))
+  done
+  return 1
+}
+
+# Find port1
+port1=$(find_free_port $start_port) || {
+  echo "❌ Could not find any free port between $start_port and $max_port."
+  exit 1
+}
+
+# Find port2, starting just after port1
+port2=$(find_free_port $((port1 + 1))) || {
+  echo "❌ Could not find a second free port between $((port1+1)) and $max_port."
+  exit 1
+}
+
+echo
+echo "🎉 Selected ports: port1=$port1, port2=$port2"
 
 set -x
 

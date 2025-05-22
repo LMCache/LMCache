@@ -815,7 +815,10 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
     ) -> Optional[MemoryObj]:
         if fmt == MemoryFormat.BINARY_BUFFER:
             return self.buffer_allocator.allocate(shape, dtype, fmt)
-        elif fmt in [MemoryFormat.KV_2LTD, MemoryFormat.KV_T2D]:
+        elif fmt in [
+                MemoryFormat.KV_2LTD, MemoryFormat.KV_T2D,
+                MemoryFormat.KV_MLA_FMT
+        ]:
             with self.host_mem_lock:
                 return self.pin_allocator.allocate(shape, dtype, fmt, self)
         else:
@@ -833,7 +836,10 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
         fmt = memory_obj.meta.fmt
         if fmt == MemoryFormat.BINARY_BUFFER:
             self.buffer_allocator.free(memory_obj)
-        elif fmt in [MemoryFormat.KV_2LTD, MemoryFormat.KV_T2D]:
+        elif fmt in [
+                MemoryFormat.KV_2LTD, MemoryFormat.KV_T2D,
+                MemoryFormat.KV_MLA_FMT
+        ]:
             with self.host_mem_lock:
                 self.pin_allocator.free(memory_obj)
         else:
