@@ -173,18 +173,19 @@ class RequestTracker:
 
         unfolded_block_ids = []
 
-        if not isinstance(new_request.block_ids[0], list):
-            unfolded_block_ids = new_request.block_ids.copy()
-        else:
-            # According to the vLLM code
-            # (https://github.com/vllm-project/vllm/blob/main/vllm/v1/core/
-            # sched/scheduler.py#L943),
-            # only one KVCacheGroup is supported in connector for now.
+        if new_request.block_ids:
+            if not isinstance(new_request.block_ids[0], list):
+                unfolded_block_ids = new_request.block_ids.copy()
+            else:
+                # According to the vLLM code
+                # (https://github.com/vllm-project/vllm/blob/main/vllm/v1/core/
+                # sched/scheduler.py#L943),
+                # only one KVCacheGroup is supported in connector for now.
 
-            # TODO: Please support multiple KVCacheGroup in connector.
-            # NOTE: Also, `update` method in RequestTracker should be
-            # updated accordingly.
-            unfolded_block_ids = new_request.block_ids[0].copy()
+                # TODO: Please support multiple KVCacheGroup in connector.
+                # NOTE: Also, `update` method in RequestTracker should be
+                # updated accordingly.
+                unfolded_block_ids = new_request.block_ids[0].copy()
 
         return RequestTracker(
             req_id=new_request.req_id,
@@ -202,11 +203,12 @@ class RequestTracker:
         scheduled again
         """
         self.token_ids.extend(cached_request.new_token_ids)
-        new_block_ids: list[int]
-        if not isinstance(cached_request.new_block_ids[0], list):
-            new_block_ids = cached_request.new_block_ids
-        else:
-            new_block_ids = cached_request.new_block_ids[0]
+        new_block_ids: list[int] = []
+        if cached_request.new_block_ids:
+            if not isinstance(cached_request.new_block_ids[0], list):
+                new_block_ids = cached_request.new_block_ids
+            else:
+                new_block_ids = cached_request.new_block_ids[0]
         self.allocated_block_ids.extend(new_block_ids)
 
 
