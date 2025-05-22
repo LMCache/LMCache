@@ -19,7 +19,7 @@ steps:
     timeout_in_minutes: 25
     plugins:
       - cache#v1.5.2:
-          key: "venv-{{ checksum \"requirements/commonm.txt\" }}-{{ checksum \"requirements/test.txt\" }}"
+          key: "venv-{{ checksum \"requirements/common.txt\" }}-{{ checksum \"requirements/test.txt\" }}"
           path: ".venv"
           restore: "pipeline"
     command:
