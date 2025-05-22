@@ -242,7 +242,7 @@ class UsageContext:
 def InitializeUsageContext(config: LMCacheEngineConfig,
                            metadata: LMCacheEngineMetadata,
                            local_log: Optional[str] = None):
-    server_url = "http://34.236.19.149:8080/endpoint"
+    server_url = "http://stats.lmcache.ai:8080/endpoint"
     if os.getenv("LMCACHE_TRACK_USAGE") == "false":
         return None
     else:
