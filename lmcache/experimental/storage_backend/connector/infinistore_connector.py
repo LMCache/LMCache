@@ -119,7 +119,7 @@ class InfinistoreConnector(RemoteConnector):
         else:
             view = memoryview(memory_obj.byte_array)
         
-        view[0:metadata.length] = bytearray(buffer[METADATA_BYTES_LEN:METADATA_BYTES_LEN+metadata.length])
+        view[0:metadata.length] = buffer[METADATA_BYTES_LEN:METADATA_BYTES_LEN+metadata.length]
         self.recv_queue.put_nowait(buf_idx)
 
         return memory_obj
