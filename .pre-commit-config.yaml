@@ -3,12 +3,12 @@ repos:
   rev: 6.0.1
   hooks:
   - id: isort
-# - repo: https://github.com/astral-sh/ruff-pre-commit
-#   rev: v0.11.7
-#   hooks:
-#   - id: ruff
-#     args: [--output-format, github, --fix]
-#   - id: ruff-format
+- repo: https://github.com/astral-sh/ruff-pre-commit
+  rev: v0.11.7
+  hooks:
+  - id: ruff
+    args: [--output-format, github, --fix]
+  - id: ruff-format
 # - repo: https://github.com/codespell-project/codespell
 #   rev: v2.4.1
 #   hooks:
