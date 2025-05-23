@@ -609,8 +609,11 @@ class LMCacheConnectorV1Impl:
                 logger.info(
                     "Storing KV cache for %d out of %d tokens "
                     "(skip_leading_tokens=%d) for request %s",
-                    len(token_ids) - skip_leading_tokens, len(token_ids),
-                    skip_leading_tokens, request.req_id)
+                    len(token_ids) - skip_leading_tokens,
+                    len(token_ids),
+                    skip_leading_tokens,
+                    request.req_id,
+                )
                 layerwise_storer = self.lmcache_engine.store_layer(
                     token_ids,
                     mask=store_mask,
@@ -681,13 +684,18 @@ class LMCacheConnectorV1Impl:
             logger.info(
                 "Storing KV cache for %d out of %d tokens "
                 "(skip_leading_tokens=%d) for request %s",
-                len(token_ids) - skip_leading_tokens, len(token_ids),
-                skip_leading_tokens, request.req_id)
-            self.lmcache_engine.store(token_ids,
-                                      mask=store_mask,
-                                      kvcaches=kvcaches,
-                                      slot_mapping=slot_mapping,
-                                      offset=skip_leading_tokens)
+                len(token_ids) - skip_leading_tokens,
+                len(token_ids),
+                skip_leading_tokens,
+                request.req_id,
+            )
+            self.lmcache_engine.store(
+                token_ids,
+                mask=store_mask,
+                kvcaches=kvcaches,
+                slot_mapping=slot_mapping,
+                offset=skip_leading_tokens,
+            )
 
     ###################
     # Scheduler side APIs

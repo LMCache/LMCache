@@ -46,12 +46,14 @@ class LocalCPUBackend(StorageBackendInterface):
     are still callable by the storage manager.
     """
 
-    def __init__(self,
-                 config: LMCacheEngineConfig,
-                 memory_allocator: MemoryAllocatorInterface,
-                 lookup_server: Optional[LookupServerInterface] = None,
-                 lmcache_worker: Optional["LMCacheWorker"] = None,
-                 layerwise: bool = False):
+    def __init__(
+        self,
+        config: LMCacheEngineConfig,
+        memory_allocator: MemoryAllocatorInterface,
+        lookup_server: Optional[LookupServerInterface] = None,
+        lmcache_worker: Optional["LMCacheWorker"] = None,
+        layerwise: bool = False,
+    ):
         self.hot_cache: OrderedDict[CacheEngineKey, MemoryObj] = OrderedDict()
         self.use_hot = config.local_cpu
         self.lookup_server = lookup_server
@@ -184,11 +186,13 @@ class LocalCPUBackend(StorageBackendInterface):
             # other backends might still (temporarily) hold the memory object.
             return True
 
-    def allocate(self,
-                 shape: torch.Size,
-                 dtype: torch.dtype,
-                 fmt: Optional[MemoryFormat] = None,
-                 eviction: bool = True) -> Optional[MemoryObj]:
+    def allocate(
+        self,
+        shape: torch.Size,
+        dtype: torch.dtype,
+        fmt: Optional[MemoryFormat] = None,
+        eviction: bool = True,
+    ) -> Optional[MemoryObj]:
         """
         allocate a memory object of shape and dtype
         evict if necessary. Storage manager should always call

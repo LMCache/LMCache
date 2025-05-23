@@ -53,9 +53,9 @@ def CreateStorageBackends(
     # TODO(Jiayi): The hierarchy is fixed for now
     # NOTE(Jiayi): The local_cpu backend is always created because
     # other backends might need it as a buffer.
-    local_cpu_backend = LocalCPUBackend(config, memory_allocator,
-                                        lookup_server, lmcache_worker,
-                                        layerwise)
+    local_cpu_backend = LocalCPUBackend(
+        config, memory_allocator, lookup_server, lmcache_worker, layerwise
+    )
     backend_name = str(local_cpu_backend)
     storage_backends[backend_name] = local_cpu_backend
 

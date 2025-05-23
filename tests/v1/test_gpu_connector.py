@@ -266,8 +266,9 @@ def test_layerwise_vllm_paged_connector_with_gpu(use_gpu):
 
     assert connector.gpu_buffer_allocator.memcheck()
 
-    check_paged_kv_cache_equal(gpu_kv_src, gpu_kv_dst, num_tokens,
-                               slot_mapping, num_heads, head_size)
+    check_paged_kv_cache_equal(
+        gpu_kv_src, gpu_kv_dst, num_tokens, slot_mapping, num_heads, head_size
+    )
 
 
 def test_vllm_paged_connector_v2_to_gpu_bench(benchmark):
@@ -291,10 +292,8 @@ def test_vllm_paged_connector_v2_to_gpu_bench(benchmark):
 
     allocator = GPUMemoryAllocator(1024 * 1024 * 1024)
 
-    gpu_kv_src = generate_kv_cache_paged_list_tensors(num_blocks, device,
-                                                      block_size)
-    gpu_kv_dst = generate_kv_cache_paged_list_tensors(num_blocks, device,
-                                                      block_size)
+    gpu_kv_src = generate_kv_cache_paged_list_tensors(num_blocks, device, block_size)
+    gpu_kv_dst = generate_kv_cache_paged_list_tensors(num_blocks, device, block_size)
 
     slot_mapping = random.sample(range(0, num_blocks * block_size), chunk_size)
     slot_mapping = torch.tensor(slot_mapping, device=device, dtype=torch.int64)
@@ -302,22 +301,26 @@ def test_vllm_paged_connector_v2_to_gpu_bench(benchmark):
     connector = VLLMPagedMemGPUConnectorV2(hidden_dim, num_layers)
     shape = connector.get_shape(chunk_size)
     memory_obj = allocator.allocate(shape, gpu_kv_src[0][0].dtype)
-    connector.from_gpu(memory_obj,
-                       0,
-                       chunk_size,
-                       kvcaches=gpu_kv_src,
-                       slot_mapping=slot_mapping,
-                       offset=0)
+    connector.from_gpu(
+        memory_obj,
+        0,
+        chunk_size,
+        kvcaches=gpu_kv_src,
+        slot_mapping=slot_mapping,
+        offset=0,
+    )
     assert memory_obj.metadata.fmt == MemoryFormat.KV_2LTD
-    benchmark.pedantic(connector.to_gpu,
-                       args=(memory_obj, 0, chunk_size),
-                       kwargs={
-                           "kvcaches": gpu_kv_dst,
-                           "slot_mapping": slot_mapping,
-                           "offset": 0,
-                       },
-                       rounds=100,
-                       iterations=1000,
-                       warmup_rounds=10)
+    benchmark.pedantic(
+        connector.to_gpu,
+        args=(memory_obj, 0, chunk_size),
+        kwargs={
+            "kvcaches": gpu_kv_dst,
+            "slot_mapping": slot_mapping,
+            "offset": 0,
+        },
+        rounds=100,
+        iterations=1000,
+        warmup_rounds=10,
+    )
     allocator.free(memory_obj)
     assert allocator.memcheck()
