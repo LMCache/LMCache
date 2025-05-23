@@ -195,7 +195,10 @@ class RequestTracker:
         self.token_ids.extend(cached_request.new_token_ids)
         new_block_ids_list = cached_request.new_block_ids
         for new_block_ids in new_block_ids_list:
-            if new_block_ids:
+            # Ignore if None
+            if isinstance(new_block_ids, int):
+                self.allocated_block_ids.append(new_block_ids)
+            elif isinstance(new_block_ids, list):
                 self.allocated_block_ids.extend(new_block_ids)
 
 
