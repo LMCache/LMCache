@@ -5,13 +5,13 @@ from typing import List, Tuple
 import torch
 import zmq
 
-from lmcache.experimental.memory_management import (AdHocMemoryAllocator,
-                                                    MemoryFormat, MemoryObj,
-                                                    TensorMemoryObj)
-from lmcache.experimental.storage_backend.connector.nixl_connector_v2 import (
-    NixlConfig, NixlPipe, NixlRole)
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
+from lmcache.v1.memory_management import (AdHocMemoryAllocator, MemoryFormat,
+                                          MemoryObj, TensorMemoryObj)
+from lmcache.v1.storage_backend.connector.nixl_connector_v2 import (NixlConfig,
+                                                                    NixlPipe,
+                                                                    NixlRole)
 
 logger = init_logger(__name__)
 

@@ -32,9 +32,9 @@ requires-python = ">=3.10,<3.13"
 dynamic = ["dependencies", "version"]
 
 [project.scripts]
-lmcache_server="lmcache.server.__main__:main"
-lmcache_experimental_server="lmcache.experimental.server.__main__:main"
-lmcache_controller="lmcache.experimental.api_server.__main__:main"
+lmcache_v0_server="lmcache.server.__main__:main"
+lmcache_server="lmcache.v1.server.__main__:main"
+lmcache_controller="lmcache.v1.api_server.__main__:main"
 
 [project.urls]
 homepage = "https://docs.lmcache.ai"

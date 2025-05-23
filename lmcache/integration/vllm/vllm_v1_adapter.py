@@ -26,10 +26,9 @@ from vllm.utils import cdiv, make_zmq_socket
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 
-from lmcache.experimental.cache_engine import (LayerwiseLMCacheEngine,
-                                               LMCacheEngine)
 from lmcache.integration.vllm.vllm_adapter import init_lmcache_engine
 from lmcache.logging import init_logger
+from lmcache.v1.cache_engine import LayerwiseLMCacheEngine, LMCacheEngine
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata

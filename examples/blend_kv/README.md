@@ -22,17 +22,17 @@ Finally, the prompt will be sent to the serving engine and the KV blending modul
 ## How to run
 ### Offline
 ```
-LMCACHE_CONFIG_FILE=example_blending.yaml python3 blend_kv.py
-LMCACHE_CONFIG_FILE=example_blending.yaml python3 batched_kv.py
-LMCACHE_CONFIG_FILE=example_blending.yaml VLLM_WORKER_MULTIPROC_METHOD=spawn python3 tp_kv.py
-LMCACHE_CONFIG_FILE=example_blending.yaml VLLM_WORKER_MULTIPROC_METHOD=spawn python3 batched_tp_kv.py
+LMCACHE_CONFIG_FILE=example_blending.yaml LMCACHE_USE_EXPERIMENTAL=False python3 blend_kv.py
+LMCACHE_CONFIG_FILE=example_blending.yaml LMCACHE_USE_EXPERIMENTAL=False python3 batched_kv.py
+LMCACHE_CONFIG_FILE=example_blending.yaml LMCACHE_USE_EXPERIMENTAL=False VLLM_WORKER_MULTIPROC_METHOD=spawn python3 tp_kv.py
+LMCACHE_CONFIG_FILE=example_blending.yaml VLLM_WORKER_MULTIPROC_METHOD=spawn LMCACHE_USE_EXPERIMENTAL=False python3 batched_tp_kv.py
 ```
 ### Online
 ```
-LMCACHE_CONFIG_FILE=example_blending.yaml CUDA_VISIBLE_DEVICES=0 python3 -m lmcache_vllm.vllm.entrypoints.openai.api_server --model mistralai/Mistral-7B-Instruct-v0.2 --gpu-memory-utilization 0.8 --port 8000
+LMCACHE_CONFIG_FILE=example_blending.yaml LMCACHE_USE_EXPERIMENTAL=False CUDA_VISIBLE_DEVICES=0 python3 -m lmcache_vllm.vllm.entrypoints.openai.api_server --model mistralai/Mistral-7B-Instruct-v0.2 --gpu-memory-utilization 0.8 --port 8000
 python3 online_kv.py 8000
 ```
 ```
-LMCACHE_CONFIG_FILE=example_blending.yaml CUDA_VISIBLE_DEVICES=0,1 VLLM_WORKER_MULTIPROC_METHOD=spawn python3 -m lmcache_vllm.vllm.entrypoints.openai.api_server --model mistralai/Mistral-7B-Instruct-v0.2 --gpu-memory-utilization 0.8 --port 8000 --tensor-parallel-size 2
+LMCACHE_CONFIG_FILE=example_blending.yaml LMCACHE_USE_EXPERIMENTAL=False CUDA_VISIBLE_DEVICES=0,1 VLLM_WORKER_MULTIPROC_METHOD=spawn python3 -m lmcache_vllm.vllm.entrypoints.openai.api_server --model mistralai/Mistral-7B-Instruct-v0.2 --gpu-memory-utilization 0.8 --port 8000 --tensor-parallel-size 2
 python3 online_kv.py 8000
 ```
