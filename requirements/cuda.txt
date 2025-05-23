@@ -1,5 +1,5 @@
-# Project dependencies
--r requirements.txt
+# Common project dependencies
+-r common.txt
 
 # Dependencies for NVIDIA GPUs
 ray >= 2.9

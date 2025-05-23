@@ -1,6 +1,6 @@
 ## Install Prerequisitesgiot
 ```
-pip install -r requirements-docs.txt
+pip install -r requirements/docs.txt
 ```
 ## To build docs from source
 
