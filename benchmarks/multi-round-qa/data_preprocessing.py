@@ -1,9 +1,11 @@
+# Standard
 import argparse
 import json
 import os
 
-import numpy as np
+# Third Party
 from transformers import AutoTokenizer
+import numpy as np
 
 parser = argparse.ArgumentParser(description="Process data percentage.")
 parser.add_argument(

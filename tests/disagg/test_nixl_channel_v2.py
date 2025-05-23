@@ -1,8 +1,10 @@
+# Standard
+from typing import List, Optional, Tuple
 import argparse
 import threading
 import time
-from typing import List, Optional, Tuple
 
+# Third Party
 import pytest
 import torch
 

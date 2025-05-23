@@ -12,10 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Standard
 import socket
 import threading
 import time
 
+# Third Party
 import torch
 
 from lmcache.logging import init_logger
@@ -142,6 +144,7 @@ class LMCacheServer:
 
 
 def main():
+    # Standard
     import sys
 
     if len(sys.argv) not in [3, 4]:

@@ -1,14 +1,16 @@
+# Standard
+from dataclasses import dataclass
+from typing import Optional
 import argparse
 import asyncio
 import json
 import logging
 import time
-from dataclasses import dataclass
-from typing import Optional
 
+# Third Party
+from utils import AsyncLoopWrapper, init_logger
 import openai
 import pandas as pd
-from utils import AsyncLoopWrapper, init_logger
 
 logger = init_logger(__name__, logging.INFO)
 

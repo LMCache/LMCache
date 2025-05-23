@@ -12,12 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Standard
+from functools import reduce
+from typing import List, Optional, Union, no_type_check
 import asyncio
 import ctypes
 import operator
-from functools import reduce
-from typing import List, Optional, Union, no_type_check
 
+# Third Party
 import infinistore
 import torch
 

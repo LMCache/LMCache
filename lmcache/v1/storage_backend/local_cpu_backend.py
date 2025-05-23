@@ -12,11 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import threading
+# Standard
 from collections import OrderedDict
 from concurrent.futures import Future
 from typing import TYPE_CHECKING, List, Optional
+import threading
 
+# Third Party
 import torch
 
 from lmcache.logging import init_logger
@@ -31,7 +33,12 @@ from lmcache.v1.memory_management import (MemoryAllocatorInterface,
 from lmcache.v1.storage_backend.abstract_backend import StorageBackendInterface
 
 if TYPE_CHECKING:
+<<<<<<< HEAD:lmcache/v1/storage_backend/local_cpu_backend.py
     from lmcache.v1.cache_controller.worker import LMCacheWorker
+=======
+    # First Party
+    from lmcache.experimental.cache_controller.worker import LMCacheWorker
+>>>>>>> 547e67f (Add Python import format handling with isort):lmcache/experimental/storage_backend/local_cpu_backend.py
 
 logger = init_logger(__name__)
 

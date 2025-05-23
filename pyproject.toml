@@ -69,7 +69,7 @@ select = [
     "B",
     # flake8-simplify
     #"SIM",
-    # isort
+    # Ruff does not support isort's import_headings feature, yet.
     # "I",
     # flake8-logging-format
     #"G",
@@ -84,6 +84,16 @@ ignore = [
     # f-string format
     "UP032",
 ]
+
+[tool.ruff.lint.isort]
+# same as .isort.cfg
+from-first = true
+# not supported yet
+# import-heading-future=Future
+# import-heading-stdlib=Standard
+# import-heading-thirdparty=Third Party
+# import-heading-firstparty=First Party
+# import-heading-localfolder=Local
 
 [tool.mypy]
 python_version = "3.10"

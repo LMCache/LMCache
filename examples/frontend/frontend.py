@@ -1,6 +1,5 @@
 import chat_session
 import streamlit as st
-from transformers import AutoTokenizer
 
 # Change the following variables as needed
 

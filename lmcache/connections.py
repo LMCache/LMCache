@@ -17,10 +17,12 @@
 # License: [Apache License 2.0]
 # Modifications: header name
 
+# Standard
 from pathlib import Path
 from typing import Mapping, MutableMapping, Optional
 from urllib.parse import urlparse
 
+# Third Party
 import aiohttp
 import requests
 

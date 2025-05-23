@@ -1,9 +1,11 @@
+# Standard
+from io import StringIO
 import os
 import sys
 import threading
 import time
-from io import StringIO
 
+# Third Party
 from openai import OpenAI
 
 if len(sys.argv) != 2:

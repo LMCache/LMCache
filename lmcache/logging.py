@@ -12,9 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Standard
+from logging import Logger
 import logging
 import os
-from logging import Logger
 
 
 def build_format(color):

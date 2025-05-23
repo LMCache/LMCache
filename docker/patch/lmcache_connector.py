@@ -7,15 +7,18 @@ The LMCacheConnector can (1) transfer KV caches between prefill vLLM worker
 (2) offload and share KV caches.
 """
 
+# Standard
 from typing import TYPE_CHECKING, List, Tuple, Union
 
-import torch
+# Third Party
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
 from vllm.logger import init_logger
 from vllm.sequence import IntermediateTensors
+import torch
 
 if TYPE_CHECKING:
+    # Third Party
     from vllm.worker.model_runner import ModelInputForGPUWithSamplingMetadata
 
 logger = init_logger(__name__)

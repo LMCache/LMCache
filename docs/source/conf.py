@@ -6,10 +6,12 @@
 # -- Project information -----------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#project-information
 
+# Standard
+from dataclasses import asdict
 import os
 import sys
-from dataclasses import asdict
 
+# Third Party
 from sphinx.ext import autodoc
 from sphinxawesome_theme import ThemeOptions
 

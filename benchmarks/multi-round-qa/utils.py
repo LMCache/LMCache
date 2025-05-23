@@ -1,7 +1,8 @@
+# Standard
+from logging import Logger
 import asyncio
 import logging
 import threading
-from logging import Logger
 
 
 def build_format(color):

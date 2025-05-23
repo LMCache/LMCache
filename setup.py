@@ -1,7 +1,9 @@
+# Standard
+from pathlib import Path
 import os
 import sys
-from pathlib import Path
 
+# Third Party
 from setuptools import find_packages, setup
 
 ROOT_DIR = Path(__file__).parent
@@ -37,6 +39,7 @@ BUILDING_SDIST = "sdist" in sys.argv or os.environ.get("NO_CUDA_EXT", "0") == "1
 
 if not BUILDING_SDIST:
     print("Building CUDA extensions")
+    # Third Party
     from torch.utils import cpp_extension
 
     ext_modules = [

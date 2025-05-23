@@ -1,5 +1,7 @@
+# Standard
 import time
 
+# Third Party
 from openai import OpenAI
 
 

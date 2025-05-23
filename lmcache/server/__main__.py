@@ -12,10 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Standard
 import socket
 import threading
 import time
 
+# First Party
 from lmcache.protocol import ClientMetaMessage, Constants, ServerMetaMessage
 from lmcache.server.server_storage_backend import CreateStorageBackend
 
@@ -124,6 +126,7 @@ class LMCacheServer:
 
 
 def main():
+    # Standard
     import sys
 
     if len(sys.argv) not in [3, 4]:

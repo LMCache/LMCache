@@ -1,12 +1,12 @@
+# Standard
+from dataclasses import dataclass
 import argparse
 import asyncio
 import logging
 import random
 import time
-from dataclasses import dataclass
 
-import openai
-import pandas as pd
+# Third Party
 from transformers import AutoTokenizer
 from utils import (
     AsyncLoopWrapper,
@@ -17,6 +17,8 @@ from utils import (
     init_logger,
     load_dataset,
 )
+import openai
+import pandas as pd
 
 logger = init_logger(__name__, logging.INFO)
 
