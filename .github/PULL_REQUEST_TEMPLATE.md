@@ -54,11 +54,11 @@ For example:
 
 To create a new release and publish `lmcache` Python package to PyPi:
 `git remote add upstream git@github.com:LMCache/LMCache.git`
-`gh release create vx.x.x --repo LMCache/LMCache --title "vx.x.x" --notes "<Add decsription>"`
+`gh release create vx.x.x --repo LMCache/LMCache --title "vx.x.x" --notes "<Add description>"`
 
 For example:
 `git remote add upstream git@github.com:LMCache/LMCache.git`
-`gh release create v0.3.0 --repo LMCache/LMCache --title "v0.3.0" --notes "LMCache v0.3.0 is a feature realease. Users are encouraged to upgrade for the best experience."`
+`gh release create v0.3.0 --repo LMCache/LMCache --title "v0.3.0" --notes "LMCache v0.3.0 is a feature release. Users are encouraged to upgrade for the best experience."`
 
 > [!TIP]
 > The creation of a release and subsequent tag generation can be done alternatively from the LMCache [releases](https://github.com/LMCache/LMCache/releases) page.
