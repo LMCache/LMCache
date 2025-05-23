@@ -4,39 +4,39 @@ import os
 import time
 from dataclasses import asdict
 
-from lmcache.experimental.cache_engine import LMCacheEngineBuilder
-from lmcache.integration.vllm.utils import ENGINE_NAME
-
 from vllm import LLM, SamplingParams
 from vllm.config import KVTransferConfig
 from vllm.engine.arg_utils import EngineArgs
 
+from lmcache.experimental.cache_engine import LMCacheEngineBuilder
+from lmcache.integration.vllm.utils import ENGINE_NAME
+
 
 def setup_environment_variables(vllm_version: str, use_disk: bool = False):
     # LMCache-related environment variables
-    
+
     # LMCache is set to use 256 tokens per chunk
     os.environ["LMCACHE_CHUNK_SIZE"] = "256"
-    
+
     if use_disk:
         # Disable local CPU backend in LMCache
         os.environ["LMCACHE_LOCAL_CPU"] = "False"
-        
+
         # Set the maximum size of the local CPU buffer size to 5GB
         os.environ["LMCACHE_MAX_LOCAL_CPU_SIZE"] = 5
-        
+
         # Enable local disk backend in LMCache
         os.environ["LMCACHE_LOCAL_DISK"] = "file://local_disk/"
-        
+
         # Set the maximum size of the local disk size to 10GB
         os.environ["LMCACHE_MAX_LOCAL_DISK_SIZE"] = 10
     else:
         # Enable local CPU backend in LMCache
         os.environ["LMCACHE_LOCAL_CPU"] = "True"
-        
+
         # Set the maximum size of the local CPU size to 5GB
         os.environ["LMCACHE_MAX_LOCAL_CPU_SIZE"] = 5
-        
+
     if vllm_version == "v0":
         os.environ["VLLM_USE_V1"] = "0"
 
@@ -103,10 +103,10 @@ def parse_args():
                         default="v1",
                         help="Specify vLLM version (default: v1)")
     parser.add_argument(
-        "-d", "--use-disk",
+        "-d",
+        "--use-disk",
         action="store_true",
-        help="Specify whether to use disk as backend (default: False)"
-    )
+        help="Specify whether to use disk as backend (default: False)")
     return parser.parse_args()
 
 
