@@ -75,7 +75,6 @@ class RedisConnector(RemoteConnector):
 
         # TODO(Jiayi): Find a way to do `get` inplace
         kv_bytes = self.connection.get(key_str + "kv_bytes")
-
         assert not inspect.isawaitable(kv_bytes)
 
         if kv_bytes is None:
@@ -88,7 +87,12 @@ class RedisConnector(RemoteConnector):
             self.connection.delete(key_str + "metadata")
             return None
 
-        view = memoryview(memory_obj.byte_array)
+        if isinstance(memory_obj.byte_array, memoryview):
+            view = memory_obj.byte_array
+            if view.format == "<B":
+                view = view.cast("B")
+        else:
+            view = memoryview(memory_obj.byte_array)
         view[:metadata.length] = kv_bytes
 
         return memory_obj
