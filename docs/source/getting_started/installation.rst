@@ -28,10 +28,24 @@ These wheels are continually built from the latest LMCache source code (not offi
 
 .. code-block:: bash
 
-    pip install --index-url https://test.pypi.org/simple --extra-index-url https://pypi.org/simple lmcache
+    pip install --index-url https://pypi.org/simple --extra-index-url https://test.pypi.org/simple lmcache==0.2.2.dev57
+
+See the latest pre-release of LMCache: `latest LMCache pre-releases <https://test.pypi.org/project/lmcache/#history>`__ and replace `0.2.2.dev57` with the latest pre-release version.
+
+This will install all dependencies from the real PyPI and only LMCache itself from TestPyPI.
+
+Confirm that you have the latest pre-release:
+
+.. code-block:: bash
+
+    python
+    >>> import lmcache
+    >>> from importlib.metadata import version
+    >>> print(version("lmcache"))
+    0.2.2.dev57 # should be the latest pre-release version you installed
 
 Install Latest LMCache from Source
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 To install from source, clone the repository and install in editable mode:
 

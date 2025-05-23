@@ -74,8 +74,8 @@ def create_app(controller_url: str) -> FastAPI:
         # a list of (instance_id, location, token_count)
         layout_info: Dict[str, Tuple[str, int]]
 
-    @app.post("/lookup")
-    async def lookup(req: LookupRequest, response_model=LookupResponse):
+    @app.post("/lookup", response_model=LookupResponse)
+    async def lookup(req: LookupRequest):
         try:
             msg = LookupMsg(tokens=req.tokens, )
             ret_msg = await lmcache_controller_manager.\

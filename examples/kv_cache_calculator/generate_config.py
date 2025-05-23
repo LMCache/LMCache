@@ -30,6 +30,14 @@ def main():
             "num_key_value_heads": getattr(config, 'num_key_value_heads', None)
         }
 
+        if args.model == "deepseek-ai/DeepSeek-V3":
+            config_data["kv_lora_rank"] = getattr(config, 'kv_lora_rank', None)
+
+        if (args.model == "Qwen/Qwen3-4B" or args.model == "Qwen/Qwen3-8B"
+                or args.model == "Qwen/Qwen3-14B"
+                or args.model == "Qwen/Qwen3-32B"):
+            config_data["head_dim"] = getattr(config, 'head_dim', None)
+
         # Convert to JSON and print
         string = json.dumps(config_data, indent=4)
 

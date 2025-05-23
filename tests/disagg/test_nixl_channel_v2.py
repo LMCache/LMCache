@@ -34,7 +34,8 @@ def generate_test_data(
                            worker_id=0,
                            chunk_hash=f"test_{i}"))
         obj = allocator.allocate(shape, dtype, fmt=MemoryFormat.KV_2LTD)
-        obj.tensor.fill_(i + 1)  # Fill with some test data, e.g., the index
+        obj.tensor.fill_(
+            (i + 1) / num_objs)  # Fill with some test data, e.g., the index
         objs.append(obj)
     return keys, objs
 
@@ -253,8 +254,10 @@ def receive_and_verify_data(observer: TestObserver,
                         if not torch.allclose(
                                 tensor, torch.full_like(
                                     tensor, expected_value)):
-                            logger.error(f"Data mismatch for key {key}. "
-                                         f"Expected value: {expected_value}")
+                            logger.error(
+                                f"Data mismatch for key {key}. "
+                                f"Received value: {tensor.flatten()[0]}. "
+                                f"Expected value: {expected_value}")
                             success = False
                 except (IndexError, ValueError) as e:
                     logger.error(f"Error parsing chunk_hash {chunk_hash}: {e}")

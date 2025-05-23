@@ -1,7 +1,7 @@
 steps:
   - label: ":pip: Install dependencies"
     key: "pip"
-    command: pip install -r requirements.txt
+    command: pip install -r requirements/common.txt
     plugins:
       - docker#v5.9.0:
           image: "python:3.10-slim"
@@ -9,7 +9,7 @@ steps:
   - label: ":pip: Install test dependencies"
     key: "pip-test"
     depends_on: ["pip"]
-    command: pip install -r requirements-test.txt
+    command: pip install -r requirements/test.txt
     plugins:
       - docker#v5.9.0:
           image: "python:3.10-slim"

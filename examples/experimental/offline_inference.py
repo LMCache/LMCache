@@ -72,12 +72,10 @@ def append_outputs(output_file_name, outputs, context_length, time_taken):
         f.write(json.dumps(json_dict) + '\n')
 
 
-kv_transfer_config = '{\
-    "kv_connector":"LMCacheConnector",\
-    "kv_role":"kv_both"}'
-
-kv_transfer_config = KVTransferConfig.from_cli(kv_transfer_config)
-
+kv_transfer_config = KVTransferConfig(
+    kv_connector="LMCacheConnectorV1",
+    kv_role="kv_both",
+)
 context_length = get_context_length(tokenizer, context_messages)
 # Create a sampling params object.
 sampling_params = SamplingParams(temperature=0.0, top_p=0.95, max_tokens=128)

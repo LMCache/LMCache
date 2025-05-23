@@ -1,5 +1,6 @@
 include LICENSE
 include README.md
-include requirements.txt
+include requirements/common.txt
+include requirements/cuda.txt
 
 recursive-include csrc *

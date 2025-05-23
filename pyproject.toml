@@ -1,5 +1,5 @@
 [build-system]
-# Should be mirrored in docker/requirements-build.txt
+# Should be mirrored in requirements/build.txt
 requires = [
     "ninja",
     "packaging>=24.2",
@@ -47,7 +47,7 @@ version_file = "lmcache/_version.py"
 local_scheme = "no-local-version"
 
 [tool.setuptools.dynamic]
-dependencies = { file = ["requirements.txt"] }
+dependencies = { file = ["requirements/common.txt"] }
 
 [tool.setuptools.packages.find]
 where = [""]

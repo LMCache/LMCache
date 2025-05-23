@@ -80,8 +80,10 @@ if __name__ == '__main__':
                                      max_tokens=128)
     prompts = gen_prompts(tokenizer, context_messages, user_inputs_batch)
 
-    kv_transfer_config = KVTransferConfig.from_cli(
-        '{"kv_connector":"LMCacheConnector","kv_role":"kv_both"}')
+    kv_transfer_config = KVTransferConfig(
+        kv_connector="LMCacheConnectorV1",
+        kv_role="kv_both",
+    )
     # Create an LLM.
     llm = LLM(model=model_name,
               gpu_memory_utilization=0.8,
