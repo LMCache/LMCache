@@ -17,11 +17,10 @@ import time
 from threading import Lock
 from typing import Dict, List, Optional
 
-from lmcache.v1.memory_management import MemoryObj
-from lmcache.v1.storage_backend.connector.base_connector import \
-    RemoteConnector
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
+from lmcache.v1.memory_management import MemoryObj
+from lmcache.v1.storage_backend.connector.base_connector import RemoteConnector
 
 logger = init_logger(__name__)
 

@@ -19,17 +19,14 @@ from typing import TYPE_CHECKING, Optional
 import torch
 
 from lmcache.config import LMCacheEngineMetadata
+from lmcache.logging import init_logger
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.lookup_server import LookupServerInterface
 from lmcache.v1.memory_management import MemoryAllocatorInterface
-from lmcache.v1.storage_backend.abstract_backend import \
-    StorageBackendInterface
-from lmcache.v1.storage_backend.local_cpu_backend import \
-    LocalCPUBackend
-from lmcache.v1.storage_backend.local_disk_backend import \
-    LocalDiskBackend
+from lmcache.v1.storage_backend.abstract_backend import StorageBackendInterface
+from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
+from lmcache.v1.storage_backend.local_disk_backend import LocalDiskBackend
 from lmcache.v1.storage_backend.remote_backend import RemoteBackend
-from lmcache.logging import init_logger
 
 if TYPE_CHECKING:
     from lmcache.v1.cache_controller.worker import LMCacheWorker

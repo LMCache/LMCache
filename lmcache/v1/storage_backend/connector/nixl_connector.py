@@ -24,13 +24,12 @@ import torch
 import zmq
 from nixl._api import nixl_agent
 
-from lmcache.v1.memory_management import (MemoryObj,
-                                                    MemoryObjMetadata,
-                                                    TensorMemoryObj)
-from lmcache.v1.storage_backend.connector.nixl_utils import (
-    NixlConfig, NixlRole)
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
+from lmcache.v1.memory_management import (MemoryObj, MemoryObjMetadata,
+                                          TensorMemoryObj)
+from lmcache.v1.storage_backend.connector.nixl_utils import (NixlConfig,
+                                                             NixlRole)
 
 logger = init_logger(__name__)
 

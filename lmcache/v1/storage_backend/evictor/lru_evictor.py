@@ -15,10 +15,10 @@
 from collections import OrderedDict
 from typing import List, Tuple, Union
 
-from lmcache.v1.storage_backend.evictor.base_evictor import (
-    BaseEvictor, PutStatus)
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
+from lmcache.v1.storage_backend.evictor.base_evictor import (BaseEvictor,
+                                                             PutStatus)
 
 logger = init_logger(__name__)
 
