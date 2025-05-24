@@ -23,12 +23,13 @@ from lmcache.v1.cache_controller.controllers import (KVController,
                                                      RegistrationController)
 from lmcache.v1.cache_controller.executor import LMCacheClusterExecutor
 from lmcache.v1.cache_controller.message import CheckFinishMsg  # noqa: E501
+from lmcache.v1.cache_controller.rpc_utils import (  # noqa: E501
+    get_zmq_context, get_zmq_socket)
+
 from lmcache.v1.cache_controller.message import (  # isort: skip
     ClearMsg, CompressMsg, DeRegisterMsg, HealthMsg, KVAdmitMsg, KVEvictMsg,
     LookupMsg, MoveMsg, Msg, MsgBase, OrchMsg, OrchRetMsg, PinMsg,
     QueryInstMsg, RegisterMsg, WorkerMsg)
-from lmcache.v1.cache_controller.rpc_utils import (  # noqa: E501
-    get_zmq_context, get_zmq_socket)
 
 logger = init_logger(__name__)
 
