@@ -19,11 +19,15 @@ import msgspec
 import zmq
 import zmq.asyncio
 
-from lmcache.v1.cache_controller.message import (  # noqa: E501
-    CheckFinishMsg, CheckFinishRetMsg, ClearMsg, ClearRetMsg, ClearWorkerMsg,
-    CompressMsg, CompressRetMsg, ErrorMsg, HealthMsg, HealthRetMsg, MoveMsg,
-    MoveRetMsg, Msg, MsgBase, PinMsg, PinRetMsg)
 from lmcache.logging import init_logger
+from lmcache.v1.cache_controller.message import (CheckFinishMsg,  # noqa: E501
+                                                 CheckFinishRetMsg, ClearMsg,
+                                                 ClearRetMsg, ClearWorkerMsg,
+                                                 CompressMsg, CompressRetMsg,
+                                                 ErrorMsg, HealthMsg,
+                                                 HealthRetMsg, MoveMsg,
+                                                 MoveRetMsg, Msg, MsgBase,
+                                                 PinMsg, PinRetMsg)
 
 logger = init_logger(__name__)
 

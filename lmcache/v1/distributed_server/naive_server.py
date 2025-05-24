@@ -20,16 +20,15 @@ from typing import Optional
 
 import torch
 
+from lmcache.logging import init_logger
+from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.distributed_server.abstract_server import \
     DistributedServerInterface  # noqa: E501
 from lmcache.v1.lookup_server import LookupServerInterface
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
-from lmcache.v1.protocol import (ClientMetaMessage, Constants,
-                                           ServerMetaMessage)
+from lmcache.v1.protocol import ClientMetaMessage, Constants, ServerMetaMessage
 from lmcache.v1.storage_backend.storage_manager import StorageManager
-from lmcache.logging import init_logger
-from lmcache.utils import CacheEngineKey
 
 logger = init_logger(__name__)
 

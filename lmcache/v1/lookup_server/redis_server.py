@@ -17,11 +17,11 @@ from typing import Optional, Sequence, Tuple
 
 import redis
 
+from lmcache.logging import init_logger
+from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.lookup_server.abstract_server import \
     LookupServerInterface  # noqa: E501
-from lmcache.logging import init_logger
-from lmcache.utils import CacheEngineKey
 
 logger = init_logger(__name__)
 

@@ -18,10 +18,10 @@ from typing import List, Optional, Tuple
 import torch
 
 import lmcache.c_ops as lmc_ops
-from lmcache.v1.memory_management import (  # noqa: E501
-    GPUMemoryAllocator, MemoryFormat, MemoryObj)
 from lmcache.logging import init_logger
 from lmcache.utils import _lmcache_nvtx_annotate
+from lmcache.v1.memory_management import (GPUMemoryAllocator,  # noqa: E501
+                                          MemoryFormat, MemoryObj)
 
 logger = init_logger(__name__)
 

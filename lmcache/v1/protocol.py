@@ -18,8 +18,8 @@ from typing import Optional
 
 import torch
 
-from lmcache.v1.memory_management import MemoryFormat
 from lmcache.utils import CacheEngineKey
+from lmcache.v1.memory_management import MemoryFormat
 
 MAX_KEY_LENGTH = 150
 

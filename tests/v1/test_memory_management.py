@@ -1,10 +1,12 @@
 import pytest
 import torch
 
-from lmcache.v1.memory_management import (  # noqa
-    BytesBufferMemoryObj, GPUMemoryAllocator, HostMemoryAllocator,
-    MemoryFormat, MixedMemoryAllocator, PinMemoryAllocator,
-    TensorMemoryAllocator)
+from lmcache.v1.memory_management import (BytesBufferMemoryObj,  # noqa
+                                          GPUMemoryAllocator,
+                                          HostMemoryAllocator, MemoryFormat,
+                                          MixedMemoryAllocator,
+                                          PinMemoryAllocator,
+                                          TensorMemoryAllocator)
 
 
 def check_allocator(allocator, max_size):

@@ -22,18 +22,16 @@ from typing import (TYPE_CHECKING, Dict, Generator, List, Optional, Sequence,
 import torch
 
 from lmcache.config import LMCacheEngineMetadata
+from lmcache.logging import init_logger
+from lmcache.utils import CacheEngineKey, _lmcache_nvtx_annotate
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.lookup_server import LookupServerInterface
 from lmcache.v1.memory_management import (MemoryAllocatorInterface,
-                                                    MemoryFormat, MemoryObj,
-                                                    MemoryObjMetadata)
+                                          MemoryFormat, MemoryObj,
+                                          MemoryObjMetadata)
 from lmcache.v1.storage_backend import CreateStorageBackends
-from lmcache.v1.storage_backend.abstract_backend import \
-    StorageBackendInterface
-from lmcache.v1.storage_backend.local_cpu_backend import \
-    LocalCPUBackend
-from lmcache.logging import init_logger
-from lmcache.utils import CacheEngineKey, _lmcache_nvtx_annotate
+from lmcache.v1.storage_backend.abstract_backend import StorageBackendInterface
+from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 
 if TYPE_CHECKING:
     from lmcache.v1.cache_controller.worker import LMCacheWorker
@@ -446,8 +444,7 @@ class DistributedStorageManager:
         allocator: MemoryAllocatorInterface,
     ):
         # lazy import because nixl cannot be installed on some machines
-        from lmcache.v1.storage_backend.nixl_backend import \
-            NixlBackend
+        from lmcache.v1.storage_backend.nixl_backend import NixlBackend
 
         self.storage_backend = NixlBackend.CreateNixlBackend(config, metadata)
         assert config.nixl_buffer_device is not None

@@ -6,7 +6,7 @@ from utils import dumb_metadata, dumb_metadata_with_model_name, generate_tokens
 
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.token_database import (ChunkedTokenDatabase,
-                                                 SegmentTokenDatabase)
+                                       SegmentTokenDatabase)
 
 
 @pytest.mark.parametrize('chunk_length', [16, 64, 256])

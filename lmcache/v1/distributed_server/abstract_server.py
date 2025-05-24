@@ -15,8 +15,8 @@
 import abc
 from typing import Optional
 
-from lmcache.v1.memory_management import MemoryObj
 from lmcache.utils import CacheEngineKey
+from lmcache.v1.memory_management import MemoryObj
 
 
 class DistributedServerInterface(metaclass=abc.ABCMeta):

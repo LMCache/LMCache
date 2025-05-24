@@ -18,8 +18,8 @@ from typing import Optional
 
 import torch
 
-from lmcache.v1.memory_management import MemoryObj
 from lmcache.utils import CacheEngineKey
+from lmcache.v1.memory_management import MemoryObj
 
 
 class StorageBackendInterface(metaclass=abc.ABCMeta):

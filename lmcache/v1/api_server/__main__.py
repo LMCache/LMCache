@@ -21,13 +21,17 @@ import uvicorn
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
+from lmcache.logging import init_logger
 from lmcache.v1.cache_controller.controller_manager import \
     LMCacheControllerManager
-from lmcache.v1.cache_controller.message import (  # noqa: E501
-    CheckFinishMsg, CheckFinishRetMsg, ClearMsg, ClearRetMsg, CompressMsg,
-    CompressRetMsg, HealthMsg, HealthRetMsg, LookupMsg, LookupRetMsg, MoveMsg,
-    MoveRetMsg, PinMsg, PinRetMsg, QueryInstMsg, QueryInstRetMsg)
-from lmcache.logging import init_logger
+from lmcache.v1.cache_controller.message import (CheckFinishMsg,  # noqa: E501
+                                                 CheckFinishRetMsg, ClearMsg,
+                                                 ClearRetMsg, CompressMsg,
+                                                 CompressRetMsg, HealthMsg,
+                                                 HealthRetMsg, LookupMsg,
+                                                 LookupRetMsg, MoveMsg,
+                                                 MoveRetMsg, PinMsg, PinRetMsg,
+                                                 QueryInstMsg, QueryInstRetMsg)
 
 logger = init_logger(__name__)
 

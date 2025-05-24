@@ -5,13 +5,12 @@ import torch
 from utils import (check_kv_cache_equal, check_paged_kv_cache_equal,
                    generate_kv_cache, generate_kv_cache_paged_list_tensors)
 
-from lmcache.v1.gpu_connector import (
-    VLLMNestedTupleGPUConnector, VLLMPagedMemGPUConnectorV2,
-    VLLMPagedMemLayerwiseGPUConnector)
+from lmcache.v1.gpu_connector import (VLLMNestedTupleGPUConnector,
+                                      VLLMPagedMemGPUConnectorV2,
+                                      VLLMPagedMemLayerwiseGPUConnector)
 from lmcache.v1.memory_management import (GPUMemoryAllocator,
-                                                    HostMemoryAllocator,
-                                                    MemoryFormat,
-                                                    PinMemoryAllocator)
+                                          HostMemoryAllocator, MemoryFormat,
+                                          PinMemoryAllocator)
 
 
 def test_vllm_nested_gpu_connector():

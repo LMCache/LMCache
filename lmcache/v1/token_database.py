@@ -21,8 +21,8 @@ import torch
 from transformers import AutoTokenizer
 
 from lmcache.config import LMCacheEngineMetadata
-from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.utils import CacheEngineKey
+from lmcache.v1.config import LMCacheEngineConfig
 
 
 class TokenDatabase(metaclass=abc.ABCMeta):
