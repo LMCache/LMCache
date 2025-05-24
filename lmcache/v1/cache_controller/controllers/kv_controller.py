@@ -14,8 +14,8 @@
 
 from dataclasses import dataclass
 
-from lmcache.v1.cache_controller.message import (CheckFinishMsg,  # noqa: E501
-                                                 CheckFinishRetMsg, ClearMsg,
+from lmcache.v1.cache_controller.message import CheckFinishMsg  # noqa: E501
+from lmcache.v1.cache_controller.message import (CheckFinishRetMsg, ClearMsg,
                                                  ClearRetMsg, CompressMsg,
                                                  CompressRetMsg, KVAdmitMsg,
                                                  KVEvictMsg, LookupMsg,

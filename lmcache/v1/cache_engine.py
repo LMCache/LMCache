@@ -30,8 +30,8 @@ from lmcache.v1.distributed_server import (DistributedServerInterface,
 from lmcache.v1.gpu_connector import (GPUConnectorInterface,
                                       VLLMPagedMemLayerwiseGPUConnector)
 from lmcache.v1.lookup_server import LookupServerInterface, RedisLookupServer
-from lmcache.v1.memory_management import (AdHocMemoryAllocator,  # noqa: E501
-                                          MemoryAllocatorInterface,
+from lmcache.v1.memory_management import AdHocMemoryAllocator  # noqa: E501
+from lmcache.v1.memory_management import (MemoryAllocatorInterface,
                                           MemoryFormat, MemoryObj,
                                           MixedMemoryAllocator)
 from lmcache.v1.storage_backend.storage_manager import (

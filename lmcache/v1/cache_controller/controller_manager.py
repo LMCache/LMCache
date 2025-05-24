@@ -22,8 +22,8 @@ from lmcache.logging import init_logger
 from lmcache.v1.cache_controller.controllers import (KVController,
                                                      RegistrationController)
 from lmcache.v1.cache_controller.executor import LMCacheClusterExecutor
-from lmcache.v1.cache_controller.message import (CheckFinishMsg,  # noqa: E501
-                                                 ClearMsg, CompressMsg,
+from lmcache.v1.cache_controller.message import CheckFinishMsg  # noqa: E501
+from lmcache.v1.cache_controller.message import (ClearMsg, CompressMsg,
                                                  DeRegisterMsg, HealthMsg,
                                                  KVAdmitMsg, KVEvictMsg,
                                                  LookupMsg, MoveMsg, Msg,

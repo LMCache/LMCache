@@ -1,8 +1,8 @@
 import pytest
 import torch
 
-from lmcache.v1.memory_management import (BytesBufferMemoryObj,  # noqa
-                                          GPUMemoryAllocator,
+from lmcache.v1.memory_management import BytesBufferMemoryObj  # noqa
+from lmcache.v1.memory_management import (GPUMemoryAllocator,
                                           HostMemoryAllocator, MemoryFormat,
                                           MixedMemoryAllocator,
                                           PinMemoryAllocator,
