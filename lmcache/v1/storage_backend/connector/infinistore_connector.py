@@ -21,10 +21,10 @@ from typing import List, Optional, Union, no_type_check
 import infinistore
 import torch
 
-from lmcache.experimental.memory_management import CopyLessMemoryObj, MemoryObj
+from lmcache.v1.memory_management import CopyLessMemoryObj, MemoryObj
 # reuse
-from lmcache.experimental.protocol import RemoteMetadata
-from lmcache.experimental.storage_backend.connector.base_connector import \
+from lmcache.v1.protocol import RemoteMetadata
+from lmcache.v1.storage_backend.connector.base_connector import \
     RemoteConnector
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey

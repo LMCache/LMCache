@@ -17,14 +17,14 @@ import re
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
-from lmcache.experimental.config import LMCacheEngineConfig
-from lmcache.experimental.storage_backend.connector.base_connector import \
+from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.v1.storage_backend.connector.base_connector import \
     RemoteConnector
-from lmcache.experimental.storage_backend.connector.lm_connector import \
+from lmcache.v1.storage_backend.connector.lm_connector import \
     LMCServerConnector
-from lmcache.experimental.storage_backend.connector.redis_connector import (
+from lmcache.v1.storage_backend.connector.redis_connector import (
     RedisConnector, RedisSentinelConnector)
-from lmcache.experimental.storage_backend.local_cpu_backend import \
+from lmcache.v1.storage_backend.local_cpu_backend import \
     LocalCPUBackend
 from lmcache.logging import init_logger
 

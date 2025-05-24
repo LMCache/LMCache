@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from typing import Union
 
 from lmcache.config import LMCacheEngineMetadata
-from lmcache.experimental.config import LMCacheEngineConfig
+from lmcache.v1.config import LMCacheEngineConfig
 
 
 def get_correct_nixl_device(nixl_device: str, worker_id: int) -> str:

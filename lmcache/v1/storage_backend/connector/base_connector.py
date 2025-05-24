@@ -15,7 +15,7 @@
 import abc
 from typing import List, Optional
 
-from lmcache.experimental.memory_management import MemoryObj
+from lmcache.v1.memory_management import MemoryObj
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
 

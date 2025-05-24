@@ -15,16 +15,16 @@
 from typing import Optional, Tuple
 
 from lmcache.config import LMCacheEngineMetadata
-from lmcache.experimental.config import LMCacheEngineConfig
-from lmcache.experimental.storage_backend.naive_serde.cachegen_decoder import \
+from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.v1.storage_backend.naive_serde.cachegen_decoder import \
     CacheGenDeserializer
-from lmcache.experimental.storage_backend.naive_serde.cachegen_encoder import \
+from lmcache.v1.storage_backend.naive_serde.cachegen_encoder import \
     CacheGenSerializer
-from lmcache.experimental.storage_backend.naive_serde.kivi_serde import (
+from lmcache.v1.storage_backend.naive_serde.kivi_serde import (
     KIVIDeserializer, KIVISerializer)
-from lmcache.experimental.storage_backend.naive_serde.naive_serde import (
+from lmcache.v1.storage_backend.naive_serde.naive_serde import (
     NaiveDeserializer, NaiveSerializer)
-from lmcache.experimental.storage_backend.naive_serde.serde import (
+from lmcache.v1.storage_backend.naive_serde.serde import (
     Deserializer, Serializer)
 
 
