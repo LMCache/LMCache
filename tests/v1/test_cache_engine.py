@@ -69,12 +69,10 @@ def test_same_retrieve_store(autorelease_v1):
 @pytest.mark.parametrize("chunk_size", [128, 256])
 @pytest.mark.parametrize("backend",
                          ["cpu", "local_disk", "remote", "remote_cachegen"])
-@pytest.mark.parametrize("lmserver_v1_process", ["cpu"],
-                         indirect=True)
+@pytest.mark.parametrize("lmserver_v1_process", ["cpu"], indirect=True)
 @pytest.mark.parametrize("use_list", [True, False])
-def test_paged_retrieve_prefix(fmt, chunk_size, backend,
-                               lmserver_v1_process, use_list,
-                               autorelease_v1):
+def test_paged_retrieve_prefix(fmt, chunk_size, backend, lmserver_v1_process,
+                               use_list, autorelease_v1):
     url = None
     remote_serde = None
     check_equality = True
@@ -178,10 +176,8 @@ def test_paged_retrieve_prefix(fmt, chunk_size, backend,
     "backend",
     ["cpu", "local_disk", "remote"],
 )
-@pytest.mark.parametrize("lmserver_v1_process", ["cpu"],
-                         indirect=True)
-def test_paged_store_offset(fmt, chunk_size, backend,
-                            lmserver_v1_process,
+@pytest.mark.parametrize("lmserver_v1_process", ["cpu"], indirect=True)
+def test_paged_store_offset(fmt, chunk_size, backend, lmserver_v1_process,
                             autorelease_v1):
     url = None
     if backend == "remote":
@@ -464,11 +460,9 @@ def test_store_kv_tensors_mask(fmt, autorelease_v1):
         "remote",
     ],
 )
-@pytest.mark.parametrize("lmserver_v1_process", ["cpu"],
-                         indirect=True)
+@pytest.mark.parametrize("lmserver_v1_process", ["cpu"], indirect=True)
 def test_hierarchy_retrieve(fmt, chunk_size, backend, retrieve_from,
-                            lmserver_v1_process,
-                            autorelease_v1):
+                            lmserver_v1_process, autorelease_v1):
     url = None
     if backend == "local_cpu_disk_remote":
         url = lmserver_v1_process.server_url
@@ -658,8 +652,7 @@ def test_prefetch_retrieve(backend, prefetch_from, autorelease_v1):
         "local_cpu_disk_remote",
     ],
 )
-@pytest.mark.parametrize("lmserver_v1_process", ["cpu"],
-                         indirect=True)
+@pytest.mark.parametrize("lmserver_v1_process", ["cpu"], indirect=True)
 def test_mem_leak(fmt, chunk_size, backend, lmserver_v1_process,
                   autorelease_v1):
     url = None
@@ -739,8 +732,7 @@ def test_builder(autorelease_v1):
     _engine = autorelease_v1(
         LMCacheEngineBuilder.get_or_create(instance_id, cfg, dumb_metadata(),
                                            connector))
-    _engine2 = autorelease_v1(
-        LMCacheEngineBuilder.get(instance_id))  # noqa
+    _engine2 = autorelease_v1(LMCacheEngineBuilder.get(instance_id))  # noqa
 
     with pytest.raises(ValueError):
         LMCacheEngineBuilder.get_or_create(instance_id, cfg2, dumb_metadata(),

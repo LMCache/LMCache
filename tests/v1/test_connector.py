@@ -11,16 +11,14 @@ from lmcache.v1.memory_management import PinMemoryAllocator
 from lmcache.v1.storage_backend.connector import CreateConnector
 
 
-@pytest.mark.parametrize("lmserver_v1_process", ["cpu"],
-                         indirect=True)
+@pytest.mark.parametrize("lmserver_v1_process", ["cpu"], indirect=True)
 @pytest.mark.parametrize(
     "url",
     [
         "lm://localhost:65000",
     ],
 )
-def test_lm_connector(url, autorelease_v1,
-                      lmserver_v1_process):
+def test_lm_connector(url, autorelease_v1, lmserver_v1_process):
     if url.startswith("lm"):
         url = lmserver_v1_process.server_url
 
@@ -61,8 +59,7 @@ def test_lm_connector(url, autorelease_v1,
     close_asyncio_loop(async_loop, async_thread)
 
 
-@pytest.mark.parametrize("lmserver_v1_process", ["cpu"],
-                         indirect=True)
+@pytest.mark.parametrize("lmserver_v1_process", ["cpu"], indirect=True)
 def test_fs_connector(lmserver_v1_process, autorelease_v1):
     """Test filesystem connector: exists, put, get, list, and file store."""
 
