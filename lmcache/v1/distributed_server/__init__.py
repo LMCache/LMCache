@@ -12,9 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from lmcache.experimental.distributed_server.abstract_server import \
+from lmcache.v1.distributed_server.abstract_server import \
     DistributedServerInterface  # noqa: E501
-from lmcache.experimental.distributed_server.naive_server import \
+from lmcache.v1.distributed_server.naive_server import \
     NaiveDistributedServer  # noqa: E501
 
 __all__ = [
