@@ -18,11 +18,10 @@ import time
 
 import torch
 
-from lmcache.experimental.memory_management import MemoryFormat
-from lmcache.experimental.protocol import (ClientMetaMessage, Constants,
-                                           ServerMetaMessage)
-from lmcache.experimental.server.storage_backend import CreateStorageBackend
 from lmcache.logging import init_logger
+from lmcache.v1.memory_management import MemoryFormat
+from lmcache.v1.protocol import ClientMetaMessage, Constants, ServerMetaMessage
+from lmcache.v1.server.storage_backend import CreateStorageBackend
 
 logger = init_logger(__name__)
 

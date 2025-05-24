@@ -17,7 +17,7 @@ from typing import Optional
 
 import torch
 
-from lmcache.experimental.memory_management import MemoryFormat
+from lmcache.v1.memory_management import MemoryFormat
 
 
 # TODO(Jiayi): Maybe move the memory management in remote
