@@ -130,7 +130,7 @@ Documentation
 
    developer_guide/contributing
    developer_guide/docker_file
-   developer_guide/usage/usage_stats_collection
+   developer_guide/usage/index
 
 :raw-html:`<br />`
 
