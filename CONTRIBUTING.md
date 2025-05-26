@@ -39,6 +39,13 @@ Once you've [created a pull request](#how-can-i-contribute), maintainers will re
 
 Maintainers will perform "squash and merge" actions on PRs in this repo, so it doesn't matter how many commits your PR has, as they will end up being a single commit after merging.
 
+### DCO and Signed-off-by
+
+When contributing changes to the project, you must agree to the [DCO](DCO).
+Commits must include a `Signed-off-by:` header which certifies agreement with the terms of the [DCO](DCO).
+
+Using `-s` with `git commit` will automatically add this header.
+
 ## Development
 
 ### Set up your dev environment
