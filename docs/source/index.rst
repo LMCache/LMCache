@@ -148,3 +148,12 @@ Documentation
 
    community/meetings
    community/blogs
+
+raw-html:`<br />`
+
+.. toctree::
+   :maxdepth: 1
+   :caption: Usage Stats Collection
+
+   usage_stats_collection/usage_stats_collection
+   
