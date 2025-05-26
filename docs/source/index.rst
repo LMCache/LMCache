@@ -130,6 +130,7 @@ Documentation
 
    developer_guide/contributing
    developer_guide/docker_file
+   developer_guide/usage/usage_stats_collection
 
 :raw-html:`<br />`
 
@@ -150,10 +151,4 @@ Documentation
    community/blogs
 
 raw-html:`<br />`
-
-.. toctree::
-   :maxdepth: 1
-   :caption: Usage Stats Collection
-
-   usage_stats_collection/usage_stats_collection
    
