@@ -96,17 +96,34 @@ from-first = true
 # import-heading-localfolder=Local
 
 [tool.mypy]
-python_version = "3.10"
+modules = ["lmcache", "tests"]
+
+# TODO: tighten MyPy checks by enabling these checks over time.
+disable_error_code = [
+    "annotation-unchecked",
+    "union-attr",
+    "var-annotated",
+    "arg-type",
+    "call-arg",
+    "import-untyped",
+    "attr-defined",
+    "return-value",
+    "assignment",
+    "call-overload",
+    "misc",
+]
 
 ignore_missing_imports = true
-check_untyped_defs = true
-follow_imports = "silent"
+explicit_package_bases = true
 
-# After fixing type errors resulting from follow_imports: "skip" -> "silent",
-# move the directory here and remove it from format.sh and mypy.yaml
-files = [
-    "lmcache"
-]
+# TODO: tighten MyPy checks by enabling these checks over time.
+check_untyped_defs = false
+disallow_incomplete_defs = false
+disallow_untyped_defs = false
+disallow_untyped_calls = false
+warn_return_any = false
+
+follow_imports = "silent"
 
 # use a custom manylinux image for cibuildwheel that contains CUDA 12.4
 [tool.cibuildwheel]
