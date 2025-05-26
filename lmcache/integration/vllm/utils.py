@@ -17,9 +17,9 @@ from typing import Union
 
 from lmcache.config import \
     LMCacheEngineConfig as Config  # type: ignore[assignment]
-from lmcache.experimental.config import \
-    LMCacheEngineConfig as ExperimentalConfig  # type: ignore[assignment]
 from lmcache.logging import init_logger
+from lmcache.v1.config import \
+    LMCacheEngineConfig as V1Config  # type: ignore[assignment]
 
 logger = init_logger(__name__)
 ENGINE_NAME = "vllm-instance"
@@ -30,7 +30,7 @@ def is_false(value: str) -> bool:
     return value.lower() in ("false", "0", "no", "n", "off")
 
 
-def lmcache_get_config() -> Union[Config, ExperimentalConfig]:
+def lmcache_get_config() -> Union[Config, V1Config]:
     """Get the LMCache configuration from the environment variable
     `LMCACHE_CONFIG_FILE`. If the environment variable is not set, this
     function will return the default configuration.
@@ -43,7 +43,7 @@ def lmcache_get_config() -> Union[Config, ExperimentalConfig]:
                        "to True.")
         LMCacheEngineConfig = Config  # type: ignore[assignment]
     else:
-        LMCacheEngineConfig = ExperimentalConfig  # type: ignore[assignment]
+        LMCacheEngineConfig = V1Config  # type: ignore[assignment]
 
     if "LMCACHE_CONFIG_FILE" not in os.environ:
         logger.warn("No LMCache configuration file is set. Trying to read"

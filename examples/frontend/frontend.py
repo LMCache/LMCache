@@ -1,5 +1,3 @@
-import os
-
 import chat_session
 import streamlit as st
 from transformers import AutoTokenizer
@@ -22,11 +20,9 @@ tokenizer = get_tokenizer()
 
 @st.cache_data
 def read_context() -> str:
-    context_text = None
-    context_file = os.path.join(os.pardir, 'ffmpeg.txt')
+    context_file = 'ffmpeg.txt'
     with open(context_file, 'r') as f:
         context_text = f.read()
-    assert context_text is not None
     return context_text
 
 

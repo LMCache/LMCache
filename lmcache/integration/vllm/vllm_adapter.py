@@ -35,15 +35,14 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils import cdiv, get_kv_cache_torch_dtype, round_down
 
 from lmcache.config import LMCacheEngineMetadata
-from lmcache.experimental.cache_engine import (LMCacheEngine,
-                                               LMCacheEngineBuilder)
-from lmcache.experimental.config import LMCacheEngineConfig
-from lmcache.experimental.gpu_connector import (
-    VLLMPagedMemGPUConnectorMLA, VLLMPagedMemGPUConnectorV2,
-    VLLMPagedMemLayerwiseGPUConnector)
 from lmcache.integration.vllm.utils import ENGINE_NAME, lmcache_get_config
 from lmcache.logging import init_logger
 from lmcache.utils import _lmcache_nvtx_annotate
+from lmcache.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
+from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.v1.gpu_connector import (VLLMPagedMemGPUConnectorMLA,
+                                      VLLMPagedMemGPUConnectorV2,
+                                      VLLMPagedMemLayerwiseGPUConnector)
 
 # FIXME(Jiayi): temporarily comment this out
 #from lmcache_vllm.blend_adapter import remove_request_id_indices
@@ -122,7 +121,7 @@ def init_lmcache_engine(
 
     config = lmcache_get_config()
     assert isinstance(config, LMCacheEngineConfig), \
-        "LMCache experimental configuration is should be passed."
+        "LMCache v1 configuration is should be passed."
 
     kv_dtype = get_kv_cache_torch_dtype(cache_config.cache_dtype,
                                         model_config.dtype)

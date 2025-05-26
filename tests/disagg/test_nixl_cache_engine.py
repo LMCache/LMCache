@@ -7,10 +7,10 @@ import torch
 from tqdm import tqdm
 
 from lmcache.config import LMCacheEngineMetadata
-from lmcache.experimental.cache_engine import LMCacheEngineBuilder
-from lmcache.experimental.config import LMCacheEngineConfig
-from lmcache.experimental.gpu_connector import VLLMPagedMemGPUConnectorV2
 from lmcache.logging import init_logger
+from lmcache.v1.cache_engine import LMCacheEngineBuilder
+from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.v1.gpu_connector import VLLMPagedMemGPUConnectorV2
 
 logger = init_logger(__name__)
 

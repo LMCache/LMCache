@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 import pytest
 
-from lmcache.experimental.cache_engine import LMCacheEngineBuilder
+from lmcache.v1.cache_engine import LMCacheEngineBuilder
 
 
 class MockRedis:
@@ -66,7 +66,7 @@ def mock_redis_sentinel():
 
 
 @pytest.fixture(scope="module")
-def lmserver_experimental_process(request):
+def lmserver_v1_process(request):
 
     def ensure_connection(host, port):
         retries = 10
@@ -98,9 +98,9 @@ def lmserver_experimental_process(request):
     while max_retries > 0:
         max_retries -= 1
         port_number = random.randint(10000, 65500)
-        print("Starting the lmcache experimental server process on port")
+        print("Starting the lmcache v1 server process on port")
         proc = subprocess.Popen(
-            shlex.split("python3 -m lmcache.experimental.server localhost "
+            shlex.split("python3 -m lmcache.v1.server localhost "
                         f"{port_number} {device}"))
 
         # Wait for lmcache process to start
@@ -213,7 +213,7 @@ def autorelease(request):
 
 
 @pytest.fixture(scope="function")
-def autorelease_experimental(request):
+def autorelease_v1(request):
     objects = []
 
     def _factory(obj):

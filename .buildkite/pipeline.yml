@@ -30,7 +30,7 @@ steps:
         coverage run --source=lmcache/ -m pytest -xsv \
           --junitxml=junit/test-results.xml \
           --ignore=tests/disagg \
-          --ignore=tests/experimental/test_pos_kernels.py
+          --ignore=tests/v1/test_pos_kernels.py
       - coverage report -m > coverage.txt
     artifact_paths:
       - "junit/test-results.xml"
