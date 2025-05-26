@@ -5,7 +5,7 @@ Usage Stats Collection
 
 LMCache collects anonymous usage data by default to help the engineering team understand real-world workloads, prioritize optimizations, and improve reliability. All collected data is aggregated and contains no sensitive user information.
 
-A sanitized subset of the aggregated data may be publicly released for the community’s benefit (for example, see the 2024 usage report at https://2024.lmcache.ai).
+A sanitized subset of the aggregated data may be publicly released for the community’s benefit (for example, see a daily usage report `here <https://github.com/Hanchenli/OSS_Growth_Toolkit/tree/main/usage_tracker/report>`_).
 
 What data is collected?
 -----------------------
