@@ -563,19 +563,19 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
             shape = torch.Size(shape)
 
         assert dtype is not None, "dtype must be specified"
-
         # Calculate the size of the tensor
         raw_size = TensorMemoryAllocator._Compute_raw_size(shape, dtype)
         aligned_size = TensorMemoryAllocator._Compute_aligned_size(raw_size)
+
 
         # Find the first block that fits the shape
         for block in self.explicit_list:
             if block.size >= aligned_size:
                 break
-            else:
-                logger.warning(f"Failed to allocate memory for "
-                            f"tensor({shape}, {dtype}) because "
-                            "no memory is available")
+        else:
+            logger.warning(f"Failed to allocate memory for "
+                        f"tensor({shape}, {dtype}) because "
+                        "no memory is available")
             return None
 
         # Do not add the block back if `block.size == aligned_size`
