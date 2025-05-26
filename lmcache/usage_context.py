@@ -262,9 +262,11 @@ class UsageContext:
         return "UNKNOWN"
 
 
-def InitializeUsageContext(config: LMCacheEngineConfig,
-                           metadata: LMCacheEngineMetadata,
-                           local_log: Optional[str] = None):
+def InitializeUsageContext(
+    config: LMCacheEngineConfig,
+    metadata: LMCacheEngineMetadata,
+    local_log: Optional[str] = None,
+):
     server_url = "http://stats.lmcache.ai:8080/endpoint"
     if os.getenv("LMCACHE_TRACK_USAGE") == "false":
         return None

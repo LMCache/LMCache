@@ -98,7 +98,7 @@ class RedisConnector(RemoteConnector):
                 view = view.cast("B")
         else:
             view = memoryview(memory_obj.byte_array)
-        view[:metadata.length] = kv_bytes
+        view[: metadata.length] = kv_bytes
 
         return memory_obj
 

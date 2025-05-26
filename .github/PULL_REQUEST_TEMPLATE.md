@@ -29,7 +29,6 @@ FIX #xxxx (*link existing issues this PR will resolve*)
 <p>The PR need to meet the following code quality standards:</p>
 
 <ul>
-    <li>Pass all linter checks. Please use <a href="https://github.com/LMCache/LMCache/blob/dev/format.sh"><code>format.sh</code></a> to format your code.</li>
     <li>The code need to be well-documented to ensure future contributors can easily understand the code.</li>
     <li> Please include sufficient tests to ensure the change is stay correct and robust. This includes both unit tests and integration tests.</li>
 </ul>
