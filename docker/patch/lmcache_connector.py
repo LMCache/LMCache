@@ -33,12 +33,12 @@ class LMCacheConnector(KVConnectorBase):
         self.transfer_config = config.kv_transfer_config
         self.vllm_config = config
 
-        from lmcache.experimental.cache_engine import LMCacheEngineBuilder
         from lmcache.integration.vllm.utils import ENGINE_NAME
         from lmcache.integration.vllm.vllm_adapter import (
             RetrieveStatus, StoreStatus, init_lmcache_engine,
             lmcache_retrieve_kv, lmcache_should_retrieve, lmcache_should_store,
             lmcache_store_kv)
+        from lmcache.v1.cache_engine import LMCacheEngineBuilder
         logger.info("Initializing LMCacheConfig under kv_transfer_config %s",
                     self.transfer_config)
 
