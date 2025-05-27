@@ -150,9 +150,7 @@ class StorageManager:
         # configure caching policies (e.g., write-through,
         # write-back, etc.)
         for storage_backend in self.storage_backends.values():
-            if storage_backend.exists_in_put_tasks(key) or storage_backend.contains(
-                key
-            ):
+            if storage_backend.exists_in_put_tasks(key):
                 memory_obj.ref_count_down()
                 return
 
