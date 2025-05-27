@@ -8,7 +8,7 @@ from vllm import LLM, SamplingParams
 from vllm.config import KVTransferConfig
 from vllm.engine.arg_utils import EngineArgs
 
-from lmcache.experimental.cache_engine import LMCacheEngineBuilder
+from lmcache.v1.cache_engine import LMCacheEngineBuilder
 from lmcache.integration.vllm.utils import ENGINE_NAME
 
 
