@@ -167,10 +167,10 @@
             }
 
             let hidden_size, num_attention_heads, num_hidden_layers, num_key_value_heads;
-            let kv_lora_rank; // for deepseek-ai/DeepSeek-V3
+            let kv_lora_rank, qk_rope_head_dim; // for deepseek-ai/DeepSeek-V3
             let head_size;
             if (model === "deepseek-ai/DeepSeek-V3") {
-                ({ num_hidden_layers, kv_lora_rank } = config);
+                ({ hidden_size, num_attention_heads, num_hidden_layers, num_key_value_heads, kv_lora_rank, qk_rope_head_dim } = config);
             } else if (model === "Qwen/Qwen3-4B" || model === "Qwen/Qwen3-8B" || 
                        model === "Qwen/Qwen3-14B" || model === "Qwen/Qwen3-32B") {
                 // The Qwen3 series use GQA, and `head_dim` needs to be read from config file.
@@ -198,7 +198,7 @@
             // Calculate KV cache size
             let total_elements;
             if (model === "deepseek-ai/DeepSeek-V3") {
-                total_elements = 2 * num_hidden_layers * tokens * kv_lora_rank;
+                total_elements = num_hidden_layers * tokens * (kv_lora_rank + qk_rope_head_dim);
             } else if (model === "Qwen/Qwen3-4B" || model === "Qwen/Qwen3-8B" || 
                        model === "Qwen/Qwen3-14B" || model === "Qwen/Qwen3-32B") {
                 total_elements = 2 * num_hidden_layers * tokens * num_key_value_heads * head_dim;
@@ -219,8 +219,9 @@
                 <b>Selected Model:</b> ${model}<br>
                 <b>Number of Hidden Layers:</b> ${num_hidden_layers}<br>
                 <b>KV-LoRA Rank(dimension of latent space):</b> ${kv_lora_rank}<br>
+                <b>QK-Rope Head Dim:</b> ${qk_rope_head_dim}<br>
                 <b>Data Type Size:</b> ${dtype_size} bytes<br>
-                <b>Total Elements:</b> 2 × ${num_hidden_layers} × ${tokens} × ${kv_lora_rank} = ${total_elements}<br>
+                <b>Total Elements:</b> ${num_hidden_layers} × ${tokens} × (${kv_lora_rank} + ${qk_rope_head_dim}) = ${total_elements}<br>
                 <b>Total Bytes:</b> ${total_elements} × ${dtype_size} = ${total_bytes} bytes<br>
                 <b>KV Cache Size:</b> ${total_bytes} / (1024³) ≈ ${kvCacheSizeGB.toFixed(4)} GB
                 `;

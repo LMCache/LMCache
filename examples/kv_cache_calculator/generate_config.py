@@ -35,6 +35,7 @@ def main():
 
         if args.model == "deepseek-ai/DeepSeek-V3":
             config_data["kv_lora_rank"] = getattr(config, "kv_lora_rank", None)
+            config_data["qk_rope_head_dim"] = getattr(config, "qk_rope_head_dim", None)
 
         if (
             args.model == "Qwen/Qwen3-4B"
