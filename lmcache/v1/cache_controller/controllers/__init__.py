@@ -12,8 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from lmcache.v1.cache_controller.controllers.kv_controller import \
-    KVController
+from lmcache.v1.cache_controller.controllers.kv_controller import KVController
 from lmcache.v1.cache_controller.controllers.registration_controller import \
     RegistrationController  # noqa: E501
 
