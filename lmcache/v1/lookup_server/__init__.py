@@ -12,10 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from lmcache.v1.lookup_server.abstract_server import \
-    LookupServerInterface  # noqa: E501
-from lmcache.v1.lookup_server.redis_server import \
-    RedisLookupServer  # noqa: E501
+# First Party
+from lmcache.v1.lookup_server.abstract_server import LookupServerInterface  # noqa: E501
+from lmcache.v1.lookup_server.redis_server import RedisLookupServer  # noqa: E501
 
 __all__ = [
     "LookupServerInterface",

@@ -173,9 +173,9 @@ class RemoteBackend(StorageBackendInterface):
         # NOTE: No need to do error handling here
         # since the `future` is never waited
         future = asyncio.run_coroutine_threadsafe(
-            self.connection.put(key, compressed_memory_obj), self.loop)
-        lambda_callback = lambda f: \
-                self.put_callback(f, key)
+            self.connection.put(key, compressed_memory_obj), self.loop
+        )
+        lambda_callback = lambda f: self.put_callback(f, key)
         future.add_done_callback(lambda_callback)
         return future
 
@@ -198,8 +198,7 @@ class RemoteBackend(StorageBackendInterface):
             logger.warning("Connection is None in get_blocking, returning None")
             return None
         t1 = time.perf_counter()
-        future = asyncio.run_coroutine_threadsafe(self.connection.get(key),
-                                                  self.loop)
+        future = asyncio.run_coroutine_threadsafe(self.connection.get(key), self.loop)
 
         try:
             memory_obj = future.result()

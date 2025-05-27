@@ -12,8 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from lmcache.v1.cache_controller.executor import \
-    LMCacheClusterExecutor  # noqa: E501
+# First Party
+from lmcache.v1.cache_controller.executor import LMCacheClusterExecutor  # noqa: E501
 from lmcache.v1.cache_controller.worker import LMCacheWorker  # noqa: E501
 
 __all__ = [

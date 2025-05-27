@@ -34,14 +34,23 @@ class LMCacheConnector(KVConnectorBase):
         self.transfer_config = config.kv_transfer_config
         self.vllm_config = config
 
+        # First Party
         from lmcache.integration.vllm.utils import ENGINE_NAME
         from lmcache.integration.vllm.vllm_adapter import (
-            RetrieveStatus, StoreStatus, init_lmcache_engine,
-            lmcache_retrieve_kv, lmcache_should_retrieve, lmcache_should_store,
-            lmcache_store_kv)
+            RetrieveStatus,
+            StoreStatus,
+            init_lmcache_engine,
+            lmcache_retrieve_kv,
+            lmcache_should_retrieve,
+            lmcache_should_store,
+            lmcache_store_kv,
+        )
         from lmcache.v1.cache_engine import LMCacheEngineBuilder
-        logger.info("Initializing LMCacheConfig under kv_transfer_config %s",
-                    self.transfer_config)
+
+        logger.info(
+            "Initializing LMCacheConfig under kv_transfer_config %s",
+            self.transfer_config,
+        )
 
         # TODO (Jiayi): Find model_config, parallel_config, and cache_config
         self.engine = init_lmcache_engine(

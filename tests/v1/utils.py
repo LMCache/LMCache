@@ -10,9 +10,11 @@ import torch
 # First Party
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.utils import CacheEngineKey
-from lmcache.v1.gpu_connector import (VLLMNestedTupleGPUConnector,
-                                      VLLMPagedMemGPUConnector,
-                                      VLLMPagedMemGPUConnectorV2)
+from lmcache.v1.gpu_connector import (
+    VLLMNestedTupleGPUConnector,
+    VLLMPagedMemGPUConnector,
+    VLLMPagedMemGPUConnectorV2,
+)
 
 
 def dumb_metadata(fmt="vllm", kv_shape=(32, 2, 256, 8, 128)):

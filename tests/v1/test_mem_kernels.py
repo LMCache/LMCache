@@ -13,8 +13,9 @@ from utils import (
 import pytest
 import torch
 
-import lmcache.c_ops as lmc_ops
+# First Party
 from lmcache.v1.memory_management import PinMemoryAllocator
+import lmcache.c_ops as lmc_ops
 
 
 def _tuple_kv_to_blob(

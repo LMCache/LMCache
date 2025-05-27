@@ -19,6 +19,7 @@ from utils import (
 import pytest
 import torch
 
+# First Party
 from lmcache.v1.cache_engine import LMCacheEngineBuilder
 from lmcache.v1.config import LMCacheEngineConfig
 
@@ -45,9 +46,10 @@ def test_same_retrieve_store(autorelease_v1):
     cfg = LMCacheEngineConfig.from_legacy(chunk_size=chunk_size, remote_url=None)
 
     engine = autorelease_v1(
-        LMCacheEngineBuilder.get_or_create("test", cfg,
-                                           dumb_metadata(fmt, kv_shape),
-                                           connector))
+        LMCacheEngineBuilder.get_or_create(
+            "test", cfg, dumb_metadata(fmt, kv_shape), connector
+        )
+    )
     """ test retrieve empty """
     ret_mask = engine.retrieve(tokens, kvcaches=retrieved_cache)
     length = torch.sum(ret_mask)
@@ -73,12 +75,12 @@ def test_same_retrieve_store(autorelease_v1):
 
 @pytest.mark.parametrize("fmt", ["vllm"])
 @pytest.mark.parametrize("chunk_size", [128, 256])
-@pytest.mark.parametrize("backend",
-                         ["cpu", "local_disk", "remote", "remote_cachegen"])
+@pytest.mark.parametrize("backend", ["cpu", "local_disk", "remote", "remote_cachegen"])
 @pytest.mark.parametrize("lmserver_v1_process", ["cpu"], indirect=True)
 @pytest.mark.parametrize("use_list", [True, False])
-def test_paged_retrieve_prefix(fmt, chunk_size, backend, lmserver_v1_process,
-                               use_list, autorelease_v1):
+def test_paged_retrieve_prefix(
+    fmt, chunk_size, backend, lmserver_v1_process, use_list, autorelease_v1
+):
     url = None
     remote_serde = None
     check_equality = True
@@ -121,9 +123,10 @@ def test_paged_retrieve_prefix(fmt, chunk_size, backend, lmserver_v1_process,
     )
 
     engine = autorelease_v1(
-        LMCacheEngineBuilder.get_or_create("test", cfg,
-                                           dumb_metadata(fmt, kv_shape),
-                                           connector))
+        LMCacheEngineBuilder.get_or_create(
+            "test", cfg, dumb_metadata(fmt, kv_shape), connector
+        )
+    )
     """ test store """
     t1 = time.perf_counter()
     engine.store(tokens, kvcaches=kv_cache, slot_mapping=slot_mapping)
@@ -181,8 +184,9 @@ def test_paged_retrieve_prefix(fmt, chunk_size, backend, lmserver_v1_process,
     ["cpu", "local_disk", "remote"],
 )
 @pytest.mark.parametrize("lmserver_v1_process", ["cpu"], indirect=True)
-def test_paged_store_offset(fmt, chunk_size, backend, lmserver_v1_process,
-                            autorelease_v1):
+def test_paged_store_offset(
+    fmt, chunk_size, backend, lmserver_v1_process, autorelease_v1
+):
     url = None
     if backend == "remote":
         url = lmserver_v1_process.server_url
@@ -207,9 +211,10 @@ def test_paged_store_offset(fmt, chunk_size, backend, lmserver_v1_process,
     )
 
     engine = autorelease_v1(
-        LMCacheEngineBuilder.get_or_create("test", cfg,
-                                           dumb_metadata(fmt, kv_shape),
-                                           connector))
+        LMCacheEngineBuilder.get_or_create(
+            "test", cfg, dumb_metadata(fmt, kv_shape), connector
+        )
+    )
     """ test store """
     engine.store(
         tokens[:num_tokens],
@@ -271,7 +276,8 @@ def test_paged_store_offset(fmt, chunk_size, backend, lmserver_v1_process,
     [
         # "cpu",
         "local_disk"
-    ])
+    ],
+)
 def test_mixed_retrieve(fmt, chunk_size, backend, autorelease_v1):
     device = "cuda"
     num_tokens = 2000
@@ -289,9 +295,10 @@ def test_mixed_retrieve(fmt, chunk_size, backend, autorelease_v1):
     cfg = LMCacheEngineConfig.from_legacy(chunk_size=chunk_size, backend=backend)
 
     engine = autorelease_v1(
-        LMCacheEngineBuilder.get_or_create("test", cfg,
-                                           dumb_metadata(fmt, kv_shape),
-                                           connector))
+        LMCacheEngineBuilder.get_or_create(
+            "test", cfg, dumb_metadata(fmt, kv_shape), connector
+        )
+    )
     """ test store """
     engine.store(tokens, kvcaches=kv_cache)
     engine.store(new_tokens, kvcaches=new_kv_cache)
@@ -375,10 +382,11 @@ def test_store_kv_tensors_mask(fmt, autorelease_v1):
     cfg = LMCacheEngineConfig.from_legacy(chunk_size=chunk_size)
 
     engine = autorelease_v1(
-        LMCacheEngineBuilder.get_or_create("test", cfg,
-                                           dumb_metadata(fmt, kv_shape),
-                                           connector))
-    ''' Store some tokens with mask '''
+        LMCacheEngineBuilder.get_or_create(
+            "test", cfg, dumb_metadata(fmt, kv_shape), connector
+        )
+    )
+    """ Store some tokens with mask """
     engine.store(tokens, kvcaches=kv_cache)
     """Wait until store finishes"""
     timeout = 1
@@ -468,8 +476,9 @@ def test_store_kv_tensors_mask(fmt, autorelease_v1):
     ],
 )
 @pytest.mark.parametrize("lmserver_v1_process", ["cpu"], indirect=True)
-def test_hierarchy_retrieve(fmt, chunk_size, backend, retrieve_from,
-                            lmserver_v1_process, autorelease_v1):
+def test_hierarchy_retrieve(
+    fmt, chunk_size, backend, retrieve_from, lmserver_v1_process, autorelease_v1
+):
     url = None
     if backend == "local_cpu_disk_remote":
         url = lmserver_v1_process.server_url
@@ -489,9 +498,10 @@ def test_hierarchy_retrieve(fmt, chunk_size, backend, retrieve_from,
     )
 
     engine = autorelease_v1(
-        LMCacheEngineBuilder.get_or_create("test", cfg,
-                                           dumb_metadata(fmt, kv_shape),
-                                           connector))
+        LMCacheEngineBuilder.get_or_create(
+            "test", cfg, dumb_metadata(fmt, kv_shape), connector
+        )
+    )
     """ test store """
     t1 = time.perf_counter()
     engine.store(tokens, kvcaches=kv_cache)
@@ -582,9 +592,10 @@ def test_prefetch_retrieve(backend, prefetch_from, autorelease_v1):
     cfg = LMCacheEngineConfig.from_legacy(chunk_size=chunk_size, backend=backend)
 
     engine = autorelease_v1(
-        LMCacheEngineBuilder.get_or_create("test", cfg,
-                                           dumb_metadata(fmt, kv_shape),
-                                           connector))
+        LMCacheEngineBuilder.get_or_create(
+            "test", cfg, dumb_metadata(fmt, kv_shape), connector
+        )
+    )
     """ test store """
     t1 = time.perf_counter()
     engine.store(tokens, kvcaches=kv_cache)
@@ -654,8 +665,7 @@ def test_prefetch_retrieve(backend, prefetch_from, autorelease_v1):
     ],
 )
 @pytest.mark.parametrize("lmserver_v1_process", ["cpu"], indirect=True)
-def test_mem_leak(fmt, chunk_size, backend, lmserver_v1_process,
-                  autorelease_v1):
+def test_mem_leak(fmt, chunk_size, backend, lmserver_v1_process, autorelease_v1):
     url = None
     if "remote" in backend:
         url = lmserver_v1_process.server_url
@@ -678,9 +688,10 @@ def test_mem_leak(fmt, chunk_size, backend, lmserver_v1_process,
     )
 
     engine = autorelease_v1(
-        LMCacheEngineBuilder.get_or_create("test", cfg,
-                                           dumb_metadata(fmt, kv_shape),
-                                           connector))
+        LMCacheEngineBuilder.get_or_create(
+            "test", cfg, dumb_metadata(fmt, kv_shape), connector
+        )
+    )
 
     engine.store(tokens, kvcaches=kv_cache, slot_mapping=slot_mapping)
 
@@ -727,8 +738,8 @@ def test_builder(autorelease_v1):
     assert should_be_none is None
 
     _engine = autorelease_v1(
-        LMCacheEngineBuilder.get_or_create(instance_id, cfg, dumb_metadata(),
-                                           connector))
+        LMCacheEngineBuilder.get_or_create(instance_id, cfg, dumb_metadata(), connector)
+    )
     _engine2 = autorelease_v1(LMCacheEngineBuilder.get(instance_id))  # noqa
 
     with pytest.raises(ValueError):

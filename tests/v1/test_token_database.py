@@ -6,9 +6,9 @@ from utils import dumb_metadata, dumb_metadata_with_model_name, generate_tokens
 import pytest
 import torch
 
+# First Party
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.token_database import (ChunkedTokenDatabase,
-                                       SegmentTokenDatabase)
+from lmcache.v1.token_database import ChunkedTokenDatabase, SegmentTokenDatabase
 
 
 @pytest.mark.parametrize("chunk_length", [16, 64, 256])

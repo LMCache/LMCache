@@ -13,6 +13,7 @@ from utils import (
 import pytest
 import torch
 
+# First Party
 from lmcache.v1.memory_management import PinMemoryAllocator
 from lmcache.v1.storage_backend.connector import CreateConnector
 
@@ -30,8 +31,7 @@ def test_lm_connector(url, autorelease_v1, lmserver_v1_process):
 
     async_loop, async_thread = init_asyncio_loop()
     memory_allocator = PinMemoryAllocator(1024 * 1024 * 1024)
-    connector = autorelease_v1(
-        CreateConnector(url, async_loop, memory_allocator))
+    connector = autorelease_v1(CreateConnector(url, async_loop, memory_allocator))
 
     random_key = dumb_cache_engine_key()
     future = asyncio.run_coroutine_threadsafe(connector.exists(random_key), async_loop)
@@ -72,8 +72,7 @@ def test_fs_connector(lmserver_v1_process, autorelease_v1):
         url = f"fs://host:0/{temp_dir}/"
         async_loop, async_thread = init_asyncio_loop()
         memory_allocator = PinMemoryAllocator(1024 * 1024 * 1024)
-        connector = autorelease_v1(
-            CreateConnector(url, async_loop, memory_allocator))
+        connector = autorelease_v1(CreateConnector(url, async_loop, memory_allocator))
         random_key = dumb_cache_engine_key()
 
         # Test 1: Verify key doesn't exist initially

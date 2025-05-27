@@ -19,11 +19,12 @@ import abc
 # Third Party
 import torch
 
-import lmcache.c_ops as lmc_ops
+# First Party
 from lmcache.logging import init_logger
 from lmcache.utils import _lmcache_nvtx_annotate
 from lmcache.v1.memory_management import GPUMemoryAllocator  # noqa: E501
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
+import lmcache.c_ops as lmc_ops
 
 logger = init_logger(__name__)
 

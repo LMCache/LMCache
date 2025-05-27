@@ -12,9 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import time
+# Standard
 from typing import List, Optional
+import time
 
+# First Party
 from lmcache.logging import init_logger
 from lmcache.observability import LMCStatsMonitor
 from lmcache.utils import CacheEngineKey
@@ -44,8 +46,7 @@ class InstrumentedRemoteConnector(RemoteConnector):
             memory_obj.ref_count_down()
 
         end = time.perf_counter()
-        self._stats_monitor.update_interval_remote_time_to_put(
-            (end - begin) * 1000)
+        self._stats_monitor.update_interval_remote_time_to_put((end - begin) * 1000)
         self._stats_monitor.update_interval_remote_write_metrics(obj_size)
         logger.debug(f"Bytes offloaded: {obj_size / 1e6:.4f} MBytes")
 
@@ -53,8 +54,7 @@ class InstrumentedRemoteConnector(RemoteConnector):
         begin = time.perf_counter()
         memory_obj = await self._connector.get(key)
         end = time.perf_counter()
-        self._stats_monitor.update_interval_remote_time_to_get(
-            (end - begin) * 1000)
+        self._stats_monitor.update_interval_remote_time_to_get((end - begin) * 1000)
         if memory_obj is not None:
             obj_size = memory_obj.get_size()
             self._stats_monitor.update_interval_remote_read_metrics(obj_size)

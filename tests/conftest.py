@@ -10,6 +10,7 @@ import time
 # Third Party
 import pytest
 
+# First Party
 from lmcache.v1.cache_engine import LMCacheEngineBuilder
 
 
@@ -66,7 +67,6 @@ def mock_redis_sentinel():
 
 @pytest.fixture(scope="module")
 def lmserver_v1_process(request):
-
     def ensure_connection(host, port):
         retries = 10
         client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -99,8 +99,10 @@ def lmserver_v1_process(request):
         port_number = random.randint(10000, 65500)
         print("Starting the lmcache v1 server process on port")
         proc = subprocess.Popen(
-            shlex.split("python3 -m lmcache.v1.server localhost "
-                        f"{port_number} {device}"))
+            shlex.split(
+                f"python3 -m lmcache.v1.server localhost {port_number} {device}"
+            )
+        )
 
         # Wait for lmcache process to start
         time.sleep(5)

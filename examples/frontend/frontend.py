@@ -1,3 +1,5 @@
+# Third Party
+from transformers import AutoTokenizer
 import chat_session
 import streamlit as st
 
@@ -19,8 +21,8 @@ tokenizer = get_tokenizer()
 
 @st.cache_data
 def read_context() -> str:
-    context_file = 'ffmpeg.txt'
-    with open(context_file, 'r') as f:
+    context_file = "ffmpeg.txt"
+    with open(context_file, "r") as f:
         context_text = f.read()
     return context_text
 

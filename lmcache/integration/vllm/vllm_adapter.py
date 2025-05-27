@@ -48,9 +48,11 @@ from lmcache.logging import init_logger
 from lmcache.utils import _lmcache_nvtx_annotate
 from lmcache.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.gpu_connector import (VLLMPagedMemGPUConnectorMLA,
-                                      VLLMPagedMemGPUConnectorV2,
-                                      VLLMPagedMemLayerwiseGPUConnector)
+from lmcache.v1.gpu_connector import (
+    VLLMPagedMemGPUConnectorMLA,
+    VLLMPagedMemGPUConnectorV2,
+    VLLMPagedMemLayerwiseGPUConnector,
+)
 
 # FIXME(Jiayi): temporarily comment this out
 # from lmcache_vllm.blend_adapter import remove_request_id_indices
@@ -131,8 +133,9 @@ def init_lmcache_engine(
     VLLM_SCHEDULER_CONFIG = scheduler_config
 
     config = lmcache_get_config()
-    assert isinstance(config, LMCacheEngineConfig), \
+    assert isinstance(config, LMCacheEngineConfig), (
         "LMCache v1 configuration is should be passed."
+    )
 
     kv_dtype = get_kv_cache_torch_dtype(cache_config.cache_dtype, model_config.dtype)
 
