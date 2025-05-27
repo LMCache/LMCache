@@ -9,8 +9,13 @@ Context‑file precedence
 3. (flag omitted)           → generate random ASCII filler
 """
 
+# Future
 from __future__ import annotations
 
+# Standard
+from io import StringIO
+from pathlib import Path
+from typing import List
 import argparse
 import json
 import random
@@ -18,18 +23,16 @@ import string
 import sys
 import threading
 import time
-from io import StringIO
-from pathlib import Path
-from typing import List
 
+# Third Party
 from openai import OpenAI
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
 # ----------------------------------------------------------------------
-SAFETY_MARGIN = 2048           # tokens kept free below model ctx limit
-FILLER_LEN_CHARS = 100_000     # ≈ length of each cache‑filler prompt
-NUM_FILLER_PROMPTS = 10        # how many fillers to send for eviction
-DEFAULT_FFMPEG = "../ffmpeg.txt"
+SAFETY_MARGIN = 2048  # tokens kept free below model ctx limit
+FILLER_LEN_CHARS = 100_000  # ≈ length of each cache‑filler prompt
+NUM_FILLER_PROMPTS = 10  # how many fillers to send for eviction
+DEFAULT_FFMPEG = "ffmpeg.txt"
 # ----------------------------------------------------------------------
 
 
@@ -43,8 +46,9 @@ def truncate_to_tokens(
     max_tokens: int,
     tok: PreTrainedTokenizerBase,
 ) -> str:
-    ids = tok.encode(text, add_special_tokens=False,
-                     truncation=True, max_length=max_tokens)
+    ids = tok.encode(
+        text, add_special_tokens=False, truncation=True, max_length=max_tokens
+    )
     return tok.decode(ids, skip_special_tokens=True)
 
 
@@ -63,8 +67,7 @@ class Printer:
     def _spin(self) -> None:
         idx = 0
         while not self._stop_event.is_set():
-            print(f"\033[31m\r{ '>' * (idx % 6):<6}\033[0m",
-                  end="", flush=True)
+            print(f"\033[31m\r{'>' * (idx % 6):<6}\033[0m", end="", flush=True)
             idx += 1
             time.sleep(0.2)
 
@@ -85,8 +88,7 @@ class Printer:
 # ---------------- benchmark helpers -----------------------------------
 def build_chat(system_doc: str, user_prompt: str) -> List[dict]:
     return [
-        {"role": "user",
-         "content": f"I've got a document:\n```\n{system_doc}\n```"},
+        {"role": "user", "content": f"I've got a document:\n```\n{system_doc}\n```"},
         {"role": "assistant", "content": "I've got your document."},
         {"role": "user", "content": user_prompt},
     ]
@@ -121,7 +123,7 @@ def ttft_stream(
             print(delta.content, end="", flush=True)
             buf.write(delta.content)
 
-    print()                         # newline after streaming
+    print()  # newline after streaming
     if first_tok_t is None:
         raise RuntimeError("no tokens returned")
     return first_tok_t - start, buf.getvalue()
@@ -131,8 +133,11 @@ def flush_kv_cache(client: OpenAI, model: str) -> None:
     filler_chat = build_chat(rand_ascii(FILLER_LEN_CHARS), "noop")
     for _ in range(NUM_FILLER_PROMPTS):
         client.chat.completions.create(
-            model=model, messages=filler_chat,
-            temperature=0.0, max_tokens=1, stream=False,
+            model=model,
+            messages=filler_chat,
+            temperature=0.0,
+            max_tokens=1,
+            stream=False,
         )
 
 
@@ -145,27 +150,52 @@ def parse_args() -> argparse.Namespace:
 
     ap = argparse.ArgumentParser(
         prog=Path(sys.argv[0]).name,
-        description="Interactive TTFT benchmark; flush cache only with -F/--flush_cache.",
+        description="Interactive TTFT benchmark; \
+        flush cache only with -F/--flush_cache.",
     )
     ap.add_argument("--api_base", default="http://localhost:8000/v1")
     ap.add_argument("--api_key", default="EMPTY")
-    ap.add_argument("--model",
-                    help="Model name/ID; default = first entry from /models.")
+    ap.add_argument(
+        "--model", help="Model name/ID; default = first entry from /models."
+    )
     # nargs='?' lets the flag appear without a path
-    ap.add_argument("-C", "--context_file", nargs='?', const="",
-                    default=None,
-                    help="FILE → use document, flag‑only → ffmpeg.txt, "
-                         "omit flag → synthetic filler")
-    ap.add_argument("--max_ctx_tokens", type=int, default=131_072,
-                    help="Max tokens kept from the document after truncation.")
-    ap.add_argument("--prompt", default="Summarize this text",
-                    help="User prompt appended after the document.")
-    ap.add_argument("--num_following", type=int, default=0,
-                    help="Extra measured requests after run 1.")
-    ap.add_argument("--flush_cache", "-F", action="store_true",
-                    help="Evict GPU KV‑cache between run 1 and follow‑ups.")
-    ap.add_argument("--out", default="benchmark.jsonl",
-                    help="JSONL file for results (overwritten each run).")
+    ap.add_argument(
+        "-C",
+        "--context_file",
+        nargs="?",
+        const="",
+        default=None,
+        help="FILE → use document, flag‑only → ffmpeg.txt, "
+        "omit flag → synthetic filler",
+    )
+    ap.add_argument(
+        "--max_ctx_tokens",
+        type=int,
+        default=131_072,
+        help="Max tokens kept from the document after truncation.",
+    )
+    ap.add_argument(
+        "--prompt",
+        default="Summarize this text",
+        help="User prompt appended after the document.",
+    )
+    ap.add_argument(
+        "--num_following",
+        type=int,
+        default=0,
+        help="Extra measured requests after run 1.",
+    )
+    ap.add_argument(
+        "--flush_cache",
+        "-F",
+        action="store_true",
+        help="Evict GPU KV‑cache between run 1 and follow‑ups.",
+    )
+    ap.add_argument(
+        "--out",
+        default="benchmark.jsonl",
+        help="JSONL file for results (overwritten each run).",
+    )
     return ap.parse_args()
 
 
@@ -191,7 +221,9 @@ def main() -> None:
     # ---------- truncate ------------------------------------------------
     try:
         tok = AutoTokenizer.from_pretrained(model_id, use_fast=True)
-        model_ctx = tok.model_max_length if tok.model_max_length > 0 else args.max_ctx_tokens
+        model_ctx = (
+            tok.model_max_length if tok.model_max_length > 0 else args.max_ctx_tokens
+        )
         doc = truncate_to_tokens(
             raw_doc, min(model_ctx, args.max_ctx_tokens) - SAFETY_MARGIN, tok
         )
@@ -200,7 +232,7 @@ def main() -> None:
         doc = raw_doc[:char_limit]
 
     out_path = Path(args.out)
-    out_path.write_text("", encoding="utf-8")           # clear file
+    out_path.write_text("", encoding="utf-8")  # clear file
     printer = Printer()
 
     # ---------------- RUN 1 ----------------
@@ -208,11 +240,14 @@ def main() -> None:
     base_chat = build_chat(doc, args.prompt)
     ttft1, gen1 = ttft_stream(client, model_id, base_chat, printer)
     print(f"\033[33mTTFT_1 = {ttft1:.3f}s\033[0m • first 80 chars: {gen1[:80]!r}")
-    log_jsonl(out_path, {
-        "run_index": 1,
-        "context_chars": len(doc),
-        "ttft_seconds": ttft1,
-    })
+    log_jsonl(
+        out_path,
+        {
+            "run_index": 1,
+            "context_chars": len(doc),
+            "ttft_seconds": ttft1,
+        },
+    )
 
     # -------------- optional follow‑ups --------------
     if args.num_following > 0:
@@ -226,16 +261,20 @@ def main() -> None:
             label = "post‑flush" if args.flush_cache else "continued"
             print(f"\n=== Run {run}: TTFT {label} ===")
             ttft, gen = ttft_stream(client, model_id, base_chat, printer)
-            print(f"\033[33mTTFT_{run} = {ttft:.3f}s\033[0m • "
-                  f"first 80 chars: {gen[:80]!r}")
-            log_jsonl(out_path, {
-                "run_index": run,
-                "context_chars": len(doc),
-                "ttft_seconds": ttft,
-            })
-            time.sleep(5)        # brief idle gap
+            print(
+                f"\033[33mTTFT_{run} = {ttft:.3f}s\033[0m • "
+                f"first 80 chars: {gen[:80]!r}"
+            )
+            log_jsonl(
+                out_path,
+                {
+                    "run_index": run,
+                    "context_chars": len(doc),
+                    "ttft_seconds": ttft,
+                },
+            )
+            time.sleep(5)  # brief idle gap
 
 
 if __name__ == "__main__":
     main()
-
