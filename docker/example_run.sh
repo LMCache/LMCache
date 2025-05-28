@@ -11,7 +11,6 @@ RUNTIME=nvidia
 
 docker run --runtime $RUNTIME --gpus all \
     --env "HF_TOKEN=<REPLACE_WITH_YOUR_HF_TOKEN>" \
-    --env "LMCACHE_USE_EXPERIMENTAL=True" \
     --env "LMCACHE_CHUNK_SIZE=256" \
     --env "LMCACHE_LOCAL_CPU=True" \
     --env "LMCACHE_MAX_LOCAL_CPU_SIZE=5" \
