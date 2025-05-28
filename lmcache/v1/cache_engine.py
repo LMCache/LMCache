@@ -155,7 +155,7 @@ class LMCacheEngine:
         """
         st = time.perf_counter()
         if mask is not None:
-            num_store_tokens = torch.sum(mask)
+            num_store_tokens = torch.sum(mask).item()
         else:
             num_store_tokens = len(tokens)
         monitor_req_id = self.stats_monitor.on_store_request(num_store_tokens)
@@ -694,7 +694,7 @@ class LayerwiseLMCacheEngine(LMCacheEngine):
         # synchronize the last layer
         next(mem_obj_consumer)
 
-        retrieved_tokens = torch.sum(ret_mask)
+        retrieved_tokens = torch.sum(ret_mask).item()
         self.stats_monitor.on_retrieve_finished(monitor_req_id, retrieved_tokens)
         logger.debug(
             f"Retrieved {retrieved_tokens} "

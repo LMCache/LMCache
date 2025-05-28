@@ -321,7 +321,7 @@ class LMCacheEngine:
             "token length does not match mask length"
         )
         # NOTE(Sixian): Now kv_tensors_mask always a suffix mask.
-        num_skip_tok = len(kv_tensors_mask) - torch.sum(kv_tensors_mask)
+        num_skip_tok = len(kv_tensors_mask) - torch.sum(kv_tensors_mask).item()
         assert num_skip_tok == 0 or skip_existing, (
             "When skip_existing is False, the mask must cover all tokens"
         )
@@ -395,7 +395,7 @@ class LMCacheEngine:
         num_skip_tok = 0
         ret_mask = torch.ones_like(tokens, dtype=torch.bool)
         if mask is not None:
-            num_skip_tok = len(mask) - torch.sum(mask)
+            num_skip_tok = len(mask) - torch.sum(mask).item()
             num_skip_chunk = num_skip_tok // self.chunk_size
         ret_mask[:num_skip_tok] = False
 
