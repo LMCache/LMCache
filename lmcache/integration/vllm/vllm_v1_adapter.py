@@ -203,6 +203,8 @@ class RequestTracker:
         """
         self.token_ids.extend(cached_request.new_token_ids)
         new_block_ids: list[int]
+        if len(cached_request.new_block_ids)==0:
+            return
         if not isinstance(cached_request.new_block_ids[0], list):
             new_block_ids = cached_request.new_block_ids
         else:
@@ -420,11 +422,11 @@ class LMCacheConnectorV1Impl:
         assert len(self.kv_caches) > 0
         kvcaches = list(self.kv_caches.values())
 
-        attn_metadata = forward_context.attn_metadata
-        if attn_metadata is None:
-            logger.warning(
-                "In connector.start_load_kv, but the attn_metadata is None")
-            return
+        # attn_metadata = forward_context.attn_metadata
+        # if attn_metadata is None:
+        #     logger.warning(
+        #         "In connector.start_load_kv, but the attn_metadata is None")
+        #     return
 
         assert self.lmcache_engine is not None
 
