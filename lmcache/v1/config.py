@@ -98,6 +98,12 @@ class LMCacheEngineConfig:
     # The url of the actual remote lmcache instance for auditing
     audit_actual_remote_url: Optional[str] = None
 
+    # (Optional) Weka/CuFile related configurations
+    # The path under the WekaFS mount that the cache will be stored
+    weka_path: Optional[str] = None
+    # Size of CuFile Buffer in MiB
+    cufile_buffer_size: Optional[int] = None
+
     @staticmethod
     def from_defaults(
         chunk_size: int = 256,
@@ -306,6 +312,9 @@ class LMCacheEngineConfig:
 
         audit_actual_remote_url = config.get("audit_actual_remote_url", None)
 
+        weka_path = config.get("weka_path", None)
+        cufile_buffer_size = config.get("cufile_buffer_size", None)
+
         local_disk_path = _parse_local_disk(local_disk)
 
         match remote_url:
@@ -346,6 +355,8 @@ class LMCacheEngineConfig:
                 nixl_buffer_device,
                 nixl_enable_gc,
                 audit_actual_remote_url,
+                weka_path,
+                cufile_buffer_size,
             )
             .validate()
             .log_config()
@@ -499,6 +510,15 @@ class LMCacheEngineConfig:
             get_env_name("audit_actual_remote_url"),
             config.audit_actual_remote_url,
         )
+
+        config.weka_path = parse_env(
+            get_env_name("weka_path"),
+            config.weka_path,
+        )
+        config.cufile_buffer_size = parse_env(
+            get_env_name("cufile_buffer_size"),
+            config.cufile_buffer_size,
+        )
         return config.validate().log_config()
 
     def to_original_config(self) -> orig_config.LMCacheEngineConfig:
@@ -552,6 +572,7 @@ class LMCacheEngineConfig:
         """log the configuration in LMCache"""
         config_dict = {
             "chunk_size": self.chunk_size,
+            "cufile_buffer_size": self.cufile_buffer_size,
             "local_cpu": self.local_cpu,
             "max_local_cpu_size": f"{self.max_local_cpu_size} GB",
             "local_disk": self.local_disk,
@@ -575,6 +596,7 @@ class LMCacheEngineConfig:
             "nixl_buffer_size": self.nixl_buffer_size,
             "nixl_buffer_device": self.nixl_buffer_device,
             "nixl_enable_gc": self.nixl_enable_gc,
+            "weka_path": self.weka_path,
         }
         logger.info(f"LMCache Configuration: {config_dict}")
 
