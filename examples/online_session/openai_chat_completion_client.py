@@ -182,8 +182,8 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument(
         "--num_following",
         type=int,
-        default=0,
-        help="Extra measured requests after run 1.",
+        default=1,
+        help="Extra measured requests after run 1 to test cache retrieval.",
     )
     ap.add_argument(
         "--flush_cache",
@@ -211,7 +211,9 @@ def main() -> None:
     # ---------- choose / build the document ---------------------------
     if args.context_file is None:
         # flag omitted → synthetic filler
-        raw_doc = rand_ascii(FILLER_LEN_CHARS)
+        # here we will generate a random ASCII string based on the max ctx tokens, 
+        raw_doc = rand_ascii(args.max_ctx_tokens * 4)  # ≈4 chars/token
+        # here we want to make the synthetic filler longer and truncate it later after tokenization
     elif args.context_file == "":
         # flag present w/o file → bundled ffmpeg.txt
         raw_doc = Path(DEFAULT_FFMPEG).read_text(encoding="utf-8")
@@ -225,7 +227,7 @@ def main() -> None:
             tok.model_max_length if tok.model_max_length > 0 else args.max_ctx_tokens
         )
         doc = truncate_to_tokens(
-            raw_doc, min(model_ctx, args.max_ctx_tokens) - SAFETY_MARGIN, tok
+            raw_doc, min(model_ctx - SAFETY_MARGIN, args.max_ctx_tokens), tok
         )
     except Exception:
         char_limit = (args.max_ctx_tokens - SAFETY_MARGIN) * 4  # ≈4 chars/token
@@ -239,12 +241,12 @@ def main() -> None:
     print("\n=== Run 1: baseline TTFT ===")
     base_chat = build_chat(doc, args.prompt)
     ttft1, gen1 = ttft_stream(client, model_id, base_chat, printer)
-    print(f"\033[33mTTFT_1 = {ttft1:.3f}s\033[0m • first 80 chars: {gen1[:80]!r}")
+    print(f"\033[33mTTFT_1 = {ttft1:.3f}s\033")
     log_jsonl(
         out_path,
         {
             "run_index": 1,
-            "context_chars": len(doc),
+            "context_tokens": len(tok.encode(doc, add_special_tokens=False)),
             "ttft_seconds": ttft1,
         },
     )
@@ -263,13 +265,12 @@ def main() -> None:
             ttft, gen = ttft_stream(client, model_id, base_chat, printer)
             print(
                 f"\033[33mTTFT_{run} = {ttft:.3f}s\033[0m • "
-                f"first 80 chars: {gen[:80]!r}"
             )
             log_jsonl(
                 out_path,
                 {
                     "run_index": run,
-                    "context_chars": len(doc),
+                    "context_tokens": len(tok.encode(doc, add_special_tokens=False)),
                     "ttft_seconds": ttft,
                 },
             )
