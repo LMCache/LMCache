@@ -60,8 +60,8 @@ RUN cd /workspace/nixl/ && \
     uv build --wheel --out-dir /tmp/dist && \
     uv pip install /tmp/dist/nixl-0.3.0-cp312-cp312-linux_x86_64.whl
 # install build and runtime dependencies
-COPY ../requirements/common.txt common.txt
-COPY ../requirements/cuda.txt cuda.txt
+COPY ./requirements/common.txt common.txt
+COPY ./requirements/cuda.txt cuda.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
     . /opt/venv/bin/activate && \
     uv pip install torch==2.7.0 torchvision==0.22.0 && \
@@ -79,7 +79,7 @@ ENV VLLM_FA_CMAKE_GPU_ARCHES=${vllm_fa_cmake_gpu_arches}
 #################### WHEEL BUILD IMAGE ####################
 # FROM base AS build
 # install build dependencies
-COPY ../requirements/build.txt build.txt
+COPY ./requirements/build.txt build.txt
 # max jobs used by Ninja to build extensions
 ARG max_jobs=2
 ENV MAX_JOBS=${max_jobs}
