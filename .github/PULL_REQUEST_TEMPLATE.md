@@ -29,7 +29,6 @@ FIX #xxxx (*link existing issues this PR will resolve*)
 <p>The PR need to meet the following code quality standards:</p>
 
 <ul>
-    <li>Pass all linter checks. Please use <a href="https://github.com/LMCache/LMCache/blob/dev/format.sh"><code>format.sh</code></a> to format your code.</li>
     <li>The code need to be well-documented to ensure future contributors can easily understand the code.</li>
     <li> Please include sufficient tests to ensure the change is stay correct and robust. This includes both unit tests and integration tests.</li>
 </ul>
@@ -54,11 +53,11 @@ For example:
 
 To create a new release and publish `lmcache` Python package to PyPi:
 `git remote add upstream git@github.com:LMCache/LMCache.git`
-`gh release create vx.x.x --repo LMCache/LMCache --title "vx.x.x" --notes "<Add decsription>"`
+`gh release create vx.x.x --repo LMCache/LMCache --title "vx.x.x" --notes "<Add description>"`
 
 For example:
 `git remote add upstream git@github.com:LMCache/LMCache.git`
-`gh release create v0.3.0 --repo LMCache/LMCache --title "v0.3.0" --notes "LMCache v0.3.0 is a feature realease. Users are encouraged to upgrade for the best experience."`
+`gh release create v0.3.0 --repo LMCache/LMCache --title "v0.3.0" --notes "LMCache v0.3.0 is a feature release. Users are encouraged to upgrade for the best experience."`
 
 > [!TIP]
 > The creation of a release and subsequent tag generation can be done alternatively from the LMCache [releases](https://github.com/LMCache/LMCache/releases) page.

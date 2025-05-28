@@ -6,10 +6,12 @@
 # -- Project information -----------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#project-information
 
+# Standard
+from dataclasses import asdict
 import os
 import sys
-from dataclasses import asdict
 
+# Third Party
 from sphinx.ext import autodoc
 from sphinxawesome_theme import ThemeOptions
 
@@ -72,11 +74,11 @@ html_permalinks_icon = "<span>#</span>"
 pygments_style = "sphinx"
 pygments_style_dark = "fruity"
 
-theme_options = ThemeOptions(# Add your theme options.
-   extra_header_link_icons = {
-         "GitHub" : {
-            "link" : "https://github.com/LMCache/LMCache/",
-            "icon" : (
+theme_options = ThemeOptions(  # Add your theme options.
+    extra_header_link_icons={
+        "GitHub": {
+            "link": "https://github.com/LMCache/LMCache/",
+            "icon": (
                 '<svg height="26px" style="margin-top:-2px;display:inline" '
                 'viewBox="0 0 45 44" '
                 'fill="currentColor" xmlns="http://www.w3.org/2000/svg">'
@@ -104,8 +106,8 @@ theme_options = ThemeOptions(# Add your theme options.
                  44.2 "
                 '22.647c0-11.996-9.726-21.72-21.722-21.72" '
                 'fill="currentColor"/></svg>'
-            )
-         }
+            ),
+        }
     }
 )
 
@@ -126,8 +128,10 @@ html_theme_options = asdict(theme_options)
 
 intersphinx_mapping = {
     "python": ("https://docs.python.org/3", None),
-    "typing_extensions":
-    ("https://typing-extensions.readthedocs.io/en/latest", None),
+    "typing_extensions": (
+        "https://typing-extensions.readthedocs.io/en/latest",
+        None,
+    ),
     "numpy": ("https://numpy.org/doc/stable", None),
     "torch": ("https://pytorch.org/docs/stable", None),
     "psutil": ("https://psutil.readthedocs.io/en/stable", None),

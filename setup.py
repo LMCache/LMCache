@@ -1,11 +1,10 @@
+# Standard
+from pathlib import Path
 import os
 import sys
-from pathlib import Path
 
-from setuptools import find_packages, setup, Extension
-from typing import List, Mapping, Tuple
-# It's good practice to import cpp_extension only when needed
-# from torch.utils import cpp_extension
+# Third Party
+from setuptools import find_packages, setup
 
 ROOT_DIR = Path(__file__).parent
 HIPIFY_DIR = os.path.join(ROOT_DIR, "csrc/")
@@ -13,8 +12,7 @@ HIPIFY_OUT_DIR =  os.path.join(ROOT_DIR, "csrc_hip/")
 
 # python -m build --sdist
 # will run python setup.py sdist --dist-dir dist
-BUILDING_SDIST = "sdist" in sys.argv or \
-                os.environ.get("NO_CUDA_EXT", "0") == "1" # Keep NO_CUDA_EXT for sdist logic
+BUILDING_SDIST = "sdist" in sys.argv or os.environ.get("NO_CUDA_EXT", "0") == "1"
 
 # New environment variable to choose between CUDA and HIP
 BUILD_WITH_HIP = os.environ.get("BUILD_WITH_HIP", "0") == "1"
@@ -67,8 +65,11 @@ def get_requirements() -> list[str]:
         for line in requirements:
             if line.startswith("-r "):
                 resolved_requirements += _read_requirements(line.split()[1])
-            elif not line.startswith("--") and not line.startswith(
-                    "#") and line.strip() != "":
+            elif (
+                not line.startswith("--")
+                and not line.startswith("#")
+                and line.strip() != ""
+            ):
                 resolved_requirements.append(line)
         return resolved_requirements
 
@@ -88,19 +89,26 @@ def cuda_extension() -> Tuple[List, Mapping]:
     ]
     ext_modules = [
         cpp_extension.CUDAExtension(
-            'lmcache.c_ops',
-            sources=cuda_sources,
+            "lmcache.c_ops",
+            [
+                "csrc/pybind.cpp",
+                "csrc/mem_kernels.cu",
+                "csrc/cal_cdf.cu",
+                "csrc/ac_enc.cu",
+                "csrc/ac_dec.cu",
+                "csrc/pos_kernels.cu",
+            ],
             extra_compile_args={
-                'cxx': ['-D_GLIBCXX_USE_CXX11_ABI=0'],
-                'nvcc': ['-D_GLIBCXX_USE_CXX11_ABI=0']
+                "cxx": ["-D_GLIBCXX_USE_CXX11_ABI=0"],
+                "nvcc": ["-D_GLIBCXX_USE_CXX11_ABI=0"],
             },
         ),
     ]
     cmdclass = {'build_ext': cpp_extension.BuildExtension}
     return ext_modules, cmdclass
 
+    
 def rocm_extension() -> Tuple[List, Mapping]:
-    from torch.utils import cpp_extension
 
     print("Building HIP extensions")
     hipify_wrapper()

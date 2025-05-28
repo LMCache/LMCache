@@ -12,18 +12,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Standard
 from typing import List, Optional
 
+# Third Party
 import torch
 
-import lmcache.c_ops as lmc_ops
-import lmcache.storage_backend.serde.cachegen_basics as CGBasics
+# First Party
 from lmcache.config import LMCacheEngineConfig, LMCacheEngineMetadata
 from lmcache.logging import init_logger
 from lmcache.storage_backend.serde.cachegen_basics import (
-    CacheGenConfig, CacheGenGPUBytestream, CacheGenGPUEncoderOutput)
+    CacheGenConfig,
+    CacheGenGPUBytestream,
+    CacheGenGPUEncoderOutput,
+)
 from lmcache.storage_backend.serde.serde import Deserializer
 from lmcache.utils import _lmcache_nvtx_annotate
+import lmcache.c_ops as lmc_ops
+import lmcache.storage_backend.serde.cachegen_basics as CGBasics
 
 logger = init_logger(__name__)
 
@@ -35,8 +41,7 @@ def quant(bins: int, xq: torch.Tensor, max1: float):
     return x
 
 
-def do_dequantize(t: torch.Tensor, bins: torch.Tensor,
-                  maxtensors: torch.Tensor):
+def do_dequantize(t: torch.Tensor, bins: torch.Tensor, maxtensors: torch.Tensor):
     """
     t: [nlayers, ntokens, nchannels]
     bins: [nlayers]
@@ -52,13 +57,12 @@ def do_dequantize(t: torch.Tensor, bins: torch.Tensor,
 @_lmcache_nvtx_annotate
 def recombine_bytes(bytes_tensor, output_lengths) -> torch.Tensor:
     output_buffer_size = CGBasics.CACHEGEN_GPU_MAX_TOKENS_PER_CHUNK
-    offsets = (output_lengths.flatten().cumsum(0).roll(1).reshape(
-        output_lengths.shape))
+    offsets = output_lengths.flatten().cumsum(0).roll(1).reshape(output_lengths.shape)
     offsets[0][0] = 0
     indexes = torch.arange(output_buffer_size, device=offsets.device).tile(
-        (output_lengths.shape[0], output_lengths.shape[1], 1))
-    final_indexes = (indexes +
-                     offsets[:, :, None]).clamp(max=len(bytes_tensor) - 1)
+        (output_lengths.shape[0], output_lengths.shape[1], 1)
+    )
+    final_indexes = (indexes + offsets[:, :, None]).clamp(max=len(bytes_tensor) - 1)
     return bytes_tensor[final_indexes]
 
 
@@ -74,10 +78,11 @@ def decode_chunk(
     """
     bytes_tensor = data_chunk.bytestream
     length_prefsum = (
-        data_chunk.bytestream_lengths.flatten().cumsum(0).reshape(
-            data_chunk.bytestream_lengths.shape))
-    lmc_ops.decode_fast_prefsum(cdf, bytes_tensor, length_prefsum,
-                                target_buffer)
+        data_chunk.bytestream_lengths.flatten()
+        .cumsum(0)
+        .reshape(data_chunk.bytestream_lengths.shape)
+    )
+    lmc_ops.decode_fast_prefsum(cdf, bytes_tensor, length_prefsum, target_buffer)
 
 
 @_lmcache_nvtx_annotate
@@ -95,14 +100,14 @@ def decode_function_gpu(
     Inputs:
         cdf: the cdf tensor, in shape [2 * nlayers, nchannels, bins + 1]
         data_chunks: the data_chunks in the encoder's output
-        layers_in_key: number of layers in K (or V) 
+        layers_in_key: number of layers in K (or V)
         (K/V should have the same number of layers)
         chunk_size: the chunk_size
         output: output buffer, in shape [ntokens, 2 * nlayers * nchannels]
 
     Outputs:
         key: the decoded key tensor in the shape of (layers, tokens, nchannels)
-        value: the decoded value tensor in the shape of 
+        value: the decoded value tensor in the shape of
         (layers, tokens, nchannels)
     """
     nlayers, nchannels, _ = cdf.shape
@@ -121,12 +126,14 @@ def decode_function_gpu(
 
 
 class CacheGenDeserializer(Deserializer):
-
-    def __init__(self, config: LMCacheEngineConfig,
-                 metadata: LMCacheEngineMetadata, dtype):
+    def __init__(
+        self,
+        config: LMCacheEngineConfig,
+        metadata: LMCacheEngineMetadata,
+        dtype,
+    ):
         self.dtype = dtype
-        self.cachegen_config = CacheGenConfig.from_model_name(
-            metadata.model_name)
+        self.cachegen_config = CacheGenConfig.from_model_name(metadata.model_name)
         self.chunk_size = config.chunk_size
         self.output_buffer: Optional[torch.Tensor] = None
         self.fmt = metadata.fmt
@@ -136,29 +143,30 @@ class CacheGenDeserializer(Deserializer):
     def make_key_bins(self, config: CacheGenConfig) -> torch.Tensor:
         ret = torch.zeros(config.nlayers)
         for spec in config.kspecs:
-            ret[spec.start_layer:spec.end_layer] = spec.bins
+            ret[spec.start_layer : spec.end_layer] = spec.bins
         return ret.cuda()
 
     def make_value_bins(self, config: CacheGenConfig) -> torch.Tensor:
         ret = torch.zeros(config.nlayers)
         for spec in config.vspecs:
-            ret[spec.start_layer:spec.end_layer] = spec.bins
+            ret[spec.start_layer : spec.end_layer] = spec.bins
         return ret.cuda()
 
     def get_output_buffer(self, nlayers: int, nchannels: int, ntokens: int):
-        if (self.output_buffer is None
-                or self.output_buffer.shape[1] != 2 * nlayers * nchannels):
+        if (
+            self.output_buffer is None
+            or self.output_buffer.shape[1] != 2 * nlayers * nchannels
+        ):
             self.output_buffer = torch.zeros(
-                (self.chunk_size, 2 * nlayers * nchannels),
-                dtype=torch.uint8).cuda()
+                (self.chunk_size, 2 * nlayers * nchannels), dtype=torch.uint8
+            ).cuda()
         return self.output_buffer[:ntokens, :]
 
     @_lmcache_nvtx_annotate
     def from_bytes(self, bs: bytes) -> torch.Tensor:
         encoder_output = CacheGenGPUEncoderOutput.from_bytes(bs)
         encoder_output.max_tensors_key = encoder_output.max_tensors_key.cuda()
-        encoder_output.max_tensors_value = (
-            encoder_output.max_tensors_value.cuda())
+        encoder_output.max_tensors_value = encoder_output.max_tensors_value.cuda()
 
         ntokens = encoder_output.max_tensors_key.shape[1]
         layers_in_key = encoder_output.max_tensors_key.shape[0]
@@ -189,24 +197,27 @@ class CacheGenDeserializer(Deserializer):
             self.value_bins = self.value_bins.cuda()
 
         key = do_dequantize(key, self.key_bins, encoder_output.max_tensors_key)
-        value = do_dequantize(value, self.value_bins,
-                              encoder_output.max_tensors_value)
+        value = do_dequantize(value, self.value_bins, encoder_output.max_tensors_value)
         """ merge key and value back and reshape """
         nlayers, ntokens, nchannels = key.shape
         blob = torch.stack([key, value])  # [2, nlayers, ntokens, nchannels]
-        blob = blob.reshape((
-            2,
-            nlayers,
-            ntokens,
-            encoder_output.num_heads,
-            encoder_output.head_size,
-        ))
+        blob = blob.reshape(
+            (
+                2,
+                nlayers,
+                ntokens,
+                encoder_output.num_heads,
+                encoder_output.head_size,
+            )
+        )
         match self.fmt:
             case "vllm":
                 return blob.permute((1, 0, 2, 3, 4)).to(
-                    self.dtype)  # [nlayers, 2, ntokens, num_heads, head_size]
+                    self.dtype
+                )  # [nlayers, 2, ntokens, num_heads, head_size]
             case "huggingface":
                 return blob.permute((1, 0, 3, 2, 4)).to(
-                    self.dtype)  # [nlayers, 2, num_heads, ntokens, head_size]
+                    self.dtype
+                )  # [nlayers, 2, num_heads, ntokens, head_size]
             case _:
                 raise RuntimeError("Unknown format %s" % self.fmt)

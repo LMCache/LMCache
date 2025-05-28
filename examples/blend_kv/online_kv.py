@@ -1,10 +1,14 @@
+# Standard
+from io import StringIO
 import sys
 import threading
 import time
-from io import StringIO
 
-from lmcache_vllm.blend_adapter import (OnlineKVPreCompute,
-                                        combine_input_prompt_chunks)
+# Third Party
+from lmcache_vllm.blend_adapter import (
+    OnlineKVPreCompute,
+    combine_input_prompt_chunks,
+)
 from openai import OpenAI
 from transformers import AutoTokenizer
 
@@ -31,7 +35,6 @@ for context_file in context_files:
 
 
 class Printer:
-
     def __init__(self):
         self._thread = None
         self._stop_event = threading.Event()
@@ -60,7 +63,6 @@ class Printer:
 
 
 class ChatSession:
-
     def __init__(self, context_chunks):
         self.client = client = OpenAI(
             # defaults to os.environ.get("OPENAI_API_KEY")
@@ -74,16 +76,14 @@ class ChatSession:
         self.context_chunks = context_chunks
         self.sys_prompt = "I've got a document, here's the content:```\n"
         user_prompt = combine_input_prompt_chunks(
-            [self.sys_prompt, *context_chunks, "\n```."])
+            [self.sys_prompt, *context_chunks, "\n```."]
+        )
         self.messages = [
             {
                 "role": "user",
                 "content": user_prompt,
             },
-            {
-                "role": "assistant",
-                "content": "I've got your document"
-            },
+            {"role": "assistant", "content": "I've got your document"},
         ]
 
         self.printer = Printer()
@@ -103,10 +103,8 @@ class ChatSession:
         end = None
 
         chat_completion = self.client.chat.completions.create(
-            messages=self.messages,
-            model=self.model,
-            temperature=0,
-            stream=True)
+            messages=self.messages, model=self.model, temperature=0, stream=True
+        )
 
         output_buffer = StringIO()
         for chunk in chat_completion:

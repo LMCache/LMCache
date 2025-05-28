@@ -39,6 +39,13 @@ Once you've [created a pull request](#how-can-i-contribute), maintainers will re
 
 Maintainers will perform "squash and merge" actions on PRs in this repo, so it doesn't matter how many commits your PR has, as they will end up being a single commit after merging.
 
+### DCO and Signed-off-by
+
+When contributing changes to the project, you must agree to the [DCO](DCO).
+Commits must include a `Signed-off-by:` header which certifies agreement with the terms of the [DCO](DCO).
+
+Using `-s` with `git commit` will automatically add this header.
+
 ## Development
 
 ### Set up your dev environment
@@ -77,15 +84,15 @@ pytest tests/test_connector.py::test_lm_connector
 
 ### Coding style
 
-LMCache follows the Python [pep8](https://peps.python.org/pep-0008/) coding style. We use [isort](https://pycqa.github.io/isort/), [mypy](https://github.com/python/mypy), [yapf](https://github.com/google/yapf), and [Ruff](https://docs.astral.sh/ruff/) for Python linting and formatting.
+LMCache follows the Python [pep8](https://peps.python.org/pep-0008/) coding style. 
+
+We use [[Ruff](https://docs.astral.sh/ruff/), and isort](https://pycqa.github.io/isort/) for Python linting and formatting.
+
+We use [mypy](https://github.com/python/mypy) for Python static code checking.
 
 We also use [codespell](https://github.com/codespell-project/codespell) for spell checking and [clang-format](https://clang.llvm.org/docs/ClangFormat.html) for C++ code formatting.
 
-You can invoke all linting and formatting with the following command:
-
-```sh
-bash format.sh
-```
+Code quality tools are managed by [pre-commit](https://pre-commit.com/) hooks. This means that code quality checks are run automatically before each commit.
 
 ## Your First Code Contribution
 

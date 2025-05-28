@@ -1,13 +1,14 @@
+# Third Party
 import pytest
 import torch
 
+# First Party
 from lmcache.cache_engine import LMCacheEngine
 from lmcache.config import LMCacheEngineConfig, LMCacheEngineMetadata
 
 
 def dumb_metadata(fmt="vllm", kv_shape=(32, 2, 256, 8, 128)):
-    return LMCacheEngineMetadata("test_model", 3, 123, fmt, torch.bfloat16,
-                                 kv_shape)
+    return LMCacheEngineMetadata("test_model", 3, 123, fmt, torch.bfloat16, kv_shape)
 
 
 def check_kv_cache_equal(left, right, num_tokens, fmt):
@@ -33,15 +34,11 @@ def check_kv_cache_equal(left, right, num_tokens, fmt):
 
         match fmt:
             case "huggingface":
-                assert (left_k[:, :num_tokens, :] == right_k[:, :num_tokens, :]
-                        ).all()
-                assert (left_v[:, :num_tokens, :] == right_v[:, :num_tokens, :]
-                        ).all()
+                assert (left_k[:, :num_tokens, :] == right_k[:, :num_tokens, :]).all()
+                assert (left_v[:, :num_tokens, :] == right_v[:, :num_tokens, :]).all()
             case "vllm":
-                assert (left_k[:num_tokens, :, :] == right_k[:num_tokens, :, :]
-                        ).all()
-                assert (left_v[:num_tokens, :, :] == right_v[:num_tokens, :, :]
-                        ).all()
+                assert (left_k[:num_tokens, :, :] == right_k[:num_tokens, :, :]).all()
+                assert (left_v[:num_tokens, :, :] == right_v[:num_tokens, :, :]).all()
 
 
 def generate_kv_cache(num_tokens, fmt, device):
@@ -49,8 +46,11 @@ def generate_kv_cache(num_tokens, fmt, device):
     num_layers = 32
     num_heads = 8
     head_size = 128
-    shape = ([num_tokens, num_heads, head_size]
-             if fmt == "vllm" else [num_heads, num_tokens, head_size])
+    shape = (
+        [num_tokens, num_heads, head_size]
+        if fmt == "vllm"
+        else [num_heads, num_tokens, head_size]
+    )
     dtype = torch.bfloat16 if fmt == "vllm" else torch.float16
 
     for i in range(num_layers):
@@ -138,11 +138,10 @@ def test_lru_fragmentation(backend, dst_device, autorelease):
 
     # The max number of chunks will be 3
     max_token = 513
-    max_size_in_gb = get_tensor_size(
-        kv_cache_1[0][0]) * 32 * 2 * max_token / 1024**3
-    cfg = LMCacheEngineConfig.from_legacy(chunk_size=256,
-                                          backend=backend,
-                                          max_local_cache_size=max_size_in_gb)
+    max_size_in_gb = get_tensor_size(kv_cache_1[0][0]) * 32 * 2 * max_token / 1024**3
+    cfg = LMCacheEngineConfig.from_legacy(
+        chunk_size=256, backend=backend, max_local_cache_size=max_size_in_gb
+    )
 
     # can store upto two chunks
 

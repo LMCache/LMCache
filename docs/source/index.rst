@@ -130,6 +130,7 @@ Documentation
 
    developer_guide/contributing
    developer_guide/docker_file
+   developer_guide/usage/index
 
 :raw-html:`<br />`
 
@@ -148,3 +149,6 @@ Documentation
 
    community/meetings
    community/blogs
+
+raw-html:`<br />`
+   

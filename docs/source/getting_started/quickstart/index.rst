@@ -8,7 +8,7 @@ KV Cache Offloading
 
 KV cache offloading allows you to move KV caches from GPU memory to CPU memory or other storage devices. This feature is particularly useful when:
 
-- There are requests shares the same prefix (e.g., long system prompt, re-using chat history in chat applications, or caching offline-processed data).
+- There are requests shares the same prefix (e.g., long system prompt, reusing chat history in chat applications, or caching offline-processed data).
 - The GPU memory is limited to save all the KV caches.
 
 By offloading KV caches, LMCache can reduce both time-to-first-token (TTFT) and GPU cycles.

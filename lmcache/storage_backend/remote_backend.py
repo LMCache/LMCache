@@ -12,18 +12,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Standard
+from typing import Iterable, Iterator, List, Optional, Tuple, Union
 import queue
 import threading
-from typing import Iterable, Iterator, List, Optional, Tuple, Union
 
+# Third Party
 import torch
 
+# First Party
 from lmcache.config import LMCacheEngineConfig, LMCacheEngineMetadata
 from lmcache.logging import init_logger
 from lmcache.storage_backend.abstract_backend import LMCBackendInterface
 from lmcache.storage_backend.connector import CreateConnector
 from lmcache.storage_backend.connector.base_connector import (
-    ConnectorType, check_connector_type)
+    ConnectorType,
+    check_connector_type,
+)
 from lmcache.storage_backend.serde import CreateSerde, Deserializer
 from lmcache.utils import CacheEngineKey, _lmcache_nvtx_annotate
 
@@ -42,49 +47,55 @@ class LMCRemoteBackend(LMCBackendInterface):
     Cache engine for storing the KV cache of the tokens in the remote server.
     """
 
-    def __init__(self,
-                 config: LMCacheEngineConfig,
-                 metadata: LMCacheEngineMetadata,
-                 dst_device: str = "cuda"):
+    def __init__(
+        self,
+        config: LMCacheEngineConfig,
+        metadata: LMCacheEngineMetadata,
+        dst_device: str = "cuda",
+    ):
         """
         Throws:
             RuntimeError if the loaded configuration does not match the current
                 configuration
         """
         super().__init__(dst_device)
-        #self.existing_keys: Set[CacheEngineKey] = set()
+        # self.existing_keys: Set[CacheEngineKey] = set()
         self.put_thread = None
 
         assert config.remote_url is not None, (
-            "Need to provide remote_url when"
-            " using LMCRemoteBackend")
+            "Need to provide remote_url when using LMCRemoteBackend"
+        )
         self.connection = CreateConnector(config.remote_url, dst_device)
         self.remote_url = config.remote_url
 
         if check_connector_type(self.connection) == ConnectorType.BYTES:
             assert config.remote_serde is not None, (
-                "Need to provide remote_serde when"
-                f" using {config.remote_url}")
+                f"Need to provide remote_serde when using {config.remote_url}"
+            )
         elif check_connector_type(self.connection) == ConnectorType.TENSOR:
             assert config.remote_serde is None, (
-                "Cannot provide remote_serde when"
-                f" using {config.remote_url}")
+                f"Cannot provide remote_serde when using {config.remote_url}"
+            )
 
-        s, d = CreateSerde(
-            config.remote_serde, config,
-            metadata) if config.remote_serde is not None else (None, None)
+        s, d = (
+            CreateSerde(config.remote_serde, config, metadata)
+            if config.remote_serde is not None
+            else (None, None)
+        )
 
         self.serializer = s
         self.deserializer = d
         # For async put
         self.put_queue: queue.Queue[
-            Union[Tuple[CacheEngineKey, torch.Tensor],
-                  RemoteBackendEndSignal]] = queue.Queue()
+            Union[Tuple[CacheEngineKey, torch.Tensor], RemoteBackendEndSignal]
+        ] = queue.Queue()
         self.put_thread = threading.Thread(target=self.put_worker, args=())
         self.put_thread.start()
 
     @_lmcache_nvtx_annotate
-    def put_worker(self, ):
+    def put_worker(
+        self,
+    ):
         # put_stream = torch.cuda.Stream()
         while True:
             item = self.put_queue.get()
@@ -117,7 +128,7 @@ class LMCRemoteBackend(LMCBackendInterface):
         list the remote keys (and also update the 'cached' existing keys set)
         """
         keys = self.connection.list()
-        #for key in keys:
+        # for key in keys:
         #    self.existing_keys.add(self._split_key(key))
         return [self._split_key(key) for key in keys]
 
@@ -134,9 +145,9 @@ class LMCRemoteBackend(LMCBackendInterface):
         Returns:
             True if the cache engine contains the key, False otherwise
         """
-        #if key in self.existing_keys:
+        # if key in self.existing_keys:
         #    return True
-        #else:
+        # else:
         flag = self.connection.exists(self._combine_key(key))
         #    if flag:
         #        self.existing_keys.add(key)
@@ -154,7 +165,7 @@ class LMCRemoteBackend(LMCBackendInterface):
         else:
             obj = kv_chunk
         self.connection.set(self._combine_key(key), obj)
-        #self.existing_keys.add(key)
+        # self.existing_keys.add(key)
 
     def put(
         self,
@@ -200,7 +211,8 @@ class LMCRemoteBackend(LMCBackendInterface):
             if len(obj) == 0:
                 return None
             assert self.deserializer is not None, (
-                f"Need to provide deserializer for {self.remote_url}")
+                f"Need to provide deserializer for {self.remote_url}"
+            )
             return self.deserializer.from_bytes(obj).to(self.dst_device)
         else:
             assert isinstance(obj, torch.Tensor)
@@ -224,10 +236,12 @@ class LMCPipelinedRemoteBackend(LMCRemoteBackend):
     Implements the pipelined get functionality for the remote backend.
     """
 
-    def __init__(self,
-                 config: LMCacheEngineConfig,
-                 metadata: LMCacheEngineMetadata,
-                 dst_device: str = "cuda"):
+    def __init__(
+        self,
+        config: LMCacheEngineConfig,
+        metadata: LMCacheEngineMetadata,
+        dst_device: str = "cuda",
+    ):
         """
         Throws:
             RuntimeError if the loaded configuration does not match the current
@@ -239,30 +253,34 @@ class LMCPipelinedRemoteBackend(LMCRemoteBackend):
         self.deserializer: Deserializer
 
         # Comment out existing_keys for now to avoid consistency issues
-        #self.existing_keys = set()
+        # self.existing_keys = set()
         self.network_thread = None
         self.deserialize_thread = None
 
         # Initialize network get thread queue
         logger.debug("Initializing network thread queue")
-        self.network_queue: queue.Queue[Union[Tuple[
-            int, CacheEngineKey], RemoteBackendEndSignal]] = queue.Queue()
-        self.network_thread = threading.Thread(target=self.network_worker,
-                                               args=())
+        self.network_queue: queue.Queue[
+            Union[Tuple[int, CacheEngineKey], RemoteBackendEndSignal]
+        ] = queue.Queue()
+        self.network_thread = threading.Thread(target=self.network_worker, args=())
         self.network_thread.start()
 
         # Initialize network get thread queue
         logger.debug("Initializing deserial thread queue")
-        self.deserialize_queue: queue.Queue[Union[Tuple[
-            int, Optional[bytes]], RemoteBackendEndSignal]] = queue.Queue()
+        self.deserialize_queue: queue.Queue[
+            Union[Tuple[int, Optional[bytes]], RemoteBackendEndSignal]
+        ] = queue.Queue()
         self.deserialize_thread = threading.Thread(
-            target=self.deserialize_worker, args=())
+            target=self.deserialize_worker, args=()
+        )
         self.deserialize_thread.start()
 
         self.result_list: List[Optional[torch.Tensor]] = []
 
     @_lmcache_nvtx_annotate
-    def network_worker(self, ):
+    def network_worker(
+        self,
+    ):
         while True:
             item = self.network_queue.get()
             if isinstance(item, RemoteBackendEndSignal):
@@ -277,7 +295,9 @@ class LMCPipelinedRemoteBackend(LMCRemoteBackend):
             self.network_queue.task_done()
 
     @_lmcache_nvtx_annotate
-    def deserialize_worker(self, ):
+    def deserialize_worker(
+        self,
+    ):
         while True:
             item = self.deserialize_queue.get()
             if isinstance(item, RemoteBackendEndSignal):
@@ -312,8 +332,7 @@ class LMCPipelinedRemoteBackend(LMCRemoteBackend):
             self.network_thread.join()
             logger.info("Closed the network worker")
 
-        if (self.deserialize_thread is not None
-                and self.deserialize_thread.is_alive()):
+        if self.deserialize_thread is not None and self.deserialize_thread.is_alive():
             self.deserialize_queue.put(RemoteBackendEndSignal())
             self.deserialize_thread.join()
             logger.info("Closed the deserialize worker")

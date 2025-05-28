@@ -1,5 +1,0 @@
-chunk_size: 256
-local_device: "cpu"
-
-# Whether save the kv cache for decoded tokens
-save_decode_cache: True

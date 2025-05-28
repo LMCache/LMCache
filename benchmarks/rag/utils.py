@@ -1,3 +1,6 @@
+# Standard
+from enum import Enum
+from logging import Logger
 import asyncio
 import collections
 import json
@@ -5,21 +8,21 @@ import logging
 import re
 import string
 import threading
-from enum import Enum
-from logging import Logger
 
+# Third Party
 from rouge_score import rouge_scorer
 
 
 def build_format(color):
     reset = "\x1b[0m"
     underline = "\x1b[3m"
-    return f"{color}[%(asctime)s] %(levelname)s:{reset} %(message)s " + \
-           f"{underline}(%(filename)s:%(lineno)d:%(name)s){reset}"
+    return (
+        f"{color}[%(asctime)s] %(levelname)s:{reset} %(message)s "
+        + f"{underline}(%(filename)s:%(lineno)d:%(name)s){reset}"
+    )
 
 
 class CustomFormatter(logging.Formatter):
-
     grey = "\x1b[1m"
     green = "\x1b[32;20m"
     yellow = "\x1b[33;20m"
@@ -65,7 +68,8 @@ class AsyncLoopWrapper:
         async def wait_for_tasks():
             current_task = asyncio.current_task(cls._loop)
             tasks = [
-                task for task in asyncio.all_tasks(cls._loop)
+                task
+                for task in asyncio.all_tasks(cls._loop)
                 if not task.done() and task is not current_task
             ]
             cls._logger.info(f"Waiting for {len(tasks)} tasks to finish")
@@ -143,7 +147,7 @@ def normalize_question(question):
 
 
 def parse_generation(s):
-    s = s.lstrip('\n').split('\n')[0]
+    s = s.lstrip("\n").split("\n")[0]
     if s.startswith("Yes") or s.startswith("yes"):
         s = "Yes"
     elif (s.split()[0]).startswith("No") or (s.split()[0]).startswith("no"):
@@ -152,7 +156,6 @@ def parse_generation(s):
 
 
 def normalize_answer(s):
-
     def remove_articles(text):
         return re.sub(r"\b(a|an|the)\b", " ", text)
 
@@ -170,11 +173,8 @@ def normalize_answer(s):
 
 
 def build_qa_prompt(example, query_prompt):
-
     q = normalize_question(example["question"])
-    doc_prompts = [
-        f"{ctx['title']}\n\n{ctx['text']}\n\n" for ctx in example["ctxs"]
-    ]
+    doc_prompts = [f"{ctx['title']}\n\n{ctx['text']}\n\n" for ctx in example["ctxs"]]
     q_prompt = f"{query_prompt}{q}\nAnswer:"
     return doc_prompts, q_prompt
 
@@ -204,13 +204,18 @@ def compute_f1(a_pred, a_gold, tokenizer):
 
 
 def compute_rl(pred, gold):
-    scorer = rouge_scorer.RougeScorer(['rougeL'], use_stemmer=True)
-    rougeL = scorer.score(gold, pred)['rougeL'].fmeasure
+    scorer = rouge_scorer.RougeScorer(["rougeL"], use_stemmer=True)
+    rougeL = scorer.score(gold, pred)["rougeL"].fmeasure
     return rougeL
 
 
-def build_rag_prompt(system_prompt, example, query_prompt, separator: str,
-                     prompt_build_method: PromptBuildMethodType):
+def build_rag_prompt(
+    system_prompt,
+    example,
+    query_prompt,
+    separator: str,
+    prompt_build_method: PromptBuildMethodType,
+):
     doc_prompts = None
     q_prompt = None
     if prompt_build_method == PromptBuildMethodType.FEW_SHOT:

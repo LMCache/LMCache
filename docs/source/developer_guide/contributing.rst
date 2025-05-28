@@ -34,9 +34,6 @@ To run tests (existing + newly added), use the following:
     pip install -r requirements/lint.txt
     pip install -r requirements/test.txt
 
-    # linting and formatting
-    bash format.sh
-
     # Unit tests (run in root directory)
     pytest
 

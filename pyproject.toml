@@ -32,9 +32,9 @@ requires-python = ">=3.10,<3.13"
 dynamic = ["dependencies", "version"]
 
 [project.scripts]
-lmcache_server="lmcache.server.__main__:main"
-lmcache_experimental_server="lmcache.experimental.server.__main__:main"
-lmcache_controller="lmcache.experimental.api_server.__main__:main"
+lmcache_v0_server="lmcache.server.__main__:main"
+lmcache_server="lmcache.v1.server.__main__:main"
+lmcache_controller="lmcache.v1.api_server.__main__:main"
 
 [project.urls]
 homepage = "https://docs.lmcache.ai"
@@ -54,8 +54,8 @@ where = [""]
 include = ["lmcache", "lmcache*"]
 
 [tool.ruff]
-# Allow lines to be as long as 80.
-line-length = 80
+# same as Black's default line length
+line-length = 88
 
 [tool.ruff.lint]
 select = [
@@ -67,8 +67,12 @@ select = [
     # "UP",
     # flake8-bugbear
     "B",
-    # isort
+    # flake8-simplify
+    #"SIM",
+    # Ruff does not support isort's import_headings feature, yet.
     # "I",
+    # flake8-logging-format
+    #"G",
 ]
 ignore = [
     # star imports
@@ -81,18 +85,45 @@ ignore = [
     "UP032",
 ]
 
+[tool.ruff.lint.isort]
+# same as .isort.cfg
+from-first = true
+# not supported yet
+# import-heading-future=Future
+# import-heading-stdlib=Standard
+# import-heading-thirdparty=Third Party
+# import-heading-firstparty=First Party
+# import-heading-localfolder=Local
+
 [tool.mypy]
-python_version = "3.10"
+modules = ["lmcache", "tests"]
+
+# TODO: tighten MyPy checks by enabling these checks over time.
+disable_error_code = [
+    "annotation-unchecked",
+    "union-attr",
+    "var-annotated",
+    "arg-type",
+    "call-arg",
+    "import-untyped",
+    "attr-defined",
+    "return-value",
+    "assignment",
+    "call-overload",
+    "misc",
+]
 
 ignore_missing_imports = true
-check_untyped_defs = true
-follow_imports = "silent"
+explicit_package_bases = true
 
-# After fixing type errors resulting from follow_imports: "skip" -> "silent",
-# move the directory here and remove it from format.sh and mypy.yaml
-files = [
-    "lmcache"
-]
+# TODO: tighten MyPy checks by enabling these checks over time.
+check_untyped_defs = false
+disallow_incomplete_defs = false
+disallow_untyped_defs = false
+disallow_untyped_calls = false
+warn_return_any = false
+
+follow_imports = "silent"
 
 # use a custom manylinux image for cibuildwheel that contains CUDA 12.4
 [tool.cibuildwheel]

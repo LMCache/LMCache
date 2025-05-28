@@ -12,14 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Standard
+from dataclasses import dataclass
+from typing import Dict, List, Union
 import os
 import threading
 import time
-from dataclasses import dataclass
-from typing import Dict, List, Union
 
+# Third Party
 import prometheus_client
 
+# First Party
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
 from lmcache.utils import thread_safe
@@ -75,8 +78,9 @@ class RetrieveRequestStats:
     def retrieve_speed(self):
         if self.time_to_retrieve() == 0:
             return 0
-        return (self.local_hit_tokens + self.remote_hit_tokens) /\
-                self.time_to_retrieve()
+        return (
+            self.local_hit_tokens + self.remote_hit_tokens
+        ) / self.time_to_retrieve()
 
 
 @dataclass
@@ -97,7 +101,6 @@ class StoreRequestStats:
 
 
 class LMCStatsMonitor:
-
     def __init__(self):
         # Interval metrics that will be reset after each log
         # Accumulate incremental values in the Prometheus Counter
@@ -132,15 +135,17 @@ class LMCStatsMonitor:
     @thread_safe
     def on_retrieve_request(self, num_tokens: int) -> int:
         """
-        Returns the internal "request id" that will be used in 
+        Returns the internal "request id" that will be used in
         on_retrieve_finished
         """
         curr_time = time.time()
-        retrieve_stats = RetrieveRequestStats(num_tokens=num_tokens,
-                                              local_hit_tokens=0,
-                                              remote_hit_tokens=0,
-                                              start_time=curr_time,
-                                              end_time=0)
+        retrieve_stats = RetrieveRequestStats(
+            num_tokens=num_tokens,
+            local_hit_tokens=0,
+            remote_hit_tokens=0,
+            start_time=curr_time,
+            end_time=0,
+        )
         self.interval_requested_tokens += num_tokens
         self.interval_retrieve_requests += 1
         self.retrieve_requests[self.retrieve_request_id] = retrieve_stats
@@ -162,9 +167,9 @@ class LMCStatsMonitor:
         Returns the internal "request id" that will be used in on_store_finished
         """
         curr_time = time.time()
-        store_stats = StoreRequestStats(num_tokens=num_tokens,
-                                        start_time=curr_time,
-                                        end_time=0)
+        store_stats = StoreRequestStats(
+            num_tokens=num_tokens, start_time=curr_time, end_time=0
+        )
         self.interval_store_requests += 1
         self.store_requests[self.store_request_id] = store_stats
         self.store_request_id += 1
@@ -214,7 +219,7 @@ class LMCStatsMonitor:
     @thread_safe
     def _clear(self):
         """
-        Clear all the distribution stats 
+        Clear all the distribution stats
         """
         self.interval_retrieve_requests = 0
         self.interval_store_requests = 0
@@ -246,32 +251,35 @@ class LMCStatsMonitor:
     @thread_safe
     def get_stats_and_clear(self) -> LMCacheStats:
         """
-        This function should be called with by prometheus adapter with 
+        This function should be called with by prometheus adapter with
         a specific interval.
-        The function will return the latest states between the current 
+        The function will return the latest states between the current
         call and the previous call.
         """
-        cache_hit_rate = 0 if self.interval_requested_tokens == 0 else \
-                self.interval_hit_tokens / self.interval_requested_tokens
+        cache_hit_rate = (
+            0
+            if self.interval_requested_tokens == 0
+            else self.interval_hit_tokens / self.interval_requested_tokens
+        )
 
         def filter_out_invalid(stats: List[float]):
             return [x for x in stats if x != 0]
 
-        time_to_retrieve = filter_out_invalid([
-            stats.time_to_retrieve()
-            for stats in self.retrieve_requests.values()
-        ])
+        time_to_retrieve = filter_out_invalid(
+            [stats.time_to_retrieve() for stats in self.retrieve_requests.values()]
+        )
 
         time_to_store = filter_out_invalid(
-            [stats.time_to_store() for stats in self.store_requests.values()])
+            [stats.time_to_store() for stats in self.store_requests.values()]
+        )
 
-        retrieve_speed = filter_out_invalid([
-            stats.retrieve_speed()
-            for stats in self.retrieve_requests.values()
-        ])
+        retrieve_speed = filter_out_invalid(
+            [stats.retrieve_speed() for stats in self.retrieve_requests.values()]
+        )
 
         store_speed = filter_out_invalid(
-            [stats.store_speed() for stats in self.store_requests.values()])
+            [stats.store_speed() for stats in self.store_requests.values()]
+        )
 
         ret = LMCacheStats(
             interval_retrieve_requests=self.interval_retrieve_requests,
@@ -282,12 +290,9 @@ class LMCStatsMonitor:
             interval_remote_read_bytes=self.interval_remote_read_bytes,
             interval_remote_write_requests=self.interval_remote_write_requests,
             interval_remote_write_bytes=self.interval_remote_write_bytes,
-            interval_remote_time_to_get=self.interval_remote_time_to_get.copy(
-            ),
-            interval_remote_time_to_put=self.interval_remote_time_to_put.copy(
-            ),
-            interval_remote_time_to_get_sync=self.
-            interval_remote_time_to_get_sync.copy(),
+            interval_remote_time_to_get=self.interval_remote_time_to_get.copy(),
+            interval_remote_time_to_put=self.interval_remote_time_to_put.copy(),
+            interval_remote_time_to_get_sync=self.interval_remote_time_to_get_sync.copy(),
             cache_hit_rate=cache_hit_rate,
             local_cache_usage_bytes=self.local_cache_usage_bytes,
             remote_cache_usage_bytes=self.remote_cache_usage_bytes,
@@ -364,8 +369,7 @@ class PrometheusLogger:
 
         self.counter_num_remote_read_bytes = self._counter_cls(
             name="lmcache:num_remote_read_bytes",
-            documentation="Total number of bytes read from "
-            "remote backends in lmcache",
+            documentation="Total number of bytes read from remote backends in lmcache",
             labelnames=labelnames,
         )
 
@@ -378,8 +382,7 @@ class PrometheusLogger:
 
         self.counter_num_remote_write_bytes = self._counter_cls(
             name="lmcache:num_remote_write_bytes",
-            documentation="Total number of bytes write to "
-            "remote backends in lmcache",
+            documentation="Total number of bytes write to remote backends in lmcache",
             labelnames=labelnames,
         )
 
@@ -387,29 +390,47 @@ class PrometheusLogger:
             name="lmcache:cache_hit_rate",
             documentation="Cache hit rate of lmcache since last log",
             labelnames=labelnames,
-            multiprocess_mode="livemostrecent")
+            multiprocess_mode="livemostrecent",
+        )
 
         self.gauge_local_cache_usage = self._gauge_cls(
             name="lmcache:local_cache_usage",
             documentation="Local cache usage (bytes) of lmcache",
             labelnames=labelnames,
-            multiprocess_mode="sum")
+            multiprocess_mode="sum",
+        )
 
         self.gauge_remote_cache_usage = self._gauge_cls(
             name="lmcache:remote_cache_usage",
             documentation="Remote cache usage (bytes) of lmcache",
             labelnames=labelnames,
-            multiprocess_mode="sum")
+            multiprocess_mode="sum",
+        )
 
         self.gauge_local_storage_usage = self._gauge_cls(
             name="lmcache:local_storage_usage",
             documentation="Local storage usage (bytes) of lmcache",
             labelnames=labelnames,
-            multiprocess_mode="sum")
+            multiprocess_mode="sum",
+        )
 
         time_to_retrieve_buckets = [
-            0.001, 0.005, 0.01, 0.02, 0.04, 0.06, 0.08, 0.1, 0.25, 0.5, 0.75,
-            1.0, 2.5, 5.0, 7.5, 10.0
+            0.001,
+            0.005,
+            0.01,
+            0.02,
+            0.04,
+            0.06,
+            0.08,
+            0.1,
+            0.25,
+            0.5,
+            0.75,
+            1.0,
+            2.5,
+            5.0,
+            7.5,
+            10.0,
         ]
         self.histogram_time_to_retrieve = self._histogram_cls(
             name="lmcache:time_to_retrieve",
@@ -419,8 +440,22 @@ class PrometheusLogger:
         )
 
         time_to_store_buckets = [
-            0.001, 0.005, 0.01, 0.02, 0.04, 0.06, 0.08, 0.1, 0.25, 0.5, 0.75,
-            1.0, 2.5, 5.0, 7.5, 10.0
+            0.001,
+            0.005,
+            0.01,
+            0.02,
+            0.04,
+            0.06,
+            0.08,
+            0.1,
+            0.25,
+            0.5,
+            0.75,
+            1.0,
+            2.5,
+            5.0,
+            7.5,
+            10.0,
         ]
         self.histogram_time_to_store = self._histogram_cls(
             name="lmcache:time_to_store",
@@ -430,8 +465,21 @@ class PrometheusLogger:
         )
 
         retrieve_speed_buckets = [
-            1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384,
-            32768, 65536
+            1,
+            8,
+            16,
+            32,
+            64,
+            128,
+            256,
+            512,
+            1024,
+            2048,
+            4096,
+            8192,
+            16384,
+            32768,
+            65536,
         ]
         self.histogram_retrieve_speed = self._histogram_cls(
             name="lmcache:retrieve_speed",
@@ -441,8 +489,21 @@ class PrometheusLogger:
         )
 
         store_speed_buckets = [
-            1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384,
-            32768, 65536
+            1,
+            8,
+            16,
+            32,
+            64,
+            128,
+            256,
+            512,
+            1024,
+            2048,
+            4096,
+            8192,
+            16384,
+            32768,
+            65536,
         ]
         self.histogram_store_speed = self._histogram_cls(
             name="lmcache:store_speed",
@@ -452,8 +513,22 @@ class PrometheusLogger:
         )
 
         remote_time_to_get = [
-            1, 5, 10, 20, 40, 60, 80, 100, 250, 500, 750, 1000, 2500, 5000,
-            7500, 10000
+            1,
+            5,
+            10,
+            20,
+            40,
+            60,
+            80,
+            100,
+            250,
+            500,
+            750,
+            1000,
+            2500,
+            5000,
+            7500,
+            10000,
         ]
         self.histogram_remote_time_to_get = self._histogram_cls(
             name="lmcache:remote_time_to_get",
@@ -463,8 +538,22 @@ class PrometheusLogger:
         )
 
         remote_time_to_put = [
-            1, 5, 10, 20, 40, 60, 80, 100, 250, 500, 750, 1000, 2500, 5000,
-            7500, 10000
+            1,
+            5,
+            10,
+            20,
+            40,
+            60,
+            80,
+            100,
+            250,
+            500,
+            750,
+            1000,
+            2500,
+            5000,
+            7500,
+            10000,
         ]
         self.histogram_remote_time_to_put = self._histogram_cls(
             name="lmcache:remote_time_to_put",
@@ -474,8 +563,22 @@ class PrometheusLogger:
         )
 
         remote_time_to_get_sync = [
-            1, 5, 10, 20, 40, 60, 80, 100, 250, 500, 750, 1000, 2500, 5000,
-            7500, 10000
+            1,
+            5,
+            10,
+            20,
+            40,
+            60,
+            80,
+            100,
+            250,
+            500,
+            750,
+            1000,
+            2500,
+            5000,
+            7500,
+            10000,
         ]
         self.histogram_remote_time_to_get_sync = self._histogram_cls(
             name="lmcache:remote_time_to_get_sync",
@@ -495,65 +598,72 @@ class PrometheusLogger:
             return
         counter.labels(**self.labels).inc(data)
 
-    def _log_histogram(self, histogram, data: Union[List[int],
-                                                    List[float]]) -> None:
+    def _log_histogram(self, histogram, data: Union[List[int], List[float]]) -> None:
         # Convenience function for logging to histogram.
         for value in data:
             histogram.labels(**self.labels).observe(value)
 
     def log_prometheus(self, stats: LMCacheStats):
-        self._log_counter(self.counter_num_retrieve_requests,
-                          stats.interval_retrieve_requests)
-        self._log_counter(self.counter_num_store_requests,
-                          stats.interval_store_requests)
+        self._log_counter(
+            self.counter_num_retrieve_requests, stats.interval_retrieve_requests
+        )
+        self._log_counter(
+            self.counter_num_store_requests, stats.interval_store_requests
+        )
 
-        self._log_counter(self.counter_num_requested_tokens,
-                          stats.interval_requested_tokens)
-        self._log_counter(self.counter_num_hit_tokens,
-                          stats.interval_hit_tokens)
+        self._log_counter(
+            self.counter_num_requested_tokens, stats.interval_requested_tokens
+        )
+        self._log_counter(self.counter_num_hit_tokens, stats.interval_hit_tokens)
 
-        self._log_counter(self.counter_num_remote_read_requests,
-                          stats.interval_remote_read_requests)
-        self._log_counter(self.counter_num_remote_read_bytes,
-                          stats.interval_remote_read_bytes)
-        self._log_counter(self.counter_num_remote_write_requests,
-                          stats.interval_remote_write_requests)
-        self._log_counter(self.counter_num_remote_write_bytes,
-                          stats.interval_remote_write_bytes)
+        self._log_counter(
+            self.counter_num_remote_read_requests,
+            stats.interval_remote_read_requests,
+        )
+        self._log_counter(
+            self.counter_num_remote_read_bytes, stats.interval_remote_read_bytes
+        )
+        self._log_counter(
+            self.counter_num_remote_write_requests,
+            stats.interval_remote_write_requests,
+        )
+        self._log_counter(
+            self.counter_num_remote_write_bytes,
+            stats.interval_remote_write_bytes,
+        )
 
         self._log_gauge(self.gauge_cache_hit_rate, stats.cache_hit_rate)
 
-        self._log_gauge(self.gauge_local_cache_usage,
-                        stats.local_cache_usage_bytes)
+        self._log_gauge(self.gauge_local_cache_usage, stats.local_cache_usage_bytes)
 
-        self._log_gauge(self.gauge_remote_cache_usage,
-                        stats.remote_cache_usage_bytes)
+        self._log_gauge(self.gauge_remote_cache_usage, stats.remote_cache_usage_bytes)
 
-        self._log_gauge(self.gauge_local_storage_usage,
-                        stats.local_storage_usage_bytes)
+        self._log_gauge(self.gauge_local_storage_usage, stats.local_storage_usage_bytes)
 
-        self._log_histogram(self.histogram_time_to_retrieve,
-                            stats.time_to_retrieve)
+        self._log_histogram(self.histogram_time_to_retrieve, stats.time_to_retrieve)
 
         self._log_histogram(self.histogram_time_to_store, stats.time_to_store)
 
-        self._log_histogram(self.histogram_retrieve_speed,
-                            stats.retrieve_speed)
+        self._log_histogram(self.histogram_retrieve_speed, stats.retrieve_speed)
 
         self._log_histogram(self.histogram_store_speed, stats.store_speed)
 
-        self._log_histogram(self.histogram_remote_time_to_get,
-                            stats.interval_remote_time_to_get)
-        self._log_histogram(self.histogram_remote_time_to_put,
-                            stats.interval_remote_time_to_put)
-        self._log_histogram(self.histogram_remote_time_to_get_sync,
-                            stats.interval_remote_time_to_get_sync)
+        self._log_histogram(
+            self.histogram_remote_time_to_get, stats.interval_remote_time_to_get
+        )
+        self._log_histogram(
+            self.histogram_remote_time_to_put, stats.interval_remote_time_to_put
+        )
+        self._log_histogram(
+            self.histogram_remote_time_to_get_sync,
+            stats.interval_remote_time_to_get_sync,
+        )
 
     @staticmethod
     def _metadata_to_labels(metadata: LMCacheEngineMetadata):
         return {
             "model_name": metadata.model_name,
-            "worker_id": metadata.worker_id
+            "worker_id": metadata.worker_id,
         }
 
     _instance = None
@@ -562,23 +672,25 @@ class PrometheusLogger:
     def GetOrCreate(metadata: LMCacheEngineMetadata) -> "PrometheusLogger":
         if PrometheusLogger._instance is None:
             PrometheusLogger._instance = PrometheusLogger(metadata)
-        #assert PrometheusLogger._instance.metadata == metadata, \
+        # assert PrometheusLogger._instance.metadata == metadata, \
         #    "PrometheusLogger instance already created with different metadata"
         if PrometheusLogger._instance.metadata != metadata:
-            logger.error("PrometheusLogger instance already created with"
-                         "different metadata. This should not happen except "
-                         "in test")
+            logger.error(
+                "PrometheusLogger instance already created with"
+                "different metadata. This should not happen except "
+                "in test"
+            )
         return PrometheusLogger._instance
 
     @staticmethod
     def GetInstance() -> "PrometheusLogger":
-        assert PrometheusLogger._instance is not None, \
+        assert PrometheusLogger._instance is not None, (
             "PrometheusLogger instance not created yet"
+        )
         return PrometheusLogger._instance
 
 
 class LMCacheStatsLogger:
-
     def __init__(self, metadata: LMCacheEngineMetadata, log_interval: int):
         self.metadata = metadata
         self.log_interval = log_interval

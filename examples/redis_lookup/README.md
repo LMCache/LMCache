@@ -45,16 +45,15 @@ docker run --runtime nvidia --gpus all \
     -v /tmp/lmcache-config.yaml:/config/lmcache-config.yaml \
     --env "LMCACHE_CONFIG_FILE=/config/lmcache-config.yaml" \
     --env "HF_TOKEN=<YOUR_HUGGINGFACE_TOKEN>" \
-    --env "LMCACHE_USE_EXPERIMENTAL=True" \
-    --env "chunk_size=256" \
-    --env "local_cpu=True" \
-    --env "max_local_cpu_size=5" \
+    --env "LMCACHE_CHUNK_SIZE=256" \
+    --env "LMCACHE_LOCAL_CPU=True" \
+    --env "LMCACHE_MAX_LOCAL_CPU_SIZE=5" \
     -v ~/.cache/huggingface:/home/ubuntu/.cache/huggingface \
     --network host \
     --entrypoint "/usr/local/bin/vllm" \
     lmcache/vllm-openai:latest \
     serve mistralai/Mistral-7B-Instruct-v0.2 --port 8001 --kv-transfer-config \
-    '{"kv_connector":"LMCacheConnector","kv_role":"kv_both"}' \
+    '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}' \
     --enable-chunked-prefill false
 ```
 
