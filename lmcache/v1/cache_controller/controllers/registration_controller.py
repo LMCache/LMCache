@@ -21,8 +21,8 @@ import zmq.asyncio
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.cache_controller.message import DeRegisterMsg  # noqa: E501
 from lmcache.v1.cache_controller.message import (
+    DeRegisterMsg,
     HealthMsg,
     HealthRetMsg,
     QueryInstMsg,
