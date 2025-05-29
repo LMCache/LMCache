@@ -80,6 +80,7 @@ Documentation
    kv_cache/infinistore
    kv_cache/mooncake
    kv_cache/valkey
+   kv_cache/weka
 
 :raw-html:`<br />`
 

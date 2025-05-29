@@ -38,6 +38,7 @@ from lmcache.v1.gpu_connector import (
 )
 from lmcache.v1.lookup_server import LookupServerInterface, RedisLookupServer
 from lmcache.v1.memory_management import AdHocMemoryAllocator  # noqa: E501
+from lmcache.v1.memory_management import CuFileMemoryAllocator  # noqa: E501
 from lmcache.v1.memory_management import (
     MemoryAllocatorInterface,
     MemoryFormat,
@@ -753,6 +754,10 @@ class LMCacheEngineBuilder:
         if config.enable_nixl:
             assert config.nixl_buffer_device is not None
             return AdHocMemoryAllocator(config.nixl_buffer_device)
+
+        if config.weka_path is not None:
+            assert config.cufile_buffer_size is not None
+            return CuFileMemoryAllocator(config.cufile_buffer_size * 1024**2)
 
         max_local_cpu_size = config.max_local_cpu_size
         return MixedMemoryAllocator(int(max_local_cpu_size * 1024**3))

@@ -111,3 +111,5 @@ lmcache/experimental/tests
 # Setuptools scm version
 /lmcache/_version.py
 
+# Miscellaneous
+cufile.log
