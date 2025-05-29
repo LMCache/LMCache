@@ -98,9 +98,9 @@ class LMCacheEngineConfig:
     # The url of the actual remote lmcache instance for auditing
     audit_actual_remote_url: Optional[str] = None
 
-    # (Optional) Weka/CuFile related configurations
-    # The path under the WekaFS mount that the cache will be stored
-    weka_path: Optional[str] = None
+    # (Optional) GDS/CuFile related configurations
+    # The path under the GDSFS mount that the cache will be stored
+    gds_path: Optional[str] = None
     # Size of CuFile Buffer in MiB
     cufile_buffer_size: Optional[int] = None
 
@@ -312,7 +312,7 @@ class LMCacheEngineConfig:
 
         audit_actual_remote_url = config.get("audit_actual_remote_url", None)
 
-        weka_path = config.get("weka_path", None)
+        gds_path = config.get("gds_path", None)
         cufile_buffer_size = config.get("cufile_buffer_size", None)
 
         local_disk_path = _parse_local_disk(local_disk)
@@ -355,7 +355,7 @@ class LMCacheEngineConfig:
                 nixl_buffer_device,
                 nixl_enable_gc,
                 audit_actual_remote_url,
-                weka_path,
+                gds_path,
                 cufile_buffer_size,
             )
             .validate()
@@ -511,9 +511,9 @@ class LMCacheEngineConfig:
             config.audit_actual_remote_url,
         )
 
-        config.weka_path = parse_env(
-            get_env_name("weka_path"),
-            config.weka_path,
+        config.gds_path = parse_env(
+            get_env_name("gds_path"),
+            config.gds_path,
         )
         config.cufile_buffer_size = parse_env(
             get_env_name("cufile_buffer_size"),
@@ -596,7 +596,7 @@ class LMCacheEngineConfig:
             "nixl_buffer_size": self.nixl_buffer_size,
             "nixl_buffer_device": self.nixl_buffer_device,
             "nixl_enable_gc": self.nixl_enable_gc,
-            "weka_path": self.weka_path,
+            "gds_path": self.gds_path,
         }
         logger.info(f"LMCache Configuration: {config_dict}")
 

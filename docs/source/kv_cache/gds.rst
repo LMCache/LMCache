@@ -1,17 +1,17 @@
-Weka
+GDS
 ====
 
-.. _weka-overview:
+.. _gds-overview:
 
 Overview
 --------
 
-WekaFS is a high-performance, distributed filesystem and is a supported option for KV Cache offloading in
-LMCache. Even though the local filesystem backend can work with a WekaFS mount, this particular backend is
-optimized for Weka's characteristics. It leverages GPUDirect Storage for I/O and it allows data-sharing
-between multiple LMCache instances.
+Networked, high-performance distributed filesystems are fully supported for KV-cache offloading in LMCache.
+While the local-filesystem backend will work when mounted on any such storage, this backend is specifically
+tuned for network-attached deployments. It takes advantage of GPU-Direct Storage for zero-copy I/O from GPU
+memory to storage systems, and enables multiple LMCache instances to share data seamlessly.
 
-Ways to configure LMCache WEKA Offloading
+Ways to configure LMCache GDS Offloading
 -----------------------------------------
 
 **1. Environment Variables:**
@@ -24,8 +24,8 @@ Ways to configure LMCache WEKA Offloading
     export LMCACHE_USE_EXPERIMENTAL=True
     # 256 Tokens per KV Chunk
     export LMCACHE_CHUNK_SIZE=256
-    # Path to Weka Mount
-    export LMCACHE_WEKA_PATH="/mnt/weka/cache"
+    # Path to GDS Mount
+    export LMCACHE_GDS_PATH="/mnt/gds/cache"
     # CuFile Buffer Size in MiB
     export LMCACHE_CUFILE_BUFFER_SIZE="8192"
     # Disabling CPU RAM offload is sometimes recommended as the
@@ -46,8 +46,8 @@ Example ``config.yaml``:
     chunk_size: 256
     # Disable local CPU
     local_cpu: false
-    # Path to Weka Mount
-    weka_path: "/mnt/weka/cache"
+    # Path to GDS-enabled mount Mount
+    gds_path: "/mnt/gds/cache"
     # CuFile Buffer Size in MiB
     cufile_buffer_size: 8192
 
@@ -64,13 +64,13 @@ it from there.
 Setup Example
 -------------
 
-.. _weka-prerequisites:
+.. _gds-prerequisites:
 
 **Prerequisites:**
 
 - A Machine with at least one GPU. You can adjust the max model length of your vllm instance depending on your GPU memory.
 
-- Weka already installed and mounted.
+- A remote file systems that is mounted and supports GDS.
 
 - vllm and lmcache installed (:doc:`Installation Guide <../getting_started/installation>`)
 
@@ -80,35 +80,31 @@ Setup Example
 
     export HF_TOKEN=your_hugging_face_token
 
-**Step 1. Create cache directory under your Weka mount:**
+**Step 1. Create cache directory under your GDS mount:**
 
-To find all your WekaFS mounts run:
+To find all the types of file systems supporting GDS in your system, use `gdscheck` from NVIDIA:
 
 .. code-block:: bash
 
-    mount -t wekafs
+    sudo /usr/local/cuda-*/gds/tools/gdscheck -p
 
-For the sake of this example let's say that the above returns:
-
-.. code-block:: text
-
-    10.27.1.1/default on /mnt/weka type wekafs (rw,relatime,writecache,inode_bits=auto,readahead_kb=32768,dentry_max_age_positive=1000,dentry_max_age_negative=0,container_name=client)
+Check with your storage vendor on how to mount the remote file sysmem.
 
 Then create a directory under it (the name here is arbitrary):
 
 .. code-block:: bash
 
-    mkdir /mnt/weka/cache
+    mkdir /mnt/gds/cache
 
-**Step 2. Start a vLLM server with Weka offloading enabled:**
+**Step 2. Start a vLLM server with GDS offloading enabled:**
 
-Create a an lmcache configuration file called: ``weka-offload.yaml``
+Create a an lmcache configuration file called: ``gds-offload.yaml``
 
 .. code-block:: yaml
 
     local_cpu: false
     chunk_size: 256
-    weka_path: "/mnt/weka/cache"
+    gds_path: "/mnt/gds/cache"
     cufile_buffer_size: 8192
 
 If you don't want to use a config file, uncomment the first three environment variables
@@ -118,9 +114,9 @@ and then comment out the ``LMCACHE_CONFIG_FILE`` below:
 
     # LMCACHE_LOCAL_CPU=False \
     # LMCACHE_CHUNK_SIZE=256 \
-    # LMCACHE_WEKA_PATH="/mnt/weka/cache" \
+    # LMCACHE_GDS_PATH="/mnt/gds/cache" \
     # LMCACHE_CUFILE_BUFFER_SIZE=8192 \
-    LMCACHE_CONFIG_FILE="weka-offload.yaml" \
+    LMCACHE_CONFIG_FILE="gds-offload.yaml" \
     LMCACHE_USE_EXPERIMENTAL=True \
     vllm serve \
         meta-llama/Llama-3.1-70B-Instruct \

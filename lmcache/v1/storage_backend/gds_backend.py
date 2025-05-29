@@ -40,7 +40,7 @@ from lmcache.v1.storage_backend.abstract_backend import StorageBackendInterface
 logger = init_logger(__name__)
 
 _METADATA_FILE_SUFFIX = ".metadata"
-_DATA_FILE_SUFFIX = ".weka1"
+_DATA_FILE_SUFFIX = ".gds1"
 _METADATA_VERSION = 1
 _METADATA_MAX_SIZE = 4096  # reserve 4K for metadata
 
@@ -146,30 +146,20 @@ def load_gds_cufile(
         )
 
 
-class WekaGdsBackend(StorageBackendInterface):
+class GdsBackend(StorageBackendInterface):
     """
     This is a backend that leverages NVIDIA's cuFile API to issue GDS requests
-    directly to the Weka Filesystem.  In order to use it, users need to specify
-    `weka_path` and `cufile_buffer_size` in their LMCache config.
+    directly to the GDS-supported remote filesystem.  In order to use it, users
+    need to specify `gds_path` and `cufile_buffer_size` in their LMCache
+    config.
 
     Cache Directory Structure created by this Backend:
-    /{weka_path}/{first_level}/{second_level}/{data & metadata}
-    This structure is semi-arbitrary. WekaFS can handle/scale many small files
-    into a single directory so we could just put all the data/metadata directly
-    under the weka_path, but we create two levels in the directory hierarchy to
+    /{gds_path}/{first_level}/{second_level}/{data & metadata} This structure
+    is semi-arbitrary. We create two levels in the directory hierarchy to
     parallelize loading the data during initialization in the Python code.
 
-    NOTE: The `weka_path` does not strictly need to be a WekaFS mount so if you
-    want to test the backend without Weka you are free to do so for testing
-    purposes. For production though it wouldn't scale as this backend is
-    tailored to the performance characteristics of WekaFS. More specifically if
-    used with non-Weka filesystems performance will suffer potentially for two
-    reasons:
-    (1) If GPUDirect is not supported on that other filesystem, then CuFile will
-        fall back to POSIX I/O.
-    (2) Our cache directory structure creates a lot of small files within a
-        single directory and uses 4K block/buffer sizes. These align very well
-        with Weka but not other filesystems.
+    NOTE: If GPUDirect is not supported on that other filesystem, then CuFile will
+    fall back to POSIX I/O.
     """
 
     def __init__(
@@ -187,12 +177,10 @@ class WekaGdsBackend(StorageBackendInterface):
         self.memory_allocator = memory_allocator
         self.dst_device = dst_device
 
-        assert config.weka_path is not None, (
-            "Need to specify weka_path for WekaGdsBackend"
-        )
-        self.weka_path = config.weka_path
-        if not os.path.exists(self.weka_path):
-            os.makedirs(self.weka_path, exist_ok=True)
+        assert config.gds_path is not None, "Need to specify gds_path for GdsBackend"
+        self.gds_path = config.gds_path
+        if not os.path.exists(self.gds_path):
+            os.makedirs(self.gds_path, exist_ok=True)
 
         self.stats = None  # TODO(Serapheim): plug into LMCache Statistics
 
@@ -221,7 +209,7 @@ class WekaGdsBackend(StorageBackendInterface):
         # snapshotting later.
         tasks = []
         start = time.perf_counter()
-        with os.scandir(self.weka_path) as it:
+        with os.scandir(self.gds_path) as it:
             for entry in it:
                 if not entry.is_dir():
                     continue
@@ -231,7 +219,7 @@ class WekaGdsBackend(StorageBackendInterface):
                 tasks.append(
                     asyncio.to_thread(
                         self._scan_metadata_subdir,
-                        os.path.join(self.weka_path, l1_dir),
+                        os.path.join(self.gds_path, l1_dir),
                         l1_dir,
                     )
                 )
@@ -321,7 +309,7 @@ class WekaGdsBackend(StorageBackendInterface):
         assert "_" not in key_str, "key string should not contain `_`"
         return (
             os.path.join(
-                self.weka_path,
+                self.gds_path,
                 l1_dir,
                 l2_dir,
                 key_str.replace("/", "_") + _DATA_FILE_SUFFIX,
@@ -361,7 +349,7 @@ class WekaGdsBackend(StorageBackendInterface):
         assert kv_chunk is not None
         path, subdir_key, l1_dir, l2_dir = self._key_to_path(key)
         if subdir_key not in self.metadata_dirs:
-            os.makedirs(os.path.join(self.weka_path, l1_dir, l2_dir), exist_ok=True)
+            os.makedirs(os.path.join(self.gds_path, l1_dir, l2_dir), exist_ok=True)
             self.metadata_dirs.add(subdir_key)
         tmp = ".tmp" + rand_suffix(self.rand, 8)
         metadata = await asyncio.to_thread(
@@ -495,4 +483,4 @@ class WekaGdsBackend(StorageBackendInterface):
         raise NotImplementedError
 
     def close(self) -> None:
-        logger.info("Weka backend closed.")
+        logger.info("GDS backend closed.")
