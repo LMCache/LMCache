@@ -211,9 +211,9 @@ def main() -> None:
     # ---------- choose / build the document ---------------------------
     if args.context_file is None:
         # flag omitted → synthetic filler
-        # here we will generate a random ASCII string based on the max ctx tokens, 
+        # here we will generate a random ASCII string based on the max ctx tokens,
         raw_doc = rand_ascii(args.max_ctx_tokens * 4)  # ≈4 chars/token
-        # here we want to make the synthetic filler longer and truncate it later after tokenization
+        # make the synthetic filler longer and truncate it later after tokenization
     elif args.context_file == "":
         # flag present w/o file → bundled ffmpeg.txt
         raw_doc = Path(DEFAULT_FFMPEG).read_text(encoding="utf-8")
@@ -263,9 +263,7 @@ def main() -> None:
             label = "post‑flush" if args.flush_cache else "continued"
             print(f"\n=== Run {run}: TTFT {label} ===")
             ttft, gen = ttft_stream(client, model_id, base_chat, printer)
-            print(
-                f"\033[33mTTFT_{run} = {ttft:.3f}s\033[0m • "
-            )
+            print(f"\033[33mTTFT_{run} = {ttft:.3f}s\033[0m • ")
             log_jsonl(
                 out_path,
                 {
