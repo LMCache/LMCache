@@ -61,7 +61,7 @@ class MooncakeStoreConfig:
             protocol=config.get("protocol", "tcp"),
             device_name=config.get("device_name", ""),
             master_server_address=config.get("master_server_address"),
-            transfer_timeout= config.get("transfer_timeout", 1),
+            transfer_timeout=config.get("transfer_timeout", 1),
         )
 
     @staticmethod
@@ -132,7 +132,7 @@ class MooncakestoreConnector(RemoteConnector):
         try:
             buffer = await asyncio.wait_for(
                 asyncio.to_thread(self.store.get_buffer, key_str),
-                timeout=self.config.transfer_timeout
+                timeout=self.config.transfer_timeout,
             )
         except asyncio.TimeoutError:
             logger.warning(
@@ -194,8 +194,10 @@ class MooncakestoreConnector(RemoteConnector):
 
         try:
             await asyncio.wait_for(
-                asyncio.to_thread(self.store.put_parts,key_str,metadata_bytes,kv_bytes),
-                timeout=self.config.transfer_timeout
+                asyncio.to_thread(
+                    self.store.put_parts, key_str, metadata_bytes, kv_bytes
+                ),
+                timeout=self.config.transfer_timeout,
             )
         except asyncio.TimeoutError:
             logger.warning(
