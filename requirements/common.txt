@@ -1,5 +1,7 @@
+aiofile
 aiofiles
 aiohttp
+cufile-python
 infinistore
 msgspec
 numpy

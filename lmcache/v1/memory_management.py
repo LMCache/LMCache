@@ -1,4 +1,5 @@
 # Copyright 2024-2025 LMCache Authors.
+# Copyright 2025 Ilya Yanok, Serapheim Dimitropoulos.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -21,6 +22,7 @@ import ctypes
 import threading
 
 # Third Party
+from cufile.bindings import cuFileBufDeregister, cuFileBufRegister
 import sortedcontainers
 import torch
 
@@ -502,8 +504,9 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
 
     ALIGN_BYTES = 512
 
-    def __init__(self, tensor: torch.Tensor):
+    def __init__(self, tensor: torch.Tensor, align_bytes: int = ALIGN_BYTES):
         self.buffer = tensor.view(torch.uint8).flatten()
+        self.align_bytes = align_bytes
 
         self.explicit_list = sortedcontainers.SortedList(key=lambda x: x.start)
 
@@ -520,8 +523,7 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         return shape.numel() * dtype.itemsize
 
     @staticmethod
-    def _Compute_aligned_size(raw_size: int) -> int:
-        align = TensorMemoryAllocator.ALIGN_BYTES
+    def _Compute_aligned_size(raw_size: int, align: int) -> int:
         return (raw_size + align - 1) & ~(align - 1)
 
     def _coalesce(
@@ -575,7 +577,9 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
 
         # Calculate the size of the tensor
         raw_size = TensorMemoryAllocator._Compute_raw_size(shape, dtype)
-        aligned_size = TensorMemoryAllocator._Compute_aligned_size(raw_size)
+        aligned_size = TensorMemoryAllocator._Compute_aligned_size(
+            raw_size, self.align_bytes
+        )
 
         # Find the first block that fits the shape
         for block in self.explicit_list:
@@ -872,13 +876,16 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
 class GPUMemoryAllocator(MemoryAllocatorInterface):
     """Allocates memory in the pre-allocated GPU memory."""
 
-    def __init__(self, size: int, device="cuda"):
+    def __init__(self, size: int, device="cuda", align_bytes: Optional[int] = None):
         """
         :param int size: The size of the GPU memory in bytes.
+        :param Optional[int] align_bytes: The byte alignment for allocations.
         """
-        buffer = torch.empty(size, dtype=torch.uint8, device=device)
-
-        self.allocator = TensorMemoryAllocator(buffer)
+        self.tensor = torch.empty(size, dtype=torch.uint8, device=device)
+        kwargs = {}
+        if align_bytes is not None:
+            kwargs["align_bytes"] = align_bytes
+        self.allocator = TensorMemoryAllocator(self.tensor, **kwargs)
 
         self.device_mem_lock = threading.Lock()
 
@@ -987,3 +994,17 @@ class AdHocMemoryAllocator(MemoryAllocatorInterface):
 
     def memcheck(self):
         return True
+
+
+class CuFileMemoryAllocator(GPUMemoryAllocator):
+    def __init__(self, size: int, device=None):
+        if device is None:
+            # TODO(Serapheim): Ideally we'd get the device from the upper
+            # layer - for now just use the current device.
+            device = f"cuda:{torch.cuda.current_device()}"
+        super().__init__(size, device, align_bytes=4096)
+        self.base_pointer = self.tensor.data_ptr()
+        cuFileBufRegister(ctypes.c_void_p(self.base_pointer), size, flags=0)
+
+    def __del__(self):
+        cuFileBufDeregister(ctypes.c_void_p(self.base_pointer))
