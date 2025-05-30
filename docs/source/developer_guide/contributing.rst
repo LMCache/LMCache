@@ -32,7 +32,7 @@ How Can I Contribute?
 
 When contributing, it's useful to start by looking at `issues <https://github.com/LMCache/LMCache/issues>`_. After picking up an issue, writing code, or updating a document, make a pull request and your work will be reviewed and merged. If you're adding a new feature or find a bug, it's best to `write an issue <https://github.com/LMCache/LMCache/issues/new>`_ first to discuss it with maintainers.
 
-If you discover a security vulnerability, please follow the instructions in: `Security doc <https://github.com/LMCache/LMCache/blob/dev/SECURITY.md>`_.
+If you discover a security vulnerability, please follow the instructions in the `Security doc <https://github.com/LMCache/LMCache/blob/dev/SECURITY.md>`_.
 
 To contribute to this repo, you'll use the Fork and Pull model common in many open source repositories. For details on this process, check out `The GitHub Workflow Guide <https://github.com/kubernetes/community/blob/master/contributors/guide/github-workflow.md>`_ from Kubernetes. In short:
 
@@ -47,7 +47,7 @@ Before sending pull requests, make sure your changes pass code quality checks an
 DCO and Signed-off-by
 ^^^^^^^^^^^^^^^^^^^^^
 
-When contributing changes to the project, you must agree to the `DCO <https://github.com/LMCache/LMCache/blob/dev/DCO>`_. Commits must include a `Signed-off-by:` header which certifies agreement with the terms of the `DCO <https://github.com/LMCache/LMCache/blob/dev/DCO>`.
+When contributing changes to the project, you must agree to the `DCO <https://github.com/LMCache/LMCache/blob/dev/DCO>`_. Commits must include a :code:`Signed-off-by` header which certifies agreement with the terms of the `DCO <https://github.com/LMCache/LMCache/blob/dev/DCO>`_.
 
 .. note::
 
@@ -97,7 +97,7 @@ Before pushing changes to GitHub, you need to run the tests and coding style che
 Unit tests
 ^^^^^^^^^^
 
-When making changes, run the tests before pushing the changes. Running unit tests ensures your contributions do not break exiting code. We use `pytest <https://docs.pytest.org/>`_ framework to run unit tests. The framework is setup to run all files in the `tests <https://github.com/LMCache/LMCache/tree/dev/tests>`_ directory which have a prefix or posfix of "test".
+When making changes, run the tests before pushing the changes. Running unit tests ensures your contributions do not break exiting code. We use the `pytest <https://docs.pytest.org/>`_ framework to run unit tests. The framework is setup to run all files in the `tests <https://github.com/LMCache/LMCache/tree/dev/tests>`_ directory which have a prefix or posfix of "test".
 
 Running unit tests is as simple as:
 
@@ -118,7 +118,7 @@ By default, all tests found within the tests directory are run. However, specifi
 Coding style
 ^^^^^^^^^^^^
 
-LMCache follows the Python `pep8 <https://peps.python.org/pep-0008/>`_ coding style for Python and `Google C++ style guide <https://google.github.io/styleguide/cppguide.html>`_ for C++. We use the following tool to enforce the coding style:
+LMCache follows the Python `pep8 <https://peps.python.org/pep-0008/>`_ coding style for Python and `Google C++ style guide <https://google.github.io/styleguide/cppguide.html>`_ for C++. We use the following tools to enforce the coding style:
 
 - Python linting and formatting: `Ruff <https://docs.astral.sh/ruff/>`_, and `isort <https://pycqa.github.io/isort/>`_
 - Python static code checking: `mypy <https://github.com/python/mypy>`_
@@ -158,10 +158,7 @@ Build the docs (from :code:`docs/` directory):
     make clean
     make html
 
-Serve docs page locally (http://localhost:8000):
-
-.. code-block:: bash
-    python -m http.server -d build/html/
+Serve docs page locally at http://localhost:8000: :code:`python -m http.server -d build/html/`
 
 Thank You
 ---------
