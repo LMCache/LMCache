@@ -15,11 +15,11 @@
 # Standard
 from dataclasses import dataclass
 from typing import Any, Optional
+import json
 import os
 import re
 
 # Third Party
-import json
 import yaml
 
 # First Party
@@ -301,7 +301,9 @@ class LMCacheEngineConfig:
 
         connector_extra_config = config.get("connector_extra_config", None)
         if connector_extra_config is not None:
-            assert isinstance(connector_extra_config, dict), "connector_extra_config is a dict"
+            assert isinstance(connector_extra_config, dict), (
+                "connector_extra_config must be a dict"
+            )
 
         # Try getting "legacy" nixl config
         if nixl_receiver_host is None:
@@ -410,7 +412,9 @@ class LMCacheEngineConfig:
         def to_dict(value: Optional[str]) -> Optional[dict]:
             if value is None:
                 return None
-            return json.loads(value)
+            res = json.loads(value)
+            assert isinstance(res, dict), "value must be a dict"
+            return res
 
         config = LMCacheEngineConfig.from_defaults(remote_url=None, remote_serde=None)
         config.chunk_size = to_int(
