@@ -24,13 +24,13 @@ import zmq
 from lmcache.logging import init_logger
 from lmcache.v1.cache_controller.controllers import KVController, RegistrationController
 from lmcache.v1.cache_controller.executor import LMCacheClusterExecutor
-from lmcache.v1.cache_controller.message import CheckFinishMsg  # noqa: E501
 from lmcache.v1.cache_controller.rpc_utils import (  # noqa: E501
     get_zmq_context,
     get_zmq_socket,
 )
 
 from lmcache.v1.cache_controller.message import (  # isort: skip
+    CheckFinishMsg,
     ClearMsg,
     CompressMsg,
     DeRegisterMsg,

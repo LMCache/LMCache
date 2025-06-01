@@ -16,8 +16,8 @@
 from dataclasses import dataclass
 
 # First Party
-from lmcache.v1.cache_controller.message import CheckFinishMsg  # noqa: E501
 from lmcache.v1.cache_controller.message import (
+    CheckFinishMsg,
     CheckFinishRetMsg,
     ClearMsg,
     ClearRetMsg,

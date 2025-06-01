@@ -24,8 +24,8 @@ import zmq
 # First Party
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
-from lmcache.v1.cache_controller.message import ClearWorkerMsg  # noqa
 from lmcache.v1.cache_controller.message import (
+    ClearWorkerMsg,
     ClearWorkerRetMsg,
     DeRegisterMsg,
     ErrorMsg,
