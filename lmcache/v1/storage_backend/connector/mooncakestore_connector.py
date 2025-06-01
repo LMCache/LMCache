@@ -46,6 +46,7 @@ class MooncakeStoreConfig:
     protocol: str
     device_name: str
     master_server_address: str
+    transfer_timeout: int
 
     @staticmethod
     def from_file(file_path: str) -> "MooncakeStoreConfig":
@@ -60,6 +61,7 @@ class MooncakeStoreConfig:
             protocol=config.get("protocol", "tcp"),
             device_name=config.get("device_name", ""),
             master_server_address=config.get("master_server_address"),
+            transfer_timeout=config.get("transfer_timeout", 1),
         )
 
     @staticmethod
@@ -128,7 +130,16 @@ class MooncakestoreConnector(RemoteConnector):
         key_str = key.to_string()
 
         try:
-            buffer = self.store.get_buffer(key_str)
+            buffer = await asyncio.wait_for(
+                asyncio.to_thread(self.store.get_buffer, key_str),
+                timeout=self.config.transfer_timeout,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"Timeout when getting key {key_str} from mooncake store."
+                "The output may be incorrect."
+            )
+            return None
         except Exception as e:
             logger.error(f"Failed to get key {key_str}. {e}")
 
@@ -182,7 +193,17 @@ class MooncakestoreConnector(RemoteConnector):
         key_str = key.to_string()
 
         try:
-            self.store.put_parts(key_str, metadata_bytes, kv_bytes)
+            await asyncio.wait_for(
+                asyncio.to_thread(
+                    self.store.put_parts, key_str, metadata_bytes, kv_bytes
+                ),
+                timeout=self.config.transfer_timeout,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"Timeout when putting key {key_str} from mooncake store."
+                "Decode instance may redo prefill."
+            )
         except Exception as e:
             logger.error(
                 f"Failed to put key {key_str},"
