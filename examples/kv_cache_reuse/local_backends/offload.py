@@ -26,19 +26,19 @@ def setup_environment_variables(vllm_version: str, use_disk: bool = False):
         os.environ["LMCACHE_LOCAL_CPU"] = "False"
 
         # Set the maximum size of the local CPU buffer size to 5GB
-        os.environ["LMCACHE_MAX_LOCAL_CPU_SIZE"] = 5
+        os.environ["LMCACHE_MAX_LOCAL_CPU_SIZE"] = "5"
 
         # Enable local disk backend in LMCache
         os.environ["LMCACHE_LOCAL_DISK"] = "file://local_disk/"
 
         # Set the maximum size of the local disk size to 10GB
-        os.environ["LMCACHE_MAX_LOCAL_DISK_SIZE"] = 10
+        os.environ["LMCACHE_MAX_LOCAL_DISK_SIZE"] = "10"
     else:
         # Enable local CPU backend in LMCache
         os.environ["LMCACHE_LOCAL_CPU"] = "True"
 
         # Set the maximum size of the local CPU size to 5GB
-        os.environ["LMCACHE_MAX_LOCAL_CPU_SIZE"] = 5
+        os.environ["LMCACHE_MAX_LOCAL_CPU_SIZE"] = "5"
 
     if vllm_version == "v0":
         os.environ["VLLM_USE_V1"] = "0"
