@@ -9,18 +9,25 @@ import os
 import re
 from pathlib import Path
 
-import matplotlib.pyplot as plt
-import pandas as pd
-import seaborn as sns
-from matplotlib.backends.backend_pdf import PdfPages
+try:
+    import matplotlib.pyplot as plt
+    import pandas as pd
+    import seaborn as sns
+    from matplotlib.backends.backend_pdf import PdfPages
+    VISUALIZATION_AVAILABLE = True
+except ImportError as e:
+    print(f"⚠️ Visualization dependencies not available: {e}")
+    print("📝 Falling back to text-only report generation")
+    VISUALIZATION_AVAILABLE = False
 
 RESULTS_DIR = "mmlu-results"
 OUTPUT_PDF = "compare-results/mmlu_benchmark_report.pdf"
 OUTPUT_JSON = "compare-results/results_summary.json"
 
 # Set style for better-looking plots
-plt.style.use('seaborn-v0_8')
-sns.set_palette("husl")
+if VISUALIZATION_AVAILABLE:
+    plt.style.use('seaborn-v0_8')
+    sns.set_palette("husl")
 
 
 def parse_result_file(filepath):
@@ -62,6 +69,9 @@ def parse_result_file(filepath):
 
 def create_comparison_plots(all_results):
     """Create comparison plots for the results."""
+    if not VISUALIZATION_AVAILABLE:
+        return None
+
     if not all_results:
         return None
 
@@ -141,6 +151,9 @@ def create_comparison_plots(all_results):
 
 def create_subject_breakdown(all_results):
     """Create subject-by-subject breakdown if available."""
+    if not VISUALIZATION_AVAILABLE:
+        return None
+
     # Find the result with the most subject data
     best_result = None
     max_subjects = 0
@@ -178,6 +191,9 @@ def create_subject_breakdown(all_results):
 
 def create_summary_table(all_results):
     """Create a summary table figure."""
+    if not VISUALIZATION_AVAILABLE:
+        return None
+
     if not all_results:
         return None
 
@@ -249,29 +265,48 @@ def generate_report():
     # Create output directory
     os.makedirs("compare-results", exist_ok=True)
 
-    # Generate PDF report
-    with PdfPages(OUTPUT_PDF) as pdf:
-        # Page 1: Summary table
-        fig_table = create_summary_table(all_results)
-        if fig_table:
-            pdf.savefig(fig_table, bbox_inches='tight')
-            plt.close(fig_table)
+    if VISUALIZATION_AVAILABLE:
+        # Generate PDF report with visualizations
+        with PdfPages(OUTPUT_PDF) as pdf:
+            # Page 1: Summary table
+            fig_table = create_summary_table(all_results)
+            if fig_table:
+                pdf.savefig(fig_table, bbox_inches='tight')
+                plt.close(fig_table)
 
-        # Page 2: Comparison plots
-        fig_comparison = create_comparison_plots(all_results)
-        if fig_comparison:
-            pdf.savefig(fig_comparison, bbox_inches='tight')
-            plt.close(fig_comparison)
+            # Page 2: Comparison plots
+            fig_comparison = create_comparison_plots(all_results)
+            if fig_comparison:
+                pdf.savefig(fig_comparison, bbox_inches='tight')
+                plt.close(fig_comparison)
 
-        # Page 3: Subject breakdown (if available)
-        fig_subjects = create_subject_breakdown(all_results)
-        if fig_subjects:
-            pdf.savefig(fig_subjects, bbox_inches='tight')
-            plt.close(fig_subjects)
+            # Page 3: Subject breakdown (if available)
+            fig_subjects = create_subject_breakdown(all_results)
+            if fig_subjects:
+                pdf.savefig(fig_subjects, bbox_inches='tight')
+                plt.close(fig_subjects)
 
-    # Save JSON summary
+        print(f"✅ PDF report generated: {OUTPUT_PDF}")
+    else:
+        # Generate text-only report
+        text_report_path = "compare-results/detailed_report.txt"
+        with open(text_report_path, 'w') as f:
+            f.write("MMLU Benchmark Results - Detailed Report\n")
+            f.write("=" * 50 + "\n\n")
+
+            for result in all_results:
+                f.write(f"Configuration: {result['config']}\n")
+                f.write(f"  Accuracy: {result['accuracy']*100:.2f}%\n" if result['accuracy'] else "  Accuracy: N/A\n")
+                f.write(f"  Latency: {result['latency']:.2f}s\n" if result['latency'] else "  Latency: N/A\n")
+                f.write(f"  Total Questions: {result['total_questions']}\n")
+                f.write(f"  Subjects Tested: {len(result['subjects'])}\n")
+                f.write("-" * 30 + "\n")
+
+        print(f"✅ Text report generated: {text_report_path}")
+
+    # Save JSON summary (always available)
     summary_data = {
-        'timestamp': pd.Timestamp.now().isoformat(),
+        'timestamp': str(pd.Timestamp.now()) if VISUALIZATION_AVAILABLE else str(os.path.getctime(result_files[0])),
         'total_configs': len(all_results),
         'results': all_results
     }
@@ -279,7 +314,6 @@ def generate_report():
     with open(OUTPUT_JSON, 'w') as f:
         json.dump(summary_data, f, indent=2)
 
-    print(f"✅ Report generated: {OUTPUT_PDF}")
     print(f"✅ JSON summary: {OUTPUT_JSON}")
 
 

@@ -54,7 +54,7 @@ steps:
       # Create venv and install dependencies
       bash .buildkite/install-env.sh
       source .venv/bin/activate
-      pip install -r requirements/bench.txt
+      uv pip install -r requirements/bench.txt
 
       # Pull Docker image
       echo "🐳 Pulling Docker image..."
@@ -98,6 +98,10 @@ steps:
       echo "🔍 Data directory exists: $([ -d data ] && echo 'YES' || echo 'NO')"
       bash .buildkite/correctness/vllm.sh
 
+      # Debug: Show what was created
+      echo "📊 Results after vLLM baseline:"
+      ls -la mmlu-results/ || echo "mmlu-results directory not found"
+
   - label: ":zap: LMCache with MLA"
     key: "lmcache-mla"
     depends_on: ["setup"]
@@ -121,6 +125,10 @@ steps:
       echo "🔍 Current directory: $(pwd)"
       echo "🔍 Data directory exists: $([ -d data ] && echo 'YES' || echo 'NO')"
       bash .buildkite/correctness/lmcache.sh
+
+      # Debug: Show what was created
+      echo "📊 Results after LMCache with MLA:"
+      ls -la mmlu-results/ || echo "mmlu-results directory not found"
 
   - label: ":electric_plug: LMCache without MLA"
     key: "lmcache-no-mla"
@@ -146,6 +154,10 @@ steps:
       echo "🔍 Data directory exists: $([ -d data ] && echo 'YES' || echo 'NO')"
       bash .buildkite/correctness/lmcache-no-mla.sh
 
+      # Debug: Show what was created
+      echo "📊 Results after LMCache without MLA:"
+      ls -la mmlu-results/ || echo "mmlu-results directory not found"
+
   - label: ":bar_chart: Summarize Results"
     key: "summarize"
     depends_on: ["vllm-baseline", "lmcache-mla", "lmcache-no-mla"]
@@ -169,6 +181,13 @@ steps:
       echo "🔍 Current directory: $(pwd)"
       echo "📁 Contents of mmlu-results/:"
       ls -la mmlu-results/ || echo "mmlu-results directory not found"
+
+      # Debug: Check installed packages
+      echo "🐍 Python version: $(python3 --version)"
+      echo "📦 Checking key dependencies:"
+      python3 -c "import matplotlib; print(f'✅ matplotlib {matplotlib.__version__}')" || echo "❌ matplotlib not found"
+      python3 -c "import pandas; print(f'✅ pandas {pandas.__version__}')" || echo "❌ pandas not found"
+      python3 -c "import seaborn; print(f'✅ seaborn {seaborn.__version__}')" || echo "❌ seaborn not found"
 
       # Generate text summary (legacy)
       python3 .buildkite/correctness/summarize_scores.py
