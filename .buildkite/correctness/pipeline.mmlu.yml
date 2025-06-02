@@ -86,6 +86,10 @@ steps:
           key: "mmlu-data-{{ checksum \".buildkite/correctness/download-data.sh\" }}"
           path: "data"
           restore: "pipeline"
+      - cache#v1.5.2:
+          key: "mmlu-results-vllm-{{ .BuildkiteCommit }}"
+          path: "mmlu-results"
+          save: "pipeline"
     command: |
       export PATH="$HOME/.local/bin:$PATH"
       source .venv/bin/activate
@@ -105,6 +109,14 @@ steps:
           key: "mmlu-data-{{ checksum \".buildkite/correctness/download-data.sh\" }}"
           path: "data"
           restore: "pipeline"
+      - cache#v1.5.2:
+          key: "mmlu-results-vllm-{{ .BuildkiteCommit }}"
+          path: "mmlu-results"
+          restore: "pipeline"
+      - cache#v1.5.2:
+          key: "mmlu-results-lmcache-mla-{{ .BuildkiteCommit }}"
+          path: "mmlu-results"
+          save: "pipeline"
     command: |
       export PATH="$HOME/.local/bin:$PATH"
       source .venv/bin/activate
@@ -124,6 +136,14 @@ steps:
           key: "mmlu-data-{{ checksum \".buildkite/correctness/download-data.sh\" }}"
           path: "data"
           restore: "pipeline"
+      - cache#v1.5.2:
+          key: "mmlu-results-lmcache-mla-{{ .BuildkiteCommit }}"
+          path: "mmlu-results"
+          restore: "pipeline"
+      - cache#v1.5.2:
+          key: "mmlu-results-final-{{ .BuildkiteCommit }}"
+          path: "mmlu-results"
+          save: "pipeline"
     command: |
       export PATH="$HOME/.local/bin:$PATH"
       source .venv/bin/activate
@@ -144,9 +164,16 @@ steps:
           key: "mmlu-data-{{ checksum \".buildkite/correctness/download-data.sh\" }}"
           path: "data"
           restore: "pipeline"
+      - cache#v1.5.2:
+          key: "mmlu-results-final-{{ .BuildkiteCommit }}"
+          path: "mmlu-results"
+          restore: "pipeline"
     command: |
       export PATH="$HOME/.local/bin:$PATH"
       source .venv/bin/activate
+      echo "🔍 Current directory: $(pwd)"
+      echo "📁 Contents of mmlu-results/:"
+      ls -la mmlu-results/ || echo "mmlu-results directory not found"
       python3 .buildkite/correctness/summarize_scores.py
     artifact_paths:
       - "mmlu-results/*.txt"

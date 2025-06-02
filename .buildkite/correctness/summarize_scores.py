@@ -10,7 +10,9 @@ def parse_file(path):
     acc, lat = None, None
     try:
         with open(path) as f:
-            for line in f:
+            content = f.read()
+            print(f"📄 Parsing {path} ({len(content)} chars)")
+            for line in content.splitlines():
                 if match := re.match(r"Average accuracy:?\s*([0-9.]+)", line):
                     acc = float(match.group(1))
                 elif match := re.match(r"Total latency:?\s*([0-9.]+)", line):
@@ -21,10 +23,26 @@ def parse_file(path):
 
 
 def main():
+    print(f"🔍 Looking for results in: {os.path.abspath(RESULTS_DIR)}")
+
+    # Check if results directory exists
+    if not os.path.exists(RESULTS_DIR):
+        print(f"❌ Results directory '{RESULTS_DIR}' does not exist")
+        print(f"📁 Current directory contents:")
+        for item in os.listdir("."):
+            print(f"   - {item}")
+        return
+
+    # List all files in results directory
+    all_files = os.listdir(RESULTS_DIR)
+    print(f"📁 Files in {RESULTS_DIR}: {all_files}")
+
     os.makedirs("compare-results", exist_ok=True)
     report = ["🔍 MMLU Benchmark Results\n"]
 
     files = sorted(glob.glob(os.path.join(RESULTS_DIR, "*.txt")))
+    print(f"🎯 Found {len(files)} .txt files: {[os.path.basename(f) for f in files]}")
+
     if not files:
         print("❌ No result files found.")
         return
@@ -42,6 +60,8 @@ def main():
 
     with open(OUTFILE, "w") as f:
         f.write(text)
+
+    print(f"✅ Summary written to {OUTFILE}")
 
 
 if __name__ == "__main__":

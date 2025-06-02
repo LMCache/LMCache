@@ -69,6 +69,17 @@ python3 .buildkite/correctness/mmlu_bench.py \
   --parallel 16 \
   > mmlu-results/lmcache_no_mla.txt || true
 
+# Verify result file was created
+if [ -f "mmlu-results/lmcache_no_mla.txt" ]; then
+    echo "✅ Result file created: $(wc -l < mmlu-results/lmcache_no_mla.txt) lines"
+    echo "📊 Last few lines of results:"
+    tail -3 mmlu-results/lmcache_no_mla.txt
+else
+    echo "❌ WARNING: Result file not created"
+    echo "📁 Contents of mmlu-results/:"
+    ls -la mmlu-results/ || echo "mmlu-results directory not found"
+fi
+
 # Step 3: Kill the vLLM server
 echo "🛑 Stopping container..."
 sudo docker kill $CONTAINER_ID || true
