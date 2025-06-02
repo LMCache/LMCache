@@ -402,7 +402,7 @@ def lmcache_should_store(
         # DECODE
         if not seq_group.is_prompt:
             # Determine whether to save decoded KV cache
-            if not engine.config.save_decode_cache:
+            if engine.config.save_decode_cache:
                 for idx in range(seq_data_idx, seq_data_idx_end):
                     if seq_lens[idx] % engine.config.chunk_size == 0:
                         store_status[idx] = StoreStatus.DECODE
