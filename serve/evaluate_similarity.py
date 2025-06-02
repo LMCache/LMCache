@@ -3,13 +3,11 @@ import pandas as pd
 from our_metrics import evaluate_answer, f1_score
 import os
 
-INPUT02       = 'results/May_13_2_triviaqa_rr/kivi/02.csv'
-INPUT03       = 'results/May_13_2_triviaqa_rr/kivi/03.csv'
-INPUT06       = 'results/May_13_2_triviaqa_rr/kivi/06.csv'
-INPUT0        = 'results/May_13_2_triviaqa_rr/prefill/0.csv'
-INPUT_OURS01  = 'results/May_13_2_triviaqa_rr/ours/kivi_01.csv'
-INPUT_OURS1   = 'results/May_13_2_triviaqa_rr/ours/kivi_1.csv'
-INPUT_OURS10  = 'results/May_13_2_triviaqa_rr/ours/kivi_10.csv'
+INPUT02       = '/home/ubuntu/st-prodstack-v/press/qmsum/results_rate_0.628571429.csv'
+INPUT03       = '/home/ubuntu/st-prodstack-v/press/qmsum/results_rate_0.514285714.csv'
+INPUT06       = '/home/ubuntu/st-prodstack-v/press/qmsum/results_rate_0.271428571.csv'
+# INPUT_1       = 'results/Apr_14/baseline_kivi/1.csv'
+INPUT0        = 'results/Apr_14/baseline_kivi/0.csv'
 
 def main():
     # Load & filter the reference answers, then reset its index
@@ -41,6 +39,7 @@ def main():
         df['ROUGEL'] = df.apply(
             lambda row: evaluate_answer(
                 row['answer'],
+                # row['generated_text'],
                 ref_map[row['index_in_dataset']]
             ),
             axis=1

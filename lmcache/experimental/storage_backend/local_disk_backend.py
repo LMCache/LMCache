@@ -45,6 +45,7 @@ class LocalDiskBackend(StorageBackendInterface):
         self.put_tasks: List[CacheEngineKey] = []
 
         self.memory_allocator = memory_allocator
+        self.policy = config.policy
 
     def __str__(self):
         return self.__class__.__name__
@@ -172,6 +173,12 @@ class LocalDiskBackend(StorageBackendInterface):
         assert dtype is not None
         assert shape is not None
         memory_obj = self.load_bytes_from_disk(path, dtype=dtype, shape=shape)
+
+        # # For baseline, moved to CPU
+        # if self.policy == "baseline_KIVI":
+        #     self.remove(old_key)
+        #     self.evictor.current_cache_size -= memory_obj.get_physical_size()
+
         self.disk_lock.release()
         return memory_obj, old_key
 
