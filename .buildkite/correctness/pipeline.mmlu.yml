@@ -53,10 +53,22 @@ steps:
       pip install -r requirements/bench.txt
 
       # Pull Docker image
+      echo "🐳 Pulling Docker image..."
       sudo docker pull $${IMAGE}
 
       # Download MMLU data
+      echo "📊 Setting up MMLU data..."
       bash .buildkite/correctness/download-data.sh
+
+      # Verify data was downloaded correctly
+      if [ ! -d "data/test" ]; then
+        echo "❌ ERROR: MMLU data download failed - data/test directory not found"
+        ls -la data/ || echo "data directory does not exist"
+        exit 1
+      fi
+
+      echo "✅ Setup completed successfully"
+      echo "📊 MMLU test subjects available: $(ls data/test/*.csv | wc -l)"
 
   - label: ":rocket: vLLM Baseline"
     key: "vllm-baseline"
@@ -69,6 +81,8 @@ steps:
     command: |
       export PATH="$HOME/.local/bin:$PATH"
       source .venv/bin/activate
+      echo "🔍 Current directory: $(pwd)"
+      echo "🔍 Data directory exists: $([ -d data ] && echo 'YES' || echo 'NO')"
       bash .buildkite/correctness/vllm.sh
 
   - label: ":zap: LMCache with MLA"
@@ -82,6 +96,8 @@ steps:
     command: |
       export PATH="$HOME/.local/bin:$PATH"
       source .venv/bin/activate
+      echo "🔍 Current directory: $(pwd)"
+      echo "🔍 Data directory exists: $([ -d data ] && echo 'YES' || echo 'NO')"
       bash .buildkite/correctness/lmcache.sh
 
   - label: ":electric_plug: LMCache without MLA"
@@ -95,6 +111,8 @@ steps:
     command: |
       export PATH="$HOME/.local/bin:$PATH"
       source .venv/bin/activate
+      echo "🔍 Current directory: $(pwd)"
+      echo "🔍 Data directory exists: $([ -d data ] && echo 'YES' || echo 'NO')"
       bash .buildkite/correctness/lmcache-no-mla.sh
 
   - label: ":bar_chart: Summarize Results"

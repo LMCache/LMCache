@@ -40,6 +40,17 @@ echo "✅ vLLM server is ready"
 
 mkdir -p mmlu-results
 
+# Verify MMLU data exists
+if [ ! -d "data/test" ]; then
+    echo "❌ ERROR: MMLU data not found. Expected data/test directory."
+    echo "Current directory: $(pwd)"
+    echo "Contents:"
+    ls -la
+    exit 1
+fi
+
+echo "✅ MMLU data found. Test subjects: $(ls data/test/*.csv | wc -l)"
+
 python3 .buildkite/correctness/mmlu_bench.py \
   --nsub 6 \
   --parallel 16 \
