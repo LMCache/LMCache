@@ -129,9 +129,9 @@ class KVCacheManager:
                 keys_snapshot = list(self.hot_cache.keys())
                 # 2.1 找到最旧的那个 key（OrderedDict 第一个）
                 oldest_key = next((k for k in keys_snapshot if k not in final_drop_list), None)
-                    if oldest_key is None:
-                        # 如果所有 key 都已经被处理过或 hot_cache 为空，则跳出
-                        break
+                if oldest_key is None:
+                    # 如果所有 key 都已经被处理过或 hot_cache 为空，则跳出
+                    break
 
                 # 2.2 拿最旧 entry 的完整 context_id 列表
                 oldest_ctx = oldest_key.metadata.context_id
