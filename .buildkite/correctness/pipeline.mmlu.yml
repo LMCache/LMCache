@@ -87,8 +87,9 @@ steps:
           path: "data"
           restore: "pipeline"
       - cache#v1.5.2:
-          key: "mmlu-results-vllm-{{ .BuildkiteCommit }}"
+          key: "mmlu-results-{{ .BuildkiteCommit }}"
           path: "mmlu-results"
+          restore: "pipeline"
           save: "pipeline"
     command: |
       export PATH="$HOME/.local/bin:$PATH"
@@ -110,12 +111,9 @@ steps:
           path: "data"
           restore: "pipeline"
       - cache#v1.5.2:
-          key: "mmlu-results-vllm-{{ .BuildkiteCommit }}"
+          key: "mmlu-results-{{ .BuildkiteCommit }}"
           path: "mmlu-results"
           restore: "pipeline"
-      - cache#v1.5.2:
-          key: "mmlu-results-lmcache-mla-{{ .BuildkiteCommit }}"
-          path: "mmlu-results"
           save: "pipeline"
     command: |
       export PATH="$HOME/.local/bin:$PATH"
@@ -137,12 +135,9 @@ steps:
           path: "data"
           restore: "pipeline"
       - cache#v1.5.2:
-          key: "mmlu-results-lmcache-mla-{{ .BuildkiteCommit }}"
+          key: "mmlu-results-{{ .BuildkiteCommit }}"
           path: "mmlu-results"
           restore: "pipeline"
-      - cache#v1.5.2:
-          key: "mmlu-results-final-{{ .BuildkiteCommit }}"
-          path: "mmlu-results"
           save: "pipeline"
     command: |
       export PATH="$HOME/.local/bin:$PATH"
@@ -165,7 +160,7 @@ steps:
           path: "data"
           restore: "pipeline"
       - cache#v1.5.2:
-          key: "mmlu-results-final-{{ .BuildkiteCommit }}"
+          key: "mmlu-results-{{ .BuildkiteCommit }}"
           path: "mmlu-results"
           restore: "pipeline"
     command: |
@@ -174,10 +169,20 @@ steps:
       echo "🔍 Current directory: $(pwd)"
       echo "📁 Contents of mmlu-results/:"
       ls -la mmlu-results/ || echo "mmlu-results directory not found"
+
+      # Generate text summary (legacy)
       python3 .buildkite/correctness/summarize_scores.py
+
+      # Generate comprehensive PDF report
+      echo "📊 Generating comprehensive PDF report..."
+      python3 .buildkite/correctness/create_report.py
+
+      echo "✅ All reports generated"
     artifact_paths:
       - "mmlu-results/*.txt"
-      - "compare-results/comparison.txt"
+      - "compare-results/*.txt"
+      - "compare-results/*.pdf"
+      - "compare-results/*.json"
 
   - label: ":wastebasket: Cleanup"
     key: "cleanup"
