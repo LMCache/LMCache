@@ -1,5 +1,7 @@
+requests
+tqdm
+transformers
 numpy
 pandas
-tiktoken
-tqdm
-requests
+matplotlib
+seaborn
