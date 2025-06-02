@@ -128,7 +128,10 @@ class KVCacheManager:
             while size_kv_cpu > self.cpu_size:
                 keys_snapshot = list(self.hot_cache.keys())
                 # 2.1 找到最旧的那个 key（OrderedDict 第一个）
-                oldest_key = next(iter(keys_snapshot))
+                oldest_key = next((k for k in keys_snapshot if k not in final_drop_list), None)
+                    if oldest_key is None:
+                        # 如果所有 key 都已经被处理过或 hot_cache 为空，则跳出
+                        break
 
                 # 2.2 拿最旧 entry 的完整 context_id 列表
                 oldest_ctx = oldest_key.metadata.context_id
@@ -136,7 +139,7 @@ class KVCacheManager:
                 # 2.3 只淘汰与之完全相同 context_id 的 entries
                 drop_keys = [
                     k for k in keys_snapshot
-                    if k.metadata.context_id == oldest_ctx
+                    if k.metadata.context_id == oldest_ctx and k not in final_drop_list
                 ]
 
                 # 2.4 一并弹出，并记录到 final_drop_list
