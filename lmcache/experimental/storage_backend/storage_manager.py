@@ -297,6 +297,7 @@ class StorageManager:
         self.manager = KVCacheManager(self.hot_cache, config.policy, config.rate)
         self.policy = config.policy
         self.update_queue: OrderedDict[CacheEngineKey, MemoryObj] = OrderedDict()
+        self.to_delete_list: List[CacheEngineKey] = []
 
     def allocate(
         self,
@@ -359,6 +360,12 @@ class StorageManager:
             current_kv_decision, update_decision = self.manager.inform_new(self.update_queue)
             self.put(self.update_queue, current_kv_decision, update_decision)
             self.update_queue.clear()
+
+        for key in self.to_delete_list:
+            for backend_name, backend in self.storage_backends.items():
+                backend.remove(key)
+                # I ignored evictor's size since I set disk memory to a large number.
+        self.to_delete_list = []
 
     def put(
         self,
@@ -573,7 +580,7 @@ class StorageManager:
                 self.memory_allocator.ref_count_up(memory_obj)
             self.manager_lock.release()
 
-    def get(self, key: CacheEngineKey, emerge_id) -> Optional[Union[MemoryObj, Tensor]]:
+    def get(self, key: CacheEngineKey, emerge_id, occurence_number) -> Optional[Union[MemoryObj, Tensor]]:
         """
         Blocking function to get the memory object from the storages.
         """
@@ -668,6 +675,11 @@ class StorageManager:
                     memory_obj = self.kivi_de.deserialize(memory_obj, BITS, self.kivi_cache[new_key][0], self.kivi_cache[new_key][1], self.kivi_cache[new_key][2], self.kivi_cache[new_key][3], self.kivi_cache[new_key][4])       
 
                 logger.info(f"Decompressed memory object from disk, rate: {new_key.metadata.rate}.\n")
+
+                # Hack the system
+                # Remove memory_obj from disk if it is in its last round 
+                if occurence_number == 3:
+                    self.to_delete_list.append(new_key)
 
                 return memory_obj
 

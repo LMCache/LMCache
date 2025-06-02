@@ -93,7 +93,7 @@ class LMCacheEngine:
         else:
             monitor_req_id = self.stats_monitor.on_store_request(len(tokens))
 
-        for start, end, key in self.token_database.process_tokens(
+        for start, end, key, occ in self.token_database.process_tokens(
                 tokens, mask, self.emerge_id):
             if self.storage_manager.contains(key):
                 continue
@@ -158,11 +158,11 @@ class LMCacheEngine:
                 len(tokens))
 
         ret_mask = torch.zeros_like(tokens, dtype=torch.bool, device="cpu")
-        for start, end, key in self.token_database.process_tokens(
+        for start, end, key, occ in self.token_database.process_tokens(
                 tokens, mask, self.emerge_id):
 
             # Get the memory object from the storage backend
-            memory_obj = self.storage_manager.get(key, self.emerge_id)
+            memory_obj = self.storage_manager.get(key, self.emerge_id, occ)
 
             if memory_obj is None:
                 break
@@ -192,7 +192,7 @@ class LMCacheEngine:
         """Launch the prefetching process in the storage manager to load the 
         KV to the local CPU memory
         """
-        for start, end, key in self.token_database.process_tokens(
+        for start, end, key, occ in self.token_database.process_tokens(
                 tokens, mask, self.emerge_id):
             self.storage_manager.prefetch(key)
 
@@ -214,7 +214,7 @@ class LMCacheEngine:
         :return: An int indicating how many prefix tokens are cached.
         """
 
-        for start, end, key in self.token_database.process_tokens(tokens, None, self.emerge_id):
+        for start, end, key, occ in self.token_database.process_tokens(tokens, None, self.emerge_id):
             if not self.storage_manager.contains(key, search_range):
                 return start
         return end

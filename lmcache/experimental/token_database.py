@@ -28,7 +28,7 @@ class TokenDatabase(metaclass=abc.ABCMeta):
         tokens: torch.Tensor,
         mask: Optional[torch.Tensor] = None,
         id: Optional[int] = None,
-    ) -> Iterable[Tuple[int, int, CacheEngineKey]]:
+    ) -> Iterable[Tuple[int, int, CacheEngineKey, int]]:
         """Process the tokens and return the corresponding cache engine keys.
 
         :param torch.Tensor tokens: The tokens to process, in 1-D CPU tensor.
@@ -177,8 +177,9 @@ class ChunkedTokenDatabase(TokenDatabase):
         self._dataset_df = pd.read_csv(config.dataset_csv)
         self.method_output_csv = config.method_output_csv
 
-    def _make_key_by_hash(self, chunk_hash: str, total_hashes: str, token_len: int, id: int) -> CacheEngineKey:
+    def _make_key_by_hash(self, chunk_hash: str, total_hashes: str, token_len: int, id: int) -> Tuple[CacheEngineKey, int]:
         dataset_value = self._dataset_df.iloc[id]["dataset"]
+        occurrence = self._dataset_df.iloc[id]["occurrence_number"]
         if self.compression == "kivi":
             threshold_file_mapping = {
                 1.0:   "cpu_1.csv",
@@ -305,7 +306,7 @@ class ChunkedTokenDatabase(TokenDatabase):
         return CacheEngineKey(self.metadata.fmt, self.metadata.model_name,
                               self.metadata.world_size,
                               self.metadata.worker_id, chunk_hash,
-                              CacheManagerMetadata([total_hashes], ["kivi"], 1, 0.0, token_len, [score_table], [], [disk_score_table]))
+                              CacheManagerMetadata([total_hashes], ["kivi"], 1, 0.0, token_len, [score_table], [], [disk_score_table])), occurrence
 
     def _get_init_hash(self) -> str:
         return ""
@@ -350,7 +351,7 @@ class ChunkedTokenDatabase(TokenDatabase):
         tokens: torch.Tensor,
         mask: Optional[torch.Tensor] = None,
         id: Optional[int] = None,
-    ) -> Iterable[Tuple[int, int, CacheEngineKey]]:
+    ) -> Iterable[Tuple[int, int, CacheEngineKey, int]]:
         """Process the tokens and return the corresponding cache engine keys.
 
         :param torch.Tensor tokens: The tokens to process, in 1-D CPU tensor.
@@ -390,4 +391,6 @@ class ChunkedTokenDatabase(TokenDatabase):
             if start_idx < num_falses:
                 continue
             else:
-                yield start_idx, end_idx, self._make_key_by_hash(hash_val, total_hashes, total_len, id)
+                key, occurrence = self._make_key_by_hash(
+                    hash_val, total_hashes, total_len, id)
+                yield start_idx, end_idx, key, occurrence
