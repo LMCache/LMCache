@@ -87,9 +87,8 @@ steps:
           path: "data"
           restore: "pipeline"
       - cache#v1.5.2:
-          key: "mmlu-results-{{ .BuildkiteCommit }}"
+          key: "mmlu-results-vllm-{{ .BuildkiteCommit }}"
           path: "mmlu-results"
-          restore: "pipeline"
           save: "pipeline"
     command: |
       export PATH="$HOME/.local/bin:$PATH"
@@ -115,9 +114,8 @@ steps:
           path: "data"
           restore: "pipeline"
       - cache#v1.5.2:
-          key: "mmlu-results-{{ .BuildkiteCommit }}"
+          key: "mmlu-results-lmcache-mla-{{ .BuildkiteCommit }}"
           path: "mmlu-results"
-          restore: "pipeline"
           save: "pipeline"
     command: |
       export PATH="$HOME/.local/bin:$PATH"
@@ -143,9 +141,8 @@ steps:
           path: "data"
           restore: "pipeline"
       - cache#v1.5.2:
-          key: "mmlu-results-{{ .BuildkiteCommit }}"
+          key: "mmlu-results-lmcache-no-mla-{{ .BuildkiteCommit }}"
           path: "mmlu-results"
-          restore: "pipeline"
           save: "pipeline"
     command: |
       export PATH="$HOME/.local/bin:$PATH"
@@ -172,14 +169,26 @@ steps:
           path: "data"
           restore: "pipeline"
       - cache#v1.5.2:
-          key: "mmlu-results-{{ .BuildkiteCommit }}"
+          key: "mmlu-results-vllm-{{ .BuildkiteCommit }}"
+          path: "mmlu-results"
+          restore: "pipeline"
+      - cache#v1.5.2:
+          key: "mmlu-results-lmcache-mla-{{ .BuildkiteCommit }}"
+          path: "mmlu-results"
+          restore: "pipeline"
+      - cache#v1.5.2:
+          key: "mmlu-results-lmcache-no-mla-{{ .BuildkiteCommit }}"
           path: "mmlu-results"
           restore: "pipeline"
     command: |
       export PATH="$HOME/.local/bin:$PATH"
       source .venv/bin/activate
       echo "🔍 Current directory: $(pwd)"
-      echo "📁 Contents of mmlu-results/:"
+
+      # Ensure results directory exists
+      mkdir -p mmlu-results
+
+      echo "📁 Contents of mmlu-results/ after cache restore:"
       ls -la mmlu-results/ || echo "mmlu-results directory not found"
 
       # Debug: Check installed packages
