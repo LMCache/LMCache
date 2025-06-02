@@ -1,0 +1,124 @@
+# our CWD is the root of the repo
+# 1. setup up
+# venv set up to use for the entire pipeline
+# docker pull lmcache/vllm-openai:latest
+# pip install -r requirements/bench.txt
+# download-data.sh
+# 2. run each of the benchmarks
+# vllm.sh
+# lmcache.sh
+# lmcache-no-mla.sh
+# 3. summarize the results
+# make sure to produce artifacts
+
+# SECURITY NOTE:
+# - HF_TOKEN must be set in Buildkite UI Environment Variables
+# - Mark HF_TOKEN as "Secret" in Buildkite to mask it in logs
+agents:
+  queue: "shaoting-gcp"
+
+env:
+  # HF_TOKEN should be set in Buildkite UI Environment Variables (not in this file for security)
+  LM_CACHE_TEST_DIR: "/home/shaotingf/lmcache-tests"
+  PATH: "/var/lib/buildkite-agent/.local/bin:${PATH}"
+  IMAGE: "lmcache/vllm-openai:latest"
+
+steps:
+  - label: ":gear: Setup Environment"
+    key: "setup"
+    plugins:
+      - cache#v1.5.2:
+          key: "venv-mmlu-{{ checksum \"requirements/bench.txt\" }}-{{ checksum \"requirements/common.txt\" }}"
+          path: ".venv"
+          save: "pipeline"
+    command: |
+      # Validate required environment variables
+      if [ -z "$${HF_TOKEN}" ]; then
+        echo "❌ ERROR: HF_TOKEN environment variable is not set"
+        echo "Please set HF_TOKEN in Buildkite UI Environment Variables"
+        exit 1
+      fi
+      echo "✅ HF_TOKEN is set"
+
+      # Install uv if not available
+      if ! command -v uv &> /dev/null; then
+        echo "📦 Installing uv..."
+        curl -Ls https://astral.sh/uv/install.sh | bash
+        export PATH="$HOME/.local/bin:$PATH"
+      fi
+
+      # Create venv and install dependencies
+      bash .buildkite/install-env.sh
+      source .venv/bin/activate
+      pip install -r requirements/bench.txt
+
+      # Pull Docker image
+      sudo docker pull $${IMAGE}
+
+      # Download MMLU data
+      bash .buildkite/correctness/download-data.sh
+
+  - label: ":rocket: vLLM Baseline"
+    key: "vllm-baseline"
+    depends_on: ["setup"]
+    plugins:
+      - cache#v1.5.2:
+          key: "venv-mmlu-{{ checksum \"requirements/bench.txt\" }}-{{ checksum \"requirements/common.txt\" }}"
+          path: ".venv"
+          restore: "pipeline"
+    command: |
+      export PATH="$HOME/.local/bin:$PATH"
+      source .venv/bin/activate
+      bash .buildkite/correctness/vllm.sh
+
+  - label: ":zap: LMCache with MLA"
+    key: "lmcache-mla"
+    depends_on: ["setup"]
+    plugins:
+      - cache#v1.5.2:
+          key: "venv-mmlu-{{ checksum \"requirements/bench.txt\" }}-{{ checksum \"requirements/common.txt\" }}"
+          path: ".venv"
+          restore: "pipeline"
+    command: |
+      export PATH="$HOME/.local/bin:$PATH"
+      source .venv/bin/activate
+      bash .buildkite/correctness/lmcache.sh
+
+  - label: ":electric_plug: LMCache without MLA"
+    key: "lmcache-no-mla"
+    depends_on: ["setup"]
+    plugins:
+      - cache#v1.5.2:
+          key: "venv-mmlu-{{ checksum \"requirements/bench.txt\" }}-{{ checksum \"requirements/common.txt\" }}"
+          path: ".venv"
+          restore: "pipeline"
+    command: |
+      export PATH="$HOME/.local/bin:$PATH"
+      source .venv/bin/activate
+      bash .buildkite/correctness/lmcache-no-mla.sh
+
+  - label: ":bar_chart: Summarize Results"
+    key: "summarize"
+    depends_on: ["vllm-baseline", "lmcache-mla", "lmcache-no-mla"]
+    allow_dependency_failure: true
+    plugins:
+      - cache#v1.5.2:
+          key: "venv-mmlu-{{ checksum \"requirements/bench.txt\" }}-{{ checksum \"requirements/common.txt\" }}"
+          path: ".venv"
+          restore: "pipeline"
+    command: |
+      export PATH="$HOME/.local/bin:$PATH"
+      source .venv/bin/activate
+      python3 .buildkite/correctness/summarize_scores.py
+    artifact_paths:
+      - "mmlu-results/*.txt"
+      - "compare-results/comparison.txt"
+
+  - label: ":wastebasket: Cleanup"
+    key: "cleanup"
+    depends_on: ["summarize"]
+    allow_dependency_failure: true
+    command: |
+      # Kill any remaining docker containers
+      sudo docker ps -q | xargs -r sudo docker kill || true
+      sudo docker system prune -f || true
