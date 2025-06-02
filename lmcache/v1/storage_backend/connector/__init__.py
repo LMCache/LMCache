@@ -181,7 +181,7 @@ def CreateConnector(
                 host, port, device_name, loop, local_cpu_backend
             )
         case "blackhole":
-            connector = BlackholeConnector()
+            connector = BlackholeConnector(config)
         case "fs":
             if num_hosts != 1:
                 raise ValueError(

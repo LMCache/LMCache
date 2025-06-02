@@ -104,6 +104,9 @@ class LMCacheEngineConfig:
     # Size of CuFile Buffer in MiB
     cufile_buffer_size: Optional[int] = None
 
+    # Extra configuration dictionary for custom settings
+    extra_config: dict = None
+
     @staticmethod
     def from_defaults(
         chunk_size: int = 256,
@@ -134,6 +137,7 @@ class LMCacheEngineConfig:
         nixl_buffer_device: Optional[str] = None,
         nixl_enable_gc: Optional[bool] = False,
         audit_actual_remote_url: Optional[str] = None,
+        extra_config: Optional[dict] = None,
     ) -> "LMCacheEngineConfig":
         # TODO (ApostaC): Add nixl config
         return LMCacheEngineConfig(
@@ -165,6 +169,7 @@ class LMCacheEngineConfig:
             nixl_buffer_device,
             nixl_enable_gc,
             audit_actual_remote_url,
+            extra_config=extra_config or {},
         ).validate()
 
     @staticmethod
@@ -315,6 +320,9 @@ class LMCacheEngineConfig:
         weka_path = config.get("weka_path", None)
         cufile_buffer_size = config.get("cufile_buffer_size", None)
 
+        # Get extra_config dictionary
+        extra_config = config.get("extra_config", {})
+
         local_disk_path = _parse_local_disk(local_disk)
 
         match remote_url:
@@ -357,6 +365,7 @@ class LMCacheEngineConfig:
                 audit_actual_remote_url,
                 weka_path,
                 cufile_buffer_size,
+                extra_config=extra_config,
             )
             .validate()
             .log_config()
@@ -395,6 +404,26 @@ class LMCacheEngineConfig:
             if value is None:
                 return 0.0
             return float(value)
+
+        def parse_extra_config(value: Optional[str]) -> dict:
+            """Parse extra_config from JSON string"""
+            if not value:
+                return {}
+            try:
+                # Standard
+                import json
+
+                return json.loads(value)
+            except ImportError:
+                # Handle missing json module (unlikely but possible)
+                logger.error("import json module error")
+                return {}
+            except (TypeError, ValueError, json.JSONDecodeError) as e:
+                # Handle all possible parsing errors
+                logger.warning(
+                    f"Failed to parse extra config: {str(e)}, using empty dict"
+                )
+                return {}
 
         config = LMCacheEngineConfig.from_defaults(remote_url=None, remote_serde=None)
         config.chunk_size = to_int(
@@ -519,6 +548,11 @@ class LMCacheEngineConfig:
             get_env_name("cufile_buffer_size"),
             config.cufile_buffer_size,
         )
+
+        # Parse extra_config from environment
+        extra_config_str = parse_env(get_env_name("extra_config"), None)
+        config.extra_config = parse_extra_config(extra_config_str)
+
         return config.validate().log_config()
 
     def to_original_config(self) -> orig_config.LMCacheEngineConfig:
@@ -597,6 +631,7 @@ class LMCacheEngineConfig:
             "nixl_buffer_device": self.nixl_buffer_device,
             "nixl_enable_gc": self.nixl_enable_gc,
             "weka_path": self.weka_path,
+            "extra_config": self.extra_config,
         }
         logger.info(f"LMCache Configuration: {config_dict}")
 

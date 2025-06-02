@@ -18,6 +18,7 @@ from typing import List, Optional, no_type_check
 # First Party
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
+from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import MemoryObj
 
 # reuse
@@ -27,11 +28,21 @@ logger = init_logger(__name__)
 
 
 class BlackholeConnector(RemoteConnector):
-    def __init__(self):
-        pass
+    def __init__(self, config: Optional[LMCacheEngineConfig] = None):
+        """
+        Initialize the Blackhole connector.
+
+        Args:
+            config: LMCacheEngineConfig instance for accessing extra_config
+        """
+        self.always_exists = False
+        if config and config.extra_config:
+            self.always_exists = config.extra_config.get(
+                "remote_black_hole_always_exists", False
+            )
 
     async def exists(self, key: CacheEngineKey) -> bool:
-        return False
+        return self.always_exists
 
     async def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         return None
