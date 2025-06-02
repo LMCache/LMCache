@@ -27,7 +27,6 @@ import time
 
 # Third Party
 import aiofile
-import cufile
 import torch
 
 # First Party
@@ -102,50 +101,6 @@ async def save_metadata(path: str, tmp: str, metadata: bytes):
     os.rename(tmp_path, path)
 
 
-@_lmcache_nvtx_annotate
-@torch.inference_mode()
-def save_gds_cufile(
-    path: str,
-    tmp: str,
-    kv_chunk: torch.Tensor,
-    base_pointer: int,
-    device_offset: int,
-):
-    if base_pointer is None:
-        addr = ctypes.c_void_p(kv_chunk.data_ptr())
-        dev_offset = 0
-    else:
-        addr = ctypes.c_void_p(base_pointer)
-        dev_offset = device_offset
-    tmp_path = path + tmp
-    offset = _METADATA_MAX_SIZE
-    metadata = pack_metadata(kv_chunk.shape, kv_chunk.dtype, kv_chunk.nbytes)
-    try:
-        with open(tmp_path, "wb") as f:
-            f.write(metadata)
-        with cufile.CuFile(tmp_path, "r+") as f:
-            f.write(addr, kv_chunk.nbytes, file_offset=offset, dev_offset=dev_offset)
-    except Exception as e:
-        logger.error(f"Error saving {tmp_path}: {e}", exc_info=True)
-        raise e
-    os.rename(tmp_path, path)
-    return metadata
-
-
-def load_gds_cufile(
-    file_path: str,
-    file_offset: int,
-    gpu_pointer: ctypes.c_void_p,
-    size_in_bytes: int,
-    dev_offset: int,
-) -> int:
-    # Read data from disk into a GPU buffer
-    with cufile.CuFile(file_path, "r") as f:
-        return f.read(
-            gpu_pointer, size_in_bytes, file_offset=file_offset, dev_offset=dev_offset
-        )
-
-
 class WekaGdsBackend(StorageBackendInterface):
     """
     This is a backend that leverages NVIDIA's cuFile API to issue GDS requests
@@ -179,6 +134,13 @@ class WekaGdsBackend(StorageBackendInterface):
         memory_allocator: MemoryAllocatorInterface,
         dst_device: str = "cuda",
     ):
+        # HACK(Jiayi): cufile import is buggy on some hardware
+        # (e.g., without GPUDirect), so it's temporarily put here.
+        # Third Party
+        import cufile
+
+        self.cufile = cufile
+
         assert dst_device.startswith("cuda")
         super().__init__(dst_device)
 
@@ -205,7 +167,7 @@ class WekaGdsBackend(StorageBackendInterface):
 
         self.rand = random.Random(self.dst_device)
 
-        self._cufile_driver = cufile.CuFileDriver()
+        self._cufile_driver = self.cufile.CuFileDriver()
         if hasattr(self.memory_allocator, "base_pointer"):
             logger.debug(f"Using base pointer {self.memory_allocator.base_pointer}")
             self.cufile_base_pointer = self.memory_allocator.base_pointer
@@ -365,7 +327,7 @@ class WekaGdsBackend(StorageBackendInterface):
             self.metadata_dirs.add(subdir_key)
         tmp = ".tmp" + rand_suffix(self.rand, 8)
         metadata = await asyncio.to_thread(
-            save_gds_cufile,
+            self._save_gds_cufile,
             path,
             tmp,
             kv_chunk,
@@ -460,7 +422,9 @@ class WekaGdsBackend(StorageBackendInterface):
         else:
             addr = ctypes.c_void_p(self.cufile_base_pointer)
             dev_offset = memory_obj.metadata.address
-        ret = load_gds_cufile(path, offset, addr, memory_obj.get_size(), dev_offset)
+        ret = self._load_gds_cufile(
+            path, offset, addr, memory_obj.get_size(), dev_offset
+        )
         if ret != memory_obj.get_size():
             if ret < 0:
                 logger.error(
@@ -485,6 +449,55 @@ class WekaGdsBackend(StorageBackendInterface):
     ) -> Optional[Future]:
         # TODO(Serapheim): Using a dummy wrapper around prefetch for now.
         return self.submit_prefetch_task(key)
+
+    @_lmcache_nvtx_annotate
+    @torch.inference_mode()
+    def _save_gds_cufile(
+        self,
+        path: str,
+        tmp: str,
+        kv_chunk: torch.Tensor,
+        base_pointer: int,
+        device_offset: int,
+    ):
+        if base_pointer is None:
+            addr = ctypes.c_void_p(kv_chunk.data_ptr())
+            dev_offset = 0
+        else:
+            addr = ctypes.c_void_p(base_pointer)
+            dev_offset = device_offset
+        tmp_path = path + tmp
+        offset = _METADATA_MAX_SIZE
+        metadata = pack_metadata(kv_chunk.shape, kv_chunk.dtype, kv_chunk.nbytes)
+        try:
+            with open(tmp_path, "wb") as f:
+                f.write(metadata)
+            with self.cufile.CuFile(tmp_path, "r+") as f:
+                f.write(
+                    addr, kv_chunk.nbytes, file_offset=offset, dev_offset=dev_offset
+                )
+        except Exception as e:
+            logger.error(f"Error saving {tmp_path}: {e}", exc_info=True)
+            raise e
+        os.rename(tmp_path, path)
+        return metadata
+
+    def _load_gds_cufile(
+        self,
+        file_path: str,
+        file_offset: int,
+        gpu_pointer: ctypes.c_void_p,
+        size_in_bytes: int,
+        dev_offset: int,
+    ) -> int:
+        # Read data from disk into a GPU buffer
+        with self.cufile.CuFile(file_path, "r") as f:
+            return f.read(
+                gpu_pointer,
+                size_in_bytes,
+                file_offset=file_offset,
+                dev_offset=dev_offset,
+            )
 
     def pin(self, key: CacheEngineKey) -> bool:
         # TODO(Serapheim): Implement this
