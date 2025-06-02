@@ -1,0 +1,11 @@
+chunk_size: 1024
+local_disk: "file:///home/ubuntu/kvcache/"
+max_local_disk_size: 2000
+local_cpu: True
+max_local_cpu_size: 60 # actually 40, set to 60 to avoid bubble
+alpha: 1
+policy: "baseline_KIVI"
+rate: 1
+compression: "kivi"
+dataset_csv: "dataset/sum_processed.csv"
+method_output_csv: "results/May_23_1_sum/prefill/1_mode.csv"

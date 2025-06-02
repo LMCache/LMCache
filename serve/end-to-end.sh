@@ -18,28 +18,13 @@ trap cleanup SIGINT SIGTERM
 # --- Configuration arrays (must all be the same length) ---
 ports=(8000)
 configs=(
-  ../config/May_13_2_triviaqa_rr/ours/kivi_1.yaml
-  # ../config/May_13_2_triviaqa_rr/ours/kivi_01.yaml
-  # ../config/May_13_2_triviaqa_rr/ours/kivi_10.yaml
-  # ../config/May_13_2_triviaqa_rr/ours/streaming_1.yaml
-  # ../config/May_13_2_triviaqa_rr/ours/streaming_04.yaml
-  # ../config/May_13_2_triviaqa_rr/ours/streaming_10.yaml
+  ../config/May_23_1_sum/prefill/1.yaml
 )
 logs=(
-  results/May_13_2_triviaqa_rr/ours/tokens/kivi_1.log
-  # results/May_13_2_triviaqa_rr/ours/tokens/kivi_01.log
-  # results/May_13_2_triviaqa_rr/ours/tokens/kivi_10.log
-  # results/May_13_2_triviaqa_rr/ours/tokens/streaming_1.log
-  # results/May_13_2_triviaqa_rr/ours/tokens/streaming_04.log
-  # results/May_13_2_triviaqa_rr/ours/tokens/streaming_10.log
+  results/May_23_1_sum/prefill/tokens/1.log
 )
 outputs=(
-  results/May_13_2_triviaqa_rr/ours/kivi_1.csv
-  # results/May_13_2_triviaqa_rr/ours/kivi_01.csv
-  # results/May_13_2_triviaqa_rr/ours/kivi_10.csv
-  # results/May_13_2_triviaqa_rr/ours/streaming_1.csv
-  # results/May_13_2_triviaqa_rr/ours/streaming_04.csv
-  # results/May_13_2_triviaqa_rr/ours/streaming_10.csv
+  results/May_23_1_sum/prefill/1.csv
 )
 
 # Array to track running PGIDs
@@ -76,7 +61,7 @@ for i in "${!ports[@]}"; do
 
   # Run the test
   echo "Running test: python3 online_test.py --output $out --port $port"
-  python3 triviaqa.py --output "$out" --port "$port" >>"$logf" 2>&1
+  python3 sum.py --output "$out" --port "$port" >>"$logf" 2>&1
 
   # Tear down this engine session
   echo "Test finished; tearing down engine session PGID $engine_pid"

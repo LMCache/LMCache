@@ -7,6 +7,8 @@ from lmcache.logging import init_logger
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.experimental.config import LMCacheEngineConfig
 from lmcache.utils import CacheEngineKey, CacheManagerMetadata
+import os
+import pandas as pd
 
 logger = init_logger(__name__)
 
@@ -25,6 +27,7 @@ class TokenDatabase(metaclass=abc.ABCMeta):
         self,
         tokens: torch.Tensor,
         mask: Optional[torch.Tensor] = None,
+        id: Optional[int] = None,
     ) -> Iterable[Tuple[int, int, CacheEngineKey]]:
         """Process the tokens and return the corresponding cache engine keys.
 
@@ -108,6 +111,58 @@ def streaming_compute_score_table(
         table.append((threshold, final_score))
     return table
 
+def compute_min_unit_quality_drop(
+    score_table: list[tuple[float, float]],
+    token_len: float,
+) -> float:
+    base_threshold, base_score = score_table[0]
+    min_unit_drop = float("inf")
+
+    for threshold, score in score_table[1:]:
+        # compute the per-unit quality drop
+        numerator = base_score - score
+        denominator = token_len * (base_threshold - threshold)
+        unit_drop = numerator / denominator
+
+        if unit_drop < min_unit_drop:
+            min_unit_drop = unit_drop
+
+    return min_unit_drop
+
+def choose_score_dict(
+    dataset: str,
+    compression_method: str,
+) -> dict[float, float]:
+    if dataset == "qmsum" and compression_method == "kivi":
+        score02 = 0 # xxxxxxxxxx
+        score03 = 0 # xxxxxxxxxx
+        score06 = 0 # xxxxxxxxxx
+        score1 = 0 # xxxxxxxxxx
+    elif dataset == "qmsum" and compression_method == "streaming":
+        score02 = 0 # xxxxxxxxxx
+        score03 = 0 # xxxxxxxxxx
+        score06 = 0 # xxxxxxxxxx
+        score1 = 0 # xxxxxxxxxx
+    elif dataset == "samsum" and compression_method == "kivi":
+        score02 = 0.7310
+        score03 = 0.9046
+        score06 = 0.9467
+        score1 = 0 # xxxxxxxxxx
+    elif dataset == "samsum" and compression_method == "streaming":
+        score02 = 0.6309
+        score03 = 0.6434
+        score06 = 0.6993
+        score1 = 0 # xxxxxxxxxx
+    else:
+        raise ValueError(f"Unsupported dataset {dataset} and compression method {compression_method}.")
+    return {
+        1.0: 1 - score1,
+        0.728571429: 1 - score06,
+        0.485714286: 1 - score03,
+        0.371428571: 1 - score02,
+        0.0:  0.0,
+    }
+
 class ChunkedTokenDatabase(TokenDatabase):
 
     def __init__(self, config: LMCacheEngineConfig,
@@ -119,8 +174,11 @@ class ChunkedTokenDatabase(TokenDatabase):
         self.alpha = config.alpha
         self.compression = config.compression
         logger.info(f"ChunkedTokenDatabase initialized with alpha {self.alpha}.")
+        self._dataset_df = pd.read_csv(config.dataset_csv)
+        self.method_output_csv = config.method_output_csv
 
-    def _make_key_by_hash(self, chunk_hash: str, total_hashes: str, token_len: int) -> CacheEngineKey:
+    def _make_key_by_hash(self, chunk_hash: str, total_hashes: str, token_len: int, id: int) -> CacheEngineKey:
+        dataset_value = self._dataset_df.iloc[id]["dataset"]
         if self.compression == "kivi":
             threshold_file_mapping = {
                 1.0:   "cpu_1.csv",
@@ -135,13 +193,9 @@ class ChunkedTokenDatabase(TokenDatabase):
                 0.485714286: "03.csv",
                 0.371428571: "02.csv",
             }
-            score_dict = {
-                1.0: 0.04712764415,
-                0.728571429: 0.04728688579,
-                0.485714286: 0.10989075498,
-                0.371428571: 0.35417149795,
-                0.0:  0.0,
-            }
+            score_dict = choose_score_dict(
+                dataset_value, "kivi"
+            )
             score_table = compute_score_table(
                 threshold_file_mapping, token_len, self.alpha,
                 self.coefficients, score_dict
@@ -164,13 +218,9 @@ class ChunkedTokenDatabase(TokenDatabase):
                 0.485714286: "1.csv",
                 0.371428571: "1.csv",
             }
-            score_dict = {
-                1.0: 0.04712764415,
-                0.728571429: 0.3007,
-                0.485714286: 0.3566,
-                0.371428571: 0.3691,
-                0.0:  0.0,
-            }
+            score_dict = choose_score_dict(
+                dataset_value, "streaming"
+            )
             score_table = streaming_compute_score_table(
                 threshold_file_mapping, token_len, self.alpha,
                 self.coefficients, score_dict
@@ -179,6 +229,78 @@ class ChunkedTokenDatabase(TokenDatabase):
                 disk_threshold_file_mapping, token_len, self.alpha,
                 self.coefficients, score_dict
             )
+        elif self.compression == "mix":
+            kivi_threshold_file_mapping = {
+                1.0:   "cpu_1.csv",
+                0.728571429: "cpu_06.csv",
+                0.485714286: "cpu_03.csv",
+                0.371428571: "cpu_02.csv",
+                0.0:   "prefill.csv",
+            }
+            streaming_threshold_file_mapping = {
+                1.0:   "cpu_1.csv",
+                0.728571429: "cpu_1.csv",
+                0.485714286: "cpu_1.csv",
+                0.371428571: "cpu_1.csv",
+                0.0:   "prefill.csv",
+            }
+            kivi_score_dict = choose_score_dict(
+                dataset_value, "kivi"
+            )
+            streaming_score_dict = choose_score_dict(
+                dataset_value, "streaming"
+            )
+            kivi_score_table = compute_score_table(
+                kivi_threshold_file_mapping, token_len, self.alpha,
+                self.coefficients, kivi_score_dict
+            )
+            streaming_score_table = streaming_compute_score_table(
+                streaming_threshold_file_mapping, token_len, self.alpha,
+                self.coefficients, streaming_score_dict
+            )
+            kivi_min_unit_quality_drop = compute_min_unit_quality_drop(kivi_score_table, token_len)
+            streaming_min_unit_quality_drop = compute_min_unit_quality_drop(streaming_score_table, token_len)
+            if kivi_min_unit_quality_drop <= streaming_min_unit_quality_drop:
+                mode = "kivi"
+                score_table = kivi_score_table
+                disk_threshold_file_mapping = {
+                    1.0:   "1.csv",
+                    0.728571429: "06.csv",
+                    0.485714286: "03.csv",
+                    0.371428571: "02.csv",
+                }
+                disk_score_table = compute_score_table(
+                    disk_threshold_file_mapping, token_len, self.alpha,
+                    self.coefficients, kivi_score_dict
+                )
+            else:
+                mode = "streaming"
+                score_table = streaming_score_table
+                disk_threshold_file_mapping = {
+                    1.0:   "1.csv",
+                    0.728571429: "1.csv",
+                    0.485714286: "1.csv",
+                    0.371428571: "1.csv",
+                }
+                disk_score_table = streaming_compute_score_table(
+                    disk_threshold_file_mapping, token_len, self.alpha,
+                    self.coefficients, streaming_score_dict
+                )
+            
+            log_file = self.method_output_csv
+            file_exists = os.path.exists(log_file)
+            if file_exists:
+                with open(log_file, "r") as f:
+                    total_lines = sum(1 for _ in f) - 1
+                    if total_lines < 0:
+                        total_lines = 0
+            else:
+                total_lines = 0
+            with open(log_file, "a", newline="") as f:
+                writer = csv.writer(f)
+                if not file_exists:
+                    writer.writerow(["index", "method"])
+                writer.writerow([total_lines, mode])
 
         return CacheEngineKey(self.metadata.fmt, self.metadata.model_name,
                               self.metadata.world_size,
@@ -227,6 +349,7 @@ class ChunkedTokenDatabase(TokenDatabase):
         self,
         tokens: torch.Tensor,
         mask: Optional[torch.Tensor] = None,
+        id: Optional[int] = None,
     ) -> Iterable[Tuple[int, int, CacheEngineKey]]:
         """Process the tokens and return the corresponding cache engine keys.
 
@@ -267,4 +390,4 @@ class ChunkedTokenDatabase(TokenDatabase):
             if start_idx < num_falses:
                 continue
             else:
-                yield start_idx, end_idx, self._make_key_by_hash(hash_val, total_hashes, total_len)
+                yield start_idx, end_idx, self._make_key_by_hash(hash_val, total_hashes, total_len, id)

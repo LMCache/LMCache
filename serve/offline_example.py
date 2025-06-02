@@ -17,7 +17,7 @@ from vllm.config import KVTransferConfig
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 os.environ["LMCACHE_USE_EXPERIMENTAL"] = "True"
-os.environ["LMCACHE_CONFIG_FILE"] = "../config/qmsum.yaml"
+os.environ["LMCACHE_CONFIG_FILE"] = "../config/May_23_1_sum/baseline_kivi/02.yaml"
 
 # This example script runs two requests with a shared prefix.
 shared_prompt = "Hi " * 8000

@@ -48,30 +48,30 @@ if __name__ == "__main__":
 
     # first panel: processed.csv
     baseline1 = [
-        'results/May_12_1/baseline/02_processed.csv',
-        'results/May_12_1/baseline/03_processed.csv',
-        'results/May_12_1/baseline/06_processed.csv',
+        '../results/May_12_1/baseline/02_processed.csv',
+        '../results/May_12_1/baseline/03_processed.csv',
+        '../results/May_12_1/baseline/06_processed.csv',
     ]
     ours1 = [
-        'results/May_12_1/ours/01_processed.csv',
-        'results/May_12_1/ours/1_processed.csv',
-        'results/May_12_1/ours/10_processed.csv',
+        '../results/May_12_1/ours/01_processed.csv',
+        '../results/May_12_1/ours/1_processed.csv',
+        '../results/May_12_1/ours/10_processed.csv',
     ]
     prefill = [
-        'results/May_10_3/prefill/0_processed.csv'
+        '../results/May_10_3/prefill/0_processed.csv'
     ]
 
     # second panel: processed2.csv
     baseline2 = [
-        'results/May_12_1/baseline/02_processed2.csv',
-        'results/May_12_1/baseline/03_processed2.csv',
-        'results/May_12_1/baseline/06_processed2.csv',
+        '../results/May_12_1/baseline/02_processed2.csv',
+        '../results/May_12_1/baseline/03_processed2.csv',
+        '../results/May_12_1/baseline/06_processed2.csv',
     ]
     ours2 = [
-        'results/May_13_1/ours/01_processed2.csv',
-        'results/May_13_1/ours/04_processed2.csv',
-        'results/May_13_1/ours/1_processed2.csv',
-        'results/May_13_1/ours/10_processed2.csv',
+        '../results/May_13_1_samsum_rr/ours/01_processed2.csv',
+        '../results/May_13_1_samsum_rr/ours/04_processed2.csv',
+        '../results/May_13_1_samsum_rr/ours/1_processed2.csv',
+        '../results/May_13_1_samsum_rr/ours/10_processed2.csv',
     ]
     prefill2 = prefill  # same prefill file for both panels
 

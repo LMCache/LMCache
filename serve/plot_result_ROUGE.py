@@ -16,9 +16,10 @@ args = parser.parse_args()
 
 # File lists
 file_paths_baseline = [
-    'results/May_12_1/baseline/02_processed2.csv',
-    'results/May_12_1/baseline/03_processed2.csv',
-    'results/May_12_1/baseline/06_processed2.csv',
+    '/home/ubuntu/st-prodstack-v/press/qmsum/results_rate_0.271428571_processed.csv',
+    '/home/ubuntu/st-prodstack-v/press/qmsum/results_rate_0.514285714_processed.csv',
+    '/home/ubuntu/st-prodstack-v/press/qmsum/results_rate_0.628571429_processed.csv',
+    # 'results/Apr_14/baseline_kivi/1_processed.csv',
 ]
 file_paths_ours = [
     'results/May_13_1/ours/01_processed2.csv',
@@ -28,7 +29,7 @@ file_paths_ours = [
     'results/May_13_1/ours/10_processed2.csv',
 ]
 file_paths_prefill = [
-    'results/May_10_3/prefill/0_processed.csv'
+    'results/Apr_14/baseline_kivi/0_processed.csv'
 ]
 
 def load_metrics(file_list):

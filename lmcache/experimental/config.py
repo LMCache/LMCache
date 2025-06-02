@@ -31,6 +31,8 @@ class LMCacheEngineConfig:
     policy: str
     rate: float
     compression: str
+    dataset_csv: str
+    method_output_csv: str
 
     @staticmethod
     def from_defaults(
@@ -49,12 +51,14 @@ class LMCacheEngineConfig:
         policy: str = "ours",
         rate: float = 1.0,
         compression: str = "kivi",
+        dataset_csv: str = "blablabla",
+        method_output_csv: str = "blablabla",
     ) -> "LMCacheEngineConfig":
         return LMCacheEngineConfig(chunk_size, local_cpu, max_local_cpu_size,
                                    local_disk, max_local_disk_size, remote_url,
                                    remote_serde, save_decode_cache,
                                    enable_blending, blend_recompute_ratio,
-                                   blend_min_tokens, alpha, policy, rate, compression)
+                                   blend_min_tokens, alpha, policy, rate, compression, dataset_csv, method_output_csv)
 
     @staticmethod
     def from_legacy(
@@ -71,6 +75,8 @@ class LMCacheEngineConfig:
         policy: str = "ours",
         rate: float = 1.0,
         compression: str = "kivi",
+        dataset_csv: str = "blablabla",
+        method_output_csv: str = "blablabla",
     ) -> "LMCacheEngineConfig":
         if backend == "cpu":
             local_cpu = True
@@ -114,7 +120,7 @@ class LMCacheEngineConfig:
                                    local_disk, max_local_disk_size, remote_url,
                                    remote_serde, save_decode_cache,
                                    enable_blending, blend_recompute_ratio,
-                                   blend_min_tokens, alpha, policy, rate, compression)
+                                   blend_min_tokens, alpha, policy, rate, compression, dataset_csv, method_output_csv)
 
     @staticmethod
     def from_file(file_path: str) -> "LMCacheEngineConfig":
@@ -144,6 +150,8 @@ class LMCacheEngineConfig:
         policy = config.get("policy", "ours")
         rate = config.get("rate", 1.0)
         compression = config.get("compression", "kivi")
+        dataset_csv = config.get("dataset_csv", "blablabla")
+        method_output_csv = config.get("method_output_csv", "blablabla")
 
         match local_disk:
             case None:
@@ -176,6 +184,8 @@ class LMCacheEngineConfig:
             policy,
             rate,
             compression,
+            dataset_csv,
+            method_output_csv,
         )
 
     @staticmethod
@@ -246,6 +256,10 @@ class LMCacheEngineConfig:
         config.rate = to_float(parse_env(get_env_name("rate"), config.rate))
         config.compression = parse_env(get_env_name("compression"),
                                         config.compression)
+        config.dataset_csv = parse_env(get_env_name("dataset_csv"),
+                                       config.dataset_csv)
+        config.method_output_csv = parse_env(get_env_name("method_output_csv"),
+                                              config.method_output_csv)
         return config
 
     def to_original_config(self) -> orig_config.LMCacheEngineConfig:
