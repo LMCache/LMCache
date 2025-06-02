@@ -88,7 +88,7 @@ steps:
           restore: "pipeline"
       - cache#v1.5.2:
           key: "mmlu-results-vllm-{{ .BuildkiteCommit }}"
-          path: "mmlu-results"
+          path: "cache-results/vllm"
           save: "pipeline"
     command: |
       export PATH="$HOME/.local/bin:$PATH"
@@ -100,6 +100,7 @@ steps:
       # Debug: Show what was created
       echo "📊 Results after vLLM baseline:"
       ls -la mmlu-results/ || echo "mmlu-results directory not found"
+      ls -la cache-results/ || echo "cache-results directory not found"
 
   - label: ":zap: LMCache with MLA"
     key: "lmcache-mla"
@@ -115,7 +116,7 @@ steps:
           restore: "pipeline"
       - cache#v1.5.2:
           key: "mmlu-results-lmcache-mla-{{ .BuildkiteCommit }}"
-          path: "mmlu-results"
+          path: "cache-results/lmcache-mla"
           save: "pipeline"
     command: |
       export PATH="$HOME/.local/bin:$PATH"
@@ -127,6 +128,7 @@ steps:
       # Debug: Show what was created
       echo "📊 Results after LMCache with MLA:"
       ls -la mmlu-results/ || echo "mmlu-results directory not found"
+      ls -la cache-results/ || echo "cache-results directory not found"
 
   - label: ":electric_plug: LMCache without MLA"
     key: "lmcache-no-mla"
@@ -142,7 +144,7 @@ steps:
           restore: "pipeline"
       - cache#v1.5.2:
           key: "mmlu-results-lmcache-no-mla-{{ .BuildkiteCommit }}"
-          path: "mmlu-results"
+          path: "cache-results/lmcache-no-mla"
           save: "pipeline"
     command: |
       export PATH="$HOME/.local/bin:$PATH"
@@ -154,6 +156,7 @@ steps:
       # Debug: Show what was created
       echo "📊 Results after LMCache without MLA:"
       ls -la mmlu-results/ || echo "mmlu-results directory not found"
+      ls -la cache-results/ || echo "cache-results directory not found"
 
   - label: ":bar_chart: Summarize Results"
     key: "summarize"
@@ -170,26 +173,43 @@ steps:
           restore: "pipeline"
       - cache#v1.5.2:
           key: "mmlu-results-vllm-{{ .BuildkiteCommit }}"
-          path: "mmlu-results"
+          path: "cache-results/vllm"
           restore: "pipeline"
       - cache#v1.5.2:
           key: "mmlu-results-lmcache-mla-{{ .BuildkiteCommit }}"
-          path: "mmlu-results"
+          path: "cache-results/lmcache-mla"
           restore: "pipeline"
       - cache#v1.5.2:
           key: "mmlu-results-lmcache-no-mla-{{ .BuildkiteCommit }}"
-          path: "mmlu-results"
+          path: "cache-results/lmcache-no-mla"
           restore: "pipeline"
     command: |
       export PATH="$HOME/.local/bin:$PATH"
       source .venv/bin/activate
       echo "🔍 Current directory: $(pwd)"
 
-      # Ensure results directory exists
+      # Ensure results directory exists and collect all cached results
       mkdir -p mmlu-results
 
-      echo "📁 Contents of mmlu-results/ after cache restore:"
+      # Copy all cached results to mmlu-results directory
+      echo "📦 Collecting cached results..."
+      if [ -d "cache-results/vllm" ]; then
+        cp cache-results/vllm/* mmlu-results/ 2>/dev/null || true
+        echo "✅ Copied vLLM results"
+      fi
+      if [ -d "cache-results/lmcache-mla" ]; then
+        cp cache-results/lmcache-mla/* mmlu-results/ 2>/dev/null || true
+        echo "✅ Copied LMCache MLA results"
+      fi
+      if [ -d "cache-results/lmcache-no-mla" ]; then
+        cp cache-results/lmcache-no-mla/* mmlu-results/ 2>/dev/null || true
+        echo "✅ Copied LMCache no-MLA results"
+      fi
+
+      echo "📁 Contents of mmlu-results/ after collecting cached results:"
       ls -la mmlu-results/ || echo "mmlu-results directory not found"
+      echo "📁 Contents of cache-results/:"
+      ls -la cache-results/ || echo "cache-results directory not found"
 
       # Debug: Check installed packages
       echo "🐍 Python version: $(python3 --version)"

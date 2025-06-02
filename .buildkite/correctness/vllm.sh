@@ -67,6 +67,11 @@ if [ -f "mmlu-results/vllm_baseline.txt" ]; then
     echo "✅ Result file created: $(wc -l < mmlu-results/vllm_baseline.txt) lines"
     echo "📊 Last few lines of results:"
     tail -3 mmlu-results/vllm_baseline.txt
+
+    # Also save to a unique cache directory
+    mkdir -p cache-results/vllm
+    cp mmlu-results/vllm_baseline.txt cache-results/vllm/
+    echo "💾 Saved to cache-results/vllm/"
 else
     echo "❌ WARNING: Result file not created"
     echo "📁 Contents of mmlu-results/:"
