@@ -43,10 +43,16 @@ mkdir -p mmlu-results
 # Verify MMLU data exists
 if [ ! -d "data/test" ]; then
     echo "❌ ERROR: MMLU data not found. Expected data/test directory."
-    echo "Current directory: $(pwd)"
-    echo "Contents:"
-    ls -la
-    exit 1
+    echo "🔄 Attempting to download MMLU data as fallback..."
+    bash .buildkite/correctness/download-data.sh
+
+    if [ ! -d "data/test" ]; then
+        echo "❌ FATAL: Failed to download MMLU data"
+        echo "Current directory: $(pwd)"
+        echo "Contents:"
+        ls -la
+        exit 1
+    fi
 fi
 
 echo "✅ MMLU data found. Test subjects: $(ls data/test/*.csv | wc -l)"
