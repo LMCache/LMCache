@@ -1,9 +1,22 @@
 #!/bin/bash
 
-# Step 1: Deploy vllm.entrypoints.api_server on port 8000 with deepseek-v2-lite
-export MODEL=deepseek-ai/DeepSeek-V2-Lite
+# Generalized LMCache script
+# Usage: ./lmcache.sh <model> <output_file> [max_model_len] [mla_disable]
+# Example: ./lmcache.sh "deepseek-ai/DeepSeek-V2-Lite" "lmcache_mla.txt" 6000 0
+# Example: ./lmcache.sh "meta-llama/Meta-Llama-3.1-8B-Instruct" "lmcache_dense.txt" 12000 1
+
+MODEL=${1:-"deepseek-ai/DeepSeek-V2-Lite"}
+OUTPUT_FILE=${2:-"lmcache_mla.txt"}
+MAX_MODEL_LEN=${3:-6000}
+VLLM_MLA_DISABLE=${4:-0}
+
 export PORT=8000
-export VLLM_MLA_DISABLE=0 # enable the MLA optimization of deepseek (compressing KV cache into latent space)
+
+echo "🚀 Starting LMCache test with:"
+echo "   Model: $MODEL"
+echo "   Output: $OUTPUT_FILE"
+echo "   Max model length: $MAX_MODEL_LEN"
+echo "   MLA disabled: $VLLM_MLA_DISABLE"
 
 # HF_TOKEN and IMAGE should be set in the environment before running this script
 CONTAINER_ID=$(sudo docker run -d --runtime=nvidia --gpus all \
@@ -15,11 +28,12 @@ CONTAINER_ID=$(sudo docker run -d --runtime=nvidia --gpus all \
     --env "LMCACHE_REMOTE_SERDE=naive" \
     --env "CUDA_VISIBLE_DEVICES=0" \
     --env "PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True" \
+    --env "VLLM_MLA_DISABLE=$VLLM_MLA_DISABLE" \
     -v ~/.cache/huggingface:/root/.cache/huggingface \
     -p 8000:8000 \
     lmcache/vllm-openai:latest \
     $MODEL \
-    --max-model-len 6000 \
+    --max-model-len $MAX_MODEL_LEN \
     --port 8000 \
     --trust-remote-code \
     --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}')
@@ -67,13 +81,14 @@ echo "✅ MMLU data found. Test subjects: $(ls data/test/*.csv | wc -l)"
 python3 .buildkite/correctness/mmlu_bench.py \
   --nsub 6 \
   --parallel 16 \
-  > mmlu-results/lmcache_mla.txt || true
+  --model "$MODEL" \
+  > mmlu-results/$OUTPUT_FILE || true
 
 # Verify result file was created
-if [ -f "mmlu-results/lmcache_mla.txt" ]; then
-    echo "✅ Result file created: $(wc -l < mmlu-results/lmcache_mla.txt) lines"
+if [ -f "mmlu-results/$OUTPUT_FILE" ]; then
+    echo "✅ Result file created: $(wc -l < mmlu-results/$OUTPUT_FILE) lines"
     echo "📊 Last few lines of results:"
-    tail -3 mmlu-results/lmcache_mla.txt
+    tail -3 mmlu-results/$OUTPUT_FILE
 else
     echo "❌ WARNING: Result file not created"
     echo "📁 Contents of mmlu-results/:"
@@ -85,5 +100,5 @@ echo "🛑 Stopping container..."
 sudo docker kill $CONTAINER_ID || true
 kill $TIMER_PID 2>/dev/null || true
 
-echo "✅ LMCache with MLA test completed"
+echo "✅ LMCache test completed for $MODEL"
 

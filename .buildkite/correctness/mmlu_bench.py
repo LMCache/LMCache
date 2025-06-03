@@ -22,9 +22,9 @@ def get_exception_traceback():
     return err_str
 
 
-def call_generate_vllm(prompt, temperature, max_tokens, stop=None, n=1, url=None):
+def call_generate_vllm(prompt, temperature, max_tokens, stop=None, n=1, url=None, model=None):
     data = {
-        "model": "deepseek-ai/DeepSeek-V2-Lite",
+        "model": model,
         "prompt": prompt,
         "temperature": temperature,
         "max_tokens": max_tokens,
@@ -41,7 +41,7 @@ def call_generate_vllm(prompt, temperature, max_tokens, stop=None, n=1, url=None
 
 
 def _get_call_generate(args: argparse.Namespace):
-    return partial(call_generate_vllm, url="http://127.0.0.1:8000/v1/completions")
+    return partial(call_generate_vllm, url="http://127.0.0.1:8000/v1/completions", model=args.model)
 
 
 def get_call_generate(args: argparse.Namespace):
@@ -61,13 +61,15 @@ def add_common_other_args_and_parse(parser: argparse.ArgumentParser):
     parser.add_argument("--parallel", type=int, default=4)
     parser.add_argument("--n-ctx", type=int, default=4096)
     parser.add_argument("--result-file", type=str, default="result.jsonl")
+    parser.add_argument("--model", type=str, default="deepseek-ai/DeepSeek-V2-Lite", help="Model name")
     args = parser.parse_args()
     return args
 
 
 choices = ["A", "B", "C", "D"]
 
-tokenizer = AutoTokenizer.from_pretrained("deepseek-ai/DeepSeek-V2-Lite")
+# Global tokenizer - will be initialized in main()
+tokenizer = None
 
 
 def format_subject(subject):
@@ -161,6 +163,16 @@ def evaluate(args, subject, dev_df, test_df, call_generate):
 
 
 def main(args):
+    global tokenizer
+
+    # Initialize tokenizer with the specified model
+    print(f"🔧 Initializing tokenizer for model: {args.model}")
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(args.model)
+    except Exception as e:
+        print(f"⚠️ Failed to load tokenizer for {args.model}, falling back to deepseek-ai/DeepSeek-V2-Lite: {e}")
+        tokenizer = AutoTokenizer.from_pretrained("deepseek-ai/DeepSeek-V2-Lite")
+
     subjects = sorted(
         [
             f.split("_test.csv")[0]
@@ -207,6 +219,7 @@ def main(args):
             "other": {
                 "nsub": args.nsub,
                 "parallel": args.parallel,
+                "model": args.model,
             },
         }
         fout.write(json.dumps(value) + "\n")

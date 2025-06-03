@@ -3,7 +3,8 @@ import glob
 import os
 import re
 
-RESULTS_DIR = "mmlu-results"
+# Use environment variable for results directory if set, otherwise default
+RESULTS_DIR = os.environ.get("RESULTS_DIR", "mmlu-results")
 OUTFILE = "compare-results/comparison.txt"
 
 

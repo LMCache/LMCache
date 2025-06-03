@@ -22,7 +22,8 @@ except ImportError as e:
     print("📝 Falling back to text-only report generation")
     VISUALIZATION_AVAILABLE = False
 
-RESULTS_DIR = "mmlu-results"
+# Use environment variable for results directory if set, otherwise default
+RESULTS_DIR = os.environ.get("RESULTS_DIR", "mmlu-results")
 OUTPUT_PDF = "compare-results/mmlu_benchmark_report.pdf"
 OUTPUT_JSON = "compare-results/results_summary.json"
 

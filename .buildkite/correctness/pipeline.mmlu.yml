@@ -4,11 +4,10 @@
 # docker pull lmcache/vllm-openai:latest
 # pip install -r requirements/bench.txt
 # download-data.sh
-# 2. run each of the benchmarks
-# vllm.sh
-# lmcache.sh
-# lmcache-no-mla.sh
-# 3. summarize the results
+# 2. run each of the benchmarks for both MLA and dense models
+# MLA models (deepseek): vllm.sh, lmcache.sh, lmcache-no-mla.sh
+# Dense models (llama): vllm.sh, lmcache.sh
+# 3. summarize the results separately for each model type
 # make sure to produce artifacts
 
 # SECURITY NOTE:
@@ -22,6 +21,11 @@ env:
   LM_CACHE_TEST_DIR: "/home/shaotingf/lmcache-tests"
   PATH: "/var/lib/buildkite-agent/.local/bin:${PATH}"
   IMAGE: "lmcache/vllm-openai:latest"
+  # Model configurations
+  MLA_MODEL: "deepseek-ai/DeepSeek-V2-Lite"
+  DENSE_MODEL: "meta-llama/Meta-Llama-3.1-8B-Instruct"
+  MLA_MAX_LEN: "6000"
+  DENSE_MAX_LEN: "12000"
 
 steps:
   - label: ":gear: Setup Environment"
@@ -73,9 +77,12 @@ steps:
 
       echo "✅ Setup completed successfully"
       echo "📊 MMLU test subjects available: $(ls data/test/*.csv | wc -l)"
+      echo "🔧 MLA Model: $${MLA_MODEL}"
+      echo "🔧 Dense Model: $${DENSE_MODEL}"
 
-  - label: ":rocket: vLLM Baseline"
-    key: "vllm-baseline"
+  # MLA Model Tests (DeepSeek V2 Lite)
+  - label: ":rocket: vLLM Baseline (MLA)"
+    key: "vllm-baseline-mla"
     depends_on: ["setup"]
     plugins:
       - cache#v1.5.2:
@@ -93,12 +100,12 @@ steps:
       echo "🔍 Data directory exists: $([ -d data ] && echo 'YES' || echo 'NO')"
 
       mkdir -p mmlu-results
-      bash .buildkite/correctness/vllm.sh
+      bash .buildkite/correctness/vllm.sh "$${MLA_MODEL}" "vllm_baseline_mla.txt" "$${MLA_MAX_LEN}" "0"
 
-      echo "📊 Results after vLLM baseline:"
+      echo "📊 Results after vLLM baseline (MLA):"
       ls -la mmlu-results/ || echo "mmlu-results directory not found"
     artifact_paths:
-      - "mmlu-results/vllm_baseline.txt"
+      - "mmlu-results/vllm_baseline_mla.txt"
 
   - label: ":zap: LMCache with MLA"
     key: "lmcache-mla"
@@ -119,7 +126,7 @@ steps:
       echo "🔍 Data directory exists: $([ -d data ] && echo 'YES' || echo 'NO')"
 
       mkdir -p mmlu-results
-      bash .buildkite/correctness/lmcache.sh
+      bash .buildkite/correctness/lmcache.sh "$${MLA_MODEL}" "lmcache_mla.txt" "$${MLA_MAX_LEN}" "0"
 
       echo "📊 Results after LMCache with MLA:"
       ls -la mmlu-results/ || echo "mmlu-results directory not found"
@@ -145,16 +152,70 @@ steps:
       echo "🔍 Data directory exists: $([ -d data ] && echo 'YES' || echo 'NO')"
 
       mkdir -p mmlu-results
-      bash .buildkite/correctness/lmcache-no-mla.sh
+      bash .buildkite/correctness/lmcache-no-mla.sh "$${MLA_MODEL}" "lmcache_no_mla.txt" "$${MLA_MAX_LEN}"
 
       echo "📊 Results after LMCache without MLA:"
       ls -la mmlu-results/ || echo "mmlu-results directory not found"
     artifact_paths:
       - "mmlu-results/lmcache_no_mla.txt"
 
-  - label: ":bar_chart: Summarize Results"
-    key: "summarize"
-    depends_on: ["vllm-baseline", "lmcache-mla", "lmcache-no-mla"]
+  # Dense Model Tests (Llama 3.1 8B)
+  - label: ":rocket: vLLM Baseline (Dense)"
+    key: "vllm-baseline-dense"
+    depends_on: ["setup"]
+    plugins:
+      - cache#v1.5.2:
+          key: "venv-mmlu-{{ checksum \"requirements/bench.txt\" }}-{{ checksum \"requirements/common.txt\" }}"
+          path: ".venv"
+          restore: "pipeline"
+      - cache#v1.5.2:
+          key: "mmlu-data-{{ checksum \".buildkite/correctness/download-data.sh\" }}"
+          path: "data"
+          restore: "pipeline"
+    command: |
+      export PATH="$HOME/.local/bin:$PATH"
+      source .venv/bin/activate
+      echo "🔍 Current directory: $(pwd)"
+      echo "🔍 Data directory exists: $([ -d data ] && echo 'YES' || echo 'NO')"
+
+      mkdir -p mmlu-results
+      bash .buildkite/correctness/vllm.sh "$${DENSE_MODEL}" "vllm_baseline_dense.txt" "$${DENSE_MAX_LEN}" "1"
+
+      echo "📊 Results after vLLM baseline (Dense):"
+      ls -la mmlu-results/ || echo "mmlu-results directory not found"
+    artifact_paths:
+      - "mmlu-results/vllm_baseline_dense.txt"
+
+  - label: ":zap: LMCache (Dense)"
+    key: "lmcache-dense"
+    depends_on: ["setup"]
+    plugins:
+      - cache#v1.5.2:
+          key: "venv-mmlu-{{ checksum \"requirements/bench.txt\" }}-{{ checksum \"requirements/common.txt\" }}"
+          path: ".venv"
+          restore: "pipeline"
+      - cache#v1.5.2:
+          key: "mmlu-data-{{ checksum \".buildkite/correctness/download-data.sh\" }}"
+          path: "data"
+          restore: "pipeline"
+    command: |
+      export PATH="$HOME/.local/bin:$PATH"
+      source .venv/bin/activate
+      echo "🔍 Current directory: $(pwd)"
+      echo "🔍 Data directory exists: $([ -d data ] && echo 'YES' || echo 'NO')"
+
+      mkdir -p mmlu-results
+      bash .buildkite/correctness/lmcache.sh "$${DENSE_MODEL}" "lmcache_dense.txt" "$${DENSE_MAX_LEN}" "1"
+
+      echo "📊 Results after LMCache (Dense):"
+      ls -la mmlu-results/ || echo "mmlu-results directory not found"
+    artifact_paths:
+      - "mmlu-results/lmcache_dense.txt"
+
+  # Summarize MLA Results
+  - label: ":bar_chart: Summarize MLA Results"
+    key: "summarize-mla"
+    depends_on: ["vllm-baseline-mla", "lmcache-mla", "lmcache-no-mla"]
     allow_dependency_failure: true
     plugins:
       - cache#v1.5.2:
@@ -169,39 +230,102 @@ steps:
       # Create directories
       mkdir -p mmlu-results compare-results
 
-      # Download all artifacts from previous steps
-      echo "📥 Downloading artifacts from previous steps..."
-      buildkite-agent artifact download "mmlu-results/vllm_baseline.txt" . --step "vllm-baseline" || echo "⚠️ vLLM artifact not found"
+      # Download MLA artifacts from previous steps
+      echo "📥 Downloading MLA artifacts from previous steps..."
+      buildkite-agent artifact download "mmlu-results/vllm_baseline_mla.txt" . --step "vllm-baseline-mla" || echo "⚠️ vLLM MLA artifact not found"
       buildkite-agent artifact download "mmlu-results/lmcache_mla.txt" . --step "lmcache-mla" || echo "⚠️ LMCache MLA artifact not found"
       buildkite-agent artifact download "mmlu-results/lmcache_no_mla.txt" . --step "lmcache-no-mla" || echo "⚠️ LMCache no-MLA artifact not found"
 
-      echo "📁 Final contents of mmlu-results/:"
+      echo "📁 MLA results contents:"
       ls -la mmlu-results/ || echo "mmlu-results directory not found"
 
-      # Debug: Check installed packages
-      echo "🐍 Python version: $(python3 --version)"
-      echo "📦 Checking key dependencies:"
-      python3 -c "import matplotlib; print(f'✅ matplotlib {matplotlib.__version__}')" || echo "❌ matplotlib not found"
-      python3 -c "import pandas; print(f'✅ pandas {pandas.__version__}')" || echo "❌ pandas not found"
-      python3 -c "import seaborn; print(f'✅ seaborn {seaborn.__version__}')" || echo "❌ seaborn not found"
+      # Create a temporary directory for MLA-only results
+      mkdir -p mmlu-results-mla
+      cp mmlu-results/vllm_baseline_mla.txt mmlu-results-mla/ 2>/dev/null || true
+      cp mmlu-results/lmcache_mla.txt mmlu-results-mla/ 2>/dev/null || true
+      cp mmlu-results/lmcache_no_mla.txt mmlu-results-mla/ 2>/dev/null || true
 
-      # Generate text summary (legacy)
-      python3 .buildkite/correctness/summarize_scores.py
+      # Generate MLA-specific reports
+      echo "📊 Generating MLA-specific reports..."
+      RESULTS_DIR="mmlu-results-mla" python3 .buildkite/correctness/summarize_scores.py
+      mv compare-results/comparison.txt compare-results/comparison_mla.txt
 
-      # Generate comprehensive PDF report
-      echo "📊 Generating comprehensive PDF report..."
-      python3 .buildkite/correctness/create_report.py
+      # Generate comprehensive PDF report for MLA
+      echo "📊 Generating comprehensive MLA PDF report..."
+      RESULTS_DIR="mmlu-results-mla" python3 -c "
+import os
+os.environ['RESULTS_DIR'] = 'mmlu-results-mla'
+exec(open('.buildkite/correctness/create_report.py').read())
+"
+      mv compare-results/mmlu_benchmark_report.pdf compare-results/mmlu_benchmark_report_mla.pdf 2>/dev/null || true
+      mv compare-results/results_summary.json compare-results/results_summary_mla.json 2>/dev/null || true
 
-      echo "✅ All reports generated"
+      echo "✅ MLA reports generated"
     artifact_paths:
-      - "mmlu-results/*.txt"
-      - "compare-results/*.txt"
-      - "compare-results/*.pdf"
-      - "compare-results/*.json"
+      - "mmlu-results/vllm_baseline_mla.txt"
+      - "mmlu-results/lmcache_mla.txt"
+      - "mmlu-results/lmcache_no_mla.txt"
+      - "compare-results/comparison_mla.txt"
+      - "compare-results/mmlu_benchmark_report_mla.pdf"
+      - "compare-results/results_summary_mla.json"
+
+  # Summarize Dense Results
+  - label: ":bar_chart: Summarize Dense Results"
+    key: "summarize-dense"
+    depends_on: ["vllm-baseline-dense", "lmcache-dense"]
+    allow_dependency_failure: true
+    plugins:
+      - cache#v1.5.2:
+          key: "venv-mmlu-{{ checksum \"requirements/bench.txt\" }}-{{ checksum \"requirements/common.txt\" }}"
+          path: ".venv"
+          restore: "pipeline"
+    command: |
+      export PATH="$HOME/.local/bin:$PATH"
+      source .venv/bin/activate
+      echo "🔍 Current directory: $(pwd)"
+
+      # Create directories
+      mkdir -p mmlu-results compare-results
+
+      # Download Dense artifacts from previous steps
+      echo "📥 Downloading Dense artifacts from previous steps..."
+      buildkite-agent artifact download "mmlu-results/vllm_baseline_dense.txt" . --step "vllm-baseline-dense" || echo "⚠️ vLLM Dense artifact not found"
+      buildkite-agent artifact download "mmlu-results/lmcache_dense.txt" . --step "lmcache-dense" || echo "⚠️ LMCache Dense artifact not found"
+
+      echo "📁 Dense results contents:"
+      ls -la mmlu-results/ || echo "mmlu-results directory not found"
+
+      # Create a temporary directory for Dense-only results
+      mkdir -p mmlu-results-dense
+      cp mmlu-results/vllm_baseline_dense.txt mmlu-results-dense/ 2>/dev/null || true
+      cp mmlu-results/lmcache_dense.txt mmlu-results-dense/ 2>/dev/null || true
+
+      # Generate Dense-specific reports
+      echo "📊 Generating Dense-specific reports..."
+      RESULTS_DIR="mmlu-results-dense" python3 .buildkite/correctness/summarize_scores.py
+      mv compare-results/comparison.txt compare-results/comparison_dense.txt
+
+      # Generate comprehensive PDF report for Dense
+      echo "📊 Generating comprehensive Dense PDF report..."
+      RESULTS_DIR="mmlu-results-dense" python3 -c "
+import os
+os.environ['RESULTS_DIR'] = 'mmlu-results-dense'
+exec(open('.buildkite/correctness/create_report.py').read())
+"
+      mv compare-results/mmlu_benchmark_report.pdf compare-results/mmlu_benchmark_report_dense.pdf 2>/dev/null || true
+      mv compare-results/results_summary.json compare-results/results_summary_dense.json 2>/dev/null || true
+
+      echo "✅ Dense reports generated"
+    artifact_paths:
+      - "mmlu-results/vllm_baseline_dense.txt"
+      - "mmlu-results/lmcache_dense.txt"
+      - "compare-results/comparison_dense.txt"
+      - "compare-results/mmlu_benchmark_report_dense.pdf"
+      - "compare-results/results_summary_dense.json"
 
   - label: ":wastebasket: Cleanup"
     key: "cleanup"
-    depends_on: ["summarize"]
+    depends_on: ["summarize-mla", "summarize-dense"]
     allow_dependency_failure: true
     command: |
       # Kill any remaining docker containers
