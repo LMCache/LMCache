@@ -343,6 +343,9 @@ class GdsBackend(StorageBackendInterface):
         kv_chunk = memory_obj.tensor
         assert kv_chunk is not None
         path, subdir_key, l1_dir, l2_dir = self._key_to_path(key)
+        # TODO: maybe remove `metadata_dirs` and insert mkdir calls
+        # only for the case where creating the CuFile fails on ENOENT. It
+        # also makes the code more resilient to out-of-band deletions
         if subdir_key not in self.metadata_dirs:
             os.makedirs(os.path.join(self.gds_path, l1_dir, l2_dir), exist_ok=True)
             self.metadata_dirs.add(subdir_key)
