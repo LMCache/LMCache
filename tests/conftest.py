@@ -15,8 +15,14 @@ from lmcache.v1.cache_engine import LMCacheEngineBuilder
 
 
 class MockRedis:
-    def __init__(self, host, port):
+    def __init__(
+        self, host=None, port=None, url=None, decode_responses=False, **kwargs
+    ):
         self.store = {}
+        self.host = host
+        self.port = port
+        self.url = url
+        self.decode_responses = decode_responses
 
     def set(self, key, value):
         self.store[key] = value
@@ -35,15 +41,26 @@ class MockRedis:
     def close(self):
         pass
 
+    @classmethod
+    def from_url(cls, url, decode_responses=False, **kwargs):
+        """Mock implementation of Redis.from_url"""
+        return cls(url=url, decode_responses=decode_responses, **kwargs)
+
 
 class MockRedisSentinel:
-    def __init__(self, hosts_and_ports, socket_timeout):
-        self.redis = MockRedis("", "")
+    def __init__(self, hosts_and_ports, socket_timeout=None, **kwargs):
+        self.redis = MockRedis()
+        self.hosts_and_ports = hosts_and_ports
+        self.socket_timeout = socket_timeout
 
-    def master_for(self, service_name, socket_timeout):
+    def master_for(
+        self, service_name, socket_timeout=None, username=None, password=None, **kwargs
+    ):
         return self.redis
 
-    def slave_for(self, service_name, socket_timeout):
+    def slave_for(
+        self, service_name, socket_timeout=None, username=None, password=None, **kwargs
+    ):
         return self.redis
 
 
@@ -55,13 +72,16 @@ class LMCacheServerProcess:
 
 @pytest.fixture(scope="function", autouse=True)
 def mock_redis():
-    with patch("redis.Redis", new_callable=lambda: MockRedis) as mock:
-        yield mock
+    with (
+        patch("redis.Redis", MockRedis) as mock_redis_class,
+        patch("redis.from_url", MockRedis.from_url),
+    ):
+        yield mock_redis_class
 
 
 @pytest.fixture(scope="function", autouse=True)
 def mock_redis_sentinel():
-    with patch("redis.Sentinel", new_callable=lambda: MockRedisSentinel) as mock:
+    with patch("redis.Sentinel", MockRedisSentinel) as mock:
         yield mock
 
 

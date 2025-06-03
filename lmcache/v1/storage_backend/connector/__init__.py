@@ -13,10 +13,11 @@
 # limitations under the License.
 
 # Standard
-from dataclasses import dataclass
-from typing import Dict, List, Optional
+from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Tuple
+from urllib.parse import parse_qs, urlparse
 import asyncio
-import re
 
 # First Party
 from lmcache.logging import init_logger
@@ -44,14 +45,15 @@ logger = init_logger(__name__)
 class ParsedRemoteURL:
     """
     The parsed URL of the format:
-    <connector_type>://<host>:<port>[/path][?query],<host2>:<port2>[/path2][?query2],...
+        <host>:<port>[/path][?query]
     """
 
-    connector_type: str
-    hosts: List[str]
-    ports: List[int]
-    paths: List[str]
-    query_params: List[Dict[str, str]]
+    host: str
+    port: int
+    username: Optional[str] = None
+    password: Optional[str] = None
+    path: Optional[str] = None
+    query_params: Dict[str, List[str]] = field(default_factory=dict)
 
 
 def parse_remote_url(url: str) -> ParsedRemoteURL:
@@ -61,64 +63,422 @@ def parse_remote_url(url: str) -> ParsedRemoteURL:
     - Path and query parameters in each host definition
     - Forward compatibility with legacy format
 
+    Args:
+        url: The URL to parse
+
+    Returns:
+        ParsedRemoteURL: The parsed URL components
+
     Raises:
-        ValueError: If the URL is invalid.
+        ValueError: If the URL is invalid
     """
-    pattern = r"(.+)://(.*)"
-    m = re.match(pattern, url)
-    if m is None:
-        logger.error(f"Cannot parse remote_url {url} in the config")
-        raise ValueError(f"Invalid remote url {url}")
 
-    connector_type, hosts_section = m.groups()
+    logger.debug(f"Parsing remote URL: {url}")
+    parsed = urlparse(url)
 
-    hosts = []
-    ports = []
-    paths = []
-    query_params = []
-
-    for host_def in hosts_section.split(","):
-        host_pattern = r"""
-                ^
-                ([^:]+)        # hostname
-                :              # :
-                (\d+)          # port
-                (/?[^?]*)      # path（optional, start with /）
-                (?:\?(.*))?    # query（optional，? content after ?）
-                $
-            """
-        match = re.match(host_pattern, host_def, re.VERBOSE)
-
-        if not match:
-            raise ValueError(f"Invalid host definition: {host_def} in URL: {url}")
-
-        host = match.group(1)
-        port = int(match.group(2))
-        path = match.group(3).lstrip("/")
-        path = path.lstrip("/")
-        query_str = match.group(4) or ""
-
-        params_dict = {}
-        if query_str:
-            for param in query_str.split("&"):
-                if "=" in param:
-                    key, value = param.split("=", 1)
-                    params_dict[key] = value
-                elif param:
-                    params_dict[param] = ""
-
-        hosts.append(host)
-        ports.append(port)
-        paths.append(path)
-        query_params.append(params_dict)
+    username = parsed.username
+    password = parsed.password
+    host = parsed.hostname
+    port = parsed.port
+    path = parsed.path if parsed.path else ""
+    query = parse_qs(parsed.query) if parsed.query else {}
 
     return ParsedRemoteURL(
-        connector_type=connector_type,
-        hosts=hosts,
-        ports=ports,
-        paths=paths,
-        query_params=query_params,
+        host=host,
+        port=port,
+        path=path,
+        username=username,
+        password=password,
+        query_params=query,
     )
+
+
+class ConnectorContext:
+    """
+    Context for creating a connector.
+
+    Attributes:
+        url: The remote URL
+        loop: The asyncio event loop
+        local_cpu_backend: The local CPU backend
+        config: Optional LMCache engine configuration
+        parsed_url: Parsed representation of the URL
+    """
+
+    def __init__(
+        self,
+        url: str,
+        loop: asyncio.AbstractEventLoop,
+        local_cpu_backend: LocalCPUBackend,
+        config: Optional[LMCacheEngineConfig],
+    ):
+        self.url = url
+        self.loop = loop
+        self.local_cpu_backend = local_cpu_backend
+        self.config = config
+
+
+class ConnectorAdapter(ABC):
+    """Base class for connector adapters."""
+
+    def __init__(self, schema: str):
+        self.schema = schema
+
+    @abstractmethod
+    def can_parse(self, url: str) -> bool:
+        """
+        Check if this adapter can parse the given URL.
+        """
+        pass
+
+    @abstractmethod
+    def create_connector(self, context: ConnectorContext) -> RemoteConnector:
+        """
+        Create a connector using the given context.
+        """
+        pass
+
+
+class RedisConnectorAdapter(ConnectorAdapter):
+    """Adapter for Redis connectors."""
+
+    def __init__(self) -> None:
+        super().__init__("redis://")
+
+    def can_parse(self, url: str) -> bool:
+        # The Redis adaptor is also applicable to the URL format of rediss.
+        return url.startswith((self.schema, "rediss://", "unix://"))
+
+    def create_connector(self, context: ConnectorContext) -> RemoteConnector:
+        """
+        Create a Redis connector.
+
+        URL formats:
+        - redis://[[username]:[password]@]host[:port][/database][?option=value]
+        - rediss://[[username]:[password]@]host[:port][/database][?option=value] (SSL)
+        - unix://[username@]/path/to/socket.sock?db=0[&password=password]
+
+        Examples:
+        - redis://localhost:6379
+        - redis://user:password@redis.example.com:6380/0
+        - redis://:password@localhost:6379/1
+        - rediss://user:password@redis.example.com:6379?ssl_cert_reqs=CERT_REQUIRED
+        """
+        logger.info(f"Creating Redis connector for URL: {context.url}")
+
+        return RedisConnector(
+            url=context.url,
+            loop=context.loop,
+            local_cpu_backend=context.local_cpu_backend,
+        )
+
+
+class RedisSentinelConnectorAdapter(ConnectorAdapter):
+    """Adapter for Redis Sentinel connectors."""
+
+    def __init__(self) -> None:
+        super().__init__("redis-sentinel://")
+
+    def can_parse(self, url: str) -> bool:
+        return url.startswith(self.schema)
+
+    def create_connector(self, context: ConnectorContext) -> RemoteConnector:
+        """
+        Create a Redis Sentinel connector.
+
+        URL format:
+        - redis-sentinel://[username:password@]host1:port1[,host2:port2,...]/service_name
+        """
+        logger.info(f"Creating Redis connector for URL: {context.url}")
+        url = context.url[len(self.schema) :]
+
+        # parse username and password from url.
+        username: str = ""
+        password: str = ""
+        if "@" in url:
+            auth, url = url.split("@", 1)
+            if ":" in auth:
+                username, password = auth.split(":", 1)
+            else:
+                username = auth
+
+        # parse host and port from url.
+        hosts_and_ports: List[Tuple[str, int]] = []
+        for sub_url in url.split(","):
+            # add a schema to parse the url correctly.
+            if not sub_url.startswith(self.schema):
+                sub_url = self.schema + sub_url
+
+            parsed_url = parse_remote_url(sub_url)
+            hosts_and_ports.append((parsed_url.host, parsed_url.port))
+
+        return RedisSentinelConnector(
+            hosts_and_ports=hosts_and_ports,
+            username=username,
+            password=password,
+            loop=context.loop,
+            local_cpu_backend=context.local_cpu_backend,
+        )
+
+
+class LMServerConnectorAdapter(ConnectorAdapter):
+    """Adapter for LM Server connectors."""
+
+    def __init__(self) -> None:
+        super().__init__("lm://")
+
+    def can_parse(self, url: str) -> bool:
+        return url.startswith(self.schema)
+
+    def create_connector(self, context: ConnectorContext) -> RemoteConnector:
+        """
+        Create an LM Server connector.
+        URL format:
+        - lm://host:port
+        """
+        logger.info(f"Creating LM Server connector for URL: {context.url}")
+        hosts = context.url.split(",")
+        if len(hosts) > 1:
+            raise ValueError(
+                f"Only one host is supported for lm server, but got {hosts}"
+            )
+
+        parse_url = parse_remote_url(context.url)
+        return LMCServerConnector(
+            host=parse_url.host,
+            port=parse_url.port,
+            loop=context.loop,
+            local_cpu_backend=context.local_cpu_backend,
+        )
+
+
+class InfinistoreConnectorAdapter(ConnectorAdapter):
+    """Adapter for Infinistore connectors."""
+
+    def __init__(self) -> None:
+        super().__init__("infinistore://")
+
+    def can_parse(self, url: str) -> bool:
+        return url.startswith(self.schema)
+
+    def create_connector(self, context: ConnectorContext) -> RemoteConnector:
+        """
+        Create an Infinistore connector.
+
+        URL format:
+        - infinistore://host:port[?device=device_name]
+
+        Examples:
+        - infinistore://127.0.0.1:12345
+        - infinistore://infinistore-server.example.com:12345?device=mlx5_0
+        - infinistore://10.0.0.1:12345?device=custom_device
+        """
+        logger.info(f"Creating Infinistore connector for URL: {context.url}")
+        hosts = context.url.split(",")
+        if len(hosts) > 1:
+            raise ValueError(
+                f"Only one host is supported for infinistore, but got {hosts}"
+            )
+
+        parse_url = parse_remote_url(context.url)
+        device_name = parse_url.query_params.get("device", ["mlx5_0"])[0]
+        return InfinistoreConnector(
+            host=parse_url.host,
+            port=parse_url.port,
+            dev_name=device_name,
+            loop=context.loop,
+            memory_allocator=context.local_cpu_backend,
+        )
+
+
+class MooncakestoreConnectorAdapter(ConnectorAdapter):
+    """Adapter for Mooncakestore connectors."""
+
+    def __init__(self) -> None:
+        super().__init__("mooncakestore://")
+
+    def can_parse(self, url: str) -> bool:
+        return url.startswith(self.schema)
+
+    def create_connector(self, context: ConnectorContext) -> RemoteConnector:
+        """
+        Create a Mooncakestore connector.
+
+        URL format:
+        - mooncakestore://host:port[?device=device_name]
+
+        Examples:
+        - mooncakestore://127.0.0.1:50051
+        - mooncakestore://mooncake-server.example.com:50051?device=custom_device
+        """
+        logger.info(f"Creating Mooncakestore connector for URL: {context.url}")
+        hosts = context.url.split(",")
+        if len(hosts) > 1:
+            raise ValueError(
+                f"Only one host is supported for mooncakestore, but got {hosts}"
+            )
+
+        parse_url = parse_remote_url(context.url)
+        device_name = parse_url.query_params.get("device", [""])[0]
+        return MooncakestoreConnector(
+            host=parse_url.host,
+            port=parse_url.port,
+            dev_name=device_name,
+            loop=context.loop,
+            local_cpu_backend=context.local_cpu_backend,
+            config=context.config,
+        )
+
+
+class BlackholeConnectorAdapter(ConnectorAdapter):
+    """Adapter for Blackhole connectors (for testing)."""
+
+    def __init__(self) -> None:
+        super().__init__("blackhole://")
+
+    def can_parse(self, url: str) -> bool:
+        return url.startswith(self.schema)
+
+    def create_connector(self, context: ConnectorContext) -> RemoteConnector:
+        """
+        Create a Blackhole connector. This connector is used for testing
+        and discards all data.
+
+        URL format:
+        - blackhole://[any_text]
+
+        Examples:
+        - blackhole://127.0.0.1:8080
+        """
+        logger.info(f"Creating Blackhole connector for URL: {context.url}")
+        return BlackholeConnector()
+
+
+class AuditConnectorAdapter(ConnectorAdapter):
+    """Adapter for Audit connectors (for debugging and verification)."""
+
+    def __init__(self) -> None:
+        super().__init__("audit://")
+
+    def can_parse(self, url: str) -> bool:
+        return url.startswith(self.schema)
+
+    def create_connector(self, context: ConnectorContext) -> RemoteConnector:
+        """
+        Create an Audit connector. This connector wraps another connector
+        and audits all operations.
+
+        URL format:
+        - audit://host:port[?verify=true|false]
+
+        Examples:
+        - audit://localhost:8080
+        - audit://audit-server.example.com:8080?verify=true
+        - audit://127.0.0.1:8080?verify=false
+        """
+        logger.info(f"Creating Audit connector for URL: {context.url}")
+        hosts = context.url.split(",")
+        if len(hosts) > 1:
+            raise ValueError(
+                f"Only one host is supported for audit connector, but got {hosts}"
+            )
+
+        if not context.config or not context.config.audit_actual_remote_url:
+            raise ValueError("audit_actual_remote_url is not set in the config")
+
+        parse_url = parse_remote_url(context.url)
+        verify_param = parse_url.query_params.get("verify", ["false"])[0]
+        verify_checksum = verify_param.lower() in ("true", "1", "yes")
+        real_url = context.config.audit_actual_remote_url
+        connector = CreateConnector(
+            real_url, context.loop, context.local_cpu_backend, context.config
+        )
+        return AuditConnector(connector, verify_checksum)
+
+
+class FsConnectorAdapter(ConnectorAdapter):
+    """Adapter for Filesystem connectors."""
+
+    def __init__(self) -> None:
+        super().__init__("fs://")
+
+    def can_parse(self, url: str) -> bool:
+        return url.startswith(self.schema)
+
+    def create_connector(self, context: ConnectorContext) -> RemoteConnector:
+        """
+        Create a Filesystem connector. This connector stores data
+        in the local filesystem.
+
+        URL format:
+        fs://[host:port]/path
+
+        Examples:
+        - fs:///tmp/lmcache
+        - fs://localhost:0/var/lib/lmcache
+        - fs://127.0.0.1:0/home/user/lmcache_data
+
+        Note: The host:port part is optional and ignored. The path is
+        the important part.
+        """
+        logger.info(f"Creating FS connector for URL: {context.url}")
+        hosts = context.url.split(",")
+        if len(hosts) > 1:
+            raise ValueError(
+                f"Only one host is supported for fs connector, but got {hosts}"
+            )
+
+        parse_url = parse_remote_url(context.url)
+        assert parse_url.path, "Path is required for fs connector"
+
+        if not parse_url.path.startswith("/"):
+            parse_url.path = "/" + parse_url.path
+
+        return FSConnector(parse_url.path, context.loop, context.local_cpu_backend)
+
+
+class ConnectorManager:
+    """
+    Manager for creating connectors based on URL.
+
+    This class maintains a registry of connector adapters and creates
+    the appropriate connector based on the URL.
+    """
+
+    def __init__(
+        self,
+        url: str,
+        loop: asyncio.AbstractEventLoop,
+        local_cpu_backend: LocalCPUBackend,
+        config: Optional[LMCacheEngineConfig] = None,
+    ) -> None:
+        self.context = ConnectorContext(
+            url=url,
+            loop=loop,
+            local_cpu_backend=local_cpu_backend,
+            config=config,
+        )
+        self.adapters: List[ConnectorAdapter] = []
+        self._register_adapters()
+
+    def _register_adapters(self) -> None:
+        """Register all available connector adapters."""
+
+        self.adapters.append(RedisConnectorAdapter())
+        self.adapters.append(RedisSentinelConnectorAdapter())
+        self.adapters.append(LMServerConnectorAdapter())
+        self.adapters.append(InfinistoreConnectorAdapter())
+        self.adapters.append(MooncakestoreConnectorAdapter())
+        self.adapters.append(BlackholeConnectorAdapter())
+        self.adapters.append(AuditConnectorAdapter())
+        self.adapters.append(FsConnectorAdapter())
+
+    def create_connector(self) -> RemoteConnector:
+        for adapter in self.adapters:
+            if adapter.can_parse(self.context.url):
+                return adapter.create_connector(self.context)
+
+        raise ValueError(f"No adapter found for URL: {self.context.url}")
 
 
 def CreateConnector(
@@ -128,135 +488,48 @@ def CreateConnector(
     config: Optional[LMCacheEngineConfig] = None,
 ) -> Optional[RemoteConnector]:
     """
-    Creates the corresponding remote connector from the given URL.
+    Create a remote connector from the given URL.
+
+    Supported URL formats:
+    - redis://[[username]:[password]@]host[:port][/database][?option=value]
+    - rediss://[[username]:[password]@]host[:port][/database][?option=value] (SSL)
+    - redis-sentinel://[[username]:[password]@]host1:port1[,host2:port2,...]/service_name
+    - lm://host:port
+    - infinistore://host:port[?device=device_name]
+    - mooncakestore://host:port[?device=device_name]
+    - blackhole://[any_text]
+    - audit://host:port[?verify=true|false]
+    - fs://[host:port]/path
+
+    Examples:
+    - redis://localhost:6379
+    - rediss://user:password@redis.example.com:6380/0
+    - redis-sentinel://user:password@sentinel1:26379,sentinel2:26379/mymaster
+    - lm://localhost:65432
+    - infinistore://127.0.0.1:12345?device=mlx5_0
+    - mooncakestore://127.0.0.1:50051
+    - blackhole://
+    - audit://localhost:8080?verify=true
+    - fs:///tmp/lmcache
+
+    Args:
+        url: The remote URL
+        loop: The asyncio event loop
+        local_cpu_backend: The local CPU backend
+        config: Optional LMCache engine configuration
+
+    Returns:
+        RemoteConnector: The created connector
+
+    Raises:
+        ValueError: If the connector cannot be created
     """
-    m = re.match(r"(.*)://(.*):(\d+)", url)
-    if m is None:
-        raise ValueError(f"Invalid remote url {url}")
 
-    parsed_url = parse_remote_url(url)
-    num_hosts = len(parsed_url.hosts)
+    # Basic URL validation - check for scheme
+    if "://" not in url:
+        raise ValueError(f"Invalid remote url {url}: missing scheme")
 
-    connector: Optional[RemoteConnector] = None
-    connector_type = parsed_url.connector_type
-    match connector_type:
-        case "redis":
-            if num_hosts == 1:
-                host, port = parsed_url.hosts[0], parsed_url.ports[0]
-                connector = RedisConnector(host, port, loop, local_cpu_backend)
-            else:
-                raise ValueError(
-                    f"Redis connector only supports a single host, but got url: {url}"
-                )
+    manager = ConnectorManager(url, loop, local_cpu_backend, config)
+    connector = manager.create_connector()
 
-        case "redis-sentinel":
-            connector = RedisSentinelConnector(
-                list(
-                    zip(
-                        parsed_url.hosts,
-                        map(int, parsed_url.ports),
-                        strict=False,
-                    )
-                ),
-                loop,
-                local_cpu_backend,
-            )
-
-        case "lm":
-            if num_hosts == 1:
-                host, port = parsed_url.hosts[0], parsed_url.ports[0]
-                connector = LMCServerConnector(host, port, loop, local_cpu_backend)
-            else:
-                raise ValueError(
-                    f"LM connector only supports a single host, but got url: {url}"
-                )
-        case "infinistore":
-            host, port = parsed_url.hosts[0], parsed_url.ports[0]
-            device_name = parsed_url.query_params[0].get("device", "mlx5_0")
-            connector = InfinistoreConnector(
-                host, port, device_name, loop, local_cpu_backend
-            )
-        case "mooncakestore":
-            host, port = parsed_url.hosts[0], parsed_url.ports[0]
-            device_name = parsed_url.query_params[0].get("device", "")
-            connector = MooncakestoreConnector(
-                host, port, device_name, loop, local_cpu_backend, config
-            )
-        case "blackhole":
-            connector = BlackholeConnector()
-        case "fs":
-            if num_hosts != 1:
-                raise ValueError(
-                    f"FS connector only supports a single path, but got url:{url}"
-                )
-            # For fs connector path is the base path of the url
-            base_path = parsed_url.paths[0]
-            # Ensure path starts with '/'
-            if not base_path.startswith("/"):
-                base_path = "/" + base_path
-            connector = FSConnector(base_path, loop, local_cpu_backend)
-        case "audit":
-            if num_hosts != 1:
-                raise ValueError(
-                    f"Audit connector only supports a single host, but got url: {url}"
-                )
-            if not config or not config.audit_actual_remote_url:
-                raise ValueError(
-                    "Audit connector requires audit_actual_remote_url in config"
-                )
-            real_url = config.audit_actual_remote_url
-            verify_checksum = parsed_url.query_params[0].get("verify") is not None
-            logger.info(f"Creating audit connector for {real_url}")
-            real_connector = CreateConnector(real_url, loop, local_cpu_backend)
-            assert real_connector is not None
-            return AuditConnector(
-                real_connector=real_connector, verify_checksum=verify_checksum
-            )
-        case "external":
-            if num_hosts != 1:
-                raise ValueError(
-                    f"External connector only supports a single host, "
-                    f"but got url: {url}"
-                )
-
-            # Get the module path and connector name
-            module_path = parsed_url.paths[0].rstrip("/")
-            connector_name = parsed_url.query_params[0].get("connector_name")
-            if not connector_name:
-                raise ValueError(
-                    "External connector requires 'connector_name' in query parameters"
-                )
-
-            # Lazily import the module and get the connector class
-            # Standard
-            import importlib
-
-            try:
-                module = importlib.import_module(module_path)
-                connector_class = getattr(module, connector_name)
-
-                # Verify that it's a subclass of RemoteConnector
-                if not issubclass(connector_class, RemoteConnector):
-                    raise TypeError(
-                        f"{connector_name} must be a subclass of RemoteConnector"
-                    )
-
-                # Create the connector instance
-                connector = connector_class(
-                    loop=loop, local_cpu_backend=local_cpu_backend, config=config
-                )
-                logger.info(
-                    f"Loaded external connector: {module_path}.{connector_name}"
-                )
-
-            except ImportError as e:
-                raise ImportError(f"Could not import module '{module_path}'") from e
-            except AttributeError as e:
-                raise AttributeError(
-                    f"Module '{module_path}' has no class '{connector_name}'"
-                ) from e
-        case _:
-            raise ValueError(f"Unknown connector type {connector_type} (url is: {url})")
-
-    logger.info(f"Created connector {connector} for {connector_type}")
     return InstrumentedRemoteConnector(connector)
