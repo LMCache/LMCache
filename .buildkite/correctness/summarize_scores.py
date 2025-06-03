@@ -1,3 +1,4 @@
+# Standard
 import glob
 import os
 import re
@@ -28,7 +29,7 @@ def main():
     # Check if results directory exists
     if not os.path.exists(RESULTS_DIR):
         print(f"❌ Results directory '{RESULTS_DIR}' does not exist")
-        print(f"📁 Current directory contents:")
+        print("📁 Current directory contents:")
         for item in os.listdir("."):
             print(f"   - {item}")
         return
@@ -52,8 +53,7 @@ def main():
         acc, lat = parse_file(f)
         acc_str = f"{acc:.4f}" if acc is not None else "N/A"
         lat_str = f"{lat:.2f}" if lat is not None else "N/A"
-        report.append(
-            f"- **{name}** → accuracy: {acc_str}, latency: {lat_str}")
+        report.append(f"- **{name}** → accuracy: {acc_str}, latency: {lat_str}")
 
     text = "\n".join(report)
     print(text)

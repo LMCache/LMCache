@@ -1,17 +1,19 @@
+# Standard
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 import argparse
 import json
 import os
 import sys
 import time
 import traceback
-from concurrent.futures import ThreadPoolExecutor
-from functools import partial
 
+# Third Party
+from tqdm import tqdm
+from transformers import AutoTokenizer
 import numpy as np
 import pandas as pd
 import requests
-from tqdm import tqdm
-from transformers import AutoTokenizer
 
 
 def get_exception_traceback():
@@ -20,13 +22,7 @@ def get_exception_traceback():
     return err_str
 
 
-def call_generate_vllm(prompt,
-                       temperature,
-                       max_tokens,
-                       stop=None,
-                       n=1,
-                       url=None):
-
+def call_generate_vllm(prompt, temperature, max_tokens, stop=None, n=1, url=None):
     data = {
         "model": "deepseek-ai/DeepSeek-V2-Lite",
         "prompt": prompt,
@@ -130,16 +126,16 @@ def evaluate(args, subject, dev_df, test_df, call_generate):
     def get_one_answer(i):
         pred = call_generate(prompts[i], temperature=0, max_tokens=max_tokens)
         pred_stripped = pred.strip()
-        if pred_stripped and pred_stripped[0] in ['A', 'B', 'C', 'D']:
+        if pred_stripped and pred_stripped[0] in ["A", "B", "C", "D"]:
             preds[i] = pred_stripped[0]
         else:
             # Fallback: look for any A, B, C, D in the response
             for char in pred_stripped:
-                if char in ['A', 'B', 'C', 'D']:
+                if char in ["A", "B", "C", "D"]:
                     preds[i] = char
                     break
             else:
-                preds[i] = 'A'  # Default fallback
+                preds[i] = "A"  # Default fallback
 
     tic = time.time()
     if args.parallel == 1:
@@ -151,22 +147,27 @@ def evaluate(args, subject, dev_df, test_df, call_generate):
     latency = time.time() - tic
 
     # Compute accuracy
-    cors = [pred == label for pred, label in zip(preds, labels)]
+    cors = [pred == label for pred, label in zip(preds, labels, strict=False)]
     acc = np.mean(cors)
     cors = np.array(cors)
 
-    print("Average accuracy {:.3f}, latency {:.2f}, #q: {} - {}".format(
-        acc, latency, len(prompts), subject))
+    print(
+        "Average accuracy {:.3f}, latency {:.2f}, #q: {} - {}".format(
+            acc, latency, len(prompts), subject
+        )
+    )
 
     return cors, acc, latency
 
 
 def main(args):
-    subjects = sorted([
-        f.split("_test.csv")[0]
-        for f in os.listdir(os.path.join(args.data_dir, "test"))
-        if "_test.csv" in f
-    ])
+    subjects = sorted(
+        [
+            f.split("_test.csv")[0]
+            for f in os.listdir(os.path.join(args.data_dir, "test"))
+            if "_test.csv" in f
+        ]
+    )
 
     all_cors = []
     all_latencies = []
@@ -175,16 +176,15 @@ def main(args):
     # Select backend
     call_generate = get_call_generate(args)
 
-    for subject in tqdm(subjects[:args.nsub]):
-        dev_df = pd.read_csv(os.path.join(args.data_dir, "dev",
-                                          subject + "_dev.csv"),
-                             header=None)[:args.ntrain]
-        test_df = pd.read_csv(os.path.join(args.data_dir, "test",
-                                           subject + "_test.csv"),
-                              header=None)
+    for subject in tqdm(subjects[: args.nsub]):
+        dev_df = pd.read_csv(
+            os.path.join(args.data_dir, "dev", subject + "_dev.csv"), header=None
+        )[: args.ntrain]
+        test_df = pd.read_csv(
+            os.path.join(args.data_dir, "test", subject + "_test.csv"), header=None
+        )
 
-        cors, acc, latency = evaluate(args, subject, dev_df, test_df,
-                                      call_generate)
+        cors, acc, latency = evaluate(args, subject, dev_df, test_df, call_generate)
         all_cors.append(cors)
         all_latencies.append(latency)
         num_requests += len(test_df)
