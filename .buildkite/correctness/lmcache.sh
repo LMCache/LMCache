@@ -79,7 +79,7 @@ fi
 echo "✅ MMLU data found. Test subjects: $(ls data/test/*.csv | wc -l)"
 
 python3 .buildkite/correctness/mmlu_bench.py \
-  --nsub 6 \
+  --nsub 12 \
   --parallel 16 \
   --model "$MODEL" \
   > mmlu-results/$OUTPUT_FILE || true

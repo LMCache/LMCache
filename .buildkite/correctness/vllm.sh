@@ -22,6 +22,7 @@ echo "   MLA disabled: $VLLM_MLA_DISABLE"
 CONTAINER_ID=$(sudo docker run -d --runtime=nvidia --gpus all \
     --env "HF_TOKEN=$HF_TOKEN" \
     --env "CUDA_VISIBLE_DEVICES=0" \
+    --env "PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True" \
     --env "VLLM_MLA_DISABLE=$VLLM_MLA_DISABLE" \
     -v ~/.cache/huggingface:/root/.cache/huggingface \
     -p 8000:8000 \
@@ -72,7 +73,7 @@ fi
 echo "✅ MMLU data found. Test subjects: $(ls data/test/*.csv | wc -l)"
 
 python3 .buildkite/correctness/mmlu_bench.py \
-  --nsub 6 \
+  --nsub 12 \
   --parallel 16 \
   --model "$MODEL" \
   > mmlu-results/$OUTPUT_FILE || true

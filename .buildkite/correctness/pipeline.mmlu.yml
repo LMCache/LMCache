@@ -159,6 +159,32 @@ steps:
     artifact_paths:
       - "mmlu-results/lmcache_no_mla.txt"
 
+  - label: ":rocket: vLLM Baseline without MLA"
+    key: "vllm-baseline-no-mla"
+    depends_on: ["setup"]
+    plugins:
+      - cache#v1.5.2:
+          key: "venv-mmlu-{{ checksum \"requirements/bench.txt\" }}-{{ checksum \"requirements/common.txt\" }}"
+          path: ".venv"
+          restore: "pipeline"
+      - cache#v1.5.2:
+          key: "mmlu-data-{{ checksum \".buildkite/correctness/download-data.sh\" }}"
+          path: "data"
+          restore: "pipeline"
+    command: |
+      export PATH="$HOME/.local/bin:$PATH"
+      source .venv/bin/activate
+      echo "🔍 Current directory: $(pwd)"
+      echo "🔍 Data directory exists: $([ -d data ] && echo 'YES' || echo 'NO')"
+
+      mkdir -p mmlu-results
+      bash .buildkite/correctness/vllm.sh "$${MLA_MODEL}" "vllm_baseline_no_mla.txt" "$${MLA_MAX_LEN}" "1"
+
+      echo "📊 Results after vLLM baseline without MLA:"
+      ls -la mmlu-results/ || echo "mmlu-results directory not found"
+    artifact_paths:
+      - "mmlu-results/vllm_baseline_no_mla.txt"
+
   # Dense Model Tests (Llama 3.1 8B)
   - label: ":rocket: vLLM Baseline (Dense)"
     key: "vllm-baseline-dense"
@@ -215,7 +241,7 @@ steps:
   # Summarize MLA Results
   - label: ":bar_chart: Summarize MLA Results"
     key: "summarize-mla"
-    depends_on: ["vllm-baseline-mla", "lmcache-mla", "lmcache-no-mla"]
+    depends_on: ["vllm-baseline-mla", "lmcache-mla", "lmcache-no-mla", "vllm-baseline-no-mla"]
     allow_dependency_failure: true
     plugins:
       - cache#v1.5.2:
@@ -235,6 +261,7 @@ steps:
       buildkite-agent artifact download "mmlu-results/vllm_baseline_mla.txt" . --step "vllm-baseline-mla" || echo "⚠️ vLLM MLA artifact not found"
       buildkite-agent artifact download "mmlu-results/lmcache_mla.txt" . --step "lmcache-mla" || echo "⚠️ LMCache MLA artifact not found"
       buildkite-agent artifact download "mmlu-results/lmcache_no_mla.txt" . --step "lmcache-no-mla" || echo "⚠️ LMCache no-MLA artifact not found"
+      buildkite-agent artifact download "mmlu-results/vllm_baseline_no_mla.txt" . --step "vllm-baseline-no-mla" || echo "⚠️ vLLM no-MLA artifact not found"
 
       echo "📁 MLA results contents:"
       ls -la mmlu-results/ || echo "mmlu-results directory not found"
@@ -244,6 +271,7 @@ steps:
       cp mmlu-results/vllm_baseline_mla.txt mmlu-results-mla/ 2>/dev/null || true
       cp mmlu-results/lmcache_mla.txt mmlu-results-mla/ 2>/dev/null || true
       cp mmlu-results/lmcache_no_mla.txt mmlu-results-mla/ 2>/dev/null || true
+      cp mmlu-results/vllm_baseline_no_mla.txt mmlu-results-mla/ 2>/dev/null || true
 
       # Generate MLA-specific reports
       echo "📊 Generating MLA-specific reports..."
@@ -261,6 +289,7 @@ steps:
       - "mmlu-results/vllm_baseline_mla.txt"
       - "mmlu-results/lmcache_mla.txt"
       - "mmlu-results/lmcache_no_mla.txt"
+      - "mmlu-results/vllm_baseline_no_mla.txt"
       - "compare-results/comparison_mla.txt"
       - "compare-results/mmlu_benchmark_report_mla.pdf"
       - "compare-results/results_summary_mla.json"
