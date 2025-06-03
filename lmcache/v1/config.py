@@ -138,6 +138,8 @@ class LMCacheEngineConfig:
         nixl_buffer_device: Optional[str] = None,
         nixl_enable_gc: Optional[bool] = False,
         audit_actual_remote_url: Optional[str] = None,
+        weka_path: Optional[str] = None,
+        cufile_buffer_size: Optional[int] = None,
         extra_config: Optional[dict] = None,
     ) -> "LMCacheEngineConfig":
         # TODO (ApostaC): Add nixl config
@@ -170,6 +172,8 @@ class LMCacheEngineConfig:
             nixl_buffer_device,
             nixl_enable_gc,
             audit_actual_remote_url,
+            weka_path,
+            cufile_buffer_size,
             extra_config,
         ).validate()
 
