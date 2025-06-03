@@ -252,11 +252,7 @@ steps:
 
       # Generate comprehensive PDF report for MLA
       echo "📊 Generating comprehensive MLA PDF report..."
-      RESULTS_DIR="mmlu-results-mla" python3 -c "
-import os
-os.environ['RESULTS_DIR'] = 'mmlu-results-mla'
-exec(open('.buildkite/correctness/create_report.py').read())
-"
+      RESULTS_DIR="mmlu-results-mla" python3 .buildkite/correctness/create_report.py
       mv compare-results/mmlu_benchmark_report.pdf compare-results/mmlu_benchmark_report_mla.pdf 2>/dev/null || true
       mv compare-results/results_summary.json compare-results/results_summary_mla.json 2>/dev/null || true
 
@@ -307,11 +303,7 @@ exec(open('.buildkite/correctness/create_report.py').read())
 
       # Generate comprehensive PDF report for Dense
       echo "📊 Generating comprehensive Dense PDF report..."
-      RESULTS_DIR="mmlu-results-dense" python3 -c "
-import os
-os.environ['RESULTS_DIR'] = 'mmlu-results-dense'
-exec(open('.buildkite/correctness/create_report.py').read())
-"
+      RESULTS_DIR="mmlu-results-dense" python3 .buildkite/correctness/create_report.py
       mv compare-results/mmlu_benchmark_report.pdf compare-results/mmlu_benchmark_report_dense.pdf 2>/dev/null || true
       mv compare-results/results_summary.json compare-results/results_summary_dense.json 2>/dev/null || true
 
