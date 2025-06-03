@@ -42,7 +42,11 @@ logger = init_logger(__name__)
 _METADATA_FILE_SUFFIX = ".metadata"
 _DATA_FILE_SUFFIX = ".kvcache.bin"
 _METADATA_VERSION = 1
-_METADATA_MAX_SIZE = 4096  # reserve 4K for metadata
+_METADATA_MAX_SIZE = 4096  # reserve 4K for metadata.
+# TODO: This can compatible with the SafeTensors format, with first 4K of
+# the file being the meta-data. There's no need for a metadata file. So this
+# code in the future will just save a single '.safetensors' file. It is possible
+# to read this 4KB block without triggering read-ahead by various means.
 
 
 class UnsupportedMetadataVersion(Exception):
@@ -65,9 +69,11 @@ dtype_to_idx = {dtype: idx for idx, dtype in enumerate(torch_dtypes)}
 
 
 def pack_metadata(shape, dtype, size) -> bytes:
+    # TODO: we can easily become SafeTensors compatible by taking some
+    # code from: https://github.com/vast-data/VUA/blob/main/src/vua/serdes.py,
+    # there's no need to invent a new format.
     metadata_desc = "<QQQQ" + len(shape) * "Q"
     if struct.calcsize(metadata_desc) > _METADATA_MAX_SIZE:
-        # TODO: support variable offset for data
         raise ValueError(
             f"Metadata size {struct.calcsize(metadata_desc)} "
             f"exceeds max size {_METADATA_MAX_SIZE}"
@@ -81,9 +87,6 @@ def unpack_metadata(buffer):
     version, dt_idx, size, ndim = struct.unpack_from("<QQQQ", buffer)
     shape_offset = struct.calcsize("<QQQQ")
     if version != _METADATA_VERSION:
-        # TODO: When we bump the _METADATA_VERSION for
-        # the first time, we need to ensure that we can still
-        # read older versions.
         raise UnsupportedMetadataVersion(f"Unsupported metadata version: {version}")
     shape = struct.unpack_from("<" + ndim * "Q", buffer, offset=shape_offset)
     return torch.Size(shape), torch_dtypes[dt_idx], size
@@ -104,10 +107,10 @@ async def save_metadata(path: str, tmp: str, metadata: bytes):
 
 class GdsBackend(StorageBackendInterface):
     """
-    This is a backend that leverages NVIDIA's cuFile API to issue GDS requests
-    directly to the GDS-supported remote filesystem.  In order to use it, users
-    need to specify `gds_path` and `cufile_buffer_size` in their LMCache
-    config.
+    Originally based on the open sourced WekaGdsBackend, this is a backend that
+    leverages NVIDIA's cuFile API to issue GDS requests directly to the
+    GDS-supported remote filesystem.  In order to use it, users need to specify
+    `gds_path` and `cufile_buffer_size` in their LMCache config.
 
     Cache Directory Structure created by this Backend:
     /{gds_path}/{first_level}/{second_level}/{data & metadata} This structure
@@ -167,9 +170,9 @@ class GdsBackend(StorageBackendInterface):
         self.save_metadata_tasks: set[asyncio.Task] = set()
 
     async def _scan_metadata(self):
-        # TODO: even though we only run it once on startup,
-        # this is still not super scalable maybe we need to add metadata
-        # snapshotting later.
+        # TODO: even though we only run it once on startup, this is still
+        # not super scalable - test whether Rust code will be faster here, or
+        # whether we can serialize meta-data in groups for faster loading.
         tasks = []
         start = time.perf_counter()
         with os.scandir(self.gds_path) as it:
