@@ -12,18 +12,26 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import time
+# Standard
 from typing import Iterable, List, Optional, Union
+import time
 
+# Third Party
 import torch
 
-from lmcache.config import (LMCacheEngineConfig, LMCacheEngineMetadata,
-                            LMCacheMemPoolMetadata)
+# First Party
+from lmcache.config import (
+    LMCacheEngineConfig,
+    LMCacheEngineMetadata,
+    LMCacheMemPoolMetadata,
+)
 from lmcache.logging import init_logger
 from lmcache.storage_backend.abstract_backend import LMCBackendInterface
 from lmcache.storage_backend.local_backend import LMCLocalBackend
-from lmcache.storage_backend.remote_backend import (LMCPipelinedRemoteBackend,
-                                                    LMCRemoteBackend)
+from lmcache.storage_backend.remote_backend import (
+    LMCPipelinedRemoteBackend,
+    LMCRemoteBackend,
+)
 from lmcache.utils import CacheEngineKey, _lmcache_nvtx_annotate
 
 logger = init_logger(__name__)
@@ -31,23 +39,24 @@ logger = init_logger(__name__)
 
 class LMCHybridBackend(LMCBackendInterface):
     """
-    A hybrid backend that uses both local and remote backend to store and 
+    A hybrid backend that uses both local and remote backend to store and
     retrieve data.
     It implements write-through and read-through caching.
     """
 
-    def __init__(self,
-                 config: LMCacheEngineConfig,
-                 metadata: LMCacheEngineMetadata,
-                 mpool_metadata: LMCacheMemPoolMetadata,
-                 dst_device: str = "cuda"):
+    def __init__(
+        self,
+        config: LMCacheEngineConfig,
+        metadata: LMCacheEngineMetadata,
+        mpool_metadata: LMCacheMemPoolMetadata,
+        dst_device: str = "cuda",
+    ):
         super().__init__(dst_device)
         self.local_store = LMCLocalBackend(config, mpool_metadata, dst_device)
 
         self.remote_store: Union[LMCPipelinedRemoteBackend, LMCRemoteBackend]
         if config.pipelined_backend and config.remote_serde is not None:
-            self.remote_store = LMCPipelinedRemoteBackend(
-                config, metadata, dst_device)
+            self.remote_store = LMCPipelinedRemoteBackend(config, metadata, dst_device)
         else:
             self.remote_store = LMCRemoteBackend(config, metadata, dst_device)
         # TODO add a configuration item to do this
@@ -60,9 +69,11 @@ class LMCHybridBackend(LMCBackendInterface):
         logger.debug(f"Metadata is {metadata}")
         start = time.perf_counter()
         for key in keys:
-            if (key.model_name != metadata.model_name
-                    or key.worker_id != metadata.worker_id
-                    or key.world_size != metadata.world_size):
+            if (
+                key.model_name != metadata.model_name
+                or key.worker_id != metadata.worker_id
+                or key.world_size != metadata.world_size
+            ):
                 continue
 
             retrived_data = self.remote_store.get(key)
@@ -82,8 +93,7 @@ class LMCHybridBackend(LMCBackendInterface):
         self,
         key: CacheEngineKey,
     ) -> bool:
-        return self.local_store.contains(key) or self.remote_store.contains(
-            key)
+        return self.local_store.contains(key) or self.remote_store.contains(key)
 
     def put(
         self,
@@ -125,10 +135,12 @@ class LMCHybridBackend(LMCBackendInterface):
                 remote_query_idxs.append(idx)
 
         remote_query_results = self.remote_store.batched_get(remote_queries)
-        for idx, key, result in zip(remote_query_idxs,
-                                    remote_queries,
-                                    remote_query_results,
-                                    strict=False):
+        for idx, key, result in zip(
+            remote_query_idxs,
+            remote_queries,
+            remote_query_results,
+            strict=False,
+        ):
             if result is not None:
                 self.local_store.put(key, result)
                 ret[idx] = result

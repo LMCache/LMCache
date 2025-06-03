@@ -1,6 +1,8 @@
+# Third Party
 import pytest
 import torch
 
+# First Party
 from lmcache.config import LMCacheEngineConfig, LMCacheEngineMetadata
 from lmcache.storage_backend.serde.cachegen_basics import CacheGenEncoderOutput
 from lmcache.storage_backend.serde.cachegen_decoder import CacheGenDeserializer
@@ -12,8 +14,11 @@ def generate_kv_cache(num_tokens, fmt, device):
     num_layers = 32
     num_heads = 8
     head_size = 128
-    shape = ([num_tokens, num_heads, head_size]
-             if fmt == "vllm" else [num_heads, num_tokens, head_size])
+    shape = (
+        [num_tokens, num_heads, head_size]
+        if fmt == "vllm"
+        else [num_heads, num_tokens, head_size]
+    )
     dtype = torch.bfloat16 if fmt == "vllm" else torch.float16
 
     for i in range(num_layers):
@@ -26,7 +31,8 @@ def generate_kv_cache(num_tokens, fmt, device):
 
 def to_blob(kv_tuples):
     return torch.stack(
-        [torch.stack(inner_tuple, dim=0) for inner_tuple in kv_tuples], dim=0)
+        [torch.stack(inner_tuple, dim=0) for inner_tuple in kv_tuples], dim=0
+    )
 
 
 @pytest.mark.parametrize("chunk_size", [16, 128, 256])
@@ -40,14 +46,16 @@ def test_cachegen_encoder(chunk_size):
         worker_id=0,
         fmt=fmt,
         kv_dtype=torch.bfloat16,
-        kv_shape=None)
+        kv_shape=None,
+    )
     metadata2 = LMCacheEngineMetadata(
         model_name="mistralai/Mistral-7B-Instruct-v0.2",
         world_size=1,
         worker_id=0,
         fmt=fmt2,
         kv_dtype=torch.bfloat16,
-        kv_shape=None)
+        kv_shape=None,
+    )
     serializer = CacheGenSerializer(config, metadata)
     serializer2 = CacheGenSerializer(config, metadata2)
 
@@ -72,7 +80,8 @@ def test_cachegen_decoder(fmt, chunk_size):
         worker_id=0,
         fmt=fmt,
         kv_dtype=torch.bfloat16,
-        kv_shape=None)
+        kv_shape=None,
+    )
     serializer = CacheGenSerializer(config, metadata)
     deserializer = CacheGenDeserializer(config, metadata, torch.bfloat16)
 
@@ -95,7 +104,8 @@ def test_cachegen_unmatched_size(fmt):
         worker_id=0,
         fmt=fmt,
         kv_dtype=torch.bfloat16,
-        kv_shape=None)
+        kv_shape=None,
+    )
     serializer = CacheGenSerializer(config, metadata)
     deserializer = CacheGenDeserializer(config, metadata, torch.bfloat16)
 

@@ -12,13 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import abc
+# Standard
 from collections import OrderedDict
 from enum import Enum
 from typing import List, Tuple, Union
+import abc
 
+# Third Party
 import torch
 
+# First Party
 from lmcache.logging import init_logger
 from lmcache.storage_backend.mem_pool import KVObj
 from lmcache.utils import CacheEngineKey, DiskCacheMetadata
@@ -37,8 +40,9 @@ class BaseEvictor(metaclass=abc.ABCMeta):
     """
 
     @abc.abstractmethod
-    def update_on_get(self, key: Union[CacheEngineKey, str],
-                      cache_dict: OrderedDict) -> None:
+    def update_on_get(
+        self, key: Union[CacheEngineKey, str], cache_dict: OrderedDict
+    ) -> None:
         """
         Update cache_dict when a cache is used is used
 
@@ -50,7 +54,7 @@ class BaseEvictor(metaclass=abc.ABCMeta):
 
     @abc.abstractmethod
     def update_on_put(
-            self, cache_dict: OrderedDict, cache_size: int
+        self, cache_dict: OrderedDict, cache_size: int
     ) -> Tuple[List[Union[CacheEngineKey, str]], PutStatus]:
         """
         Evict cache when a new cache comes and the storage is full
@@ -58,11 +62,11 @@ class BaseEvictor(metaclass=abc.ABCMeta):
         Input:
             cache_dict: a dict consists of current cache
             cache_size: the size of the cache to be injected
-        
+
         Return:
             evict_keys: a list of keys to be evicted
-            status: 
-                PutStatus.LEGAL if the cache is legal, 
+            status:
+                PutStatus.LEGAL if the cache is legal,
                 PutStatus.ILLEGAL if the cache is illegal
         """
         raise NotImplementedError
@@ -72,7 +76,7 @@ class BaseEvictor(metaclass=abc.ABCMeta):
     def get_size(self, kv_obj: Union[torch.Tensor, bytes, KVObj]) -> int:
         """
         Get the size of the kv cache
-        
+
         Input:
             kv_obj: kv cache
 
@@ -91,16 +95,15 @@ class BaseEvictor(metaclass=abc.ABCMeta):
         elif isinstance(kv_obj, DiskCacheMetadata):
             size_in_bytes = kv_obj.size
         else:
-            raise Exception(
-                f"Encountered unknown kv data type {type(kv_obj)}!")
+            raise Exception(f"Encountered unknown kv data type {type(kv_obj)}!")
 
         return size_in_bytes
 
 
 class DummyEvictor(BaseEvictor):
-
-    def update_on_get(self, key: Union[CacheEngineKey, str],
-                      cache_dict: OrderedDict) -> None:
+    def update_on_get(
+        self, key: Union[CacheEngineKey, str], cache_dict: OrderedDict
+    ) -> None:
         # Dummy implementation does nothing
         pass
 

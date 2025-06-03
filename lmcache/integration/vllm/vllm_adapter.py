@@ -12,40 +12,65 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import dataclasses
-import os
+# Standard
 from copy import deepcopy
 from enum import Enum
 from typing import TYPE_CHECKING, List, Optional, Tuple, Union
+import dataclasses
+import os
 
+# Third Party
+from torch.nn.utils.rnn import pad_sequence
 import torch
 import torch.distributed as dist
-from torch.nn.utils.rnn import pad_sequence
 
 if TYPE_CHECKING:
     from vllm.worker.model_runner import ModelInputForGPUWithSamplingMetadata
 
+# Third Party
+from vllm.attention import AttentionMetadata
 from vllm.attention.backends.flash_attn import FlashAttentionMetadata
-from vllm.config import CacheConfig, ModelConfig, ParallelConfig
+from vllm.attention.backends.flashmla import FlashMLAMetadata
+from vllm.attention.backends.mla.common import MLACommonMetadata
+from vllm.config import (
+    CacheConfig,
+    ModelConfig,
+    ParallelConfig,
+    SchedulerConfig,
+)
 from vllm.sequence import IntermediateTensors
-from vllm.utils import get_kv_cache_torch_dtype
+from vllm.utils import cdiv, get_kv_cache_torch_dtype, round_down
 
+# First Party
 from lmcache.config import LMCacheEngineMetadata
-from lmcache.experimental.cache_engine import (LMCacheEngine,
-                                               LMCacheEngineBuilder)
-from lmcache.experimental.config import LMCacheEngineConfig
-from lmcache.experimental.gpu_connector import (
-    VLLMPagedMemGPUConnectorV2, VLLMPagedMemLayerwiseGPUConnector)
 from lmcache.integration.vllm.utils import ENGINE_NAME, lmcache_get_config
 from lmcache.logging import init_logger
 from lmcache.utils import _lmcache_nvtx_annotate
+from lmcache.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
+from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.v1.gpu_connector import (
+    VLLMPagedMemGPUConnectorMLA,
+    VLLMPagedMemGPUConnectorV2,
+    VLLMPagedMemLayerwiseGPUConnector,
+)
 
 # FIXME(Jiayi): temporarily comment this out
-#from lmcache_vllm.blend_adapter import remove_request_id_indices
+# from lmcache_vllm.blend_adapter import remove_request_id_indices
 
 logger = init_logger(__name__)
 
 LMCACHE_CUDA_STREAM = torch.cuda.Stream()
+
+SUPPORTED_BACKEND_METADATA = (
+    FlashAttentionMetadata,
+    FlashMLAMetadata,
+    MLACommonMetadata,
+)
+
+VLLM_CACHE_CONFIG: Optional[CacheConfig] = None
+VLLM_MODEL_CONFIG: Optional[ModelConfig] = None
+VLLM_PARALLEL_CONFIG: Optional[ParallelConfig] = None
+VLLM_SCHEDULER_CONFIG: Optional[SchedulerConfig] = None
 
 
 class StoreStatus(Enum):
@@ -65,16 +90,17 @@ class RetrieveStatus(Enum):
 
 
 def need_gpu_interm_buffer(lmcache_config: LMCacheEngineConfig):
-    if lmcache_config.local_cpu:
-        return True
-    else:
+    if lmcache_config.enable_nixl:
         return False
+    else:
+        return True
 
 
 def init_lmcache_engine(
     model_config: ModelConfig,
     parallel_config: ParallelConfig,
     cache_config: CacheConfig,
+    scheduler_config: SchedulerConfig,
 ) -> Optional[LMCacheEngine]:
     """Initialize the LMCache engine by the given model config and parallel
     config. This function will check the environment variable
@@ -87,6 +113,8 @@ def init_lmcache_engine(
     :type parallel_config: ParallelConfig
     :param cache_config: The KV cache configuration in vLLM.
     :type cache_config: CacheConfig
+    :param scheduler_config: The scheduler configuration in vLLM.
+    :type scheduler_config: SchedulerConfig
 
     :return: The initialized LMCache engine or None (if the environment variable
         `LMCACHE_CONFIG_FILE` is not set).
@@ -95,55 +123,101 @@ def init_lmcache_engine(
     if LMCacheEngineBuilder.get(ENGINE_NAME) is not None:
         return None
 
-    config = lmcache_get_config()
-    assert isinstance(config, LMCacheEngineConfig), \
-        "LMCache experimental configuration is should be passed."
+    global VLLM_CACHE_CONFIG
+    global VLLM_PARALLEL_CONFIG
+    global VLLM_MODEL_CONFIG
+    global VLLM_SCHEDULER_CONFIG
+    VLLM_CACHE_CONFIG = cache_config
+    VLLM_PARALLEL_CONFIG = parallel_config
+    VLLM_MODEL_CONFIG = model_config
+    VLLM_SCHEDULER_CONFIG = scheduler_config
 
-    kv_dtype = get_kv_cache_torch_dtype(cache_config.cache_dtype,
-                                        model_config.dtype)
+    config = lmcache_get_config()
+    assert isinstance(config, LMCacheEngineConfig), (
+        "LMCache v1 configuration is should be passed."
+    )
+
+    kv_dtype = get_kv_cache_torch_dtype(cache_config.cache_dtype, model_config.dtype)
+
+    use_mla = False
+    if (
+        hasattr(model_config, "use_mla")
+        and isinstance(model_config.use_mla, bool)
+        and model_config.use_mla
+    ):
+        use_mla = True
+
+    if use_mla and config.remote_serde != "naive":
+        raise ValueError("MLA only works with naive serde mode..")
 
     # construct kv shape (for mem pool)
     num_layer = model_config.get_num_layers(parallel_config)
     chunk_size = config.chunk_size
     num_kv_head = model_config.get_num_kv_heads(parallel_config)
     head_size = model_config.get_head_size()
-    kv_shape = (num_layer, 2, chunk_size, num_kv_head, head_size)
+    if use_mla:
+        kv_shape = (num_layer, 1, chunk_size, 1, head_size)
+    else:
+        kv_shape = (num_layer, 2, chunk_size, num_kv_head, head_size)
 
     # Change current device.
     torch.cuda.device(parallel_config.rank)
     device = torch.device(f"cuda:{parallel_config.rank}")
-    metadata = LMCacheEngineMetadata(model_config.model,
-                                     parallel_config.world_size,
-                                     parallel_config.rank, "vllm", kv_dtype,
-                                     kv_shape)
-    hidden_dim_size = num_kv_head * head_size
-    use_gpu = need_gpu_interm_buffer(config)
+    metadata = LMCacheEngineMetadata(
+        model_config.model,
+        parallel_config.world_size,
+        parallel_config.rank,
+        "vllm",
+        kv_dtype,
+        kv_shape,
+    )
 
-    vllm_gpu_connector: Union[VLLMPagedMemGPUConnectorV2,
-                              VLLMPagedMemLayerwiseGPUConnector]
+    use_gpu = need_gpu_interm_buffer(config)
+    vllm_gpu_connector: Union[
+        VLLMPagedMemGPUConnectorV2,
+        VLLMPagedMemLayerwiseGPUConnector,
+        VLLMPagedMemGPUConnectorMLA,
+    ]
 
     # FIXME(Jiayi): support non-environ config
     env_layerwise = os.getenv("LMCACHE_USE_LAYERWISE", "False")
     use_layerwise = env_layerwise.lower() in ["true", "1"]
 
-    if use_layerwise:
-        vllm_gpu_connector = VLLMPagedMemLayerwiseGPUConnector(
-            hidden_dim_size,
+    if use_mla:
+        if use_layerwise:
+            raise ValueError("layerwise MLA connector is not supported yet")
+        vllm_gpu_connector = VLLMPagedMemGPUConnectorMLA(
+            head_size,
             num_layer,
             use_gpu=use_gpu,
             chunk_size=chunk_size,
             dtype=kv_dtype,
-            device=device)
+            device=device,
+        )
     else:
-        vllm_gpu_connector = VLLMPagedMemGPUConnectorV2(hidden_dim_size,
-                                                        num_layer,
-                                                        use_gpu=use_gpu,
-                                                        chunk_size=chunk_size,
-                                                        dtype=kv_dtype,
-                                                        device=device)
-    engine = LMCacheEngineBuilder.get_or_create(ENGINE_NAME, config, metadata,
-                                                vllm_gpu_connector,
-                                                use_layerwise)
+        hidden_dim_size = num_kv_head * head_size
+
+        if use_layerwise:
+            vllm_gpu_connector = VLLMPagedMemLayerwiseGPUConnector(
+                hidden_dim_size,
+                num_layer,
+                use_gpu=use_gpu,
+                chunk_size=chunk_size,
+                dtype=kv_dtype,
+                device=device,
+            )
+        else:
+            vllm_gpu_connector = VLLMPagedMemGPUConnectorV2(
+                hidden_dim_size,
+                num_layer,
+                use_gpu=use_gpu,
+                chunk_size=chunk_size,
+                dtype=kv_dtype,
+                device=device,
+            )
+    engine = LMCacheEngineBuilder.get_or_create(
+        ENGINE_NAME, config, metadata, vllm_gpu_connector, use_layerwise
+    )
 
     return engine
 
@@ -186,13 +260,11 @@ def broadcast_seq_group_list(
     else:
         sampling_metadata = model_input.sampling_metadata
         sampling_metadata.seq_groups = seq_groups  # type: ignore
-        return dataclasses.replace(model_input,
-                                   sampling_metadata=sampling_metadata)
+        return dataclasses.replace(model_input, sampling_metadata=sampling_metadata)
 
 
 def close_lmcache_engine() -> None:
-    """Close the LMCache engine if it is initialized.
-    """
+    """Close the LMCache engine if it is initialized."""
     logger.debug("Closing LMCache Engine")
     LMCacheEngineBuilder.destroy(ENGINE_NAME)
 
@@ -212,8 +284,9 @@ def lmcache_should_retrieve(
     :return: RetrieveStatus.
     """
 
-    assert isinstance(model_input.attn_metadata, FlashAttentionMetadata), \
-        "Only FlashAttention backend is supported for now."
+    assert isinstance(model_input.attn_metadata, SUPPORTED_BACKEND_METADATA), (
+        f"Only backend with {SUPPORTED_BACKEND_METADATA} is supported for now."
+    )
 
     # model_input doesn't have seq_lens in tp
     # but attn_metadata does
@@ -227,18 +300,17 @@ def lmcache_should_retrieve(
 
     attn_meta = model_input.attn_metadata
 
-    prefill_exist = (attn_meta.num_prefills > 0)
+    prefill_exist = attn_meta.num_prefills > 0
     if not prefill_exist:
         return retrieve_status
     assert model_input.sampling_metadata is not None
     seq_group_list = model_input.sampling_metadata.seq_groups
-    model_input = broadcast_seq_group_list(model_input, seq_group_list
-                                           is not None)
+    model_input = broadcast_seq_group_list(model_input, seq_group_list is not None)
     seq_group_list = model_input.sampling_metadata.seq_groups
     assert seq_group_list is not None
 
     seq_data_idx = 0
-    #selected_token_indices_idx = 0
+    # selected_token_indices_idx = 0
     for seq_group_idx, seq_group in enumerate(seq_group_list):
         num_seqs_in_seq_group = len(seq_group.seq_data)
         seq_data_idx_end = seq_data_idx + num_seqs_in_seq_group
@@ -250,13 +322,15 @@ def lmcache_should_retrieve(
 
         # CHUNK_PREFILL
         if not seq_group.do_sample:
-            retrieve_status[seq_data_idx:seq_data_idx_end] =\
-                [RetrieveStatus.CHUNK_PREFILL] * num_seqs_in_seq_group
+            retrieve_status[seq_data_idx:seq_data_idx_end] = [
+                RetrieveStatus.CHUNK_PREFILL
+            ] * num_seqs_in_seq_group
             seq_data_idx = seq_data_idx_end
         # LAST_CHUNK_PREFILL or NORMAL_PREFILL
         else:
-            retrieve_status[seq_data_idx:seq_data_idx_end] =\
-                [RetrieveStatus.PREFILL] * num_seqs_in_seq_group
+            retrieve_status[seq_data_idx:seq_data_idx_end] = [
+                RetrieveStatus.PREFILL
+            ] * num_seqs_in_seq_group
             seq_data_idx = seq_data_idx_end
 
     return retrieve_status
@@ -278,16 +352,16 @@ def lmcache_should_store(
     """
 
     def is_blend_effective(attn_metadata):
-        """Check if the blend is effective for the current request
-        """
+        """Check if the blend is effective for the current request"""
         blend_metadata = getattr(attn_metadata, "blend_metadata", None)
         if blend_metadata is None:
             return False
 
         return blend_metadata.processed_layer_count > 0
 
-    assert isinstance(model_input.attn_metadata, FlashAttentionMetadata), \
-        "Only FlashAttention backend is supported for now."
+    assert isinstance(model_input.attn_metadata, SUPPORTED_BACKEND_METADATA), (
+        f"Only backend with {SUPPORTED_BACKEND_METADATA} is supported for now."
+    )
 
     seq_lens = model_input.attn_metadata.seq_lens
     assert seq_lens is not None
@@ -313,13 +387,11 @@ def lmcache_should_store(
     # `lmcache_store`
     # We use this dirty fix now as we don't want to modify the vllm
     # connector interface for now
-    model_input = broadcast_seq_group_list(model_input, seq_group_list
-                                           is not None)
+    model_input = broadcast_seq_group_list(model_input, seq_group_list is not None)
     seq_group_list = model_input.sampling_metadata.seq_groups
     assert seq_group_list is not None
 
-    selected_token_indices = \
-        model_input.sampling_metadata.selected_token_indices
+    selected_token_indices = model_input.sampling_metadata.selected_token_indices
 
     seq_data_idx = 0
     selected_token_indices_idx = 0
@@ -330,7 +402,7 @@ def lmcache_should_store(
         # DECODE
         if not seq_group.is_prompt:
             # Determine whether to save decoded KV cache
-            if not engine.config.save_decode_cache:
+            if engine.config.save_decode_cache:
                 for idx in range(seq_data_idx, seq_data_idx_end):
                     if seq_lens[idx] % engine.config.chunk_size == 0:
                         store_status[idx] = StoreStatus.DECODE
@@ -352,15 +424,18 @@ def lmcache_should_store(
 
         # CHUNK_PREFILL
         if not seq_group.do_sample:
-            store_status[seq_data_idx:seq_data_idx_end] = \
-                [StoreStatus.CHUNK_PREFILL] * num_seqs_in_seq_group
+            store_status[seq_data_idx:seq_data_idx_end] = [
+                StoreStatus.CHUNK_PREFILL
+            ] * num_seqs_in_seq_group
             seq_data_idx = seq_data_idx_end
             continue
 
         # LAST_CHUNK_PREFILL or NORMAL_PREFILL
         for seqid, seq_data in seq_group.seq_data.items():
-            if seq_data.get_len(
-            ) - 1 != selected_token_indices[selected_token_indices_idx]:
+            if (
+                seq_data.get_len() - 1
+                != selected_token_indices[selected_token_indices_idx]
+            ):
                 # last chunk in chunk prefill
                 # or prefix already hit in retrieve
                 store_status[seq_data_idx] = StoreStatus.SUFFIX_PREFILL
@@ -398,8 +473,9 @@ def lmcache_store_kv(
     engine = LMCacheEngineBuilder.get(ENGINE_NAME)
     assert engine is not None, "LMCache engine is not initialized."
 
-    assert isinstance(model_input.attn_metadata, FlashAttentionMetadata), \
-        "Only FlashAttention backend is supported for now."
+    assert isinstance(model_input.attn_metadata, SUPPORTED_BACKEND_METADATA), (
+        f"Only backend with {SUPPORTED_BACKEND_METADATA} is supported for now."
+    )
 
     seq_lens = model_input.attn_metadata.seq_lens
     assert seq_lens is not None
@@ -435,7 +511,8 @@ def lmcache_store_kv(
             if status in [StoreStatus.NONE]:
                 continue
             elif status in [
-                    StoreStatus.SUFFIX_PREFILL, StoreStatus.CHUNK_PREFILL
+                StoreStatus.SUFFIX_PREFILL,
+                StoreStatus.CHUNK_PREFILL,
             ]:
                 seq_len = seq_lens[seq_data_idx]
             else:
@@ -443,14 +520,16 @@ def lmcache_store_kv(
                 if status == StoreStatus.DECODE:
                     if seq_len % engine.config.chunk_size != 0:
                         continue
-            current_tokens = torch.tensor(seq_data.get_token_ids()[:seq_len],
-                                          device="cpu")
+            current_tokens = torch.tensor(
+                seq_data.get_token_ids()[:seq_len], device="cpu"
+            )
 
             skip_leading_tokens = engine.lookup(current_tokens)
             assert skip_leading_tokens <= seq_len
 
-            vllm_num_required_tokens = (query_start_loc[seq_data_idx + 1] -
-                                        query_start_loc[seq_data_idx]).item()
+            vllm_num_required_tokens = (
+                query_start_loc[seq_data_idx + 1] - query_start_loc[seq_data_idx]
+            ).item()
             assert isinstance(vllm_num_required_tokens, int)
 
             start_pos = next_start_pos
@@ -461,12 +540,14 @@ def lmcache_store_kv(
             if vllm_num_computed_tokens > 0:
                 if skip_leading_tokens >= vllm_num_computed_tokens:
                     slot_mapping_req_full = torch.full(
-                        (seq_len, ),
+                        (seq_len,),
                         -1,
                         device=slot_mapping.device,
-                        dtype=slot_mapping.dtype)
-                    slot_mapping_req_full[vllm_num_computed_tokens:] = \
-                        slot_mapping[start_pos:end_pos]
+                        dtype=slot_mapping.dtype,
+                    )
+                    slot_mapping_req_full[vllm_num_computed_tokens:] = slot_mapping[
+                        start_pos:end_pos
+                    ]
                 else:
                     # NOTE(Jiayi): the cache is stored even if it's in vllm
                     # as long as it's not in lmc
@@ -478,10 +559,13 @@ def lmcache_store_kv(
                     indices = torch.arange(
                         vllm_block_size,
                         device=slot_mapping.device,
-                        dtype=slot_mapping.dtype).repeat(n_block)
-                    slot_mapping_req_full = vllm_block_size \
-                        * block_table_full.repeat_interleave(vllm_block_size)\
+                        dtype=slot_mapping.dtype,
+                    ).repeat(n_block)
+                    slot_mapping_req_full = (
+                        vllm_block_size
+                        * block_table_full.repeat_interleave(vllm_block_size)
                         + indices
+                    )
                     slot_mapping_req_full = slot_mapping_req_full[:seq_len]
 
             else:
@@ -497,20 +581,23 @@ def lmcache_store_kv(
                 # might error here. `slot_mapping_seq` could be wrong
 
                 stored_token_num = seq_len - skip_leading_tokens
-                kv_tensors_mask = torch.ones_like(current_tokens,
-                                                  dtype=torch.bool)
+                kv_tensors_mask = torch.ones_like(current_tokens, dtype=torch.bool)
                 kv_tensors_mask[:skip_leading_tokens] = False
 
-                engine.store(current_tokens.cpu(),
-                             kv_tensors_mask,
-                             kvcaches=kv_caches,
-                             slot_mapping=slot_mapping_req_full,
-                             offset=skip_leading_tokens)
+                engine.store(
+                    current_tokens.cpu(),
+                    kv_tensors_mask,
+                    kvcaches=kv_caches,
+                    slot_mapping=slot_mapping_req_full,
+                    offset=skip_leading_tokens,
+                )
             else:
                 stored_token_num = 0
                 skip_leading_tokens = seq_len
-            logger.debug(f"Store skips {skip_leading_tokens} tokens "\
-                    f"and then stores {stored_token_num} tokens")
+            logger.debug(
+                f"Store skips {skip_leading_tokens} tokens "
+                f"and then stores {stored_token_num} tokens"
+            )
             seq_data_idx += 1
 
 
@@ -521,8 +608,11 @@ def lmcache_retrieve_kv(
     cache_config: CacheConfig,
     kv_caches: List[torch.Tensor],
     retrieve_status: List[RetrieveStatus],
-) -> Tuple["ModelInputForGPUWithSamplingMetadata", bool, Union[
-        torch.Tensor, IntermediateTensors]]:
+) -> Tuple[
+    "ModelInputForGPUWithSamplingMetadata",
+    bool,
+    Union[torch.Tensor, IntermediateTensors],
+]:
     """Retrieve the KV caches from LMCache for the current model_input. And
     rebuild the model_input to reflect the changes in KV if necessary.
 
@@ -543,19 +633,20 @@ def lmcache_retrieve_kv(
     :return: The boolean value to indicate whether the
              entire execute_model should be skipped
     """
-
     engine = LMCacheEngineBuilder.get(ENGINE_NAME)
     assert engine is not None, "LMCache engine is not initialized."
 
     if engine.config.enable_blending:
         return model_input, False, None
 
-    assert isinstance(model_input.attn_metadata, FlashAttentionMetadata), \
-        "Only FlashAttention backend is supported for now."
+    assert isinstance(model_input.attn_metadata, SUPPORTED_BACKEND_METADATA), (
+        f"Only backend with {SUPPORTED_BACKEND_METADATA} is supported for now."
+    )
 
     query_start_loc = model_input.attn_metadata.query_start_loc
     assert query_start_loc is not None
     slot_mapping = model_input.attn_metadata.slot_mapping.flatten()
+
     assert slot_mapping is not None
     seq_lens = model_input.attn_metadata.seq_lens
     assert seq_lens is not None
@@ -595,11 +686,13 @@ def lmcache_retrieve_kv(
                 do_sample_list.append(True)
 
             full_token_tensor = torch.tensor(
-                seq_data.get_token_ids()[:total_seq_len], device="cpu")
+                seq_data.get_token_ids()[:total_seq_len], device="cpu"
+            )
             full_tokens_list.append(full_token_tensor)
 
-            vllm_num_required_tokens = (query_start_loc[idx + 1] -
-                                        query_start_loc[idx]).item()
+            vllm_num_required_tokens = (
+                query_start_loc[idx + 1] - query_start_loc[idx]
+            ).item()
             assert isinstance(vllm_num_required_tokens, int)
 
             start_pos = next_start_pos
@@ -636,19 +729,23 @@ def lmcache_retrieve_kv(
             # construct token mesk to indicate what tokens should be retrieved
             # from lmc. Tokens computed in vllm already should be skipped
             token_mask = torch.ones_like(full_token_tensor, dtype=torch.bool)
-            vllm_num_computed_tokens_align = vllm_num_computed_tokens\
-                // lmc_chunk_size * lmc_chunk_size
+            vllm_num_computed_tokens_align = (
+                vllm_num_computed_tokens // lmc_chunk_size * lmc_chunk_size
+            )
             token_mask[:vllm_num_computed_tokens_align] = False
 
             # TODO(Jiayi): Please get rid of this in the future
             # Please only pass the required slot_mapping to the engine
             if vllm_num_computed_tokens > 0:
-                slot_mapping_req_full = torch.full((total_seq_len, ),
-                                                   -1,
-                                                   device=slot_mapping.device,
-                                                   dtype=slot_mapping.dtype)
-                slot_mapping_req_full[vllm_num_computed_tokens:] = \
-                    slot_mapping[start_pos:end_pos]
+                slot_mapping_req_full = torch.full(
+                    (total_seq_len,),
+                    -1,
+                    device=slot_mapping.device,
+                    dtype=slot_mapping.dtype,
+                )
+                slot_mapping_req_full[vllm_num_computed_tokens:] = slot_mapping[
+                    start_pos:end_pos
+                ]
             else:
                 slot_mapping_req_full = slot_mapping[start_pos:end_pos]
 
@@ -657,18 +754,19 @@ def lmcache_retrieve_kv(
                 full_token_tensor,
                 token_mask,
                 kvcaches=kv_caches,
-                slot_mapping=slot_mapping_req_full)
+                slot_mapping=slot_mapping_req_full,
+                use_mla=engine.metadata.use_mla,
+            )
             lmc_num_computed_tokens = max(
-                    torch.sum(ret_token_mask).item() - \
-                    (vllm_num_computed_tokens - vllm_num_computed_tokens_align),
-                    0
-                )
+                torch.sum(ret_token_mask).item()
+                - (vllm_num_computed_tokens - vllm_num_computed_tokens_align),
+                0,
+            )
 
             assert isinstance(lmc_num_computed_tokens, int)
 
             # total number of computed tokens (vllm + lmc)
-            num_computed_tokens = vllm_num_computed_tokens + \
-                lmc_num_computed_tokens
+            num_computed_tokens = vllm_num_computed_tokens + lmc_num_computed_tokens
 
             # TODO(Jiayi): currently we do not skip anything if chunked prefill
             # is batched with any decode or other chunked prefills.
@@ -703,7 +801,8 @@ def lmcache_retrieve_kv(
     assert len(num_computed_tokens_list) == seq_cnt
 
     is_all_chunk_prefill = all(
-        [status == RetrieveStatus.CHUNK_PREFILL for status in retrieve_status])
+        [status == RetrieveStatus.CHUNK_PREFILL for status in retrieve_status]
+    )
 
     # NOTE: We can only skip model forward if all requests are chunk prefill
 
@@ -712,10 +811,9 @@ def lmcache_retrieve_kv(
         num_dim = model_executable.model.embed_tokens.embedding_dim
         dtype = model_executable.model.embed_tokens.weight.dtype
         device = model_input.input_tokens.device
-        hidden_or_intermediate_states = torch.zeros(num_tok,
-                                                    num_dim,
-                                                    device=device,
-                                                    dtype=dtype)
+        hidden_or_intermediate_states = torch.zeros(
+            num_tok, num_dim, device=device, dtype=dtype
+        )
         logger.debug("Skip the entire model forward!")
         return model_input, True, hidden_or_intermediate_states
 
@@ -751,11 +849,13 @@ def build_partial_prefill_input(
     device: torch.device,
     cache_config: CacheConfig,
 ) -> "ModelInputForGPUWithSamplingMetadata":
-    """Helper function to rebuild the model input for the current request.
-    """
+    """Helper function to rebuild the model input for the current request."""
     assert model_input.attn_metadata is not None
-    assert isinstance(model_input.attn_metadata, FlashAttentionMetadata), \
-        "Only FlashAttention backend is supported for now."
+
+    assert isinstance(model_input.attn_metadata, SUPPORTED_BACKEND_METADATA), (
+        f"Only backend with {SUPPORTED_BACKEND_METADATA} is supported for now."
+    )
+
     assert model_input.attn_metadata.context_lens_tensor is not None
     assert model_input.attn_metadata.block_tables is not None
     assert model_input.attn_metadata.query_start_loc is not None
@@ -781,10 +881,18 @@ def build_partial_prefill_input(
     for idx in range(len(full_tokens_list)):
         token_tensor = full_tokens_list[idx]
         num_token = len(token_tensor)
-        num_computed_token = num_computed_tokens_list[idx]
+        num_computed_token = (
+            num_computed_tokens_list[idx]
+            // cache_config.block_size
+            * cache_config.block_size
+        )
         start_pos = start_pos_list[idx]
         is_prefill = is_prefill_list[idx]
-        lmc_num_computed_tokens = lmc_num_computed_tokens_list[idx]
+        lmc_num_computed_tokens = (
+            lmc_num_computed_tokens_list[idx]
+            // cache_config.block_size
+            * cache_config.block_size
+        )
         rebuilt_input_tokens.append(token_tensor[num_computed_token:])
         q_len = num_token - num_computed_token
         assert q_len > 0
@@ -792,7 +900,8 @@ def build_partial_prefill_input(
         start_input_pos_idx = start_pos + lmc_num_computed_tokens
         end_input_pos_idx = start_input_pos_idx + q_len
         rebuilt_input_positions.append(
-            model_input.input_positions[start_input_pos_idx:end_input_pos_idx])
+            model_input.input_positions[start_input_pos_idx:end_input_pos_idx]
+        )
         # Attn metadata-related
         if is_prefill:
             rebuilt_num_prefills += 1
@@ -812,13 +921,13 @@ def build_partial_prefill_input(
 
         # recover `block_table`
         if len(model_input.attn_metadata.block_tables[idx]) > 0:
-            rebuilt_block_tables.append(
-                model_input.attn_metadata.block_tables[idx])
+            rebuilt_block_tables.append(model_input.attn_metadata.block_tables[idx])
         else:
             slot_mapping_req = slot_mapping_flat[start_pos:end_slot_idx]
             vllm_block_size = cache_config.block_size
-            rebuilt_block_table = slot_mapping_req[::16].to(torch.int32) \
-                // vllm_block_size
+            rebuilt_block_table = (
+                slot_mapping_req[::vllm_block_size].to(torch.int32) // vllm_block_size
+            )
             rebuilt_block_tables.append(rebuilt_block_table)
 
         # Sampling metadata related
@@ -830,22 +939,38 @@ def build_partial_prefill_input(
     rebuilt_attn_metadata = deepcopy(model_input.attn_metadata)
     rebuilt_attn_metadata.num_prefills = rebuilt_num_prefills
     rebuilt_attn_metadata.num_prefill_tokens = rebuilt_num_prefill_tokens
-    rebuilt_attn_metadata.slot_mapping = torch.cat(rebuilt_slot_mapping).to(
-        device)
+    rebuilt_attn_metadata.slot_mapping = torch.cat(rebuilt_slot_mapping).to(device)
     rebuilt_attn_metadata.max_query_len = rebuilt_max_query_len
 
     rebuilt_attn_metadata.block_tables = pad_sequence(
-        rebuilt_block_tables, batch_first=True).to(device)
+        rebuilt_block_tables, batch_first=True
+    ).to(device)
 
     rebuilt_attn_metadata.query_start_loc = torch.tensor(
         rebuilt_query_start_loc,
-        dtype=model_input.attn_metadata.query_start_loc.dtype).to(device)
+        dtype=model_input.attn_metadata.query_start_loc.dtype,
+    ).to(device)
     rebuilt_attn_metadata.context_lens_tensor = torch.tensor(
         rebuilt_context_lens_tensor,
         dtype=model_input.attn_metadata.context_lens_tensor.dtype,
     ).to(device)
 
     rebuilt_attn_metadata._cached_prefill_metadata = None
+
+    if isinstance(rebuilt_attn_metadata, MLACommonMetadata) or isinstance(
+        rebuilt_attn_metadata, FlashMLAMetadata
+    ):
+        # use mla
+        rebuilt_input_positions_tensor = torch.cat(rebuilt_input_positions).to(
+            device=device, dtype=model_input.attn_metadata.input_positions.dtype
+        )
+        # New for MLA(compared to FlashAttentionMetadata)
+        build_mla_params(rebuilt_attn_metadata, device, rebuilt_input_positions_tensor)
+    else:
+        rebuilt_input_positions_tensor = torch.cat(rebuilt_input_positions).to(
+            device=device, dtype=model_input.input_positions.dtype
+        )
+
     rebuilt_sampling_metadata = None
     # rebuilt sampling_metadata
     if model_input.sampling_metadata is not None:
@@ -860,10 +985,12 @@ def build_partial_prefill_input(
         ).to(device)
 
     # import here to avoid circular import.
+    # Third Party
     from vllm.worker.model_runner import ModelInputForGPUWithSamplingMetadata
+
     rebuilt_model_input = ModelInputForGPUWithSamplingMetadata(
         input_tokens=torch.cat(rebuilt_input_tokens).to(device),
-        input_positions=torch.cat(rebuilt_input_positions).to(device),
+        input_positions=rebuilt_input_positions_tensor,
         seq_lens=model_input.seq_lens,
         query_lens=rebuilt_query_lens,
         lora_mapping=model_input.lora_mapping,
@@ -881,3 +1008,103 @@ def build_partial_prefill_input(
     )
 
     return rebuilt_model_input
+
+
+def build_mla_params(
+    attention_mata: "AttentionMetadata",
+    device: torch.device,
+    input_positions_tensor: torch.Tensor,
+) -> None:
+    assert VLLM_CACHE_CONFIG is not None
+    assert VLLM_MODEL_CONFIG is not None
+    assert VLLM_SCHEDULER_CONFIG is not None
+    assert VLLM_PARALLEL_CONFIG is not None
+
+    # set context chunk params
+    context_chunk_workspace_size = min(
+        # Max sure there is enough for 8 full length request or at least
+        # 4 pages of cache per request
+        max(
+            8 * VLLM_MODEL_CONFIG.max_model_len,
+            4 * VLLM_SCHEDULER_CONFIG.max_num_seqs * VLLM_CACHE_CONFIG.block_size,
+        ),
+        # For long-context models try not to over-allocate limiting
+        # kv-cache space, limiting it to 64k tokens,
+        # which would result in the workspace being:
+        #   2*(576)*(64*1024) = 144mb
+        # (assuming 576 MLA head dim, and fp16)
+        # which would result in up-projected context being
+        #   2*(192*128)*(64*1024) = 3gb
+        # (assuming 192 QK head dim, 128 heads, and fp16)
+        128 * 1024,
+    )
+
+    context_chunk_cu_seq_lens = None
+    context_chunk_starts = None
+    context_chunk_seq_tot = None
+    context_chunk_max_seq_lens = None
+
+    num_prefills = attention_mata.num_prefills
+    context_lens_tensor = attention_mata.context_lens_tensor
+    if (
+        num_prefills > 0
+        and context_lens_tensor is not None
+        and context_lens_tensor[:num_prefills].max() > 0
+    ):
+        num_prefills_with_context = (
+            (context_lens_tensor[:num_prefills] > 0).sum().item()
+        )
+
+        max_context_chunk = context_chunk_workspace_size // num_prefills_with_context
+
+        max_context_chunk = round_down(max_context_chunk, VLLM_CACHE_CONFIG.block_size)
+        assert max_context_chunk > 0
+        num_chunks = cdiv(context_lens_tensor.max(), max_context_chunk)
+
+        context_chunk_starts = (
+            torch.arange(num_chunks, device=device, dtype=torch.int32)
+            .unsqueeze(1)
+            .expand(-1, num_prefills)
+            * max_context_chunk
+        )
+        chunk_ends = torch.min(
+            context_lens_tensor[:num_prefills].unsqueeze(0),
+            context_chunk_starts + max_context_chunk,
+        )
+        chunk_seq_lens = (chunk_ends - context_chunk_starts).clamp(min=0)
+        _context_chunk_cu_seq_lens = chunk_seq_lens.cumsum(dim=1).to(torch.int32)
+        zero = torch.zeros(num_chunks, dtype=torch.int32, device=device).unsqueeze(-1)
+        context_chunk_cu_seq_lens = torch.cat([zero, _context_chunk_cu_seq_lens], dim=1)
+        context_chunk_max_seq_lens = chunk_seq_lens.max(dim=1).values.tolist()
+        context_chunk_seq_tot = chunk_seq_lens.sum(dim=1).tolist()
+        assert max(context_chunk_seq_tot) <= context_chunk_workspace_size
+
+    attention_mata.context_chunk_seq_tot = context_chunk_seq_tot
+    attention_mata.context_chunk_cu_seq_lens = context_chunk_cu_seq_lens
+    attention_mata.context_chunk_starts = context_chunk_starts
+    attention_mata.context_chunk_max_seq_lens = context_chunk_max_seq_lens
+
+    if attention_mata.context_chunk_workspace is None:
+        attention_mata.context_chunk_workspace = torch.empty(
+            (context_chunk_workspace_size, VLLM_MODEL_CONFIG.get_head_size()),
+            dtype=VLLM_MODEL_CONFIG.dtype,
+            device=device,
+        )
+
+    # set decode params
+    if attention_mata.num_decode_tokens > 0:
+        # Third Party
+        from vllm.attention.ops.flashmla import get_mla_metadata
+
+        num_q_heads = VLLM_MODEL_CONFIG.get_num_attention_heads(VLLM_PARALLEL_CONFIG)
+        (
+            attention_mata.decode_tile_scheduler_metadata,
+            attention_mata.decode_num_splits,
+        ) = get_mla_metadata(
+            attention_mata.seq_lens_tensor[num_prefills:],
+            num_q_heads,
+            1,  # MQA for the decode path
+        )
+
+    # set input positions
+    attention_mata.input_positions = input_positions_tensor

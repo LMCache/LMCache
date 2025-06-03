@@ -1,38 +1,48 @@
+# Standard
+from typing import List, Tuple
 import argparse
 import time
-from typing import List, Tuple
 
+# Third Party
 import torch
 import zmq
 
-from lmcache.experimental.memory_management import (AdHocMemoryAllocator,
-                                                    MemoryFormat, MemoryObj,
-                                                    TensorMemoryObj)
-from lmcache.experimental.storage_backend.connector.nixl_connector_v2 import (
-    NixlConfig, NixlPipe, NixlRole)
+# First Party
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
+from lmcache.v1.memory_management import (
+    AdHocMemoryAllocator,
+    MemoryFormat,
+    MemoryObj,
+    TensorMemoryObj,
+)
+from lmcache.v1.storage_backend.connector.nixl_connector_v2 import (
+    NixlConfig,
+    NixlPipe,
+    NixlRole,
+)
 
 logger = init_logger(__name__)
 
 
 def generate_test_data(
-    num_objs: int,
-    shape: torch.Size,
-    dtype: torch.dtype = torch.bfloat16
+    num_objs: int, shape: torch.Size, dtype: torch.dtype = torch.bfloat16
 ) -> Tuple[List[CacheEngineKey], List[MemoryObj]]:
     keys = []
     objs = []
     allocator = AdHocMemoryAllocator(
-        device='cuda',  # Assuming we are using CUDA for the test
+        device="cuda",  # Assuming we are using CUDA for the test
     )
     for i in range(num_objs):
         keys.append(
-            CacheEngineKey(fmt="test",
-                           model_name="test_model",
-                           world_size=1,
-                           worker_id=0,
-                           chunk_hash=f"test_{i}"))
+            CacheEngineKey(
+                fmt="test",
+                model_name="test_model",
+                world_size=1,
+                worker_id=0,
+                chunk_hash=f"test_{i}",
+            )
+        )
         obj = allocator.allocate(shape, dtype, fmt=MemoryFormat.KV_2LTD)
         obj.tensor.fill_(i + 1)  # Fill with some test data, e.g., the index
         objs.append(obj)
@@ -42,43 +52,52 @@ def generate_test_data(
 def calculate_throughput(total_bytes: int, elapsed_time: float) -> float:
     """Calculate throughput in GB/s"""
     if elapsed_time == 0:
-        return float('inf')
+        return float("inf")
     gb = total_bytes / (1024 * 1024 * 1024)
     return gb / elapsed_time
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description='Test NixlPipe V2 with sender/receiver roles')
-    parser.add_argument('--role',
-                        type=str,
-                        required=True,
-                        choices=['sender', 'receiver'],
-                        help='Role of this instance (sender or receiver)')
-    parser.add_argument('--host',
-                        type=str,
-                        default='localhost',
-                        help='Host name/IP for connection')
-    parser.add_argument('--port',
-                        type=int,
-                        default=5555,
-                        help='Port number for connection')
-    parser.add_argument('--num-rounds',
-                        type=int,
-                        default=1,
-                        help='Number of rounds to run the experiment')
-    parser.add_argument('--num-objs',
-                        type=int,
-                        default=100,
-                        help='Number of objects to transfer')
-    parser.add_argument('--simulate-work',
-                        action='store_true',
-                        help='Simulate some work on both sides')
+        description="Test NixlPipe V2 with sender/receiver roles"
+    )
+    parser.add_argument(
+        "--role",
+        type=str,
+        required=True,
+        choices=["sender", "receiver"],
+        help="Role of this instance (sender or receiver)",
+    )
+    parser.add_argument(
+        "--host",
+        type=str,
+        default="localhost",
+        help="Host name/IP for connection",
+    )
+    parser.add_argument(
+        "--port", type=int, default=5555, help="Port number for connection"
+    )
+    parser.add_argument(
+        "--num-rounds",
+        type=int,
+        default=1,
+        help="Number of rounds to run the experiment",
+    )
+    parser.add_argument(
+        "--num-objs",
+        type=int,
+        default=100,
+        help="Number of objects to transfer",
+    )
+    parser.add_argument(
+        "--simulate-work",
+        action="store_true",
+        help="Simulate some work on both sides",
+    )
 
     args = parser.parse_args()
 
-    keys, objs = generate_test_data(args.num_objs,
-                                    torch.Size([32, 2, 256, 1024]))
+    keys, objs = generate_test_data(args.num_objs, torch.Size([32, 2, 256, 1024]))
 
     # Common configuration
     config = NixlConfig(
@@ -86,7 +105,7 @@ if __name__ == "__main__":
         receiver_host=args.host,
         receiver_port=args.port,
         buffer_size=2**32,  # 4GB
-        buffer_device='cuda:0',
+        buffer_device="cuda:0",
         enable_gc=False,
     )
 
@@ -104,23 +123,23 @@ if __name__ == "__main__":
     total_bytes_transferred = 0
 
     for round_num in range(args.num_rounds):
-        logger.info(f"Starting round {round_num+1}/{args.num_rounds}")
+        logger.info(f"Starting round {round_num + 1}/{args.num_rounds}")
 
         if args.role == "sender":
             # Sender side
             total_size = 0
 
             # Allocate and write data to buffer
-            transfer_time = 0.
+            transfer_time = 0.0
             for idx, obj in enumerate(objs):
                 if args.simulate_work and idx % 10 == 0:
                     time.sleep(0.05)  # Simulate some work
 
                 # Use the new allocate_for_write method
                 transfer_start = time.time()
-                new_obj = pipe.allocate_for_write(obj.tensor.shape,
-                                                  obj.tensor.dtype,
-                                                  obj.metadata.fmt)
+                new_obj = pipe.allocate_for_write(
+                    obj.tensor.shape, obj.tensor.dtype, obj.metadata.fmt
+                )
                 if new_obj is not None:
                     # Copy data from original object to the new one
                     new_obj.tensor.copy_(obj.tensor)
@@ -136,8 +155,7 @@ if __name__ == "__main__":
             total_bytes_transferred += total_size
 
             logger.info(f"Transfer time: {transfer_time:.6f} seconds")
-            transfer_throughput = calculate_throughput(total_size,
-                                                       transfer_time)
+            transfer_throughput = calculate_throughput(total_size, transfer_time)
             logger.info(f"Transfer throughput: {transfer_throughput:.2f} GB/s")
 
         else:
@@ -148,12 +166,11 @@ if __name__ == "__main__":
             received_objs: list[MemoryObj] = []
             while len(received_objs) < len(metadatas):
                 pipe.wait_read()
-                new_objs = pipe.read_buffer(metadatas[len(received_objs):])
+                new_objs = pipe.read_buffer(metadatas[len(received_objs) :])
                 nobj_before = len(received_objs)
                 for idx, obj in enumerate(new_objs):
                     cloned_tensor = obj.tensor.detach().clone()
-                    received_objs.append(
-                        TensorMemoryObj(cloned_tensor, obj.metadata))
+                    received_objs.append(TensorMemoryObj(cloned_tensor, obj.metadata))
 
                     # Simulate some work: 20ms per 10 objects
                     if args.simulate_work and len(received_objs) % 10 == 0:
@@ -168,21 +185,22 @@ if __name__ == "__main__":
             total_transfer_time += transfer_time
 
             logger.info(f"Received {len(received_objs)} objects")
-            transfer_throughput = calculate_throughput(total_size,
-                                                       transfer_time)
+            transfer_throughput = calculate_throughput(total_size, transfer_time)
             logger.info(f"Transfer throughput: {transfer_throughput:.2f} GB/s")
 
             # Check if the received objects are the same as the original objects
-            assert len(received_objs) == len(objs), \
-                "Number of received objects does not match the number of " \
+            assert len(received_objs) == len(objs), (
+                "Number of received objects does not match the number of "
                 "original objects"
+            )
             for i, (received_obj, original_obj) in enumerate(
-                    zip(received_objs, objs, strict=False)):
-                assert torch.allclose(received_obj.tensor,
-                                      original_obj.tensor), \
-                    f"Data mismatch at index {i}: received " \
-                    f"{received_obj.tensor.mean()} " \
+                zip(received_objs, objs, strict=False)
+            ):
+                assert torch.allclose(received_obj.tensor, original_obj.tensor), (
+                    f"Data mismatch at index {i}: received "
+                    f"{received_obj.tensor.mean()} "
                     f"but expected {original_obj.tensor.mean()}"
+                )
             logger.info("Round passed")
 
     # Print aggregate statistics
@@ -190,11 +208,14 @@ if __name__ == "__main__":
         avg_time = total_transfer_time / args.num_rounds
         logger.info(f"Average transfer time: {avg_time:.6f} seconds")
 
-        avg_throughput = calculate_throughput(total_bytes_transferred,
-                                              total_transfer_time)
+        avg_throughput = calculate_throughput(
+            total_bytes_transferred, total_transfer_time
+        )
         logger.info(f"Total bytes transferred: {total_bytes_transferred}")
-        logger.info(f"Average throughput over {args.num_rounds} rounds: "
-                    f"{avg_throughput:.2f} GB/s")
+        logger.info(
+            f"Average throughput over {args.num_rounds} rounds: "
+            f"{avg_throughput:.2f} GB/s"
+        )
 
     # Wait a bit before closing
     time.sleep(5)

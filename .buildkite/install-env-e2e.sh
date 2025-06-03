@@ -23,8 +23,8 @@ source "${VENV_DIR}/bin/activate"
 # ─── Install packages using regular pip ───────────────────────────────────────
 set -xe
 
-pip install -r requirements.txt
-pip install -r requirements-test.txt
+pip install -r requirements/common.txt
+pip install -r requirements/test.txt
 pip install coverage
 
 set +x

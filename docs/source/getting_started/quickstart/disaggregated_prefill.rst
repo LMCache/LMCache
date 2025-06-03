@@ -100,7 +100,6 @@ Step-by-Step Setup
 
           UCX_TLS=cuda_ipc,cuda_copy,tcp \
               LMCACHE_CONFIG_FILE=lmcache-decoder-config.yaml \
-              LMCACHE_USE_EXPERIMENTAL=True \
               CUDA_VISIBLE_DEVICES=1 \
               vllm serve meta-llama/Llama-3.1-8B-Instruct \
               --port 8200 \
@@ -114,7 +113,6 @@ Step-by-Step Setup
 
           UCX_TLS=cuda_ipc,cuda_copy,tcp \
               LMCACHE_CONFIG_FILE=lmcache-prefiller-config.yaml \
-              LMCACHE_USE_EXPERIMENTAL=True \
               CUDA_VISIBLE_DEVICES=0 \
               vllm serve meta-llama/Llama-3.1-8B-Instruct \
               --port 8100 \
@@ -142,7 +140,6 @@ Step-by-Step Setup
 
     The ``UCX_TLS`` environment variable is used to specify the transport layer for UCX (the example uses NVLink)
     The ``CUDA_VISIBLE_DEVICES`` environment variable is used to specify the GPUs to use for the servers.
-    The ``LMCACHE_USE_EXPERIMENTAL`` environment variable is used to enable the experimental features of LMCache.
     
 
 3. **Verify Setup**
@@ -184,7 +181,7 @@ Monitoring
 
 The prefiller instance will log the throughput of KV cache transfer:
 
-    LMCache INFO: Store 5271 tokens takes: 6.5000 ms, throughput: 98.9889 GB/s; offload_time: 2.6594 ms, put_time: 3.4539 ms (cache_engine.py:190:lmcache.experimental.cache_engine)
+    LMCache INFO: Store 5271 tokens takes: 6.5000 ms, throughput: 98.9889 GB/s; offload_time: 2.6594 ms, put_time: 3.4539 ms (cache_engine.py:190:lmcache.v1.cache_engine)
 
 The decoder instance will log how many tokens are fetched from the LMCache:
 

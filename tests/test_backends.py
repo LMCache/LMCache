@@ -1,17 +1,22 @@
+# Standard
+from pathlib import Path
 import random
 import string
 import time
-from pathlib import Path
 
+# Third Party
 import pytest
 import torch
 
+# First Party
 from lmcache.config import LMCacheEngineConfig, LMCacheEngineMetadata
 from lmcache.logging import init_logger
 from lmcache.storage_backend import CreateStorageBackend
 from lmcache.storage_backend.hybrid_backend import LMCHybridBackend
-from lmcache.storage_backend.local_backend import (LMCLocalBackend,
-                                                   LMCLocalDiskBackend)
+from lmcache.storage_backend.local_backend import (
+    LMCLocalBackend,
+    LMCLocalDiskBackend,
+)
 from lmcache.storage_backend.remote_backend import LMCRemoteBackend
 from lmcache.utils import CacheEngineKey
 
@@ -37,14 +42,17 @@ def generate_random_key() -> CacheEngineKey:
 def get_config(t, remote_url):
     match t:
         case "local":
-            return LMCacheEngineConfig.from_defaults(local_device="cuda",
-                                                     remote_url=None)
+            return LMCacheEngineConfig.from_defaults(
+                local_device="cuda", remote_url=None
+            )
         case "remote":
-            return LMCacheEngineConfig.from_defaults(local_device=None,
-                                                     remote_url=remote_url)
+            return LMCacheEngineConfig.from_defaults(
+                local_device=None, remote_url=remote_url
+            )
         case "hybrid":
-            return LMCacheEngineConfig.from_defaults(local_device="cuda",
-                                                     remote_url=remote_url)
+            return LMCacheEngineConfig.from_defaults(
+                local_device="cuda", remote_url=remote_url
+            )
         case "hybrid_pipelined":
             return LMCacheEngineConfig.from_defaults(
                 local_device="cuda",
@@ -52,40 +60,38 @@ def get_config(t, remote_url):
                 pipelined_backend=True,
             )
         case _:
-            raise ValueError(
-                f"Testbed internal error: Unknown config type: {t}")
+            raise ValueError(f"Testbed internal error: Unknown config type: {t}")
 
 
 def get_metadata(kv_shape=(32, 2, 256, 8, 128)):
-    return LMCacheEngineMetadata("lmsys/longchat-7b-16k", 1, -1, "vllm",
-                                 torch.half, kv_shape)
+    return LMCacheEngineMetadata(
+        "lmsys/longchat-7b-16k", 1, -1, "vllm", torch.half, kv_shape
+    )
 
 
-@pytest.mark.parametrize("lmserver_process", ["cpu", "remote_disk/"],
-                         indirect=True)
+@pytest.mark.parametrize("lmserver_process", ["cpu", "remote_disk/"], indirect=True)
 def test_creation(autorelease, lmserver_process):
-    config_local = LMCacheEngineConfig.from_defaults(local_device="cuda",
-                                                     remote_url=None)
+    config_local = LMCacheEngineConfig.from_defaults(
+        local_device="cuda", remote_url=None
+    )
     lmserver_url = lmserver_process.server_url
-    config_remote = LMCacheEngineConfig.from_defaults(local_device=None,
-                                                      remote_url=lmserver_url)
-    config_hybrid = LMCacheEngineConfig.from_defaults(local_device="cuda",
-                                                      remote_url=lmserver_url)
+    config_remote = LMCacheEngineConfig.from_defaults(
+        local_device=None, remote_url=lmserver_url
+    )
+    config_hybrid = LMCacheEngineConfig.from_defaults(
+        local_device="cuda", remote_url=lmserver_url
+    )
     _metadata = get_metadata()
 
-    backend_local = autorelease(
-        CreateStorageBackend(config_local, get_metadata()))
-    backend_remote = autorelease(
-        CreateStorageBackend(config_remote, get_metadata()))
-    backend_hybrid = autorelease(
-        CreateStorageBackend(config_hybrid, get_metadata()))
+    backend_local = autorelease(CreateStorageBackend(config_local, get_metadata()))
+    backend_remote = autorelease(CreateStorageBackend(config_remote, get_metadata()))
+    backend_hybrid = autorelease(CreateStorageBackend(config_hybrid, get_metadata()))
 
     assert isinstance(backend_local, LMCLocalBackend)
     assert isinstance(backend_remote, LMCRemoteBackend)
     assert isinstance(backend_hybrid, LMCHybridBackend)
 
-    config_fail = LMCacheEngineConfig.from_defaults(local_device=None,
-                                                    remote_url=None)
+    config_fail = LMCacheEngineConfig.from_defaults(local_device=None, remote_url=None)
     with pytest.raises(ValueError):
         _backend_fail = CreateStorageBackend(config_fail, get_metadata())
 
@@ -95,26 +101,26 @@ def test_creation_from_file(autorelease, lmserver_process):
     BASE_DIR = Path(__file__).parent
 
     config_local = LMCacheEngineConfig.from_file(
-        BASE_DIR / "data/test_creation_from_file/local.yaml")
+        BASE_DIR / "data/test_creation_from_file/local.yaml"
+    )
     config_disk = LMCacheEngineConfig.from_file(
-        BASE_DIR / "data/test_creation_from_file/disk.yaml")
+        BASE_DIR / "data/test_creation_from_file/disk.yaml"
+    )
     config_remote = LMCacheEngineConfig.from_file(
-        BASE_DIR / "data/test_creation_from_file/remote.yaml")
+        BASE_DIR / "data/test_creation_from_file/remote.yaml"
+    )
     config_hybrid = LMCacheEngineConfig.from_file(
-        BASE_DIR / "data/test_creation_from_file/hybrid.yaml")
+        BASE_DIR / "data/test_creation_from_file/hybrid.yaml"
+    )
 
     config_remote.remote_url = lmserver_process.server_url
     config_hybrid.remote_url = lmserver_process.server_url
     _metadata = get_metadata()
 
-    backend_local = autorelease(
-        CreateStorageBackend(config_local, get_metadata()))
-    backend_disk = autorelease(
-        CreateStorageBackend(config_disk, get_metadata()))
-    backend_remote = autorelease(
-        CreateStorageBackend(config_remote, get_metadata()))
-    backend_hybrid = autorelease(
-        CreateStorageBackend(config_hybrid, get_metadata()))
+    backend_local = autorelease(CreateStorageBackend(config_local, get_metadata()))
+    backend_disk = autorelease(CreateStorageBackend(config_disk, get_metadata()))
+    backend_remote = autorelease(CreateStorageBackend(config_remote, get_metadata()))
+    backend_hybrid = autorelease(CreateStorageBackend(config_hybrid, get_metadata()))
 
     assert isinstance(backend_local, LMCLocalBackend)
     assert isinstance(backend_disk, LMCLocalDiskBackend)
@@ -122,16 +128,17 @@ def test_creation_from_file(autorelease, lmserver_process):
     assert isinstance(backend_hybrid, LMCHybridBackend)
 
     config_fail = LMCacheEngineConfig.from_file(
-        BASE_DIR / "data/test_creation_from_file/fail.yaml")
+        BASE_DIR / "data/test_creation_from_file/fail.yaml"
+    )
     with pytest.raises(ValueError):
         _backend_fail = CreateStorageBackend(config_fail, get_metadata())
 
 
-@pytest.mark.parametrize("backend_type",
-                         ["local", "remote", "hybrid", "hybrid_pipelined"])
+@pytest.mark.parametrize(
+    "backend_type", ["local", "remote", "hybrid", "hybrid_pipelined"]
+)
 @pytest.mark.parametrize("dst_device", ["cuda", "cpu"])
-@pytest.mark.parametrize("lmserver_process", ["cpu", "remote_disk/"],
-                         indirect=True)
+@pytest.mark.parametrize("lmserver_process", ["cpu", "remote_disk/"], indirect=True)
 def test_backends(backend_type, dst_device, autorelease, lmserver_process):
     config = get_config(backend_type, lmserver_process.server_url)
 
@@ -158,8 +165,7 @@ def test_backends(backend_type, dst_device, autorelease, lmserver_process):
 
 
 @pytest.mark.parametrize("backend_type", ["local", "remote", "hybrid"])
-@pytest.mark.parametrize("lmserver_process", ["cpu", "remote_disk/"],
-                         indirect=True)
+@pytest.mark.parametrize("lmserver_process", ["cpu", "remote_disk/"], indirect=True)
 def test_nonblocking_put(backend_type, autorelease, lmserver_process):
     config = get_config(backend_type, lmserver_process.server_url)
     kv_shape = (16, 2, 128, 4, 128)
@@ -193,8 +199,7 @@ def test_nonblocking_put(backend_type, autorelease, lmserver_process):
             assert torch.equal(value, retrieved.to(value.device))
 
 
-@pytest.mark.parametrize("lmserver_process", ["cpu", "remote_disk/"],
-                         indirect=True)
+@pytest.mark.parametrize("lmserver_process", ["cpu", "remote_disk/"], indirect=True)
 def test_restart(autorelease, lmserver_process):
     config = get_config("hybrid", lmserver_process.server_url)
     # LMCacheEngineConfig.from_defaults(local_device = "cuda",

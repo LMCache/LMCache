@@ -1,18 +1,20 @@
+# Standard
+from dataclasses import dataclass
+from unittest.mock import patch
 import random
 import shlex
 import socket
 import subprocess
 import time
-from dataclasses import dataclass
-from unittest.mock import patch
 
+# Third Party
 import pytest
 
-from lmcache.experimental.cache_engine import LMCacheEngineBuilder
+# First Party
+from lmcache.v1.cache_engine import LMCacheEngineBuilder
 
 
 class MockRedis:
-
     def __init__(self, host, port):
         self.store = {}
 
@@ -35,7 +37,6 @@ class MockRedis:
 
 
 class MockRedisSentinel:
-
     def __init__(self, hosts_and_ports, socket_timeout):
         self.redis = MockRedis("", "")
 
@@ -60,14 +61,12 @@ def mock_redis():
 
 @pytest.fixture(scope="function", autouse=True)
 def mock_redis_sentinel():
-    with patch("redis.Sentinel",
-               new_callable=lambda: MockRedisSentinel) as mock:
+    with patch("redis.Sentinel", new_callable=lambda: MockRedisSentinel) as mock:
         yield mock
 
 
 @pytest.fixture(scope="module")
-def lmserver_experimental_process(request):
-
+def lmserver_v1_process(request):
     def ensure_connection(host, port):
         retries = 10
         client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -98,10 +97,12 @@ def lmserver_experimental_process(request):
     while max_retries > 0:
         max_retries -= 1
         port_number = random.randint(10000, 65500)
-        print("Starting the lmcache experimental server process on port")
+        print("Starting the lmcache v1 server process on port")
         proc = subprocess.Popen(
-            shlex.split("python3 -m lmcache.experimental.server localhost "
-                        f"{port_number} {device}"))
+            shlex.split(
+                f"python3 -m lmcache.v1.server localhost {port_number} {device}"
+            )
+        )
 
         # Wait for lmcache process to start
         time.sleep(5)
@@ -133,7 +134,6 @@ def lmserver_experimental_process(request):
 
 @pytest.fixture(scope="module")
 def lmserver_process(request):
-
     def ensure_connection(host, port):
         retries = 10
         client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -166,8 +166,8 @@ def lmserver_process(request):
         port_number = random.randint(10000, 65500)
         print("Starting the lmcache server process on port")
         proc = subprocess.Popen(
-            shlex.split(
-                f"python3 -m lmcache.server localhost {port_number} {device}"))
+            shlex.split(f"python3 -m lmcache.server localhost {port_number} {device}")
+        )
 
         # Wait for lmcache process to start
         time.sleep(5)
@@ -213,7 +213,7 @@ def autorelease(request):
 
 
 @pytest.fixture(scope="function")
-def autorelease_experimental(request):
+def autorelease_v1(request):
     objects = []
 
     def _factory(obj):
@@ -225,5 +225,5 @@ def autorelease_experimental(request):
     LMCacheEngineBuilder.destroy("test")
 
     # Cleanup all objects created by the factory
-    #for obj in objects:
+    # for obj in objects:
     #    obj.close()

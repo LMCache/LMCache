@@ -32,8 +32,6 @@ First, set up the necessary environment variables for LMCache:
 
     import os
 
-    # Enable experimental features in LMCache
-    os.environ["LMCACHE_USE_EXPERIMENTAL"] = "True"
     # Set token chunk size to 256
     os.environ["LMCACHE_CHUNK_SIZE"] = "256"
     # Enable CPU memory backend
@@ -49,8 +47,10 @@ Next, configure vLLM with LMCache integration:
     from vllm.config import KVTransferConfig
 
     # Configure KV cache transfer to use LMCache
-    ktc = KVTransferConfig.from_cli(
-        '{"kv_connector":"LMCacheConnectorV1", "kv_role":"kv_both"}')
+    ktc = KVTransferConfig(
+        kv_connector="LMCacheConnectorV1",
+        kv_role="kv_both",
+    )
 
     # Initialize LLM with LMCache configuration
     # Adjust gpu_memory_utilization based on your GPU memory
@@ -82,7 +82,7 @@ When the inference is complete, clean up the LMCache backend:
 
 .. code-block:: python
 
-    from lmcache.experimental.cache_engine import LMCacheEngineBuilder
+    from lmcache.v1.cache_engine import LMCacheEngineBuilder
     from lmcache.integration.vllm.utils import ENGINE_NAME
 
     LMCacheEngineBuilder.destroy(ENGINE_NAME)
@@ -118,7 +118,6 @@ Next, launch the vLLM server with LMCache integration. Here's an example command
 .. code-block:: bash
 
     LMCACHE_CONFIG_PATH=/path/to/lmcache_config.yaml \
-    LMCACHE_USE_EXPERIMENTAL=True \
     vllm serve \
         meta-llama/Llama-3.1-8B-Instruct \
         --kv-transfer-config \
@@ -129,7 +128,6 @@ Next, launch the vLLM server with LMCache integration. Here's an example command
 Key parameters explained:
 
 - ``LMCACHE_CONFIG_PATH``: Path to the LMCache configuration file.
-- ``LMCACHE_USE_EXPERIMENTAL``: Enables experimental version of LMCache (which has better performance).
 - ``--kv-transfer-config``: Configures LMCache integration
     - ``kv_connector``: Specifies the LMCache connector 
     - ``kv_role``: Set to "kv_both" for both storing and loading KV cache
@@ -193,7 +191,7 @@ Save the following script as ``cpu-offloading.py``:
     import torch
     import argparse
     import time
-    from lmcache.experimental.cache_engine import LMCacheEngineBuilder
+    from lmcache.v1.cache_engine import LMCacheEngineBuilder
     from lmcache.integration.vllm.utils import ENGINE_NAME
     from vllm import LLM, SamplingParams
     from vllm.config import KVTransferConfig
@@ -219,7 +217,6 @@ Save the following script as ``cpu-offloading.py``:
         cpu_size = num_prompts * num_tokens * 1.5 / 10000  # 1.5GB per 10000 tokens
         
         env_vars = {
-            "LMCACHE_USE_EXPERIMENTAL": "True",  # Use experimental features
             "LMCACHE_CHUNK_SIZE": "256",         # Set tokens per chunk
             "LMCACHE_LOCAL_CPU": "True",         # Enable local CPU backend
             "LMCACHE_MAX_LOCAL_CPU_SIZE": str(cpu_size)  # Dynamic CPU memory limit (GB)
@@ -273,8 +270,10 @@ Save the following script as ``cpu-offloading.py``:
         Returns:
             LLM: Configured LLM instance
         """
-        ktc = KVTransferConfig.from_cli(
-            '{"kv_connector":"LMCacheConnectorV1", "kv_role":"kv_both"}') if enable_lmcache else None
+        ktc = KVTransferConfig(
+            kv_connector="LMCacheConnectorV1",
+            kv_role="kv_both",
+        ) if enable_lmcache else None
         
         return LLM(
             model=model_name,

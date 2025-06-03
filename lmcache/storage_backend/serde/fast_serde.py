@@ -12,8 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Third Party
 import torch
 
+# First Party
 from lmcache.logging import init_logger
 from lmcache.storage_backend.serde.serde import Deserializer, Serializer
 
@@ -21,7 +23,6 @@ logger = init_logger(__name__)
 
 
 class FastSerializer(Serializer):
-
     def __init__(self):
         super().__init__()
 
@@ -32,7 +33,6 @@ class FastSerializer(Serializer):
 
 
 class FastDeserializer(Deserializer):
-
     def __init__(self, dtype):
         super().__init__(dtype)
 
