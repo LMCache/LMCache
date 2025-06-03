@@ -68,6 +68,27 @@ torch_dtypes = [
 dtype_to_idx = {dtype: idx for idx, dtype in enumerate(torch_dtypes)}
 
 
+def get_fstype(path):
+    with open("/proc/mounts", "r") as f:
+        lines = f.readlines()
+
+    # Find the best matching mount point
+    best_match = ""
+    best_fstype = ""
+    for line in lines:
+        parts = line.split()
+        if len(parts) >= 3:
+            _, mount_point, fstype = parts[0], parts[1], parts[2]
+            if path.startswith(mount_point) and len(mount_point) > len(best_match):
+                best_match = mount_point
+                best_fstype = fstype
+
+    if not best_fstype:
+        raise RuntimeError(f"Unable to detect fstype for {path}")
+
+    return best_fstype
+
+
 def pack_metadata(shape, dtype, size) -> bytes:
     # TODO: we can easily become SafeTensors compatible by taking some
     # code from: https://github.com/vast-data/VUA/blob/main/src/vua/serdes.py,
@@ -145,6 +166,14 @@ class GdsBackend(StorageBackendInterface):
 
         assert config.gds_path is not None, "Need to specify gds_path for GdsBackend"
         self.gds_path = config.gds_path
+        self.fstype = get_fstype(config.gds_path)
+
+        # Log the fstype - this is useful in reports and varying optimizations
+        # based on the kind of fstype used.
+        logger.info(
+            f"GDS backend using fstype '{self.fstype}' on path '{self.gds_path}'"
+        )
+
         if not os.path.exists(self.gds_path):
             os.makedirs(self.gds_path, exist_ok=True)
 
