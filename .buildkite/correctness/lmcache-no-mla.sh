@@ -74,11 +74,6 @@ if [ -f "mmlu-results/lmcache_no_mla.txt" ]; then
     echo "✅ Result file created: $(wc -l < mmlu-results/lmcache_no_mla.txt) lines"
     echo "📊 Last few lines of results:"
     tail -3 mmlu-results/lmcache_no_mla.txt
-
-    # Also save to a unique cache directory
-    mkdir -p cache-results/lmcache-no-mla
-    cp mmlu-results/lmcache_no_mla.txt cache-results/lmcache-no-mla/
-    echo "💾 Saved to cache-results/lmcache-no-mla/"
 else
     echo "❌ WARNING: Result file not created"
     echo "📁 Contents of mmlu-results/:"

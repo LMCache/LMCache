@@ -86,21 +86,19 @@ steps:
           key: "mmlu-data-{{ checksum \".buildkite/correctness/download-data.sh\" }}"
           path: "data"
           restore: "pipeline"
-      - cache#v1.5.2:
-          key: "mmlu-results-vllm-{{ .BuildkiteCommit }}"
-          path: "cache-results/vllm"
-          save: "pipeline"
     command: |
       export PATH="$HOME/.local/bin:$PATH"
       source .venv/bin/activate
       echo "🔍 Current directory: $(pwd)"
       echo "🔍 Data directory exists: $([ -d data ] && echo 'YES' || echo 'NO')"
+
+      mkdir -p mmlu-results
       bash .buildkite/correctness/vllm.sh
 
-      # Debug: Show what was created
       echo "📊 Results after vLLM baseline:"
       ls -la mmlu-results/ || echo "mmlu-results directory not found"
-      ls -la cache-results/ || echo "cache-results directory not found"
+    artifact_paths:
+      - "mmlu-results/vllm_baseline.txt"
 
   - label: ":zap: LMCache with MLA"
     key: "lmcache-mla"
@@ -114,21 +112,19 @@ steps:
           key: "mmlu-data-{{ checksum \".buildkite/correctness/download-data.sh\" }}"
           path: "data"
           restore: "pipeline"
-      - cache#v1.5.2:
-          key: "mmlu-results-lmcache-mla-{{ .BuildkiteCommit }}"
-          path: "cache-results/lmcache-mla"
-          save: "pipeline"
     command: |
       export PATH="$HOME/.local/bin:$PATH"
       source .venv/bin/activate
       echo "🔍 Current directory: $(pwd)"
       echo "🔍 Data directory exists: $([ -d data ] && echo 'YES' || echo 'NO')"
+
+      mkdir -p mmlu-results
       bash .buildkite/correctness/lmcache.sh
 
-      # Debug: Show what was created
       echo "📊 Results after LMCache with MLA:"
       ls -la mmlu-results/ || echo "mmlu-results directory not found"
-      ls -la cache-results/ || echo "cache-results directory not found"
+    artifact_paths:
+      - "mmlu-results/lmcache_mla.txt"
 
   - label: ":electric_plug: LMCache without MLA"
     key: "lmcache-no-mla"
@@ -142,21 +138,19 @@ steps:
           key: "mmlu-data-{{ checksum \".buildkite/correctness/download-data.sh\" }}"
           path: "data"
           restore: "pipeline"
-      - cache#v1.5.2:
-          key: "mmlu-results-lmcache-no-mla-{{ .BuildkiteCommit }}"
-          path: "cache-results/lmcache-no-mla"
-          save: "pipeline"
     command: |
       export PATH="$HOME/.local/bin:$PATH"
       source .venv/bin/activate
       echo "🔍 Current directory: $(pwd)"
       echo "🔍 Data directory exists: $([ -d data ] && echo 'YES' || echo 'NO')"
+
+      mkdir -p mmlu-results
       bash .buildkite/correctness/lmcache-no-mla.sh
 
-      # Debug: Show what was created
       echo "📊 Results after LMCache without MLA:"
       ls -la mmlu-results/ || echo "mmlu-results directory not found"
-      ls -la cache-results/ || echo "cache-results directory not found"
+    artifact_paths:
+      - "mmlu-results/lmcache_no_mla.txt"
 
   - label: ":bar_chart: Summarize Results"
     key: "summarize"
@@ -167,49 +161,22 @@ steps:
           key: "venv-mmlu-{{ checksum \"requirements/bench.txt\" }}-{{ checksum \"requirements/common.txt\" }}"
           path: ".venv"
           restore: "pipeline"
-      - cache#v1.5.2:
-          key: "mmlu-data-{{ checksum \".buildkite/correctness/download-data.sh\" }}"
-          path: "data"
-          restore: "pipeline"
-      - cache#v1.5.2:
-          key: "mmlu-results-vllm-{{ .BuildkiteCommit }}"
-          path: "cache-results/vllm"
-          restore: "pipeline"
-      - cache#v1.5.2:
-          key: "mmlu-results-lmcache-mla-{{ .BuildkiteCommit }}"
-          path: "cache-results/lmcache-mla"
-          restore: "pipeline"
-      - cache#v1.5.2:
-          key: "mmlu-results-lmcache-no-mla-{{ .BuildkiteCommit }}"
-          path: "cache-results/lmcache-no-mla"
-          restore: "pipeline"
     command: |
       export PATH="$HOME/.local/bin:$PATH"
       source .venv/bin/activate
       echo "🔍 Current directory: $(pwd)"
 
-      # Ensure results directory exists and collect all cached results
-      mkdir -p mmlu-results
+      # Create directories
+      mkdir -p mmlu-results compare-results
 
-      # Copy all cached results to mmlu-results directory
-      echo "📦 Collecting cached results..."
-      if [ -d "cache-results/vllm" ]; then
-        cp cache-results/vllm/* mmlu-results/ 2>/dev/null || true
-        echo "✅ Copied vLLM results"
-      fi
-      if [ -d "cache-results/lmcache-mla" ]; then
-        cp cache-results/lmcache-mla/* mmlu-results/ 2>/dev/null || true
-        echo "✅ Copied LMCache MLA results"
-      fi
-      if [ -d "cache-results/lmcache-no-mla" ]; then
-        cp cache-results/lmcache-no-mla/* mmlu-results/ 2>/dev/null || true
-        echo "✅ Copied LMCache no-MLA results"
-      fi
+      # Download all artifacts from previous steps
+      echo "📥 Downloading artifacts from previous steps..."
+      buildkite-agent artifact download "mmlu-results/vllm_baseline.txt" . --step "vllm-baseline" || echo "⚠️ vLLM artifact not found"
+      buildkite-agent artifact download "mmlu-results/lmcache_mla.txt" . --step "lmcache-mla" || echo "⚠️ LMCache MLA artifact not found"
+      buildkite-agent artifact download "mmlu-results/lmcache_no_mla.txt" . --step "lmcache-no-mla" || echo "⚠️ LMCache no-MLA artifact not found"
 
-      echo "📁 Contents of mmlu-results/ after collecting cached results:"
+      echo "📁 Final contents of mmlu-results/:"
       ls -la mmlu-results/ || echo "mmlu-results directory not found"
-      echo "📁 Contents of cache-results/:"
-      ls -la cache-results/ || echo "cache-results directory not found"
 
       # Debug: Check installed packages
       echo "🐍 Python version: $(python3 --version)"
