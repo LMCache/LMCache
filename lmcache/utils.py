@@ -14,16 +14,13 @@
 
 # Standard
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 import hashlib
 import threading
 
 # Third Party
 from nvtx import annotate  # type: ignore
 import torch
-
-# First Party
-from lmcache.v1.memory_management import MemoryFormat
 
 # Type definition
 KVCache = Tuple[Tuple[torch.Tensor, torch.Tensor], ...]
@@ -35,7 +32,7 @@ class DiskCacheMetadata:
     size: int  # in bytes
     shape: Optional[torch.Size] = None
     dtype: Optional[torch.dtype] = None
-    fmt: Optional[MemoryFormat] = None
+    fmt: Any = None
     is_pin: bool = False
 
     def pin(self) -> bool:
