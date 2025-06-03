@@ -3,16 +3,17 @@ import pandas as pd
 from our_metrics import evaluate_answer, f1_score
 import os
 
-INPUT02       = '/home/ubuntu/st-prodstack-v/press/qmsum/results_rate_0.628571429.csv'
-INPUT03       = '/home/ubuntu/st-prodstack-v/press/qmsum/results_rate_0.514285714.csv'
-INPUT06       = '/home/ubuntu/st-prodstack-v/press/qmsum/results_rate_0.271428571.csv'
-# INPUT_1       = 'results/Apr_14/baseline_kivi/1.csv'
-INPUT0        = 'results/Apr_14/baseline_kivi/0.csv'
+INPUT02       = '/home/ubuntu/st-prodstack-v/LMCache/serve/results/May_23_1_sum/baseline_kivi/02.csv'
+INPUT03       = '/home/ubuntu/st-prodstack-v/LMCache/serve/results/May_23_1_sum/baseline_kivi/03.csv'
+INPUT06       = '/home/ubuntu/st-prodstack-v/LMCache/serve/results/May_23_1_sum/baseline_kivi/06.csv'
+INPUT_1       = '/home/ubuntu/st-prodstack-v/LMCache/serve/results/May_23_1_sum/prefill/1.csv'
+INPUT0        = '/home/ubuntu/st-prodstack-v/LMCache/serve/results/May_23_1_sum/prefill/0.csv'
 
 def main():
     # Load & filter the reference answers, then reset its index
     df0 = pd.read_csv(INPUT0)
-    df0 = df0[df0['occurrence_number'] != 1].reset_index(drop=True)
+    df0 = df0.reset_index(drop=True)
+    reference_answers = df0['answer'].tolist()
 
     # Collect all INPUT* paths except the reference INPUT0
     input_paths = [
@@ -26,21 +27,17 @@ def main():
         for path in input_paths
     ]
 
-    # before your loop, build a dict from df0
-    ref_map = df0.set_index('index_in_dataset')['answer'].to_dict()
-
     # Process each CSV in turn
     for path, fname in zip(input_paths, filenames):
         # Load & filter this CSV, then reset its index
         df = pd.read_csv(path)
-        df = df[df['occurrence_number'] != 1].reset_index(drop=True)
+        df = df.reset_index(drop=True)
 
-        # Compute ROUGE‑L by looking up the reference answer via index_in_dataset
+        # Compute ROUGE‑L by looking up the reference answer via row number
         df['ROUGEL'] = df.apply(
             lambda row: evaluate_answer(
                 row['answer'],
-                # row['generated_text'],
-                ref_map[row['index_in_dataset']]
+                reference_answers[row.name]
             ),
             axis=1
         )

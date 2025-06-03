@@ -1,7 +1,6 @@
 import argparse
 import pandas as pd
 import os
-import sys
 
 # constants
 A_CPU = 8.54669335240032e-06
@@ -25,33 +24,37 @@ def find_row_value(df, idx_col, val_col, idx):
 
 def main(args):
     # read input and filter
-    df = pd.read_csv(args.input_csv)
-    df = df[df["occurrence_number"] == 2].copy()
-    if df.empty:
-        print("No rows with occurence_number == 2", file=sys.stderr)
-        sys.exit(1)
+    df = pd.read_csv(args.input_tokens_csv)
+    df_aux = pd.read_csv(args.input_csv)
+    df = df.copy()
 
     # preload auxiliary CSVs
     prefill_csv = os.path.join(args.prefill_dir, "0.csv")
     df_prefill = pd.read_csv(prefill_csv)
 
     # preload rate-dependent ROUGEL CSVs
-    df_rates = {}
+    df_rates1 = {}
     for rate, code in RATE_CODE.items():
-        path = os.path.join(args.streaming_dir, f"results_rate_{code}_processed.csv")
-        df_rates[code] = pd.read_csv(path)
-    df_rates["1"] = pd.read_csv("../results/Apr_28_samsum/baseline_kivi/1_processed.csv")
+        path = os.path.join(args.streaming_dir1, f"results_rate_{code}_processed.csv")
+        df_rates1[code] = pd.read_csv(path)
+
+    # preload rate-dependent ROUGEL CSVs
+    df_rates2 = {}
+    for rate, code in RATE_CODE.items():
+        path = os.path.join(args.streaming_dir2, f"results_rate_{code}_processed.csv")
+        df_rates2[code] = pd.read_csv(path)
 
     ttfts = []
     rouges = []
 
-    for _, row in df.iterrows():
+    for _idx_row, (_, row) in enumerate(df.iterrows()):
         token_num = row["Token Number"]
         device    = row["device"]
         idx       = row["index_in_dataset"]
+        dataset   = df_aux.iloc[_idx_row]["dataset"]
 
         if token_num == 0:
-            ttft  = find_row_value(df_prefill, "index_in_dataset", "ttft", idx)
+            ttft  = df_prefill.iloc[_idx_row]["ttft"]
             rouge = 1.0
         else:
             rate = row["Rates"]
@@ -60,8 +63,6 @@ def main(args):
                 num = num[:-1]
             rate = float(num)
             code = next((c for r, c in RATE_CODE.items() if abs(rate - r) < 1e-6), None)
-            if rate == 1:
-                code = "1"
 
             if device == "cpu":
                 ttft = token_num * rate * A_CPU + B_CPU
@@ -70,7 +71,10 @@ def main(args):
             else:
                 raise ValueError(f"Unknown device '{device}'")
 
-            rouge = find_row_value(df_rates[code], "index_in_dataset", "ROUGEL", idx)
+            if dataset == args.dataset1:
+                rouge = find_row_value(df_rates1[code], "index_in_dataset", "ROUGEL", idx)
+            elif dataset == args.dataset2:
+                rouge = find_row_value(df_rates2[code], "index_in_dataset", "ROUGEL", idx)
 
         ttfts.append(ttft)
         rouges.append(rouge)
@@ -79,23 +83,40 @@ def main(args):
     df["ROUGEL"] = rouges
 
     # derive output path by appending _processed
-    dirpath, filename = os.path.split(args.input_csv)
+    dirpath, filename = os.path.split(args.input_tokens_csv)
     # go one level up from that directory
     parent_dir = os.path.dirname(dirpath)
     # split filename into name and extension
     base_name, ext = os.path.splitext(filename)
     # build your output path in the parent directory
-    output_csv = os.path.join(parent_dir, f"{base_name}_processed2{ext}")
+    output_csv = os.path.join(f"{parent_dir}/../baseline_streaming", f"{base_name}_processed{ext}")
 
     df.to_csv(output_csv, index=False)
     print(f"Wrote results to {output_csv}")
 
 if __name__ == "__main__":
-    p = argparse.ArgumentParser(description="Compute ttft & ROUGEL for occurrence_number=2 rows")
-    p.add_argument("input_csv",   help="Path to your input CSV")
+    p = argparse.ArgumentParser(description="Compute ttft & ROUGEL")
+    p.add_argument("input_tokens_csv",   help="Path to your input tokens CSV")
+    p.add_argument("--input-csv",   help="Path to your input CSV")
     p.add_argument("--prefill-dir",  default="results/May_13_2_triviaqa_rr/prefill",
                    help="Directory containing 0.csv")
-    p.add_argument("--streaming-dir", default="results/May_14_1_triviaqa_press",
+    p.add_argument("--streaming-dir1", default="results/May_14_1_triviaqa_press",
                    help="Base dir for results_rate_XX_processed.csv files")
+    p.add_argument("--dataset1")
+    p.add_argument("--streaming-dir2", default="results/May_14_1_triviaqa_press",
+                   help="Base dir for results_rate_XX_processed.csv files")
+    p.add_argument("--dataset2")
     args = p.parse_args()
     main(args)
+
+'''
+Usage for sum:
+python3 evaluate_similarity_streaming.py \
+    results/May_23_1_sum/baseline_kivi/tokens/02.csv \
+    --input-csv results/May_23_1_sum/baseline_kivi/02.csv \
+    --prefill-dir results/May_23_1_sum/prefill \
+    --streaming-dir1 results/May_13_streaming \
+    --dataset1 samsum \
+    --streaming-dir2 ../../press/qmsum \
+    --dataset2 qmsum
+'''

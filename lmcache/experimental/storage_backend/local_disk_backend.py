@@ -68,6 +68,10 @@ class LocalDiskBackend(StorageBackendInterface):
         self,
         key: CacheEngineKey,
     ) -> None:
+        
+        logger.info(f"Manually removing {key} from disk cache.")
+        logger.info(f"Then disk cache size: {self.evictor.current_cache_size} bytes")
+
         path = self.dict[key].path
         self.disk_lock.acquire()
         self.dict.pop(key)

@@ -1,14 +1,14 @@
 import re
 import csv
 import sys
-
+csv.field_size_limit(sys.maxsize)
 # Default reference CSV path
-default_reference_csv = 'dataset/triviaqa_processed_v2.csv'
+default_reference_csv = 'dataset/sum_processed.csv'
 
 def extract_token_numbers(input_file, output_csv, reference_csv=default_reference_csv):
     # Patterns
     token_pattern  = r"Injected token number:\s*(\d+)"
-    rate_pattern   = r"rate:\s*([\d\.]+)"
+    rate_pattern   = r", rate:\s*([\d\.]+)"
     device_pattern = r"Decompressed memory object from (disk|hot cache)"
 
     records = []
