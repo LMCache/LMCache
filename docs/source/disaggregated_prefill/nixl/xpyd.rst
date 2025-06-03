@@ -25,24 +25,23 @@ Example 2p1d Architecture:
                       │
               ┌───────▼───────┐
               │ Proxy Server  │
-              │   Port 9000   │
-              │ (Round-Robin) │
-              └───┬───────┬───┘
-                  │       │
-         ┌────────▼──┐  ┌─▼────────┐
-         │Prefiller1 │  │Prefiller2│
-         │Port 8100  │  │Port 8101 │
-         │  GPU 0    │  │  GPU 1   │
-         └─────┬─────┘  └─────┬────┘
-               │              │
-               └──────┬───────┘
-                      │
-                ┌─────▼─────┐
-                │  Decoder  │
-                │Port 8200  │
-                │  GPU 2    │
+              │   Port 9000   │--------------|
+              │ (Round-Robin) │              |
+              └───┬───────┬───┘              |
+                  │       │                  |
+         ┌────────▼──┐  ┌─▼────────┐         |
+         │Prefiller1 │  │Prefiller2│         |
+         │Port 8100  │  │Port 8101 │         |
+         │  GPU 0    │  │  GPU 1   │         |
+         └─────┬─────┘  └─────┬────┘         |
+               │              │              |
+               └──────┬───────┘              |
+                      │ NIXL Transfer        |
+                ┌─────▼─────┐                |
+                │  Decoder  │                |
+                │Port 8200  │<---------------|
+                │  GPU 2    │                  
                 └───────────┘
-                NIXL Transfer
 
 Prerequisites
 ~~~~~~~~~~~~~
