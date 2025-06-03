@@ -301,9 +301,7 @@ class LMCacheEngineConfig:
 
         extra_config = config.get("extra_config", None)
         if extra_config is not None:
-            assert isinstance(extra_config, dict), (
-                "extra_config must be a dict"
-            )
+            assert isinstance(extra_config, dict), "extra_config must be a dict"
 
         # Try getting "legacy" nixl config
         if nixl_receiver_host is None:
@@ -539,9 +537,7 @@ class LMCacheEngineConfig:
             get_env_name("cufile_buffer_size"),
             config.cufile_buffer_size,
         )
-        config.extra_config = to_dict(
-            parse_env(get_env_name("extra_config"), None)
-        )
+        config.extra_config = to_dict(parse_env(get_env_name("extra_config"), None))
         return config.validate().log_config()
 
     def to_original_config(self) -> orig_config.LMCacheEngineConfig:

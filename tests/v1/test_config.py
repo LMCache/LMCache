@@ -18,9 +18,8 @@ def test_get_extra_config_from_env():
     assert config.extra_config is None
 
     # set env of extra_config
-    os.environ["LMCACHE_EXTRA_CONFIG"] = (
-        '{"key1": "value1", "key2": "value2"}'
-    )
+    os.environ["LMCACHE_EXTRA_CONFIG"] = '{"key1": "value1", "key2": "value2"}'
+
     new_config = LMCacheEngineConfig.from_env()
     check_extra_config(new_config)
 
