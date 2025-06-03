@@ -105,8 +105,8 @@ class LMCacheEngineConfig:
     # Size of CuFile Buffer in MiB
     cufile_buffer_size: Optional[int] = None
 
-    # The extra config of connector
-    connector_extra_config: Optional[dict] = None
+    # The extra config
+    extra_config: Optional[dict] = None
 
     @staticmethod
     def from_defaults(
@@ -138,7 +138,7 @@ class LMCacheEngineConfig:
         nixl_buffer_device: Optional[str] = None,
         nixl_enable_gc: Optional[bool] = False,
         audit_actual_remote_url: Optional[str] = None,
-        connector_extra_config: Optional[dict] = None,
+        extra_config: Optional[dict] = None,
     ) -> "LMCacheEngineConfig":
         # TODO (ApostaC): Add nixl config
         return LMCacheEngineConfig(
@@ -170,7 +170,7 @@ class LMCacheEngineConfig:
             nixl_buffer_device,
             nixl_enable_gc,
             audit_actual_remote_url,
-            connector_extra_config,
+            extra_config,
         ).validate()
 
     @staticmethod
@@ -299,10 +299,10 @@ class LMCacheEngineConfig:
         nixl_buffer_device = config.get("nixl_buffer_device", None)
         nixl_enable_gc = config.get("nixl_enable_gc", False)
 
-        connector_extra_config = config.get("connector_extra_config", None)
-        if connector_extra_config is not None:
-            assert isinstance(connector_extra_config, dict), (
-                "connector_extra_config must be a dict"
+        extra_config = config.get("extra_config", None)
+        if extra_config is not None:
+            assert isinstance(extra_config, dict), (
+                "extra_config must be a dict"
             )
 
         # Try getting "legacy" nixl config
@@ -369,7 +369,7 @@ class LMCacheEngineConfig:
                 audit_actual_remote_url,
                 weka_path,
                 cufile_buffer_size,
-                connector_extra_config,
+                extra_config,
             )
             .validate()
             .log_config()
@@ -539,8 +539,8 @@ class LMCacheEngineConfig:
             get_env_name("cufile_buffer_size"),
             config.cufile_buffer_size,
         )
-        config.connector_extra_config = to_dict(
-            parse_env(get_env_name("connector_extra_config"), None)
+        config.extra_config = to_dict(
+            parse_env(get_env_name("extra_config"), None)
         )
         return config.validate().log_config()
 
@@ -620,7 +620,7 @@ class LMCacheEngineConfig:
             "nixl_buffer_device": self.nixl_buffer_device,
             "nixl_enable_gc": self.nixl_enable_gc,
             "weka_path": self.weka_path,
-            "connector_extra_config": self.connector_extra_config,
+            "extra_config": self.extra_config,
         }
         logger.info(f"LMCache Configuration: {config_dict}")
 

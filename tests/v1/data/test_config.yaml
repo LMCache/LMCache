@@ -1,5 +1,5 @@
 chunk_size: 256
 local_cpu: False
-connector_extra_config:
+extra_config:
   key1: value1
   key2: value2
