@@ -138,7 +138,7 @@ def create_comparison_plots(all_results):
 
     # 3. Accuracy vs Latency scatter plot
     ax3.scatter(
-        latencies, accuracies, s=100, alpha=0.7, c=range(len(configs)), cmap="husl"
+        latencies, accuracies, s=100, alpha=0.7, c=range(len(configs)), cmap="viridis"
     )
     ax3.set_xlabel("Latency (seconds)")
     ax3.set_ylabel("Accuracy (%)")
