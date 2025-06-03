@@ -33,6 +33,7 @@ from lmcache.v1.storage_backend.connector import CreateConnector
 from lmcache.v1.storage_backend.connector.base_connector import RemoteConnector
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.v1.storage_backend.naive_serde import CreateSerde
+from lmcache.v1.storage_backend.remote_monitor import RemoteMonitor
 
 logger = init_logger(__name__)
 
@@ -91,6 +92,13 @@ class RemoteBackend(StorageBackendInterface):
         # we must make decision (whether to send or not) at the local side
 
         self.stats_monitor = LMCStatsMonitor.GetOrCreate()
+
+        # Create RemoteMonitor instance, which initializes the
+        # connection status and active connector
+        self.remote_monitor = RemoteMonitor(self)
+
+        # Start the remote monitor thread (if ping is supported)
+        self.remote_monitor.start()
 
     def __str__(self):
         return self.__class__.__name__

@@ -79,3 +79,12 @@ class InstrumentedRemoteConnector(RemoteConnector):
 
     def getWrappedConnector(self) -> RemoteConnector:
         return self._connector
+
+    def support_ping(self) -> bool:
+        return self._connector.support_ping()
+
+    async def ping(self) -> int:
+        return await self._connector.ping()
+
+    def __repr__(self) -> str:
+        return f"InstrumentedRemoteConnector({self._connector})"
