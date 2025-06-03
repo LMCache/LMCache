@@ -1,0 +1,889 @@
+Using default model: meta-llama/Llama-3.1-8B-Instruct
+INFO 06-02 17:49:42 [__init__.py:243] Automatically detected platform cuda.
+INFO 06-02 17:49:47 [__init__.py:31] Available plugins for group vllm.general_plugins:
+INFO 06-02 17:49:47 [__init__.py:33] - lora_filesystem_resolver -> vllm.plugins.lora_resolvers.filesystem_resolver:register_filesystem_resolver
+INFO 06-02 17:49:47 [__init__.py:36] All plugins in this group will be loaded. Set `VLLM_PLUGINS` to control which plugins to load.
+INFO 06-02 17:49:48 [api_server.py:1289] vLLM API server version 0.9.0.1
+INFO 06-02 17:49:49 [cli_args.py:300] non-default args: {'port': 8100, 'enforce_eager': True, 'kv_transfer_config': KVTransferConfig(kv_connector='LMCacheConnectorV1', engine_id='4a03f263-52d6-40da-b3a2-4109d9e7db0c', kv_buffer_device='cuda', kv_buffer_size=1000000000.0, kv_role='kv_producer', kv_rank=None, kv_parallel_size=1, kv_ip='127.0.0.1', kv_port=14579, kv_connector_extra_config={'discard_partial_chunks': False, 'lmcache_rpc_port': 'producer1'}, kv_connector_module_path=None), 'disable_log_requests': True}
+INFO 06-02 17:49:59 [config.py:793] This model supports multiple tasks: {'embed', 'score', 'reward', 'generate', 'classify'}. Defaulting to 'generate'.
+INFO 06-02 17:49:59 [config.py:2118] Chunked prefill is enabled with max_num_batched_tokens=8192.
+WARNING 06-02 17:49:59 [cuda.py:87] To see benefits of async output processing, enable CUDA graph. Since, enforce-eager is enabled, async output processor cannot be used
+INFO 06-02 17:50:02 [__init__.py:243] Automatically detected platform cuda.
+INFO 06-02 17:50:07 [core.py:438] Waiting for init message from front-end.
+INFO 06-02 17:50:07 [__init__.py:31] Available plugins for group vllm.general_plugins:
+INFO 06-02 17:50:07 [__init__.py:33] - lora_filesystem_resolver -> vllm.plugins.lora_resolvers.filesystem_resolver:register_filesystem_resolver
+INFO 06-02 17:50:07 [__init__.py:36] All plugins in this group will be loaded. Set `VLLM_PLUGINS` to control which plugins to load.
+INFO 06-02 17:50:07 [core.py:65] Initializing a V1 LLM engine (v0.9.0.1) with config: model='meta-llama/Llama-3.1-8B-Instruct', speculative_config=None, tokenizer='meta-llama/Llama-3.1-8B-Instruct', skip_tokenizer_init=False, tokenizer_mode=auto, revision=None, override_neuron_config={}, tokenizer_revision=None, trust_remote_code=False, dtype=torch.bfloat16, max_seq_len=131072, download_dir=None, load_format=auto, tensor_parallel_size=1, pipeline_parallel_size=1, disable_custom_all_reduce=False, quantization=None, enforce_eager=True, kv_cache_dtype=auto,  device_config=cuda, decoding_config=DecodingConfig(backend='auto', disable_fallback=False, disable_any_whitespace=False, disable_additional_properties=False, reasoning_backend=''), observability_config=ObservabilityConfig(show_hidden_metrics_for_version=None, otlp_traces_endpoint=None, collect_detailed_traces=None), seed=0, served_model_name=meta-llama/Llama-3.1-8B-Instruct, num_scheduler_steps=1, multi_step_stream_outputs=True, enable_prefix_caching=True, chunked_prefill_enabled=True, use_async_output_proc=False, pooler_config=None, compilation_config={"compile_sizes": [], "inductor_compile_config": {"enable_auto_functionalized_v2": false}, "cudagraph_capture_sizes": [], "max_capture_size": 0}
+WARNING 06-02 17:50:07 [utils.py:2671] Methods determine_num_available_blocks,device_config,get_cache_block_size_bytes,initialize_cache not implemented in <vllm.v1.worker.gpu_worker.Worker object at 0x7f3e9713a4d0>
+INFO 06-02 17:50:11 [parallel_state.py:1064] rank 0 in world size 1 is assigned as DP rank 0, PP rank 0, TP rank 0, EP rank 0
+INFO 06-02 17:50:11 [factory.py:73] Creating v1 connector with name: LMCacheConnectorV1
+WARNING 06-02 17:50:11 [base.py:61] Initializing KVConnectorBase_V1. This API is experimental and subject to change in the future as we iterate the design.
+[32;20m[2025-06-02 17:50:11,239] LMCache INFO:[0m Loading LMCache config file /home/yihua/temp-test/LMCache/examples/disagg_prefill/1p1d/configs/lmcache-prefiller-config.yaml [3m(utils.py:64:lmcache.integration.vllm.utils)[0m
+[33;20m[2025-06-02 17:50:11,240] LMCache WARNING:[0m nixl_peer_host is deprecated, please use nixl_receiver_host in the config file instead [3m(config.py:294:lmcache.v1.config)[0m
+[33;20m[2025-06-02 17:50:11,240] LMCache WARNING:[0m nixl_peer_port is deprecated, please use nixl_receiver_port in the config file instead [3m(config.py:302:lmcache.v1.config)[0m
+[32;20m[2025-06-02 17:50:11,240] LMCache INFO:[0m LMCache Configuration: {'chunk_size': 256, 'local_cpu': False, 'max_local_cpu_size': '0 GB', 'local_disk': None, 'max_local_disk_size': '0 GB', 'remote_url': None, 'remote_serde': None, 'save_decode_cache': False, 'enable_blending': False, 'blend_recompute_ratio': 0.15, 'blend_min_tokens': 256, 'enable_p2p': False, 'lookup_url': None, 'distributed_url': None, 'error_handling': False, 'enable_controller': False, 'lmcache_instance_id': 'lmcache_default_instance', 'enable_nixl': True, 'nixl_role': 'sender', 'nixl_receiver_host': 'localhost', 'nixl_receiver_port': 55555, 'nixl_buffer_size': 1073741824, 'nixl_buffer_device': 'cuda', 'nixl_enable_gc': True} [3m(config.py:579:lmcache.v1.config)[0m
+[32;20m[2025-06-02 17:50:11,240] LMCache INFO:[0m Creating LMCacheEngine instance vllm-instance [3m(cache_engine.py:783:lmcache.v1.cache_engine)[0m
+[32;20m[2025-06-02 17:50:11,241] LMCache INFO:[0m Creating LMCacheEngine with config: LMCacheEngineConfig(chunk_size=256, local_cpu=False, max_local_cpu_size=0, local_disk=None, max_local_disk_size=0, remote_url=None, remote_serde=None, save_decode_cache=False, enable_blending=False, blend_recompute_ratio=0.15, blend_min_tokens=256, blend_special_str=' # # ', enable_p2p=False, lookup_url=None, distributed_url=None, error_handling=False, enable_controller=False, lmcache_instance_id='lmcache_default_instance', controller_url=None, lmcache_worker_port=None, enable_nixl=True, nixl_role='sender', nixl_receiver_host='localhost', nixl_receiver_port=55555, nixl_buffer_size=1073741824, nixl_buffer_device='cuda', nixl_enable_gc=True, audit_actual_remote_url=None) [3m(cache_engine.py:86:lmcache.v1.cache_engine)[0m
+[32;20m[2025-06-02 17:50:12,252] LMCache INFO:[0m Received remote transfer descriptors [3m(nixl_connector_v2.py:256:lmcache.v1.storage_backend.connector.nixl_connector_v2)[0m
+[32;20m[2025-06-02 17:50:12,252] LMCache INFO:[0m Initializing usage context. [3m(usage_context.py:274:lmcache.usage_context)[0m
+Backend UCX was instantiated
+Initialized NIXL agent: NixlRole.SENDERcuda:0
+WARNING 06-02 17:50:14 [topk_topp_sampler.py:58] FlashInfer is not available. Falling back to the PyTorch-native implementation of top-p & top-k sampling. For the best performance, please install FlashInfer.
+INFO 06-02 17:50:14 [gpu_model_runner.py:1531] Starting to load model meta-llama/Llama-3.1-8B-Instruct...
+INFO 06-02 17:50:14 [cuda.py:217] Using Flash Attention backend on V1 engine.
+INFO 06-02 17:50:15 [weight_utils.py:291] Using model weights format ['*.safetensors']
+Loading safetensors checkpoint shards:   0% Completed | 0/4 [00:00<?, ?it/s]
+Loading safetensors checkpoint shards:  25% Completed | 1/4 [00:00<00:02,  1.11it/s]
+Loading safetensors checkpoint shards:  50% Completed | 2/4 [00:01<00:01,  1.04it/s]
+Loading safetensors checkpoint shards:  75% Completed | 3/4 [00:02<00:00,  1.00it/s]
+Loading safetensors checkpoint shards: 100% Completed | 4/4 [00:03<00:00,  1.34it/s]
+Loading safetensors checkpoint shards: 100% Completed | 4/4 [00:03<00:00,  1.21it/s]
+
+INFO 06-02 17:50:19 [default_loader.py:280] Loading weights took 3.35 seconds
+INFO 06-02 17:50:19 [gpu_model_runner.py:1549] Model loading took 14.9889 GiB and 4.991583 seconds
+INFO 06-02 17:50:20 [kv_cache_utils.py:637] GPU KV cache size: 406,768 tokens
+INFO 06-02 17:50:20 [kv_cache_utils.py:640] Maximum concurrency for 131,072 tokens per request: 3.10x
+INFO 06-02 17:50:21 [core.py:167] init engine (profile, create kv cache, warmup model) took 1.42 seconds
+INFO 06-02 17:50:21 [factory.py:73] Creating v1 connector with name: LMCacheConnectorV1
+WARNING 06-02 17:50:21 [base.py:61] Initializing KVConnectorBase_V1. This API is experimental and subject to change in the future as we iterate the design.
+INFO 06-02 17:50:21 [loggers.py:134] vllm cache_config_info with initialization after num_gpu_blocks is: 25423
+WARNING 06-02 17:50:21 [config.py:1339] Default sampling parameters have been overridden by the model's Hugging Face generation config recommended from the model creator. If this is not intended, please relaunch vLLM instance with `--generation-config vllm`.
+INFO 06-02 17:50:21 [serving_chat.py:117] Using default chat sampling params from model: {'temperature': 0.6, 'top_p': 0.9}
+INFO 06-02 17:50:21 [serving_completion.py:65] Using default completion sampling params from model: {'temperature': 0.6, 'top_p': 0.9}
+INFO 06-02 17:50:21 [api_server.py:1336] Starting vLLM API server on http://0.0.0.0:8100
+INFO 06-02 17:50:21 [launcher.py:28] Available routes are:
+INFO 06-02 17:50:21 [launcher.py:36] Route: /openapi.json, Methods: HEAD, GET
+INFO 06-02 17:50:21 [launcher.py:36] Route: /docs, Methods: HEAD, GET
+INFO 06-02 17:50:21 [launcher.py:36] Route: /docs/oauth2-redirect, Methods: HEAD, GET
+INFO 06-02 17:50:21 [launcher.py:36] Route: /redoc, Methods: HEAD, GET
+INFO 06-02 17:50:21 [launcher.py:36] Route: /health, Methods: GET
+INFO 06-02 17:50:21 [launcher.py:36] Route: /load, Methods: GET
+INFO 06-02 17:50:21 [launcher.py:36] Route: /ping, Methods: POST
+INFO 06-02 17:50:21 [launcher.py:36] Route: /ping, Methods: GET
+INFO 06-02 17:50:21 [launcher.py:36] Route: /tokenize, Methods: POST
+INFO 06-02 17:50:21 [launcher.py:36] Route: /detokenize, Methods: POST
+INFO 06-02 17:50:21 [launcher.py:36] Route: /v1/models, Methods: GET
+INFO 06-02 17:50:21 [launcher.py:36] Route: /version, Methods: GET
+INFO 06-02 17:50:21 [launcher.py:36] Route: /v1/chat/completions, Methods: POST
+INFO 06-02 17:50:21 [launcher.py:36] Route: /v1/completions, Methods: POST
+INFO 06-02 17:50:21 [launcher.py:36] Route: /v1/embeddings, Methods: POST
+INFO 06-02 17:50:21 [launcher.py:36] Route: /pooling, Methods: POST
+INFO 06-02 17:50:21 [launcher.py:36] Route: /classify, Methods: POST
+INFO 06-02 17:50:21 [launcher.py:36] Route: /score, Methods: POST
+INFO 06-02 17:50:21 [launcher.py:36] Route: /v1/score, Methods: POST
+INFO 06-02 17:50:21 [launcher.py:36] Route: /v1/audio/transcriptions, Methods: POST
+INFO 06-02 17:50:21 [launcher.py:36] Route: /rerank, Methods: POST
+INFO 06-02 17:50:21 [launcher.py:36] Route: /v1/rerank, Methods: POST
+INFO 06-02 17:50:21 [launcher.py:36] Route: /v2/rerank, Methods: POST
+INFO 06-02 17:50:21 [launcher.py:36] Route: /invocations, Methods: POST
+INFO 06-02 17:50:21 [launcher.py:36] Route: /metrics, Methods: GET
+INFO:     Started server process [869900]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     127.0.0.1:44726 - "GET /v1/completions HTTP/1.1" 405 Method Not Allowed
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:52:55,117] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-6173c59d6c064e31bd8165ed53c91a50-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:52:55,926] LMCache INFO:[0m Store 7500 tokens takes: 808.8254 ms, throughput: 1.1319 GB/s; offload_time: 1.5844 ms, put_time: 805.7613 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:52:55,931] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:52:56,179] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-5f49c318c8064c5ca0dbd1ce24703437-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:52:56,185] LMCache INFO:[0m Store 7500 tokens takes: 5.7468 ms, throughput: 159.3096 GB/s; offload_time: 1.2061 ms, put_time: 3.9770 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:52:56,187] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:52:56,623] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-a47e3c8f035140fbbfce0b4cd843c8cd-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:52:56,629] LMCache INFO:[0m Store 7500 tokens takes: 5.6258 ms, throughput: 162.7368 GB/s; offload_time: 1.1802 ms, put_time: 3.9229 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:52:56,630] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:52:56,881] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-6158306ee80f4bc8bad7bfae77751f58-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:52:56,886] LMCache INFO:[0m Store 7500 tokens takes: 5.6760 ms, throughput: 161.2976 GB/s; offload_time: 1.1859 ms, put_time: 3.9351 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:52:56,888] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:52:57,153] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-03e0f4edc1ba4be9b50eedb3d24f3c0b-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:52:57,159] LMCache INFO:[0m Store 7500 tokens takes: 5.7839 ms, throughput: 158.2879 GB/s; offload_time: 1.1919 ms, put_time: 4.0237 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:52:57,160] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:52:57,404] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-ac5635c042ac4c52bb7a10da223fedca-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:52:57,410] LMCache INFO:[0m Store 7500 tokens takes: 5.6508 ms, throughput: 162.0175 GB/s; offload_time: 1.1754 ms, put_time: 3.9032 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:52:57,411] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:52:57,700] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-a16d67e6bf5b422ba7c6e7a5537d619e-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:52:57,706] LMCache INFO:[0m Store 7500 tokens takes: 5.6749 ms, throughput: 161.3286 GB/s; offload_time: 1.1764 ms, put_time: 3.9339 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:52:57,707] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:52:57,983] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-0c3e8a1043944fd3a2ad7f8713b1fd89-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:52:57,989] LMCache INFO:[0m Store 7500 tokens takes: 5.7036 ms, throughput: 160.5171 GB/s; offload_time: 1.1891 ms, put_time: 3.9259 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:52:57,991] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:52:58,226] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-fb8ca7c8c89045559b3c2238e2a5de51-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:52:58,232] LMCache INFO:[0m Store 7500 tokens takes: 5.7108 ms, throughput: 160.3138 GB/s; offload_time: 1.1918 ms, put_time: 3.9515 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:52:58,233] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:52:58,527] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-90d918b7b5d84909882854b48a6818dc-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:52:58,533] LMCache INFO:[0m Store 7500 tokens takes: 5.7461 ms, throughput: 159.3307 GB/s; offload_time: 1.2132 ms, put_time: 3.9299 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:52:58,535] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:52:58,773] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-992517b44995494b8ee5f0fdabb177e0-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:52:58,779] LMCache INFO:[0m Store 7500 tokens takes: 6.2250 ms, throughput: 147.0723 GB/s; offload_time: 1.2318 ms, put_time: 4.2783 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:52:58,781] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:52:59,029] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-837d406b994b4e8aa2dbcf20afb50a35-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:52:59,035] LMCache INFO:[0m Store 7500 tokens takes: 5.9175 ms, throughput: 154.7157 GB/s; offload_time: 1.2390 ms, put_time: 4.0737 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:52:59,037] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:52:59,357] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-fd964e2d08644954ae191a0666436ea5-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:52:59,363] LMCache INFO:[0m Store 7500 tokens takes: 5.8419 ms, throughput: 156.7171 GB/s; offload_time: 1.2375 ms, put_time: 3.9748 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:52:59,365] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:52:59,665] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-3f42b3e7f72f4345a6eef82bf7df86e2-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:52:59,671] LMCache INFO:[0m Store 7500 tokens takes: 5.6089 ms, throughput: 163.2286 GB/s; offload_time: 1.1636 ms, put_time: 3.8936 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:52:59,673] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:52:59,959] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-a63d32f70dba4d57857164546100d0da-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:52:59,965] LMCache INFO:[0m Store 7500 tokens takes: 5.5924 ms, throughput: 163.7091 GB/s; offload_time: 1.1763 ms, put_time: 3.8959 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:52:59,966] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:00,241] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-b317625c03994670816a333f401f3566-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:00,247] LMCache INFO:[0m Store 7500 tokens takes: 5.6571 ms, throughput: 161.8357 GB/s; offload_time: 1.1795 ms, put_time: 3.9349 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:00,249] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:00,474] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-d4c7dd04ed6d4ec6bc350a240e4c3b98-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:00,480] LMCache INFO:[0m Store 7500 tokens takes: 5.5802 ms, throughput: 164.0684 GB/s; offload_time: 1.1628 ms, put_time: 3.8858 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:00,481] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:00,803] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-5d596404c4864e5bbda5cafa83dc5701-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:00,809] LMCache INFO:[0m Store 7500 tokens takes: 5.6793 ms, throughput: 161.2039 GB/s; offload_time: 1.1864 ms, put_time: 3.9408 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:00,811] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:01,089] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-93c955263ee3466aaa905aae500ac4d3-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:01,095] LMCache INFO:[0m Store 7500 tokens takes: 5.7079 ms, throughput: 160.3965 GB/s; offload_time: 1.1890 ms, put_time: 3.9560 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:01,097] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:01,374] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-aa8681cf71084f2187893b91402d667a-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:01,380] LMCache INFO:[0m Store 7500 tokens takes: 5.8410 ms, throughput: 156.7426 GB/s; offload_time: 1.2058 ms, put_time: 4.0796 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:01,382] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:01,696] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-b18cf567cf524fdb88cac226a1326bdd-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:01,702] LMCache INFO:[0m Store 7500 tokens takes: 5.8062 ms, throughput: 157.6799 GB/s; offload_time: 1.1955 ms, put_time: 3.9471 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:01,703] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:01,947] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-bc9357640bdb4a4eb0fd1506458f8eea-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:01,953] LMCache INFO:[0m Store 7500 tokens takes: 5.6216 ms, throughput: 162.8590 GB/s; offload_time: 1.1714 ms, put_time: 3.9218 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:01,954] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO 06-02 17:53:02 [loggers.py:116] Engine 000: Avg prompt throughput: 16499.6 tokens/s, Avg generation throughput: 2.2 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 4.5%
+[32;20m[2025-06-02 17:53:02,240] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-2d00305036554fb482119ee664428eb1-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:02,246] LMCache INFO:[0m Store 7500 tokens takes: 5.7218 ms, throughput: 160.0081 GB/s; offload_time: 1.1915 ms, put_time: 3.9733 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:02,248] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:38440 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:02,465] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-82dd81aa1a214ffa956c1abd48a5b0a7-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:02,471] LMCache INFO:[0m Store 7500 tokens takes: 5.7421 ms, throughput: 159.4419 GB/s; offload_time: 1.2240 ms, put_time: 3.9261 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:02,472] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:02,697] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-e17e18151ac642c0994be723865d4908-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:02,703] LMCache INFO:[0m Store 7500 tokens takes: 5.6723 ms, throughput: 161.4029 GB/s; offload_time: 1.1824 ms, put_time: 3.9114 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:02,704] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:02,953] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-fd0597f5f0b04fb79d7726c5bcca9519-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:02,959] LMCache INFO:[0m Store 7500 tokens takes: 5.4795 ms, throughput: 167.0833 GB/s; offload_time: 1.1441 ms, put_time: 3.8216 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:02,960] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:03,252] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-7fa7b54376704f078c7090dbf4aedb2f-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:03,258] LMCache INFO:[0m Store 7500 tokens takes: 5.7539 ms, throughput: 159.1145 GB/s; offload_time: 1.1790 ms, put_time: 4.0462 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:03,260] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:03,562] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-849126ec0bc342ddaf2baf934c11b072-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:03,568] LMCache INFO:[0m Store 7500 tokens takes: 5.7875 ms, throughput: 158.1913 GB/s; offload_time: 1.2229 ms, put_time: 3.9809 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:03,570] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:03,864] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-29a897aa4d7f4c48b1ca328710d4fc7b-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:03,870] LMCache INFO:[0m Store 7500 tokens takes: 5.6565 ms, throughput: 161.8552 GB/s; offload_time: 1.1747 ms, put_time: 3.9359 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:03,871] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:04,123] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-979adf7e0a0b4a7d9aacf8303c085e1f-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:04,129] LMCache INFO:[0m Store 7500 tokens takes: 5.8644 ms, throughput: 156.1149 GB/s; offload_time: 1.2343 ms, put_time: 4.0225 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:04,131] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:04,368] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-32261f23a06744c4ba2fa831c74e9c94-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:04,374] LMCache INFO:[0m Store 7500 tokens takes: 5.6652 ms, throughput: 161.6065 GB/s; offload_time: 1.1764 ms, put_time: 3.9257 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:04,375] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:04,656] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-7355a59224c143a2bef07973c28e7ca9-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:04,662] LMCache INFO:[0m Store 7500 tokens takes: 5.6445 ms, throughput: 162.1970 GB/s; offload_time: 1.1716 ms, put_time: 3.9197 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:04,663] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:04,901] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-bf485fa990d14be7a834c19e40e197d5-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:04,907] LMCache INFO:[0m Store 7500 tokens takes: 5.5372 ms, throughput: 165.3425 GB/s; offload_time: 1.1528 ms, put_time: 3.8563 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:04,908] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:05,189] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-120bdb5c1808450296680dbef725bd8a-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:05,195] LMCache INFO:[0m Store 7500 tokens takes: 5.6966 ms, throughput: 160.7144 GB/s; offload_time: 1.1832 ms, put_time: 3.9529 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:05,197] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:05,464] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-d661bb4ddabd40eba05d0ce2ba73e554-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:05,469] LMCache INFO:[0m Store 7500 tokens takes: 5.5879 ms, throughput: 163.8414 GB/s; offload_time: 1.1780 ms, put_time: 3.8867 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:05,471] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:05,726] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-514bfa8c480d4dfaa3b3752c29cb99fd-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:05,732] LMCache INFO:[0m Store 7500 tokens takes: 5.6136 ms, throughput: 163.0897 GB/s; offload_time: 1.1624 ms, put_time: 3.9479 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:05,733] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:06,048] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-ad549679e15d46f78999447d8b427361-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:06,054] LMCache INFO:[0m Store 7500 tokens takes: 5.7449 ms, throughput: 159.3648 GB/s; offload_time: 1.1889 ms, put_time: 4.0409 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:06,055] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:06,325] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-f78e1a6d8f924fb8bd7ae60f8b728600-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:06,332] LMCache INFO:[0m Store 7500 tokens takes: 6.0889 ms, throughput: 150.3612 GB/s; offload_time: 1.2426 ms, put_time: 4.1441 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:06,334] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:06,584] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-54a82f060994477a9e8a547a07bcb137-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:06,589] LMCache INFO:[0m Store 7500 tokens takes: 5.6121 ms, throughput: 163.1342 GB/s; offload_time: 1.1720 ms, put_time: 3.8516 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:06,591] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:06,901] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-42898e4cad0e47a9929611dbd53a8a30-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:06,907] LMCache INFO:[0m Store 7500 tokens takes: 5.9031 ms, throughput: 155.0935 GB/s; offload_time: 1.2393 ms, put_time: 4.0907 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:06,908] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:07,167] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-d21910ae69cc47338c500bbe4a9cc9c4-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:07,173] LMCache INFO:[0m Store 7500 tokens takes: 5.8140 ms, throughput: 157.4700 GB/s; offload_time: 1.2425 ms, put_time: 3.9855 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:07,174] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:07,471] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-c5c2bd6619254fe28ca2c7b5271f7632-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:07,477] LMCache INFO:[0m Store 7500 tokens takes: 5.8804 ms, throughput: 155.6912 GB/s; offload_time: 1.2767 ms, put_time: 3.9355 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:07,479] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:07,746] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-5fe4185221e141f49f149cca864e1849-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:07,751] LMCache INFO:[0m Store 7500 tokens takes: 5.5524 ms, throughput: 164.8901 GB/s; offload_time: 1.1610 ms, put_time: 3.8893 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:07,753] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:08,003] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-b533c3598e2746c0aa1f24a8d09dc9d4-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:08,009] LMCache INFO:[0m Store 7500 tokens takes: 5.5249 ms, throughput: 165.7105 GB/s; offload_time: 1.1675 ms, put_time: 3.8598 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:08,010] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:08,250] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-36d229e064854f64a704b765cba0f82a-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:08,256] LMCache INFO:[0m Store 7500 tokens takes: 5.6845 ms, throughput: 161.0559 GB/s; offload_time: 1.1808 ms, put_time: 3.9629 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:08,257] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:08,551] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-4538866ed37e4283ade88a8f9015debf-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:08,557] LMCache INFO:[0m Store 7500 tokens takes: 5.6919 ms, throughput: 160.8478 GB/s; offload_time: 1.1777 ms, put_time: 4.0137 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:08,558] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:08,802] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-ad0ecce6a9cc470c80f1a9fea5731b1d-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:08,808] LMCache INFO:[0m Store 7500 tokens takes: 5.9771 ms, throughput: 153.1719 GB/s; offload_time: 1.2061 ms, put_time: 4.1774 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:08,809] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:09,074] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-88b38f5255ab43e4b55d5af57e11be16-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:09,080] LMCache INFO:[0m Store 7500 tokens takes: 5.9802 ms, throughput: 153.0942 GB/s; offload_time: 1.2121 ms, put_time: 4.1439 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:09,082] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:09,307] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-37236ffeb2f541d3b06dd5e729192fdb-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:09,313] LMCache INFO:[0m Store 7500 tokens takes: 5.9833 ms, throughput: 153.0133 GB/s; offload_time: 1.2428 ms, put_time: 4.1235 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:09,315] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:09,589] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-be55ebc5d7fe4668a435b8aacae4e8be-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:09,595] LMCache INFO:[0m Store 7500 tokens takes: 5.8308 ms, throughput: 157.0147 GB/s; offload_time: 1.2268 ms, put_time: 4.0338 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:09,596] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:09,919] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-7d041177a4ed4ce2b086d3087de95aa4-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:09,925] LMCache INFO:[0m Store 7500 tokens takes: 5.6877 ms, throughput: 160.9672 GB/s; offload_time: 1.2219 ms, put_time: 3.9517 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:09,926] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:10,180] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-83c86529138643549ef5a8a231deeaaa-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:10,186] LMCache INFO:[0m Store 7500 tokens takes: 5.8433 ms, throughput: 156.6794 GB/s; offload_time: 1.2283 ms, put_time: 3.9887 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:10,188] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:10,447] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-ca67e91e20044d7ea2d7f141ae3b2ff0-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:10,453] LMCache INFO:[0m Store 7500 tokens takes: 5.9079 ms, throughput: 154.9671 GB/s; offload_time: 1.3467 ms, put_time: 4.0242 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:10,455] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:10,718] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-f30450e66f1e4e1f87af4691ca45cc58-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:10,724] LMCache INFO:[0m Store 7500 tokens takes: 5.6530 ms, throughput: 161.9554 GB/s; offload_time: 1.1872 ms, put_time: 3.9262 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:10,726] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:11,004] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-c20dc90e71f14ad39c91ee88a2a7f36b-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:11,010] LMCache INFO:[0m Store 7500 tokens takes: 5.5988 ms, throughput: 163.5219 GB/s; offload_time: 1.1584 ms, put_time: 3.9318 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:11,012] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:11,296] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-219aa9fa63a94dd1b942c33704ad10ff-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:11,303] LMCache INFO:[0m Store 7500 tokens takes: 6.1793 ms, throughput: 148.1594 GB/s; offload_time: 1.2072 ms, put_time: 4.2394 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:11,304] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:11,565] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-7e2d74599ff5468ba11f70a99c390134-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:11,571] LMCache INFO:[0m Store 7500 tokens takes: 5.6803 ms, throughput: 161.1755 GB/s; offload_time: 1.1612 ms, put_time: 3.9660 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:11,572] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:11,841] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-b5e5865996de4c38b15a3914b8af5618-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:11,847] LMCache INFO:[0m Store 7500 tokens takes: 5.8644 ms, throughput: 156.1164 GB/s; offload_time: 1.1961 ms, put_time: 3.9756 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:11,848] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:12,138] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-fee1f0afaf9142349efefd6aca43cea4-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO 06-02 17:53:12 [loggers.py:116] Engine 000: Avg prompt throughput: 26998.3 tokens/s, Avg generation throughput: 3.6 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 1.7%
+[32;20m[2025-06-02 17:53:12,144] LMCache INFO:[0m Store 7500 tokens takes: 5.9969 ms, throughput: 152.6657 GB/s; offload_time: 1.1950 ms, put_time: 4.0304 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:12,146] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:12,431] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-31b66bad1bc446f39e6253c4c82fb128-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:12,438] LMCache INFO:[0m Store 7500 tokens takes: 6.5410 ms, throughput: 139.9682 GB/s; offload_time: 1.2300 ms, put_time: 4.0225 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:12,439] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:12,704] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-9f7e2548d7d5457e9d7eb6add0087eb5-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:12,710] LMCache INFO:[0m Store 7500 tokens takes: 6.2176 ms, throughput: 147.2468 GB/s; offload_time: 1.2403 ms, put_time: 4.0131 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:12,712] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:12,983] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-b588fb976ac24704b794b4c707aeddc7-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:12,989] LMCache INFO:[0m Store 7500 tokens takes: 6.0848 ms, throughput: 150.4607 GB/s; offload_time: 1.2161 ms, put_time: 3.9806 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:12,990] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:13,251] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-e17f25810b5b4acf9805beef5b376ca4-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:13,257] LMCache INFO:[0m Store 7500 tokens takes: 5.9252 ms, throughput: 154.5129 GB/s; offload_time: 1.2234 ms, put_time: 3.9797 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:13,259] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:13,570] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-ddacdf74613041508bc1a254169b6ecd-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:13,576] LMCache INFO:[0m Store 7500 tokens takes: 5.8948 ms, throughput: 155.3102 GB/s; offload_time: 1.1931 ms, put_time: 3.9780 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:13,577] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:13,808] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-20944bfe19b34dedaa82f37f6dd47775-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:13,814] LMCache INFO:[0m Store 7500 tokens takes: 6.1526 ms, throughput: 148.8042 GB/s; offload_time: 1.1975 ms, put_time: 4.1791 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:13,816] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:14,050] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-6cba8252334f4624b1570ce2eb230f22-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:14,056] LMCache INFO:[0m Store 7500 tokens takes: 5.7040 ms, throughput: 160.5061 GB/s; offload_time: 1.1792 ms, put_time: 3.8720 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:14,057] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:14,338] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-a66e2d3ec9874a57a1bcf687f41b8709-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:14,344] LMCache INFO:[0m Store 7500 tokens takes: 5.8901 ms, throughput: 155.4345 GB/s; offload_time: 1.2121 ms, put_time: 3.9515 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:14,346] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:14,619] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-81ffb125da9a459b9667c23ae3769b4a-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:14,626] LMCache INFO:[0m Store 7500 tokens takes: 6.2935 ms, throughput: 145.4721 GB/s; offload_time: 1.2719 ms, put_time: 4.1079 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:14,627] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:14,904] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-5f1e101206ee4263b7e04d6854468d4e-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:14,911] LMCache INFO:[0m Store 7500 tokens takes: 5.9030 ms, throughput: 155.0952 GB/s; offload_time: 1.1823 ms, put_time: 3.9905 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:14,912] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:15,203] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-4e8240c8804349e0ad9babdec7ece874-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:15,209] LMCache INFO:[0m Store 7500 tokens takes: 5.9974 ms, throughput: 152.6547 GB/s; offload_time: 1.2080 ms, put_time: 4.0536 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:15,210] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:15,479] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-810b228384394ef78343708543259ac4-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:15,486] LMCache INFO:[0m Store 7500 tokens takes: 6.1155 ms, throughput: 149.7058 GB/s; offload_time: 1.2434 ms, put_time: 4.0422 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:15,487] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:15,780] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-54ac1634dca9409cb0c71ec9e7c09064-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:15,788] LMCache INFO:[0m Store 7500 tokens takes: 7.4001 ms, throughput: 123.7184 GB/s; offload_time: 1.2521 ms, put_time: 4.0812 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:15,790] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:16,061] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-d03ee6c88f1646eaba99aeaf094e6bec-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:16,067] LMCache INFO:[0m Store 7500 tokens takes: 5.9848 ms, throughput: 152.9753 GB/s; offload_time: 1.2083 ms, put_time: 3.9889 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:16,068] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:16,341] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-e239bf5f19a64edf9a840a48bc2381b9-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:16,347] LMCache INFO:[0m Store 7500 tokens takes: 5.9142 ms, throughput: 154.8004 GB/s; offload_time: 1.1951 ms, put_time: 3.9675 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:16,348] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:33064 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:16,561] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-899de6e24f044b8cb39d69f23e2e890d-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:16,566] LMCache INFO:[0m Store 7500 tokens takes: 5.7511 ms, throughput: 159.1923 GB/s; offload_time: 1.1653 ms, put_time: 3.9178 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:16,568] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:16,787] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-1d29739e030e42c6aaf894fc389bd3bd-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:16,793] LMCache INFO:[0m Store 7500 tokens takes: 5.8661 ms, throughput: 156.0703 GB/s; offload_time: 1.1964 ms, put_time: 3.9642 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:16,795] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:17,023] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-65ea98416d124953a8b3da1c46ab45bd-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:17,029] LMCache INFO:[0m Store 7500 tokens takes: 5.8468 ms, throughput: 156.5873 GB/s; offload_time: 1.2008 ms, put_time: 3.9385 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:17,030] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:17,294] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-67e9e4a1eff74e8eb432adf56c0e5b67-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:17,300] LMCache INFO:[0m Store 7500 tokens takes: 5.9202 ms, throughput: 154.6449 GB/s; offload_time: 1.2328 ms, put_time: 3.9670 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:17,302] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:17,639] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-78e58a70d54642c6b1eec5d9bf4d0bb5-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:17,646] LMCache INFO:[0m Store 7500 tokens takes: 6.2784 ms, throughput: 145.8229 GB/s; offload_time: 1.2230 ms, put_time: 4.2368 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:17,647] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:33064 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:17,857] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-38860511fcb9422ba346cff260dfa3c4-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:17,863] LMCache INFO:[0m Store 7500 tokens takes: 6.0078 ms, throughput: 152.3901 GB/s; offload_time: 1.2036 ms, put_time: 3.9959 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:17,864] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:18,149] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-f36df69eb735488f84ca6f6d7657c295-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:18,155] LMCache INFO:[0m Store 7500 tokens takes: 5.9634 ms, throughput: 153.5255 GB/s; offload_time: 1.2217 ms, put_time: 3.9871 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:18,157] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:18,445] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-a9aa036b3cca46b88d94caefe31336ea-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:18,451] LMCache INFO:[0m Store 7500 tokens takes: 6.2393 ms, throughput: 146.7361 GB/s; offload_time: 1.2702 ms, put_time: 4.0859 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:18,453] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:18,735] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-a4352e60ba0242bcbdcd425f508ae877-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:18,741] LMCache INFO:[0m Store 7500 tokens takes: 5.9692 ms, throughput: 153.3745 GB/s; offload_time: 1.2549 ms, put_time: 3.9801 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:18,742] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:19,001] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-f88af904087b463393c84f38c8960a36-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:19,009] LMCache INFO:[0m Store 7500 tokens takes: 8.1261 ms, throughput: 112.6650 GB/s; offload_time: 1.2931 ms, put_time: 4.0558 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:19,011] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:19,271] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-04af4e07b84740fa92eb05f31439a176-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:19,278] LMCache INFO:[0m Store 7500 tokens takes: 6.1921 ms, throughput: 147.8532 GB/s; offload_time: 1.2527 ms, put_time: 4.0453 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:19,279] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:19,546] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-87b9d7915466463f92981eb5d526e94c-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:19,552] LMCache INFO:[0m Store 7500 tokens takes: 5.9918 ms, throughput: 152.7973 GB/s; offload_time: 1.1860 ms, put_time: 4.0684 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:19,553] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:19,792] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-51907ba7f062495bae697d31da7875b3-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:19,798] LMCache INFO:[0m Store 7500 tokens takes: 5.9809 ms, throughput: 153.0762 GB/s; offload_time: 1.1917 ms, put_time: 3.9931 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:19,800] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:20,060] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-1be43152719f48759b77af8819a926b9-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:20,066] LMCache INFO:[0m Store 7500 tokens takes: 5.7858 ms, throughput: 158.2381 GB/s; offload_time: 1.1635 ms, put_time: 3.8931 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:20,067] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:20,342] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-d0734e5c82684a0aaf162ea787fce9fb-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:20,348] LMCache INFO:[0m Store 7500 tokens takes: 6.1020 ms, throughput: 150.0367 GB/s; offload_time: 1.1858 ms, put_time: 4.1664 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:20,349] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:20,624] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-08938c73a6fc4f76b1b037469ff9a1ec-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:20,630] LMCache INFO:[0m Store 7500 tokens takes: 6.0157 ms, throughput: 152.1886 GB/s; offload_time: 1.2066 ms, put_time: 4.0173 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:20,631] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:20,923] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-f65d506b651243998b06765e36e33031-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:20,929] LMCache INFO:[0m Store 7500 tokens takes: 6.0596 ms, throughput: 151.0858 GB/s; offload_time: 1.2230 ms, put_time: 4.0490 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:20,931] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:33064 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:21,142] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-a24d217d7ba24fed84552d2f4844ef03-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:21,149] LMCache INFO:[0m Store 7500 tokens takes: 6.0694 ms, throughput: 150.8429 GB/s; offload_time: 1.2577 ms, put_time: 4.0314 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:21,150] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:21,373] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-c7b6bcc705e9413f8f09643fd76f589f-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:21,379] LMCache INFO:[0m Store 7500 tokens takes: 5.9657 ms, throughput: 153.4647 GB/s; offload_time: 1.2365 ms, put_time: 3.9570 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:21,381] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:21,644] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-fed82facdf3f4eca9d54062e9d272871-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:21,651] LMCache INFO:[0m Store 7500 tokens takes: 6.3689 ms, throughput: 143.7492 GB/s; offload_time: 1.2415 ms, put_time: 3.9647 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:21,652] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:21,957] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-3e6bb76ad42a4559a41a35820eaf6d35-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:21,963] LMCache INFO:[0m Store 7500 tokens takes: 5.8232 ms, throughput: 157.2215 GB/s; offload_time: 1.1776 ms, put_time: 3.9001 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:21,964] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO 06-02 17:53:22 [loggers.py:116] Engine 000: Avg prompt throughput: 27748.8 tokens/s, Avg generation throughput: 3.7 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 1.1%
+[32;20m[2025-06-02 17:53:22,241] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-d094686117164749b6dffe7e6959a42d-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:22,249] LMCache INFO:[0m Store 7500 tokens takes: 7.4424 ms, throughput: 123.0143 GB/s; offload_time: 1.1955 ms, put_time: 3.9817 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:22,251] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:22,522] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-32d2a4d8248d4852995640b142c2f0c8-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:22,528] LMCache INFO:[0m Store 7500 tokens takes: 6.1367 ms, throughput: 149.1882 GB/s; offload_time: 1.1944 ms, put_time: 4.1857 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:22,529] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:22,793] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-4aa60a65c19a47248310778c58ca8961-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:22,800] LMCache INFO:[0m Store 7500 tokens takes: 5.9398 ms, throughput: 154.1349 GB/s; offload_time: 1.1960 ms, put_time: 3.9409 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:22,801] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:23,099] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-4e0a71df2fbe4af7b0f8637aa35a52ff-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:23,106] LMCache INFO:[0m Store 7500 tokens takes: 6.6124 ms, throughput: 138.4556 GB/s; offload_time: 1.5397 ms, put_time: 4.1685 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:23,108] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:23,341] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-98ba70136fed4ae0888d982e6db2759e-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:23,347] LMCache INFO:[0m Store 7500 tokens takes: 5.8057 ms, throughput: 157.6939 GB/s; offload_time: 1.1970 ms, put_time: 3.8847 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:23,348] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:33064 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:23,547] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-2505f8c3ea404b0392cdd43ad6b213f9-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:23,553] LMCache INFO:[0m Store 7500 tokens takes: 6.2147 ms, throughput: 147.3171 GB/s; offload_time: 1.2662 ms, put_time: 4.0986 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:23,555] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:23,833] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-9a56ba246f5046caa12c46b952aa4b38-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:23,839] LMCache INFO:[0m Store 7500 tokens takes: 5.9537 ms, throughput: 153.7757 GB/s; offload_time: 1.2267 ms, put_time: 3.9734 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:23,841] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:24,181] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-5e7c5722b3434dd58c323e848568b4dd-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:24,188] LMCache INFO:[0m Store 7500 tokens takes: 6.4055 ms, throughput: 142.9279 GB/s; offload_time: 1.2747 ms, put_time: 4.0306 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:24,190] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:24,455] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-e4a736c1b77544b79441e6aea038d1f1-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:24,461] LMCache INFO:[0m Store 7500 tokens takes: 6.0714 ms, throughput: 150.7924 GB/s; offload_time: 1.2266 ms, put_time: 3.9882 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:24,463] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:24,740] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-332bf2a0b3ff478e8172cea29788fdc4-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:24,746] LMCache INFO:[0m Store 7500 tokens takes: 5.8623 ms, throughput: 156.1718 GB/s; offload_time: 1.1692 ms, put_time: 3.9371 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:24,747] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:24,999] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-e9e6c915e992424a915afd7124ca6fe2-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:25,005] LMCache INFO:[0m Store 7500 tokens takes: 6.2025 ms, throughput: 147.6070 GB/s; offload_time: 1.2252 ms, put_time: 4.1892 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:25,006] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:25,280] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-324efc55f8fb4b2bb70666af7d5fbe16-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:25,286] LMCache INFO:[0m Store 7500 tokens takes: 6.1320 ms, throughput: 149.3026 GB/s; offload_time: 1.2005 ms, put_time: 4.0282 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:25,288] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:25,524] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-faafabe0368d445884593fd4ab38d706-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:25,532] LMCache INFO:[0m Store 7500 tokens takes: 7.4409 ms, throughput: 123.0392 GB/s; offload_time: 1.2544 ms, put_time: 4.0724 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:25,534] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:25,840] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-6d10370f0dd745ae83a23c0c30b06398-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:25,846] LMCache INFO:[0m Store 7500 tokens takes: 6.1342 ms, throughput: 149.2498 GB/s; offload_time: 1.2488 ms, put_time: 4.0622 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:25,848] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:26,116] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-ba82efea5d5f44e6a3648d9aa24ffe33-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:26,122] LMCache INFO:[0m Store 7500 tokens takes: 6.0312 ms, throughput: 151.7991 GB/s; offload_time: 1.1928 ms, put_time: 4.0428 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:26,124] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:26,449] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-01da31e47e8840b0b04d6e0bff0a0c61-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:26,455] LMCache INFO:[0m Store 7500 tokens takes: 6.3152 ms, throughput: 144.9725 GB/s; offload_time: 1.2434 ms, put_time: 3.9966 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:26,457] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:26,777] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-05a52d455e624533852c746afcabbc5f-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:26,783] LMCache INFO:[0m Store 7500 tokens takes: 6.1283 ms, throughput: 149.3938 GB/s; offload_time: 1.1958 ms, put_time: 3.9907 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:26,785] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:27,067] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-0e2efb5abd9343488b847c6c9a1f9574-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:27,073] LMCache INFO:[0m Store 7500 tokens takes: 5.7727 ms, throughput: 158.5958 GB/s; offload_time: 1.1939 ms, put_time: 3.8809 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:27,074] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:27,374] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-d001ded10e844e9fa1c9823feb107f42-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:27,380] LMCache INFO:[0m Store 7500 tokens takes: 5.7338 ms, throughput: 159.6719 GB/s; offload_time: 1.1680 ms, put_time: 3.8657 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:27,381] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:27,640] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-739c872dbe8a4890aa3e00cfeb061ec1-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:27,646] LMCache INFO:[0m Store 7500 tokens takes: 6.3262 ms, throughput: 144.7199 GB/s; offload_time: 1.2288 ms, put_time: 4.2475 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:27,648] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:27,971] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-ade4328d0c914a74bb073e2358c41e40-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:27,977] LMCache INFO:[0m Store 7500 tokens takes: 6.1152 ms, throughput: 149.7133 GB/s; offload_time: 1.2290 ms, put_time: 4.0224 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:27,979] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:28,235] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-7514bfb916294aa3bd47367f87158290-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:28,242] LMCache INFO:[0m Store 7500 tokens takes: 6.4212 ms, throughput: 142.5793 GB/s; offload_time: 1.5323 ms, put_time: 4.1489 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:28,244] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:28,533] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-17466e4715504534909ee40475ed1d68-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:28,539] LMCache INFO:[0m Store 7500 tokens takes: 6.0395 ms, throughput: 151.5887 GB/s; offload_time: 1.1877 ms, put_time: 4.0955 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:28,541] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:28,813] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-273e64907c394e168ed6db020e96f3fa-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:28,820] LMCache INFO:[0m Store 7500 tokens takes: 6.2272 ms, throughput: 147.0213 GB/s; offload_time: 1.2740 ms, put_time: 4.0929 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:28,822] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:29,082] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-e8de0d3b5f2741f3a79ff2b658213c09-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:29,089] LMCache INFO:[0m Store 7500 tokens takes: 7.1112 ms, throughput: 128.7444 GB/s; offload_time: 1.2303 ms, put_time: 3.9882 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:29,091] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:29,334] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-f2f5159c0232415e923faf880ac47446-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:29,340] LMCache INFO:[0m Store 7500 tokens takes: 6.0399 ms, throughput: 151.5802 GB/s; offload_time: 1.2326 ms, put_time: 4.0178 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:29,342] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:29,604] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-954025e868ca4f5ca12f66d0c63477cd-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:29,610] LMCache INFO:[0m Store 7500 tokens takes: 6.2762 ms, throughput: 145.8737 GB/s; offload_time: 1.2487 ms, put_time: 4.0668 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:29,612] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:29,859] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-de1b9d4340804aa5a557ad8df5e79cde-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:29,865] LMCache INFO:[0m Store 7500 tokens takes: 5.9067 ms, throughput: 154.9983 GB/s; offload_time: 1.2012 ms, put_time: 3.9789 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:29,866] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:59328 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:30,080] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-cddb897614a8499ebb945cd16be3029e-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:30,086] LMCache INFO:[0m Store 7500 tokens takes: 6.2614 ms, throughput: 146.2167 GB/s; offload_time: 1.2082 ms, put_time: 4.1861 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:30,088] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:30,334] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-c0d88713f2e44d6fab858bfbf7545d75-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:30,340] LMCache INFO:[0m Store 7500 tokens takes: 5.7221 ms, throughput: 159.9996 GB/s; offload_time: 1.1772 ms, put_time: 3.8790 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:30,341] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:30,597] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-5a2c48b910604422a193c4278014c851-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:30,603] LMCache INFO:[0m Store 7500 tokens takes: 6.3163 ms, throughput: 144.9461 GB/s; offload_time: 1.2519 ms, put_time: 4.1287 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:30,605] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:30,873] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-5dd463d5dbf748ec856acf072e1c7eda-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:30,879] LMCache INFO:[0m Store 7500 tokens takes: 6.0231 ms, throughput: 152.0034 GB/s; offload_time: 1.2132 ms, put_time: 4.0216 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:30,881] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:31,195] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-a07fce70cb04452490c0b8d0e15d6cfa-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:31,201] LMCache INFO:[0m Store 7500 tokens takes: 6.2063 ms, throughput: 147.5150 GB/s; offload_time: 1.2343 ms, put_time: 4.1256 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:31,202] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:31,426] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-1abcd3a9d5334bd38db303863344d5c3-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:31,432] LMCache INFO:[0m Store 7500 tokens takes: 5.8776 ms, throughput: 155.7663 GB/s; offload_time: 1.2264 ms, put_time: 3.9507 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:31,433] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:31,712] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-56957653c533417786025d014240e440-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:31,719] LMCache INFO:[0m Store 7500 tokens takes: 6.6784 ms, throughput: 137.0873 GB/s; offload_time: 1.2607 ms, put_time: 4.0527 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:31,720] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:31,991] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-ea52fb9cea204e49b81671f0b6723cce-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:31,997] LMCache INFO:[0m Store 7500 tokens takes: 5.9379 ms, throughput: 154.1827 GB/s; offload_time: 1.2260 ms, put_time: 3.9430 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:31,998] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO 06-02 17:53:32 [loggers.py:116] Engine 000: Avg prompt throughput: 26999.1 tokens/s, Avg generation throughput: 3.6 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.8%
+[32;20m[2025-06-02 17:53:32,236] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-f1c2988d76a544dbb1df8aa5409f494b-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:32,244] LMCache INFO:[0m Store 7500 tokens takes: 7.5521 ms, throughput: 121.2276 GB/s; offload_time: 1.2194 ms, put_time: 3.9713 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:32,246] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:32,524] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-87f975879d1544c0bd7041e0d8ce5932-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:59328 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:32,806] LMCache INFO:[0m Store 7500 tokens takes: 281.5752 ms, throughput: 3.2514 GB/s; offload_time: 1.3028 ms, put_time: 4.2351 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:33,005] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-b76e0b7173dd498888f741059c1ff73d-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:33,011] LMCache INFO:[0m Store 7500 tokens takes: 5.8818 ms, throughput: 155.6552 GB/s; offload_time: 1.2036 ms, put_time: 3.9547 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+INFO:     127.0.0.1:59328 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:33,211] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-f600a58414f84ae1924a416f6ca1d7c7-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:33,217] LMCache INFO:[0m Store 7500 tokens takes: 5.8665 ms, throughput: 156.0615 GB/s; offload_time: 1.2258 ms, put_time: 4.0538 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[32;20m[2025-06-02 17:53:33,417] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-5edb448e19bf41e49e092d36ff8828c4-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:33,422] LMCache INFO:[0m Store 7500 tokens takes: 5.5003 ms, throughput: 166.4490 GB/s; offload_time: 1.1461 ms, put_time: 3.8605 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:33,424] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:33,674] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-564857b8178d41e8a78f33590cc132f9-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:33,680] LMCache INFO:[0m Store 7500 tokens takes: 6.3080 ms, throughput: 145.1380 GB/s; offload_time: 1.2940 ms, put_time: 4.1958 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:33,682] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:33,940] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-0f149c180d664c9d896b1f6842ab5d27-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:33,946] LMCache INFO:[0m Store 7500 tokens takes: 5.9490 ms, throughput: 153.8959 GB/s; offload_time: 1.2250 ms, put_time: 3.9444 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:33,947] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:34,264] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-b2388fc7e4cd4bf3bff64ecf0d87e973-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:34,271] LMCache INFO:[0m Store 7500 tokens takes: 6.5639 ms, throughput: 139.4783 GB/s; offload_time: 1.2621 ms, put_time: 4.0198 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:34,273] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:34,572] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-01176a82f45c497caa2e4f3ff2cdefe4-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:34,578] LMCache INFO:[0m Store 7500 tokens takes: 5.8864 ms, throughput: 155.5329 GB/s; offload_time: 1.1760 ms, put_time: 3.9187 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:34,579] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:34,820] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-3f64f2649df94a5ab44d60c462728ee4-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:34,826] LMCache INFO:[0m Store 7500 tokens takes: 6.1451 ms, throughput: 148.9842 GB/s; offload_time: 1.2228 ms, put_time: 4.0916 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:34,827] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:35,113] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-c61af295e05f4922b9f7cb959b3e0bdf-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:35,119] LMCache INFO:[0m Store 7500 tokens takes: 5.8878 ms, throughput: 155.4952 GB/s; offload_time: 1.1853 ms, put_time: 3.9365 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:35,121] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:35,368] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-2a09e89c636d482dbe06e133ea3729ad-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:35,375] LMCache INFO:[0m Store 7500 tokens takes: 6.2003 ms, throughput: 147.6586 GB/s; offload_time: 1.1948 ms, put_time: 4.2166 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:35,376] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:35,599] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-2926b767c98b4afb9a3d88fe574755b6-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:35,607] LMCache INFO:[0m Store 7500 tokens takes: 7.2338 ms, throughput: 126.5618 GB/s; offload_time: 1.2173 ms, put_time: 4.0174 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:35,609] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:35,888] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-db3b7652005b4b3dba7ac39f0af4f059-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:35,894] LMCache INFO:[0m Store 7500 tokens takes: 6.0589 ms, throughput: 151.1045 GB/s; offload_time: 1.1975 ms, put_time: 4.0425 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:35,895] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:36,194] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-72c2e2d389654fc1b6e11b12709e3d3e-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:36,200] LMCache INFO:[0m Store 7500 tokens takes: 5.8644 ms, throughput: 156.1151 GB/s; offload_time: 1.1897 ms, put_time: 3.9460 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:36,201] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:36,442] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-76b968a2e2844e8e9794773c9640d45c-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:36,449] LMCache INFO:[0m Store 7500 tokens takes: 5.9949 ms, throughput: 152.7185 GB/s; offload_time: 1.2304 ms, put_time: 4.0365 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:36,450] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:36,752] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-3f289a97d5624bda9e983059f9f93936-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:36,758] LMCache INFO:[0m Store 7500 tokens takes: 6.0513 ms, throughput: 151.2954 GB/s; offload_time: 1.2155 ms, put_time: 3.9998 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:36,759] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:37,038] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-ea8e067511fa4e2e8feef6d8e00c0578-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:37,044] LMCache INFO:[0m Store 7500 tokens takes: 6.0346 ms, throughput: 151.7134 GB/s; offload_time: 1.2335 ms, put_time: 3.9920 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:37,046] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:37,352] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-519ca5c295024b26ae0ad2f5054cc4fe-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:37,358] LMCache INFO:[0m Store 7500 tokens takes: 5.9658 ms, throughput: 153.4625 GB/s; offload_time: 1.2053 ms, put_time: 3.9665 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:37,359] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:37,615] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-971b7f72b1fc4914a01ae8235feaca3a-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:37,621] LMCache INFO:[0m Store 7500 tokens takes: 6.1429 ms, throughput: 149.0389 GB/s; offload_time: 1.2462 ms, put_time: 4.0727 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:37,623] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:37,934] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-026dafc819564551b2548d8654e0ac34-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:37,940] LMCache INFO:[0m Store 7500 tokens takes: 6.0779 ms, throughput: 150.6324 GB/s; offload_time: 1.2322 ms, put_time: 4.0281 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:37,942] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:38,208] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-f5d5536cddea41d5a77b1d3ba15481d5-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:38,214] LMCache INFO:[0m Store 7500 tokens takes: 5.9672 ms, throughput: 153.4271 GB/s; offload_time: 1.2142 ms, put_time: 3.9558 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:38,215] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:38,501] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-17c6ff7e6e8746e9901170e7cad2f810-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:38,507] LMCache INFO:[0m Store 7500 tokens takes: 5.8169 ms, throughput: 157.3901 GB/s; offload_time: 1.1824 ms, put_time: 3.9261 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:38,509] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:38,774] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-21cae96e0b78435aac05326a1d614e8a-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:38,780] LMCache INFO:[0m Store 7500 tokens takes: 6.5186 ms, throughput: 140.4487 GB/s; offload_time: 1.2644 ms, put_time: 4.3366 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:38,782] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:39,065] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-48c2ae84b8414dee87a5f87c6287721c-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:39,072] LMCache INFO:[0m Store 7500 tokens takes: 7.5203 ms, throughput: 121.7410 GB/s; offload_time: 1.2573 ms, put_time: 4.0875 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:39,074] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:39,291] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-47ec81f499434952ac7e283114d03794-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:39,298] LMCache INFO:[0m Store 7500 tokens takes: 6.1265 ms, throughput: 149.4382 GB/s; offload_time: 1.2406 ms, put_time: 4.1024 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:39,299] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:39,544] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-f9f8f1c4bd944aa4b445d9db66807d83-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:39,550] LMCache INFO:[0m Store 7500 tokens takes: 5.8811 ms, throughput: 155.6730 GB/s; offload_time: 1.1923 ms, put_time: 3.9518 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:39,551] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:39,846] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-9dbc3a2545b949bd89b30ff551780a26-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:39,852] LMCache INFO:[0m Store 7500 tokens takes: 5.9600 ms, throughput: 153.6126 GB/s; offload_time: 1.1971 ms, put_time: 3.9890 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:39,853] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:40,086] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-4017ad4c17e348aa8630fd075b3aa79a-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:40,092] LMCache INFO:[0m Store 7500 tokens takes: 5.9698 ms, throughput: 153.3602 GB/s; offload_time: 1.2458 ms, put_time: 3.9753 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:40,094] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:40,396] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-271513d6b7544fdeb0390742b0d917b9-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:40,403] LMCache INFO:[0m Store 7500 tokens takes: 6.6893 ms, throughput: 136.8644 GB/s; offload_time: 1.3581 ms, put_time: 4.1944 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:40,405] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:40,665] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-c18582f0ffb246fca0c92994c73ebec7-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:40,671] LMCache INFO:[0m Store 7500 tokens takes: 5.9491 ms, throughput: 153.8933 GB/s; offload_time: 1.1956 ms, put_time: 3.9889 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:40,673] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:40,942] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-600dde37f7af4805983d3f98adb30c4f-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:40,948] LMCache INFO:[0m Store 7500 tokens takes: 6.0533 ms, throughput: 151.2439 GB/s; offload_time: 1.2038 ms, put_time: 4.0562 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:40,949] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:41,226] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-9b363f9fee274e7eafd844dada31a2e6-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:41,232] LMCache INFO:[0m Store 7500 tokens takes: 5.9363 ms, throughput: 154.2244 GB/s; offload_time: 1.2103 ms, put_time: 3.9945 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:41,234] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:41,497] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-52efde2271224ad2a1d7a5ef5e2fdeb7-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:41,503] LMCache INFO:[0m Store 7500 tokens takes: 5.6451 ms, throughput: 162.1807 GB/s; offload_time: 1.1841 ms, put_time: 3.9222 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:41,504] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:41,786] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-432b806fcb5547a4982d4bacffb9f644-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:41,792] LMCache INFO:[0m Store 7500 tokens takes: 6.1202 ms, throughput: 149.5906 GB/s; offload_time: 1.2200 ms, put_time: 4.0998 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:41,794] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:42,068] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-3e538de0bfbc4c4dbf41c1c68de41778-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:42,074] LMCache INFO:[0m Store 7500 tokens takes: 5.9393 ms, throughput: 154.1472 GB/s; offload_time: 1.1942 ms, put_time: 3.9651 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:42,075] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO 06-02 17:53:42 [loggers.py:116] Engine 000: Avg prompt throughput: 26997.4 tokens/s, Avg generation throughput: 3.6 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.6%
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:42,354] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-da4db191cd18466baac680ee7a10ec66-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:42,362] LMCache INFO:[0m Store 7500 tokens takes: 7.8240 ms, throughput: 117.0146 GB/s; offload_time: 1.1994 ms, put_time: 3.9838 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:42,364] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:42,654] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-bbc578f58264477ea7871429180923a0-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:42,660] LMCache INFO:[0m Store 7500 tokens takes: 5.9527 ms, throughput: 153.7998 GB/s; offload_time: 1.1776 ms, put_time: 4.0258 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:42,661] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:42,921] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-5842b54f874b43a3a4f8b9432165d99c-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:42,927] LMCache INFO:[0m Store 7500 tokens takes: 5.9238 ms, throughput: 154.5509 GB/s; offload_time: 1.1890 ms, put_time: 3.9621 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:42,929] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:43,208] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-a0892a33a29b41e3be83ef6920e95d98-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:53390 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:43,215] LMCache INFO:[0m Store 7500 tokens takes: 6.5637 ms, throughput: 139.4844 GB/s; offload_time: 1.7958 ms, put_time: 3.9345 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[32;20m[2025-06-02 17:53:43,414] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-1791a2f950b041748c6b7282adb0e967-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:43,420] LMCache INFO:[0m Store 7500 tokens takes: 5.7310 ms, throughput: 159.7501 GB/s; offload_time: 1.1948 ms, put_time: 3.9619 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:43,422] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:43,658] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-5a71ae14433d4ccd957b2780406448e1-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:43,664] LMCache INFO:[0m Store 7500 tokens takes: 5.9544 ms, throughput: 153.7568 GB/s; offload_time: 1.2174 ms, put_time: 4.0051 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:43,666] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:43,938] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-172edc47b34e4b2caf8f968082670c40-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:43,945] LMCache INFO:[0m Store 7500 tokens takes: 6.0064 ms, throughput: 152.4248 GB/s; offload_time: 1.2308 ms, put_time: 3.9953 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:43,946] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:44,187] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-1ca22fe027cf41d793a77fd5427741e6-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:44,193] LMCache INFO:[0m Store 7500 tokens takes: 5.9239 ms, throughput: 154.5488 GB/s; offload_time: 1.2235 ms, put_time: 3.9644 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:44,194] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:44,506] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-f27479908a004c819d9b4bcffac43c81-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:44,512] LMCache INFO:[0m Store 7500 tokens takes: 5.9240 ms, throughput: 154.5448 GB/s; offload_time: 1.2178 ms, put_time: 3.9596 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:44,514] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:44,821] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-861ffaaba96448d282d38933dbaec81f-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:44,827] LMCache INFO:[0m Store 7500 tokens takes: 6.3416 ms, throughput: 144.3679 GB/s; offload_time: 1.2102 ms, put_time: 4.2665 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:44,829] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:45,110] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-81e80531bb4c430f89821daa13ccf2a3-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:45,117] LMCache INFO:[0m Store 7500 tokens takes: 5.9444 ms, throughput: 154.0160 GB/s; offload_time: 1.2212 ms, put_time: 3.9890 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:45,118] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:45,399] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-3369c2b484864f688d7e84d6793dbad8-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:45,406] LMCache INFO:[0m Store 7500 tokens takes: 6.1428 ms, throughput: 149.0419 GB/s; offload_time: 1.2201 ms, put_time: 4.0758 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:45,407] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:45,657] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-d33a45ff857445be907f48b474b545ef-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:45,664] LMCache INFO:[0m Store 7500 tokens takes: 7.0608 ms, throughput: 129.6643 GB/s; offload_time: 1.2046 ms, put_time: 4.0326 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:45,665] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:45,954] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-940ce3c507e641be9774e573cbdf4f68-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:45,960] LMCache INFO:[0m Store 7500 tokens takes: 6.1490 ms, throughput: 148.8903 GB/s; offload_time: 1.2435 ms, put_time: 4.0705 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:45,962] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:46,218] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-e2a58631c97b4af8b045127163fa63ae-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:46,224] LMCache INFO:[0m Store 7500 tokens takes: 6.0502 ms, throughput: 151.3227 GB/s; offload_time: 1.2112 ms, put_time: 4.0761 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:46,226] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:46,485] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-120fd98393c343cb95172c15610bba16-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:46,492] LMCache INFO:[0m Store 7500 tokens takes: 6.1827 ms, throughput: 148.0796 GB/s; offload_time: 1.2545 ms, put_time: 4.0803 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:46,493] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:46,786] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-f96b9e677f834c26af5d84c9fa6ae274-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:46,792] LMCache INFO:[0m Store 7500 tokens takes: 5.9978 ms, throughput: 152.6435 GB/s; offload_time: 1.2269 ms, put_time: 4.0073 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:46,793] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:47,014] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-31fdbfab1e19456e8f5e3fd6a5889e7a-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:47,020] LMCache INFO:[0m Store 7500 tokens takes: 6.2226 ms, throughput: 147.1298 GB/s; offload_time: 1.2103 ms, put_time: 4.1207 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:47,022] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:53390 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:47,237] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-2b7fb09173a546679ca75d7a4d2e077c-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:47,243] LMCache INFO:[0m Store 7500 tokens takes: 5.7988 ms, throughput: 157.8834 GB/s; offload_time: 1.1855 ms, put_time: 3.9135 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:47,244] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:47,507] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-d7c2bf08416443aab792366d60d13330-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:47,513] LMCache INFO:[0m Store 7500 tokens takes: 5.7963 ms, throughput: 157.9499 GB/s; offload_time: 1.1748 ms, put_time: 3.9287 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:47,514] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:47,763] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-a4a7077c67074babbfa84dd3f218ecab-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:47,770] LMCache INFO:[0m Store 7500 tokens takes: 5.9597 ms, throughput: 153.6200 GB/s; offload_time: 1.2009 ms, put_time: 3.9899 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:47,771] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:48,076] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-a65f6d01246b4fdeb55d2e4d71917063-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:48,083] LMCache INFO:[0m Store 7500 tokens takes: 5.8715 ms, throughput: 155.9278 GB/s; offload_time: 1.1863 ms, put_time: 3.9526 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:48,084] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:48,345] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-fd0e25f805bb4a3bb632deb4921ee6da-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:48,351] LMCache INFO:[0m Store 7500 tokens takes: 6.0071 ms, throughput: 152.4071 GB/s; offload_time: 1.2054 ms, put_time: 4.0224 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:48,353] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:48,656] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-86a8e047c27142bdaee493297ba09839-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:48,662] LMCache INFO:[0m Store 7500 tokens takes: 5.9957 ms, throughput: 152.6982 GB/s; offload_time: 1.1969 ms, put_time: 4.0009 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:48,664] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:48,999] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-935701a28cf14292b5a606d7b5074c38-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:49,006] LMCache INFO:[0m Store 7500 tokens takes: 7.4651 ms, throughput: 122.6412 GB/s; offload_time: 1.2112 ms, put_time: 4.0554 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:49,008] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:49,307] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-8daf3057f87a40c28a1008592e671c4f-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:49,313] LMCache INFO:[0m Store 7500 tokens takes: 6.2205 ms, throughput: 147.1780 GB/s; offload_time: 1.2465 ms, put_time: 4.1818 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:49,315] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:49,636] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-711e28f1b1f14d169e5f58fdf96dc0d1-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:49,642] LMCache INFO:[0m Store 7500 tokens takes: 6.0546 ms, throughput: 151.2113 GB/s; offload_time: 1.2180 ms, put_time: 4.0122 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:49,643] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:49,883] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-024a5cdcb5c24a4b90634cd766cebacc-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:49,890] LMCache INFO:[0m Store 7500 tokens takes: 6.2996 ms, throughput: 145.3300 GB/s; offload_time: 1.2357 ms, put_time: 4.2436 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:49,891] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:50,132] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-b9f96e29d8034c94abd62ca4ab763888-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:50,138] LMCache INFO:[0m Store 7500 tokens takes: 6.1525 ms, throughput: 148.8058 GB/s; offload_time: 1.1996 ms, put_time: 4.0788 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:50,141] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:50,446] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-4d5da137f08c41dca716582d2d490acf-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:50,453] LMCache INFO:[0m Store 7500 tokens takes: 6.2291 ms, throughput: 146.9760 GB/s; offload_time: 1.2526 ms, put_time: 4.1483 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:50,454] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:50,710] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-1c8b5bd1a75443039028f8b1399aeb91-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:50,717] LMCache INFO:[0m Store 7500 tokens takes: 6.0276 ms, throughput: 151.8885 GB/s; offload_time: 1.2666 ms, put_time: 3.9910 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:50,718] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:51,030] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-f8d8f0c03dfd4cf19b49e0a723e3c999-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:51,036] LMCache INFO:[0m Store 7500 tokens takes: 6.1961 ms, throughput: 147.7598 GB/s; offload_time: 1.2130 ms, put_time: 4.1251 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:51,038] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:51,269] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-9d831d3bfde44ea9ae79fca7219d10a4-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:51,275] LMCache INFO:[0m Store 7500 tokens takes: 5.9247 ms, throughput: 154.5277 GB/s; offload_time: 1.1784 ms, put_time: 4.0539 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:51,276] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:45414 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:51,556] LMCache INFO:[0m Storing KV cache for 7500 out of 7500 tokens (skip_leading_tokens=0) for request cmpl-b93c15ed8e8849f383054f50d5f1437d-0 [3m(vllm_v1_adapter.py:688:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[32;20m[2025-06-02 17:53:51,563] LMCache INFO:[0m Store 7500 tokens takes: 6.1015 ms, throughput: 150.0503 GB/s; offload_time: 1.1994 ms, put_time: 4.2486 ms [3m(cache_engine.py:214:lmcache.v1.cache_engine)[0m
+[33;20m[2025-06-02 17:53:51,565] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO 06-02 17:53:52 [loggers.py:116] Engine 000: Avg prompt throughput: 25499.3 tokens/s, Avg generation throughput: 3.4 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.5%

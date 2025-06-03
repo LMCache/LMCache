@@ -1,0 +1,283 @@
+INFO:     Started server process [869886]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://localhost:9000 (Press CTRL+C to quit)
+INFO:     127.0.0.1:60244 - "GET /v1/completions HTTP/1.1" 405 Method Not Allowed
+=============================== 
+Num requests: 1
+Prefill node TTFT stats:
+ - Average (ms): 1.0865764617919922
+ - Median (ms): 1.0865764617919922
+ - 99th Percentile (ms): 1.0865764617919922
+ ===============================
+INFO:     127.0.0.1:59000 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59008 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59014 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59022 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59028 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59030 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59032 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60652 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60660 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60676 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60690 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60702 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60704 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60712 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60726 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60728 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60738 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60744 - "POST /v1/completions HTTP/1.1" 200 OK
+=============================== 
+Num requests: 19
+Prefill node TTFT stats:
+ - Average (ms): 0.26201243149606807
+ - Median (ms): 0.2250378131866455
+ - 99th Percentile (ms): 0.9326943969726564
+ ===============================
+INFO:     127.0.0.1:60748 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60762 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60770 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60786 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60800 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60812 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60818 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60820 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60828 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60830 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60842 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60850 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60866 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60880 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60890 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60898 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60914 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60926 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60930 - "POST /v1/completions HTTP/1.1" 200 OK
+=============================== 
+Num requests: 38
+Prefill node TTFT stats:
+ - Average (ms): 0.24294590322594894
+ - Median (ms): 0.22449922561645508
+ - 99th Percentile (ms): 0.7707683587074301
+ ===============================
+INFO:     127.0.0.1:60946 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60948 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60950 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60964 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60972 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60980 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58404 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58408 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58424 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58438 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58452 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58468 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58478 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58488 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58498 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58512 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58524 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58536 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58552 - "POST /v1/completions HTTP/1.1" 200 OK
+=============================== 
+Num requests: 57
+Prefill node TTFT stats:
+ - Average (ms): 0.2374699032097532
+ - Median (ms): 0.22485136985778809
+ - 99th Percentile (ms): 0.6132625579833966
+ ===============================
+INFO:     127.0.0.1:58560 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58572 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58578 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58580 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58596 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58600 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58608 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58622 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58626 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58642 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58656 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58670 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58682 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58688 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58702 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58706 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58718 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58732 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58736 - "POST /v1/completions HTTP/1.1" 200 OK
+=============================== 
+Num requests: 76
+Prefill node TTFT stats:
+ - Average (ms): 0.23458662785981832
+ - Median (ms): 0.22497975826263428
+ - 99th Percentile (ms): 0.45267391204833984
+ ===============================
+INFO:     127.0.0.1:58748 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58754 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58764 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58772 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58778 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54760 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54766 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54774 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54790 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54796 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54800 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54804 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54818 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54828 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54842 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54848 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54854 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54856 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54864 - "POST /v1/completions HTTP/1.1" 200 OK
+=============================== 
+Num requests: 95
+Prefill node TTFT stats:
+ - Average (ms): 0.23328640335484555
+ - Median (ms): 0.225264310836792
+ - 99th Percentile (ms): 0.29208526611328317
+ ===============================
+INFO:     127.0.0.1:54874 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54886 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54892 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54904 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54916 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54930 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54946 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54962 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54966 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54970 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54982 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54984 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54992 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55002 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55016 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55026 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55030 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55046 - "POST /v1/completions HTTP/1.1" 200 OK
+=============================== 
+Num requests: 113
+Prefill node TTFT stats:
+ - Average (ms): 0.23219366200202335
+ - Median (ms): 0.2254467010498047
+ - 99th Percentile (ms): 0.2404279232025146
+ ===============================
+INFO:     127.0.0.1:55052 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55068 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55078 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51896 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51912 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51914 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51924 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51932 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51948 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51958 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51960 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51970 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51982 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51998 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52014 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52026 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52040 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52044 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52048 - "POST /v1/completions HTTP/1.1" 200 OK
+=============================== 
+Num requests: 132
+Prefill node TTFT stats:
+ - Average (ms): 0.23138697400237573
+ - Median (ms): 0.22545456886291504
+ - 99th Percentile (ms): 0.2395912456512451
+ ===============================
+INFO:     127.0.0.1:52058 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52062 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52064 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52072 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52088 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52104 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52120 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52132 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52144 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52158 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52162 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52164 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52176 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52192 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52206 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52218 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52224 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52232 - "POST /v1/completions HTTP/1.1" 200 OK
+=============================== 
+Num requests: 150
+Prefill node TTFT stats:
+ - Average (ms): 0.23484023412068686
+ - Median (ms): 0.22564435005187988
+ - 99th Percentile (ms): 0.4571628212928764
+ ===============================
+INFO:     127.0.0.1:52242 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52254 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:40954 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:40956 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:40960 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:40970 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:40980 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:40984 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:40990 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:40994 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:41004 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:41016 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:41018 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:41024 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:41030 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:41032 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:41042 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:41054 - "POST /v1/completions HTTP/1.1" 200 OK
+=============================== 
+Num requests: 168
+Prefill node TTFT stats:
+ - Average (ms): 0.23403958053815932
+ - Median (ms): 0.22590315341949463
+ - 99th Percentile (ms): 0.44134701490402334
+ ===============================
+INFO:     127.0.0.1:41058 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:41070 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:41074 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:41076 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:41088 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:41094 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:41104 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:41110 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:41126 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:41142 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:41152 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:41164 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:41170 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:41186 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:41188 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:41202 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:41214 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:41228 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:41230 - "POST /v1/completions HTTP/1.1" 200 OK
+=============================== 
+Num requests: 187
+Prefill node TTFT stats:
+ - Average (ms): 0.2334427999302665
+ - Median (ms): 0.22617125511169434
+ - 99th Percentile (ms): 0.4246525526046741
+ ===============================
+INFO:     127.0.0.1:41244 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:41248 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56788 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56790 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56792 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56806 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56818 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56824 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56840 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56856 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56860 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56862 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56866 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56880 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56896 - "POST /v1/completions HTTP/1.1" 200 OK

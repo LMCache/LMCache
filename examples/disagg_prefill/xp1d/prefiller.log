@@ -1,0 +1,2 @@
+Using default model: meta-llama/Llama-3.1-8B-Instruct
+INFO 06-02 17:49:04 [__init__.py:243] Automatically detected platform cuda.

@@ -1,0 +1,498 @@
+Using default model: meta-llama/Llama-3.1-8B-Instruct
+INFO 06-02 17:49:42 [__init__.py:243] Automatically detected platform cuda.
+INFO 06-02 17:49:46 [__init__.py:31] Available plugins for group vllm.general_plugins:
+INFO 06-02 17:49:46 [__init__.py:33] - lora_filesystem_resolver -> vllm.plugins.lora_resolvers.filesystem_resolver:register_filesystem_resolver
+INFO 06-02 17:49:46 [__init__.py:36] All plugins in this group will be loaded. Set `VLLM_PLUGINS` to control which plugins to load.
+INFO 06-02 17:49:48 [api_server.py:1289] vLLM API server version 0.9.0.1
+INFO 06-02 17:49:49 [cli_args.py:300] non-default args: {'port': 8200, 'enforce_eager': True, 'kv_transfer_config': KVTransferConfig(kv_connector='LMCacheConnectorV1', engine_id='b9583e16-3a59-4858-acaf-9e85f351ef83', kv_buffer_device='cuda', kv_buffer_size=1000000000.0, kv_role='kv_consumer', kv_rank=None, kv_parallel_size=1, kv_ip='127.0.0.1', kv_port=14579, kv_connector_extra_config={'discard_partial_chunks': False, 'lmcache_rpc_port': 'consumer1'}, kv_connector_module_path=None), 'disable_log_requests': True}
+INFO 06-02 17:49:59 [config.py:793] This model supports multiple tasks: {'generate', 'classify', 'reward', 'score', 'embed'}. Defaulting to 'generate'.
+INFO 06-02 17:49:59 [config.py:2118] Chunked prefill is enabled with max_num_batched_tokens=8192.
+WARNING 06-02 17:49:59 [cuda.py:87] To see benefits of async output processing, enable CUDA graph. Since, enforce-eager is enabled, async output processor cannot be used
+INFO 06-02 17:50:02 [__init__.py:243] Automatically detected platform cuda.
+INFO 06-02 17:50:07 [core.py:438] Waiting for init message from front-end.
+INFO 06-02 17:50:07 [__init__.py:31] Available plugins for group vllm.general_plugins:
+INFO 06-02 17:50:07 [__init__.py:33] - lora_filesystem_resolver -> vllm.plugins.lora_resolvers.filesystem_resolver:register_filesystem_resolver
+INFO 06-02 17:50:07 [__init__.py:36] All plugins in this group will be loaded. Set `VLLM_PLUGINS` to control which plugins to load.
+INFO 06-02 17:50:07 [core.py:65] Initializing a V1 LLM engine (v0.9.0.1) with config: model='meta-llama/Llama-3.1-8B-Instruct', speculative_config=None, tokenizer='meta-llama/Llama-3.1-8B-Instruct', skip_tokenizer_init=False, tokenizer_mode=auto, revision=None, override_neuron_config={}, tokenizer_revision=None, trust_remote_code=False, dtype=torch.bfloat16, max_seq_len=131072, download_dir=None, load_format=auto, tensor_parallel_size=1, pipeline_parallel_size=1, disable_custom_all_reduce=False, quantization=None, enforce_eager=True, kv_cache_dtype=auto,  device_config=cuda, decoding_config=DecodingConfig(backend='auto', disable_fallback=False, disable_any_whitespace=False, disable_additional_properties=False, reasoning_backend=''), observability_config=ObservabilityConfig(show_hidden_metrics_for_version=None, otlp_traces_endpoint=None, collect_detailed_traces=None), seed=0, served_model_name=meta-llama/Llama-3.1-8B-Instruct, num_scheduler_steps=1, multi_step_stream_outputs=True, enable_prefix_caching=True, chunked_prefill_enabled=True, use_async_output_proc=False, pooler_config=None, compilation_config={"compile_sizes": [], "inductor_compile_config": {"enable_auto_functionalized_v2": false}, "cudagraph_capture_sizes": [], "max_capture_size": 0}
+WARNING 06-02 17:50:07 [utils.py:2671] Methods determine_num_available_blocks,device_config,get_cache_block_size_bytes,initialize_cache not implemented in <vllm.v1.worker.gpu_worker.Worker object at 0x7fcd03a56590>
+INFO 06-02 17:50:11 [parallel_state.py:1064] rank 0 in world size 1 is assigned as DP rank 0, PP rank 0, TP rank 0, EP rank 0
+INFO 06-02 17:50:11 [factory.py:73] Creating v1 connector with name: LMCacheConnectorV1
+WARNING 06-02 17:50:11 [base.py:61] Initializing KVConnectorBase_V1. This API is experimental and subject to change in the future as we iterate the design.
+[32;20m[2025-06-02 17:50:11,401] LMCache INFO:[0m Loading LMCache config file /home/yihua/temp-test/LMCache/examples/disagg_prefill/1p1d/configs/lmcache-decoder-config.yaml [3m(utils.py:64:lmcache.integration.vllm.utils)[0m
+[33;20m[2025-06-02 17:50:11,402] LMCache WARNING:[0m nixl_peer_host is deprecated, please use nixl_receiver_host in the config file instead [3m(config.py:294:lmcache.v1.config)[0m
+[33;20m[2025-06-02 17:50:11,402] LMCache WARNING:[0m nixl_peer_port is deprecated, please use nixl_receiver_port in the config file instead [3m(config.py:302:lmcache.v1.config)[0m
+[32;20m[2025-06-02 17:50:11,402] LMCache INFO:[0m LMCache Configuration: {'chunk_size': 256, 'local_cpu': False, 'max_local_cpu_size': '0 GB', 'local_disk': None, 'max_local_disk_size': '0 GB', 'remote_url': None, 'remote_serde': None, 'save_decode_cache': False, 'enable_blending': False, 'blend_recompute_ratio': 0.15, 'blend_min_tokens': 256, 'enable_p2p': False, 'lookup_url': None, 'distributed_url': None, 'error_handling': False, 'enable_controller': False, 'lmcache_instance_id': 'lmcache_default_instance', 'enable_nixl': True, 'nixl_role': 'receiver', 'nixl_receiver_host': 'localhost', 'nixl_receiver_port': 55555, 'nixl_buffer_size': 1073741824, 'nixl_buffer_device': 'cuda', 'nixl_enable_gc': True} [3m(config.py:579:lmcache.v1.config)[0m
+[32;20m[2025-06-02 17:50:11,403] LMCache INFO:[0m Creating LMCacheEngine instance vllm-instance [3m(cache_engine.py:783:lmcache.v1.cache_engine)[0m
+[32;20m[2025-06-02 17:50:11,403] LMCache INFO:[0m Creating LMCacheEngine with config: LMCacheEngineConfig(chunk_size=256, local_cpu=False, max_local_cpu_size=0, local_disk=None, max_local_disk_size=0, remote_url=None, remote_serde=None, save_decode_cache=False, enable_blending=False, blend_recompute_ratio=0.15, blend_min_tokens=256, blend_special_str=' # # ', enable_p2p=False, lookup_url=None, distributed_url=None, error_handling=False, enable_controller=False, lmcache_instance_id='lmcache_default_instance', controller_url=None, lmcache_worker_port=None, enable_nixl=True, nixl_role='receiver', nixl_receiver_host='localhost', nixl_receiver_port=55555, nixl_buffer_size=1073741824, nixl_buffer_device='cuda', nixl_enable_gc=True, audit_actual_remote_url=None) [3m(cache_engine.py:86:lmcache.v1.cache_engine)[0m
+[32;20m[2025-06-02 17:50:11,409] LMCache INFO:[0m Initializing usage context. [3m(usage_context.py:274:lmcache.usage_context)[0m
+[32;20m[2025-06-02 17:50:11,533] LMCache INFO:[0m Initializing NixlPipe for sender: sender-8aa5f5b6d9044801993c205e1c782494 [3m(nixl_connector_v2.py:675:lmcache.v1.storage_backend.connector.nixl_connector_v2)[0m
+[32;20m[2025-06-02 17:50:12,103] LMCache INFO:[0m Sent local transfer descriptors to sender [3m(nixl_connector_v2.py:270:lmcache.v1.storage_backend.connector.nixl_connector_v2)[0m
+[32;20m[2025-06-02 17:50:12,103] LMCache INFO:[0m NixlPipe initialized successfully for sender: sender-8aa5f5b6d9044801993c205e1c782494 [3m(nixl_connector_v2.py:686:lmcache.v1.storage_backend.connector.nixl_connector_v2)[0m
+[32;20m[2025-06-02 17:50:12,103] LMCache INFO:[0m New sender connected with ID: sender-8aa5f5b6d9044801993c205e1c782494 [3m(nixl_connector_v2.py:760:lmcache.v1.storage_backend.connector.nixl_connector_v2)[0m
+Backend UCX was instantiated
+Initialized NIXL agent: NixlRole.RECEIVERcuda:0
+WARNING 06-02 17:50:13 [topk_topp_sampler.py:58] FlashInfer is not available. Falling back to the PyTorch-native implementation of top-p & top-k sampling. For the best performance, please install FlashInfer.
+INFO 06-02 17:50:13 [gpu_model_runner.py:1531] Starting to load model meta-llama/Llama-3.1-8B-Instruct...
+INFO 06-02 17:50:13 [cuda.py:217] Using Flash Attention backend on V1 engine.
+INFO 06-02 17:50:14 [weight_utils.py:291] Using model weights format ['*.safetensors']
+Loading safetensors checkpoint shards:   0% Completed | 0/4 [00:00<?, ?it/s]
+Loading safetensors checkpoint shards:  25% Completed | 1/4 [00:00<00:02,  1.13it/s]
+Loading safetensors checkpoint shards:  50% Completed | 2/4 [00:01<00:01,  1.05it/s]
+Loading safetensors checkpoint shards:  75% Completed | 3/4 [00:02<00:00,  1.02it/s]
+Loading safetensors checkpoint shards: 100% Completed | 4/4 [00:03<00:00,  1.36it/s]
+Loading safetensors checkpoint shards: 100% Completed | 4/4 [00:03<00:00,  1.23it/s]
+
+INFO 06-02 17:50:17 [default_loader.py:280] Loading weights took 3.29 seconds
+INFO 06-02 17:50:17 [gpu_model_runner.py:1549] Model loading took 14.9889 GiB and 4.294201 seconds
+INFO 06-02 17:50:18 [kv_cache_utils.py:637] GPU KV cache size: 406,768 tokens
+INFO 06-02 17:50:18 [kv_cache_utils.py:640] Maximum concurrency for 131,072 tokens per request: 3.10x
+INFO 06-02 17:50:18 [core.py:167] init engine (profile, create kv cache, warmup model) took 0.82 seconds
+INFO 06-02 17:50:19 [factory.py:73] Creating v1 connector with name: LMCacheConnectorV1
+WARNING 06-02 17:50:19 [base.py:61] Initializing KVConnectorBase_V1. This API is experimental and subject to change in the future as we iterate the design.
+INFO 06-02 17:50:19 [loggers.py:134] vllm cache_config_info with initialization after num_gpu_blocks is: 25423
+WARNING 06-02 17:50:19 [config.py:1339] Default sampling parameters have been overridden by the model's Hugging Face generation config recommended from the model creator. If this is not intended, please relaunch vLLM instance with `--generation-config vllm`.
+INFO 06-02 17:50:19 [serving_chat.py:117] Using default chat sampling params from model: {'temperature': 0.6, 'top_p': 0.9}
+INFO 06-02 17:50:19 [serving_completion.py:65] Using default completion sampling params from model: {'temperature': 0.6, 'top_p': 0.9}
+INFO 06-02 17:50:19 [api_server.py:1336] Starting vLLM API server on http://0.0.0.0:8200
+INFO 06-02 17:50:19 [launcher.py:28] Available routes are:
+INFO 06-02 17:50:19 [launcher.py:36] Route: /openapi.json, Methods: GET, HEAD
+INFO 06-02 17:50:19 [launcher.py:36] Route: /docs, Methods: GET, HEAD
+INFO 06-02 17:50:19 [launcher.py:36] Route: /docs/oauth2-redirect, Methods: GET, HEAD
+INFO 06-02 17:50:19 [launcher.py:36] Route: /redoc, Methods: GET, HEAD
+INFO 06-02 17:50:19 [launcher.py:36] Route: /health, Methods: GET
+INFO 06-02 17:50:19 [launcher.py:36] Route: /load, Methods: GET
+INFO 06-02 17:50:19 [launcher.py:36] Route: /ping, Methods: POST
+INFO 06-02 17:50:19 [launcher.py:36] Route: /ping, Methods: GET
+INFO 06-02 17:50:19 [launcher.py:36] Route: /tokenize, Methods: POST
+INFO 06-02 17:50:19 [launcher.py:36] Route: /detokenize, Methods: POST
+INFO 06-02 17:50:19 [launcher.py:36] Route: /v1/models, Methods: GET
+INFO 06-02 17:50:19 [launcher.py:36] Route: /version, Methods: GET
+INFO 06-02 17:50:19 [launcher.py:36] Route: /v1/chat/completions, Methods: POST
+INFO 06-02 17:50:19 [launcher.py:36] Route: /v1/completions, Methods: POST
+INFO 06-02 17:50:19 [launcher.py:36] Route: /v1/embeddings, Methods: POST
+INFO 06-02 17:50:19 [launcher.py:36] Route: /pooling, Methods: POST
+INFO 06-02 17:50:19 [launcher.py:36] Route: /classify, Methods: POST
+INFO 06-02 17:50:19 [launcher.py:36] Route: /score, Methods: POST
+INFO 06-02 17:50:19 [launcher.py:36] Route: /v1/score, Methods: POST
+INFO 06-02 17:50:19 [launcher.py:36] Route: /v1/audio/transcriptions, Methods: POST
+INFO 06-02 17:50:19 [launcher.py:36] Route: /rerank, Methods: POST
+INFO 06-02 17:50:19 [launcher.py:36] Route: /v1/rerank, Methods: POST
+INFO 06-02 17:50:19 [launcher.py:36] Route: /v2/rerank, Methods: POST
+INFO 06-02 17:50:19 [launcher.py:36] Route: /invocations, Methods: POST
+INFO 06-02 17:50:19 [launcher.py:36] Route: /metrics, Methods: GET
+INFO:     Started server process [869899]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     127.0.0.1:57402 - "GET /v1/completions HTTP/1.1" 405 Method Not Allowed
+INFO:     127.0.0.1:54062 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:52:56,002] LMCache INFO:[0m Reqid: cmpl-8ac5edb186234c3a9c75a3d096fa56a3-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[33;20m[2025-06-02 17:52:56,120] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:54062 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:52:56,208] LMCache INFO:[0m Reqid: cmpl-49592ab46d9c474ca9418a49234d748b-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 11 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[33;20m[2025-06-02 17:52:56,280] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:54062 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:52:56,660] LMCache INFO:[0m Reqid: cmpl-b8b6f40bf5784a0c898f9e71dd528696-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:54074 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:52:56,918] LMCache INFO:[0m Reqid: cmpl-3d0acb93973e4d0587ffce545a3a7b7f-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:54076 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:52:57,191] LMCache INFO:[0m Reqid: cmpl-62af09bdf2f14b2eae842e4dc1e33a6b-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:54082 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:52:57,444] LMCache INFO:[0m Reqid: cmpl-db0a936be3264559ab2432538e0d029c-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:38970 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:52:57,733] LMCache INFO:[0m Reqid: cmpl-ed89cd23e5b74e3bacdf88a6ef441b99-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:38980 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:52:58,028] LMCache INFO:[0m Reqid: cmpl-cd09c035f4d846bc917a292fb5c38569-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:38986 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:52:58,268] LMCache INFO:[0m Reqid: cmpl-c5f9954be0554a7baad7a7a6bf625ca6-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:39002 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:52:58,572] LMCache INFO:[0m Reqid: cmpl-58f519cec72848d8bdea2c48a357de25-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:54062 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:52:58,813] LMCache INFO:[0m Reqid: cmpl-46ee1bef3abc4bf19a3736d4f283bcef-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:54074 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:52:59,076] LMCache INFO:[0m Reqid: cmpl-4a6ce3ea32dd42c29ab9ad498ddf5a04-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:54076 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:52:59,396] LMCache INFO:[0m Reqid: cmpl-d66fdaa565b642a8a08e647288ed6c4f-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:54082 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:52:59,702] LMCache INFO:[0m Reqid: cmpl-01fe4700a9774d739f36a3c890c75c11-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO 06-02 17:52:59 [loggers.py:116] Engine 000: Avg prompt throughput: 10499.5 tokens/s, Avg generation throughput: 158.3 tokens/s, Running: 8 reqs, Waiting: 0 reqs, GPU KV cache usage: 15.0%, Prefix cache hit rate: 7.1%
+INFO:     127.0.0.1:38970 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:52:59,995] LMCache INFO:[0m Reqid: cmpl-64b738e7681d42feb4de0495951ef7b4-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:38970 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:00,282] LMCache INFO:[0m Reqid: cmpl-bee33e4b0ecd4df8bf03761092c80b91-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:38980 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:00,513] LMCache INFO:[0m Reqid: cmpl-27d5644e7ca147d3b487104ac20075a6-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:38986 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:00,851] LMCache INFO:[0m Reqid: cmpl-d7e829c957a14a2f93b5495dbf58c624-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:54062 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:01,125] LMCache INFO:[0m Reqid: cmpl-5fcb5b96ceb24b8f86ecc055b9e5c136-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:54074 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:01,417] LMCache INFO:[0m Reqid: cmpl-f1469545200c4aa1930d7287741ebee7-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:54076 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:01,732] LMCache INFO:[0m Reqid: cmpl-9b19094276af4a15b0c1be53bdc9ad7e-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:54082 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:01,985] LMCache INFO:[0m Reqid: cmpl-f9c1529ccdd24101870101e5523874b2-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:38986 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:02,281] LMCache INFO:[0m Reqid: cmpl-3fabf40fd98341b9b5b773a91060cdea-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:38970 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:02,502] LMCache INFO:[0m Reqid: cmpl-88d8cb0657d54571af01596903b3720c-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:38980 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:02,732] LMCache INFO:[0m Reqid: cmpl-92b50827dd094f229e5b76248ce7843f-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:39002 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:02,993] LMCache INFO:[0m Reqid: cmpl-31c5e1598e08497696613a4da0924a53-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:39008 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:03,292] LMCache INFO:[0m Reqid: cmpl-d167b7e2c461453aa15e928c9ef735c7-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:54062 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:03,595] LMCache INFO:[0m Reqid: cmpl-c3b60b2246cc49b280253f29e78b77f5-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:54074 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:03,910] LMCache INFO:[0m Reqid: cmpl-044daf595007499dace0b50bf4b48f5c-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:54076 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:04,168] LMCache INFO:[0m Reqid: cmpl-a2da08b2eb4f43978935fa35e8e93f22-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:54082 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:04,407] LMCache INFO:[0m Reqid: cmpl-2d138af52cb8488c89b4cd9b8f9724d9-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:38986 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:04,694] LMCache INFO:[0m Reqid: cmpl-cf53be176ae3457a9e160e1584943c8f-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:38970 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:04,945] LMCache INFO:[0m Reqid: cmpl-96b7c54b2e3149af9e6a0d0eaf026acc-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:38980 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:05,226] LMCache INFO:[0m Reqid: cmpl-bd93c8b4ba5d413fa033b3f29d91b0f5-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:39002 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:05,495] LMCache INFO:[0m Reqid: cmpl-e93a73790a7343a09162d8a51d63f747-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:39008 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:05,768] LMCache INFO:[0m Reqid: cmpl-46f13b439f1840539d559889b5c5342c-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:54062 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:06,085] LMCache INFO:[0m Reqid: cmpl-c11bad8ed3a042b091fd19d9c575b3ab-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:54074 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:06,360] LMCache INFO:[0m Reqid: cmpl-41029186dd914de6af5931a9d33b2565-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:54076 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:06,624] LMCache INFO:[0m Reqid: cmpl-31feab5216ea44f8bc19df8256d8bf0a-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:54082 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:06,938] LMCache INFO:[0m Reqid: cmpl-63709ad16f7644f0a1734b9b44fce06b-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:38986 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:07,213] LMCache INFO:[0m Reqid: cmpl-2031ba860f18441382f37955f58916da-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:38970 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:07,502] LMCache INFO:[0m Reqid: cmpl-6511c2bdde9d44759d51f6913afedffa-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:38980 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:07,782] LMCache INFO:[0m Reqid: cmpl-1a7739fa20a6416d825368fb810296b1-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:39002 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:08,038] LMCache INFO:[0m Reqid: cmpl-46c3a85b0f5b49a7885bdb59cc2034aa-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:39008 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:08,293] LMCache INFO:[0m Reqid: cmpl-0eed1612d6724256ab2b9a2e370fc73b-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:54062 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:08,594] LMCache INFO:[0m Reqid: cmpl-fd6c76f4811c47c1933da3e6eb517e67-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:54074 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:08,840] LMCache INFO:[0m Reqid: cmpl-be38eb434d0845bc8d5d4837877bb180-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:54076 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:09,120] LMCache INFO:[0m Reqid: cmpl-65f38d21c6274f28955ac92186ec5ee8-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:54082 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:09,349] LMCache INFO:[0m Reqid: cmpl-03ba1ebbe91545d487a16cd5cf07fbba-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:38986 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:09,625] LMCache INFO:[0m Reqid: cmpl-7cb1c60d0a514798bb152fcabd216de6-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO 06-02 17:53:09 [loggers.py:116] Engine 000: Avg prompt throughput: 26997.3 tokens/s, Avg generation throughput: 677.3 tokens/s, Running: 8 reqs, Waiting: 0 reqs, GPU KV cache usage: 15.0%, Prefix cache hit rate: 2.0%
+INFO:     127.0.0.1:38970 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:09,957] LMCache INFO:[0m Reqid: cmpl-cf0c67a485d44185ba4014204099202c-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:38970 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:10,216] LMCache INFO:[0m Reqid: cmpl-3070167d6f0e468d88624d69c8853dfe-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:38980 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:10,490] LMCache INFO:[0m Reqid: cmpl-fe2d7f955d224eff853573f4003bf2b9-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:38980 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:10,753] LMCache INFO:[0m Reqid: cmpl-afabb0aad08e45f787e540fbaa38e92e-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:54062 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:11,047] LMCache INFO:[0m Reqid: cmpl-0d112ff5e7b64dcbab470259b65758f7-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:54074 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:11,342] LMCache INFO:[0m Reqid: cmpl-1fffc1040a1148de9fd27cb3eb2d2840-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:54076 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:11,598] LMCache INFO:[0m Reqid: cmpl-6d7857691b6a46fb8f61656b3bdae7b4-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:54082 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:11,877] LMCache INFO:[0m Reqid: cmpl-e13f2ba5ffdf48f381f49bb44e574042-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:38986 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:12,180] LMCache INFO:[0m Reqid: cmpl-c0d982bd3998490ca521cc3ec7beeb48-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:38970 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:12,478] LMCache INFO:[0m Reqid: cmpl-6def477e36b147e19b7ddb9d4a2efbc9-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:39002 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:12,740] LMCache INFO:[0m Reqid: cmpl-8fe3b1155b8a440caa580a488762d8d1-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:38980 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:13,015] LMCache INFO:[0m Reqid: cmpl-0910e274f7c74516b265468ea5b22055-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:54062 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:13,289] LMCache INFO:[0m Reqid: cmpl-ac0361224c0d430fb8f2d8a6757108b1-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:54074 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:13,618] LMCache INFO:[0m Reqid: cmpl-ca8b0db373954d86871e5b742a650f4f-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:54076 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:13,852] LMCache INFO:[0m Reqid: cmpl-65338c26f4024300a8438ddab2770115-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:39008 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:14,093] LMCache INFO:[0m Reqid: cmpl-f1d66d4b8ef04bf6a1fbdb16822fd490-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:54082 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:14,376] LMCache INFO:[0m Reqid: cmpl-294b3a766d244d23bbe8dfb08a87481a-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:38986 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:14,658] LMCache INFO:[0m Reqid: cmpl-561df977923c4ce798c4e131be18a831-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:38970 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:14,943] LMCache INFO:[0m Reqid: cmpl-4e1362a4389b4658b07431995059cd0f-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:39002 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:15,245] LMCache INFO:[0m Reqid: cmpl-8598afc7ceb240b99acce092436b797c-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:38980 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:15,515] LMCache INFO:[0m Reqid: cmpl-0116cd7f67ae48bf866d5850e1384ee4-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:54062 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:15,820] LMCache INFO:[0m Reqid: cmpl-699cfb3cd32a4ab893b055feee8baba3-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:54074 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:16,106] LMCache INFO:[0m Reqid: cmpl-6de5bd3ab46849898eaea461b5acdde4-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:54076 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:16,382] LMCache INFO:[0m Reqid: cmpl-a2fead4caf8049268875e07b39ebbc2f-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:38980 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:16,604] LMCache INFO:[0m Reqid: cmpl-432dbd75b62b4d13bbf147a6a18f6ab4-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:54082 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:16,825] LMCache INFO:[0m Reqid: cmpl-ed6d474c58084942bfff74c515a1b89e-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:38986 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:17,056] LMCache INFO:[0m Reqid: cmpl-0f9bbd96033e4fa0a3aee7a936d24ba1-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:38970 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:17,331] LMCache INFO:[0m Reqid: cmpl-86f261d20fec4d88b12950d438a0543c-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:39002 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:17,679] LMCache INFO:[0m Reqid: cmpl-998dc53cc2cc4f0ba01e4c23c6f1ed8e-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:39008 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:17,891] LMCache INFO:[0m Reqid: cmpl-20188c7e6eab40feb2ff3b5544ebcea9-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:54062 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:18,192] LMCache INFO:[0m Reqid: cmpl-d85f92e7f42d427dad5eb8d8ed91712a-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:54074 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:18,494] LMCache INFO:[0m Reqid: cmpl-890239bb21f84e0393857d504bc2ff8c-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:54076 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:18,782] LMCache INFO:[0m Reqid: cmpl-a9f1175d54d84a6a9411bfddc5e96355-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:38980 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:19,044] LMCache INFO:[0m Reqid: cmpl-16ca88b2a1334affa43c03f59b2be46e-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:54082 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:19,315] LMCache INFO:[0m Reqid: cmpl-c8a5d841372b4685b4519f9c459be611-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:38986 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:19,580] LMCache INFO:[0m Reqid: cmpl-daed169e96e3410293d0c3cc381854bd-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:38970 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:19,837] LMCache INFO:[0m Reqid: cmpl-801c7f44c46347ebaff4d56718dc749b-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO 06-02 17:53:19 [loggers.py:116] Engine 000: Avg prompt throughput: 27746.3 tokens/s, Avg generation throughput: 667.3 tokens/s, Running: 9 reqs, Waiting: 0 reqs, GPU KV cache usage: 16.8%, Prefix cache hit rate: 1.1%
+INFO:     127.0.0.1:39002 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:20,091] LMCache INFO:[0m Reqid: cmpl-f77f0109989a4e6ab6c67836617ba541-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:39008 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:20,386] LMCache INFO:[0m Reqid: cmpl-f0ea726dbbc84a8f870a343d9a616c8d-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:54062 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:20,670] LMCache INFO:[0m Reqid: cmpl-7a9f426aa4904c8ba68614e747260dae-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:54074 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:20,964] LMCache INFO:[0m Reqid: cmpl-b0066ca4a26c41c2877de73d20576268-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:54076 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:21,184] LMCache INFO:[0m Reqid: cmpl-2e38b63aca8044a2a6927ef8551a9be0-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:38980 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:21,423] LMCache INFO:[0m Reqid: cmpl-25c16163ff6a433ca88f2e330e8eb304-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:54082 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:21,677] LMCache INFO:[0m Reqid: cmpl-0120615b971142df83628ff325458911-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:54062 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:21,994] LMCache INFO:[0m Reqid: cmpl-4b4cbf5d1a914f1eb28e3363a8bf857a-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:38970 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:22,276] LMCache INFO:[0m Reqid: cmpl-356daaa3f3c7482ca63961b7c5e7003b-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:38980 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:22,559] LMCache INFO:[0m Reqid: cmpl-66858e2fc7db413b80ee1b42c9c8a37c-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:38986 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:22,832] LMCache INFO:[0m Reqid: cmpl-f8fb0d1d0e3a4c3caeb8c505e590c92d-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:39002 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:23,139] LMCache INFO:[0m Reqid: cmpl-fd5e661a71954854b2f9895ad712ccbe-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:54074 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:23,381] LMCache INFO:[0m Reqid: cmpl-b7518e49473f47dc8a2624013aac829d-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:54076 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:23,592] LMCache INFO:[0m Reqid: cmpl-2c8842ae5c3446cd9ca69c545a39ae60-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:39008 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:23,882] LMCache INFO:[0m Reqid: cmpl-39e7942db75c4ac09604a715753fa09a-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:54062 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:24,218] LMCache INFO:[0m Reqid: cmpl-d720cbb60429444ab443634a55fc7035-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:54082 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:24,500] LMCache INFO:[0m Reqid: cmpl-7e5f405e32404b7bbc1a32c712d6aa9d-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:38970 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:24,783] LMCache INFO:[0m Reqid: cmpl-891ae0e6dfed4d478f22e1b3c8b44058-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:38980 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:25,034] LMCache INFO:[0m Reqid: cmpl-d8c4e88036544e1e943cbe9ac550ebe2-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:38986 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:25,330] LMCache INFO:[0m Reqid: cmpl-52c41fbd4d4c4899b2ac42a1888ff567-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:38986 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:25,563] LMCache INFO:[0m Reqid: cmpl-d8e171aafb7a448f98e04437e1968d12-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:54074 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:25,878] LMCache INFO:[0m Reqid: cmpl-58883a043a6d47eba4cb9d7f1477e0cc-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:54076 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:26,153] LMCache INFO:[0m Reqid: cmpl-3929cec032784309a4498231504048a1-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:54062 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:26,488] LMCache INFO:[0m Reqid: cmpl-2edb738ab1ce4a90962b456a8f41b89a-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:54082 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:26,817] LMCache INFO:[0m Reqid: cmpl-b70e5e7a1e49493ca46fb55cd063d966-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:38970 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:27,100] LMCache INFO:[0m Reqid: cmpl-713587ec60054ede8535dab13cee0219-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:38980 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:27,410] LMCache INFO:[0m Reqid: cmpl-72e9f416f0e5454093a6dcfa05529427-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:39002 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:27,685] LMCache INFO:[0m Reqid: cmpl-d0c10ba200d546a8bdf1f2a3372ccd0c-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:38986 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:28,017] LMCache INFO:[0m Reqid: cmpl-41202a19e2f541538eb5a479b0a9c66c-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:54074 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:28,277] LMCache INFO:[0m Reqid: cmpl-d0eca21b5e644ee082915df28f16e8af-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:54076 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:28,823] LMCache INFO:[0m Reqid: cmpl-a614024326ce46c781d499f0edb79588-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:39008 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:28,852] LMCache INFO:[0m Reqid: cmpl-bfdcb3a61e7a404a98fa0e313f761212-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:54062 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:29,131] LMCache INFO:[0m Reqid: cmpl-90990ed11ca54325a69919d88e9b1c6d-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:54082 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:29,375] LMCache INFO:[0m Reqid: cmpl-eb72222fbf3f4698b505133322b9120e-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:49772 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:29,650] LMCache INFO:[0m Reqid: cmpl-3c7f44feb0764394b78929308ebc5965-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO 06-02 17:53:29 [loggers.py:116] Engine 000: Avg prompt throughput: 26248.9 tokens/s, Avg generation throughput: 623.3 tokens/s, Running: 8 reqs, Waiting: 0 reqs, GPU KV cache usage: 15.0%, Prefix cache hit rate: 0.8%
+INFO:     127.0.0.1:54074 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:29,900] LMCache INFO:[0m Reqid: cmpl-2486917cab204a408e8e6e8589f963d1-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:38970 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:30,118] LMCache INFO:[0m Reqid: cmpl-4d967db6d57c45dc887eeb3e8b296fc0-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:38980 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:30,363] LMCache INFO:[0m Reqid: cmpl-81de95015c7a461f8f824ed3b3adc00b-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:39002 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:30,633] LMCache INFO:[0m Reqid: cmpl-9f55f3c8fe48481c9173735d9e6bc235-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:38986 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:30,917] LMCache INFO:[0m Reqid: cmpl-a72c606b9fb64a53a4ad61ec0992cbd9-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:49780 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:31,235] LMCache INFO:[0m Reqid: cmpl-c48646e6227145f8914b3d6a2cf99fee-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:54076 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:31,462] LMCache INFO:[0m Reqid: cmpl-c7c6bd1d355d46eba21bae20fa250db1-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:54062 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:31,762] LMCache INFO:[0m Reqid: cmpl-c902d73433a9468b8688fdc86f2caa29-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:54082 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:32,032] LMCache INFO:[0m Reqid: cmpl-01984791676140f38fdc0520b884dd7b-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:39008 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:32,277] LMCache INFO:[0m Reqid: cmpl-6cfca54bb4d54486b6fb04884cb806c5-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:54074 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:32,843] LMCache INFO:[0m Reqid: cmpl-53306312779a429ca2345800182ce06e-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:38970 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:33,045] LMCache INFO:[0m Reqid: cmpl-61ce90a919f54027b15bb1e6fc49eea2-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:38980 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:33,245] LMCache INFO:[0m Reqid: cmpl-67938c75ca7740448fed218a13a8158d-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:38986 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:33,454] LMCache INFO:[0m Reqid: cmpl-795f4a2ee70b4624b3de051827d0a94b-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:39002 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:33,717] LMCache INFO:[0m Reqid: cmpl-116fbafc951149f881636dbf21801d06-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:54076 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:33,981] LMCache INFO:[0m Reqid: cmpl-871245e50881490db5d367f84d05c065-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:54062 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:34,299] LMCache INFO:[0m Reqid: cmpl-8b117c29c79646d2a9476b715904f124-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:54082 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:34,603] LMCache INFO:[0m Reqid: cmpl-9f1e671a4ed24764b47d7466347a01fd-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:39008 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:34,857] LMCache INFO:[0m Reqid: cmpl-173359bbc551470fa1069e0d0edd5704-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:54074 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:35,152] LMCache INFO:[0m Reqid: cmpl-549a6d6c8c0b40b6bd0deaae724ad900-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:38970 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:35,410] LMCache INFO:[0m Reqid: cmpl-3431055350fa457f8f406f33f345c6de-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:38980 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:35,643] LMCache INFO:[0m Reqid: cmpl-cd4e5ddc49dc43c98c8f98098335c92e-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:38986 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:35,935] LMCache INFO:[0m Reqid: cmpl-f3dd0aca8ef44afe82e7094c1c3caf7d-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:39002 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:36,236] LMCache INFO:[0m Reqid: cmpl-150b8812bcd143c691064d681eae85f3-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:54076 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:36,480] LMCache INFO:[0m Reqid: cmpl-4b233b42ae9d4aa2aafaee4f0ac4ac8e-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:54062 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:36,796] LMCache INFO:[0m Reqid: cmpl-089f4c3a4fd04889b53dc82789c8cf8c-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:54082 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:37,080] LMCache INFO:[0m Reqid: cmpl-89d717ae9af24217b73137df21dd3e47-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:39008 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:37,394] LMCache INFO:[0m Reqid: cmpl-fa82f32d7a4044788576c3c2c1b5979c-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:54074 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:37,654] LMCache INFO:[0m Reqid: cmpl-4f8b7408be7c4cb5bad00aa1df1ccb6e-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:38970 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:37,975] LMCache INFO:[0m Reqid: cmpl-0be1570ee1514e2186d213df8690a761-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:38980 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:38,262] LMCache INFO:[0m Reqid: cmpl-0cdbc591397e4c44bcb99b38c4ed2886-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:38986 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:38,541] LMCache INFO:[0m Reqid: cmpl-20474c22fdd84dbd967b14fbadc0c652-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:54076 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:38,818] LMCache INFO:[0m Reqid: cmpl-facc11ba14d4410b843d0a122077b6fa-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:54062 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:39,116] LMCache INFO:[0m Reqid: cmpl-f5cb019b071b447abee410a99262d6dc-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:39002 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:39,340] LMCache INFO:[0m Reqid: cmpl-7c15479b38eb4ed9becc1894af5468f0-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:54082 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:39,588] LMCache INFO:[0m Reqid: cmpl-03af4d0356ce439db2417e2cfc0ce121-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:39008 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO 06-02 17:53:39 [loggers.py:116] Engine 000: Avg prompt throughput: 26994.7 tokens/s, Avg generation throughput: 706.4 tokens/s, Running: 8 reqs, Waiting: 0 reqs, GPU KV cache usage: 15.0%, Prefix cache hit rate: 0.6%
+[32;20m[2025-06-02 17:53:39,893] LMCache INFO:[0m Reqid: cmpl-d338151e4d5a4d2d8878bd3fe99af1a5-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:54074 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:40,133] LMCache INFO:[0m Reqid: cmpl-75edce1d174843b184ec9e16e2e9a0d5-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:38970 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:40,439] LMCache INFO:[0m Reqid: cmpl-c6141849e03343f88f84264cbe3a2a34-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:38980 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:40,706] LMCache INFO:[0m Reqid: cmpl-d2edea64c94745d0a09517b5466817b9-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:38986 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:40,987] LMCache INFO:[0m Reqid: cmpl-98df355558004335b7a688a54373dd41-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:54076 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:41,271] LMCache INFO:[0m Reqid: cmpl-c84e6f492f554e50bd38f753b4619e5e-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:40036 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:41,537] LMCache INFO:[0m Reqid: cmpl-a66373f8f7944b74bcaaca2bae38c125-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:54062 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:41,826] LMCache INFO:[0m Reqid: cmpl-f0c74de175a84962a160d4b4655eb6f6-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:54082 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:42,107] LMCache INFO:[0m Reqid: cmpl-665b721600004786860bfb893ef93fd4-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:39002 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:42,400] LMCache INFO:[0m Reqid: cmpl-761fc551d2ec4cabb1ec790fcab551b5-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:54074 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:42,691] LMCache INFO:[0m Reqid: cmpl-cc9414e670b94b66adce0cdde7751c57-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:38970 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:42,960] LMCache INFO:[0m Reqid: cmpl-543ce0f0485a43398508a75f7662b793-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:38980 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:43,250] LMCache INFO:[0m Reqid: cmpl-531ba1c746ee48c88d3e432dcc6bd1f1-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:38986 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:43,452] LMCache INFO:[0m Reqid: cmpl-de5d8a79f36c4e1facd279044582bf46-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:54076 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:43,693] LMCache INFO:[0m Reqid: cmpl-855dab45f9194913b7ef7bc503f29a4f-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:39008 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:43,978] LMCache INFO:[0m Reqid: cmpl-07b759a64e95409eb6fed46d80ea19d5-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:40036 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:44,222] LMCache INFO:[0m Reqid: cmpl-92e11f0f9d3e41b2b1498aeaa6440053-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:54062 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:44,544] LMCache INFO:[0m Reqid: cmpl-5ae692abe5164d32af22542c93c22a25-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:54082 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:44,862] LMCache INFO:[0m Reqid: cmpl-9f5931fe28b54e45a4d7a23b87b1bcd9-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:54074 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:45,149] LMCache INFO:[0m Reqid: cmpl-7516816c7785449fa7da5f7802fa5a52-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:38970 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:45,442] LMCache INFO:[0m Reqid: cmpl-b9aa9d917fa64b4ab6a8dbea4bd849b2-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:38980 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:45,693] LMCache INFO:[0m Reqid: cmpl-670ce0a3c9004bb7acadf96de12a9617-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:38986 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:45,993] LMCache INFO:[0m Reqid: cmpl-b816e9fb037a496a91c91c4fd6f9e93d-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:54076 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:46,256] LMCache INFO:[0m Reqid: cmpl-40db778744ce4ed3bc9946255ad6ed6d-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:54076 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:46,526] LMCache INFO:[0m Reqid: cmpl-790cf515878142ab9e0e9946f22530e5-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:39002 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:46,822] LMCache INFO:[0m Reqid: cmpl-4430ac23fe044586a912033fdc3f2c88-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:54062 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:47,045] LMCache INFO:[0m Reqid: cmpl-fb9a7ed3714c4c1db36c5c5b72b19f93-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:54082 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:47,269] LMCache INFO:[0m Reqid: cmpl-a318a320ed95464fb7fba91d59751f12-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:54074 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:47,545] LMCache INFO:[0m Reqid: cmpl-ab629f4c57ae4f4786e86d4941131a24-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:38970 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:47,800] LMCache INFO:[0m Reqid: cmpl-ef9e8b43f98a48e5a2599702c1960cca-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:38980 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:48,108] LMCache INFO:[0m Reqid: cmpl-061f81df899440dfb7662519de42c761-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:38986 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:48,386] LMCache INFO:[0m Reqid: cmpl-ab0734deb8a449468ff43bfec576e8e0-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:38986 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:48,694] LMCache INFO:[0m Reqid: cmpl-9807c10339274c2998c7092c4563e4cc-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:54076 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:49,039] LMCache INFO:[0m Reqid: cmpl-9b1a54554a294404ab6ff45fd10cd130-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:54062 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:49,346] LMCache INFO:[0m Reqid: cmpl-2126f700d9644d59a800e6ae06e8f172-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:54082 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:49,673] LMCache INFO:[0m Reqid: cmpl-e1cb7e89d65843349dca10a414ab7437-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO 06-02 17:53:49 [loggers.py:116] Engine 000: Avg prompt throughput: 27001.0 tokens/s, Avg generation throughput: 695.3 tokens/s, Running: 6 reqs, Waiting: 0 reqs, GPU KV cache usage: 11.2%, Prefix cache hit rate: 0.5%
+INFO:     127.0.0.1:54074 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:49,913] LMCache INFO:[0m Reqid: cmpl-da458d71484545c7ba94f6d3b9c0e5bb-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:38970 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:50,176] LMCache INFO:[0m Reqid: cmpl-f9b6d4af1e5f4bd3b0d8699168555819-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:38980 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:50,481] LMCache INFO:[0m Reqid: cmpl-9578f10ddeaa40a1b01e37dc56d9dd72-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:39002 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:50,755] LMCache INFO:[0m Reqid: cmpl-c3e7a056111640608c4a74958b7d9065-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:38986 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:51,074] LMCache INFO:[0m Reqid: cmpl-0a6f3346a4a94f11b365bfceec0edc92-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:54076 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:51,299] LMCache INFO:[0m Reqid: cmpl-ee065fd6ce834dd3b1a6a922d4897305-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO:     127.0.0.1:54062 - "POST /v1/completions HTTP/1.1" 200 OK
+[32;20m[2025-06-02 17:53:51,596] LMCache INFO:[0m Reqid: cmpl-96d279e759894c7e8e1fc86288aad42b-0, Total tokens 7500, LMCache hit tokens: 7499, need to load: 7499 [3m(vllm_v1_adapter.py:745:lmcache.integration.vllm.vllm_v1_adapter)[0m
+[33;20m[2025-06-02 17:53:53,532] LMCache WARNING:[0m In connector.start_load_kv, but the attn_metadata is None [3m(vllm_v1_adapter.py:455:lmcache.integration.vllm.vllm_v1_adapter)[0m
+INFO 06-02 17:53:59 [loggers.py:116] Engine 000: Avg prompt throughput: 5249.6 tokens/s, Avg generation throughput: 199.7 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.5%
