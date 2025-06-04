@@ -1,5 +1,6 @@
 # Standard
 from pathlib import Path
+from typing import Tuple, List, Mapping
 import os
 import sys
 
@@ -19,25 +20,19 @@ BUILD_WITH_HIP = os.environ.get("BUILD_WITH_HIP", "0") == "1"
 
 def hipify_wrapper() -> None:
     from torch.utils.hipify.hipify_python import hipify
-    import shutil
     print("Hipifying sources ")
 
     # Get absolute path for all source files.
-    includes =os.path.join(HIPIFY_DIR, '*')
     extra_files = [
             os.path.abspath(os.path.join(HIPIFY_DIR, item))
             for item in os.listdir(HIPIFY_DIR)
             if os.path.isfile(os.path.join(HIPIFY_DIR, item)) 
     ]
 
-    # Copy sources from project directory to output directory.
-    # The directory might already exist to hold object files so we ignore that.
-    shutil.copytree(HIPIFY_DIR, HIPIFY_OUT_DIR, dirs_exist_ok=True)
-
     hipify_result = hipify(project_directory=HIPIFY_DIR,
                            output_directory=HIPIFY_OUT_DIR,
                            header_include_dirs=[],
-                           includes=includes,
+                           includes=[],
                            extra_files=extra_files,
                            show_detailed=True,
                            is_pytorch_extension=True,
@@ -90,14 +85,7 @@ def cuda_extension() -> Tuple[List, Mapping]:
     ext_modules = [
         cpp_extension.CUDAExtension(
             "lmcache.c_ops",
-            [
-                "csrc/pybind.cpp",
-                "csrc/mem_kernels.cu",
-                "csrc/cal_cdf.cu",
-                "csrc/ac_enc.cu",
-                "csrc/ac_dec.cu",
-                "csrc/pos_kernels.cu",
-            ],
+            sources=cuda_sources,
             extra_compile_args={
                 "cxx": ["-D_GLIBCXX_USE_CXX11_ABI=0"],
                 "nvcc": ["-D_GLIBCXX_USE_CXX11_ABI=0"],
@@ -107,10 +95,10 @@ def cuda_extension() -> Tuple[List, Mapping]:
     cmdclass = {'build_ext': cpp_extension.BuildExtension}
     return ext_modules, cmdclass
 
-    
 def rocm_extension() -> Tuple[List, Mapping]:
+    from torch.utils import cpp_extension # Import here
 
-    print("Building HIP extensions")
+    print("Building ROCM extensions")
     hipify_wrapper()
     hip_sources = [
         'csrc/pybind_hip.cpp', # Use the hipified pybind
