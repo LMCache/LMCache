@@ -3,9 +3,11 @@ from pathlib import Path
 import asyncio
 import os
 import shutil
+import tempfile
 import threading
 
 # Third Party
+import safetensors
 import torch
 
 # First Party
@@ -14,6 +16,32 @@ from lmcache.v1.cache_engine import LMCacheEngineBuilder
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import CuFileMemoryAllocator
 from lmcache.v1.storage_backend import CreateStorageBackends
+from lmcache.v1.storage_backend.gds_backend import pack_metadata, unpack_metadata
+
+
+def test_gds_backend_metadata():
+    # This is a sanity check that packing and unpacking works. We can add
+    # more tensor types to be sure.
+    for [tensor, expected_nbytes] in [(torch.randn(3, 10), 120)]:
+        r = pack_metadata(tensor, version="test")
+        size, dtype, nbytes, meta = unpack_metadata(r)
+        assert size == tensor.size()
+        assert dtype == tensor.dtype
+        assert expected_nbytes == nbytes
+        assert meta["version"] == "test"
+
+        # Make sure that safetensors can load this
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_file_path = os.path.join(temp_dir, "test.safetensors")
+            with open(temp_file_path, "wb") as f:
+                f.write(r)
+                f.write(b" " * nbytes)
+
+            with safetensors.safe_open(temp_file_path, framework="pt") as f:
+                tensor = f.get_tensor("kvcache")
+                assert size == tensor.size()
+                assert dtype == tensor.dtype
+                assert expected_nbytes == nbytes
 
 
 def test_gds_backend_sanity():

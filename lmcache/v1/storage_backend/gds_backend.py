@@ -19,6 +19,7 @@ from concurrent.futures import Future
 from typing import Optional, Tuple
 import asyncio
 import ctypes
+import json
 import os
 import random
 import string
@@ -40,32 +41,36 @@ from lmcache.v1.storage_backend.abstract_backend import StorageBackendInterface
 logger = init_logger(__name__)
 
 _METADATA_FILE_SUFFIX = ".metadata"
-_DATA_FILE_SUFFIX = ".kvcache.bin"
+_DATA_FILE_SUFFIX = ".kvcache.safetensors"
 _METADATA_VERSION = 1
 _METADATA_MAX_SIZE = 4096  # reserve 4K for metadata.
-# TODO: This can compatible with the SafeTensors format, with first 4K of
-# the file being the meta-data. There's no need for a metadata file. So this
-# code in the future will just save a single '.safetensors' file. It is possible
-# to read this 4KB block without triggering read-ahead by various means.
+# TODO: It is possible to read this 4KB block without triggering read-ahead by
+# various means.
 
 
 class UnsupportedMetadataVersion(Exception):
     pass
 
 
-torch_dtypes = [
-    torch.half,
-    torch.float16,
-    torch.bfloat16,
-    torch.float,
-    torch.float32,
-    torch.float64,
-    torch.double,
-    torch.uint8,
-    torch.float8_e4m3fn,
-    torch.float8_e5m2,
-]
-dtype_to_idx = {dtype: idx for idx, dtype in enumerate(torch_dtypes)}
+torch_dtypes = {
+    torch.half: "F16",
+    torch.bfloat16: "BF16",
+    torch.float32: "F32",
+    torch.float64: "F64",
+    torch.uint8: "U8",
+    torch.uint16: "U16",
+    torch.uint32: "U32",
+    torch.uint64: "U64",
+    torch.int8: "I8",
+    torch.int16: "I16",
+    torch.int32: "I32",
+    torch.int64: "I64",
+    torch.float8_e4m3fn: "F8E4M3FN",
+    torch.float8_e5m2: "F8E5M2",
+}
+
+
+torch_dtypes_inverse = dict([(v, k) for k, v in torch_dtypes.items()])
 
 
 def get_fstype(path):
@@ -89,28 +94,47 @@ def get_fstype(path):
     return best_fstype
 
 
-def pack_metadata(shape, dtype, size) -> bytes:
-    # TODO: we can easily become SafeTensors compatible by taking some
-    # code from: https://github.com/vast-data/VUA/blob/main/src/vua/serdes.py,
-    # there's no need to invent a new format.
-    metadata_desc = "<QQQQ" + len(shape) * "Q"
-    if struct.calcsize(metadata_desc) > _METADATA_MAX_SIZE:
-        raise ValueError(
-            f"Metadata size {struct.calcsize(metadata_desc)} "
-            f"exceeds max size {_METADATA_MAX_SIZE}"
-        )
-    return struct.pack(
-        metadata_desc, _METADATA_VERSION, dtype_to_idx[dtype], size, len(shape), *shape
-    )
+def pack_metadata(tensor, **extra_metadata) -> bytes:
+    if tensor.dtype not in torch_dtypes:
+        raise RuntimeError(f"unhandled dtype {tensor.dtype}")
+
+    # Metadata
+    data_size = tensor.numel() * tensor.element_size()
+    tensor_meta = {
+        "dtype": torch_dtypes[tensor.dtype],
+        "shape": list(tensor.size()),
+        "data_offsets": [0, data_size],
+        "__metadata__": extra_metadata,
+    }
+    meta = {"kvcache": tensor_meta}
+    str_meta = json.dumps(meta).encode("utf-8")
+    meta_len = len(str_meta)
+    assert meta_len <= _METADATA_MAX_SIZE - 8
+
+    # Align to _METADATA_MAX_SIZE - 8
+    str_meta += b" " * (_METADATA_MAX_SIZE - 8 - meta_len)
+
+    # Pack it all up so it is sized _METADATA_MAX_SIZE exactly.
+    return struct.pack("<Q", len(str_meta)) + str_meta
 
 
-def unpack_metadata(buffer):
-    version, dt_idx, size, ndim = struct.unpack_from("<QQQQ", buffer)
-    shape_offset = struct.calcsize("<QQQQ")
-    if version != _METADATA_VERSION:
-        raise UnsupportedMetadataVersion(f"Unsupported metadata version: {version}")
-    shape = struct.unpack_from("<" + ndim * "Q", buffer, offset=shape_offset)
-    return torch.Size(shape), torch_dtypes[dt_idx], size
+def unpack_metadata(buffer: bytes):
+    meta_len = struct.unpack("<Q", buffer[:8])[0]
+
+    str_meta = buffer[8 : 8 + meta_len]
+    json_meta = str_meta.rstrip(b" ")
+
+    meta = json.loads(json_meta.decode("utf-8"))
+    tensor_meta = meta["kvcache"]
+
+    shape = tensor_meta["shape"]
+    dtype_str = tensor_meta["dtype"]
+    data_offsets = tensor_meta["data_offsets"]
+
+    nbytes = data_offsets[1] - data_offsets[0]
+    dtype = torch_dtypes_inverse[dtype_str]
+
+    return torch.Size(shape), dtype, nbytes, tensor_meta["__metadata__"]
 
 
 def rand_suffix(rand, n: int):
@@ -262,7 +286,12 @@ class GdsBackend(StorageBackendInterface):
     def _read_metadata(self, key, filename, subdir_key):
         with open(filename, "rb") as f:
             buf = f.read(_METADATA_MAX_SIZE)
-        shape, dtype, size = unpack_metadata(buf)
+
+        shape, dtype, size, extra_metadata = unpack_metadata(buf)
+        if extra_metadata["lmcache_version"] != str(_METADATA_VERSION):
+            raise RuntimeError("unhandled lmcache metadata")
+
+        # TODO(extra_metadata)
         metadata = DiskCacheMetadata(
             filename.removesuffix(_METADATA_FILE_SUFFIX), size, shape, dtype
         )
@@ -492,7 +521,9 @@ class GdsBackend(StorageBackendInterface):
             dev_offset = device_offset
         tmp_path = path + tmp
         offset = _METADATA_MAX_SIZE
-        metadata = pack_metadata(kv_chunk.shape, kv_chunk.dtype, kv_chunk.nbytes)
+        # TODO: We can add the chunk's metadata here, e.g. Tensor parallelism shard
+        # and pipeline parallelism index.
+        metadata = pack_metadata(kv_chunk, lmcache_version=str(_METADATA_VERSION))
         try:
             with open(tmp_path, "wb") as f:
                 f.write(metadata)
