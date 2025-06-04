@@ -125,12 +125,12 @@ warn_return_any = false
 
 follow_imports = "silent"
 
-# use a custom manylinux image for cibuildwheel that contains CUDA 12.4
+# use a custom manylinux image for cibuildwheel that contains CUDA 12.8
 [tool.cibuildwheel]
-manylinux-x86_64-image = "docker.io/apostab/manylinux-cuda124"
+manylinux-x86_64-image = "docker.io/pytorch/manylinux2_28-builder:cuda12.8"
 repair-wheel-command = """
 auditwheel repair \
-  --plat manylinux_2_17_x86_64 \
+  --plat manylinux_2_28_x86_64 \
   --exclude libtorch.so \
   --exclude libtorch_cuda.so \
   --exclude libtorch_python.so \
