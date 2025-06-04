@@ -403,7 +403,7 @@ class LMCLocalDiskBackend(LMCBackendInterface):
         """
         Sweep the future pool to free up memory.
         """
-        while not self.stop_event:
+        while not self.stop_event.is_set():
             logger.debug("Sweeping memory buffer")
             self.update_lock.acquire()
             for key in list(self.future_pool.keys()):
