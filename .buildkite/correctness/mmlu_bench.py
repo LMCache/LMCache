@@ -177,7 +177,8 @@ def main(args):
         tokenizer = AutoTokenizer.from_pretrained(args.model)
     except Exception as e:
         print(
-            f"⚠️ Failed to load tokenizer for {args.model}, falling back to deepseek-ai/DeepSeek-V2-Lite: {e}"
+            f"⚠️ Failed to load tokenizer for {args.model}, "
+            f"falling back to deepseek-ai/DeepSeek-V2-Lite: {e}"
         )
         tokenizer = AutoTokenizer.from_pretrained("deepseek-ai/DeepSeek-V2-Lite")
 
