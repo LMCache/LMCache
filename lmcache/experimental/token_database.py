@@ -134,25 +134,25 @@ def choose_score_dict(
     compression_method: str,
 ) -> dict[float, float]:
     if dataset == "qmsum" and compression_method == "kivi":
-        score02 = 0 # xxxxxxxxxx
-        score03 = 0 # xxxxxxxxxx
-        score06 = 0 # xxxxxxxxxx
-        score1 = 0 # xxxxxxxxxx
+        score02 = 0.5056
+        score03 = 0.7473
+        score06 = 0.8599
+        score1 = 0.8780
     elif dataset == "qmsum" and compression_method == "streaming":
-        score02 = 0 # xxxxxxxxxx
-        score03 = 0 # xxxxxxxxxx
-        score06 = 0 # xxxxxxxxxx
-        score1 = 0 # xxxxxxxxxx
+        score02 = 0.3712
+        score03 = 0.3989
+        score06 = 0.4629
+        score1 = 0.8780
     elif dataset == "samsum" and compression_method == "kivi":
-        score02 = 0.7310
-        score03 = 0.9046
-        score06 = 0.9467
-        score1 = 0 # xxxxxxxxxx
+        score02 = 0.7313
+        score03 = 0.9095
+        score06 = 0.9565
+        score1 = 0.9567
     elif dataset == "samsum" and compression_method == "streaming":
         score02 = 0.6309
         score03 = 0.6434
         score06 = 0.6993
-        score1 = 0 # xxxxxxxxxx
+        score1 = 0.9567
     else:
         raise ValueError(f"Unsupported dataset {dataset} and compression method {compression_method}.")
     return {

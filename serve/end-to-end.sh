@@ -16,15 +16,21 @@ cleanup() {
 trap cleanup SIGINT SIGTERM
 
 # --- Configuration arrays (must all be the same length) ---
-ports=(8000)
+ports=(8000 8001 8002)
 configs=(
-  ../config/May_23_1_sum/prefill/1.yaml
+  ../config/May_23_1_sum/ours/1.yaml
+  ../config/May_23_1_sum/ours/01.yaml
+  ../config/May_23_1_sum/ours/10.yaml
 )
 logs=(
-  results/May_23_1_sum/prefill/tokens/1.log
+  results/May_23_1_sum/ours/tokens/1.log
+  results/May_23_1_sum/ours/tokens/01.log
+  results/May_23_1_sum/ours/tokens/10.log
 )
 outputs=(
-  results/May_23_1_sum/prefill/1.csv
+  results/May_23_1_sum/ours/1.csv
+  results/May_23_1_sum/ours/01.csv
+  results/May_23_1_sum/ours/10.csv
 )
 
 # Array to track running PGIDs
