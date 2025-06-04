@@ -212,10 +212,10 @@ class RequestTracker:
         """Update the request tracker when a running request is
         scheduled again
         """
+
         self.token_ids.extend(cached_request.new_token_ids)
         new_block_ids: list[int]
-        if len(cached_request.new_block_ids)==0:
-            return
+
         if not isinstance(cached_request.new_block_ids[0], list):
             new_block_ids = cached_request.new_block_ids
         else:
@@ -454,11 +454,11 @@ class LMCacheConnectorV1Impl:
         assert len(self.kv_caches) > 0
         kvcaches = list(self.kv_caches.values())
 
-        # attn_metadata = forward_context.attn_metadata
-        # if attn_metadata is None:
-        #     logger.warning(
-        #         "In connector.start_load_kv, but the attn_metadata is None")
-        #     return
+        attn_metadata = forward_context.attn_metadata
+        if attn_metadata is None:
+            logger.warning(
+                "In connector.start_load_kv, but the attn_metadata is None")
+            return
 
         assert self.lmcache_engine is not None
 
@@ -844,6 +844,8 @@ class LMCacheConnectorV1Impl:
 
         for request in scheduler_output.scheduled_cached_reqs:
             request_tracker = self._request_trackers[request.req_id]
+            if len(request.new_block_ids)==0:
+                continue
             request_tracker.update(request)
 
             req_meta = ReqMeta.from_request_tracker(
