@@ -26,8 +26,8 @@ import uvicorn
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.cache_controller.controller_manager import LMCacheControllerManager
-from lmcache.v1.cache_controller.message import CheckFinishMsg  # noqa: E501
 from lmcache.v1.cache_controller.message import (  # noqa: E501
+    CheckFinishMsg,
     CheckFinishRetMsg,
     ClearMsg,
     ClearRetMsg,

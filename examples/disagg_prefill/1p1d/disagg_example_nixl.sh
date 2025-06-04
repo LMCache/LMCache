@@ -48,9 +48,31 @@ ensure_python_library_installed() {
 
 cleanup() {
     echo "Stopping everything…"
-    trap - INT TERM        # prevent re-entrancy
-    kill -- -$$            # negative PID  ==  “this whole process-group”
-    wait                   # reap children so we don't leave zombies
+    trap - INT TERM USR1   # prevent re-entrancy
+    
+    # Kill all tracked PIDs
+    for pid in "${PIDS[@]}"; do
+        if kill -0 "$pid" 2>/dev/null; then
+            echo "Killing process $pid"
+            kill "$pid" 2>/dev/null
+        fi
+    done
+    
+    # Wait a moment for graceful shutdown
+    sleep 2
+    
+    # Force kill any remaining processes
+    for pid in "${PIDS[@]}"; do
+        if kill -0 "$pid" 2>/dev/null; then
+            echo "Force killing process $pid"
+            kill -9 "$pid" 2>/dev/null
+        fi
+    done
+    
+    # Kill the entire process group as backup
+    kill -- -$$ 2>/dev/null
+    
+    echo "All processes stopped."
     exit 0
 }
 
@@ -118,8 +140,17 @@ main() {
     wait_for_server 8200
     wait_for_server 9000
 
+    echo "================================================"
     echo "All servers are up. You can send request now..."
+    echo "Press Ctrl-C to terminate all instances."
 
+    # Keep the script running until interrupted
+    echo "Script is running. Waiting for termination signal..."
+    echo "================================================"
+
+    while true; do
+        sleep 1
+    done
 }
 
 main

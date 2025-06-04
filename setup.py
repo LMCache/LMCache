@@ -1,6 +1,5 @@
 # Standard
 from pathlib import Path
-from typing import Tuple, List, Mapping
 import os
 import sys
 
@@ -71,9 +70,10 @@ def get_requirements() -> list[str]:
     requirements = _read_requirements("common.txt")
     return requirements
 
-def cuda_extension() -> Tuple[List, Mapping]:
+def cuda_extension() -> tuple[list, dict]:
     from torch.utils import cpp_extension # Import here
     print("Building CUDA extensions")
+    
     cuda_sources = [
         'csrc/pybind.cpp',
         'csrc/mem_kernels.cu',
@@ -95,7 +95,7 @@ def cuda_extension() -> Tuple[List, Mapping]:
     cmdclass = {'build_ext': cpp_extension.BuildExtension}
     return ext_modules, cmdclass
 
-def rocm_extension() -> Tuple[List, Mapping]:
+def rocm_extension() -> tuple[list, dict]:
     from torch.utils import cpp_extension # Import here
 
     print("Building ROCM extensions")
@@ -137,7 +137,7 @@ def rocm_extension() -> Tuple[List, Mapping]:
     cmdclass = {'build_ext': cpp_extension.BuildExtension}
     return ext_modules, cmdclass
 
-def source_dist_extension() -> Tuple[List, Mapping]:
+def source_dist_extension() -> tuple[list, dict]:
     print("Not building CUDA/HIP extensions for sdist")
     return [], {}
 
