@@ -18,6 +18,12 @@ echo "   Output: $OUTPUT_FILE"
 echo "   Max model length: $MAX_MODEL_LEN"
 echo "   MLA disabled: $VLLM_MLA_DISABLE"
 
+# Clean up any existing containers on port 8000
+echo "🧹 Cleaning up any existing containers on port 8000..."
+sudo docker ps -q --filter "publish=8000" | xargs -r sudo docker kill
+sudo docker ps -aq --filter "publish=8000" | xargs -r sudo docker rm
+sleep 5
+
 # HF_TOKEN and IMAGE should be set in the environment before running this script
 CONTAINER_ID=$(sudo docker run -d --runtime=nvidia --gpus all \
     --env "HF_TOKEN=$HF_TOKEN" \
@@ -39,6 +45,14 @@ CONTAINER_ID=$(sudo docker run -d --runtime=nvidia --gpus all \
     --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}')
 
 echo "Started container: $CONTAINER_ID"
+
+# Check if container started successfully
+sleep 5
+if ! sudo docker ps -q --filter "id=$CONTAINER_ID" | grep -q .; then
+    echo "❌ Container failed to start. Checking logs..."
+    sudo docker logs $CONTAINER_ID
+    exit 1
+fi
 
 # Start 10-minute self-destruct
 (sleep 600 && echo "Timeout reached, force killing container..." && sudo docker kill $CONTAINER_ID) &
