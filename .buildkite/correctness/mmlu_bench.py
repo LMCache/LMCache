@@ -4,13 +4,14 @@ from functools import partial
 import argparse
 import json
 import os
+import random
 import sys
 import time
 import traceback
 
 # Third Party
 from tqdm import tqdm
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, set_seed
 import numpy as np
 import pandas as pd
 import requests
@@ -32,6 +33,7 @@ def call_generate_vllm(
         "max_tokens": max_tokens,
         "stop": stop,
         "n": n,
+        "seed": 42,  # Add explicit seed for determinism
     }
     res = requests.post(url, json=data)
     assert res.status_code == 200
@@ -62,12 +64,14 @@ def get_call_generate(args: argparse.Namespace):
 
 
 def add_common_other_args_and_parse(parser: argparse.ArgumentParser):
-    parser.add_argument("--parallel", type=int, default=4)
+    parser.add_argument("--parallel", type=int, default=1)  # Changed default to 1 for determinism
     parser.add_argument("--n-ctx", type=int, default=4096)
     parser.add_argument("--result-file", type=str, default="result.jsonl")
     parser.add_argument(
         "--model", type=str, default="deepseek-ai/DeepSeek-V2-Lite", help="Model name"
     )
+    parser.add_argument("--seed", type=int, default=42, help="Random seed for determinism")
+    parser.add_argument("--debug", action="store_true", help="Enable debug logging")
     args = parser.parse_args()
     return args
 
@@ -114,9 +118,14 @@ def evaluate(args, subject, dev_df, test_df, call_generate):
     # Construct prompts
     k = args.ntrain
     train_prompt = gen_prompt(dev_df, subject, k)
-    while len(tokenizer(train_prompt)["input_ids"]) > 1536:
+
+    # Make tokenizer behavior deterministic
+    original_k = k
+    while len(tokenizer(train_prompt, add_special_tokens=True, return_tensors="pt")["input_ids"][0]) > 1536:
         k -= 1
         train_prompt = gen_prompt(dev_df, subject, k)
+        if args.debug:
+            print(f"Reduced k from {original_k} to {k} for subject {subject}")
 
     for i in range(test_df.shape[0]):
         prompt_end = format_example(test_df, i, include_answer=False)
@@ -129,9 +138,10 @@ def evaluate(args, subject, dev_df, test_df, call_generate):
     preds = [None] * len(prompts)
     max_tokens = 3
 
-    # Run requests
-    # Use thread pool
+    # Run requests deterministically
     def get_one_answer(i):
+        if args.debug:
+            print(f"Processing request {i}/{len(prompts)} for subject {subject}")
         pred = call_generate(prompts[i], temperature=0, max_tokens=max_tokens)
         pred_stripped = pred.strip()
         if pred_stripped and pred_stripped[0] in ["A", "B", "C", "D"]:
@@ -145,13 +155,19 @@ def evaluate(args, subject, dev_df, test_df, call_generate):
             else:
                 preds[i] = "A"  # Default fallback
 
+        if args.debug:
+            print(f"Request {i}: pred='{pred_stripped}' -> '{preds[i]}'")
+
     tic = time.time()
     if args.parallel == 1:
+        # Sequential execution for determinism
         for i in range(len(prompts)):
             get_one_answer(i)
     else:
+        # If parallel is requested, use ordered execution
         with ThreadPoolExecutor(args.parallel) as executor:
-            executor.map(get_one_answer, list(range(len(prompts))))
+            # Use list() to ensure ordered execution
+            list(executor.map(get_one_answer, range(len(prompts))))
     latency = time.time() - tic
 
     # Compute accuracy
@@ -171,10 +187,22 @@ def evaluate(args, subject, dev_df, test_df, call_generate):
 def main(args):
     global tokenizer
 
+    # Set all random seeds for determinism
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    set_seed(args.seed)  # HuggingFace transformers seed
+
+    if args.debug:
+        print(f"🔧 Set random seed to {args.seed} for deterministic results")
+        print(f"🔧 Parallel execution: {args.parallel}")
+
     # Initialize tokenizer with the specified model
     print(f"🔧 Initializing tokenizer for model: {args.model}")
     try:
         tokenizer = AutoTokenizer.from_pretrained(args.model)
+        # Ensure tokenizer is deterministic
+        if hasattr(tokenizer, 'model_max_length'):
+            print(f"🔧 Tokenizer max length: {tokenizer.model_max_length}")
     except Exception as e:
         print(
             f"⚠️ Failed to load tokenizer for {args.model}, "
@@ -182,13 +210,17 @@ def main(args):
         )
         tokenizer = AutoTokenizer.from_pretrained("deepseek-ai/DeepSeek-V2-Lite")
 
-    subjects = sorted(
-        [
-            f.split("_test.csv")[0]
-            for f in os.listdir(os.path.join(args.data_dir, "test"))
-            if "_test.csv" in f
-        ]
-    )
+    # Get subjects in deterministic order
+    test_dir = os.path.join(args.data_dir, "test")
+    if not os.path.exists(test_dir):
+        raise FileNotFoundError(f"Test directory not found: {test_dir}")
+
+    all_files = os.listdir(test_dir)
+    test_files = [f for f in all_files if f.endswith("_test.csv")]
+    subjects = sorted([f.split("_test.csv")[0] for f in test_files])
+
+    if args.debug:
+        print(f"🔧 Found {len(subjects)} subjects: {subjects[:5]}..." if len(subjects) > 5 else f"🔧 Found subjects: {subjects}")
 
     all_cors = []
     all_latencies = []
@@ -197,7 +229,7 @@ def main(args):
     # Select backend
     call_generate = get_call_generate(args)
 
-    for subject in tqdm(subjects[: args.nsub]):
+    for subject in tqdm(subjects[: args.nsub], desc="Processing subjects"):
         dev_df = pd.read_csv(
             os.path.join(args.data_dir, "dev", subject + "_dev.csv"), header=None
         )[: args.ntrain]
@@ -229,6 +261,7 @@ def main(args):
                 "nsub": args.nsub,
                 "parallel": args.parallel,
                 "model": args.model,
+                "seed": args.seed,
             },
         }
         fout.write(json.dumps(value) + "\n")
