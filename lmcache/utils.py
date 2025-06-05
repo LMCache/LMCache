@@ -12,15 +12,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Future
+from __future__ import annotations
+
 # Standard
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import TYPE_CHECKING, List, Optional, Tuple
 import hashlib
 import threading
 
 # Third Party
 from nvtx import annotate  # type: ignore
 import torch
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.memory_management import MemoryFormat
 
 # Type definition
 KVCache = Tuple[Tuple[torch.Tensor, torch.Tensor], ...]
@@ -32,6 +39,7 @@ class DiskCacheMetadata:
     size: int  # in bytes
     shape: Optional[torch.Size] = None
     dtype: Optional[torch.dtype] = None
+    fmt: MemoryFormat = None
     is_pin: bool = False
 
     def pin(self) -> bool:

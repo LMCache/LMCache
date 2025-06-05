@@ -31,7 +31,7 @@ from lmcache.utils import CacheEngineKey, DiskCacheMetadata, _lmcache_nvtx_annot
 from lmcache.v1.cache_controller.message import KVAdmitMsg, KVEvictMsg
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.lookup_server import LookupServerInterface
-from lmcache.v1.memory_management import MemoryObj
+from lmcache.v1.memory_management import MemoryFormat, MemoryObj
 from lmcache.v1.storage_backend.abstract_backend import StorageBackendInterface
 from lmcache.v1.storage_backend.evictor import LRUEvictor, PutStatus
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
@@ -145,6 +145,7 @@ class LocalDiskBackend(StorageBackendInterface):
         size = memory_obj.get_size()
         shape = memory_obj.metadata.shape
         dtype = memory_obj.metadata.dtype
+        fmt = memory_obj.metadata.fmt
 
         has_stored = False
         with self.disk_lock:
@@ -153,7 +154,7 @@ class LocalDiskBackend(StorageBackendInterface):
                 self.dict.pop(key)
                 has_stored = True
 
-            self.dict[key] = DiskCacheMetadata(path, size, shape, dtype, False)
+            self.dict[key] = DiskCacheMetadata(path, size, shape, dtype, fmt, False)
 
         # push kv admit msg
         if self.lmcache_worker is not None and not has_stored:
@@ -206,13 +207,14 @@ class LocalDiskBackend(StorageBackendInterface):
         path = self.dict[key].path
         dtype = self.dict[key].dtype
         shape = self.dict[key].shape
+        fmt = self.dict[key].fmt
         self.disk_lock.release()
         logger.info(f"Prefetching {key} from disk.")
 
         assert dtype is not None
         assert shape is not None
         future = asyncio.run_coroutine_threadsafe(
-            self.async_load_bytes_from_disk(path, dtype, shape), self.loop
+            self.async_load_bytes_from_disk(path, dtype, shape, fmt), self.loop
         )
         return future
 
@@ -234,9 +236,10 @@ class LocalDiskBackend(StorageBackendInterface):
         path = self.dict[key].path
         dtype = self.dict[key].dtype
         shape = self.dict[key].shape
+        fmt = self.dict[key].fmt
         assert dtype is not None
         assert shape is not None
-        memory_obj = self.load_bytes_from_disk(path, dtype=dtype, shape=shape)
+        memory_obj = self.load_bytes_from_disk(path, dtype=dtype, shape=shape, fmt=fmt)
         self.disk_lock.release()
         return memory_obj
 
@@ -284,15 +287,12 @@ class LocalDiskBackend(StorageBackendInterface):
     # TODO(Jiayi): use `bytes_read = await f.readinto(buffer)`
     # for better performance (i.e., fewer copy)
     async def async_load_bytes_from_disk(
-        self,
-        path: str,
-        dtype: torch.dtype,
-        shape: torch.Size,
+        self, path: str, dtype: torch.dtype, shape: torch.Size, fmt: MemoryFormat
     ) -> Optional[MemoryObj]:
         """
         Async load bytearray from disk.
         """
-        memory_obj = self.local_cpu_backend.allocate(shape, dtype)
+        memory_obj = self.local_cpu_backend.allocate(shape, dtype, fmt)
         if memory_obj is None:
             logger.debug("Memory allocation failed during async disk load.")
             return None
@@ -305,15 +305,12 @@ class LocalDiskBackend(StorageBackendInterface):
     # TODO(Jiayi): the pinned cpu memory_obj should directly be passed into
     # gpu connector; this gpu buffer could be avoided
     def load_bytes_from_disk(
-        self,
-        path: str,
-        dtype: torch.dtype,
-        shape: torch.Size,
+        self, path: str, dtype: torch.dtype, shape: torch.Size, fmt: MemoryFormat
     ) -> Optional[MemoryObj]:
         """
         Load bytearray from disk.
         """
-        memory_obj = self.local_cpu_backend.allocate(shape, dtype)
+        memory_obj = self.local_cpu_backend.allocate(shape, dtype, fmt)
         if memory_obj is None:
             logger.debug("Memory allocation failed during async disk load.")
             return None
@@ -330,6 +327,7 @@ class LocalDiskBackend(StorageBackendInterface):
         backend: str = "bytes",
         dtype: Optional[torch.dtype] = None,
         shape: Optional[torch.Size] = None,
+        fmt: Optional[MemoryFormat] = None,
     ) -> Optional[MemoryObj]:
         """
         Load KV from disk.
@@ -337,7 +335,7 @@ class LocalDiskBackend(StorageBackendInterface):
         if backend == "bytes":
             assert dtype is not None
             assert shape is not None
-            memory_obj = self.load_bytes_from_disk(path, dtype, shape)
+            memory_obj = self.load_bytes_from_disk(path, dtype, shape, fmt)
         else:
             raise ValueError(f"Invalid backend: {backend}")
         return memory_obj

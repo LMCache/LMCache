@@ -47,7 +47,6 @@ def CreateStorageBackends(
     dst_device: str = "cuda",
     lmcache_worker: Optional["LMCacheWorker"] = None,
     lookup_server: Optional[LookupServerInterface] = None,
-    layerwise: bool = False,
 ) -> OrderedDict[str, StorageBackendInterface]:
     # Replace 'cuda' with 'cuda:<device id>'
     if dst_device == "cuda":
@@ -59,7 +58,10 @@ def CreateStorageBackends(
     # NOTE(Jiayi): The local_cpu backend is always created because
     # other backends might need it as a buffer.
     local_cpu_backend = LocalCPUBackend(
-        config, memory_allocator, lookup_server, lmcache_worker, layerwise
+        config,
+        memory_allocator,
+        lookup_server,
+        lmcache_worker,
     )
     backend_name = str(local_cpu_backend)
     storage_backends[backend_name] = local_cpu_backend
