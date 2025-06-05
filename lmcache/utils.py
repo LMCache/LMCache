@@ -22,11 +22,6 @@ import threading
 from nvtx import annotate  # type: ignore
 import torch
 
-# First Party
-from lmcache.logging import init_logger
-
-logger = init_logger(__name__)
-
 # Type definition
 KVCache = Tuple[Tuple[torch.Tensor, torch.Tensor], ...]
 
