@@ -35,13 +35,35 @@ def call_generate_vllm(
         "n": n,
         "seed": 42,  # Add explicit seed for determinism
     }
-    res = requests.post(url, json=data)
-    assert res.status_code == 200
-    if n == 1:
-        pred = res.json()["choices"][0]["text"]
-    else:
-        pred = [choice["text"] for choice in res.json()["choices"]]
-    return pred
+
+    try:
+        res = requests.post(url, json=data, timeout=30)  # 30 second timeout
+    except requests.exceptions.Timeout:
+        print(f"❌ API Timeout: Request took longer than 30 seconds")
+        raise Exception("API request timed out after 30 seconds")
+    except requests.exceptions.ConnectionError as e:
+        print(f"❌ Connection Error: {e}")
+        raise Exception(f"Failed to connect to API: {e}")
+    except Exception as e:
+        print(f"❌ Request Error: {e}")
+        raise Exception(f"API request failed: {e}")
+
+    if res.status_code != 200:
+        print(f"❌ API Error {res.status_code}: {res.text}")
+        print(f"🔍 Request data: {data}")
+        raise Exception(f"API request failed with status {res.status_code}: {res.text}")
+
+    try:
+        response_json = res.json()
+        if n == 1:
+            pred = response_json["choices"][0]["text"]
+        else:
+            pred = [choice["text"] for choice in response_json["choices"]]
+        return pred
+    except (KeyError, IndexError, ValueError) as e:
+        print(f"❌ Response parsing error: {e}")
+        print(f"🔍 Response content: {res.text}")
+        raise Exception(f"Failed to parse API response: {e}")
 
 
 def _get_call_generate(args: argparse.Namespace):
@@ -184,6 +206,21 @@ def evaluate(args, subject, dev_df, test_df, call_generate):
     return cors, acc, latency
 
 
+def test_api_connection(args):
+    """Test if the vLLM API is working before running the full benchmark"""
+    print("🔍 Testing API connection...")
+    test_prompt = "Hello, world!"
+
+    try:
+        call_generate = get_call_generate(args)
+        response = call_generate(test_prompt, temperature=0, max_tokens=1)
+        print(f"✅ API test successful. Response: '{response.strip()}'")
+        return True
+    except Exception as e:
+        print(f"❌ API test failed: {e}")
+        return False
+
+
 def main(args):
     global tokenizer
 
@@ -209,6 +246,11 @@ def main(args):
             f"falling back to deepseek-ai/DeepSeek-V2-Lite: {e}"
         )
         tokenizer = AutoTokenizer.from_pretrained("deepseek-ai/DeepSeek-V2-Lite")
+
+    # Test API connection before proceeding
+    if not test_api_connection(args):
+        print("❌ API connection test failed. Exiting.")
+        sys.exit(1)
 
     # Get subjects in deterministic order
     test_dir = os.path.join(args.data_dir, "test")
