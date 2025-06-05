@@ -456,8 +456,7 @@ class LMCacheConnectorV1Impl:
 
         attn_metadata = forward_context.attn_metadata
         if attn_metadata is None:
-            logger.warning(
-                "In connector.start_load_kv, but the attn_metadata is None")
+            logger.warning("In connector.start_load_kv, but the attn_metadata is None")
             return
 
         assert self.lmcache_engine is not None
@@ -844,8 +843,6 @@ class LMCacheConnectorV1Impl:
 
         for request in scheduler_output.scheduled_cached_reqs:
             request_tracker = self._request_trackers[request.req_id]
-            if len(request.new_block_ids)==0:
-                continue
             request_tracker.update(request)
 
             req_meta = ReqMeta.from_request_tracker(

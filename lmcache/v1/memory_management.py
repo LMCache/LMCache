@@ -579,7 +579,6 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
             raw_size, self.align_bytes
         )
 
-
         # Find the first block that fits the shape
         for block in self.explicit_list:
             if block.size >= aligned_size:

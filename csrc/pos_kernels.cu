@@ -27,8 +27,6 @@
 #include "cuda_compat.h"
 namespace lmc {
 
-
-
 template <typename scalar_t, bool IS_NEOX>
 inline __device__ void apply_token_rotary_embedding_fused(
     scalar_t* __restrict__ arr, const scalar_t* __restrict__ old_cos_ptr,
