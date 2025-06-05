@@ -66,7 +66,6 @@ class StorageManager:
         allocator: MemoryAllocatorInterface,
         lmcache_worker: Optional["LMCacheWorker"] = None,
         lookup_server: Optional[LookupServerInterface] = None,
-        layerwise: bool = False,
     ):
         self.memory_allocator = allocator
 
@@ -85,7 +84,6 @@ class StorageManager:
                 dst_device,
                 lmcache_worker,
                 lookup_server,
-                layerwise,
             )
         )
         self.local_cpu_backend = self.storage_backends["LocalCPUBackend"]

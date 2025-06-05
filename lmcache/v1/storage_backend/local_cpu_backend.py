@@ -59,7 +59,6 @@ class LocalCPUBackend(StorageBackendInterface):
         memory_allocator: MemoryAllocatorInterface,
         lookup_server: Optional[LookupServerInterface] = None,
         lmcache_worker: Optional["LMCacheWorker"] = None,
-        layerwise: bool = False,
     ):
         self.hot_cache: OrderedDict[CacheEngineKey, MemoryObj] = OrderedDict()
         self.use_hot = config.local_cpu
@@ -73,7 +72,6 @@ class LocalCPUBackend(StorageBackendInterface):
 
         self.stats_monitor = LMCStatsMonitor.GetOrCreate()
         self.usage = 0
-        self.layerwise = layerwise
 
     def __str__(self):
         return self.__class__.__name__
@@ -207,10 +205,7 @@ class LocalCPUBackend(StorageBackendInterface):
         regardless of whether local_cpu is True or False
         """
         if fmt is None:
-            if self.layerwise:
-                fmt = MemoryFormat.KV_T2D
-            else:
-                fmt = MemoryFormat.KV_2LTD
+            fmt = MemoryFormat.KV_2LTD
 
         memory_obj = self.memory_allocator.allocate(shape, dtype, fmt)
         if memory_obj is not None or not eviction:

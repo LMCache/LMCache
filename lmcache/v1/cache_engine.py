@@ -82,7 +82,6 @@ class LMCacheEngine:
         memory_allocator: MemoryAllocatorInterface,
         token_database: TokenDatabase,
         gpu_connector: GPUConnectorInterface,
-        layerwise: bool = False,
     ):
         logger.info(f"Creating LMCacheEngine with config: {config}")
         self.config = config
@@ -121,7 +120,6 @@ class LMCacheEngine:
                 self.memory_allocator,
                 self.lmcache_worker,
                 self.lookup_server,
-                layerwise,
             )  # type: ignore[assignment]
 
         if self.enable_p2p:
@@ -474,7 +472,6 @@ class LayerwiseLMCacheEngine(LMCacheEngine):
         memory_allocator: MemoryAllocatorInterface,
         token_database: TokenDatabase,
         layerwise_gpu_connector: GPUConnectorInterface,
-        layerwise: bool = True,
     ):
         super().__init__(
             config,
@@ -482,7 +479,6 @@ class LayerwiseLMCacheEngine(LMCacheEngine):
             memory_allocator,
             token_database,
             layerwise_gpu_connector,
-            layerwise,
         )
         assert isinstance(self.gpu_connector, VLLMPagedMemLayerwiseGPUConnector)
 
