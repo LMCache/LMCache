@@ -247,11 +247,6 @@ def main(args):
         )
         tokenizer = AutoTokenizer.from_pretrained("deepseek-ai/DeepSeek-V2-Lite")
 
-    # Test API connection before proceeding
-    if not test_api_connection(args):
-        print("❌ API connection test failed. Exiting.")
-        sys.exit(1)
-
     # Get subjects in deterministic order
     test_dir = os.path.join(args.data_dir, "test")
     if not os.path.exists(test_dir):

@@ -44,18 +44,32 @@ echo "Started container: $CONTAINER_ID"
 (sleep 600 && echo "Timeout reached, force killing container..." && sudo docker kill $CONTAINER_ID) &
 TIMER_PID=$!
 
-sleep 60
-# Wait until the vLLM server is ready
+# Wait longer for model loading
+echo "⏳ Waiting for model to load (this may take a few minutes)..."
+sleep 120
+
+# Wait until the vLLM server is ready AND the model is loaded
+echo "🔍 Checking server health..."
 until curl --fail http://localhost:8000/health; do
   if ! sudo docker ps -q --filter "id=$CONTAINER_ID" | grep -q .; then
     echo "❌ vLLM server container exited prematurely"
     exit 1
   fi
   echo "Waiting for vLLM server to become ready..."
-  sleep 5
+  sleep 10
 done
 
-echo "✅ LMCache (no MLA) server is ready"
+echo "🔍 Checking if model is loaded..."
+until curl --fail -s http://localhost:8000/v1/models | grep -q "$MODEL"; do
+  if ! sudo docker ps -q --filter "id=$CONTAINER_ID" | grep -q .; then
+    echo "❌ vLLM server container exited prematurely"
+    exit 1
+  fi
+  echo "Waiting for model $MODEL to be loaded..."
+  sleep 10
+done
+
+echo "✅ LMCache (no MLA) server is ready and model is loaded"
 
 # Step 2: Run mmlu_bench.py
 
