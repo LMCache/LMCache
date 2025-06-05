@@ -171,10 +171,41 @@ class StorageManager:
         Do not store if the same object is being stored (handled here by
         storage manager) or has been stored (handled by storage backend).
 
-        A default implementation using "put"
+        Optimized implementation using batched operations to reduce lock contention.
         """
+        # Check for existing put tasks
+        filtered_keys = []
+        filtered_objs = []
+        
         for key, obj in zip(keys, memory_objs, strict=False):
-            self.put(key, obj)
+            # Check if any backend is already storing this cache
+            already_storing = False
+            for storage_backend in self.storage_backends.values():
+                if storage_backend.exists_in_put_tasks(key):
+                    obj.ref_count_down()
+                    already_storing = True
+                    break
+            
+            if not already_storing:
+                filtered_keys.append(key)
+                filtered_objs.append(obj)
+        
+        if not filtered_keys:
+            return
+        
+        # Use batched operations where available
+        for backend_name, backend in self.storage_backends.items():
+            if hasattr(backend, 'batched_submit_put_tasks'):
+                # Use batched operations to reduce lock contention
+                backend.batched_submit_put_tasks(filtered_keys, filtered_objs)
+            else:
+                # Fall back to individual puts for backends without batched support
+                for key, obj in zip(filtered_keys, filtered_objs, strict=False):
+                    backend.submit_put_task(key, obj)
+        
+        # Decrement reference counts
+        for obj in filtered_objs:
+            obj.ref_count_down()
 
     def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         """

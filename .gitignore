@@ -113,3 +113,8 @@ lmcache/experimental/tests
 
 # Miscellaneous
 cufile.log
+docker-compose.yml
+prometheus.yml
+grafana.json
+grafana_updated.json
+benchmarks/multi-round-qa/test_results.csv

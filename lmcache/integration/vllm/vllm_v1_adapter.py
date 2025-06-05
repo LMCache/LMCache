@@ -618,19 +618,30 @@ class LMCacheConnectorV1Impl:
                     skip_leading_tokens,
                     request.req_id,
                 )
-                layerwise_storer = self.lmcache_engine.store_layer(
-                    token_ids,
-                    mask=store_mask,
-                    kvcaches=kvcaches,
-                    slot_mapping=slot_mapping,
-                    offset=skip_leading_tokens,
-                )
-                self.layerwise_storers.append(layerwise_storer)
+                try:
+                    layerwise_storer = self.lmcache_engine.store_layer(
+                        token_ids,
+                        mask=store_mask,
+                        kvcaches=kvcaches,
+                        slot_mapping=slot_mapping,
+                        offset=skip_leading_tokens,
+                    )
+                    self.layerwise_storers.append(layerwise_storer)
+                except Exception as e:
+                    logger.warning(
+                        "Failed to store layer KV cache for request %s: %s", 
+                        request.req_id, e
+                    )
 
         for layerwise_storer in self.layerwise_storers:
-            next(layerwise_storer)
-            if self.current_layer == self.num_layers - 1:
+            try:
                 next(layerwise_storer)
+                if self.current_layer == self.num_layers - 1:
+                    next(layerwise_storer)
+            except Exception as e:
+                logger.warning(
+                    "Failed to advance layerwise storer: %s", e
+                )
         self.current_layer += 1
 
     def wait_for_save(self):
@@ -693,13 +704,19 @@ class LMCacheConnectorV1Impl:
                 skip_leading_tokens,
                 request.req_id,
             )
-            self.lmcache_engine.store(
-                token_ids,
-                mask=store_mask,
-                kvcaches=kvcaches,
-                slot_mapping=slot_mapping,
-                offset=skip_leading_tokens,
-            )
+            try:
+                self.lmcache_engine.store(
+                    token_ids,
+                    mask=store_mask,
+                    kvcaches=kvcaches,
+                    slot_mapping=slot_mapping,
+                    offset=skip_leading_tokens,
+                )
+            except Exception as e:
+                logger.warning(
+                    "Failed to store KV cache for request %s: %s", 
+                    request.req_id, e
+                )
 
     ###################
     # Scheduler side APIs

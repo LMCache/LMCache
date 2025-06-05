@@ -99,12 +99,14 @@ class LocalCPUBackend(StorageBackendInterface):
         if not self.use_hot:
             return None
 
+        # Increment reference count first to ensure memory safety
+        memory_obj.ref_count_up()
+        
+        old_memory_obj = None
         with self.cpu_lock:
             if key in self.hot_cache:
                 old_memory_obj = self.hot_cache.pop(key)
-                old_memory_obj.ref_count_down()
             self.hot_cache[key] = memory_obj
-            memory_obj.ref_count_up()
 
             self.usage += memory_obj.get_size()
             self.stats_monitor.update_local_cache_usage(self.usage)
@@ -114,7 +116,65 @@ class LocalCPUBackend(StorageBackendInterface):
                 self.lmcache_worker.put_msg(
                     KVAdmitMsg(self.instance_id, key.worker_id, key.chunk_hash, "cpu")
                 )
+        
+        # Decrement reference count of old object outside the lock
+        # This ensures the put operation is complete before cleanup
+        if old_memory_obj is not None:
+            old_memory_obj.ref_count_down()
+            
         return None
+
+    def batched_submit_put_tasks(
+        self, keys: List[CacheEngineKey], memory_objs: List[MemoryObj]
+    ) -> List[Optional[Future]]:
+        """
+        Batched version of submit_put_task to reduce lock contention.
+        Processes multiple put operations under a single lock acquisition.
+        """
+        if not self.use_hot:
+            return [None] * len(keys)
+        
+        results = []
+        kv_admit_msgs = []
+        old_memory_objs = []
+        
+        # Increment reference counts first to ensure memory safety
+        for memory_obj in memory_objs:
+            memory_obj.ref_count_up()
+        
+        with self.cpu_lock:
+            for key, memory_obj in zip(keys, memory_objs, strict=False):
+                # Handle existing key - collect old objects for cleanup outside lock
+                if key in self.hot_cache:
+                    old_memory_objs.append(self.hot_cache.pop(key))
+                
+                # Store new memory object
+                self.hot_cache[key] = memory_obj
+                
+                # Update usage tracking
+                self.usage += memory_obj.get_size()
+                
+                # Prepare admit messages for batch sending
+                if self.lmcache_worker is not None:
+                    kv_admit_msgs.append(
+                        KVAdmitMsg(self.instance_id, key.worker_id, key.chunk_hash, "cpu")
+                    )
+                
+                results.append(None)
+            
+            # Update stats once at the end
+            self.stats_monitor.update_local_cache_usage(self.usage)
+        
+        # Clean up old objects outside the lock to ensure put operations are complete
+        for old_memory_obj in old_memory_objs:
+            old_memory_obj.ref_count_down()
+        
+        # Send admit messages outside of lock to reduce lock hold time
+        if self.lmcache_worker is not None:
+            for msg in kv_admit_msgs:
+                self.lmcache_worker.put_msg(msg)
+        
+        return results
 
     # NOTE (Jiayi): prefetch might be deprecated in the future.
     # Should be replaced by `move`.
