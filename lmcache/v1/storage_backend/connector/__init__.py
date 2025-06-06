@@ -173,7 +173,9 @@ def CreateConnector(
         case "infinistore":
             host, port = parsed_url.hosts[0], parsed_url.ports[0]
             device_name = parsed_url.query_params[0].get("device", "mlx5_0")
-            connector = InfinistoreConnector(host, port, device_name, loop)
+            connector = InfinistoreConnector(
+                host, port, device_name, loop, local_cpu_backend
+            )
         case "mooncakestore":
             host, port = parsed_url.hosts[0], parsed_url.ports[0]
             device_name = parsed_url.query_params[0].get("device", "")
