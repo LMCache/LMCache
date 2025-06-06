@@ -41,16 +41,10 @@ jobs:
               with:
                 egress-policy: audit # TODO: change to 'egress-policy: block' after couple of runs
 
-            - name: Remove toolcache to free space
+            - name: Print disk space before cleanup
               run: |
-                sudo rm -rf /opt/hostedtoolcache || true
                 df -h
-
-            - name: Remove other cruft to free space
-              run: |
-                docker system prune -af || true
-                sudo rm -rf ~/.cache || true
-                df -h
+              shell: bash
 
             - name: Free Disk Space Linux
               if: runner.os == 'Linux'
@@ -65,6 +59,11 @@ jobs:
                 sudo aptitude purge '~n ^dotnet' -f -y >/dev/null 2>&1
                 sudo apt-get autoremove -y >/dev/null 2>&1
                 sudo apt-get autoclean -y >/dev/null 2>&1
+              shell: bash
+
+            - name: Print disk space after cleanup
+              run: |
+                df -h
               shell: bash
 
             - name: Checkout code
