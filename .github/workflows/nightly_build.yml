@@ -54,7 +54,10 @@ jobs:
 
       - name: Build lmcache/vllm-openai container image
         run: |
-          docker build --tag lmcache/vllm-openai:latest-nightly --tag lmcache/vllm-openai:nightly-${{ env.NOW }} \
+          docker build \
+          --build-arg CUDA_VERSION=12.8 --build-arg UBUNTU_VERSION=24.04 \
+          --target image-build \
+          --tag lmcache/vllm-openai:latest-nightly --tag lmcache/vllm-openai:nightly-${{ env.NOW }} \
           --file docker/Dockerfile .
 
       - name: Push lmcache/vllm-openai container image to DockerHub
