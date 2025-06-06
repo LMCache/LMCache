@@ -77,36 +77,9 @@ jobs:
                 NO_CUDA_EXT=1 python -m build --sdist
 
             - name: Build CUDA wheels with cibuildwheel
-              env:
-                # this builds 3.10, 3.11, 3.12, 3.13 right now
-                CIBW_BUILD: "cp3*-manylinux_x86_64"
-                CIBW_SKIP: "pp*"
-                # see https://developer.nvidia.com/cuda-gpus for compute capabilities
-                # "CUDA-Enabled Datacenter Products"
-                # 7.0: V100
-                # 7.5: T4
-                # 8.0: A100, A30
-                # 8.6: A40, A10, A16, A2
-                # 8.9: L4, L40, L40S
-                # 9.0: H100
-                # CIBW_ENVIRONMENT: "TORCH_CUDA_ARCH_LIST='7.0;7.5;8.0;8.6;8.9;9.0'"
-                CIBW_ENVIRONMENT: "TORCH_CUDA_ARCH_LIST='9.0'"
-                CIBW_MANYLINUX_X86_64_IMAGE: "docker.io/pytorch/manylinux2_28-builder:cuda12.8"
-                CIBW_REPAIR_WHEEL_COMMAND_LINUX: >
-                    auditwheel repair
-                    --plat manylinux_2_28_x86_64
-                    --exclude libtorch.so
-                    --exclude libtorch_cuda.so
-                    --exclude libtorch_python.so
-                    --exclude libtorch_cpu.so
-                    --exclude libc10.so
-                    --exclude libc10_cuda.so
-                    --exclude libcudart.so.12
-                    -w {dest_dir} {wheel}
-              # continue even if cibuildwheel fails since the wheels are probably
-              # built even if some error messages show up
+              # Configuration is set in pyproject.toml
               run: |
-                python -m cibuildwheel --output-dir dist || true
+                python -m cibuildwheel --output-dir dist
 
             - name: Upload release artifacts to GHA
               uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
