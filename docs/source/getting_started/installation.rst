@@ -102,7 +102,7 @@ We provide pre-built Docker images that include vLLM integration:
 
 .. code-block:: bash
 
-    docker pull lmcache/vllm-openai:2025-04-18
+    docker pull lmcache/vllm-openai
 
 .. note::
     Currently, we build and release Docker images manually. An automated Docker build/release GitHub workflow will be set up soon. Contributions to this effort are welcomed!
