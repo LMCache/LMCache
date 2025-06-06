@@ -213,12 +213,14 @@ def _lmcache_nvtx_annotate(func, domain="lmcache"):
     )(func)
 
 
-##### Threading related #####
-def thread_safe(func):
-    lock = threading.Lock()
+##### Observability Threading related #####
+_shared_observability_lock = threading.Lock()
 
+
+def thread_safe(func):
     def wrapper(*args, **kwargs):
-        with lock:
-            return func(*args, **kwargs)
+        with _shared_observability_lock:
+            result = func(*args, **kwargs)
+        return result
 
     return wrapper

@@ -76,6 +76,7 @@ Documentation
 
    kv_cache/cpu_ram
    kv_cache/local_storage
+   kv_cache/gds
    kv_cache/redis
    kv_cache/infinistore
    kv_cache/mooncake

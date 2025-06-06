@@ -359,16 +359,6 @@ class TensorMemoryObj(MemoryObj):
         return self.metadata.is_pin
 
 
-# TODO(Jiayi): Need to make this compatible with pin/unpin semantics
-class CopyLessMemoryObj(TensorMemoryObj):
-    def __init__(self, raw_data, metadata, callback, parent_allocator=None):
-        super().__init__(raw_data, metadata, parent_allocator)
-        self.callback = callback
-
-    def __del__(self):
-        self.callback()
-
-
 class BytesBufferMemoryObj(MemoryObj):
     """
     Wraps a raw flat tensor with some metadata

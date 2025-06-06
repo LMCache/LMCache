@@ -216,7 +216,6 @@ class LMCStatsMonitor:
     def update_interval_remote_time_to_get_sync(self, get_time_sync: float):
         self.interval_remote_time_to_get_sync.append(get_time_sync)
 
-    @thread_safe
     def _clear(self):
         """
         Clear all the distribution stats
