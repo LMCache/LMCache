@@ -25,6 +25,8 @@
   #include <cuda_fp8.h>
 #endif
 
+#include "dispatch_utils.h"
+
 namespace lmc {
 
 template <typename scalar_t>
@@ -280,6 +282,86 @@ __global__ void load_and_reshape_multi_layer_kernel_unilateral(
   }
 }
 
+/**
+ * Quickly load KV cache between vLLM paged memory and offloading buffer
+ * slot_id = slot_mapping[block.x]
+ * key_value[block.z, block.y, block.x, thread.x] <=> ptrs[block.y][block.z,
+ * slot_id, thread.x]
+ */
+template <typename scalar_t, bool DIRECTION>
+__global__ void load_and_reshape_multi_layer_page_attn_kernel(
+    scalar_t* __restrict__ key_value,  // [2, num_layer, num_tokens, num_heads *
+                                       // head_size]
+    scalar_t** __restrict__ paged_buffer_ptrs,  // [num_layers] * [[page_num,
+                                                // num_heads, head_size/x,
+                                                // page_size, x]
+                                                //  ,[page_num, num_heads,
+                                                //  head_size, page_size]]
+    const int64_t* __restrict__ slot_mapping,   // [num_tokens]    const int
+                                                // num_tokens,
+    const int num_tokens, const int num_layers, const int page_size,
+    const int num_pages, const int num_heads, const int head_size,
+    const int x) {
+    
+  const int token_id = blockIdx.x;
+  const int layer_id = blockIdx.y;
+  const int k_or_v = blockIdx.z;
+  const int tid = threadIdx.x;
+  const int num_threads = blockDim.x;
+
+  if (token_id >= num_tokens) return;
+  
+  const int64_t slot_idx = slot_mapping[token_id];
+  if (slot_idx < 0) return;
+
+  const int64_t page_idx = slot_idx / page_size;
+  const int64_t page_offset = slot_idx % page_size;
+  const int n = num_heads * head_size;
+  const int head_size_div_x = head_size / x;
+  
+  scalar_t* __restrict__ paged_buffer_ptr = paged_buffer_ptrs[layer_id];
+  
+  const int64_t lmcache_base_offset = k_or_v * num_layers * num_tokens * n +
+                                      layer_id * num_tokens * n + 
+                                      token_id * n;
+
+  int64_t vllm_base_offset;
+  if (k_or_v == 0) {
+    vllm_base_offset = page_idx * page_size * num_heads * head_size_div_x * x +
+                       page_offset * x;
+  } else {
+    vllm_base_offset = num_pages * page_size * n +
+                       page_idx * num_heads * head_size * page_size +
+                       page_offset;
+  }
+
+  for (int i = tid; i < n; i += num_threads) {
+    const int head_idx = i / head_size;
+    const int head_offset = i % head_size;
+    
+    int64_t vllm_offset;
+    if (k_or_v == 0) {
+      const int x_idx = head_offset / x;
+      const int x_offset = head_offset % x;
+      vllm_offset = vllm_base_offset + 
+                    head_idx * head_size_div_x * page_size * x +
+                    x_idx * page_size * x + x_offset;
+    } else {
+      vllm_offset = vllm_base_offset + 
+                    head_idx * head_size * page_size + 
+                    head_offset * page_size;
+    }
+
+    const int64_t lmcache_offset = lmcache_base_offset + i;
+    
+    if (DIRECTION) {
+      key_value[lmcache_offset] = paged_buffer_ptr[vllm_offset];
+    } else {
+      paged_buffer_ptr[vllm_offset] = key_value[lmcache_offset];
+    }
+  }
+}
+
 }  // namespace lmc
 
 template <typename T, typename TENSOR_TYPE>
@@ -449,6 +531,79 @@ void multi_layer_kv_transfer_unilateral(
                                      num_layers, page_buffer_size);
     C10_CUDA_KERNEL_LAUNCH_CHECK();
   }
+}
+
+/**
+ * Quickly offload KV cache from vLLM paged memory to the offloading buffer
+ * Processes all the layers at the same time
+ *
+ * Each layer in vLLM's KV buffer has a shape of
+ * [2, page_num, page_size*num_heads*head_size] in paged_attn
+ *
+ * Each thread block processes the copy for a token
+ * The grid size should be (num_tokens, num_layers, 2)
+ *
+ * Therefore:
+ *  - k/v -- block.z
+ *  - layer id -- block.y
+ *  - token id -- block.x
+ *  - offset within a token -- thread.x
+ *
+ * The function does:
+ * slot_id = slot_mapping[block.x]
+ * key_value[block.z, block.y, block.x, thread.x] = ptrs[block.y][block.z,
+ * slot_id, thread.x]
+ *
+ * Param:
+ *  - direction: false  means LMCache to PagedBuffer, true  means PagedBuffer to
+ * LMCache
+ */
+void multi_layer_kv_transfer_page_attn(
+    torch::Tensor&
+        key_value,  // [2, num_layer, num_tokens, num_heads*head_size]
+                    // key/value must be on gpu/pinned cpu
+    const torch::Tensor& key_value_ptrs,  // [num_layers]
+    const torch::Tensor& slot_mapping,    // [num_tokens],
+    const torch::Device& paged_memory_device, const int page_size,
+    const int num_pages, const int head_size, const int x,
+    const bool direction) {
+  const int num_layers = key_value.size(1);
+  int num_tokens = slot_mapping.size(0);
+  int num_origin_elements = key_value.size(3);
+  int num_heads = num_origin_elements / head_size;
+
+  int k_or_v_size = 2;
+
+  dim3 grid(key_value.size(2), key_value.size(1), k_or_v_size);
+  dim3 block(std::min(num_origin_elements, 512));
+
+  const at::cuda::OptionalCUDAGuard device_guard(paged_memory_device);
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+
+  LMC_DISPATCH_FLOATING_TYPES(
+      key_value.scalar_type(), "multi_layer_kv_transfer_page_attn", [&] {
+        if (not direction) {
+          lmc::load_and_reshape_multi_layer_page_attn_kernel<scalar_t, false>
+              <<<grid, block, 0, stream>>>(
+                  get_kernel_ptr<scalar_t, torch::Tensor>(key_value),
+                  get_kernel_ptr<scalar_t*, const torch::Tensor>(
+                      key_value_ptrs),
+                  get_kernel_ptr<const int64_t, const torch::Tensor>(
+                      slot_mapping),
+                  num_tokens, num_layers, page_size, num_pages, num_heads,
+                  head_size, x);
+        } else {
+          lmc::load_and_reshape_multi_layer_page_attn_kernel<scalar_t, true>
+              <<<grid, block, 0, stream>>>(
+                  get_kernel_ptr<scalar_t, torch::Tensor>(key_value),
+                  get_kernel_ptr<scalar_t*, const torch::Tensor>(
+                      key_value_ptrs),
+                  get_kernel_ptr<const int64_t, const torch::Tensor>(
+                      slot_mapping),
+                  num_tokens, num_layers, page_size, num_pages, num_heads,
+                  head_size, x);
+        }
+      });
 }
 
 void single_layer_kv_transfer(

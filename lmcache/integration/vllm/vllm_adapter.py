@@ -42,6 +42,7 @@ except (ModuleNotFoundError, ImportError):
 # Third Party
 from vllm.attention.backends.flashmla import FlashMLAMetadata
 from vllm.attention.backends.mla.common import MLACommonMetadata
+from vllm.attention.ops.paged_attn import PagedAttentionMetadata
 from vllm.config import (
     CacheConfig,
     ModelConfig,
@@ -50,6 +51,7 @@ from vllm.config import (
 )
 from vllm.sequence import IntermediateTensors
 from vllm.utils import cdiv, get_kv_cache_torch_dtype, round_down
+import vllm.envs as envs
 
 # First Party
 from lmcache.config import LMCacheEngineMetadata
@@ -72,6 +74,7 @@ logger = init_logger(__name__)
 LMCACHE_CUDA_STREAM = torch.cuda.Stream()
 
 SUPPORTED_BACKEND_METADATA = (
+    PagedAttentionMetadata,
     FlashAttentionMetadata,
     FlashMLAMetadata,
     MLACommonMetadata,
@@ -188,7 +191,7 @@ def init_lmcache_engine(
         VLLMPagedMemLayerwiseGPUConnector,
     ]
 
-    if use_mla and config.use_layerwise:
+        if use_mla and config.use_layerwise:
         raise ValueError("layerwise MLA connector is not supported yet")
 
     # When use_mla is True, num_kv_head is 1
@@ -214,9 +217,13 @@ def init_lmcache_engine(
                 device=device,
             )
     else:
+        backend = envs.VLLM_ATTENTION_BACKEND
         vllm_gpu_connector = VLLMPagedMemGPUConnectorV2(
-            hidden_dim_size,
             num_layer,
+            num_kv_head,
+            head_size,
+            cache_config.block_size,
+            attn_backend=backend,
             use_gpu=use_gpu,
             chunk_size=chunk_size,
             dtype=kv_dtype,
@@ -598,6 +605,7 @@ def lmcache_store_kv(
                     kvcaches=kv_caches,
                     slot_mapping=slot_mapping_req_full,
                     offset=skip_leading_tokens,
+                    is_paged_attn=isinstance(model_input.attn_metadata, PagedAttentionMetadata),
                 )
             else:
                 stored_token_num = 0
@@ -764,6 +772,8 @@ def lmcache_retrieve_kv(
                 kvcaches=kv_caches,
                 slot_mapping=slot_mapping_req_full,
                 use_mla=engine.metadata.use_mla,
+                is_paged_attn=isinstance(model_input.attn_metadata, PagedAttentionMetadata),
+
             )
             lmc_num_computed_tokens = max(
                 torch.sum(ret_token_mask).item()
