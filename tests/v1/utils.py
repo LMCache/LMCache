@@ -148,6 +148,26 @@ def generate_sglang_kv_cache_paged_list_tensors(
     return kv_cache
 
 
+def generate_kv_cache_paged_list_tensors_for_paged_attn(
+    num_blocks, device, block_size=16, dtype=torch.bfloat16
+):
+    """
+    Instead of Tuple[Tuple[Tensor, Tensor]], return List[Tensor]
+    where KV are in the same tensor
+    """
+    ret = []
+    num_layers = 32
+    num_heads = 8
+    head_size = 128
+    shape = [2, num_blocks, block_size * num_heads * head_size]
+
+    for i in range(num_layers):
+        kv = torch.rand(shape, dtype=dtype, device=device)
+        ret.append(kv)
+
+    return ret
+
+
 def generate_mla_kv_cache_paged_list_tensors(
     num_blocks, device, block_size=64, dtype=torch.bfloat16, num_layers=32
 ):
@@ -301,6 +321,43 @@ def check_paged_kv_cache_equal_with_mla(
         assert new_right_kv.shape[token_dim] >= num_tokens
 
         assert (new_left_kv[slot_mapping, :] == new_right_kv[slot_mapping, :]).all()
+
+
+def check_paged_kv_cache_equal_for_paged_attn(
+    left,
+    right,
+    num_tokens,
+    slot_mapping,
+    num_blocks,
+    block_size,
+    num_heads=8,
+    head_size=128,
+):
+    """
+    check whether two paged kv caches are the same at slot_mapping
+    """
+    for left_kv, right_kv in zip(left, right, strict=False):
+        x = 16 // left_kv.element_size()
+        left_k = left_kv[0].view(num_blocks, num_heads, head_size // x, -1, x)
+        left_v = left_kv[1].view(num_blocks, num_heads, head_size, -1)
+        right_k = right_kv[0].view(num_blocks, num_heads, head_size // x, -1, x)
+        right_v = right_kv[1].view(num_blocks, num_heads, head_size, -1)
+
+        assert len(left_k.shape) == 5
+        assert len(left_v.shape) == 4
+        assert len(right_k.shape) == 5
+        assert len(right_v.shape) == 4
+
+        block_idx = slot_mapping // block_size
+        block_offset = slot_mapping % block_size
+        assert (
+            left_k[block_idx, :, :, block_offset, :]
+            == right_k[block_idx, :, :, block_offset, :]
+        ).all()
+        assert (
+            left_v[block_idx, :, :, block_offset]
+            == right_v[block_idx, :, :, block_offset]
+        ).all()
 
 
 def check_kv_cache_device(kvs, device):
