@@ -15,7 +15,7 @@
 
 # Standard
 from dataclasses import dataclass
-from enum import Enum
+from enum import Enum, auto
 from typing import Optional, Tuple, Union
 import abc
 import ctypes
@@ -33,26 +33,26 @@ logger = init_logger(__name__)
 
 
 class MemoryFormat(Enum):
-    UNDEFINED = 0
+    UNDEFINED = auto()
     """[2, num_layers, num_tokens, hidden_dim]
     """
     # KV_BLOB = 1
-    KV_2LTD = 1
+    KV_2LTD = auto()
     """[num_tokens, 2, hidden_dim]
     """
     # LAYER_KV_BLOB = 2
-    KV_T2D = 2
+    KV_T2D = auto()
     """[2, num_tokens, hidden_dim]
     """
 
-    KV_2TD = 3
+    KV_2TD = auto()
     """Compressed binary array format
     """
-    BINARY = 4
+    BINARY = auto()
 
-    BINARY_BUFFER = 5
+    BINARY_BUFFER = auto()
 
-    KV_MLA_FMT = 6
+    KV_MLA_FMT = auto()
     """[1, num_layers, num_tokens, aligned_head_size]
     """
 
