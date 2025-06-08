@@ -559,9 +559,11 @@ class LMCacheEngineConfig:
             get_env_name("gds_path"),
             config.gds_path,
         )
-        config.cufile_buffer_size = parse_env(
-            get_env_name("cufile_buffer_size"),
-            config.cufile_buffer_size,
+        config.cufile_buffer_size = to_int(
+            parse_env(
+                get_env_name("cufile_buffer_size"),
+                config.cufile_buffer_size,
+            )
         )
         config.extra_config = to_dict(parse_env(get_env_name("extra_config"), None))
         return config.validate().log_config()
