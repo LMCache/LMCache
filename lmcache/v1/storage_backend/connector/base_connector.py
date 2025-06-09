@@ -101,7 +101,7 @@ class RemoteConnector(metaclass=abc.ABCMeta):
         Ping the remote server
 
         Returns:
-            The time taken to ping the remote server in milliseconds
+            The error code, 0 means success
         """
         raise NotImplementedError
 
