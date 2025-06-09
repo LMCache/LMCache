@@ -174,6 +174,7 @@ def init_lmcache_engine(
 
     use_gpu = need_gpu_interm_buffer(config)
     vllm_gpu_connector: Union[
+        VLLMBufferLayerwiseGPUConnector,
         VLLMPagedMemGPUConnectorV2,
         VLLMPagedMemLayerwiseGPUConnector,
         VLLMPagedMemGPUConnectorMLA,
