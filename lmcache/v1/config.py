@@ -144,6 +144,7 @@ class LMCacheEngineConfig:
         nixl_enable_gc: Optional[bool] = False,
         audit_actual_remote_url: Optional[str] = None,
         weka_path: Optional[str] = None,
+        gds_path: Optional[str] = None,
         cufile_buffer_size: Optional[int] = None,
         extra_config: Optional[dict] = None,
     ) -> "LMCacheEngineConfig":
@@ -179,6 +180,7 @@ class LMCacheEngineConfig:
             nixl_enable_gc,
             audit_actual_remote_url,
             weka_path,
+            gds_path,
             cufile_buffer_size,
             extra_config,
         ).validate()
