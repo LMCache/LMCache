@@ -570,7 +570,6 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
             shape = torch.Size(shape)
 
         assert dtype is not None, "dtype must be specified"
-
         # Calculate the size of the tensor
         raw_size = TensorMemoryAllocator._Compute_raw_size(shape, dtype)
         aligned_size = TensorMemoryAllocator._Compute_aligned_size(

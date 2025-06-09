@@ -214,8 +214,10 @@ class RequestTracker:
         """Update the request tracker when a running request is
         scheduled again
         """
+
         self.token_ids.extend(cached_request.new_token_ids)
         new_block_ids: list[int]
+
         if not isinstance(cached_request.new_block_ids[0], list):
             new_block_ids = cached_request.new_block_ids
         else:
@@ -293,7 +295,9 @@ class ReqMeta:
         # OPTIMIZATION: pre-allocate the buffer for token ids and block
         # ids
         token_ids = torch.tensor(input_token_ids)[:num_tokens_to_save]
+
         num_blocks = len(tracker.allocated_block_ids)
+
         block_ids = torch.tensor(tracker.allocated_block_ids, dtype=torch.long)
 
         if len(token_ids) > num_blocks * block_size:

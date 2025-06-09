@@ -28,7 +28,18 @@ if TYPE_CHECKING:
 
 # Third Party
 from vllm.attention import AttentionMetadata
-from vllm.attention.backends.flash_attn import FlashAttentionMetadata
+
+# from vllm.attention.backends.flash_attn import FlashAttentionMetadata
+try:
+    # Third Party
+    from vllm.attention.backends.flash_attn import FlashAttentionMetadata
+except (ModuleNotFoundError, ImportError):
+    # vllm_flash_attn is not installed, try the ROCm FA metadata
+    from vllm.attention.backends.rocm_flash_attn import (
+        ROCmFlashAttentionMetadata as FlashAttentionMetadata,
+    )
+
+# Third Party
 from vllm.attention.backends.flashmla import FlashMLAMetadata
 from vllm.attention.backends.mla.common import MLACommonMetadata
 from vllm.config import (
