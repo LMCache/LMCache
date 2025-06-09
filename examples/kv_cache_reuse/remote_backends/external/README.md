@@ -36,6 +36,6 @@ vllm serve /disc/f/models/opt-125m/ \
            --enforce-eager  \
            --port 8000 \
            --gpu-memory-utilization 0.8 \
-           --kv-transfer-config '{"kv_connector":"LMCacheConnector","kv_role":"kv_both","kv_parallel_size":2}' \
+           --kv-transfer-config '{"kv_connector":"LMCacheConnector","kv_role":"kv_both"}' \
            --trust-remote-code
 ```
