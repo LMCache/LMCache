@@ -119,3 +119,9 @@ cufile.log
 /csrc/*.hip
 /csrc/*_hip.cuh
 /csrc/*_hip.cpp
+CLAUDE.md
+docker-compose.yml
+grafana_updated.json
+grafana.json
+benchmarks/multi-round-qa/test_results.csv
+prometheus.yml
