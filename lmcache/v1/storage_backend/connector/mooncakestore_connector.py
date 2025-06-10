@@ -84,14 +84,14 @@ class MooncakeStoreConfig:
         if extra_config is None:
             raise ValueError("The extra config is not set.")
         return MooncakeStoreConfig(
-            local_hostname=str(extra_config["local_hostname"]),
-            metadata_server=str(extra_config["metadata_server"]),
-            global_segment_size=int(extra_config["global_segment_size"]),
-            local_buffer_size=int(extra_config["local_buffer_size"]),
-            protocol=str(extra_config["protocol"]),
-            device_name=str(extra_config["device_name"]),
-            master_server_address=str(extra_config["master_server_address"]),
-            transfer_timeout=int(extra_config["transfer_timeout"]),
+            local_hostname=extra_config["local_hostname"],
+            metadata_server=extra_config["metadata_server"],
+            global_segment_size=extra_config.get("global_segment_size", 3355443200),
+            local_buffer_size=extra_config.get("local_buffer_size", 1073741824),
+            protocol=extra_config.get("protocol", "tcp"),
+            device_name=extra_config.get("device_name", ""),
+            master_server_address=extra_config["master_server_address"],
+            transfer_timeout=extra_config.get("transfer_timeout", 1),
         )
 
 
