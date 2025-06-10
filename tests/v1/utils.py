@@ -229,6 +229,26 @@ def check_paged_kv_cache_equal(
         assert (left_v[slot_mapping, :, :] == right_v[slot_mapping, :, :]).all()
 
 
+def check_paged_kv_cache_equal_with_mla(
+    left, right, num_tokens, slot_mapping, head_size=128
+):
+    """
+    check whether two paged kv caches are the same at slot_mapping when use mla
+    """
+    token_dim = 0
+    for left_kv, right_kv in zip(left, right, strict=False):
+        new_left_kv = left_kv.reshape(-1, head_size)
+        new_right_kv = right_kv.reshape(-1, head_size)
+
+        assert len(new_left_kv.shape) == 2
+        assert len(new_right_kv.shape) == 2
+
+        assert new_left_kv.shape[token_dim] >= num_tokens
+        assert new_right_kv.shape[token_dim] >= num_tokens
+
+        assert (new_left_kv[slot_mapping, :] == new_right_kv[slot_mapping, :]).all()
+
+
 def check_kv_cache_device(kvs, device):
     for kv in kvs:
         k, v = kv

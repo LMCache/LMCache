@@ -5,6 +5,7 @@ import random
 from utils import (
     check_kv_cache_equal,
     check_paged_kv_cache_equal,
+    check_paged_kv_cache_equal_with_mla,
     generate_kv_cache,
     generate_kv_cache_paged_list_tensors,
 )
@@ -89,7 +90,14 @@ def test_vllm_paged_connector_v2_with_gpu_and_mla(use_gpu, use_mla):
 
     # Check the gpu_kv is not the same before copying
     with pytest.raises(AssertionError):
-        check_kv_cache_equal(gpu_kv_src, gpu_kv_dst, num_tokens, "vllm")
+        if use_mla:
+            check_paged_kv_cache_equal_with_mla(
+                gpu_kv_src, gpu_kv_dst, num_tokens, slot_mapping, head_size
+            )
+        else:
+            check_paged_kv_cache_equal(
+                gpu_kv_src, gpu_kv_dst, num_tokens, slot_mapping, num_heads, head_size
+            )
 
     connector = VLLMPagedMemGPUConnectorV2(
         hidden_dim,
@@ -138,9 +146,14 @@ def test_vllm_paged_connector_v2_with_gpu_and_mla(use_gpu, use_mla):
         allocator.free(memory_obj)
         assert allocator.memcheck()
 
-    check_paged_kv_cache_equal(
-        gpu_kv_src, gpu_kv_dst, num_tokens, slot_mapping, num_heads, head_size
-    )
+    if use_mla:
+        check_paged_kv_cache_equal_with_mla(
+            gpu_kv_src, gpu_kv_dst, num_tokens, slot_mapping, head_size
+        )
+    else:
+        check_paged_kv_cache_equal(
+            gpu_kv_src, gpu_kv_dst, num_tokens, slot_mapping, num_heads, head_size
+        )
 
 
 @pytest.mark.parametrize("use_gpu", [True])
@@ -167,7 +180,9 @@ def test_layerwise_vllm_paged_connector_with_gpu(use_gpu):
 
     # Check the gpu_kv is not the same before copying
     with pytest.raises(AssertionError):
-        check_kv_cache_equal(gpu_kv_src, gpu_kv_dst, num_tokens, "vllm")
+        check_paged_kv_cache_equal(
+            gpu_kv_src, gpu_kv_dst, num_tokens, slot_mapping, num_heads, head_size
+        )
 
     connector = VLLMPagedMemLayerwiseGPUConnector(
         hidden_dim,
@@ -425,7 +440,9 @@ def test_layerwise_vllm_buffer_connector_with_gpu(use_gpu):
 
     # Check the gpu_kv is not the same before copying
     with pytest.raises(AssertionError):
-        check_kv_cache_equal(gpu_kv_src, gpu_kv_dst, num_tokens, "vllm")
+        check_paged_kv_cache_equal(
+            gpu_kv_src, gpu_kv_dst, num_tokens, slot_mapping, num_heads, head_size
+        )
 
     connector = VLLMBufferLayerwiseGPUConnector(
         hidden_dim,
