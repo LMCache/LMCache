@@ -1,45 +1,23 @@
 Dockerfile
 ==========
 
-We provide a Dockerfile to help you build a Docker image for LMCache. More information about deploying LMCache with Docker can be 
-found here - :ref:`Docker deployment guide <docker_deployment>`.
+We provide a Dockerfile to help you build a container image for LMCache integrated with vLLM.
+More information about deploying LMCache image using Docker can be found here - :ref:`Docker deployment guide <docker_deployment>`.
 
-Example run command
--------------------
+Building the container image
+----------------------------
 
-.. code-block:: bash
+You can build the LMCache (integrated with vLLM) image using Docker from source via the provided Dockerfile.
+The Dockerfile is located at `docker <https://github.com/LMCache/LMCache/tree/dev/docker>`_.
 
-    IMAGE=<IMAGE_NAME>:<TAG>
-    docker run --runtime nvidia --gpus all \
-        --env "HF_TOKEN=<YOUR_HUGGINGFACE_TOKEN>" \
-        --env "LMCACHE_USE_EXPERIMENTAL=True" \
-        --env "LMCACHE_CHUNK_SIZE=256" \
-        --env "LMCACHE_LOCAL_CPU=True" \
-        --env "LMCACHE_MAX_LOCAL_CPU_SIZE=5" \
-        -v ~/.cache/huggingface:/root/.cache/huggingface \
-        --network host \
-        --entrypoint "/usr/local/bin/vllm" \
-        $IMAGE \
-        serve mistralai/Mistral-7B-Instruct-v0.2 --kv-transfer-config \
-        '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}'
-
-
-The Image Name and Tag can be found on Docker Hub - `LMCache <https://hub.docker.com/r/lmcache/vllm-openai>`_.
-
-Building the Docker image
--------------------------
-
-You can build and run LMCache with Docker from source via the provided Dockerfile.
-The Dockerfile is located in at `Dockerfile <https://github.com/LMCache/LMCache/tree/dev/docker>`_.
-
-To build the Docker image, run the following command from the root directory of the LMCache repository:
+To build the container image, run the following command from the root directory of the LMCache repository:
 
 .. code-block:: bash
 
-    docker build -t <IMAGE_NAME>:<TAG> -f docker/Dockerfile .
+    docker build --tag <IMAGE_NAME>:<TAG> --target image-build --file docker/Dockerfile .
 
-Replace `<IMAGE_NAME>` and `<TAG>` with your desired image name and tag.
-
+Replace `<IMAGE_NAME>` and `<TAG>` with your desired image name and tag. See example build file in `docker <https://github.com/LMCache/LMCache/tree/dev/docker>`_
+for explanation of all arguments.
 
 
 
