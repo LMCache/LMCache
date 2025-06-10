@@ -96,6 +96,17 @@ class NixlBufferAllocator(MemoryAllocatorInterface):
         self.allocated_size += required_size
         return ret
 
+    def batched_allocate(
+        self,
+        shape: torch.Size,
+        dtype: Optional[torch.dtype],
+        batch_size: int,
+        fmt=MemoryFormat.KV_2LTD,
+    ):
+        raise NotImplementedError(
+            "Batched allocation is not supported in NIXL buffer allocator"
+        )
+
     def dry_allocate(
         self,
         shape: torch.Size,
@@ -114,6 +125,10 @@ class NixlBufferAllocator(MemoryAllocatorInterface):
 
     def free(self, obj: MemoryObj):
         """Free the memory object."""
+        pass
+
+    def batched_free(self, objs: list[MemoryObj]):
+        """Free the memory objects in batch."""
         pass
 
     ### For NIXL Pipe to call

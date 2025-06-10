@@ -3,8 +3,8 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.memory_management import BytesBufferMemoryObj  # noqa
 from lmcache.v1.memory_management import (
+    BytesBufferMemoryObj,
     GPUMemoryAllocator,
     HostMemoryAllocator,
     MemoryFormat,
@@ -128,6 +128,37 @@ def test_boundary_alloc(alloc_cls):
 
     # `FreeBlock` with size 0 shouldn't exist in the allocator
     allocator.allocate([512, 10], torch.float)
+
+    if isinstance(allocator, MixedMemoryAllocator):
+        assert len(allocator.pin_allocator.explicit_list) == 1
+    else:
+        assert len(allocator.allocator.explicit_list) == 1
+
+
+@pytest.mark.parametrize(
+    "alloc_cls",
+    [
+        HostMemoryAllocator,
+        PinMemoryAllocator,
+        GPUMemoryAllocator,
+        MixedMemoryAllocator,
+    ],
+)
+def test_batched_alloc(alloc_cls):
+    total_size = 32 * 100 * 2 * 1024 * 2
+    batch_size = 32
+    allocator = alloc_cls(total_size)
+    objs = allocator.batched_allocate(
+        [100, 2, 1024], torch.bfloat16, batch_size, MemoryFormat.KV_T2D
+    )
+
+    assert len(objs) == batch_size
+    for obj in objs:
+        assert obj is not None
+        assert obj.tensor is not None
+        assert obj.tensor.dtype == torch.bfloat16
+        assert obj.tensor.shape == (100, 2, 1024)
+    allocator.batched_free(objs)
 
     if isinstance(allocator, MixedMemoryAllocator):
         assert len(allocator.pin_allocator.explicit_list) == 1

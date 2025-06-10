@@ -24,7 +24,7 @@ import torch
 # First Party
 from lmcache.logging import init_logger
 from lmcache.observability import LMCStatsMonitor
-from lmcache.utils import CacheEngineKey
+from lmcache.utils import CacheEngineKey, _lmcache_nvtx_annotate
 from lmcache.v1.cache_controller.message import KVAdmitMsg, KVEvictMsg
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.lookup_server import LookupServerInterface
@@ -175,12 +175,13 @@ class LocalCPUBackend(StorageBackendInterface):
             memory_obj.unpin()
             return True
 
-    def remove(self, key: CacheEngineKey) -> bool:
+    def remove(self, key: CacheEngineKey, free_obj=True) -> bool:
         with self.cpu_lock:
             if key not in self.hot_cache:
                 return False
             memory_obj = self.hot_cache.pop(key)
-            memory_obj.ref_count_down()
+            if free_obj:
+                memory_obj.ref_count_down()
 
             self.usage -= memory_obj.get_size()
             self.stats_monitor.update_local_cache_usage(self.usage)
@@ -194,6 +195,7 @@ class LocalCPUBackend(StorageBackendInterface):
             # other backends might still (temporarily) hold the memory object.
             return True
 
+    @_lmcache_nvtx_annotate
     def allocate(
         self,
         shape: torch.Size,
@@ -202,7 +204,7 @@ class LocalCPUBackend(StorageBackendInterface):
         eviction: bool = True,
     ) -> Optional[MemoryObj]:
         """
-        allocate a memory object of shape and dtype
+        Allocate a memory object of shape and dtype
         evict if necessary. Storage manager should always call
         local_cpu_backend.allocate() to get memory objects
         regardless of whether local_cpu is True or False
@@ -242,6 +244,83 @@ class LocalCPUBackend(StorageBackendInterface):
         if self.lookup_server is not None:
             self.lookup_server.batched_remove(evict_keys)
         return memory_obj
+
+    @_lmcache_nvtx_annotate
+    def batched_allocate(
+        self,
+        shape: torch.Size,
+        dtype: torch.dtype,
+        batch_size: int,
+        fmt: Optional[MemoryFormat] = None,
+        eviction: bool = True,
+    ) -> Optional[List[MemoryObj]]:
+        """
+        Batched allocate `batch_size` memory objects of shape and dtype
+        evict if necessary. Storage manager should always call
+        local_cpu_backend.allocate() to get memory objects
+        regardless of whether local_cpu is True or False
+        """
+        if fmt is None:
+            if self.layerwise:
+                if self.enable_blending:
+                    fmt = MemoryFormat.KV_2TD
+                else:
+                    fmt = MemoryFormat.KV_T2D
+            else:
+                fmt = MemoryFormat.KV_2LTD
+
+        memory_objs = self.memory_allocator.batched_allocate(
+            shape, dtype, batch_size, fmt
+        )
+        if memory_objs is not None or not eviction:
+            return memory_objs
+
+        assert isinstance(self.memory_allocator, MixedMemoryAllocator)
+
+        # NOTE: Tune this number for performance.
+        # Setting it to small will cause more eviction overhead.
+        # Setting it to large might result in lower cache hit
+        # because more caches are evicted.
+        # blocks_to_free = batch_size
+
+        evict_keys = []
+        old_mem_objs = []
+        with self.cpu_lock:
+            for evict_key in self.hot_cache:
+                if evict_key in evict_keys:
+                    continue
+                old_mem_obj = self.hot_cache[evict_key]
+                # If the ref_count > 1, we cannot evict it as the cpu memory
+                # might be used as buffers by other storage backends
+                if old_mem_obj.get_ref_count() > 1 and not old_mem_obj.is_pinned:
+                    continue
+                # HACK: We assume batch_size=num_layers here.
+                # We also assume if the one layer's ref_count > 1 or pinned,
+                # then the other layers are also ref_count > 1 or
+                # pinned in the cpu memory.
+                evict_key_all_layer = evict_key.split_layers(batch_size)
+                evict_keys.extend(evict_key_all_layer)
+                for key in evict_key_all_layer:
+                    old_mem_objs.append(self.hot_cache[key])
+
+                # if len(old_mem_objs) < blocks_to_free:
+                #    continue
+
+                self.memory_allocator.batched_free(old_mem_objs)
+                memory_objs = self.memory_allocator.batched_allocate(
+                    shape, dtype, batch_size, fmt
+                )
+
+                logger.debug(f"Evicting {len(old_mem_objs)} chunks from cpu memory")
+
+                if memory_objs is not None:
+                    break
+                old_mem_objs = []
+        for evict_key in evict_keys:
+            self.remove(evict_key, free_obj=False)
+        if self.lookup_server is not None:
+            self.lookup_server.batched_remove(evict_keys)
+        return memory_objs
 
     def write_back(self, key: CacheEngineKey, memory_obj: MemoryObj):
         if memory_obj is None or not self.use_hot:

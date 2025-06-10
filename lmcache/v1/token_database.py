@@ -24,7 +24,7 @@ import torch
 
 # First Party
 from lmcache.config import LMCacheEngineMetadata
-from lmcache.utils import CacheEngineKey
+from lmcache.utils import CacheEngineKey, _lmcache_nvtx_annotate
 from lmcache.v1.config import LMCacheEngineConfig
 
 
@@ -124,6 +124,7 @@ class ChunkedTokenDatabase(TokenDatabase):
             prefix_hash = self._hash(token_chunk, prefix_hash)
             yield prefix_hash
 
+    @_lmcache_nvtx_annotate
     def process_tokens(
         self,
         tokens: Union[torch.Tensor, List[int]],

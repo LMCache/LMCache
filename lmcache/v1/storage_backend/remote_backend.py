@@ -229,10 +229,18 @@ class RemoteBackend(StorageBackendInterface):
         raise NotImplementedError
 
     def pin(self, key: CacheEngineKey) -> bool:
-        raise NotImplementedError
+        logger.warning(
+            "Remote backend does not support pin. "
+            "This method is a no-op and will return True."
+        )
+        return True
 
     def unpin(self, key: CacheEngineKey) -> bool:
-        raise NotImplementedError
+        logger.warning(
+            "Remote backend does not support unpin. "
+            "This method is a no-op and will return True."
+        )
+        return True
 
     def close(self):
         try:

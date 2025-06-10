@@ -43,7 +43,6 @@ from lmcache.v1.memory_management import CuFileMemoryAllocator  # noqa: E501
 from lmcache.v1.memory_management import (
     MemoryAllocatorInterface,
     MemoryFormat,
-    MemoryObj,
     MixedMemoryAllocator,
 )
 from lmcache.v1.storage_backend.storage_manager import (
@@ -351,6 +350,9 @@ class LMCacheEngine:
             self.gpu_connector.to_gpu(memory_obj, start, end, **kwargs)
             memory_obj.ref_count_down()
 
+            if isinstance(self.storage_manager, StorageManager):
+                self.storage_manager.batched_unpin([key])
+
             # NOTE (ApostaC): This is only for the current implementation:
             # When the object is retrieved back to vLLM, the storage backend
             # will immediately remove the object from itself
@@ -366,6 +368,7 @@ class LMCacheEngine:
         )
         return ret_mask
 
+    @_lmcache_nvtx_annotate
     def prefetch(
         self,
         tokens: torch.Tensor,
@@ -379,6 +382,7 @@ class LMCacheEngine:
             self.storage_manager.prefetch(key)
 
     # TODO(Jiayi): Currently, search_range is only used for testing.
+    @_lmcache_nvtx_annotate
     def lookup(
         self,
         tokens: Union[torch.Tensor, List[int]],
@@ -427,6 +431,7 @@ class LMCacheEngine:
         # all tokens where found, return the maximal end
         return end
 
+    @_lmcache_nvtx_annotate
     def clear(
         self,
         tokens: Optional[Union[torch.Tensor, List[int]]] = None,
@@ -551,27 +556,18 @@ class LayerwiseLMCacheEngine(LMCacheEngine):
             num_tokens = end - start
             kv_shape_single_layer = self.gpu_connector.get_shape(num_tokens)
 
-            # TODO(Jiayi): Optimize with batched allocation
-            memory_objs_multi_layer: List[MemoryObj] = []
-            no_space_left = False
-            for layer_id in range(self.num_layers):
-                mem_obj_single_layer = self.storage_manager.allocate(
-                    kv_shape_single_layer, kv_dtype, fmt=self.fmt
+            memory_objs_multi_layer = self.storage_manager.batched_allocate(
+                kv_shape_single_layer,
+                kv_dtype,
+                batch_size=self.num_layers,
+                fmt=self.fmt,
+            )
+
+            if memory_objs_multi_layer is None:
+                logger.warning(
+                    "Failed to allocate memory for the KV cache.\n"
+                    "The KV cache will not be stored."
                 )
-
-                if mem_obj_single_layer is None:
-                    logger.warning(
-                        "Failed to allocate memory for the KV cache.\n"
-                        "The KV cache will not be stored."
-                    )
-                    no_space_left = True
-                    for mem_obj_prev_layer in memory_objs_multi_layer:
-                        mem_obj_prev_layer.ref_count_down()
-                    break
-
-                memory_objs_multi_layer.append(mem_obj_single_layer)
-
-            if no_space_left:
                 break
 
             starts.append(start)
@@ -725,6 +721,7 @@ class LayerwiseLMCacheEngine(LMCacheEngine):
 
         yield ret_mask
 
+    @_lmcache_nvtx_annotate
     def lookup(
         self,
         tokens: Union[torch.Tensor, List[int]],

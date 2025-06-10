@@ -249,6 +249,7 @@ def test_layerwise_vllm_paged_connector_with_gpu(use_gpu):
         ends,
         kvcaches=gpu_kv_src,
         slot_mapping=slot_mapping,
+        sync=True,
     )
 
     for layer_id in range(num_layers + 1):
@@ -260,6 +261,7 @@ def test_layerwise_vllm_paged_connector_with_gpu(use_gpu):
         ends,
         kvcaches=gpu_kv_dst,
         slot_mapping=slot_mapping,
+        sync=True,
     )
     next(mem_obj_consumer)
     for layer_id in range(num_layers):
@@ -277,6 +279,167 @@ def test_layerwise_vllm_paged_connector_with_gpu(use_gpu):
 
     check_paged_kv_cache_equal(
         gpu_kv_src, gpu_kv_dst, num_tokens, slot_mapping, num_heads, head_size
+    )
+
+
+@pytest.mark.parametrize("use_gpu", [True])
+def test_batched_layerwise_vllm_paged_connector_with_gpu(use_gpu):
+    num_blocks = 100
+    block_size = 16
+    num_layers = 32
+    num_heads = 8
+    head_size = 128
+    device = "cuda"
+    hidden_dim = num_heads * head_size
+
+    num_tokens_1 = 800
+    num_tokens_2 = 500
+    num_tokens_total = num_tokens_1 + num_tokens_2
+    chunk_size = 256
+
+    allocator = PinMemoryAllocator(1024 * 1024 * 1024)
+
+    gpu_kv_src = generate_kv_cache_paged_list_tensors(num_blocks, device, block_size)
+    gpu_kv_dst = generate_kv_cache_paged_list_tensors(num_blocks, device, block_size)
+    dtype = gpu_kv_src[0][0].dtype
+
+    slot_mapping_total = random.sample(
+        range(0, num_blocks * block_size), num_tokens_total
+    )
+    slot_mapping_total = torch.tensor(
+        slot_mapping_total, device=device, dtype=torch.int64
+    )
+
+    # Check the gpu_kv is not the same before copying
+    with pytest.raises(AssertionError):
+        check_kv_cache_equal(gpu_kv_src, gpu_kv_dst, num_tokens_total, "vllm")
+
+    connector = VLLMPagedMemLayerwiseGPUConnector(
+        hidden_dim,
+        num_layers,
+        use_gpu=use_gpu,
+        chunk_size=chunk_size,
+        dtype=dtype,
+        device=device,
+    )
+
+    # from gpu to cpu
+    starts_1 = []
+    ends_1 = []
+    memory_objs_1 = []
+
+    for start in range(0, num_tokens_1, chunk_size):
+        end = min(start + chunk_size, num_tokens_1)
+        shape_single_layer = connector.get_shape(end - start)
+        memory_objs_multi_layer = []
+
+        for layer_id in range(num_layers):
+            mem_obj_single_layer = allocator.allocate(
+                shape_single_layer, dtype, fmt=MemoryFormat.KV_T2D
+            )
+            memory_objs_multi_layer.append(mem_obj_single_layer)
+
+        starts_1.append(start)
+        ends_1.append(end)
+        memory_objs_1.append(memory_objs_multi_layer)
+
+    memory_objs_1 = [list(row) for row in zip(*memory_objs_1, strict=False)]
+
+    starts_2 = []
+    ends_2 = []
+    memory_objs_2 = []
+    for start in range(num_tokens_1, num_tokens_total, chunk_size):
+        end = min(start + chunk_size, num_tokens_total)
+        shape_single_layer = connector.get_shape(end - start)
+        memory_objs_multi_layer = []
+
+        for layer_id in range(num_layers):
+            mem_obj_single_layer = allocator.allocate(
+                shape_single_layer, dtype, fmt=MemoryFormat.KV_T2D
+            )
+            memory_objs_multi_layer.append(mem_obj_single_layer)
+
+        starts_2.append(start)
+        ends_2.append(end)
+        memory_objs_2.append(memory_objs_multi_layer)
+
+    memory_objs_2 = [list(row) for row in zip(*memory_objs_2, strict=False)]
+
+    mem_obj_generator_1 = connector.batched_from_gpu(
+        memory_objs_1,
+        starts_1,
+        ends_1,
+        kvcaches=gpu_kv_src,
+        slot_mapping=slot_mapping_total,
+        sync=True,
+    )
+
+    mem_obj_generator_1 = connector.batched_from_gpu(
+        memory_objs_1,
+        starts_1,
+        ends_1,
+        kvcaches=gpu_kv_src,
+        slot_mapping=slot_mapping_total,
+        sync=True,
+    )
+
+    mem_obj_generator_2 = connector.batched_from_gpu(
+        memory_objs_2,
+        starts_2,
+        ends_2,
+        kvcaches=gpu_kv_src,
+        slot_mapping=slot_mapping_total,
+        sync=False,
+    )
+
+    for layer_id in range(num_layers + 1):
+        next(mem_obj_generator_1)
+        next(mem_obj_generator_2)
+
+    # from cpu to gpu
+    mem_obj_consumer_1 = connector.batched_to_gpu(
+        starts_1,
+        ends_1,
+        kvcaches=gpu_kv_dst,
+        slot_mapping=slot_mapping_total,
+        sync=False,
+    )
+    mem_obj_consumer_2 = connector.batched_to_gpu(
+        starts_2,
+        ends_2,
+        kvcaches=gpu_kv_dst,
+        slot_mapping=slot_mapping_total,
+        sync=True,
+    )
+
+    next(mem_obj_consumer_1)
+    next(mem_obj_consumer_2)
+    for layer_id in range(num_layers):
+        mem_obj_consumer_1.send(memory_objs_1[layer_id])
+        mem_obj_consumer_2.send(memory_objs_2[layer_id])
+    next(mem_obj_consumer_1)
+    next(mem_obj_consumer_2)
+
+    # free all mem objs
+    for mem_obj_multi_layer in memory_objs_1:
+        for mem_obj in mem_obj_multi_layer:
+            mem_obj.ref_count_down()
+
+    for mem_obj_multi_layer in memory_objs_2:
+        for mem_obj in mem_obj_multi_layer:
+            mem_obj.ref_count_down()
+
+    assert allocator.memcheck()
+
+    assert connector.gpu_buffer_allocator.memcheck()
+
+    check_paged_kv_cache_equal(
+        gpu_kv_src,
+        gpu_kv_dst,
+        num_tokens_total,
+        slot_mapping_total,
+        num_heads,
+        head_size,
     )
 
 

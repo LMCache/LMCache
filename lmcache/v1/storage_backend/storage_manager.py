@@ -103,6 +103,7 @@ class StorageManager:
 
         self.stream = torch.cuda.Stream()
 
+    @_lmcache_nvtx_annotate
     def allocate(
         self,
         shape: torch.Size,
@@ -118,6 +119,26 @@ class StorageManager:
         # TODO (Jiayi): We might need to pre-allocate and management
         # disk in a similar way as CPU.
         return self.local_cpu_backend.allocate(shape, dtype, fmt, eviction=eviction)
+
+    @_lmcache_nvtx_annotate
+    def batched_allocate(
+        self,
+        shape: torch.Size,
+        dtype: torch.dtype,
+        batch_size: int,
+        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
+        eviction=True,
+    ) -> Optional[MemoryObj]:
+        """
+        Batched allocate memory object with memory allocator.
+        Use LRU evictor if eviction is enabled.
+        """
+        assert isinstance(self.local_cpu_backend, LocalCPUBackend)
+        # TODO (Jiayi): We might need to pre-allocate and management
+        # disk in a similar way as CPU.
+        return self.local_cpu_backend.batched_allocate(
+            shape, dtype, batch_size, fmt, eviction=eviction
+        )
 
     def dry_allocate(
         self,
@@ -465,6 +486,7 @@ class DistributedStorageManager:
         # zero-copy allocatations
         # self.allocator = allocator
 
+    @_lmcache_nvtx_annotate
     def allocate(
         self,
         shape: torch.Size,

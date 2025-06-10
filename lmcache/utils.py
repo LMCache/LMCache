@@ -177,6 +177,22 @@ class LayerCacheEngineKey(CacheEngineKey):
             f"@{self.worker_id}@{self.chunk_hash}@{self.layer_id}"
         )
 
+    def split_layers(self, num_layers: int) -> List["LayerCacheEngineKey"]:
+        """Split the key into multiple keys for each layer"""
+        keys = []
+        for layer_id in range(num_layers):
+            keys.append(
+                LayerCacheEngineKey(
+                    self.fmt,
+                    self.model_name,
+                    self.world_size,
+                    self.worker_id,
+                    self.chunk_hash,
+                    layer_id,
+                )
+            )
+        return keys
+
     @staticmethod
     def from_string(s):
         parts = s.split("@")

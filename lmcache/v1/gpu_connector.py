@@ -868,13 +868,18 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
         if "slot_mapping" not in kwargs:
             raise ValueError("'slot_mapping' should be provided in kwargs.")
 
+        if "sync" not in kwargs:
+            raise ValueError("'sync' should be provided in kwargs.")
+
         kvcaches: List[torch.Tensor] = kwargs["kvcaches"]
         slot_mapping: torch.Tensor = kwargs["slot_mapping"]
+        sync: bool = kwargs["sync"]
 
         slot_mapping_chunks = []
         for start, end in zip(starts, ends, strict=False):
             slot_mapping_chunks.append(slot_mapping[start:end])
 
+        # TODO(Jiayi): Optimize away this `cat`
         slot_mapping_full = torch.cat(slot_mapping_chunks, dim=0)
 
         num_tokens = len(slot_mapping_full)
@@ -892,7 +897,8 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
 
         for layer_id in range(self.num_layers):
             memory_objs_layer = yield
-            current_stream.wait_stream(self.load_stream)
+            if sync:
+                current_stream.wait_stream(self.load_stream)
             if layer_id > 0:
                 logger.debug(f"Finished loading layer {layer_id - 1}")
 
@@ -917,7 +923,8 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
         yield
 
         # synchronize the last layer
-        current_stream.wait_stream(self.load_stream)
+        if sync:
+            current_stream.wait_stream(self.load_stream)
 
         # free the buffer memory
         tmp_gpu_buffer_obj.ref_count_down()
@@ -965,8 +972,12 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
         if "slot_mapping" not in kwargs:
             raise ValueError("'slot_mapping' should be provided in kwargs.")
 
+        if "sync" not in kwargs:
+            raise ValueError("'sync' should be provided in kwargs.")
+
         kvcaches: List[torch.Tensor] = kwargs["kvcaches"]
         slot_mapping: torch.Tensor = kwargs["slot_mapping"]
+        sync: bool = kwargs["sync"]
 
         slot_mapping_chunks = []
         for start, end in zip(starts, ends, strict=False):
@@ -1010,7 +1021,8 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
                     )
 
             yield
-            self.store_stream.synchronize()
+            if sync:
+                self.store_stream.synchronize()
             logger.debug(f"Finished offloading layer {layer_id}")
 
         # free the buffer memory
