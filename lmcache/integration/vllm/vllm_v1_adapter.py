@@ -729,6 +729,11 @@ class LMCacheConnectorV1Impl:
                 offset=skip_leading_tokens,
             )
 
+    def get_finished(
+        self, finished_req_ids: set[str]
+    ) -> tuple[Optional[set[str]], Optional[set[str]]]:
+        return None, None
+
     ###################
     # Scheduler side APIs
     ####################
