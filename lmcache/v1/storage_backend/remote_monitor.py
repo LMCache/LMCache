@@ -19,7 +19,10 @@ import time
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.storage_backend.connector import BlackholeConnector
+from lmcache.v1.storage_backend.connector import (
+    BlackholeConnector,
+    InstrumentedRemoteConnector,
+)
 
 logger = init_logger(__name__)
 
@@ -42,14 +45,14 @@ class RemoteMonitor:
     def __init__(self, backend):
         self.backend = backend
 
-        # Initialize connection status
-        self.connection_healthy = True
+        # Lock for connector switching
+        self.connector_lock = threading.RLock()
 
         # Store the original connector
         self.original_connector = backend.connection
 
         # Create a blackhole connector for fallback
-        self.blackhole_connector = BlackholeConnector()
+        self.blackhole_connector = InstrumentedRemoteConnector(BlackholeConnector())
 
     def _should_skip_ping(self) -> bool:
         """
@@ -84,6 +87,12 @@ class RemoteMonitor:
         thread.start()
         return thread
 
+    def _safe_switch_connector(self, new_connector):
+        """Thread-safe connector switching"""
+        with self.connector_lock:
+            if self.backend.connection != new_connector:
+                self.backend.connection = new_connector
+
     def run_loop(self):
         """
         Run the monitor loop
@@ -102,23 +111,28 @@ class RemoteMonitor:
             f"Starting remote monitor thread {threading.current_thread().name} "
             f"with interval {ping_interval}s and timeout {ping_timeout}s"
         )
+
+        connection_healthy = True
         while True:
             time.sleep(ping_interval)
             # Check if original_connector is still uninitialized
             if self.original_connector is None:
-                logger.warning(
-                    "original_connector is None, skipping ping. Re-init connection."
-                )
-                self.backend.init_connection()
-                self.original_connector = self.backend.connection
-                if self.original_connector is None:
-                    continue
-                if not self.original_connector.support_ping():
-                    logger.info(
-                        f"Connector {self.original_connector} "
-                        "does not support ping, break RemoteMonitor thread."
-                    )
-                    break
+                # Double-checked locking for initialization
+                with self.connector_lock:
+                    if self.original_connector is None:
+                        logger.warning(
+                            "original_connector is None, re-initializing connection."
+                        )
+                        self.backend.init_connection()
+                        self.original_connector = self.backend.connection
+                        if self.original_connector is None:
+                            continue
+                        if not self.original_connector.support_ping():
+                            logger.info(
+                                f"Connector {self.original_connector} "
+                                "does not support ping, break RemoteMonitor thread."
+                            )
+                            break
 
             try:
                 start_time = time.perf_counter()
@@ -129,20 +143,20 @@ class RemoteMonitor:
                 latency = (time.perf_counter() - start_time) * 1000
                 # Record ping latency
                 self.backend.stats_monitor.update_remote_ping_latency(latency)
-                self.connection_healthy = error_code == 0
+                connection_healthy = error_code == 0
                 # Record error code (0 means success)
                 self.backend.stats_monitor.update_remote_ping_error_code(error_code)
                 if error_code != 0:
                     logger.warning(f"Ping failed with error code: {error_code}")
             except asyncio.TimeoutError:
-                self.connection_healthy = False
+                connection_healthy = False
                 logger.warning("Ping timeout")
                 # Set timeout error code (-1)
                 self.backend.stats_monitor.update_remote_ping_error_code(
                     PING_TIMEOUT_ERROR_CODE
                 )
             except Exception as e:
-                self.connection_healthy = False
+                connection_healthy = False
                 logger.error(f"Ping error: {e}")
                 # Set generic exception error code (-2)
                 self.backend.stats_monitor.update_remote_ping_error_code(
@@ -150,15 +164,7 @@ class RemoteMonitor:
                 )
 
             # Update connector based on health status
-            if self.connection_healthy:
-                if self.backend.connection != self.original_connector:
-                    logger.info(
-                        "Connection restored, switching back to original connector"
-                    )
-                    self.backend.connection = self.original_connector
+            if connection_healthy:
+                self._safe_switch_connector(self.original_connector)
             else:
-                if self.backend.connection != self.blackhole_connector:
-                    logger.warning(
-                        "Connection unhealthy, switching to blackhole connector"
-                    )
-                    self.backend.connection = self.blackhole_connector
+                self._safe_switch_connector(self.blackhole_connector)
