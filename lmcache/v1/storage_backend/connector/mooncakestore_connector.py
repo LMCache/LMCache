@@ -74,17 +74,15 @@ class MooncakeStoreConfig:
                 "The environment variable 'MOONCAKE_CONFIG_PATH' is not set."
             )
         return MooncakeStoreConfig.from_file(config_file_path)
-    
+
     @staticmethod
     def load_from_lmcache_config(
-        config: "LMCacheEngineConfig"
+        config: "LMCacheEngineConfig",
     ) -> "MooncakeStoreConfig":
         """Load config from a file specified in the environment variable."""
         extra_config = config.extra_config
         if extra_config is None:
-            raise ValueError(
-                "The extra config is not set."
-            )
+            raise ValueError("The extra config is not set.")
         return MooncakeStoreConfig(
             local_hostname=str(extra_config["local_hostname"]),
             metadata_server=str(extra_config["metadata_server"]),
@@ -95,6 +93,7 @@ class MooncakeStoreConfig:
             master_server_address=str(extra_config["master_server_address"]),
             transfer_timeout=int(extra_config["transfer_timeout"]),
         )
+
 
 class MooncakestoreConnector(RemoteConnector):
     def __init__(
