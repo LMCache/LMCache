@@ -50,7 +50,7 @@ jobs:
 
       - name: Get the current date
         run: |
-          echo "NOW=$(date +'%Y-%m-%d')" >> $GITHUB_ENV
+          echo "NOW=$(date +'%Y-%m-%d')" >> "$GITHUB_ENV"
 
       - name: Build lmcache/vllm-openai container image
         run: |
