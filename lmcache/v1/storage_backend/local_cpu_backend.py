@@ -65,6 +65,7 @@ class LocalCPUBackend(StorageBackendInterface):
         self.lookup_server = lookup_server
         self.memory_allocator = memory_allocator
         self.lmcache_worker = lmcache_worker
+        self.config = config
         self.instance_id = config.lmcache_instance_id
         self.cpu_lock = threading.Lock()
 
