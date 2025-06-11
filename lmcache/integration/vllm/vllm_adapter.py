@@ -181,6 +181,7 @@ def init_lmcache_engine(
         "vllm",
         kv_dtype,
         kv_shape,
+        use_mla,
     )
 
     use_gpu = need_gpu_interm_buffer(config)
