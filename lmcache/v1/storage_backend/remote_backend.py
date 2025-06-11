@@ -80,10 +80,10 @@ class RemoteBackend(StorageBackendInterface):
             and metadata.world_size > 1
             and metadata.worker_id != 0
         )
-
+        logger.info(f"metadata={metadata}")
         logger.info(
             f"Connected to remote storage at {config.remote_url}, "
-            f"remote mla worker id as 0 mode: {self._mla_worker_id_as0_mode}"
+            f"remote_mla_worker_id_as_0 mode: {self._mla_worker_id_as0_mode}"
         )
 
         # TODO(Jiayi): If we want to have cache admission policies,
