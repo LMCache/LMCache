@@ -109,6 +109,12 @@ class LMCacheEngineConfig:
     # Size of CuFile Buffer in MiB
     cufile_buffer_size: Optional[int] = None
 
+    # Layerwise remote configurations
+    enable_layerwise_remote: bool = True  # whether to enable layerwise for remote backends
+    layerwise_prefetch_layers: int = 1  # number of layers to prefetch ahead
+    use_async_redis: bool = True  # whether to use async Redis client
+    layerwise_batch_timeout: float = 0.1  # timeout for layerwise batch operations
+
     # The extra config
     extra_config: Optional[dict] = None
 
@@ -150,6 +156,10 @@ class LMCacheEngineConfig:
         weka_path: Optional[str] = None,
         gds_path: Optional[str] = None,
         cufile_buffer_size: Optional[int] = None,
+        enable_layerwise_remote: bool = True,
+        layerwise_prefetch_layers: int = 1,
+        use_async_redis: bool = True,
+        layerwise_batch_timeout: float = 0.1,
         extra_config: Optional[dict] = None,
         save_unfull_chunk: bool = True,
     ) -> "LMCacheEngineConfig":
@@ -187,6 +197,10 @@ class LMCacheEngineConfig:
             weka_path,
             gds_path,
             cufile_buffer_size,
+            enable_layerwise_remote,
+            layerwise_prefetch_layers,
+            use_async_redis,
+            layerwise_batch_timeout,
             extra_config,
             save_unfull_chunk,
         ).validate()
@@ -323,6 +337,12 @@ class LMCacheEngineConfig:
         nixl_buffer_device = config.get("nixl_buffer_device", None)
         nixl_enable_gc = config.get("nixl_enable_gc", False)
 
+        # Layerwise remote configurations
+        enable_layerwise_remote = config.get("enable_layerwise_remote", True)
+        layerwise_prefetch_layers = config.get("layerwise_prefetch_layers", 1)
+        use_async_redis = config.get("use_async_redis", True)
+        layerwise_batch_timeout = config.get("layerwise_batch_timeout", 0.1)
+
         extra_config = config.get("extra_config", None)
         if extra_config is not None:
             assert isinstance(extra_config, dict), "extra_config must be a dict"
@@ -396,6 +416,10 @@ class LMCacheEngineConfig:
                 weka_path,
                 gds_path,
                 cufile_buffer_size,
+                enable_layerwise_remote,
+                layerwise_prefetch_layers,
+                use_async_redis,
+                layerwise_batch_timeout,
                 extra_config,
                 save_unfull_chunk,
             )
@@ -467,6 +491,20 @@ class LMCacheEngineConfig:
 
         config.use_layerwise = to_bool(
             parse_env(get_env_name("use_layerwise"), config.use_layerwise)
+        )
+
+        # Parse layerwise remote configurations
+        config.enable_layerwise_remote = to_bool(
+            parse_env(get_env_name("enable_layerwise_remote"), config.enable_layerwise_remote)
+        )
+        config.layerwise_prefetch_layers = to_int(
+            parse_env(get_env_name("layerwise_prefetch_layers"), config.layerwise_prefetch_layers)
+        )
+        config.use_async_redis = to_bool(
+            parse_env(get_env_name("use_async_redis"), config.use_async_redis)
+        )
+        config.layerwise_batch_timeout = to_float(
+            parse_env(get_env_name("layerwise_batch_timeout"), config.layerwise_batch_timeout)
         )
 
         config.save_decode_cache = to_bool(

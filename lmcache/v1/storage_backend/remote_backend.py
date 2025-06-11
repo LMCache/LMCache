@@ -15,7 +15,7 @@
 # Standard
 from concurrent.futures import Future
 from functools import wraps
-from typing import List, Optional
+from typing import List, Optional, Generator
 import asyncio
 import threading
 import time
@@ -209,7 +209,7 @@ class RemoteBackend(StorageBackendInterface):
             logger.warning(f"Error occurred in get_blocking: {e}")
             logger.warning("Returning None")
             return None
-
+#
         t2 = time.perf_counter()
         self.stats_monitor.update_interval_remote_time_to_get_sync((t2 - t1) * 1000)
         if memory_obj is None:
@@ -252,3 +252,129 @@ class RemoteBackend(StorageBackendInterface):
             logger.info("Remote backend closed.")
         except Exception as e:
             logger.warning(f"Error occurred when closing remote connection: {e}")
+
+    def supports_layerwise_operations(self) -> bool:
+        """
+        Check if this backend supports optimized layerwise operations.
+        
+        Returns:
+            bool - True if layerwise operations are supported and optimized
+        """
+        return (
+            hasattr(self.connection, 'supports_layerwise') and 
+            self.connection.supports_layerwise()
+        )
+    
+    def layerwise_batched_get(self, keys: List[List[CacheEngineKey]]) -> Generator[List[Future], None, None]:
+        """
+        Generator-based layerwise retrieval matching local backend interface.
+        
+        Args:
+            keys: List[List[CacheEngineKey]] - [layer][chunk] format
+            
+        Yields:
+            List[Future] - futures for each layer's memory objects
+        """
+        if not self.supports_layerwise_operations():
+            # Fallback to individual gets for backwards compatibility
+            for layer_keys in keys:
+                layer_futures = []
+                for key in layer_keys:
+                    future = asyncio.run_coroutine_threadsafe(
+                        self.connection.get(key), self.loop
+                    )
+                    layer_futures.append(future)
+                yield layer_futures
+            return
+        
+        # Optimized layerwise retrieval
+        async def _layerwise_get_async():
+            layer_futures_list = []
+            async for layer_objs in self.connection.layerwise_get(keys):
+                # Convert memory objects to completed futures
+                layer_futures = []
+                for obj in layer_objs:
+                    future = asyncio.Future()
+                    if obj is not None:
+                        # Object already deserialized in Redis connector, no need to deserialize again
+                        future.set_result(obj)
+                    else:
+                        future.set_result(None)
+                    layer_futures.append(future)
+                layer_futures_list.append(layer_futures)
+            return layer_futures_list
+        
+        # Execute async layerwise get and yield results
+        main_future = asyncio.run_coroutine_threadsafe(_layerwise_get_async(), self.loop)
+        try:
+            layer_futures_list = main_future.result()
+            for layer_futures in layer_futures_list:
+                yield layer_futures
+        except Exception as e:
+            logger.warning(f"Layerwise get failed: {e}, falling back to individual gets")
+            # Fallback to individual operations
+            for layer_keys in keys:
+                layer_futures = []
+                for key in layer_keys:
+                    future = asyncio.run_coroutine_threadsafe(
+                        self.connection.get(key), self.loop
+                    )
+                    layer_futures.append(future)
+                yield layer_futures
+                
+    def layerwise_batched_put(self, keys: List[List[CacheEngineKey]], 
+                             memory_objs: List[List[MemoryObj]]) -> Generator[None, None, None]:
+        """
+        Generator-based layerwise storage matching local backend interface.
+        
+        Args:
+            keys: List[List[CacheEngineKey]] - [layer][chunk] format
+            memory_objs: List[List[MemoryObj]] - corresponding memory objects
+            
+        Yields:
+            None - yields after each layer completion
+        """
+        if not self.supports_layerwise_operations():
+            # Fallback to individual puts
+            for layer_keys, layer_objs in zip(keys, memory_objs):
+                for key, obj in zip(layer_keys, layer_objs):
+                    if obj is not None:
+                        self.submit_put_task(key, obj)
+                yield
+            return
+        
+        # Optimized layerwise storage
+        async def _layerwise_put_async():
+            # Redis connector handles serialization internally, pass raw memory objects
+            # Increase ref counts before passing to connector
+            for layer_objs in memory_objs:
+                for obj in layer_objs:
+                    if obj is not None:
+                        obj.ref_count_up()
+            
+            try:
+                # Store layer by layer - connector handles serialization
+                async for _ in self.connection.layerwise_put(keys, memory_objs):
+                    pass
+            finally:
+                # Decrease ref counts after storage
+                for layer_objs in memory_objs:
+                    for obj in layer_objs:
+                        if obj is not None:
+                            obj.ref_count_down()
+        
+        # Execute async layerwise put
+        main_future = asyncio.run_coroutine_threadsafe(_layerwise_put_async(), self.loop)
+        try:
+            main_future.result()
+            # Yield for each layer to match interface
+            for _ in keys:
+                yield
+        except Exception as e:
+            logger.warning(f"Layerwise put failed: {e}, falling back to individual puts")
+            # Fallback to individual operations
+            for layer_keys, layer_objs in zip(keys, memory_objs):
+                for key, obj in zip(layer_keys, layer_objs):
+                    if obj is not None:
+                        self.submit_put_task(key, obj)
+                yield

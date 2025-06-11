@@ -262,14 +262,65 @@ class StorageManager:
 
         :return: A generator that yields a list of futures for each layer.
         """
-        for keys_multi_chunk in keys:
-            # Store all chunks for one layer
-            tasks = []
-            for key in keys_multi_chunk:
-                task = self.get_non_blocking(key)
-                assert task is not None
-                tasks.append(task)
-            yield tasks
+        # Check if any backend supports optimized layerwise operations
+        layerwise_backend = None
+        for backend_name, backend in self.storage_backends.items():
+            if hasattr(backend, 'supports_layerwise_operations') and backend.supports_layerwise_operations():
+                layerwise_backend = backend
+                logger.debug(f"Using optimized layerwise operations with {type(backend).__name__}")
+                break
+        
+        if layerwise_backend:
+            # Use optimized layerwise operations
+            yield from layerwise_backend.layerwise_batched_get(keys)
+        else:
+            # Fallback to original implementation
+            logger.debug("Using fallback layerwise operations")
+            for keys_multi_chunk in keys:
+                # Store all chunks for one layer
+                tasks = []
+                for key in keys_multi_chunk:
+                    task = self.get_non_blocking(key)
+                    if task is not None:
+                        tasks.append(task)
+                    else:
+                        # Create a failed future for missing keys
+                        failed_future = Future()
+                        failed_future.set_result(None)
+                        tasks.append(failed_future)
+                yield tasks
+
+    def layerwise_batched_put(self, keys: List[List[CacheEngineKey]], 
+                             memory_objs: List[List[MemoryObj]]) -> Generator[None, None, None]:
+        """
+        Enhanced layerwise batched put with remote backend support.
+        
+        Args:
+            keys: List[List[CacheEngineKey]] - [layer][chunk] format
+            memory_objs: List[List[MemoryObj]] - corresponding memory objects
+            
+        Yields:
+            None - yields after each layer completion
+        """
+        # Check if any backend supports optimized layerwise operations
+        layerwise_backend = None
+        for backend_name, backend in self.storage_backends.items():
+            if hasattr(backend, 'supports_layerwise_operations') and backend.supports_layerwise_operations():
+                layerwise_backend = backend
+                logger.debug(f"Using optimized layerwise put with {type(backend).__name__}")
+                break
+        
+        if layerwise_backend:
+            # Use optimized layerwise operations
+            yield from layerwise_backend.layerwise_batched_put(keys, memory_objs)
+        else:
+            # Fallback to individual puts
+            logger.debug("Using fallback layerwise put operations")
+            for layer_keys, layer_objs in zip(keys, memory_objs):
+                for key, obj in zip(layer_keys, layer_objs):
+                    if obj is not None:
+                        self.batched_put([key], [obj])
+                yield
 
     # TODO(Jiayi): we need to consider eviction in prefetch
     def prefetch_callback(self, future, key):

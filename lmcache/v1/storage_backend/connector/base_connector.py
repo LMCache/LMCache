@@ -13,7 +13,7 @@
 # limitations under the License.
 
 # Standard
-from typing import List, Optional
+from typing import List, Optional, AsyncGenerator
 import abc
 
 # First Party
@@ -86,3 +86,72 @@ class RemoteConnector(metaclass=abc.ABCMeta):
 
         """
         raise NotImplementedError
+
+    # New layerwise methods with default implementations for backwards compatibility
+    async def layerwise_exists(self, keys: List[List[CacheEngineKey]]) -> List[List[bool]]:
+        """
+        Check existence of keys in layerwise format.
+        
+        Args:
+            keys: List[List[CacheEngineKey]] - [layer][chunk] format
+            
+        Returns:
+            List[List[bool]] - existence status in same format
+            
+        Default implementation: calls exists() for each key individually
+        """
+        results = []
+        for layer_keys in keys:
+            layer_results = []
+            for key in layer_keys:
+                exists = await self.exists(key)
+                layer_results.append(exists)
+            results.append(layer_results)
+        return results
+    
+    async def layerwise_get(self, keys: List[List[CacheEngineKey]]) -> AsyncGenerator[List[Optional[MemoryObj]], None]:
+        """
+        Generator-based layerwise retrieval for streaming.
+        
+        Args:
+            keys: List[List[CacheEngineKey]] - [layer][chunk] format
+            
+        Yields:
+            List[Optional[MemoryObj]] - memory objects for each layer
+            
+        Default implementation: processes layer by layer using regular get()
+        """
+        for layer_keys in keys:
+            layer_objs = []
+            for key in layer_keys:
+                obj = await self.get(key)
+                layer_objs.append(obj)
+            yield layer_objs
+    
+    async def layerwise_put(self, keys: List[List[CacheEngineKey]], 
+                           memory_objs: List[List[MemoryObj]]) -> AsyncGenerator[None, None]:
+        """
+        Generator-based layerwise storage for streaming.
+        
+        Args:
+            keys: List[List[CacheEngineKey]] - [layer][chunk] format
+            memory_objs: List[List[MemoryObj]] - corresponding memory objects
+            
+        Yields:
+            None - yields after each layer completion
+            
+        Default implementation: processes layer by layer using regular put()
+        """
+        for layer_keys, layer_objs in zip(keys, memory_objs):
+            for key, obj in zip(layer_keys, layer_objs):
+                await self.put(key, obj)
+            yield
+            
+    def supports_layerwise(self) -> bool:
+        """
+        Check if this connector supports optimized layerwise operations.
+        
+        Returns:
+            bool - True if layerwise methods are optimized, False for default fallback
+        """
+        return False  # Default implementation uses fallback
