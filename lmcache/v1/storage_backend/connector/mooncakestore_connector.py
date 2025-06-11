@@ -119,7 +119,7 @@ class MooncakestoreConnector(RemoteConnector):
             config_file_path = os.getenv("MOONCAKE_CONFIG_PATH")
             if config_file_path is None:
                 self.config = MooncakeStoreConfig.load_from_lmcache_config(
-                    local_cpu_backend.config
+                    self.lmcache_config
                 )
             else:
                 self.config = MooncakeStoreConfig.from_file(config_file_path)
@@ -148,6 +148,9 @@ class MooncakestoreConnector(RemoteConnector):
 
         self.loop = loop
         self.local_cpu_backend = local_cpu_backend
+    
+    def get_config_from_lmcache(self, lmcache_config: LMCacheEngineConfig):
+        self.lmcache_config = lmcache_config
 
     async def exists(self, key: CacheEngineKey) -> bool:
         return self.store.is_exist(key.to_string())

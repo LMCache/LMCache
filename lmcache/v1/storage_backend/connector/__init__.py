@@ -182,6 +182,8 @@ def CreateConnector(
             connector = MooncakestoreConnector(
                 host, port, device_name, loop, local_cpu_backend
             )
+            if config is not None:
+                connector.get_config_from_lmcache(config)
         case "blackhole":
             connector = BlackholeConnector()
         case "fs":
