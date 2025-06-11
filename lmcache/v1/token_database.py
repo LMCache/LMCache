@@ -72,6 +72,7 @@ class ChunkedTokenDatabase(TokenDatabase):
     ):
         if config is not None:
             self.chunk_size = config.chunk_size
+            self.save_unfull_chunk = config.save_unfull_chunk
         self.metadata = metadata
 
     def _make_key_by_hash(self, chunk_hash: str, layer_id: Optional[int] = None):
@@ -112,7 +113,12 @@ class ChunkedTokenDatabase(TokenDatabase):
         :return: a generator of chunks of tokens, each with
                 shape [chunk_size]
         """
-        for i in range(0, len(tokens), self.chunk_size):
+        end = (
+            len(tokens)
+            if self.save_unfull_chunk
+            else (len(tokens) - len(tokens) % self.chunk_size)
+        )
+        for i in range(0, end, self.chunk_size):
             yield tokens[i : i + self.chunk_size]
 
     def _prefix_hash(
@@ -165,7 +171,6 @@ class ChunkedTokenDatabase(TokenDatabase):
         token_chunks = self._chunk_tokens(tokens)
         prefix_hashes = self._prefix_hash(token_chunks)
 
-        start_idx = 0
         for chunk_id, hash_val in enumerate(prefix_hashes):
             start_idx = chunk_id * self.chunk_size
             end_idx = min(start_idx + self.chunk_size, total_len)
