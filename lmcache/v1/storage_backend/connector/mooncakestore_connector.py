@@ -103,7 +103,7 @@ class MooncakestoreConnector(RemoteConnector):
                 self.config.device_name = dev_name
             logger.info("Mooncake Configuration loaded. config: %s", self.config)
 
-            self.store.setup(
+            self.store.setup_lmcache(
                 self.config.local_hostname,
                 self.config.metadata_server,
                 self.config.global_segment_size,
@@ -111,6 +111,8 @@ class MooncakestoreConnector(RemoteConnector):
                 self.config.protocol,
                 self.config.device_name,
                 self.config.master_server_address,
+                local_cpu_backend.instance_id,
+                str(local_cpu_backend.lmcache_worker.worker_id),
             )
 
         except ValueError as e:
