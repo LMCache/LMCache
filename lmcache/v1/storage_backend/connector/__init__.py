@@ -214,6 +214,49 @@ def CreateConnector(
             return AuditConnector(
                 real_connector=real_connector, verify_checksum=verify_checksum
             )
+        case "external":
+            if num_hosts != 1:
+                raise ValueError(
+                    f"External connector only supports a single host, "
+                    f"but got url: {url}"
+                )
+
+            # Get the module path and connector name
+            module_path = parsed_url.paths[0].rstrip("/")
+            connector_name = parsed_url.query_params[0].get("connector_name")
+            if not connector_name:
+                raise ValueError(
+                    "External connector requires 'connector_name' in query parameters"
+                )
+
+            # Lazily import the module and get the connector class
+            # Standard
+            import importlib
+
+            try:
+                module = importlib.import_module(module_path)
+                connector_class = getattr(module, connector_name)
+
+                # Verify that it's a subclass of RemoteConnector
+                if not issubclass(connector_class, RemoteConnector):
+                    raise TypeError(
+                        f"{connector_name} must be a subclass of RemoteConnector"
+                    )
+
+                # Create the connector instance
+                connector = connector_class(
+                    loop=loop, local_cpu_backend=local_cpu_backend, config=config
+                )
+                logger.info(
+                    f"Loaded external connector: {module_path}.{connector_name}"
+                )
+
+            except ImportError as e:
+                raise ImportError(f"Could not import module '{module_path}'") from e
+            except AttributeError as e:
+                raise AttributeError(
+                    f"Module '{module_path}' has no class '{connector_name}'"
+                ) from e
         case _:
             raise ValueError(f"Unknown connector type {connector_type} (url is: {url})")
 
