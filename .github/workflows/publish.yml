@@ -178,16 +178,11 @@ jobs:
     # - a new GitHub release is created
     publish-image:
         name: Publish image to DockerHub
-        # Uncomment once prove job is working
-        # if: |
-        #     github.repository_owner == 'LMCache' && github.event.action == 'published'
-        # Remove once ready to merge .. only runs when release cut
+        if: |
+            github.repository_owner == 'LMCache' && github.event.action == 'published'
 
         runs-on: ubuntu-latest
-        # Uncomment once prove job is working
-        # needs: publish-pypi
-        # Remove once ready to merge .. only runs when release cut
-        needs: build-artifacts
+        needs: publish-pypi
 
         steps:
             - name: "Harden Runner"
@@ -248,9 +243,6 @@ jobs:
                 --file docker/Dockerfile .
 
             - name: Push lmcache/vllm-openai container image to DockerHub
-              # Uncomment and use when ready to merge as its overrides the latest tag
-              # run: |
-              #   docker push lmcache/vllm-openai:latest
-              #   docker push lmcache/vllm-openai:${{ env.LATEST_TAG }}
               run: |
+                docker push lmcache/vllm-openai:latest
                 docker push lmcache/vllm-openai:${{ env.LATEST_TAG }}
