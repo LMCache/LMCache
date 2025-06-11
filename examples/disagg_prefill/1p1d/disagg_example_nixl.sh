@@ -125,7 +125,7 @@ main() {
     decoder_pid=$!
     PIDS+=($decoder_pid)
 
-    python3 disagg_proxy_server.py \
+    python3 disagg_proxy_server_first_token_from_prefiller.py \
         --host localhost \
         --port 9000 \
         --prefiller-host localhost \
