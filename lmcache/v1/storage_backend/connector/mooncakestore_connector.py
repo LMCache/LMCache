@@ -148,7 +148,7 @@ class MooncakestoreConnector(RemoteConnector):
 
         self.loop = loop
         self.local_cpu_backend = local_cpu_backend
-    
+
     def get_config_from_lmcache(self, lmcache_config: LMCacheEngineConfig):
         self.lmcache_config = lmcache_config
 
