@@ -49,6 +49,7 @@ RUN cd /workspace
 RUN git clone https://github.com/ai-dynamo/nixl && \
     cd nixl && \
     git checkout b1c22edd8fe10e2e5221c107ee51200fce6f09a8
+RUN cd /workspace/nixl
 RUN source /opt/venv/bin/activate
 RUN . /opt/venv/bin/activate && \
     uv pip install meson
