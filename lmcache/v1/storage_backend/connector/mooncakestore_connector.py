@@ -103,6 +103,7 @@ class MooncakestoreConnector(RemoteConnector):
         dev_name,
         loop: asyncio.AbstractEventLoop,
         local_cpu_backend: LocalCPUBackend,
+        lmcache_config: Optional[LMCacheEngineConfig],
     ):
         try:
             # Third Party
@@ -117,12 +118,15 @@ class MooncakestoreConnector(RemoteConnector):
         try:
             self.store = MooncakeDistributedStore()
             config_file_path = os.getenv("MOONCAKE_CONFIG_PATH")
-            if config_file_path is None:
+            if config_file_path is not None:
+                self.config = MooncakeStoreConfig.from_file(config_file_path)
+            elif lmcache_config is not None:
                 self.config = MooncakeStoreConfig.load_from_lmcache_config(
-                    self.lmcache_config
+                    lmcache_config.extra_config
                 )
             else:
-                self.config = MooncakeStoreConfig.from_file(config_file_path)
+                raise ValueError("MOONCAKE_CONFIG_PATH/lmcache_config must be provided")
+
             if host != "" and port != 0:
                 self.config.master_server_address = host + ":" + str(port)
             if dev_name != "":
@@ -150,9 +154,6 @@ class MooncakestoreConnector(RemoteConnector):
 
         self.loop = loop
         self.local_cpu_backend = local_cpu_backend
-
-    def get_config_from_lmcache(self, lmcache_config: LMCacheEngineConfig):
-        self.lmcache_config = lmcache_config
 
     async def exists(self, key: CacheEngineKey) -> bool:
         return self.store.is_exist(key.to_string())
