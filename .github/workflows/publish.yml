@@ -232,7 +232,7 @@ jobs:
 
             - name: Get the latest tag (corresponds to release cut in publish-pypi job)
               run: |
-                echo "LATEST_TAG=$(git describe --tags --abbrev=0)" >> $GITHUB_ENV
+                echo "LATEST_TAG=$(git describe --tags --abbrev=0)" >> "$GITHUB_ENV"
 
             - name: Build lmcache/vllm-openai container image with latest releases
               run: |
