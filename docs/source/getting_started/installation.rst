@@ -3,14 +3,14 @@
 Installation
 ============
 
-Prerequisites
--------------
-
-- Python 3.10+
-- CUDA 12.4+
-
 Setup using Python
 ------------------
+
+Prerequisites
+~~~~~~~~~~~~~
+
+- Python 3.10+
+- CUDA 12.8+
 
 Install Stable LMCache from PyPI
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -95,14 +95,24 @@ LMCache with vLLM v0
 Setup using Docker
 ------------------
 
-Pre-built vLLM + LMCache Images
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Prerequisites
+~~~~~~~~~~~~~
 
-We provide pre-built Docker images that include vLLM integration:
+- Docker Engine 27.0+
+
+Pre-built LMCache integrated with vLLM Images
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+We provide pre-built container images of LMCache integrated with vLLM.
+
+You can get the latest stable image as follows:
 
 .. code-block:: bash
 
     docker pull lmcache/vllm-openai
 
-.. note::
-    Currently, we build and release Docker images manually. An automated Docker build/release GitHub workflow will be set up soon. Contributions to this effort are welcomed!
+You can get the nightly build of latest code of LMcache and vLLM as follows:
+
+.. code-block:: bash
+
+    docker pull lmcache/vllm-openai:latest-nightly
