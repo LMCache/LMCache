@@ -122,7 +122,7 @@ class MooncakestoreConnector(RemoteConnector):
                 self.config = MooncakeStoreConfig.from_file(config_file_path)
             elif lmcache_config is not None:
                 self.config = MooncakeStoreConfig.load_from_lmcache_config(
-                    lmcache_config.extra_config
+                    lmcache_config
                 )
             else:
                 raise ValueError("MOONCAKE_CONFIG_PATH/lmcache_config must be provided")
