@@ -171,9 +171,10 @@ def init_lmcache_engine(
     else:
         kv_shape = (num_layer, 2, chunk_size, num_kv_head, head_size)
 
-    # Change current device.
-    torch.cuda.device(parallel_config.rank)
-    device = torch.device(f"cuda:{parallel_config.rank}")
+    # No need to change the device.
+    # vLLM already sets the device during worker initialization via init_device.
+    # https://github.com/vllm-project/vllm/blob/v0.8.5/vllm/v1/worker/gpu_worker.py#L125
+    device = torch.device("cuda")
     metadata = LMCacheEngineMetadata(
         model_config.model,
         parallel_config.world_size,
