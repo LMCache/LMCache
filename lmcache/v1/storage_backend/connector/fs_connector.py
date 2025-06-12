@@ -3,6 +3,7 @@
 from pathlib import Path
 from typing import List, Optional, no_type_check
 import asyncio
+import os
 
 # Third Party
 import aiofiles
@@ -74,6 +75,11 @@ class FSConnector(RemoteConnector):
         """Check if key exists in file system"""
         file_path = self._get_file_path(key)
         return await aiofiles.os.path.exists(file_path)
+
+    def exists_sync(self, key: CacheEngineKey) -> bool:
+        """Check if key exists in file system synchronized"""
+        file_path = self._get_file_path(key)
+        return os.path.exists(file_path)
 
     async def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         """Get data from file system"""

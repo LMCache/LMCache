@@ -117,6 +117,19 @@ class RemoteConnector(metaclass=abc.ABCMeta):
         raise NotImplementedError
 
     @abc.abstractmethod
+    def exists_sync(self, key: CacheEngineKey) -> bool:
+        """
+        Check if the remote server contains the key synchronized
+
+        Input:
+            key: a string
+
+        Returns:
+            True if the cache engine contains the key, False otherwise
+        """
+        raise NotImplementedError
+
+    @abc.abstractmethod
     async def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         """
         Get the memory_obj of the corresponding key

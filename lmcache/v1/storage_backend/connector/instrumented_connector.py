@@ -59,6 +59,9 @@ class InstrumentedRemoteConnector(RemoteConnector):
     async def exists(self, key: CacheEngineKey) -> bool:
         return await self._connector.exists(key)
 
+    def exists_sync(self, key: CacheEngineKey) -> bool:
+        return self._connector.exists_sync(key)
+
     async def list(self) -> List[str]:
         return await self._connector.list()
 

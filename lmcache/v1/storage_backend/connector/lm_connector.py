@@ -91,6 +91,15 @@ class LMCServerConnector(RemoteConnector):
 
         return ServerMetaMessage.deserialize(response).code == Constants.SERVER_SUCCESS
 
+    def exists_sync(self, key: CacheEngineKey) -> bool:
+        future = asyncio.run_coroutine_threadsafe(self.exists(key), self.loop)
+        try:
+            res = future.result()
+            return res
+        except Exception as e:
+            logger.warning(f"lm connector failed in exists: {e}")
+            return False
+
     async def put(
         self,
         key: CacheEngineKey,
