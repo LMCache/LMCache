@@ -224,7 +224,7 @@ Save the following script as ``cpu-offloading.py``:
         for key, value in env_vars.items():
             os.environ[key] = value
 
-    def calculate_gpu_utilization(target_memory_gb=24):
+    def calculate_gpu_utilization(target_memory_gb=23):
         """
         Calculate GPU memory utilization to use exactly target_memory_gb of GPU memory.
         Args:
