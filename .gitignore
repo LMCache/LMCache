@@ -129,3 +129,4 @@ prometheus.yml
 test_lmcache_performance.sh
 test_lmcache_heavy_load.sh
 benchmarks/multi-round-qa/test_results.csv
+CLAUDE.md

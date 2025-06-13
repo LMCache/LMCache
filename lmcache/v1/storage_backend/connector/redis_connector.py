@@ -20,6 +20,7 @@ import os
 
 # Third Party
 import redis
+import torch
 
 # First Party
 from lmcache.logging import init_logger
@@ -67,9 +68,19 @@ class RedisConnector(RemoteConnector):
         assert not inspect.isawaitable(metadata_bytes)
 
         metadata = RemoteMetadata.deserialize(memoryview(metadata_bytes))
+        
+        # Reconstruct original shape by removing trailing zeros (reverse of padding)
+        original_shape = []
+        for dim in metadata.shape:
+            if dim > 0:
+                original_shape.append(dim)
+            else:
+                break  # Stop at first zero (trailing zeros were padding)
+        original_shape = torch.Size(original_shape)
+        logger.debug(f"Shape reconstructed from {metadata.shape} to {original_shape}")
 
         memory_obj = self.local_cpu_backend.allocate(
-            metadata.shape,
+            original_shape,  # Use original shape, not padded shape
             metadata.dtype,
             metadata.fmt,
         )
@@ -111,8 +122,13 @@ class RedisConnector(RemoteConnector):
         kv_dtype = memory_obj.get_dtype()
         memory_format = memory_obj.get_memory_format()
 
+        # Pad shape to 4 dimensions as required by RemoteMetadata protocol
+        # "Pass in shape [x, 0, 0, 0] if it is a bytes memory object"
+        padded_shape = list(kv_shape) + [0] * (4 - len(kv_shape))
+        padded_shape = torch.Size(padded_shape[:4])  # Ensure exactly 4 dimensions
+        
         metadata_bytes = RemoteMetadata(
-            len(kv_bytes), kv_shape, kv_dtype, memory_format
+            len(kv_bytes), padded_shape, kv_dtype, memory_format
         ).serialize()
 
         key_str = key.to_string()
@@ -123,6 +139,131 @@ class RedisConnector(RemoteConnector):
     @no_type_check
     async def list(self) -> List[str]:
         pass
+
+    async def batched_get(self, keys: List[CacheEngineKey]) -> List[Optional[MemoryObj]]:
+        """
+        Optimized batch get using Redis pipeline.
+        
+        Reduces network round trips from 2*N (metadata + kv_bytes for each key) 
+        to 1 pipeline execution.
+        """
+        if not keys:
+            return []
+        
+        # Use Redis pipeline for batch operations
+        pipe = self.connection.pipeline()
+        
+        # Add all metadata and kv_bytes gets to pipeline
+        key_strs = [key.to_string() for key in keys]
+        for key_str in key_strs:
+            pipe.get(key_str + "metadata")
+            pipe.get(key_str + "kv_bytes")
+        
+        # Execute pipeline - gets all results in one network round trip
+        try:
+            results = pipe.execute()
+        except Exception as e:
+            logger.warning(f"Redis pipeline execution failed: {e}")
+            return [None] * len(keys)
+        
+        # Process results - results are [meta1, kv1, meta2, kv2, ...]
+        memory_objs = []
+        for i, key in enumerate(keys):
+            metadata_bytes = results[i * 2]
+            kv_bytes = results[i * 2 + 1]
+            
+            if metadata_bytes is None or kv_bytes is None:
+                if metadata_bytes is not None and kv_bytes is None:
+                    # Cleanup orphaned metadata
+                    logger.warning(
+                        "Key exists but KV cache does not exist. "
+                        "Might happen when the cache is evicted by redis."
+                    )
+                    self.connection.delete(key_strs[i] + "metadata")
+                memory_objs.append(None)
+                continue
+            
+            try:
+                # Deserialize metadata
+                metadata = RemoteMetadata.deserialize(memoryview(metadata_bytes))
+                
+                # Reconstruct original shape by removing trailing zeros (reverse of padding)
+                original_shape = []
+                for dim in metadata.shape:
+                    if dim > 0:
+                        original_shape.append(dim)
+                    else:
+                        break  # Stop at first zero (trailing zeros were padding)
+                original_shape = torch.Size(original_shape)
+                
+                # Allocate memory object
+                memory_obj = self.local_cpu_backend.allocate(
+                    original_shape,  # Use original shape, not padded shape
+                    metadata.dtype, 
+                    metadata.fmt,
+                )
+                if memory_obj is None:
+                    logger.warning("Failed to allocate memory during batch remote receive")
+                    memory_objs.append(None)
+                    continue
+                
+                # Copy data into memory object
+                if isinstance(memory_obj.byte_array, memoryview):
+                    view = memory_obj.byte_array
+                    if view.format == "<B":
+                        view = view.cast("B")
+                else:
+                    view = memoryview(memory_obj.byte_array)
+                view[:metadata.length] = kv_bytes
+                
+                memory_objs.append(memory_obj)
+                
+            except Exception as e:
+                logger.warning(f"Failed to process batched result for key {keys[i]}: {e}")
+                memory_objs.append(None)
+        
+        return memory_objs
+
+    async def batched_put(self, keys_and_objs: List[Tuple[CacheEngineKey, MemoryObj]]):
+        """
+        Optimized batch put using Redis pipeline.
+        
+        Reduces network round trips from 2*N (metadata + kv_bytes for each key)
+        to 1 pipeline execution.
+        """
+        if not keys_and_objs:
+            return
+        
+        # Use Redis pipeline for batch operations
+        pipe = self.connection.pipeline()
+        
+        # Add all sets to pipeline
+        for key, memory_obj in keys_and_objs:
+            # Prepare data (same as individual put)
+            kv_bytes = memory_obj.byte_array
+            kv_shape = memory_obj.get_shape()
+            kv_dtype = memory_obj.get_dtype()
+            memory_format = memory_obj.get_memory_format()
+            
+            # Pad shape to 4 dimensions as required by RemoteMetadata protocol
+            padded_shape = list(kv_shape) + [0] * (4 - len(kv_shape))
+            padded_shape = torch.Size(padded_shape[:4])  # Ensure exactly 4 dimensions
+            
+            metadata_bytes = RemoteMetadata(
+                len(kv_bytes), padded_shape, kv_dtype, memory_format
+            ).serialize()
+            
+            key_str = key.to_string()
+            
+            # Add to pipeline (instead of executing immediately)
+            pipe.set(key_str + "metadata", metadata_bytes)
+            pipe.set(key_str + "kv_bytes", kv_bytes)
+        
+        # Execute all operations in one network round trip
+        try:
+            pipe.execute()
+        except Exception as e:
+            logger.warning(f"Redis pipeline execution failed in batched_put: {e}")
 
     async def close(self):
         self.connection.close()
@@ -192,9 +333,18 @@ class RedisSentinelConnector(RemoteConnector):
         assert not inspect.isawaitable(metadata_bytes)
 
         metadata = RemoteMetadata.deserialize(metadata_bytes)
+        
+        # Reconstruct original shape by removing trailing zeros (reverse of padding)
+        original_shape = []
+        for dim in metadata.shape:
+            if dim > 0:
+                original_shape.append(dim)
+            else:
+                break  # Stop at first zero (trailing zeros were padding)
+        original_shape = torch.Size(original_shape)
 
         memory_obj = self.local_cpu_backend.allocate(
-            metadata.shape,
+            original_shape,  # Use original shape, not padded shape
             metadata.dtype,
             metadata.fmt,
         )
@@ -232,8 +382,12 @@ class RedisSentinelConnector(RemoteConnector):
         kv_dtype = memory_obj.get_dtype()
         memory_format = memory_obj.get_memory_format()
 
+        # Pad shape to 4 dimensions as required by RemoteMetadata protocol
+        padded_shape = list(kv_shape) + [0] * (4 - len(kv_shape))
+        padded_shape = torch.Size(padded_shape[:4])  # Ensure exactly 4 dimensions
+
         metadata_bytes = RemoteMetadata(
-            len(kv_bytes), kv_shape, kv_dtype, memory_format
+            len(kv_bytes), padded_shape, kv_dtype, memory_format
         ).serialize()
 
         key_str = key.to_string()
@@ -241,6 +395,127 @@ class RedisSentinelConnector(RemoteConnector):
         self.master.set(key_str + "kv_bytes", kv_bytes)
 
         memory_obj.ref_count_down()
+
+    async def batched_get(self, keys: List[CacheEngineKey]) -> List[Optional[MemoryObj]]:
+        """
+        Optimized batch get using Redis Sentinel pipeline on slave.
+        
+        Uses slave for read operations to distribute load.
+        """
+        if not keys:
+            return []
+        
+        # Use slave pipeline for batch read operations
+        pipe = self.slave.pipeline()
+        
+        # Add all metadata and kv_bytes gets to pipeline
+        key_strs = [key.to_string() for key in keys]
+        for key_str in key_strs:
+            pipe.get(key_str + "metadata")
+            pipe.get(key_str + "kv_bytes")
+        
+        # Execute pipeline
+        try:
+            results = pipe.execute()
+        except Exception as e:
+            logger.warning(f"Redis Sentinel pipeline execution failed: {e}")
+            return [None] * len(keys)
+        
+        # Process results (same logic as RedisConnector)
+        memory_objs = []
+        for i, key in enumerate(keys):
+            metadata_bytes = results[i * 2]
+            kv_bytes = results[i * 2 + 1]
+            
+            if metadata_bytes is None or kv_bytes is None:
+                if metadata_bytes is not None and kv_bytes is None:
+                    # Cleanup orphaned metadata (use master for write)
+                    logger.warning(
+                        "Key exists but KV cache does not exist. "
+                        "Might happen when the cache is evicted by redis."
+                    )
+                    self.master.delete(key_strs[i] + "metadata")
+                memory_objs.append(None)
+                continue
+            
+            try:
+                # Deserialize metadata
+                metadata = RemoteMetadata.deserialize(metadata_bytes)
+                
+                # Reconstruct original shape by removing trailing zeros (reverse of padding)
+                original_shape = []
+                for dim in metadata.shape:
+                    if dim > 0:
+                        original_shape.append(dim)
+                    else:
+                        break  # Stop at first zero (trailing zeros were padding)
+                original_shape = torch.Size(original_shape)
+                
+                # Allocate memory object
+                memory_obj = self.local_cpu_backend.allocate(
+                    original_shape,  # Use original shape, not padded shape
+                    metadata.dtype,
+                    metadata.fmt,
+                )
+                if memory_obj is None:
+                    logger.warning("Failed to allocate memory during batch remote receive")
+                    memory_objs.append(None)
+                    continue
+                
+                # Copy data into memory object
+                view = memoryview(memory_obj.byte_array)
+                view[0:metadata.length] = kv_bytes
+                
+                memory_objs.append(memory_obj)
+                
+            except Exception as e:
+                logger.warning(f"Failed to process batched result for key {keys[i]}: {e}")
+                memory_objs.append(None)
+        
+        return memory_objs
+
+    async def batched_put(self, keys_and_objs: List[Tuple[CacheEngineKey, MemoryObj]]):
+        """
+        Optimized batch put using Redis Sentinel pipeline on master.
+        
+        Uses master for write operations to ensure consistency.
+        """
+        if not keys_and_objs:
+            return
+        
+        # Use master pipeline for batch write operations
+        pipe = self.master.pipeline()
+        
+        # Add all sets to pipeline
+        for key, memory_obj in keys_and_objs:
+            # Prepare data (same as individual put)
+            kv_bytes = memory_obj.byte_array
+            kv_shape = memory_obj.get_shape()
+            kv_dtype = memory_obj.get_dtype()
+            memory_format = memory_obj.get_memory_format()
+            
+            # Pad shape to 4 dimensions as required by RemoteMetadata protocol
+            padded_shape = list(kv_shape) + [0] * (4 - len(kv_shape))
+            padded_shape = torch.Size(padded_shape[:4])  # Ensure exactly 4 dimensions
+            
+            metadata_bytes = RemoteMetadata(
+                len(kv_bytes), padded_shape, kv_dtype, memory_format
+            ).serialize()
+            
+            key_str = key.to_string()
+            
+            # Add to pipeline
+            pipe.set(key_str + "metadata", metadata_bytes)
+            pipe.set(key_str + "kv_bytes", kv_bytes)
+            
+            # Handle ref count (same as individual put)
+            memory_obj.ref_count_down()
+        
+        # Execute all operations in one network round trip
+        try:
+            pipe.execute()
+        except Exception as e:
+            logger.warning(f"Redis Sentinel pipeline execution failed in batched_put: {e}")
 
     # TODO
     @no_type_check

@@ -162,6 +162,7 @@ class StorageManager:
         Do not store if the same object is being stored (handled here by
         storage manager) or has been stored (handled by storage backend).
         """
+        logger.debug(f"Storage put for key: {key.to_string()}")
 
         # TODO(Jiayi): currently, the entire put task will be cancelled
         # if one of the backend is already storing this cache.
@@ -170,15 +171,14 @@ class StorageManager:
         # write-back, etc.)
         for storage_backend in self.storage_backends.values():
             if storage_backend.exists_in_put_tasks(key):
+                logger.debug(f"Key already in put tasks, skipping")
                 memory_obj.ref_count_down()
                 return
 
         # ever_put = False
         for backend_name, backend in self.storage_backends.items():
+            logger.debug(f"Submitting put task to backend: {backend_name}")
             put_task = backend.submit_put_task(key, memory_obj)
-
-            if put_task is None:
-                continue
 
         memory_obj.ref_count_down()
 
@@ -201,6 +201,7 @@ class StorageManager:
         """
         Blocking function to get the memory object from the storages.
         """
+        logger.info(f"[LAYERWISE_DEBUG] StorageManager.get (blocking) called for key: {key.to_string()}")
         # Search in prefetch task
         self.manager_lock.acquire()
         prefetch_task = self.prefetch_tasks.get(key, None)
@@ -236,12 +237,15 @@ class StorageManager:
         Non-blocking function to get the memory object from the storages.
         """
         # TODO (Jiayi): incorporate prefetching here
+        logger.debug(f"Non-blocking get for key: {key.to_string()}")
 
         # Search all backends for non-blocking get
         for backend_name, backend in self.storage_backends.items():
+            logger.debug(f"Checking backend: {backend_name}")
             # NOTE(Jiayi): bypass the allocator for now
             task = backend.get_non_blocking(key)
             if task is not None:
+                logger.debug(f"Backend {backend_name} returned task")
                 # TODO (Jiayi): add write-back logic here
                 return task
         return None
@@ -253,8 +257,10 @@ class StorageManager:
         """
         Non-blocking function to get the memory objects into the storages
         in a layerwise manner.
-        Do not store if the same object is being stored (handled here by
-        storage manager) or has been stored (handled by storage backend).
+        
+        Simple wrapper that loops over get_non_blocking as designed.
+        Individual backends with batched capabilities can detect patterns
+        and optimize internally (e.g., RemoteBackend with Redis pipelines).
 
         :param List[List[CacheEngineKey]] keys: The keys to get. The first
             dimension corresponds to the number of layers, and the second
@@ -262,10 +268,11 @@ class StorageManager:
 
         :return: A generator that yields a list of futures for each layer.
         """
-        for keys_multi_chunk in keys:
+        logger.debug(f"Layerwise batched get called with {len(keys)} layers")
+        for layer_idx, keys_multi_chunk in enumerate(keys):
+            logger.debug(f"Processing layer {layer_idx} with {len(keys_multi_chunk)} keys")
             # Simple wrapper that loops over get_non_blocking
-            # Remote backends can optimize their get_non_blocking implementation
-            # to handle layerwise batching internally
+            # Individual backends can implement optimization internally
             tasks = []
             for key in keys_multi_chunk:
                 task = self.get_non_blocking(key)

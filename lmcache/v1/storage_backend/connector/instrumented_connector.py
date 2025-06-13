@@ -13,7 +13,7 @@
 # limitations under the License.
 
 # Standard
-from typing import List, Optional
+from typing import List, Optional, Tuple
 import time
 
 # First Party
@@ -76,3 +76,10 @@ class InstrumentedRemoteConnector(RemoteConnector):
 
     async def close(self) -> None:
         await self._connector.close()
+
+    # Forward batched operations to underlying connector
+    async def batched_get(self, keys: List[CacheEngineKey]) -> List[Optional[MemoryObj]]:
+        return await self._connector.batched_get(keys)
+
+    async def batched_put(self, keys_and_objs: List[Tuple[CacheEngineKey, MemoryObj]]) -> None:
+        await self._connector.batched_put(keys_and_objs)

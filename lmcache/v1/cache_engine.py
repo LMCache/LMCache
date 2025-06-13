@@ -639,7 +639,6 @@ class LayerwiseLMCacheEngine(LMCacheEngine):
             last iteration, it moves the memory objects of the last layer to
             the GPU.
         """
-
         if mask is not None:
             num_required_tokens = torch.sum(mask).item()
         else:

@@ -15,7 +15,7 @@
 # Standard
 from concurrent.futures import Future
 from functools import wraps
-from typing import List, Optional
+from typing import List, Optional, Tuple
 import asyncio
 import threading
 import time
@@ -148,8 +148,16 @@ class RemoteBackend(StorageBackendInterface):
         """
         Callback function for put tasks.
         """
+        try:
+            future.result()
+        except Exception as e:
+            logger.warning(f"Put task failed for key {key.to_string()}: {e}")
+        
         self.lock.acquire()
-        self.put_tasks.remove(key)
+        try:
+            self.put_tasks.remove(key)
+        except ValueError:
+            pass  # Key already removed
         self.lock.release()
 
     def submit_put_task(
@@ -170,8 +178,7 @@ class RemoteBackend(StorageBackendInterface):
         compressed_memory_obj = self.serializer.serialize(memory_obj)
         memory_obj.ref_count_down()
 
-        # NOTE: No need to do error handling here
-        # since the `future` is never waited
+        # Put is async, await it directly for fire-and-forget performance
         future = asyncio.run_coroutine_threadsafe(
             self.connection.put(key, compressed_memory_obj), self.loop
         )
@@ -231,6 +238,7 @@ class RemoteBackend(StorageBackendInterface):
         This enables layerwise transfer by allowing the storage manager
         to orchestrate layer-by-layer data loading.
         """
+        logger.debug(f"Remote get_non_blocking for key: {key.to_string()}")
         if self.connection is None:
             logger.warning("Connection is None in get_non_blocking, returning None")
             return None
@@ -274,6 +282,91 @@ class RemoteBackend(StorageBackendInterface):
             "This method is a no-op and will return True."
         )
         return True
+
+    @_lmcache_nvtx_annotate
+    def batched_get_blocking(self, keys: List[CacheEngineKey]) -> List[Optional[MemoryObj]]:
+        """
+        Blocking batched get function leveraging Redis pipeline optimization.
+        
+        This reduces network round trips from N to 1 for each layer.
+        """
+        if not keys:
+            return []
+            
+        if self.connection is None:
+            logger.warning("Connection is None in batched_get_blocking, returning None list")
+            return [None] * len(keys)
+        
+        t1 = time.perf_counter()
+        future = asyncio.run_coroutine_threadsafe(
+            self.connection.batched_get(keys), self.loop
+        )
+        
+        try:
+            memory_objs = future.result()
+        except Exception as e:
+            with self.lock:
+                self.connection = None
+                self.failure_time = time.time()
+            logger.warning(f"Error occurred in batched_get_blocking: {e}")
+            logger.warning("Returning None list")
+            return [None] * len(keys)
+
+        t2 = time.perf_counter()
+        self.stats_monitor.update_interval_remote_time_to_get_sync((t2 - t1) * 1000)
+        
+        # Redis connector already handles deserialization, so memory_objs are ready to use
+        # (Unlike individual get_blocking which expects serialized objects)
+        
+        t3 = time.perf_counter()
+        logger.debug(
+            f"Batched get takes {(t2 - t1) * 1000:.6f} msec, "
+            f"processing takes {(t3 - t2) * 1000:.6f} msec"
+        )
+        return memory_objs
+
+    def batched_submit_put_task(self, keys_and_objs: List[Tuple[CacheEngineKey, MemoryObj]]) -> List[Optional[Future]]:
+        """
+        Submit batched put tasks leveraging Redis pipeline optimization.
+        
+        This reduces network round trips from 2*N to 1 for storing multiple objects.
+        """
+        if not keys_and_objs:
+            return []
+            
+        if self.connection is None:
+            logger.warning("Connection is None in batched_submit_put_task")
+            # Still decrease ref counts for cleanup
+            for _, memory_obj in keys_and_objs:
+                memory_obj.ref_count_down()
+            return [None] * len(keys_and_objs)
+
+        # Add all keys to put_tasks tracking
+        keys = [key for key, _ in keys_and_objs]
+        with self.lock:
+            self.put_tasks.extend(keys)
+
+        # Note: Redis connector handles serialization and ref_count_down internally
+        # So we don't need to serialize here (unlike individual put operations)
+        
+        # Submit batched put task - batched_put is async, await it directly
+        future = asyncio.run_coroutine_threadsafe(
+            self.connection.batched_put(keys_and_objs), self.loop
+        )
+        
+        # Create callback for cleanup
+        def batched_put_callback(f):
+            with self.lock:
+                for key in keys:
+                    try:
+                        self.put_tasks.remove(key)
+                    except ValueError:
+                        pass  # Key already removed, ignore
+        
+        future.add_done_callback(batched_put_callback)
+        
+        # Return list of same future for all operations (they're batched)
+        return [future] * len(keys_and_objs)
 
     def close(self):
         try:
