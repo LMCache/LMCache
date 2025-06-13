@@ -40,7 +40,7 @@ class MockConnector(RemoteConnector):
 
 # Mock the entire torch.cuda.Stream class
 @mock.patch("torch.cuda.Stream")
-def test_remote_backend_methods(mock_stream):
+def test_remote_mla_worker_id_as0(mock_stream):
     # Create configuration
     config = LMCacheEngineConfig(
         chunk_size=256,
@@ -154,15 +154,24 @@ def test_remote_backend_methods(mock_stream):
     assert retrieved.get_shape() == torch.Size([10, 10])
 
     # Cleanup
-    # Cancel all running tasks
-    tasks = asyncio.all_tasks(loop)
-    for task in tasks:
-        task.cancel()
-    # Wait until all tasks are cancelled
-    loop.run_until_complete(asyncio.gather(*tasks, return_exceptions=True))
-    # Stop the event loop
-    loop.call_soon_threadsafe(loop.stop)
-    # Wait for the loop thread to finish
-    loop_thread.join(timeout=1.0)
-    # Then close the loop
-    loop.close()
+    async def shutdown():
+        # Get all tasks
+        tasks = [t for t in asyncio.all_tasks(loop) if t is not asyncio.current_task()]
+        for task in tasks:
+            task.cancel()
+        # Wait for all tasks to be cancelled (or completed)
+        await asyncio.gather(*tasks, return_exceptions=True)
+        # Then stop the loop
+        loop.stop()
+
+    # Schedule the shutdown coroutine in the event loop thread
+    future = asyncio.run_coroutine_threadsafe(shutdown(), loop)
+    try:
+        # Wait for the shutdown to complete, but with a timeout
+        future.result(timeout=10)
+    except Exception as e:
+        print(f"Error during shutdown: {e}")
+    finally:
+        # Wait for the loop thread to finish
+        loop_thread.join(timeout=1.0)
+        loop.close()
