@@ -38,6 +38,7 @@ class LookupClientFactory:
 
     @staticmethod
     def create_lookup_client(
+        lmcache_engine: LMCacheEngine,
         role: "KVConnectorRole",
         is_tp: bool,
         vllm_config: "VllmConfig",
@@ -46,6 +47,7 @@ class LookupClientFactory:
         Create a lookup client based on the configuration.
 
         Args:
+            lmcache_engine: The LMCache engine instance
             role: The KV connector role
             is_tp: Whether tensor parallelism is enabled
             vllm_config: The vLLM configuration
@@ -60,6 +62,14 @@ class LookupClientFactory:
             return LookupClientFactory._create_external_lookup_client(
                 config.external_lookup_client, role, is_tp, vllm_config
             )
+
+        if LookupClientFactory._use_direct_lookup_client(config):
+            # First Party
+            from lmcache.v1.lookup_client.lmcache_direct_lookup_client import (
+                LMCacheDirectLookupClient,
+            )
+
+            return LMCacheDirectLookupClient(lmcache_engine)
         else:
             # First Party
             from lmcache.v1.lookup_client.lmcache_lookup_client import (
@@ -92,17 +102,13 @@ class LookupClientFactory:
         # Only create the KV lookup API server on worker rank 0
         # when there are multiple workers and when not using external lookup client
         if (
-            vllm_config.parallel_config.rank == 0
-            and config.external_lookup_client is None
+            vllm_config.parallel_config.rank > 0
+            or config.external_lookup_client is not None
+            or LookupClientFactory._use_direct_lookup_client(config)
         ):
-            # First Party
-            from lmcache.v1.lookup_client.lmcache_lookup_client import (
-                LMCacheLookupServer,
-            )
+            return None
 
-            return LMCacheLookupServer(lmcache_engine, role, is_tp, vllm_config)
-
-        return None
+        return LMCacheLookupServer(lmcache_engine, role, is_tp, vllm_config)
 
     @staticmethod
     def _create_external_lookup_client(
@@ -160,3 +166,17 @@ class LookupClientFactory:
         )
 
         return MooncakeLookupClient(role, is_tp, vllm_config, master_address)
+
+    @staticmethod
+    def _use_direct_lookup_client(config: "VllmConfig") -> bool:
+        is_zero_cpu = (
+            isinstance(config.max_local_cpu_size, (int, float))
+            and abs(config.max_local_cpu_size) < 0.001
+        )
+
+        has_kv_service_sm_remote = (
+            config.kv_service_sm_url is not None
+            and config.kv_service_sm_url.strip() != ""
+        )
+
+        return is_zero_cpu and has_kv_service_sm_remote

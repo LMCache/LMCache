@@ -15,6 +15,7 @@
 # Standard
 from typing import List, Optional, Tuple, Union
 import abc
+import threading
 
 # Third Party
 import torch
@@ -322,20 +323,9 @@ class VLLMBufferLayerwiseGPUConnector(GPUConnectorInterface):
         logger.info(
             f"Using max_tokens={max_tokens} for VLLMBufferLayerwiseGPUConnector"
         )
-        shape = self.get_shape(max_tokens)
+        self.get_shape(max_tokens)  # Calculate shape (unused)
         self.dtype = kwargs["dtype"]
         self.device = kwargs["device"]
-
-        num_elements = shape.numel()
-
-        # All sizes are in bytes
-        element_size = torch.tensor([], dtype=self.dtype).element_size()
-        # We need to `2 *` here because we need two buffers:
-        # one for storing/loading and the other for compute
-        gpu_buffer_size = 2 * num_elements * element_size
-        self.gpu_buffer_allocator = GPUMemoryAllocator(
-            gpu_buffer_size, device=self.device
-        )
 
         self.load_stream = torch.cuda.Stream()
         self.store_stream = torch.cuda.Stream()
@@ -645,8 +635,291 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
         # All sizes are in bytes
         self.element_size = torch.tensor([], dtype=self.dtype).element_size()
 
-        self.load_stream = torch.cuda.Stream()
-        self.store_stream = torch.cuda.Stream()
+        # Initialize streaming buffer pool with fixed small buffers
+        # This eliminates dynamic allocation and provides constant memory footprint
+        # Conservative buffer sizing for production stability
+        self.streaming_buffer_size = 512  # tokens per buffer
+        self.num_streaming_buffers = 4  # concurrent operations
+
+        logger.info(
+            f"Initializing StreamingBufferPool with {self.num_streaming_buffers} "
+            f"buffers of {self.streaming_buffer_size} tokens each"
+        )
+
+        try:
+            self._init_streaming_buffer_pool()
+            logger.info("StreamingBufferPool initialized successfully")
+        except Exception as e:
+            logger.error(f"Failed to initialize streaming buffer pool: {e}")
+            # Graceful fallback - continue without GPU buffers
+            self.streaming_buffers = []
+            self.buffer_available = []
+            self.buffer_lock = threading.Lock()
+            logger.warning("Using CPU-only fallback mode - operations will continue")
+
+        try:
+            self.load_stream = torch.cuda.Stream()
+            self.store_stream = torch.cuda.Stream()
+        except Exception as e:
+            logger.warning(f"Failed to create CUDA streams: {e}, using default stream")
+            self.load_stream = None
+            self.store_stream = None
+
+    def _init_streaming_buffer_pool(self):
+        """Initialize fixed-size streaming buffer pool."""
+        self.streaming_buffers = []
+        self.buffer_available = []
+        self.buffer_lock = threading.Lock()
+
+        buffer_shape = self.get_shape(self.streaming_buffer_size)
+
+        for i in range(self.num_streaming_buffers):
+            try:
+                # Allocate small fixed buffers that should always succeed
+                buffer_tensor = torch.zeros(
+                    buffer_shape, dtype=self.dtype, device=self.device
+                )
+                self.streaming_buffers.append(buffer_tensor)
+                self.buffer_available.append(True)
+                logger.debug(f"Allocated streaming buffer {i}: {buffer_shape}")
+            except Exception as e:
+                logger.error(f"Failed to allocate streaming buffer {i}: {e}")
+                break
+
+        if len(self.streaming_buffers) == 0:
+            raise RuntimeError("Could not allocate any streaming buffers")
+
+        logger.info(f"Initialized {len(self.streaming_buffers)} streaming buffers")
+
+    def _acquire_streaming_buffer(self):
+        """Acquire an available buffer from the pool."""
+        with self.buffer_lock:
+            for i, available in enumerate(self.buffer_available):
+                if available:
+                    self.buffer_available[i] = False
+                    logger.debug(f"Acquired streaming buffer {i}")
+                    return self.streaming_buffers[i]
+
+        logger.warning("No streaming buffers available - using CPU fallback")
+        return None
+
+    def _release_streaming_buffer(self, buffer_tensor):
+        """Return a buffer to the pool."""
+        with self.buffer_lock:
+            for i, pool_buffer in enumerate(self.streaming_buffers):
+                if pool_buffer is buffer_tensor:
+                    self.buffer_available[i] = True
+                    logger.debug(f"Released streaming buffer {i}")
+                    return
+
+        logger.error("Attempted to release unknown buffer")
+
+    def batched_from_gpu_streaming(
+        self,
+        memory_objs: Union[List[List[MemoryObj]], List[MemoryObj]],
+        starts: List[int],
+        ends: List[int],
+        **kwargs,
+    ):
+        """
+        Stream-based KV cache transfer that uses fixed-size buffer pool.
+        Handles requests of any size by chunking them through small buffers.
+        This eliminates dynamic allocation and provides constant memory footprint.
+
+        Generator yields num_layers + 1 times to match expected behavior:
+        - Initial yield for setup
+        - One yield per layer after processing
+        """
+        if "kvcaches" not in kwargs:
+            raise ValueError("'kvcaches' should be provided in kwargs.")
+
+        if "slot_mapping" not in kwargs:
+            raise ValueError("'slot_mapping' should be provided in kwargs.")
+
+        if "sync" not in kwargs:
+            raise ValueError("'sync' should be provided in kwargs.")
+
+        kvcaches: List[torch.Tensor] = kwargs["kvcaches"]
+        slot_mapping: torch.Tensor = kwargs["slot_mapping"]
+        sync: bool = kwargs["sync"]
+
+        current_stream = torch.cuda.current_stream()
+
+        # Process each layer sequentially using streaming buffers
+        for layer_id in range(self.num_layers):
+            memory_objs_layer = memory_objs[layer_id]
+
+            # Process transfers for this layer
+            if self.store_stream is not None:
+                with torch.cuda.stream(self.store_stream):
+                    self.store_stream.wait_stream(current_stream)
+                    self._process_layer_streaming(
+                        layer_id,
+                        memory_objs_layer,
+                        starts,
+                        ends,
+                        kvcaches,
+                        slot_mapping,
+                    )
+            else:
+                # Use default stream
+                self._process_layer_streaming(
+                    layer_id, memory_objs_layer, starts, ends, kvcaches, slot_mapping
+                )
+
+            yield
+            if sync and self.store_stream is not None:
+                self.store_stream.synchronize()
+            logger.debug(f"Finished offloading layer {layer_id}")
+
+        # Final yield to match expected generator behavior (num_layers + 1 yields total)
+        yield
+        logger.debug(f"Completed streaming transfer for {self.num_layers} layers")
+
+    def _process_layer_streaming(
+        self, layer_id, memory_objs_layer, starts, ends, kvcaches, slot_mapping
+    ):
+        """Process a single layer using streaming buffer pool."""
+
+        # Build full slot mapping for this layer
+        slot_mapping_chunks = []
+        for start, end in zip(starts, ends, strict=False):
+            slot_mapping_chunks.append(slot_mapping[start:end])
+        slot_mapping_full = torch.cat(slot_mapping_chunks, dim=0)
+
+        # Try to get a streaming buffer for the entire layer
+        streaming_buffer = self._acquire_streaming_buffer()
+
+        if streaming_buffer is not None:
+            try:
+                # Use streaming buffer - transfer full layer at once if it fits
+                total_tokens = sum(
+                    end - start for start, end in zip(starts, ends, strict=False)
+                )
+
+                if total_tokens <= self.streaming_buffer_size:
+                    # Full layer fits in one buffer
+                    lmc_ops.single_layer_kv_transfer(
+                        streaming_buffer[:total_tokens],
+                        kvcaches[layer_id][0],
+                        kvcaches[layer_id][1],
+                        slot_mapping_full,
+                        True,  # from_gpu=True
+                        True,  # is_layerwise=True
+                    )
+
+                    # Copy to memory objects
+                    offset = 0
+                    for start, end, memory_obj in zip(
+                        starts, ends, memory_objs_layer, strict=False
+                    ):
+                        chunk_size = end - start
+                        assert memory_obj.tensor is not None
+                        memory_obj.tensor.copy_(
+                            streaming_buffer[offset : offset + chunk_size],
+                            non_blocking=True,
+                        )
+                        offset += chunk_size
+                else:
+                    # Layer too large, process in chunks
+                    self._process_layer_chunked(
+                        layer_id,
+                        memory_objs_layer,
+                        starts,
+                        ends,
+                        kvcaches,
+                        slot_mapping,
+                        streaming_buffer,
+                    )
+
+            finally:
+                self._release_streaming_buffer(streaming_buffer)
+        else:
+            # No streaming buffer available, use CPU fallback
+            logger.warning(
+                f"No streaming buffer available for layer {layer_id}, "
+                f"using CPU fallback"
+            )
+            self._process_layer_cpu_fallback(
+                layer_id, memory_objs_layer, starts, ends, kvcaches, slot_mapping_full
+            )
+
+    def _process_layer_chunked(
+        self,
+        layer_id,
+        memory_objs_layer,
+        starts,
+        ends,
+        kvcaches,
+        slot_mapping,
+        streaming_buffer,
+    ):
+        """Process layer in chunks when it doesn't fit in streaming buffer."""
+        for start, end, memory_obj in zip(
+            starts, ends, memory_objs_layer, strict=False
+        ):
+            assert memory_obj.tensor is not None
+
+            offset = start
+            mem_offset = 0
+
+            # Process in chunks using streaming buffer size
+            while offset < end:
+                chunk_end = min(offset + self.streaming_buffer_size, end)
+                chunk_tokens = chunk_end - offset
+
+                # Create slot mapping for this chunk
+                chunk_slot_mapping = slot_mapping[offset:chunk_end]
+
+                # Transfer from GPU to streaming buffer
+                lmc_ops.single_layer_kv_transfer(
+                    streaming_buffer[:chunk_tokens],
+                    kvcaches[layer_id][0],
+                    kvcaches[layer_id][1],
+                    chunk_slot_mapping,
+                    True,  # from_gpu=True
+                    True,  # is_layerwise=True
+                )
+
+                # Copy from streaming buffer to memory object
+                memory_obj.tensor[mem_offset : mem_offset + chunk_tokens].copy_(
+                    streaming_buffer[:chunk_tokens],
+                    non_blocking=True,
+                )
+
+                offset = chunk_end
+                mem_offset += chunk_tokens
+
+    def _process_layer_cpu_fallback(
+        self, layer_id, memory_objs_layer, starts, ends, kvcaches, slot_mapping_full
+    ):
+        """CPU fallback when no streaming buffers available."""
+        for start, end, memory_obj in zip(
+            starts, ends, memory_objs_layer, strict=False
+        ):
+            assert memory_obj.tensor is not None
+
+            # Create temporary tensor for direct transfer
+            chunk_tokens = end - start
+            chunk_shape = self.get_shape(chunk_tokens)
+            temp_tensor = torch.zeros(
+                chunk_shape, dtype=memory_obj.tensor.dtype, device="cpu"
+            )
+
+            # Create slot mapping for this chunk
+            chunk_slot_mapping = slot_mapping_full[start:end]
+
+            lmc_ops.single_layer_kv_transfer(
+                temp_tensor,
+                kvcaches[layer_id][0],
+                kvcaches[layer_id][1],
+                chunk_slot_mapping,
+                True,  # from_gpu=True
+                True,  # is_layerwise=True
+            )
+
+            # Copy to final memory object
+            memory_obj.tensor.copy_(temp_tensor, non_blocking=False)
 
     def _lazy_initialize_buffer(self, kv_caches):
         """
@@ -725,68 +998,167 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
         # TODO(Jiayi): Optimize away this `cat`
         slot_mapping_full = torch.cat(slot_mapping_chunks, dim=0)
 
-        num_tokens = len(slot_mapping_full)
-
-        if self.use_gpu:
-            buffer_shape = self.get_shape(num_tokens)
-            tmp_gpu_buffer_obj = self.gpu_buffer_allocator.allocate(
-                buffer_shape, self.dtype, MemoryFormat.KV_T2D
-            )
-            assert tmp_gpu_buffer_obj is not None, (
-                "Failed to allocate GPU buffer in GPUConnector"
-            )
-            assert tmp_gpu_buffer_obj.tensor is not None
-
-        offset = starts[0]
         current_stream = torch.cuda.current_stream()
+
+        # Use streaming buffer for loading as well
+        streaming_buffer = self._acquire_streaming_buffer()
 
         for layer_id in range(self.num_layers):
             memory_objs_layer = yield
-            if sync:
+            if sync and self.load_stream is not None:
                 current_stream.wait_stream(self.load_stream)
             if layer_id > 0:
                 logger.debug(f"Finished loading layer {layer_id - 1}")
 
-            # memobj -> gpu_buffer -> kvcaches
-            with torch.cuda.stream(self.load_stream):
-                for start, end, memory_obj in zip(
-                    starts, ends, memory_objs_layer, strict=False
-                ):
-                    assert memory_obj.metadata.fmt == MemoryFormat.KV_T2D
-                    if self.use_gpu:
-                        tmp_gpu_buffer_obj.tensor[start - offset : end - offset].copy_(
-                            memory_obj.tensor, non_blocking=True
-                        )
-                    else:
-                        lmc_ops.single_layer_kv_transfer(
-                            memory_obj.tensor,
-                            kvcaches[layer_id][0],
-                            kvcaches[layer_id][1],
+            # memobj -> streaming_buffer -> kvcaches
+            if streaming_buffer is not None:
+                # Use streaming buffer approach
+                if self.load_stream is not None:
+                    with torch.cuda.stream(self.load_stream):
+                        self._load_layer_with_streaming_buffer(
+                            layer_id,
+                            memory_objs_layer,
+                            starts,
+                            ends,
+                            kvcaches,
                             slot_mapping_full,
-                            False,
-                            True,
+                            streaming_buffer,
                         )
-
-                if self.use_gpu:
-                    lmc_ops.single_layer_kv_transfer(
-                        tmp_gpu_buffer_obj.tensor,
-                        kvcaches[layer_id][0],
-                        kvcaches[layer_id][1],
+                else:
+                    # Use default stream
+                    self._load_layer_with_streaming_buffer(
+                        layer_id,
+                        memory_objs_layer,
+                        starts,
+                        ends,
+                        kvcaches,
                         slot_mapping_full,
-                        False,
-                        True,
+                        streaming_buffer,
                     )
+            else:
+                # Direct CPU fallback for loading
+                logger.warning(
+                    f"No streaming buffer available for loading layer {layer_id}, "
+                    f"using direct transfer"
+                )
+                self._load_layer_direct(
+                    layer_id,
+                    memory_objs_layer,
+                    starts,
+                    ends,
+                    kvcaches,
+                    slot_mapping_full,
+                )
+
         yield
 
         # synchronize the last layer
-        if sync:
+        if sync and self.load_stream is not None:
             current_stream.wait_stream(self.load_stream)
 
-        # free the buffer memory
-        tmp_gpu_buffer_obj.ref_count_down()
+        # Release streaming buffer
+        if streaming_buffer is not None:
+            self._release_streaming_buffer(streaming_buffer)
 
         logger.debug(f"Finished loading layer {layer_id}")
         yield
+
+    def _load_layer_with_streaming_buffer(
+        self,
+        layer_id,
+        memory_objs_layer,
+        starts,
+        ends,
+        kvcaches,
+        slot_mapping_full,
+        streaming_buffer,
+    ):
+        """Load a layer using streaming buffer."""
+        total_tokens = sum(
+            end - start for start, end in zip(starts, ends, strict=False)
+        )
+
+        if total_tokens <= self.streaming_buffer_size:
+            # All fits in streaming buffer
+            buffer_offset = 0
+            for start, end, memory_obj in zip(
+                starts, ends, memory_objs_layer, strict=False
+            ):
+                assert memory_obj.metadata.fmt == MemoryFormat.KV_T2D
+                chunk_size = end - start
+                streaming_buffer[buffer_offset : buffer_offset + chunk_size].copy_(
+                    memory_obj.tensor, non_blocking=True
+                )
+                buffer_offset += chunk_size
+
+            # Transfer full buffer to GPU
+            lmc_ops.single_layer_kv_transfer(
+                streaming_buffer[:total_tokens],
+                kvcaches[layer_id][0],
+                kvcaches[layer_id][1],
+                slot_mapping_full,
+                False,  # to_gpu=False (GPU->memory)
+                True,  # is_layerwise=True
+            )
+        else:
+            # Process in chunks
+            for start, end, memory_obj in zip(
+                starts, ends, memory_objs_layer, strict=False
+            ):
+                assert memory_obj.metadata.fmt == MemoryFormat.KV_T2D
+                chunk_tokens = end - start
+
+                # Process this memory object in streaming buffer-sized chunks
+                mem_offset = 0
+                while mem_offset < chunk_tokens:
+                    chunk_end = min(
+                        mem_offset + self.streaming_buffer_size, chunk_tokens
+                    )
+                    chunk_size = chunk_end - mem_offset
+
+                    # Copy chunk to streaming buffer
+                    streaming_buffer[:chunk_size].copy_(
+                        memory_obj.tensor[mem_offset:chunk_end], non_blocking=True
+                    )
+
+                    # Create slot mapping for this chunk
+                    chunk_slot_mapping = slot_mapping_full[
+                        start + mem_offset : start + chunk_end
+                    ]
+
+                    # Transfer to GPU
+                    lmc_ops.single_layer_kv_transfer(
+                        streaming_buffer[:chunk_size],
+                        kvcaches[layer_id][0],
+                        kvcaches[layer_id][1],
+                        chunk_slot_mapping,
+                        False,  # to_gpu=False
+                        True,  # is_layerwise=True
+                    )
+
+                    mem_offset = chunk_end
+
+    def _load_layer_direct(
+        self, layer_id, memory_objs_layer, starts, ends, kvcaches, slot_mapping_full
+    ):
+        """Direct loading without streaming buffer (fallback)."""
+        for start, end, memory_obj in zip(
+            starts, ends, memory_objs_layer, strict=False
+        ):
+            assert memory_obj.metadata.fmt == MemoryFormat.KV_T2D
+
+            # Create slot mapping for this chunk
+            chunk_slot_mapping = slot_mapping_full[start:end]
+
+            # Direct transfer from memory object to GPU
+            lmc_ops.single_layer_kv_transfer(
+                memory_obj.tensor,
+                kvcaches[layer_id][0],
+                kvcaches[layer_id][1],
+                chunk_slot_mapping,
+                False,  # to_gpu=False
+                True,  # is_layerwise=True
+            )
 
     @_lmcache_nvtx_annotate
     def batched_from_gpu(
@@ -797,108 +1169,14 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
         **kwargs,
     ):
         """
-        This function is a generator that moves the KV cache from the paged GPU
-        memory to the memory objects. The first iteration will prepare some
-        related metadata and initiate the transfer in the first layer. In each
-        of the following iterations, it will first wait until the storing of
-        previous layer finishes, and then initiate string the KV cache of the
-        current layer one. The storing process of the KV cache is paged GPU
-        memory -> GPU buffer -> memory objects. The last iteration simply waits
-        for the last layer to finish.
-        In total, this the generator will yield num_layers + 1 times.
-
-        :param memory_objs: The memory objects to store the KV cache. The first
-            dimension is the number of layers, and the second dimension is the
-            number of memory objects (i.e., number of chunks) for each layer.
-
-        :param starts: The starting indices of the KV cache in the corresponding
-            token sequence.
-
-        :param ends: The ending indices of the KV cache in the corresponding
-            token sequence.
-
-        :raises ValueError: If 'kvcaches' is not provided in kwargs.
-
-        :raises ValueError: If 'slot_mapping' is not provided in kwargs.
+        Main entry point for batched GPU to memory transfer.
+        Uses streaming buffer pool to handle requests of any size gracefully.
+        This replaces dynamic allocation with fixed-size buffer reuse.
         """
+        logger.debug("Starting batched_from_gpu with streaming buffer pool")
 
-        if "kvcaches" not in kwargs:
-            raise ValueError("'kvcaches' should be provided in kwargs.")
-
-        if "slot_mapping" not in kwargs:
-            raise ValueError("'slot_mapping' should be provided in kwargs.")
-
-        if "sync" not in kwargs:
-            raise ValueError("'sync' should be provided in kwargs.")
-
-        kvcaches: List[torch.Tensor] = kwargs["kvcaches"]
-        slot_mapping: torch.Tensor = kwargs["slot_mapping"]
-        sync: bool = kwargs["sync"]
-
-        self._lazy_initialize_buffer(kvcaches)
-
-        slot_mapping_chunks = []
-        for start, end in zip(starts, ends, strict=False):
-            slot_mapping_chunks.append(slot_mapping[start:end])
-
-        slot_mapping_full = torch.cat(slot_mapping_chunks, dim=0)
-
-        num_tokens = len(slot_mapping_full)
-
-        if self.use_gpu:
-            buffer_shape = self.get_shape(num_tokens)
-            tmp_gpu_buffer_obj = self.gpu_buffer_allocator.allocate(
-                buffer_shape, self.dtype, MemoryFormat.KV_T2D
-            )
-            assert tmp_gpu_buffer_obj is not None, (
-                "Failed to allocate GPU buffer in GPUConnector"
-            )
-            assert tmp_gpu_buffer_obj.tensor is not None
-
-        offset = starts[0]
-        current_stream = torch.cuda.current_stream()
-
-        for layer_id in range(self.num_layers):
-            memory_objs_layer = memory_objs[layer_id]
-            # kvcaches -> gpu_buffer -> memobj
-            with torch.cuda.stream(self.store_stream):
-                self.store_stream.wait_stream(current_stream)
-                if self.use_gpu:
-                    lmc_ops.single_layer_kv_transfer(
-                        tmp_gpu_buffer_obj.tensor,
-                        kvcaches[layer_id][0],
-                        kvcaches[layer_id][1],
-                        slot_mapping_full,
-                        True,
-                        True,
-                    )
-                for start, end, memory_obj in zip(
-                    starts, ends, memory_objs_layer, strict=False
-                ):
-                    assert memory_obj.tensor is not None
-                    if self.use_gpu:
-                        memory_obj.tensor.copy_(
-                            tmp_gpu_buffer_obj.tensor[start - offset : end - offset],
-                            non_blocking=True,
-                        )
-                    else:
-                        lmc_ops.single_layer_kv_transfer(
-                            memory_obj.tensor,
-                            kvcaches[layer_id][0],
-                            kvcaches[layer_id][1],
-                            slot_mapping[start:end],
-                            True,
-                            True,
-                        )
-
-            yield
-            if sync:
-                self.store_stream.synchronize()
-            logger.debug(f"Finished offloading layer {layer_id}")
-
-        # free the buffer memory
-        tmp_gpu_buffer_obj.ref_count_down()
-        yield
+        # Delegate to streaming implementation
+        yield from self.batched_from_gpu_streaming(memory_objs, starts, ends, **kwargs)
 
     def get_shape(self, num_tokens: int) -> torch.Size:
         return torch.Size([num_tokens, 2, self.hidden_dim_size])

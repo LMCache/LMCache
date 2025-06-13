@@ -28,6 +28,7 @@ from lmcache.v1.lookup_server import LookupServerInterface
 from lmcache.v1.memory_management import MemoryAllocatorInterface
 from lmcache.v1.storage_backend.abstract_backend import StorageBackendInterface
 from lmcache.v1.storage_backend.gds_backend import GdsBackend
+from lmcache.v1.storage_backend.kv_service_sm_backend import KVServiceSMBackend
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.v1.storage_backend.local_disk_backend import LocalDiskBackend
 from lmcache.v1.storage_backend.remote_backend import RemoteBackend
@@ -98,6 +99,11 @@ def CreateStorageBackends(
     if config.gds_path is not None:
         gds_backend = GdsBackend(config, loop, memory_allocator, dst_device)
         storage_backends[str(gds_backend)] = gds_backend
+    if config.kv_service_sm_url is not None:
+        kv_service_sm_backend = KVServiceSMBackend(
+            config, loop, memory_allocator, dst_device
+        )
+        storage_backends[str(kv_service_sm_backend)] = kv_service_sm_backend
     if config.remote_url is not None:
         remote_backend = RemoteBackend(
             config, metadata, loop, local_cpu_backend, dst_device, lookup_server

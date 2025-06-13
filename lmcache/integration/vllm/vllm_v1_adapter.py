@@ -306,20 +306,21 @@ class LMCacheConnectorV1Impl:
 
         config = lmcache_get_config()
         self.layerwise_retrievers = []
+
+        self.lmcache_engine = init_lmcache_engine(
+            vllm_config.model_config,
+            vllm_config.parallel_config,
+            vllm_config.cache_config,
+            vllm_config.scheduler_config,
+        )
+
         if role == KVConnectorRole.SCHEDULER:
             # Create lookup client using factory
             self.lookup_client = LookupClientFactory.create_lookup_client(
-                role, is_tp, vllm_config
+                self.lmcache_engine, role, is_tp, vllm_config
             )
             self._requests_in_step: dict[str, Request] = {}
         else:
-            self.lmcache_engine = init_lmcache_engine(
-                vllm_config.model_config,
-                vllm_config.parallel_config,
-                vllm_config.cache_config,
-                vllm_config.scheduler_config,
-            )
-
             self.use_layerwise = config.use_layerwise
             self.enable_blending = config.enable_blending
 
