@@ -27,6 +27,7 @@ import torch
 # First Party
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
+from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.protocol import RemoteMetadata
 from lmcache.v1.storage_backend.connector.base_connector import RemoteConnector
@@ -74,6 +75,25 @@ class MooncakeStoreConfig:
             )
         return MooncakeStoreConfig.from_file(config_file_path)
 
+    @staticmethod
+    def load_from_lmcache_config(
+        config: "LMCacheEngineConfig",
+    ) -> "MooncakeStoreConfig":
+        """Load config from a file specified in the environment variable."""
+        extra_config = config.extra_config
+        if extra_config is None:
+            raise ValueError("The extra config is not set.")
+        return MooncakeStoreConfig(
+            local_hostname=extra_config["local_hostname"],
+            metadata_server=extra_config["metadata_server"],
+            global_segment_size=extra_config.get("global_segment_size", 3355443200),
+            local_buffer_size=extra_config.get("local_buffer_size", 1073741824),
+            protocol=extra_config.get("protocol", "tcp"),
+            device_name=extra_config.get("device_name", ""),
+            master_server_address=extra_config["master_server_address"],
+            transfer_timeout=extra_config.get("transfer_timeout", 1),
+        )
+
 
 class MooncakestoreConnector(RemoteConnector):
     def __init__(
@@ -83,6 +103,7 @@ class MooncakestoreConnector(RemoteConnector):
         dev_name,
         loop: asyncio.AbstractEventLoop,
         local_cpu_backend: LocalCPUBackend,
+        lmcache_config: Optional[LMCacheEngineConfig],
     ):
         try:
             # Third Party
@@ -96,7 +117,16 @@ class MooncakestoreConnector(RemoteConnector):
 
         try:
             self.store = MooncakeDistributedStore()
-            self.config = MooncakeStoreConfig.load_from_env()
+            config_file_path = os.getenv("MOONCAKE_CONFIG_PATH")
+            if config_file_path is not None:
+                self.config = MooncakeStoreConfig.from_file(config_file_path)
+            elif lmcache_config is not None:
+                self.config = MooncakeStoreConfig.load_from_lmcache_config(
+                    lmcache_config
+                )
+            else:
+                raise ValueError("MOONCAKE_CONFIG_PATH/lmcache_config must be provided")
+
             if host != "" and port != 0:
                 self.config.master_server_address = host + ":" + str(port)
             if dev_name != "":

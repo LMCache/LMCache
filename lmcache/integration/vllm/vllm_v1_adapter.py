@@ -14,7 +14,7 @@
 
 # Standard
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional
 import threading
 
 # Third Party
@@ -757,6 +757,11 @@ class LMCacheConnectorV1Impl:
                 offset=skip_leading_tokens,
             )
 
+    def get_finished(
+        self, finished_req_ids: set[str]
+    ) -> tuple[Optional[set[str]], Optional[set[str]]]:
+        return None, None
+
     ###################
     # Scheduler side APIs
     ####################
@@ -912,3 +917,20 @@ class LMCacheConnectorV1Impl:
                 meta.add_request(req_meta)
 
         return meta
+
+    def request_finished(
+        self,
+        request: "Request",
+        block_ids: list[int],
+    ) -> tuple[bool, Optional[dict[str, Any]]]:
+        params = request.kv_transfer_params
+        return_params = None
+
+        # NOTE: Used to stream back the first token
+        # for disagg prefill
+        if params is not None and "ret_first_tok" in params:
+            return_params = {
+                "first_tok": request._output_token_ids[0],
+            }
+
+        return 0, return_params

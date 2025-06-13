@@ -180,7 +180,7 @@ def CreateConnector(
             host, port = parsed_url.hosts[0], parsed_url.ports[0]
             device_name = parsed_url.query_params[0].get("device", "")
             connector = MooncakestoreConnector(
-                host, port, device_name, loop, local_cpu_backend
+                host, port, device_name, loop, local_cpu_backend, config
             )
         case "blackhole":
             connector = BlackholeConnector()

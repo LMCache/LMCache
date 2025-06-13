@@ -46,7 +46,9 @@ RUN apt-get update -y && \
 RUN export LD_LIBRARY_PATH=/usr/local/cuda/compat/lib.real:$LD_LIBRARY_PATH
 RUN export NIXL_PLUGIN_DIR=/usr/local/nixl/lib/x86_64-linux-gnu/plugins
 RUN cd /workspace
-RUN git clone https://github.com/ai-dynamo/nixl
+RUN git clone https://github.com/ai-dynamo/nixl && \
+    cd nixl && \
+    git checkout b1c22edd8fe10e2e5221c107ee51200fce6f09a8
 RUN cd /workspace/nixl
 RUN source /opt/venv/bin/activate
 RUN . /opt/venv/bin/activate && \
@@ -85,7 +87,7 @@ ARG vllm_fa_cmake_gpu_arches='80-real;90-real'
 ENV VLLM_FA_CMAKE_GPU_ARCHES=${vllm_fa_cmake_gpu_arches}
 
 #################### vLLM IMAGE & LMCache (Build) #######################
-# Integrate vLLM nightly build and LMCache build and 
+# Integrate vLLM nightly build and LMCache build and
 # expose vLLM OpenAI API
 
 FROM base AS image-build
@@ -125,7 +127,7 @@ WORKDIR /workspace
 ENTRYPOINT ["/opt/venv/bin/vllm", "serve"]
 
 #################### vLLM IMAGE & LMCache (Release) #######################
-# Integrate vLLM and LMCache stable releases and expose vLLM 
+# Integrate vLLM and LMCache stable releases and expose vLLM
 # OpenAI API
 
 FROM base AS image-release
