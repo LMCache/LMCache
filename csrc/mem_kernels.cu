@@ -15,7 +15,6 @@
  */
 
 #include <torch/all.h>
-#include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
 #include "mem_kernels.cuh"
 #include <ATen/ATen.h>
