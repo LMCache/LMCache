@@ -13,7 +13,7 @@
 # limitations under the License.
 
 # Standard
-from typing import List, Optional
+from typing import List, Optional, Tuple
 import abc
 
 # First Party
@@ -86,3 +86,35 @@ class RemoteConnector(metaclass=abc.ABCMeta):
 
         """
         raise NotImplementedError
+
+    async def batched_get(self, keys: List[CacheEngineKey]) -> List[Optional[MemoryObj]]:
+        """
+        Get multiple memory objects in batch.
+        
+        Default implementation: simple loop over get() for compatibility.
+        Subclasses can override for optimization.
+
+        Args:
+            keys: List of cache engine keys to retrieve
+
+        Returns:
+            List of memory objects corresponding to keys, None if key doesn't exist
+        """
+        results = []
+        for key in keys:
+            result = await self.get(key)
+            results.append(result)
+        return results
+
+    async def batched_put(self, keys_and_objs: List[Tuple[CacheEngineKey, MemoryObj]]):
+        """
+        Put multiple memory objects in batch.
+        
+        Default implementation: simple loop over put() for compatibility.
+        Subclasses can override for optimization.
+
+        Args:
+            keys_and_objs: List of (key, memory_obj) tuples to store
+        """
+        for key, memory_obj in keys_and_objs:
+            await self.put(key, memory_obj)

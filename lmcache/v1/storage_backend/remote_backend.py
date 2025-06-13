@@ -226,7 +226,40 @@ class RemoteBackend(StorageBackendInterface):
         self,
         key: CacheEngineKey,
     ) -> Optional[Future]:
-        raise NotImplementedError
+        """
+        Non-blocking get function that returns a Future.
+        This enables layerwise transfer by allowing the storage manager
+        to orchestrate layer-by-layer data loading.
+        """
+        if self.connection is None:
+            logger.warning("Connection is None in get_non_blocking, returning None")
+            return None
+        
+        # Create a future and run the async operation in the event loop
+        future = asyncio.run_coroutine_threadsafe(
+            self.connection.get(key), self.loop
+        )
+        
+        # Wrap the future to handle deserialization
+        result_future = Future()
+        
+        def handle_result(f):
+            try:
+                serialized_obj = f.result()
+                if serialized_obj is None:
+                    result_future.set_result(None)
+                else:
+                    decompressed_obj = self.deserializer.deserialize(serialized_obj)
+                    result_future.set_result(decompressed_obj)
+            except Exception as e:
+                with self.lock:
+                    self.connection = None
+                    self.failure_time = time.time()
+                logger.warning(f"Error occurred in get_non_blocking: {e}")
+                result_future.set_result(None)
+        
+        future.add_done_callback(handle_result)
+        return result_future
 
     def pin(self, key: CacheEngineKey) -> bool:
         logger.warning(

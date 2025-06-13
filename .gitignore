@@ -119,3 +119,13 @@ cufile.log
 /csrc/*.hip
 /csrc/*_hip.cuh
 /csrc/*_hip.cpp
+docker-compose.yml
+grafana.json
+grafana_updated.json
+lmcache_heavy_load_results.txt
+lmcache_performance_metrics.csv
+lmcache_test_results.txt
+prometheus.yml
+test_lmcache_performance.sh
+test_lmcache_heavy_load.sh
+benchmarks/multi-round-qa/test_results.csv

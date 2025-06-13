@@ -263,7 +263,9 @@ class StorageManager:
         :return: A generator that yields a list of futures for each layer.
         """
         for keys_multi_chunk in keys:
-            # Store all chunks for one layer
+            # Simple wrapper that loops over get_non_blocking
+            # Remote backends can optimize their get_non_blocking implementation
+            # to handle layerwise batching internally
             tasks = []
             for key in keys_multi_chunk:
                 task = self.get_non_blocking(key)
