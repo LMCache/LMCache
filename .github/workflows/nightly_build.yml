@@ -17,17 +17,6 @@ jobs:
         with:
             egress-policy: audit # TODO: change to 'egress-policy: block' after couple of runs
 
-      - name: Remove toolcache to free space
-        run: |
-          sudo rm -rf /opt/hostedtoolcache || true
-          df -h
-
-      - name: Remove other cruft to free space
-        run: |
-          docker system prune -af || true
-          sudo rm -rf ~/.cache || true
-          df -h
-
       - name: Login to DockerHub
         uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
         with:
@@ -42,6 +31,9 @@ jobs:
         with:
           # for setuptools-scm
           fetch-depth: 0
+
+      - name: Free disk space
+        uses: ./.github/actions/free-disk-space
 
       - name: Setup Python 3.11
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
