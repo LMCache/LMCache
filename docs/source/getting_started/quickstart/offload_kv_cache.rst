@@ -279,6 +279,7 @@ Save the following script as ``cpu-offloading.py``:
             model=model_name,
             kv_transfer_config=ktc,
             max_model_len=max_len,
+            enable_prefix_caching=False,
             gpu_memory_utilization=calculate_gpu_utilization()
         )
 
