@@ -405,7 +405,8 @@ def test_multi_layer_kernel_use_mla(num_tokens):
 
 
 @pytest.mark.parametrize("num_tokens", [256, 500, 1024, 8000])
-def test_single_layer_kernel(num_tokens):
+@pytest.mark.parametrize("token_major", [True, False])
+def test_single_layer_kernel(num_tokens, token_major):
     device = "cuda"
 
     num_layers = 32
@@ -424,9 +425,14 @@ def test_single_layer_kernel(num_tokens):
     slot_mapping = random.sample(range(0, num_blocks * block_size), num_tokens)
     slot_mapping = torch.tensor(slot_mapping, device=device)
 
-    tmp_gpu_buffer = torch.empty(
-        (num_tokens, 2, hidden_dim_size), dtype=dtype, device=device
-    )
+    if token_major:
+        tmp_gpu_buffer = torch.empty(
+            (num_tokens, 2, hidden_dim_size), dtype=dtype, device=device
+        )
+    else:
+        tmp_gpu_buffer = torch.empty(
+            (2, num_tokens, hidden_dim_size), dtype=dtype, device=device
+        )
 
     for layer_id in range(num_layers):
         lmc_ops.single_layer_kv_transfer(
@@ -435,6 +441,7 @@ def test_single_layer_kernel(num_tokens):
             kv_cache[layer_id][1],
             slot_mapping,
             True,
+            token_major,
         )
         lmc_ops.single_layer_kv_transfer(
             tmp_gpu_buffer,
@@ -442,6 +449,7 @@ def test_single_layer_kernel(num_tokens):
             kv_cache_new[layer_id][1],
             slot_mapping,
             False,
+            token_major,
         )
 
     check_paged_kv_cache_equal(

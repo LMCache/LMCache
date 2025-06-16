@@ -14,7 +14,7 @@
 
 # Standard
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional
 import threading
 
 # Third Party
@@ -32,9 +32,12 @@ import vllm.envs as envs
 import zmq
 
 # First Party
+from lmcache.integration.vllm.utils import ENGINE_NAME, lmcache_get_config
 from lmcache.integration.vllm.vllm_adapter import init_lmcache_engine
 from lmcache.logging import init_logger
+from lmcache.utils import _lmcache_nvtx_annotate
 from lmcache.v1.cache_engine import LayerwiseLMCacheEngine, LMCacheEngine
+from lmcache.v1.compute.blend import LMCBlenderBuilder
 
 if TYPE_CHECKING:
     # Third Party
@@ -114,7 +117,7 @@ class LMCacheLookupServer:
                 # request = self.socket.recv()
                 frames = self.socket.recv_multipart(copy=False)
                 token_ids = self.decoder.decode(frames)
-                result = self.lmcache_engine.lookup(token_ids)
+                result = self.lmcache_engine.lookup(token_ids, pin=True)
                 response = result.to_bytes(4, "big")
                 self.socket.send(response)
                 # except Exception as e:
@@ -212,8 +215,10 @@ class RequestTracker:
         """Update the request tracker when a running request is
         scheduled again
         """
+
         self.token_ids.extend(cached_request.new_token_ids)
         new_block_ids: list[int]
+
         if not isinstance(cached_request.new_block_ids[0], list):
             new_block_ids = cached_request.new_block_ids
         else:
@@ -291,7 +296,9 @@ class ReqMeta:
         # OPTIMIZATION: pre-allocate the buffer for token ids and block
         # ids
         token_ids = torch.tensor(input_token_ids)[:num_tokens_to_save]
+
         num_blocks = len(tracker.allocated_block_ids)
+
         block_ids = torch.tensor(tracker.allocated_block_ids, dtype=torch.long)
 
         if len(token_ids) > num_blocks * block_size:
@@ -361,6 +368,9 @@ class LMCacheConnectorV1Impl:
         self._parent = parent
         self.kv_role = vllm_config.kv_transfer_config.kv_role
         is_tp = vllm_config.parallel_config.tensor_parallel_size > 1
+
+        config = lmcache_get_config()
+
         if role == KVConnectorRole.SCHEDULER:
             self.lookup_client = LMCacheLookupClient(role, is_tp, vllm_config)
         else:
@@ -370,7 +380,16 @@ class LMCacheConnectorV1Impl:
                 vllm_config.cache_config,
                 vllm_config.scheduler_config,
             )
-            self.use_layerwise = isinstance(self.lmcache_engine, LayerwiseLMCacheEngine)
+
+            self.use_layerwise = config.use_layerwise
+            self.enable_blending = config.enable_blending
+
+            if self.enable_blending:
+                self.blender = LMCBlenderBuilder.get_or_create(
+                    ENGINE_NAME,
+                    self.lmcache_engine,
+                    self.lmcache_engine.gpu_connector,
+                )
 
             # NOTE: Only create the KV lookup API server on worker rank 0
             # when there are multiple workers
@@ -399,8 +418,7 @@ class LMCacheConnectorV1Impl:
             )
         )
 
-        # FIXME(Jiayi): need to align this chunk size with lmcache
-        self._lmcache_chunk_size = 256
+        self._lmcache_chunk_size = config.chunk_size
 
         self.skip_last_n_tokens = vllm_config.kv_transfer_config.get_from_extra_config(
             "skip_last_n_tokens", 0
@@ -427,6 +445,7 @@ class LMCacheConnectorV1Impl:
     # Worker side APIs
     ####################
 
+    @_lmcache_nvtx_annotate
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         """Start loading the KV cache from the connector buffer to vLLM's
         paged KV buffer.
@@ -457,8 +476,13 @@ class LMCacheConnectorV1Impl:
 
         assert self.lmcache_engine is not None
 
+        for idx, request in enumerate(metadata.requests):
+            if request.load_spec is None:
+                continue
+            last_idx = idx
+
         self.layerwise_retrievers = []
-        for request in metadata.requests:
+        for idx, request in enumerate(metadata.requests):
             if request.load_spec is None:
                 continue
 
@@ -481,16 +505,31 @@ class LMCacheConnectorV1Impl:
 
             if self.use_layerwise:
                 assert isinstance(self.lmcache_engine, LayerwiseLMCacheEngine)
-                layerwise_retriever = self.lmcache_engine.retrieve_layer(
-                    tokens,
-                    token_mask,
-                    kvcaches=kvcaches,
-                    slot_mapping=slot_mapping,
-                )
-                # NOTE: retrieve for two layers at the first layer
-                next(layerwise_retriever)
-                next(layerwise_retriever)
-                self.layerwise_retrievers.append(layerwise_retriever)
+                if idx == last_idx:
+                    sync = True
+                else:
+                    sync = False
+                # NOTE(Jiayi): Perform blending before layerwise prefix caching
+                if self.enable_blending:
+                    self.blender.blend(
+                        tokens[: request.load_spec.lmcache_cached_tokens],
+                        token_mask[: request.load_spec.lmcache_cached_tokens],
+                        kvcaches=kvcaches,
+                        slot_mapping=slot_mapping,
+                    )
+                else:
+                    # TODO(Jiayi): Need to make prefix caching and blending compatible
+                    layerwise_retriever = self.lmcache_engine.retrieve_layer(
+                        tokens,
+                        token_mask,
+                        kvcaches=kvcaches,
+                        slot_mapping=slot_mapping,
+                        sync=sync,
+                    )
+                    # NOTE: retrieve for two layers at the first layer
+                    next(layerwise_retriever)
+                    next(layerwise_retriever)
+                    self.layerwise_retrievers.append(layerwise_retriever)
             else:
                 ret_token_mask = self.lmcache_engine.retrieve(
                     tokens,
@@ -517,6 +556,7 @@ class LMCacheConnectorV1Impl:
                         num_expected_tokens,
                     )
 
+    @_lmcache_nvtx_annotate
     def wait_for_layer_load(self, layer_name: str) -> None:
         """Blocking until the KV for a specific layer is loaded into vLLM's
         paged buffer.
@@ -540,6 +580,7 @@ class LMCacheConnectorV1Impl:
 
         return
 
+    @_lmcache_nvtx_annotate
     def save_kv_layer(
         self,
         layer_name: str,
@@ -575,7 +616,10 @@ class LMCacheConnectorV1Impl:
         kvcaches = list(self.kv_caches.values())
         if self.current_layer == 0:
             self.layerwise_storers = []
-            for request in connector_metadata.requests:
+
+            is_first = False
+
+            for idx, request in enumerate(connector_metadata.requests):
                 save_spec = request.save_spec
                 if save_spec is None or not save_spec.can_save:
                     continue
@@ -594,10 +638,12 @@ class LMCacheConnectorV1Impl:
                 # return 0 if there is no local storage configured.
                 # In this case, we should rely on the slip_leading_tokens in
                 # save_spec to avoid transmit the already saved tokens again.
-                skip_leading_tokens = max(
-                    self.lmcache_engine.lookup(token_ids),
-                    save_spec.skip_leading_tokens,
-                )
+                # skip_leading_tokens = max(
+                #    self.lmcache_engine.lookup(token_ids),
+                #    save_spec.skip_leading_tokens,
+                # )
+                skip_leading_tokens = save_spec.skip_leading_tokens
+
                 if skip_leading_tokens == len(token_ids):
                     continue  # skip this request
                 # Align to lmcache chunk size
@@ -618,21 +664,27 @@ class LMCacheConnectorV1Impl:
                     skip_leading_tokens,
                     request.req_id,
                 )
+                if not is_first:
+                    sync = True
+                    is_first = True
+                else:
+                    sync = False
                 layerwise_storer = self.lmcache_engine.store_layer(
                     token_ids,
                     mask=store_mask,
                     kvcaches=kvcaches,
                     slot_mapping=slot_mapping,
                     offset=skip_leading_tokens,
+                    sync=sync,
                 )
                 self.layerwise_storers.append(layerwise_storer)
 
         for layerwise_storer in self.layerwise_storers:
             next(layerwise_storer)
-            if self.current_layer == self.num_layers - 1:
-                next(layerwise_storer)
+
         self.current_layer += 1
 
+    @_lmcache_nvtx_annotate
     def wait_for_save(self):
         """Blocking until the KV cache is saved to the connector buffer."""
         if self.kv_role == "kv_consumer":
@@ -640,6 +692,8 @@ class LMCacheConnectorV1Impl:
             return
 
         if self.use_layerwise:
+            for layerwise_storer in self.layerwise_storers:
+                next(layerwise_storer)
             return
 
         connector_metadata = self._parent._get_connector_metadata()
@@ -669,10 +723,12 @@ class LMCacheConnectorV1Impl:
             # 0 if there is no local storage configured. In this case, we
             # should rely on the slip_leading_tokens in save_spec to avoid
             # transmit the already saved tokens again.
-            skip_leading_tokens = max(
-                self.lmcache_engine.lookup(token_ids),
-                save_spec.skip_leading_tokens,
-            )
+            # skip_leading_tokens = max(
+            #    self.lmcache_engine.lookup(token_ids),
+            #    save_spec.skip_leading_tokens,
+            # )
+            skip_leading_tokens = save_spec.skip_leading_tokens
+
             if skip_leading_tokens == len(token_ids):
                 continue  # skip this request
             # Align to lmcache chunk size
@@ -701,10 +757,16 @@ class LMCacheConnectorV1Impl:
                 offset=skip_leading_tokens,
             )
 
+    def get_finished(
+        self, finished_req_ids: set[str]
+    ) -> tuple[Optional[set[str]], Optional[set[str]]]:
+        return None, None
+
     ###################
     # Scheduler side APIs
     ####################
 
+    @_lmcache_nvtx_annotate
     def get_num_new_matched_tokens(
         self,
         request: "Request",
@@ -764,6 +826,7 @@ class LMCacheConnectorV1Impl:
         #        self._block_size
         return need_to_allocate
 
+    @_lmcache_nvtx_annotate
     def update_state_after_alloc(self, request: "Request", num_external_tokens: int):
         """
         Update KVConnector state after temporary buffer alloc.
@@ -794,6 +857,7 @@ class LMCacheConnectorV1Impl:
 
         self.load_specs[request.request_id].can_load = True
 
+    @_lmcache_nvtx_annotate
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
     ) -> KVConnectorMetadata:
@@ -853,3 +917,20 @@ class LMCacheConnectorV1Impl:
                 meta.add_request(req_meta)
 
         return meta
+
+    def request_finished(
+        self,
+        request: "Request",
+        block_ids: list[int],
+    ) -> tuple[bool, Optional[dict[str, Any]]]:
+        params = request.kv_transfer_params
+        return_params = None
+
+        # NOTE: Used to stream back the first token
+        # for disagg prefill
+        if params is not None and "ret_first_tok" in params:
+            return_params = {
+                "first_tok": request._output_token_ids[0],
+            }
+
+        return 0, return_params

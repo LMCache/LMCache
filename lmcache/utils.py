@@ -12,15 +12,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Future
+from __future__ import annotations
+
 # Standard
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import TYPE_CHECKING, List, Optional, Tuple
 import hashlib
 import threading
 
 # Third Party
 from nvtx import annotate  # type: ignore
 import torch
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.memory_management import MemoryFormat
 
 # Type definition
 KVCache = Tuple[Tuple[torch.Tensor, torch.Tensor], ...]
@@ -32,6 +39,7 @@ class DiskCacheMetadata:
     size: int  # in bytes
     shape: Optional[torch.Size] = None
     dtype: Optional[torch.dtype] = None
+    fmt: MemoryFormat = None
     is_pin: bool = False
 
     def pin(self) -> bool:
@@ -169,6 +177,22 @@ class LayerCacheEngineKey(CacheEngineKey):
             f"@{self.worker_id}@{self.chunk_hash}@{self.layer_id}"
         )
 
+    def split_layers(self, num_layers: int) -> List["LayerCacheEngineKey"]:
+        """Split the key into multiple keys for each layer"""
+        keys = []
+        for layer_id in range(num_layers):
+            keys.append(
+                LayerCacheEngineKey(
+                    self.fmt,
+                    self.model_name,
+                    self.world_size,
+                    self.worker_id,
+                    self.chunk_hash,
+                    layer_id,
+                )
+            )
+        return keys
+
     @staticmethod
     def from_string(s):
         parts = s.split("@")
@@ -205,12 +229,14 @@ def _lmcache_nvtx_annotate(func, domain="lmcache"):
     )(func)
 
 
-##### Threading related #####
-def thread_safe(func):
-    lock = threading.Lock()
+##### Observability Threading related #####
+_shared_observability_lock = threading.Lock()
 
+
+def thread_safe(func):
     def wrapper(*args, **kwargs):
-        with lock:
-            return func(*args, **kwargs)
+        with _shared_observability_lock:
+            result = func(*args, **kwargs)
+        return result
 
     return wrapper

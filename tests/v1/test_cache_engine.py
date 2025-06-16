@@ -718,7 +718,9 @@ def test_mem_leak(fmt, chunk_size, backend, lmserver_v1_process, autorelease_v1)
             if time.time() - start_time > timeout:
                 raise TimeoutError(f"Operation timed out after {timeout} seconds.")
             time.sleep(0.01)
-    tensor_memory_allocator = engine.storage_manager.memory_allocator.pin_allocator
+    tensor_memory_allocator = (
+        engine.storage_manager.allocator_backend.memory_allocator.pin_allocator
+    )
     if "cpu" not in backend:
         assert tensor_memory_allocator.total_allocated_size == 0
     else:

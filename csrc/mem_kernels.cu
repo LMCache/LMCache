@@ -15,12 +15,15 @@
  */
 
 #include <torch/all.h>
-#include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
 #include "mem_kernels.cuh"
 #include <ATen/ATen.h>
 #include <ATen/cuda/CUDAContext.h>
-#include <cuda_fp8.h>
+#ifdef USE_ROCM
+  #include <hip/hip_fp8.h>
+#else
+  #include <cuda_fp8.h>
+#endif
 
 namespace lmc {
 
@@ -117,6 +120,9 @@ __global__ void single_layer_kv_transfer_kernel(
     // num_heads*head_size] scalar_t* __restrict__ lmc_value_cache,  //
     // [num_tokens, num_heads*head_size]
     scalar_t* __restrict__ lmc_key_value_cache,  // [num_tokens, 2,
+                                                 // num_heads*head_size]
+                                                 // or
+                                                 // [2, num_tokens,
                                                  // num_heads*head_size]
     scalar_t* __restrict__ vllm_key_cache,       // [num_blocks, block_size,
                                                  // num_heads, head_size]
@@ -320,6 +326,8 @@ void single_layer_kv_transfer(
     // torch::Tensor& lmc_value_cache,  // [num_tokens, num_heads*head_size]
 
     torch::Tensor& lmc_key_value_cache,  // [num_tokens, 2, num_heads*head_size]
+                                         // or
+                                         // [2, num_tokens, num_heads*head_size]
 
     torch::Tensor&
         vllm_key_cache,  // [num_blocks, block_size, num_heads, head_size]
@@ -327,8 +335,12 @@ void single_layer_kv_transfer(
         vllm_value_cache,  // [num_blocks, block_size, num_heads, head_size]
                            // key_cache/value_cache must be on gpu
     torch::Tensor& slot_mapping,  // [num_tokens]
-    const bool direction  // false: LMCache to PagedBuffer, true: PagedBuffer to
-                          // LMCache
+    const bool direction,   // false: LMCache to PagedBuffer, true: PagedBuffer
+                            // to LMCache
+    const bool token_major  // true: lmc_key_value_cache is
+                            // [num_tokens, 2, num_heads*head_size]
+                            // false: lmc_key_value_cache is
+                            // [2, num_tokens, num_heads*head_size]
 ) {
   // int64_t* lmc_key_cache_ptr = get_kernel_ptr<int64_t,
   // torch::Tensor>(lmc_key_cache); int64_t* lmc_value_cache_ptr =
@@ -352,8 +364,15 @@ void single_layer_kv_transfer(
 
   int block_size = vllm_key_cache.size(1);
 
-  int lmc_stride = lmc_key_value_cache.stride(0) / elements_per_entry;
-  int lmc_value_offset = lmc_key_value_cache.stride(1) / elements_per_entry;
+  int lmc_stride;
+  int lmc_value_offset;
+  if (token_major) {
+    lmc_stride = lmc_key_value_cache.stride(0) / elements_per_entry;
+    lmc_value_offset = lmc_key_value_cache.stride(1) / elements_per_entry;
+  } else {
+    lmc_stride = lmc_key_value_cache.stride(1) / elements_per_entry;
+    lmc_value_offset = lmc_key_value_cache.stride(0) / elements_per_entry;
+  }
 
   int block_stride_in_64bit = vllm_key_cache.stride(0) / elements_per_entry;
   TORCH_CHECK(vllm_key_cache.stride(0) == vllm_value_cache.stride(0));

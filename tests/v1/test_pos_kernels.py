@@ -2,7 +2,7 @@
 import torch
 
 # First Party
-from lmcache.v1.blend.positional_encoding import get_fused_rope
+from lmcache.v1.compute.positional_encoding import get_fused_rope
 
 
 # TODO: test more configurations

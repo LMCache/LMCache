@@ -5,3 +5,4 @@ We have examples for the following backends:
 
 - Infinistore: `infinistore/`
 - Mooncake: `mooncakestore/`
+- External: `external/`

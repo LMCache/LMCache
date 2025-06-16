@@ -15,6 +15,7 @@
 # Standard
 from typing import Optional
 import asyncio
+import json
 
 # Third Party
 import msgspec
@@ -142,8 +143,14 @@ class LMCacheControllerManager:
                 parts = await socket.recv_multipart()
 
                 for part in parts:
-                    msg = msgspec.msgpack.decode(part, type=Msg)
-                    logger.info(f"Received msg type: {type(msg)}")
+                    # Parse message based on format
+                    if part.startswith(b"{"):
+                        # JSON format - typically from external systems like Mooncake
+                        msg_dict = json.loads(part)
+                        msg = msgspec.convert(msg_dict, type=Msg)
+                    else:
+                        # MessagePack format - internal LMCache communication
+                        msg = msgspec.msgpack.decode(part, type=Msg)
                     if isinstance(msg, WorkerMsg):
                         await self.handle_worker_message(msg)
 

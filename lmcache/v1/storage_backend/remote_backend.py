@@ -58,6 +58,7 @@ class RemoteBackend(StorageBackendInterface):
 
         self.loop = loop
         self.config = config
+        self.metadata = metadata
 
         # Re-establish connection only when the connection
         # has been lost for 10 secs
@@ -71,7 +72,19 @@ class RemoteBackend(StorageBackendInterface):
             config.remote_serde, metadata, config
         )
 
-        logger.info(f"Connected to remote storage at {config.remote_url}")
+        # Precompute MLA mode status
+        self._mla_worker_id_as0_mode = (
+            config.extra_config is not None
+            and config.extra_config.get("remote_enable_mla_worker_id_as0", False)
+            and metadata.use_mla
+            and metadata.world_size > 1
+            and metadata.worker_id != 0
+        )
+        logger.info(f"metadata={metadata}")
+        logger.info(
+            f"Connected to remote storage at {config.remote_url}, "
+            f"remote_mla_worker_id_as_0 mode: {self._mla_worker_id_as0_mode}"
+        )
 
         # TODO(Jiayi): If we want to have cache admission policies,
         # we must make decision (whether to send or not) at the local side
@@ -126,6 +139,12 @@ class RemoteBackend(StorageBackendInterface):
             logger.warning("Connection is None in contains, returning False")
             return False
 
+        # For MLA worker id as 0 mode, use worker_id 0
+        if self._mla_worker_id_as0_mode:
+            key = CacheEngineKey(
+                key.fmt, key.model_name, key.world_size, 0, key.chunk_hash
+            )
+
         future = asyncio.run_coroutine_threadsafe(
             self.connection.exists(key), self.loop
         )
@@ -161,6 +180,10 @@ class RemoteBackend(StorageBackendInterface):
             logger.warning("Connection is None in submit_put_task, returning None")
             return None
 
+        # If MLA worker id as 0 mode is enabled, skip put tasks
+        if self._mla_worker_id_as0_mode:
+            return None
+
         memory_obj.ref_count_up()
 
         self.lock.acquire()
@@ -178,6 +201,14 @@ class RemoteBackend(StorageBackendInterface):
         lambda_callback = lambda f: self.put_callback(f, key)
         future.add_done_callback(lambda_callback)
         return future
+
+    def batched_submit_put_task(
+        self, keys: List[CacheEngineKey], memory_objs: List[MemoryObj]
+    ) -> Optional[List[Future]]:
+        return [
+            self.submit_put_task(key, memory_obj)
+            for key, memory_obj in zip(keys, memory_objs, strict=False)
+        ]
 
     def submit_prefetch_task(
         self,
@@ -197,6 +228,11 @@ class RemoteBackend(StorageBackendInterface):
         if self.connection is None:
             logger.warning("Connection is None in get_blocking, returning None")
             return None
+        # For MLA worker id as 0 mode, use worker_id 0
+        if self._mla_worker_id_as0_mode:
+            key = CacheEngineKey(
+                key.fmt, key.model_name, key.world_size, 0, key.chunk_hash
+            )
         t1 = time.perf_counter()
         future = asyncio.run_coroutine_threadsafe(self.connection.get(key), self.loop)
 
@@ -229,10 +265,18 @@ class RemoteBackend(StorageBackendInterface):
         raise NotImplementedError
 
     def pin(self, key: CacheEngineKey) -> bool:
-        raise NotImplementedError
+        logger.warning(
+            "Remote backend does not support pin. "
+            "This method is a no-op and will return True."
+        )
+        return True
 
     def unpin(self, key: CacheEngineKey) -> bool:
-        raise NotImplementedError
+        logger.warning(
+            "Remote backend does not support unpin. "
+            "This method is a no-op and will return True."
+        )
+        return True
 
     def close(self):
         try:

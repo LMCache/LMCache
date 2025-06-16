@@ -159,7 +159,7 @@ def get_fused_rope(
     head_size: int,
     rotary_dim: int,
     max_position: int,
-    base: int,
+    base: float,
     is_neox_style: bool = True,
     rope_scaling: Optional[Dict[str, Any]] = None,
     dtype: Optional[torch.dtype] = None,
@@ -202,4 +202,4 @@ def get_fused_rope(
         )
         return None
 
-    return reverse_rope
+    return fused_rope

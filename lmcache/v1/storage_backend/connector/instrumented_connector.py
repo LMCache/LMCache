@@ -48,7 +48,10 @@ class InstrumentedRemoteConnector(RemoteConnector):
         end = time.perf_counter()
         self._stats_monitor.update_interval_remote_time_to_put((end - begin) * 1000)
         self._stats_monitor.update_interval_remote_write_metrics(obj_size)
-        logger.debug(f"Bytes offloaded: {obj_size / 1e6:.4f} MBytes")
+        logger.debug(
+            f"Bytes offloaded: {obj_size / 1e6:.3f} MBytes "
+            f"in {(end - begin) * 1000:.3f}ms"
+        )
 
     async def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         begin = time.perf_counter()
@@ -58,7 +61,10 @@ class InstrumentedRemoteConnector(RemoteConnector):
         if memory_obj is not None:
             obj_size = memory_obj.get_size()
             self._stats_monitor.update_interval_remote_read_metrics(obj_size)
-            logger.debug(f"Bytes loaded: {obj_size / 1e6:.4f} MBytes")
+            logger.debug(
+                f"Bytes loaded: {obj_size / 1e6:.3f} MBytes "
+                f"in {(end - begin) * 1000:.3f}ms"
+            )
         return memory_obj
 
     # Delegate all other methods to the underlying connector

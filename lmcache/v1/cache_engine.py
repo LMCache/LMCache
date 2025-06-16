@@ -34,6 +34,7 @@ from lmcache.v1.distributed_server import (
 )
 from lmcache.v1.gpu_connector import (
     GPUConnectorInterface,
+    VLLMBufferLayerwiseGPUConnector,
     VLLMPagedMemLayerwiseGPUConnector,
 )
 from lmcache.v1.lookup_server import LookupServerInterface, RedisLookupServer
@@ -42,14 +43,14 @@ from lmcache.v1.memory_management import CuFileMemoryAllocator  # noqa: E501
 from lmcache.v1.memory_management import (
     MemoryAllocatorInterface,
     MemoryFormat,
-    MemoryObj,
     MixedMemoryAllocator,
 )
-from lmcache.v1.storage_backend.storage_manager import (
-    DistributedStorageManager,
-    StorageManager,
+from lmcache.v1.storage_backend.storage_manager import StorageManager
+from lmcache.v1.token_database import (
+    ChunkedTokenDatabase,
+    SegmentTokenDatabase,
+    TokenDatabase,
 )
-from lmcache.v1.token_database import ChunkedTokenDatabase, TokenDatabase
 
 logger = init_logger(__name__)
 
@@ -82,7 +83,6 @@ class LMCacheEngine:
         memory_allocator: MemoryAllocatorInterface,
         token_database: TokenDatabase,
         gpu_connector: GPUConnectorInterface,
-        layerwise: bool = False,
     ):
         logger.info(f"Creating LMCacheEngine with config: {config}")
         self.config = config
@@ -108,21 +108,16 @@ class LMCacheEngine:
         if self.config.enable_controller:
             self.lmcache_worker = LMCacheWorker(config, metadata, self)
 
-        self.use_distributed_storage_manager = False
-        if config.enable_nixl:
-            self.use_distributed_storage_manager = True
-            self.storage_manager = DistributedStorageManager(
-                config, metadata, self.memory_allocator
-            )
-        else:
-            self.storage_manager = StorageManager(
-                config,
-                metadata,
-                self.memory_allocator,
-                self.lmcache_worker,
-                self.lookup_server,
-                layerwise,
-            )  # type: ignore[assignment]
+        self.storage_manager = StorageManager(
+            config,
+            metadata,
+            self.memory_allocator,
+            self.lmcache_worker,
+            self.lookup_server,
+        )
+
+        # HACK: remove this in the future
+        self.remove_after_retrieve = config.enable_nixl
 
         if self.enable_p2p:
             self.distributed_loop = asyncio.get_event_loop()
@@ -139,90 +134,6 @@ class LMCacheEngine:
 
         InitializeUsageContext(config.to_original_config(), metadata)
         self.stats_monitor = LMCStatsMonitor.GetOrCreate()
-
-    @_lmcache_nvtx_annotate
-    @torch.inference_mode()
-    def store_distributed(
-        self,
-        tokens: torch.Tensor,
-        mask: Optional[torch.Tensor] = None,
-        **kwargs,
-    ) -> None:
-        """Store the tokens and mask into the cache engine.
-
-        This function is only for distributed storage manager.
-
-        This function will be refactored in the future.
-        """
-        st = time.perf_counter()
-        if mask is not None:
-            num_store_tokens = torch.sum(mask)
-        else:
-            num_store_tokens = len(tokens)
-        monitor_req_id = self.stats_monitor.on_store_request(num_store_tokens)
-
-        # Register the put request
-        keys = []
-        metadatas = []
-        steds = []
-        for start, end, key in self.token_database.process_tokens(tokens, mask):
-            assert isinstance(key, CacheEngineKey)
-            # Allocate the memory object
-            num_tokens = end - start
-            kv_shape = self.gpu_connector.get_shape(num_tokens)
-            kv_dtype = self.metadata.kv_dtype
-            memobj_meta = self.storage_manager.dry_allocate(kv_shape, kv_dtype)
-            assert memobj_meta is not None
-            keys.append(key)
-            metadatas.append(memobj_meta)
-            steds.append((start, end))
-
-        self.storage_manager.prepare_put(keys, metadatas)
-
-        offload_time = 0.0
-        put_time = 0.0
-        tot_kv_size = 0
-        # Offload the KV cache and write to remote
-        for key, memobj_meta, (start, end) in zip(keys, metadatas, steds, strict=False):
-            assert memobj_meta.dtype is not None
-            kv_shape = memobj_meta.shape
-            kv_dtype = memobj_meta.dtype
-
-            # Allocate for a zero-copy buffer, trigger send if needed
-            t = time.perf_counter()
-            memory_obj = self.storage_manager.allocate(kv_shape, kv_dtype)
-            put_time += time.perf_counter() - t
-            if memory_obj is None:
-                logger.warning(
-                    "Failed to allocate memory for the KV cache.\n"
-                    "The KV cache will not be stored."
-                )
-                break
-
-            # Copy the KV cache to the zero-copy buffer
-            t = time.perf_counter()
-            self.gpu_connector.from_gpu(memory_obj, start, end, **kwargs)
-            offload_time += time.perf_counter() - t
-
-            tot_kv_size += memory_obj.get_size()
-
-        # Flush
-        t = time.perf_counter()
-        self.storage_manager.commit_put()
-        put_time += time.perf_counter() - t
-        ed = time.perf_counter()
-
-        logger.info(
-            "Store %d tokens takes: %.4f ms, throughput: %.4f GB/s; "
-            "offload_time: %.4f ms, put_time: %.4f ms",
-            num_store_tokens,
-            (ed - st) * 1000,
-            tot_kv_size / (ed - st) / 1024**3,
-            offload_time * 1000,
-            put_time * 1000,
-        )
-
-        self.stats_monitor.on_store_finished(monitor_req_id)
 
     @_lmcache_nvtx_annotate
     @torch.inference_mode()
@@ -249,16 +160,22 @@ class LMCacheEngine:
         :raises: ValueError if the number of Falses in the mask is not a
             multiple of the chunk size.
         """
-        # FIXME(ApostaC): A HACK for distributed storage manager
-        if self.use_distributed_storage_manager:
-            self.store_distributed(tokens, mask, **kwargs)
-            return
 
         if mask is not None:
             num_stored_tokens = torch.sum(mask).item()
         else:
             num_stored_tokens = len(tokens)
         monitor_req_id = self.stats_monitor.on_store_request(num_stored_tokens)
+
+        starts = []
+        ends = []
+        keys = []
+        memory_objs = []
+
+        offload_time = 0.0
+        put_time = 0.0
+        tot_kv_size = 0
+        t = time.perf_counter()
 
         for start, end, key in self.token_database.process_tokens(tokens, mask):
             assert isinstance(key, CacheEngineKey)
@@ -276,12 +193,34 @@ class LMCacheEngine:
                 )
                 break
 
-            self.gpu_connector.from_gpu(memory_obj, start, end, **kwargs)
-            self.storage_manager.put(key, memory_obj)
+            starts.append(start)
+            ends.append(end)
+            keys.append(key)
+            memory_objs.append(memory_obj)
 
-            # Update lookup server
-            if self.lookup_server is not None:
-                self.lookup_server.insert(key)
+            tot_kv_size = memory_obj.get_size()
+
+        self.gpu_connector.batched_from_gpu(memory_objs, starts, ends, **kwargs)
+        offload_time += time.perf_counter() - t
+
+        t = time.perf_counter()
+        self.storage_manager.batched_put(keys, memory_objs)
+        put_time += time.perf_counter() - t
+
+        tot_time = offload_time + put_time
+
+        if self.lookup_server is not None:
+            self.lookup_server.batched_insert(key)
+
+        logger.debug(
+            "Store %d tokens takes: %.4f ms, throughput: %.4f GB/s; "
+            "offload_time: %.4f ms, put_time: %.4f ms",
+            num_stored_tokens,
+            tot_time * 1000,
+            tot_kv_size / tot_time / 1024**3,
+            offload_time * 1000,
+            put_time * 1000,
+        )
 
         self.stats_monitor.on_store_finished(monitor_req_id)
 
@@ -351,8 +290,10 @@ class LMCacheEngine:
             # NOTE (ApostaC): This is only for the current implementation:
             # When the object is retrieved back to vLLM, the storage backend
             # will immediately remove the object from itself
-            if isinstance(self.storage_manager, DistributedStorageManager):
+            if self.remove_after_retrieve:
                 self.storage_manager.remove(key)
+            else:
+                self.storage_manager.batched_unpin([key])
 
         retrieved_tokens = torch.sum(ret_mask)
         self.stats_monitor.on_retrieve_finished(monitor_req_id, retrieved_tokens)
@@ -363,6 +304,7 @@ class LMCacheEngine:
         )
         return ret_mask
 
+    @_lmcache_nvtx_annotate
     def prefetch(
         self,
         tokens: torch.Tensor,
@@ -376,6 +318,7 @@ class LMCacheEngine:
             self.storage_manager.prefetch(key)
 
     # TODO(Jiayi): Currently, search_range is only used for testing.
+    @_lmcache_nvtx_annotate
     def lookup(
         self,
         tokens: Union[torch.Tensor, List[int]],
@@ -424,6 +367,7 @@ class LMCacheEngine:
         # all tokens where found, return the maximal end
         return end
 
+    @_lmcache_nvtx_annotate
     def clear(
         self,
         tokens: Optional[Union[torch.Tensor, List[int]]] = None,
@@ -474,7 +418,6 @@ class LayerwiseLMCacheEngine(LMCacheEngine):
         memory_allocator: MemoryAllocatorInterface,
         token_database: TokenDatabase,
         layerwise_gpu_connector: GPUConnectorInterface,
-        layerwise: bool = True,
     ):
         super().__init__(
             config,
@@ -482,11 +425,19 @@ class LayerwiseLMCacheEngine(LMCacheEngine):
             memory_allocator,
             token_database,
             layerwise_gpu_connector,
-            layerwise,
         )
-        assert isinstance(self.gpu_connector, VLLMPagedMemLayerwiseGPUConnector)
+
+        assert isinstance(
+            self.gpu_connector,
+            (VLLMPagedMemLayerwiseGPUConnector, VLLMBufferLayerwiseGPUConnector),
+        )
 
         self.num_layers = metadata.kv_shape[0]
+
+        if config.enable_blending:
+            self.fmt = MemoryFormat.KV_2TD
+        else:
+            self.fmt = MemoryFormat.KV_T2D
 
     @_lmcache_nvtx_annotate
     @torch.inference_mode()
@@ -541,27 +492,18 @@ class LayerwiseLMCacheEngine(LMCacheEngine):
             num_tokens = end - start
             kv_shape_single_layer = self.gpu_connector.get_shape(num_tokens)
 
-            # TODO(Jiayi): Optimize with batched allocation
-            memory_objs_multi_layer: List[MemoryObj] = []
-            no_space_left = False
-            for layer_id in range(self.num_layers):
-                mem_obj_single_layer = self.storage_manager.allocate(
-                    kv_shape_single_layer, kv_dtype, fmt=MemoryFormat.KV_T2D
+            memory_objs_multi_layer = self.storage_manager.batched_allocate(
+                kv_shape_single_layer,
+                kv_dtype,
+                batch_size=self.num_layers,
+                fmt=self.fmt,
+            )
+
+            if memory_objs_multi_layer is None:
+                logger.warning(
+                    "Failed to allocate memory for the KV cache.\n"
+                    "The KV cache will not be stored."
                 )
-
-                if mem_obj_single_layer is None:
-                    logger.warning(
-                        "Failed to allocate memory for the KV cache.\n"
-                        "The KV cache will not be stored."
-                    )
-                    no_space_left = True
-                    for mem_obj_prev_layer in memory_objs_multi_layer:
-                        mem_obj_prev_layer.ref_count_down()
-                    break
-
-                memory_objs_multi_layer.append(mem_obj_single_layer)
-
-            if no_space_left:
                 break
 
             starts.append(start)
@@ -578,7 +520,11 @@ class LayerwiseLMCacheEngine(LMCacheEngine):
             memory_objs = [list(row) for row in zip(*memory_objs, strict=False)]
             keys = [list(row) for row in zip(*keys, strict=False)]
 
-            assert isinstance(self.gpu_connector, VLLMPagedMemLayerwiseGPUConnector)
+            assert isinstance(
+                self.gpu_connector,
+                (VLLMPagedMemLayerwiseGPUConnector, VLLMBufferLayerwiseGPUConnector),
+            )
+
             mem_obj_generator = self.gpu_connector.batched_from_gpu(
                 memory_objs, starts, ends, **kwargs
             )
@@ -662,7 +608,13 @@ class LayerwiseLMCacheEngine(LMCacheEngine):
 
             get_generator = self.storage_manager.layerwise_batched_get(keys_layer_major)
 
-            assert isinstance(self.gpu_connector, VLLMPagedMemLayerwiseGPUConnector)
+            assert isinstance(
+                self.gpu_connector,
+                (
+                    VLLMPagedMemLayerwiseGPUConnector,
+                    VLLMBufferLayerwiseGPUConnector,
+                ),
+            )
             mem_obj_consumer = self.gpu_connector.batched_to_gpu(starts, ends, **kwargs)
             next(mem_obj_consumer)
 
@@ -705,6 +657,7 @@ class LayerwiseLMCacheEngine(LMCacheEngine):
 
         yield ret_mask
 
+    @_lmcache_nvtx_annotate
     def lookup(
         self,
         tokens: Union[torch.Tensor, List[int]],
@@ -725,7 +678,9 @@ class LayerwiseLMCacheEngine(LMCacheEngine):
 
         :return: An int indicating how many prefix tokens are cached.
         """
+
         end = 0
+        old_end = 0
         for start, end, key in self.token_database.process_tokens(tokens):
             assert isinstance(key, CacheEngineKey)
 
@@ -736,7 +691,8 @@ class LayerwiseLMCacheEngine(LMCacheEngine):
                 if not self.storage_manager.contains(
                     key_single_layer, search_range, pin
                 ):
-                    return start
+                    return old_end
+            old_end = end
         return end
 
 
@@ -755,7 +711,7 @@ class LMCacheEngineBuilder:
             assert config.nixl_buffer_device is not None
             return AdHocMemoryAllocator(config.nixl_buffer_device)
 
-        if config.weka_path is not None:
+        if config.weka_path is not None or config.gds_path is not None:
             assert config.cufile_buffer_size is not None
             return CuFileMemoryAllocator(config.cufile_buffer_size * 1024**2)
 
@@ -767,6 +723,8 @@ class LMCacheEngineBuilder:
         config: LMCacheEngineConfig,
         metadata: LMCacheEngineMetadata,
     ) -> TokenDatabase:
+        if config.enable_blending:
+            return SegmentTokenDatabase(config, metadata)
         return ChunkedTokenDatabase(config, metadata)
 
     @classmethod
@@ -776,7 +734,6 @@ class LMCacheEngineBuilder:
         config: LMCacheEngineConfig,
         metadata: LMCacheEngineMetadata,
         gpu_connector: GPUConnectorInterface,
-        use_layerwise_engine: bool = False,
     ) -> LMCacheEngine:
         """
         Builds a new LMCacheEngine instance if it doesn't already exist for the
@@ -793,7 +750,7 @@ class LMCacheEngineBuilder:
 
             # HACK(Jiayi): Merge two types of engine into one in the future
             engine: Union[LayerwiseLMCacheEngine, LMCacheEngine]
-            if use_layerwise_engine:
+            if config.use_layerwise:
                 engine = LayerwiseLMCacheEngine(
                     config,
                     metadata,

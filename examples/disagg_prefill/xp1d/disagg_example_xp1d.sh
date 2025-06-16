@@ -48,9 +48,31 @@ ensure_python_library_installed() {
 
 cleanup() {
     echo "Stopping everything…"
-    trap - INT TERM        # prevent re-entrancy
-    kill -- -$$            # negative PID  ==  “this whole process-group”
-    wait                   # reap children so we don't leave zombies
+    trap - INT TERM USR1   # prevent re-entrancy
+    
+    # Kill all tracked PIDs
+    for pid in "${PIDS[@]}"; do
+        if kill -0 "$pid" 2>/dev/null; then
+            echo "Killing process $pid"
+            kill "$pid" 2>/dev/null
+        fi
+    done
+    
+    # Wait a moment for graceful shutdown
+    sleep 2
+    
+    # Force kill any remaining processes
+    for pid in "${PIDS[@]}"; do
+        if kill -0 "$pid" 2>/dev/null; then
+            echo "Force killing process $pid"
+            kill -9 "$pid" 2>/dev/null
+        fi
+    done
+    
+    # Kill the entire process group as backup
+    kill -- -$$ 2>/dev/null
+    
+    echo "All processes stopped."
     exit 0
 }
 
@@ -93,21 +115,31 @@ main() {
     echo "Launching prefiller, decoder and proxy..."
     echo "Please check prefiller.log, decoder.log and proxy.log for logs."
 
-    bash disagg_vllm_launcher.sh prefiller \
-        > >(tee prefiller.log) 2>&1 &
-    prefiller_pid=$!
-    PIDS+=($prefiller_pid)
-
+    # Launch the decoder first
     bash disagg_vllm_launcher.sh decoder  \
         > >(tee decoder.log)  2>&1 &
     decoder_pid=$!
     PIDS+=($decoder_pid)
+    wait_for_server 8200
 
-    python3 disagg_proxy_server.py \
+    # Launch the prefillers next
+    bash disagg_vllm_launcher.sh prefiller1 \
+        > >(tee prefiller1.log) 2>&1 &
+    prefiller_pid=$!
+    PIDS+=($prefiller_pid)
+
+    sleep 5  # Don't launch the second prefiller too quickly
+    bash disagg_vllm_launcher.sh prefiller2 \
+        > >(tee prefiller2.log) 2>&1 &
+    prefiller2_pid=$!
+    PIDS+=($prefiller2_pid)
+
+    python3 disagg_proxy_server_first_token_from_prefiller.py \
         --host localhost \
         --port 9000 \
         --prefiller-host localhost \
         --prefiller-port 8100 \
+        --num-prefillers 2 \
         --decoder-host localhost \
         --decoder-port 8200  \
         > >(tee proxy.log)    2>&1 &
@@ -115,11 +147,20 @@ main() {
     PIDS+=($proxy_pid)
 
     wait_for_server 8100
-    wait_for_server 8200
+    wait_for_server 8101
     wait_for_server 9000
 
+    echo "==================================================="
     echo "All servers are up. You can send request now..."
+    echo "Press Ctrl-C to terminate all instances."
 
+    # Keep the script running until interrupted
+    echo "Script is running. Waiting for termination signal..."
+    echo "==================================================="
+
+    while true; do
+        sleep 1
+    done
 }
 
 main

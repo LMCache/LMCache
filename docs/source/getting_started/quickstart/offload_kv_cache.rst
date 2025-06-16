@@ -117,7 +117,7 @@ Next, launch the vLLM server with LMCache integration. Here's an example command
 
 .. code-block:: bash
 
-    LMCACHE_CONFIG_PATH=/path/to/lmcache_config.yaml \
+    LMCACHE_CONFIG_FILE=/path/to/lmcache_config.yaml \
     vllm serve \
         meta-llama/Llama-3.1-8B-Instruct \
         --kv-transfer-config \
@@ -127,7 +127,7 @@ Next, launch the vLLM server with LMCache integration. Here's an example command
 
 Key parameters explained:
 
-- ``LMCACHE_CONFIG_PATH``: Path to the LMCache configuration file.
+- ``LMCACHE_CONFIG_FILE``: Path to the LMCache configuration file.
 - ``--kv-transfer-config``: Configures LMCache integration
     - ``kv_connector``: Specifies the LMCache connector 
     - ``kv_role``: Set to "kv_both" for both storing and loading KV cache
@@ -279,6 +279,7 @@ Save the following script as ``cpu-offloading.py``:
             model=model_name,
             kv_transfer_config=ktc,
             max_model_len=max_len,
+            enable_prefix_caching=False,
             gpu_memory_utilization=calculate_gpu_utilization()
         )
 

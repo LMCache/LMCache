@@ -1,19 +1,19 @@
-# Example script to build the LMCache container image
+# Example script to build the LMCache integrated with vLLM container image
 
 # Update the following variables accordingly
-# Note: latest (built from GitHub) images of vLLM are in AWS ECR registry:
-# public.ecr.aws/q9t5s3a7/vllm-ci-test-repo
-# The latest release version of vLLM imnage are on DockerHub: vllm/vllm-openai
-CUDA_VERSION=12.8.1
+CUDA_VERSION=12.8
 DOCKERFILE_NAME='Dockerfile'
 DOCKER_BUILD_PATH='../' # This path should point to the LMCache root for access to 'requirements' directory
-UBUNTU_VERSION=22.04
-VLLM_IMAGE_REPO='vllm/vllm-openai'
-VLLM_TAG='latest'
+UBUNTU_VERSION=24.04
+
+# `image-build` target will use the latest LMCache and vLLM code
+# Change to 'image-release' target for using release package versions of vLLM and LMCache
+BUILD_TARGET=image-build 
+
+IMAGE_TAG='lmcache/vllm-openai:build-latest' # Name of container image to build
 
 docker build \
     --build-arg CUDA_VERSION=$CUDA_VERSION \
     --build-arg UBUNTU_VERSION=$UBUNTU_VERSION \
-    --build-arg VLLM_IMAGE_REPO=$VLLM_IMAGE_REPO \
-    --build-arg VLLM_TAG=$VLLM_TAG \
-    -f $DOCKERFILE_NAME $DOCKER_BUILD_PATH
+    --target $BUILD_TARGET --file $DOCKERFILE_NAME \
+    --tag $IMAGE_TAG  $DOCKER_BUILD_PATH

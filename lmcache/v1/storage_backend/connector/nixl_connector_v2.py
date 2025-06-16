@@ -41,6 +41,7 @@ from lmcache.v1.storage_backend.connector.nixl_utils import NixlConfig, NixlRole
 logger = init_logger(__name__)
 
 
+# TODO(Jiayi): Make this part of memory_management.py
 class NixlBufferAllocator(MemoryAllocatorInterface):
     """The memory allocator on NIXL transfer buffer."""
 
@@ -73,18 +74,29 @@ class NixlBufferAllocator(MemoryAllocatorInterface):
 
         :rtype: Optional[MemoryObj]
         """
-        metadata = self.dry_allocate(torch.Size(shape), dtype, fmt)
-        metadata.address = self.allocated_size
+
+        metadata = MemoryObjMetadata(
+            shape=shape,
+            dtype=dtype,
+            address=self.allocated_size,
+            phy_size=0,
+            ref_count=1,
+            fmt=fmt,
+        )
 
         # check the size and capacity
         required_size = metadata.get_size()
-        assert required_size < self.capacity, (
-            "The object size is larger than the NIXL buffer capacity"
+        assert self.allocated_size + required_size <= self.capacity, (
+            "The object size is larger than the NIXL buffer capacity. "
+            "Consider decreasing `max_batched_tokens` in vllm config"
+            "or increasing `nixl_buffer_size` in lmcache config."
         )
 
-        if self.allocated_size + required_size > self.capacity:
-            # If no enough space, try to flush
-            self._flush()
+        # NOTE: the following `flush` can be skipped for now
+        # due to the above assertion.
+        # if self.allocated_size + required_size > self.capacity:
+        # If no enough space, try to flush
+        #    self._flush()
 
         # allocate the memory
         raw_tensor = self.buffer[
@@ -96,24 +108,23 @@ class NixlBufferAllocator(MemoryAllocatorInterface):
         self.allocated_size += required_size
         return ret
 
-    def dry_allocate(
+    def batched_allocate(
         self,
         shape: torch.Size,
         dtype: Optional[torch.dtype],
-        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
-    ) -> MemoryObjMetadata:
-        """Dry allocate the memory and return the metadata.
-
-        Note: `address` is not valid in the dry allocation.
-        """
-        metadata = MemoryObjMetadata(
-            shape, dtype, address=0, phy_size=0, ref_count=1, fmt=fmt
+        batch_size: int,
+        fmt=MemoryFormat.KV_2LTD,
+    ):
+        raise NotImplementedError(
+            "Batched allocation is not supported in NIXL buffer allocator"
         )
-        metadata.phy_size = metadata.get_size()
-        return metadata
 
     def free(self, obj: MemoryObj):
         """Free the memory object."""
+        pass
+
+    def batched_free(self, objs: list[MemoryObj]):
+        """Free the memory objects in batch."""
         pass
 
     ### For NIXL Pipe to call
@@ -521,15 +532,6 @@ class NixlSender:
         """Get the underlying allocator for the NIXL pipe"""
         return self._pipe.get_allocator()
 
-    def dry_allocate(
-        self,
-        shape: torch.Size,
-        dtype: Optional[torch.dtype],
-        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
-    ) -> MemoryObjMetadata:
-        """Dry allocate the memory and return the metadata."""
-        return self._pipe._allocator.dry_allocate(shape, dtype, fmt)
-
     def prepare_send(
         self, keys: list[CacheEngineKey], metadatas: list[MemoryObjMetadata]
     ):
@@ -550,7 +552,6 @@ class NixlSender:
 
         self._during_send = True
         self._prepared_count = len(keys)
-        self._added_payload_count = 0
 
     def allocate_for_send(
         self,
@@ -563,15 +564,6 @@ class NixlSender:
         If the buffer is full, it will trigger a flush and then allocate
         the memory from the beginning.
         """
-        if not self._during_send:
-            logger.error(
-                "Cannot add payload to a send transaction that is not prepared"
-            )
-            raise RuntimeError("No send transaction is prepared")
-
-        if self._added_payload_count >= self._prepared_count:
-            logger.error("Cannot add more payloads than prepared objects")
-            raise RuntimeError("Cannot add more payloads than prepared objects")
 
         self._added_payload_count += 1
         return self._pipe.allocate_for_write(shape, dtype, fmt)
@@ -879,16 +871,6 @@ class NixlChannel:
         """Get the underlying allocator for the NIXL pipe"""
         sender = self._check_sender()
         return sender.get_allocator()
-
-    def dry_allocate(
-        self,
-        shape: torch.Size,
-        dtype: Optional[torch.dtype],
-        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
-    ) -> MemoryObjMetadata:
-        """Dry allocate the memory and return the metadata."""
-        sender = self._check_sender()
-        return sender.dry_allocate(shape, dtype, fmt)
 
     def prepare_send(
         self, keys: list[CacheEngineKey], metadatas: list[MemoryObjMetadata]

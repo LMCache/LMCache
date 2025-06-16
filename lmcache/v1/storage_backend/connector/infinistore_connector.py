@@ -26,11 +26,12 @@ import torch
 # First Party
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
-from lmcache.v1.memory_management import CopyLessMemoryObj, MemoryObj
+from lmcache.v1.memory_management import MemoryObj
 
 # reuse
 from lmcache.v1.protocol import RemoteMetadata
 from lmcache.v1.storage_backend.connector.base_connector import RemoteConnector
+from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 
 logger = init_logger(__name__)
 
@@ -44,7 +45,14 @@ def _get_ptr(mv: Union[bytearray, memoryview]) -> int:
 
 
 class InfinistoreConnector(RemoteConnector):
-    def __init__(self, host: str, port: int, dev_name, loop: asyncio.AbstractEventLoop):
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        dev_name,
+        loop: asyncio.AbstractEventLoop,
+        memory_allocator: LocalCPUBackend,
+    ):
         config = infinistore.ClientConfig(
             host_addr=host,
             service_port=port,
@@ -66,6 +74,8 @@ class InfinistoreConnector(RemoteConnector):
         self.recv_queue: asyncio.Queue[int] = asyncio.Queue(maxsize=MAX_BUFFER_CNT)
 
         self.buffer_size = MAX_BUFFER_SIZE
+        self.memory_allocator = memory_allocator
+
         for i in range(MAX_BUFFER_CNT):
             send_buffer = bytearray(self.buffer_size)
             self.rdma_conn.register_mr(_get_ptr(send_buffer), self.buffer_size)
@@ -99,9 +109,6 @@ class InfinistoreConnector(RemoteConnector):
 
         metadata = RemoteMetadata.deserialize(buffer)
 
-        def callback():
-            self.recv_queue.put_nowait(buf_idx)
-
         num_elements = reduce(operator.mul, metadata.shape)
         assert metadata.dtype is not None
         temp_tensor = torch.frombuffer(
@@ -111,11 +118,22 @@ class InfinistoreConnector(RemoteConnector):
             count=num_elements,
         ).reshape(metadata.shape)
 
-        memory_obj = CopyLessMemoryObj(
-            raw_data=temp_tensor, metadata=metadata, callback=callback
+        memory_obj = self.memory_allocator.allocate(
+            metadata.shape,
+            metadata.dtype,
+            metadata.fmt,
         )
 
+        assert memory_obj is not None
+        assert memory_obj.tensor is not None
+
+        # deep copy to pinned memory
+        # and hot cache will reference this memory obj
+        memory_obj.tensor.copy_(temp_tensor)
+
         logger.debug(f"get key: {key_str} done, {memory_obj.get_shape()}")
+        self.recv_queue.put_nowait(buf_idx)
+
         return memory_obj
 
     async def put(self, key: CacheEngineKey, memory_obj: MemoryObj):

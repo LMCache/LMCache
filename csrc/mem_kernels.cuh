@@ -32,8 +32,8 @@ void multi_layer_kv_transfer(torch::Tensor& key_value,
 void single_layer_kv_transfer(torch::Tensor& lmc_key_value_cache,
                               torch::Tensor& vllm_key_cache,
                               torch::Tensor& vllm_value_cache,
-                              torch::Tensor& slot_mapping,
-                              const bool direction);
+                              torch::Tensor& slot_mapping, const bool direction,
+                              const bool token_major = false);
 
 void load_and_reshape_flash(torch::Tensor& key_value, torch::Tensor& key_cache,
                             torch::Tensor& value_cache,
