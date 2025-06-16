@@ -411,7 +411,7 @@ class FsConnectorAdapter(ConnectorAdapter):
         in the local filesystem.
 
         URL format:
-        fs://[host:port]/path
+        - fs://[host:port]/path
 
         Examples:
         - fs:///tmp/lmcache
@@ -435,6 +435,73 @@ class FsConnectorAdapter(ConnectorAdapter):
             parse_url.path = "/" + parse_url.path
 
         return FSConnector(parse_url.path, context.loop, context.local_cpu_backend)
+
+
+class ExternalConnectorAdapter(ConnectorAdapter):
+    """Adapter for External connectors."""
+
+    def __init__(self) -> None:
+        super().__init__("external://")
+
+    def can_parse(self, url: str) -> bool:
+        return url.startswith(self.schema)
+
+    def create_connector(self, context: ConnectorContext) -> RemoteConnector:
+        """
+        Create a External connector. This connector stores data
+        in the key-value store.
+
+        URL format:
+        - external://host:port/module_path/?connector_name=ConnectorName
+
+        Examples:
+        - external://host:0/adt.adt_kv_connector/?connector_name=AdtKVConnector
+        """
+        logger.info(f"Creating External connector for URL: {context.url}")
+        hosts = context.url.split(",")
+        if len(hosts) > 1:
+            raise ValueError(
+                f"Only one host is supported for external connector, but got {hosts}"
+            )
+
+        parse_url = parse_remote_url(context.url)
+
+        # Get the module path and connector name
+        module_path = parse_url.path
+        connector_name = parse_url.query_params.get("connector_name", [""])[0]
+        if not connector_name:
+            raise ValueError(
+                "External connector requires 'connector_name' in query parameters"
+            )
+
+        # Lazily import the module and get the connector class
+        # Standard
+        import importlib
+
+        try:
+            module = importlib.import_module(module_path)
+            connector_class = getattr(module, connector_name)
+
+            # Verify that it's a subclass of RemoteConnector
+            if not issubclass(connector_class, RemoteConnector):
+                raise TypeError(
+                    f"{connector_name} must be a subclass of RemoteConnector"
+                )
+
+            # Create the connector instance
+            connector = connector_class(
+                loop=context.loop,
+                local_cpu_backend=context.local_cpu_backend,
+                config=context.config,
+            )
+            logger.info(f"Loaded external connector: {module_path}.{connector_name}")
+            return connector
+        except ImportError as e:
+            raise ImportError(f"Could not import module '{module_path}'") from e
+        except AttributeError as e:
+            raise AttributeError(
+                f"Module '{module_path}' has no class '{connector_name}'"
+            ) from e
 
 
 class ConnectorManager:
@@ -472,6 +539,7 @@ class ConnectorManager:
         self.adapters.append(BlackholeConnectorAdapter())
         self.adapters.append(AuditConnectorAdapter())
         self.adapters.append(FsConnectorAdapter())
+        self.adapters.append(ExternalConnectorAdapter())
 
     def create_connector(self) -> RemoteConnector:
         for adapter in self.adapters:
@@ -500,6 +568,7 @@ def CreateConnector(
     - blackhole://[any_text]
     - audit://host:port[?verify=true|false]
     - fs://[host:port]/path
+    - external://host:port/module_path/?connector_name=ConnectorName
 
     Examples:
     - redis://localhost:6379
@@ -511,6 +580,7 @@ def CreateConnector(
     - blackhole://
     - audit://localhost:8080?verify=true
     - fs:///tmp/lmcache
+    - external://host:0/adt.adt_kv_connector/?connector_name=AdtKVConnector
 
     Args:
         url: The remote URL
