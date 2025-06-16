@@ -99,7 +99,7 @@ def test_paged_retrieve_prefix(
     num_blocks = 1000
     block_size = 16
     dtype = torch.bfloat16
-    connector = create_gpu_connector(1024, 32, paged=True, use_list=use_list)
+    connector = create_gpu_connector(1024, 32, paged=True, use_list=use_list, num_kv_heads=8, head_size=128, block_size=block_size)
 
     tokens = generate_tokens(num_tokens, device)
     kv_cache = generate_kv_cache_paged(

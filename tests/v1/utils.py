@@ -367,10 +367,10 @@ def check_kv_cache_device(kvs, device):
         assert v.device == torch.device(device)
 
 
-def create_gpu_connector(hidden_dim, num_layers, paged=False, use_list=False):
+def create_gpu_connector(hidden_dim, num_layers, paged=False, use_list=False, num_kv_heads=8, head_size=128, block_size=16):
     if paged:
         if use_list:
-            return VLLMPagedMemGPUConnectorV2(hidden_dim, num_layers)
+            return VLLMPagedMemGPUConnectorV2(num_layers, num_heads=num_kv_heads, head_size=head_size, vllm_block_size=block_size)
         return VLLMPagedMemGPUConnector(hidden_dim, num_layers)
     else:
         return VLLMNestedTupleGPUConnector(hidden_dim, num_layers)
