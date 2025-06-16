@@ -64,7 +64,7 @@ class RemoteMonitor:
 
         if not self.original_connector.support_ping():
             logger.info(
-                f"Connector {type(self.original_connector).__name__} "
+                f"Connector {self.original_connector} "
                 f"does not support ping, skipping ping loop"
             )
             return True
