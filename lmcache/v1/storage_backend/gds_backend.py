@@ -199,14 +199,16 @@ class GdsBackend(StorageBackendInterface):
         if config.extra_config is not None:
             use_cufile = config.extra_config.get("use_cufile", None)
             if use_cufile is not None:
-                if use_cufile in [False, True]:
-                    logger.info("Getting use_cufile from config")
+                logger.info("Getting use_cufile from config")
+                if isinstance(use_cufile, str):
+                    self.use_cufile = use_cufile.lower() == "true"
+                elif use_cufile in [False, True]:
                     self.use_cufile = use_cufile
-                    use_cufile_from_config = True
                 else:
                     raise RuntimeError(
                         f"Invalid value `{use_cufile}` for use_cufile in extra_config"
                     )
+                use_cufile_from_config = True
 
         if self.fstype in ["tmpfs", "overlayfs"]:
             # TODO: we can replace the auto-detection of unsupported cufile
