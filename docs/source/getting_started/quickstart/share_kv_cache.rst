@@ -14,12 +14,15 @@ In this example, we will show you how to share KV cache across multiple LLM inst
 Prerequisites
 -------------
 
-Before you begin, make sure you have:
+Your server should have at least 2 GPUs.
 
-- vLLM v1 with LMCache installed (see :doc:`Installation <../installation>`)
-- At least 2 GPUs for running multiple instances
-- `Logged into HuggingFace <https://huggingface.co/docs/huggingface_hub/en/guides/cli#huggingface-cli-login>`_ using a token with gated access permission (required for model downloads)
-- Redis server (for P2P sharing) or LMCache server (for centralized sharing)
+For Centralized sharing, this will use the port 8000 and 8001 for 2 vllms,
+And will use port 8200 and 8201 for 2 distributed cache servers,
+And will use port 8100 for lookup server.
+
+For P2P sharing, this will use the port 8000 and 8001 (for vLLM) and port 65432 (for LMCache).  
+
+Before you begin, make sure you have:
 
 Centralized KV cache sharing
 ----------------------------
@@ -47,61 +50,60 @@ First, create a configuration file named ``lmcache_config.yaml`` with the follow
 Run centralized sharing example
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-1. **Start the LMCache centralized server:**
+1. Start the LMCache centralized server,
 
-   .. code-block:: bash
+.. code-block:: bash
 
-       lmcache_server localhost 65432
+    lmcache_server localhost 65432
 
-2. **Launch the first vLLM instance on GPU 0:**
+2. In a different terminal,
 
-   .. code-block:: bash
+.. code-block:: bash
 
-       LMCACHE_CONFIG_FILE=lmcache_config.yaml \
-       CUDA_VISIBLE_DEVICES=0 \
-       vllm serve meta-llama/Meta-Llama-3.1-8B-Instruct \
-           --gpu-memory-utilization 0.8 \
-           --port 8000 \
-           --kv-transfer-config \
-           '{"kv_connector":"LMCacheConnectorV1", "kv_role":"kv_both"}'
+    LMCACHE_CONFIG_FILE=example.yaml \
+    CUDA_VISIBLE_DEVICES=0 \
+    vllm serve mistralai/Mistral-7B-Instruct-v0.2 \
+        --gpu-memory-utilization 0.8 \
+        --port 8000 --kv-transfer-config \
+        '{"kv_connector":"LMCacheConnectorV1", "kv_role":"kv_both"}'
 
-3. **Launch the second vLLM instance on GPU 1:**
+In another terminal,
 
-   .. code-block:: bash
+.. code-block:: bash
 
-       LMCACHE_CONFIG_FILE=lmcache_config.yaml \
-       CUDA_VISIBLE_DEVICES=1 \
-       vllm serve meta-llama/Meta-Llama-3.1-8B-Instruct \
-           --gpu-memory-utilization 0.8 \
-           --port 8001 \
-           --kv-transfer-config \
-           '{"kv_connector":"LMCacheConnectorV1", "kv_role":"kv_both"}'
+    LMCACHE_CONFIG_FILE=example.yaml \
+    CUDA_VISIBLE_DEVICES=1 \
+    vllm serve mistralai/Mistral-7B-Instruct-v0.2 \
+        --gpu-memory-utilization 0.8 \
+        --port 8001 \
+        --kv-transfer-config \
+        '{"kv_connector":"LMCacheConnectorV1", "kv_role":"kv_both"}'
 
-   Wait until both engines are ready.
+Wait until both engines are ready.
 
-4. **Send a request to the first instance:**
+3.  Send one request to the engine at port 8000,
 
-   .. code-block:: bash
+.. code-block:: bash
 
-       curl -X POST http://localhost:8000/v1/completions \
-         -H "Content-Type: application/json" \
-         -d '{
-           "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
-           "prompt": "Explain the significance of KV cache in language models.",
-           "max_tokens": 100
-         }'
+    curl -X POST http://localhost:8000/v1/completions \
+        -H "Content-Type: application/json" \
+        -d '{
+            "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
+            "prompt": "Explain the significance of KV cache in language models.",
+            "max_tokens": 10
+        }'
 
-5. **Send the same request to the second instance:**
+4. Send the same request to the engine at port 8001,
 
-   .. code-block:: bash
+.. code-block:: bash
 
-       curl -X POST http://localhost:8001/v1/completions \
-         -H "Content-Type: application/json" \
-         -d '{
-           "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
-           "prompt": "Explain the significance of KV cache in language models.",
-           "max_tokens": 100
-         }'
+    curl -X POST http://localhost:8001/v1/completions \
+        -H "Content-Type: application/json" \
+        -d '{
+            "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
+            "prompt": "Explain the significance of KV cache in language models.",
+            "max_tokens": 10
+        }'
 
 The second request will automatically retrieve and reuse the KV cache from the first instance, significantly reducing generation time.
 
