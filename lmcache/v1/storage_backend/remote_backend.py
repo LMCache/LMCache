@@ -53,6 +53,7 @@ class RemoteBackend(StorageBackendInterface):
         assert config.remote_url is not None
 
         self.remote_url = config.remote_url
+        self.get_blocking_timeout_secs = config.get_blocking_timeout_secs
 
         self.local_cpu_backend = local_cpu_backend
 
@@ -237,7 +238,7 @@ class RemoteBackend(StorageBackendInterface):
         future = asyncio.run_coroutine_threadsafe(self.connection.get(key), self.loop)
 
         try:
-            memory_obj = future.result()
+            memory_obj = future.result(self.get_blocking_timeout_secs)
         except Exception as e:
             with self.lock:
                 self.connection = None
