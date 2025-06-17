@@ -22,8 +22,6 @@ And will use port 8100 for lookup server.
 
 For P2P sharing, this will use the port 8000 and 8001 (for vLLM) and port 65432 (for LMCache).  
 
-Before you begin, make sure you have:
-
 Centralized KV cache sharing
 ----------------------------
 
