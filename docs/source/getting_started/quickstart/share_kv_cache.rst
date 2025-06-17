@@ -3,13 +3,12 @@
 Example: Share KV cache across multiple LLMs
 ============================================
 
-In this example, we will show you how to share KV cache across multiple LLM instances using LMCache.
+LMCache should be able to reduce the generation time of the second and following calls.
 
-.. note::
-    LMCache supports two main approaches for sharing KV cache across instances:
-    
-    - **Centralized sharing**: Using a centralized cache server
-    - **P2P sharing**: Using peer-to-peer cache transfer
+We have examples for the following types of across-instance KV cache sharing:
+
+- KV cache sharing through a centralized cache server: ``centralized_sharing``
+- KV cache sharing through p2p cache transfer: ``p2p_sharing``
 
 Prerequisites
 -------------
@@ -34,11 +33,8 @@ First, create a configuration file named ``lmcache_config.yaml`` with the follow
 
 .. code-block:: yaml
 
-    # Basic configurations
     chunk_size: 256
     local_cpu: true
-    
-    # Centralized sharing configurations
     remote_url: "lm://localhost:65432"
     remote_serde: "cachegen"
     
@@ -115,11 +111,10 @@ Setup P2P sharing
 
 Create two configuration files for the P2P sharing setup:
 
-**Instance 1 configuration (``lmcache_config1.yaml``):**
+Instance 1 configuration (``lmcache_config1.yaml``):
 
 .. code-block:: yaml
 
-    # Basic configurations
     chunk_size: 256
     local_cpu: true
     max_local_cpu_size: 5
@@ -129,11 +124,10 @@ Create two configuration files for the P2P sharing setup:
     lookup_url: "localhost:8100"
     distributed_url: "localhost:8200"
 
-**Instance 2 configuration (``lmcache_config2.yaml``):**
+Instance 2 configuration (``lmcache_config2.yaml``):
 
 .. code-block:: yaml
 
-    # Basic configurations
     chunk_size: 256
     local_cpu: true
     max_local_cpu_size: 5
@@ -146,64 +140,65 @@ Create two configuration files for the P2P sharing setup:
 Run P2P sharing example
 ~~~~~~~~~~~~~~~~~~~~~~~
 
-1. **Start Redis server as lookup service:**
+1. Pull redis docker and start lookup server at port 8100:
 
-   .. code-block:: bash
+.. code-block:: bash
 
-       docker pull redis
-       docker run --name lmcache-redis -d -p 8100:6379 redis
+    docker pull redis
+    docker run --name lmcache-redis -d -p 8100:6379 redis
 
-2. **Launch the first vLLM instance on GPU 0:**
+2. Start two vllm engines:
+   
+Start vllm engine 1 at port 8000:
 
-   .. code-block:: bash
+.. code-block:: bash
 
-       CUDA_VISIBLE_DEVICES=0 \
-       LMCACHE_CONFIG_FILE=lmcache_config1.yaml \
-       vllm serve meta-llama/Meta-Llama-3.1-8B-Instruct \
-           --max-model-len 4096 \
-           --gpu-memory-utilization 0.8 \
-           --port 8000 \
-           --kv-transfer-config \
-           '{"kv_connector":"LMCacheConnectorV1", "kv_role":"kv_both"}'
+    CUDA_VISIBLE_DEVICES=0 \
+    LMCACHE_CONFIG_FILE=lmcache_config1.yaml \
+    vllm serve meta-llama/Meta-Llama-3.1-8B-Instruct \
+        --max-model-len 4096 \
+        --gpu-memory-utilization 0.8 \
+        --port 8000 \
+        --kv-transfer-config \
+        '{"kv_connector":"LMCacheConnectorV1", "kv_role":"kv_both"}'
 
-3. **Launch the second vLLM instance on GPU 1:**
+Start vllm engine 2 at port 8001:
 
-   .. code-block:: bash
+.. code-block:: bash
 
-       CUDA_VISIBLE_DEVICES=1 \
-       LMCACHE_CONFIG_FILE=lmcache_config2.yaml \
-       vllm serve meta-llama/Meta-Llama-3.1-8B-Instruct \
-           --max-model-len 4096 \
-           --gpu-memory-utilization 0.8 \
-           --port 8001 \
-           --kv-transfer-config \
-           '{"kv_connector":"LMCacheConnectorV1", "kv_role":"kv_both"}'
+    CUDA_VISIBLE_DEVICES=1 \
+    LMCACHE_CONFIG_FILE=lmcache_config2.yaml \
+    vllm serve meta-llama/Meta-Llama-3.1-8B-Instruct \
+        --max-model-len 4096 \
+        --gpu-memory-utilization 0.8 \
+        --port 8001 \
+        --kv-transfer-config \
+        '{"kv_connector":"LMCacheConnectorV1", "kv_role":"kv_both"}'
 
-   .. note::
-       The two distributed cache servers will automatically start at ports 8200 and 8201.
+Note that the two distributed cache servers will start at port 8200 and 8201.
 
-4. **Send a request to the first instance:**
+3. Send request to vllm engine 1:  
 
-   .. code-block:: bash
+.. code-block:: bash
 
-       curl -X POST http://localhost:8000/v1/completions \
-         -H "Content-Type: application/json" \
-         -d '{
-           "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
-           "prompt": "Explain the significance of KV cache in language models.",
-           "max_tokens": 100
-         }'
+    curl -X POST http://localhost:8000/v1/completions \
+        -H "Content-Type: application/json" \
+        -d '{
+        "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
+        "prompt": "Explain the significance of KV cache in language models.",
+        "max_tokens": 100
+        }'
 
-5. **Send the same request to the second instance:**
+4. Send request to vllm engine 2:  
 
-   .. code-block:: bash
+.. code-block:: bash
 
-       curl -X POST http://localhost:8001/v1/completions \
-         -H "Content-Type: application/json" \
-         -d '{
-           "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
-           "prompt": "Explain the significance of KV cache in language models.",
-           "max_tokens": 100
-         }'
+    curl -X POST http://localhost:8001/v1/completions \
+        -H "Content-Type: application/json" \
+        -d '{
+        "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
+        "prompt": "Explain the significance of KV cache in language models.",
+        "max_tokens": 100
+        }'
 
-The cache will be automatically retrieved from the first vLLM instance through P2P transfer.
+The cache will be automatically retrieved from vllm engine 1.
