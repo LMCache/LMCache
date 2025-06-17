@@ -25,14 +25,15 @@ from lmcache.v1.protocol import (
 
 
 def main():
-    if len(sys.argv) != 2:
-        print("Usage: health_probe.py <port>", file=sys.stderr)
+    if len(sys.argv) != 3:
+        print("Usage: health_probe.py <host> <port>", file=sys.stderr)
         sys.exit(1)
 
-    port = int(sys.argv[1])
+    host = sys.argv[1]
+    port = int(sys.argv[2])
     try:
         # Create connection with timeout and ensure proper cleanup with context manager
-        with socket.create_connection(("127.0.0.1", port), timeout=2) as s:
+        with socket.create_connection((host, port), timeout=5) as s:
             # Create and send health check message
             msg = ClientMetaMessage(
                 Constants.CLIENT_HEALTH,
