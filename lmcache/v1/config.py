@@ -592,7 +592,10 @@ class LMCacheEngineConfig:
             parse_env(get_env_name("save_unfull_chunk"), config.save_unfull_chunk)
         )
         config.get_blocking_timeout_secs = to_int(
-            parse_env(get_env_name("get_blocking_timeout_secs"), config.get_blocking_timeout_secs)
+            parse_env(
+                get_env_name("get_blocking_timeout_secs"),
+                config.get_blocking_timeout_secs,
+            )
         )
         return config.validate().log_config()
 
