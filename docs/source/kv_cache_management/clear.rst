@@ -34,7 +34,7 @@ Second, we need a yaml file ``example.yaml`` to properly configure the lmcache i
     enable_controller: True
     lmcache_instance_id: "lmcache_default_instance"
     controller_url: "localhost:9001"
-    lmcache_worker_url: "localhost:8001"
+    lmcache_worker_port: 8001
 
 Third, we need to start the vllm/lmcache instance:
 
