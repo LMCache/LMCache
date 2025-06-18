@@ -152,6 +152,22 @@ async def save_metadata(path: str, tmp: str, metadata: bytes):
     os.rename(tmp_path, path)
 
 
+def get_extra_config_bool(key, config: LMCacheEngineConfig) -> bool | None:
+    value = config.extra_config.get(key, None)
+    if value is None:
+        return None
+
+    if isinstance(value, str):
+        bool_value = value.lower() == "true"
+    elif value in [False, True]:
+        bool_value = value
+    else:
+        raise RuntimeError(f"Invalid value `{value}` for `{key}` in extra_config")
+
+    logger.info(f"Getting {key} = {bool_value} from extra_config")
+    return bool_value
+
+
 class GdsBackend(StorageBackendInterface):
     """
     Originally based on the open sourced WekaGdsBackend, this is a backend that
@@ -197,17 +213,9 @@ class GdsBackend(StorageBackendInterface):
         use_cufile_from_config = False
 
         if config.extra_config is not None:
-            use_cufile = config.extra_config.get("use_cufile", None)
+            use_cufile = get_extra_config_bool("use_cufile", config)
             if use_cufile is not None:
-                logger.info("Getting use_cufile from config")
-                if isinstance(use_cufile, str):
-                    self.use_cufile = use_cufile.lower() == "true"
-                elif use_cufile in [False, True]:
-                    self.use_cufile = use_cufile
-                else:
-                    raise RuntimeError(
-                        f"Invalid value `{use_cufile}` for use_cufile in extra_config"
-                    )
+                self.use_cufile = use_cufile
                 use_cufile_from_config = True
 
         if self.fstype in ["tmpfs", "overlayfs"]:
@@ -234,6 +242,13 @@ class GdsBackend(StorageBackendInterface):
             logger.info("Not using cufile")
             self.cufile = None
             self.cudart = ctypes.CDLL("libcudart.so")
+
+        self.use_direct_io = False
+
+        if config.extra_config is not None:
+            use_direct_io = get_extra_config_bool("use_direct_io", config)
+            if use_direct_io is not None:
+                self.use_direct_io = use_direct_io
 
         if not os.path.exists(self.gds_path):
             os.makedirs(self.gds_path, exist_ok=True)
@@ -570,7 +585,9 @@ class GdsBackend(StorageBackendInterface):
             with open(tmp_path, "wb") as f:
                 f.write(metadata)
             if self.cufile:
-                with self.cufile.CuFile(tmp_path, "r+") as f:
+                with self.cufile.CuFile(
+                    tmp_path, "r+", use_direct_io=self.use_direct_io
+                ) as f:
                     f.write(
                         addr, kv_chunk.nbytes, file_offset=offset, dev_offset=dev_offset
                     )
@@ -615,7 +632,9 @@ class GdsBackend(StorageBackendInterface):
     ) -> int:
         # Read data from disk into a GPU buffer
         if self.cufile:
-            with self.cufile.CuFile(gds_path, "r") as f:
+            with self.cufile.CuFile(
+                gds_path, "r", use_direct_io=self.use_direct_io
+            ) as f:
                 return f.read(
                     gpu_pointer,
                     size_in_bytes,
