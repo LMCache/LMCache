@@ -13,7 +13,7 @@
 # limitations under the License.
 
 # Standard
-from concurrent.futures import Future
+from concurrent.futures import Future, TimeoutError
 from functools import wraps
 from typing import List, Optional
 import asyncio
@@ -240,6 +240,9 @@ class RemoteBackend(StorageBackendInterface):
         try:
             memory_obj = future.result(self.blocking_timeout_secs)
         except Exception as e:
+            if isinstance(e, TimeoutError):
+                logger.warning("get blocking timeout, trigger cancel the future task")
+                future.cancel()
             with self.lock:
                 self.connection = None
                 self.failure_time = time.time()
