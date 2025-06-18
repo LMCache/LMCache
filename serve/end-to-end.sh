@@ -16,21 +16,24 @@ cleanup() {
 trap cleanup SIGINT SIGTERM
 
 # --- Configuration arrays (must all be the same length) ---
-ports=(8000 8001 8002)
+ports=(8000 8001 8002 8003)
 configs=(
-  ../config/May_23_1_sum/ours/1.yaml
-  ../config/May_23_1_sum/ours/01.yaml
-  ../config/May_23_1_sum/ours/10.yaml
+  ../config/Jun_5_1_qa/ours/1.yaml
+  ../config/Jun_5_1_qa/ours/04.yaml
+  ../config/Jun_5_1_qa/ours/10.yaml
+  ../config/Jun_5_1_qa/ours/01.yaml
 )
 logs=(
-  results/May_23_1_sum/ours/tokens/1.log
-  results/May_23_1_sum/ours/tokens/01.log
-  results/May_23_1_sum/ours/tokens/10.log
+  results/Jun_5_1_qa/ours/tokens/1.log
+  results/Jun_5_1_qa/ours/tokens/04.log
+  results/Jun_5_1_qa/ours/tokens/10.log
+  results/Jun_5_1_qa/ours/tokens/01.log
 )
 outputs=(
-  results/May_23_1_sum/ours/1.csv
-  results/May_23_1_sum/ours/01.csv
-  results/May_23_1_sum/ours/10.csv
+  results/Jun_5_1_qa/ours/1.csv
+  results/Jun_5_1_qa/ours/04.csv
+  results/Jun_5_1_qa/ours/10.csv
+  results/Jun_5_1_qa/ours/01.csv
 )
 
 # Array to track running PGIDs
@@ -67,7 +70,7 @@ for i in "${!ports[@]}"; do
 
   # Run the test
   echo "Running test: python3 online_test.py --output $out --port $port"
-  python3 sum.py --output "$out" --port "$port" >>"$logf" 2>&1
+  python3 qa.py --output "$out" --port "$port" >>"$logf" 2>&1
 
   # Tear down this engine session
   echo "Test finished; tearing down engine session PGID $engine_pid"

@@ -106,7 +106,7 @@ class KVCacheManager:
         # NOTE(Shaoting): policy related variables define here
         self.method = method
         self.rate = rate
-        self.cpu_size = 5368709120 * 8 # 40 GB
+        self.cpu_size = 5368709120 * 19.4 # 97 GB
         # self.cpu_size = 5368709120 * 0.48 # 2.4 GB
 
         self.hot_cache = hot_cache
@@ -164,7 +164,7 @@ class KVCacheManager:
             size_kv_cpu += size
 
             final_drop_list = {}
-            new_kv_rate = 1
+            new_kv_rate = key.metadata.rate
 
             # If cpu is full
             while size_kv_cpu > self.cpu_size:
@@ -174,17 +174,19 @@ class KVCacheManager:
 
                 # 1) Process the *new* key 
                 first_update_key = next(iter(to_save_list))
-                update_total_tokens = first_update_key.metadata.num_tokens
-                new_best, new_drop = compute_best_rate_and_drop(
-                    first_update_key.metadata.score_table,
-                    new_kv_rate,
-                    update_total_tokens,
-                    first_update_key.metadata.disk_score_table
-                )
-                # if new_drop * len(first_update_key.metadata.emerge_id) < min_quality_drop:
-                if new_drop < min_quality_drop:
-                    min_quality_drop = new_drop
-                    drop_list[-1] = new_best
+                if len(first_update_key.metadata.emerge_id) == 2:
+                    drop_list[-1] = 0
+                else:
+                    update_total_tokens = first_update_key.metadata.num_tokens
+                    new_best, new_drop = compute_best_rate_and_drop(
+                        first_update_key.metadata.score_table,
+                        new_kv_rate,
+                        update_total_tokens,
+                        first_update_key.metadata.disk_score_table
+                    )
+                    if new_drop < min_quality_drop:
+                        min_quality_drop = new_drop
+                        drop_list[-1] = new_best
 
                 # 2) Now do the *hot‑cache* entries with the same helper
                 groups = defaultdict(list)
@@ -198,28 +200,31 @@ class KVCacheManager:
                     # representative key (all in this group share score_table & rate semantics)
                     rep = keys[0]
 
-                    # current rate (as before)
-                    curr_rate = final_drop_list.get(rep, rep.metadata.rate)
-
-                    # aggregate length
-                    total_tokens = rep.metadata.num_tokens
-
-                    best_r, drop_r = compute_best_rate_and_drop(
-                        rep.metadata.score_table,
-                        curr_rate,
-                        total_tokens,
-                        rep.metadata.disk_score_table
-                    )
-                    # compare against the running minimum
-                    # if drop_r * len(rep.metadata.emerge_id) < min_quality_drop:
-                    if drop_r < min_quality_drop:
-                        min_quality_drop = drop_r
-                        # assign to all keys in this group
-                        drop_list = {k: best_r for k in keys}
-                    # elif drop_r * len(rep.metadata.emerge_id) == min_quality_drop:
-                    elif drop_r == min_quality_drop:
+                    if len(rep.metadata.emerge_id) == 2:
                         for k in keys:
-                            drop_list[k] = best_r
+                            drop_list[k] = 0
+                            min_quality_drop = float('inf')
+                    else:
+                        # current rate (as before)
+                        curr_rate = final_drop_list.get(rep, rep.metadata.rate)
+
+                        # aggregate length
+                        total_tokens = rep.metadata.num_tokens
+
+                        best_r, drop_r = compute_best_rate_and_drop(
+                            rep.metadata.score_table,
+                            curr_rate,
+                            total_tokens,
+                            rep.metadata.disk_score_table
+                        )
+                        # compare against the running minimum
+                        if drop_r < min_quality_drop:
+                            min_quality_drop = drop_r
+                            # assign to all keys in this group
+                            drop_list = {k: best_r for k in keys}
+                        elif drop_r != float('inf') and drop_r == min_quality_drop:
+                            for k in keys:
+                                drop_list[k] = best_r
 
                 # 3) apply whichever entry(s) we’ve decided to drop/rate‐reduce
                 for idx, chosen_r in drop_list.items():
@@ -366,12 +371,6 @@ class StorageManager:
             current_kv_decision, update_decision = self.manager.inform_new(self.update_queue)
             self.put(self.update_queue, current_kv_decision, update_decision)
             self.update_queue.clear()
-
-        for key in self.to_delete_list:
-            for backend_name, backend in self.storage_backends.items():
-                backend.remove(key)
-                # I ignored evictor's size since I set disk memory to a large number.
-        self.to_delete_list = []
 
     def put(
         self,
@@ -662,11 +661,10 @@ class StorageManager:
             
             if memory_obj is not None:
 
-                # Make baseline worse
-                if self.policy == "baseline_KIVI":
-                    self.put_in_queue(new_key, memory_obj)
-                    self.memory_allocator.ref_count_up(memory_obj)
-                    self.to_delete_list[new_key] = memory_obj.get_physical_size()
+                # In memory update (from disk to cpu)
+                self.put_in_queue(new_key, memory_obj)
+                self.memory_allocator.ref_count_up(memory_obj)
+                self.to_delete_list[new_key] = memory_obj.get_physical_size()
 
                 # De-compress memory_obj
                 if new_key.metadata.method[0] == "kivi" and new_key.metadata.rate != 1:  
@@ -682,11 +680,6 @@ class StorageManager:
                     memory_obj = self.kivi_de.deserialize(memory_obj, BITS, self.kivi_cache[new_key][0], self.kivi_cache[new_key][1], self.kivi_cache[new_key][2], self.kivi_cache[new_key][3], self.kivi_cache[new_key][4])       
 
                 logger.info(f"Decompressed memory object from disk, rate: {new_key.metadata.rate}.\n")
-
-                # Hack the system
-                # Remove memory_obj from disk if it is in its last round 
-                if occurence_number == 3:
-                    self.to_delete_list.append(new_key)
 
                 return memory_obj
 

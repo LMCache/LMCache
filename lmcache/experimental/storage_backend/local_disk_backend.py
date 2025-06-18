@@ -164,9 +164,9 @@ class LocalDiskBackend(StorageBackendInterface):
             old_key.metadata.method.append(key.metadata.method[0])
             old_key.metadata.score_table.append(key.metadata.score_table[0])
             old_key.metadata.disk_score_table.append(key.metadata.disk_score_table[0])
-            self.dict[old_key] = self.dict.pop(key)
         # Record request pattern
-            old_key.metadata.emerge_id.append(emerge_id)
+        old_key.metadata.emerge_id.append(emerge_id)
+        self.dict[old_key] = self.dict.pop(key)
 
         # # Update cache recency
         # self.evictor.update_on_hit(key, self.dict)
@@ -177,11 +177,6 @@ class LocalDiskBackend(StorageBackendInterface):
         assert dtype is not None
         assert shape is not None
         memory_obj = self.load_bytes_from_disk(path, dtype=dtype, shape=shape)
-
-        # # For baseline, moved to CPU
-        # if self.policy == "baseline_KIVI":
-        #     self.remove(old_key)
-        #     self.evictor.current_cache_size -= memory_obj.get_physical_size()
 
         self.disk_lock.release()
         return memory_obj, old_key

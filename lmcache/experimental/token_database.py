@@ -153,6 +153,26 @@ def choose_score_dict(
         score03 = 0.6434
         score06 = 0.6993
         score1 = 0.9567
+    elif dataset == "triviaqa" and compression_method == "kivi":
+        score02 = 0.9702
+        score03 = 0.9945
+        score06 = 0.9940
+        score1 = 1
+    elif dataset == "triviaqa" and compression_method == "streaming":
+        score02 = 0.9617
+        score03 = 0.9582
+        score06 = 0.9675
+        score1 = 1
+    elif dataset == "hotpotqa" and compression_method == "kivi":
+        score02 = 0.8728
+        score03 = 0.9743
+        score06 = 0.9917
+        score1 = 1
+    elif dataset == "hotpotqa" and compression_method == "streaming":
+        score02 = 0.7552
+        score03 = 0.7706
+        score06 = 0.8240
+        score1 = 1
     else:
         raise ValueError(f"Unsupported dataset {dataset} and compression method {compression_method}.")
     return {
@@ -177,10 +197,24 @@ class ChunkedTokenDatabase(TokenDatabase):
         self._dataset_df = pd.read_csv(config.dataset_csv)
         self.method_output_csv = config.method_output_csv
 
+        if os.path.exists(self.method_output_csv):
+            os.remove(self.method_output_csv)
+
     def _make_key_by_hash(self, chunk_hash: str, total_hashes: str, token_len: int, id: int) -> Tuple[CacheEngineKey, int]:
         dataset_value = self._dataset_df.iloc[id]["dataset"]
         occurrence = self._dataset_df.iloc[id]["occurrence_number"]
-        if self.compression == "kivi":
+        index_in_dataset = self._dataset_df.iloc[id]["index_in_dataset"]
+        
+        method_value = None                    
+        if os.path.isfile(self.method_output_csv):
+            with open(self.method_output_csv, newline='', encoding='utf-8') as f:
+                for row in csv.DictReader(f):
+                    if row['index'].strip() == str(index_in_dataset) \
+                    and row['dataset'].strip() == dataset_value:
+                        method_value = row['method']
+                        break
+        
+        if self.compression == "kivi" or method_value == "kivi":
             threshold_file_mapping = {
                 1.0:   "cpu_1.csv",
                 0.728571429: "cpu_06.csv",
@@ -205,7 +239,7 @@ class ChunkedTokenDatabase(TokenDatabase):
                 disk_threshold_file_mapping, token_len, self.alpha,
                 self.coefficients, score_dict
             )
-        elif self.compression == "streaming":
+        elif self.compression == "streaming" or method_value == "streaming":
             threshold_file_mapping = {
                 1.0:   "cpu_1.csv",
                 0.728571429: "cpu_1.csv",
@@ -300,8 +334,8 @@ class ChunkedTokenDatabase(TokenDatabase):
             with open(log_file, "a", newline="") as f:
                 writer = csv.writer(f)
                 if not file_exists:
-                    writer.writerow(["index", "method"])
-                writer.writerow([total_lines, mode])
+                    writer.writerow(["index", "dataset", "method"])
+                writer.writerow([index_in_dataset, dataset_value, mode])
 
         return CacheEngineKey(self.metadata.fmt, self.metadata.model_name,
                               self.metadata.world_size,

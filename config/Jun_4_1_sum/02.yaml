@@ -1,0 +1,11 @@
+chunk_size: 1024
+local_disk: "file:///home/ubuntu/kvcache/"
+max_local_disk_size: 400
+local_cpu: True
+max_local_cpu_size: 20
+alpha: 0.01
+policy: "disk"
+rate: 0.371428571
+compression: "kivi"
+dataset_csv: "dataset/sum_processed_filter.csv"
+method_output_csv: "results/Jun_4_1_sum/02_mode.csv"

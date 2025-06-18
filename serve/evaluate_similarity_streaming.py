@@ -31,6 +31,8 @@ def main(args):
     # preload auxiliary CSVs
     prefill_csv = os.path.join(args.prefill_dir, "0.csv")
     df_prefill = pd.read_csv(prefill_csv)
+    if args.rate_1_file:
+        df_rate1 = pd.read_csv(args.rate_1_file)
 
     # preload rate-dependent ROUGEL CSVs
     df_rates1 = {}
@@ -64,17 +66,21 @@ def main(args):
             rate = float(num)
             code = next((c for r, c in RATE_CODE.items() if abs(rate - r) < 1e-6), None)
 
-            if device == "cpu":
-                ttft = token_num * rate * A_CPU + B_CPU
-            elif device == "disk":
-                ttft = token_num * rate * A_DISK + B_DISK
-            else:
-                raise ValueError(f"Unknown device '{device}'")
+            if rate != 1:
+                if device == "cpu":
+                    ttft = token_num * rate * A_CPU + B_CPU
+                elif device == "disk":
+                    ttft = token_num * rate * A_DISK + B_DISK
+                else:
+                    raise ValueError(f"Unknown device '{device}'")
 
-            if dataset == args.dataset1:
-                rouge = find_row_value(df_rates1[code], "index_in_dataset", "ROUGEL", idx)
-            elif dataset == args.dataset2:
-                rouge = find_row_value(df_rates2[code], "index_in_dataset", "ROUGEL", idx)
+                if dataset == args.dataset1:
+                    rouge = find_row_value(df_rates1[code], "index_in_dataset", "ROUGEL", idx)
+                elif dataset == args.dataset2:
+                    rouge = find_row_value(df_rates2[code], "index_in_dataset", "ROUGEL", idx)
+            else:
+                ttft = df_rate1.iloc[_idx_row]["ttft"]
+                rouge = df_rate1.iloc[_idx_row]["ROUGEL"]
 
         ttfts.append(ttft)
         rouges.append(rouge)
@@ -89,7 +95,10 @@ def main(args):
     # split filename into name and extension
     base_name, ext = os.path.splitext(filename)
     # build your output path in the parent directory
-    output_csv = os.path.join(f"{parent_dir}/../baseline_streaming", f"{base_name}_processed{ext}")
+    if args.output_csv == None:
+        output_csv = os.path.join(f"{parent_dir}/../baseline_streaming", f"{base_name}_processed{ext}")
+    else:
+        output_csv = args.output_csv
 
     df.to_csv(output_csv, index=False)
     print(f"Wrote results to {output_csv}")
@@ -106,17 +115,30 @@ if __name__ == "__main__":
     p.add_argument("--streaming-dir2", default="results/May_14_1_triviaqa_press",
                    help="Base dir for results_rate_XX_processed.csv files")
     p.add_argument("--dataset2")
+    p.add_argument("--rate-1-file", default="results/May_23_1_sum/prefill/1_processed.csv",)
+    p.add_argument("--output-csv", default=None)
     args = p.parse_args()
     main(args)
 
 '''
 Usage for sum:
 python3 evaluate_similarity_streaming.py \
-    results/May_23_1_sum/baseline_kivi/tokens/02.csv \
-    --input-csv results/May_23_1_sum/baseline_kivi/02.csv \
-    --prefill-dir results/May_23_1_sum/prefill \
+    results/Jun_4_2_sum/baseline_kivi/tokens/02.csv \
+    --input-csv results/Jun_4_2_sum/baseline_kivi/02.csv \
+    --prefill-dir results/Jun_4_2_sum/prefill \
     --streaming-dir1 results/May_13_streaming \
     --dataset1 samsum \
     --streaming-dir2 ../../press/qmsum \
     --dataset2 qmsum
+
+Usage for qa:
+python3 evaluate_similarity_streaming.py \
+    results/Jun_5_1_qa/baseline_kivi/tokens/02.csv \
+    --input-csv results/Jun_5_1_qa/baseline_kivi/02.csv \
+    --prefill-dir results/Jun_5_1_qa/prefill \
+    --streaming-dir1 ../../press/triviaqa \
+    --dataset1 triviaqa \
+    --streaming-dir2 ../../press/hotpotqa \
+    --dataset2 hotpotqa \
+    --rate-1-file results/Jun_5_1_qa/prefill/1_processed.csv
 '''

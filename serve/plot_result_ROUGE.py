@@ -2,7 +2,7 @@ import argparse
 import pandas as pd
 import matplotlib.pyplot as plt
 
-# --- Parse command-line arguments for plot filename (only used for naming first plot) ---
+# --- Parse command-line arguments for plot filename and metric selection ---
 parser = argparse.ArgumentParser(
     description="Plot Average ROUGEL vs Average ttft from CSV results"
 )
@@ -12,26 +12,42 @@ parser.add_argument(
     default="all_results.pdf",
     help="Filename for saving the 'all_results' plot"
 )
+parser.add_argument(
+    "--metric",
+    choices=["rouge", "f1"],
+    default="rouge",
+    help="Which metric to label on the y-axis: 'rouge' for ROUGE-L, 'f1' for F1 score"
+)
 args = parser.parse_args()
+
+# Determine y-axis label based on chosen metric
+if args.metric == "f1":
+    y_label = "Average F1 Score"
+else:
+    y_label = "Average ROUGE-L Score"
 
 # File lists
 file_paths_kivi = [
-    'results/May_23_1_sum/baseline_kivi/02_processed.csv',
-    'results/May_23_1_sum/baseline_kivi/03_processed.csv',
-    'results/May_23_1_sum/baseline_kivi/06_processed.csv',
+    'results/Jun_5_1_qa/baseline_kivi/02_processed.csv',
+    'results/Jun_5_1_qa/baseline_kivi/03_processed.csv',
+    'results/Jun_5_1_qa/baseline_kivi/06_processed.csv',
 ]
 file_paths_ours = [
+    'results/Jun_5_1_qa/ours/01_processed_updated.csv',
+    'results/Jun_5_1_qa/ours/04_processed_updated.csv',
+    'results/Jun_5_1_qa/ours/1_processed_updated.csv',
+    # 'results/Jun_5_1_qa/ours/10_processed_updated.csv',
 ]
 file_paths_prefill = [
-    'results/May_23_1_sum/prefill/0_processed.csv'
+    'results/Jun_5_1_qa/prefill/0_processed.csv'
 ]
 file_paths_streaming = [
-    'results/May_23_1_sum/baseline_streaming/02_processed.csv',
-    'results/May_23_1_sum/baseline_streaming/03_processed.csv',
-    'results/May_23_1_sum/baseline_streaming/06_processed.csv',
+    'results/Jun_5_1_qa/baseline_streaming/02_processed.csv',
+    'results/Jun_5_1_qa/baseline_streaming/03_processed.csv',
+    'results/Jun_5_1_qa/baseline_streaming/06_processed.csv',
 ]
 file_paths_offload = [
-    'results/May_23_1_sum/prefill/1_processed.csv'
+    'results/Jun_5_1_qa/prefill/1_processed.csv'
 ]
 
 def load_metrics(file_list, filter_first=False):
@@ -51,7 +67,7 @@ def load_metrics(file_list, filter_first=False):
         if filter_first:
             print("  (filtered out occurrence_number == 1)")
         print(f"  Average ttft: {ttft_vals[-1]:.2f}")
-        print(f"  Average ROUGEL: {f1_vals[-1]:.4f}")
+        print(f"  Average ROUGE-L: {f1_vals[-1]:.4f}")
     return ttft_vals, f1_vals, labels
 
 # --- 1) Compute metrics for "all_results" (no filtering) ---
@@ -120,7 +136,7 @@ if file_paths_offload:
     )
 
 plt.xlabel("Average Delay (s)", fontsize=16)
-plt.ylabel("Average ROUGE-L Score", fontsize=16)
+plt.ylabel(y_label, fontsize=16)
 plt.title("Dataset: qmsum & samsum", fontsize=16)
 plt.xticks(fontsize=14)
 plt.yticks(fontsize=14)
@@ -198,8 +214,8 @@ if file_paths_offload:
     )
 
 plt.xlabel("Average Delay (s)", fontsize=16)
-plt.ylabel("Average ROUGE-L Score", fontsize=16)
-plt.title("Dataset: qmsum & samsum", fontsize=16)
+plt.ylabel(y_label, fontsize=16)
+plt.title("Dataset: triviaqa & hotpotqa", fontsize=16)
 plt.xticks(fontsize=14)
 plt.yticks(fontsize=14)
 plt.grid(True)
