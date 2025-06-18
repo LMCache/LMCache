@@ -113,7 +113,6 @@ class LMCacheConnector:
         self.world_size = world_size
         self.k_pool = k_pool
         self.v_pool = v_pool
-        print(f"Pool size: {k_pool[0].shape}")
 
     ####################
     # Worker side APIs
@@ -130,8 +129,6 @@ class LMCacheConnector:
         load_mask = torch.ones_like(token_ids, dtype=torch.bool)
         load_mask[:offset] = False
 
-        logger.info(f"Loading KV cache for {len(token_ids)} tokens ")
-
         ret_token_mask = self.lmcache_engine.retrieve(
             token_ids,
             mask=load_mask,
@@ -141,7 +138,6 @@ class LMCacheConnector:
         )
 
         num_retrieved_tokens = ret_token_mask.sum().item()
-        logger.info(f"Loaded {num_retrieved_tokens} tokens from KV cache")
 
         return num_retrieved_tokens
 
@@ -154,8 +150,6 @@ class LMCacheConnector:
 
         slot_mapping = slot_mapping.cuda()
         store_mask = torch.ones_like(token_ids, dtype=torch.bool)
-
-        logger.info(f"Storing KV cache for {len(token_ids)} tokens ")
 
         self.lmcache_engine.store(
             token_ids,
