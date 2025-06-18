@@ -17,11 +17,9 @@ from typing import Union
 import os
 
 # First Party
-from lmcache.config import LMCacheEngineConfig as Config  # type: ignore[assignment]
+from lmcache.config import LMCacheEngineConfig as Config
 from lmcache.logging import init_logger
-from lmcache.v1.config import (
-    LMCacheEngineConfig as V1Config,  # type: ignore[assignment]
-)
+from lmcache.v1.config import LMCacheEngineConfig as V1Config
 
 logger = init_logger(__name__)
 ENGINE_NAME = "sglang-instance"
