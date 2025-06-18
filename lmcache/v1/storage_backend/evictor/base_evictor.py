@@ -14,7 +14,7 @@
 
 # Standard
 from collections import OrderedDict
-from enum import Enum
+from enum import Enum, auto
 from typing import List, Tuple
 import abc
 
@@ -26,8 +26,8 @@ logger = init_logger(__name__)
 
 
 class PutStatus(Enum):
-    LEGAL = 1
-    ILLEGAL = 2
+    LEGAL = auto()
+    ILLEGAL = auto()
 
 
 class BaseEvictor(metaclass=abc.ABCMeta):

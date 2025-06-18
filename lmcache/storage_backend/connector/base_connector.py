@@ -13,7 +13,7 @@
 # limitations under the License.
 
 # Standard
-from enum import Enum
+from enum import Enum, auto
 from typing import List, Optional
 import abc
 import time
@@ -29,8 +29,8 @@ logger = init_logger(__name__)
 
 
 class ConnectorType(Enum):
-    BYTES = 1
-    TENSOR = 2
+    BYTES = auto()
+    TENSOR = auto()
 
 
 class RemoteConnector(metaclass=abc.ABCMeta):
