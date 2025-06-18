@@ -1209,7 +1209,7 @@ class SGLangGPUConnector(GPUConnectorInterface):
         key_pointers, value_pointers = self._initialize_pointers(kvcaches)
 
         if self.gpu_buffer is None or end - start != self.gpu_buffer.shape[2]:
-            lmc_ops.multi_layer_kv_transfer_sgl(
+            lmc_ops.multi_layer_kv_transfer_unilateral(
                 memory_obj.tensor,
                 key_pointers,
                 value_pointers,
@@ -1222,7 +1222,7 @@ class SGLangGPUConnector(GPUConnectorInterface):
             # kvcaches -> gpu_buffer -> memobj
             assert self.gpu_buffer.device == kvcaches[0][0].device
             tmp_gpu_buffer = self.gpu_buffer[:, :, : end - start, :]
-            lmc_ops.multi_layer_kv_transfer_sgl(
+            lmc_ops.multi_layer_kv_transfer_unilateral(
                 tmp_gpu_buffer,
                 key_pointers,
                 value_pointers,
