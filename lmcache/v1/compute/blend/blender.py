@@ -69,9 +69,15 @@ class LMCBlender:
         layer_id: int,
         attn_output: Optional[torch.Tensor],
         attn_metadata,
+        mask: Optional[torch.Tensor] = None
     ):
         logger.debug(f"Blender is processing KV for layer {layer_id}")
         old_k, old_v = self.gpu_connector.get_kv(layer_id)
+
+        if mask is not None:
+            num_falses = mask.numel() - mask.long().sum().item()
+        else:
+            num_falses = 0
 
         if attn_output is None:
             attn_output = torch.empty(
@@ -90,8 +96,11 @@ class LMCBlender:
         q, k = attn_layer.rotary_emb(self.metadata.positions, q, k)
 
         if layer_id in self.common_metadata.check_layers:
+            assert k[num_falses:].shape[0] == old_k.shape[0], \
+                "Mismatch between number of tokens in k (after skipping falses) and old_k"
+
             diff_k = torch.sum(
-                (k.to(torch.float32) - old_k.to(torch.float32)) ** 2, dim=[1]
+                (k[num_falses:].to(torch.float32) - old_k.to(torch.float32)) ** 2, dim=[1]
             )
             total_len = diff_k.shape[0]
 
@@ -136,7 +145,7 @@ class LMCBlender:
 
         # TODO(Jiayi): store is currently not included in this function
 
-        layerwise_model_executor = self.layerwise_model.compute_layer(tokens)
+        layerwise_model_executor = self.layerwise_model.compute_layer(tokens, mask)
         layerwise_retriever = self.cache_engine.retrieve_layer(tokens, mask, **kwargs)
 
         next(layerwise_retriever)

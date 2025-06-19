@@ -13,6 +13,7 @@
 # limitations under the License.
 
 # Third Party
+from typing import Optional
 from torch import nn
 import torch
 
@@ -68,6 +69,7 @@ class LMCLlamaModel(nn.Module):
     def compute_layer(
         self,
         input_ids: torch.Tensor,
+        mask: Optional[torch.Tensor] = None
     ):
         hidden_states = self.vllm_model.get_input_embeddings(input_ids.cuda())
         residual = None
@@ -116,7 +118,7 @@ class LMCLlamaModel(nn.Module):
             )
 
             q, k, v, residual, attn_output, attn_metadata = self.blender.process_qkv(
-                q, k, v, residual, idx, attn_output, attn_metadata
+                q, k, v, residual, idx, attn_output, attn_metadata, mask
             )
 
             num_heads = self.vllm_attn_layers[idx].num_heads
