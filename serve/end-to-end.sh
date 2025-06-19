@@ -16,24 +16,27 @@ cleanup() {
 trap cleanup SIGINT SIGTERM
 
 # --- Configuration arrays (must all be the same length) ---
-ports=(8000 8001 8002 8003)
+ports=(8000 8001 8002 8003 8004)
 configs=(
-  ../config/Jun_5_1_qa/ours/1.yaml
-  ../config/Jun_5_1_qa/ours/04.yaml
-  ../config/Jun_5_1_qa/ours/10.yaml
-  ../config/Jun_5_1_qa/ours/01.yaml
+  ../config/Jun_19_1_coding/baseline_kivi/02.yaml
+  ../config/Jun_19_1_coding/baseline_kivi/03.yaml
+  ../config/Jun_19_1_coding/baseline_kivi/06.yaml
+  ../config/Jun_19_1_coding/prefill/0.yaml
+  ../config/Jun_19_1_coding/prefill/1.yaml
 )
 logs=(
-  results/Jun_5_1_qa/ours/tokens/1.log
-  results/Jun_5_1_qa/ours/tokens/04.log
-  results/Jun_5_1_qa/ours/tokens/10.log
-  results/Jun_5_1_qa/ours/tokens/01.log
+  results/Jun_19_1_coding/baseline_kivi/tokens/02.log
+  results/Jun_19_1_coding/baseline_kivi/tokens/03.log
+  results/Jun_19_1_coding/baseline_kivi/tokens/06.log
+  results/Jun_19_1_coding/prefill/tokens/0.log
+  results/Jun_19_1_coding/prefill/tokens/1.log
 )
 outputs=(
-  results/Jun_5_1_qa/ours/1.csv
-  results/Jun_5_1_qa/ours/04.csv
-  results/Jun_5_1_qa/ours/10.csv
-  results/Jun_5_1_qa/ours/01.csv
+  results/Jun_19_1_coding/baseline_kivi/02.csv
+  results/Jun_19_1_coding/baseline_kivi/03.csv
+  results/Jun_19_1_coding/baseline_kivi/06.csv
+  results/Jun_19_1_coding/prefill/0.csv
+  results/Jun_19_1_coding/prefill/1.csv
 )
 
 # Array to track running PGIDs
@@ -70,7 +73,7 @@ for i in "${!ports[@]}"; do
 
   # Run the test
   echo "Running test: python3 online_test.py --output $out --port $port"
-  python3 qa.py --output "$out" --port "$port" >>"$logf" 2>&1
+  python3 coding.py --output "$out" --port "$port" >>"$logf" 2>&1
 
   # Tear down this engine session
   echo "Test finished; tearing down engine session PGID $engine_pid"

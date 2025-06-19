@@ -2,6 +2,7 @@
 import argparse
 import pandas as pd
 import numpy as np
+import csv
 
 def main():
     parser = argparse.ArgumentParser(description="Combine two CSVs, replicate each row two times with Poisson‐distributed time intervals, and output a single processed CSV.")
@@ -66,7 +67,7 @@ def main():
 
     # ——— 步骤 5：按 start_time 升序排列并输出 ———
     df_out = df_out.sort_values('start_time').reset_index(drop=True)
-    df_out.to_csv(args.output, index=False)
+    df_out.to_csv(args.output, index=False, quoting=csv.QUOTE_ALL, lineterminator="\n")
     print(f"生成完成：{args.output} 共 {len(df_out)} 行")
 
 if __name__ == "__main__":
