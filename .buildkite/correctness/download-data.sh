@@ -3,6 +3,9 @@ set -euo pipefail
 
 echo "📥 Downloading MMLU data..."
 
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+cd $SCRIPT_DIR
+
 # Check if data already exists
 if [ -d "data" ] && [ -d "data/test" ] && [ -d "data/dev" ]; then
     echo "✅ MMLU data already exists, skipping download"
