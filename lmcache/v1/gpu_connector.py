@@ -517,8 +517,10 @@ class VLLMBufferLayerwiseGPUConnector(GPUConnectorInterface):
                 "device should be provided to create a GPU buffer."
             )
 
-            # FIXME (Jiayi): Please remove this hardcode
-            max_tokens = 32000
+            max_tokens = kwargs.get("max_tokens", 32000)
+            logger.info(
+                f"Using max_tokens={max_tokens} for VLLMBufferLayerwiseGPUConnector"
+            )
             shape = self.get_shape(max_tokens)
             self.dtype = kwargs["dtype"]
             self.device = kwargs["device"]
@@ -841,8 +843,10 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
                 "device should be provided to create a GPU buffer."
             )
 
-            # FIXME (Jiayi): Please remove this hardcode
-            max_tokens = 32000
+            max_tokens = kwargs.get("max_tokens", 32000)
+            logger.info(
+                f"Using max_tokens={max_tokens} for VLLMPagedMemLayerwiseGPUConnector"
+            )
             shape = self.get_shape(max_tokens)
             self.dtype = kwargs["dtype"]
             self.device = kwargs["device"]
