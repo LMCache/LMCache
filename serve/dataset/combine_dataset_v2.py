@@ -27,6 +27,11 @@ def main():
         default=42,
         help="Seed for reproducibility (affects shuffle and Poisson draws)."
     )
+    parser.add_argument(
+        "--frac", "-f",
+        type=float,
+        default=1
+    )
     args = parser.parse_args()
 
     # ——— 全局随机种子 ———
@@ -40,7 +45,7 @@ def main():
 
     # ——— 步骤 2：合并并随机打乱 ———
     df = pd.concat([df1, df2], ignore_index=True)
-    df = df.sample(frac=1, random_state=args.random_state).reset_index(drop=True)
+    df = df.sample(frac=args.frac, random_state=args.random_state).reset_index(drop=True)
 
     # ——— 步骤 3：为每一行生成两次重复（occurrence_number），
     #         并为“原始行”之间的 start_time 间隔 ~ Poisson(λ=1) ———
