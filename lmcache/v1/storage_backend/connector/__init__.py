@@ -205,7 +205,7 @@ def CreateConnector(
     loop: asyncio.AbstractEventLoop,
     local_cpu_backend: LocalCPUBackend,
     config: Optional[LMCacheEngineConfig] = None,
-) -> Optional[RemoteConnector]:
+) -> Optional[InstrumentedRemoteConnector]:
     """
     Create a remote connector from the given URL.
 

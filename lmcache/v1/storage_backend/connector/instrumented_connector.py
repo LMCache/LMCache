@@ -76,3 +76,6 @@ class InstrumentedRemoteConnector(RemoteConnector):
 
     async def close(self) -> None:
         await self._connector.close()
+
+    def getWrappedConnector(self) -> RemoteConnector:
+        return self._connector
