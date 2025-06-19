@@ -9,6 +9,7 @@ We have examples for the following types of across-instance KV cache sharing:
 
 - KV cache sharing through a centralized cache server: ``centralized_sharing``
 - KV cache sharing through p2p cache transfer: ``p2p_sharing``
+- KV cache sharing through shared network filesystem. The shared filesystem option uses the ``fs_connector`` (located in ``lmcache/v1/storage_backend/connector/fs_connector.py``) which allows sharing KV cache through standard network filesystems like NFS, GPFS, or Lustre. It is another simple shared KV cache option, but detailed insturctions for running it are not provided here.
 
 Prerequisites
 -------------
