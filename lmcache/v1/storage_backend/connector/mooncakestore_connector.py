@@ -195,14 +195,17 @@ class MooncakestoreConnector(RemoteConnector):
             logger.warning("Failed to allocate memory during remote receive")
             return None
 
-        if memory_obj.tensor is not None:
+        if memory_obj.tensor is not None and len(buffer) > 0:
             assert metadata_dtype is not None
             expected_data_size = (
                 reduce(operator.mul, metadata_shape) * metadata_dtype.itemsize
             )
             actual_data_size = len(buffer)
             if expected_data_size == actual_data_size:
-                memory_obj.tensor.copy_(torch.frombuffer(buffer, dtype=metadata_dtype))
+                source_tensor = torch.frombuffer(buffer, dtype=metadata_dtype).reshape(
+                    metadata_shape
+                )
+                memory_obj.tensor.copy_(source_tensor)
                 return memory_obj
             else:
                 # Chunk is not full, need to reshape
@@ -222,7 +225,6 @@ class MooncakestoreConnector(RemoteConnector):
                         f"({expected_elements})"
                     )
                     return None
-
                 source_tensor = torch.frombuffer(
                     buffer,
                     dtype=metadata_dtype,
@@ -248,40 +250,30 @@ class MooncakestoreConnector(RemoteConnector):
                     )
                     return None
 
-                # Reshape source tensor and copy to memory object
+                # Reshape source tensor to match actual data
                 source_tensor = source_tensor.reshape(actual_shape)
 
-                # Reshape memory object tensor to match actual data
-                memory_obj.tensor = memory_obj.tensor.view(-1)[:actual_elements].view(
-                    actual_shape
-                )
-                memory_obj.tensor.copy_(source_tensor)
+                # Update the raw_data buffer to only include the actual elements
+                # This is necessary because the tensor property uses
+                # raw_data.view(dtype).view(shape)
+                actual_bytes = actual_elements * metadata_dtype.itemsize
+                memory_obj.raw_data = memory_obj.raw_data[:actual_bytes]
+
+                # Update metadata shape to match actual data
                 memory_obj.meta.shape = actual_shape
+
+                # Now copy the data to the correctly sized tensor
+                target_tensor = memory_obj.tensor
+                if target_tensor is not None:
+                    target_tensor.copy_(source_tensor)
+                else:
+                    logger.error("Failed to get tensor view from memory object")
+                    return None
                 return memory_obj
         else:
             return None
 
     async def put(self, key: CacheEngineKey, memory_obj: MemoryObj):
-        # Assert that memory object metadata matches metadata context
-        assert self.metadata_context is not None, (
-            "Metadata context not set. Cannot store data without metadata."
-        )
-        memory_shape = memory_obj.get_shape()
-        memory_dtype = memory_obj.get_dtype()
-        memory_fmt = memory_obj.get_fmt()
-        assert memory_shape == self.metadata_context.shape, (
-            f"Memory object shape {memory_shape} does not match "
-            f"metadata context shape {self.metadata_context.shape}"
-        )
-        assert memory_dtype == self.metadata_context.dtype, (
-            f"Memory object dtype {memory_dtype} does not match "
-            f"metadata context dtype {self.metadata_context.dtype}"
-        )
-        assert memory_fmt == self.metadata_context.fmt, (
-            f"Memory object format {memory_fmt} does not match "
-            f"metadata context format {self.metadata_context.fmt}"
-        )
-
         kv_bytes = memory_obj.byte_array
         key_str = key.to_string()
         try:
