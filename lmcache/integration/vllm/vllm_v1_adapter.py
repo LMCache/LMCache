@@ -505,6 +505,7 @@ class LMCacheConnectorV1Impl:
                 tokens = tokens[: -self.skip_last_n_tokens]
                 token_mask = token_mask[: -self.skip_last_n_tokens]
 
+            lmcache_cached_tokens = request.load_spec.lmcache_cached_tokens
             if self.use_layerwise:
                 assert isinstance(self.lmcache_engine, LayerwiseLMCacheEngine)
                 if idx == last_idx:
@@ -522,10 +523,10 @@ class LMCacheConnectorV1Impl:
                 else:
                     # TODO(Jiayi): Need to make prefix caching and blending compatible
                     layerwise_retriever = self.lmcache_engine.retrieve_layer(
-                        tokens,
-                        token_mask,
+                        tokens[:lmcache_cached_tokens],
+                        token_mask[:lmcache_cached_tokens],
                         kvcaches=kvcaches,
-                        slot_mapping=slot_mapping,
+                        slot_mapping=slot_mapping[:lmcache_cached_tokens],
                         sync=sync,
                     )
                     # NOTE: retrieve for two layers at the first layer
@@ -534,10 +535,10 @@ class LMCacheConnectorV1Impl:
                     self.layerwise_retrievers.append(layerwise_retriever)
             else:
                 ret_token_mask = self.lmcache_engine.retrieve(
-                    tokens,
-                    token_mask,
+                    tokens[:lmcache_cached_tokens],
+                    token_mask[:lmcache_cached_tokens],
                     kvcaches=kvcaches,
-                    slot_mapping=slot_mapping,
+                    slot_mapping=slot_mapping[:lmcache_cached_tokens],
                 )
 
                 # Check the result
