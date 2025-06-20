@@ -203,8 +203,9 @@ fi
 echo "⏳ Waiting for models to load (this may take several minutes)..."
 echo "📊 Monitoring container status and logs..."
 
-# Wait with periodic status updates
+# Wait with periodic status updates and early health checks
 elapsed_seconds=0
+early_health_success=false
 while true; do
     elapsed_seconds=$((elapsed_seconds + 10))
     echo ""
@@ -223,6 +224,33 @@ while true; do
         echo "📋 Consumer logs:"
         sudo docker logs --tail 20 $CONSUMER_ID
         exit 1
+    fi
+    
+    # Check health endpoints every 20 seconds after 60 seconds have elapsed
+    if (( elapsed_seconds >= 60 && elapsed_seconds % 20 == 0 )); then
+        echo "🔍 Early health check: testing both health endpoints"
+        producer_healthy=false
+        consumer_healthy=false
+        
+        if curl --fail -s --max-time 5 http://localhost:8000/health > /dev/null 2>&1; then
+            echo "  ✅ Producer (port 8000) is healthy"
+            producer_healthy=true
+        else
+            echo "  ⏳ Producer (port 8000) not ready yet"
+        fi
+        
+        if curl --fail -s --max-time 5 http://localhost:8001/health > /dev/null 2>&1; then
+            echo "  ✅ Consumer (port 8001) is healthy"
+            consumer_healthy=true
+        else
+            echo "  ⏳ Consumer (port 8001) not ready yet"
+        fi
+        
+        if $producer_healthy && $consumer_healthy; then
+            echo "✅ Both servers responded to health checks early! Breaking out of wait loop."
+            early_health_success=true
+            break
+        fi
     fi
     
     # Show recent logs every 30 seconds (every 3rd iteration)
@@ -245,51 +273,55 @@ done
 echo "✅ Model loading wait period completed"
 
 # Wait for both serving engines to be ready
-echo "🔍 Checking server health..."
-echo "📡 Testing health endpoints: http://localhost:8000/health and http://localhost:8001/health"
-total_time_elapsed=0
-health_check_count=0
-until curl --fail -s http://localhost:8000/health && curl --fail -s http://localhost:8001/health; do
-    health_check_count=$((health_check_count + 1))
-    echo "⏳ Health check attempt ${health_check_count}: servers not ready yet..."
-    
-    # Test each endpoint individually to see which one is failing
-    if curl --fail -s http://localhost:8000/health > /dev/null; then
-        echo "  ✅ Producer (port 8000) is healthy"
-    else
-        echo "  ⏳ Producer (port 8000) not ready"
-    fi
-    
-    if curl --fail -s http://localhost:8001/health > /dev/null; then
-        echo "  ✅ Consumer (port 8001) is healthy"
-    else
-        echo "  ⏳ Consumer (port 8001) not ready"
-    fi
-    
-    if ! sudo docker ps -q --filter "id=$PRODUCER_ID" | grep -q .; then
-        echo "❌ Producer container exited prematurely"
-        sudo docker logs $PRODUCER_ID
-        exit 1
-    fi
-    if ! sudo docker ps -q --filter "id=$CONSUMER_ID" | grep -q .; then
-        echo "❌ Consumer container exited prematurely"
-        sudo docker logs $CONSUMER_ID
-        exit 1
-    fi
-    sleep 10
-    total_time_elapsed=$((total_time_elapsed + 10))
-    
-    # Show recent logs every 60 seconds during health checks
-    if (( health_check_count % 6 == 0 )); then
-        echo "📋 Recent container logs (health check debugging):"
-        echo "  Producer (last 3 lines):"
-        sudo docker logs --tail 3 $PRODUCER_ID | sed 's/^/    /'
-        echo "  Consumer (last 3 lines):"
-        sudo docker logs --tail 3 $CONSUMER_ID | sed 's/^/    /'
-    fi
-done
+if [ "$early_health_success" = true ]; then
+    echo "✅ Both servers are already healthy (confirmed during early checks)!"
+else
+    echo "🔍 Checking server health..."
+    echo "📡 Testing health endpoints: http://localhost:8000/health and http://localhost:8001/health"
+    total_time_elapsed=0
+    health_check_count=0
+    until curl --fail -s http://localhost:8000/health && curl --fail -s http://localhost:8001/health; do
+        health_check_count=$((health_check_count + 1))
+        echo "⏳ Health check attempt ${health_check_count}: servers not ready yet..."
+        
+        # Test each endpoint individually to see which one is failing
+        if curl --fail -s http://localhost:8000/health > /dev/null; then
+            echo "  ✅ Producer (port 8000) is healthy"
+        else
+            echo "  ⏳ Producer (port 8000) not ready"
+        fi
+        
+        if curl --fail -s http://localhost:8001/health > /dev/null; then
+            echo "  ✅ Consumer (port 8001) is healthy"
+        else
+            echo "  ⏳ Consumer (port 8001) not ready"
+        fi
+        
+        if ! sudo docker ps -q --filter "id=$PRODUCER_ID" | grep -q .; then
+            echo "❌ Producer container exited prematurely"
+            sudo docker logs $PRODUCER_ID
+            exit 1
+        fi
+        if ! sudo docker ps -q --filter "id=$CONSUMER_ID" | grep -q .; then
+            echo "❌ Consumer container exited prematurely"
+            sudo docker logs $CONSUMER_ID
+            exit 1
+        fi
+        sleep 10
+        total_time_elapsed=$((total_time_elapsed + 10))
+        
+        # Show recent logs every 60 seconds during health checks
+        if (( health_check_count % 6 == 0 )); then
+            echo "📋 Recent container logs (health check debugging):"
+            echo "  Producer (last 3 lines):"
+            sudo docker logs --tail 3 $PRODUCER_ID | sed 's/^/    /'
+            echo "  Consumer (last 3 lines):"
+            sudo docker logs --tail 3 $CONSUMER_ID | sed 's/^/    /'
+        fi
+    done
 
-echo "✅ Both servers are healthy!"
+    echo "✅ Both servers are healthy!"
+fi
 
 echo "🔍 Checking if models are loaded..."
 echo "📡 Testing model endpoints for: $MODEL_URL"

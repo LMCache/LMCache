@@ -152,8 +152,9 @@ fi
 echo "⏳ Waiting for model to load (this may take a few minutes)..."
 echo "📊 Monitoring container status and logs..."
 
-# Wait with periodic status updates
+# Wait with periodic status updates and early health checks
 elapsed_seconds=0
+early_health_success=false
 while true; do
     elapsed_seconds=$((elapsed_seconds + 10))
     echo ""
@@ -165,6 +166,18 @@ while true; do
         echo "📋 Container logs:"
         sudo docker logs --tail 20 $CONTAINER_ID
         exit 1
+    fi
+    
+    # Check health endpoint every 20 seconds after 30 seconds have elapsed
+    if (( elapsed_seconds >= 30 && elapsed_seconds % 20 == 0 )); then
+        echo "🔍 Early health check: testing http://localhost:8000/health"
+        if curl --fail -s --max-time 5 http://localhost:8000/health > /dev/null 2>&1; then
+            echo "✅ Server responded to health check early! Breaking out of wait loop."
+            early_health_success=true
+            break
+        else
+            echo "⏳ Health check failed, continuing to wait..."
+        fi
     fi
     
     # Show recent logs every 30 seconds
@@ -185,30 +198,34 @@ done
 echo "✅ Model loading wait period completed"
 
 # Wait until the vLLM server is ready AND the model is loaded
-echo "🔍 Checking server health..."
-echo "📡 Testing health endpoint: http://localhost:8000/health"
-total_time_elapsed=0
-health_check_count=0
-until curl --fail -s http://localhost:8000/health; do
-    health_check_count=$((health_check_count + 1))
-    echo "⏳ Health check attempt ${health_check_count}: server not ready yet..."
-    
-    if ! sudo docker ps -q --filter "id=$CONTAINER_ID" | grep -q .; then
-        echo "❌ vLLM server container exited prematurely"
-        sudo docker logs $CONTAINER_ID
-        exit 1
-    fi
-    sleep 10
-    total_time_elapsed=$((total_time_elapsed + 10))
-    
-    # Show recent logs every 60 seconds during health checks
-    if (( health_check_count % 6 == 0 )); then
-        echo "📋 Recent container logs (health check debugging):"
-        sudo docker logs --tail 3 $CONTAINER_ID | sed 's/^/  /'
-    fi
-done
+if [ "$early_health_success" = true ]; then
+    echo "✅ Server is already healthy (confirmed during early checks)!"
+else
+    echo "🔍 Checking server health..."
+    echo "📡 Testing health endpoint: http://localhost:8000/health"
+    total_time_elapsed=0
+    health_check_count=0
+    until curl --fail -s http://localhost:8000/health; do
+        health_check_count=$((health_check_count + 1))
+        echo "⏳ Health check attempt ${health_check_count}: server not ready yet..."
+        
+        if ! sudo docker ps -q --filter "id=$CONTAINER_ID" | grep -q .; then
+            echo "❌ vLLM server container exited prematurely"
+            sudo docker logs $CONTAINER_ID
+            exit 1
+        fi
+        sleep 10
+        total_time_elapsed=$((total_time_elapsed + 10))
+        
+        # Show recent logs every 60 seconds during health checks
+        if (( health_check_count % 6 == 0 )); then
+            echo "📋 Recent container logs (health check debugging):"
+            sudo docker logs --tail 3 $CONTAINER_ID | sed 's/^/  /'
+        fi
+    done
 
-echo "✅ Server is healthy!"
+    echo "✅ Server is healthy!"
+fi
 
 echo "🔍 Checking if model is loaded..."
 echo "📡 Testing model endpoint for: $MODEL_URL"

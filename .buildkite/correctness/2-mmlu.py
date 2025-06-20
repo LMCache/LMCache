@@ -5,6 +5,30 @@
 # 2. the mmlu dataset is in a "data" directory
 # 3. all invocations of this script should be run in the same directory (for later consolidation)
 
+# Manually Test KV Transfer first with curl:
+"""
+# JSON payload (swap model name for your own)
+cat > payload.json <<EOF
+{
+  "model": "deepseek-ai/DeepSeek-V2-Lite",
+  "prompt": "The capital of France is\nA. Berlin\nB. Madrid\nC. Paris\nD. Rome\nAnswer:",
+  "temperature": 0,
+  "max_tokens": 3,
+  "stop": null,
+  "n": 1,
+  "seed": 42
+}
+EOF
+
+curl -X POST http://localhost:8000/v1/completions \
+     -H "Content-Type: application/json" \
+     -d @payload.json
+
+curl -X POST http://localhost:8001/v1/completions \
+     -H "Content-Type: application/json" \
+     -d @payload.json
+"""
+
 from transformers import AutoTokenizer, set_seed
 import argparse
 import os
