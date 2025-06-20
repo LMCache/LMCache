@@ -12,11 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Future
 from __future__ import annotations
+
 # Standard
-from typing import Union, TYPE_CHECKING
-import os
+from typing import TYPE_CHECKING, Union
 import copy
+import os
 
 # First Party
 from lmcache.config import LMCacheEngineConfig as Config  # type: ignore[assignment]
@@ -24,7 +26,9 @@ from lmcache.logging import init_logger
 from lmcache.v1.config import (
     LMCacheEngineConfig as V1Config,  # type: ignore[assignment]
 )
+
 if TYPE_CHECKING:
+    # Third Party
     from vllm.multimodal.inputs import PlaceholderRange
 
 logger = init_logger(__name__)
@@ -70,16 +74,16 @@ def lmcache_get_config() -> Union[Config, V1Config]:
 
     return config
 
+
 def hex_hash_to_int16(s: str) -> int:
     """
     Convert a hex hash string to a 16-bit integer.
     """
     return int(s, 16) & 0xFFFF
 
+
 def apply_mm_hashes_to_token_ids(
-    token_ids: list[int],
-    mm_hashes: list[str],
-    mm_positions: list[PlaceholderRange]
+    token_ids: list[int], mm_hashes: list[str], mm_positions: list[PlaceholderRange]
 ) -> None:
     """
     Overwrite token_ids in-place for multimodal placeholders.
@@ -89,13 +93,14 @@ def apply_mm_hashes_to_token_ids(
         mm_hashes: Hexadecimal hash strings for each placeholder.
         mm_positions: Corresponding placeholder ranges.
     """
-    for hash_str, placeholder in zip(mm_hashes, mm_positions):
+    for hash_str, placeholder in zip(mm_hashes, mm_positions, strict=False):
         start = placeholder.offset
         end = start + placeholder.length
         hash_int = hex_hash_to_int16(hash_str)
         for idx in range(start, end):
             if idx < len(token_ids):
                 token_ids[idx] = hash_int
+
 
 def mask_mm_hashes_in_request(request) -> list[int]:
     # No multimodal hashes in the request, return the original request
@@ -105,8 +110,6 @@ def mask_mm_hashes_in_request(request) -> list[int]:
     # Mask the multimodal hashes in the request's prompt token ids
     cloned = copy.deepcopy(request)
     apply_mm_hashes_to_token_ids(
-        cloned.prompt_token_ids,
-        cloned.mm_hashes,
-        cloned.mm_positions
+        cloned.prompt_token_ids, cloned.mm_hashes, cloned.mm_positions
     )
     return cloned
