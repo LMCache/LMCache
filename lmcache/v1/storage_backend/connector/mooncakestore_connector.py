@@ -152,13 +152,6 @@ class MooncakestoreConnector(RemoteConnector):
         self.local_cpu_backend = local_cpu_backend
         self.lmcache_config = lmcache_config
 
-        # Check if save_unfull_chunk is enabled, throw if disabled
-        if lmcache_config is None or lmcache_config.save_unfull_chunk:
-            raise ValueError(
-                "MooncakestoreConnector requires save_unfull_chunk to be disabled. "
-                "Please set save_unfull_chunk=False in your LMCache configuration."
-            )
-
     async def exists(self, key: CacheEngineKey) -> bool:
         return self.store.is_exist(key.to_string())
 
@@ -172,6 +165,12 @@ class MooncakestoreConnector(RemoteConnector):
         metadata_shape = self.metadata_context.shape
         metadata_dtype = self.metadata_context.dtype
         metadata_fmt = self.metadata_context.fmt
+
+        memory_obj = self.local_cpu_backend.allocate(
+            metadata_shape,
+            metadata_dtype,
+            metadata_fmt,
+        )
 
         key_str = key.to_string()
 
@@ -192,35 +191,73 @@ class MooncakestoreConnector(RemoteConnector):
         if buffer is None:
             return None
 
-        memory_obj = self.local_cpu_backend.allocate(
-            metadata_shape,
-            metadata_dtype,
-            metadata_fmt,
-        )
-
         if memory_obj is None:
             logger.warning("Failed to allocate memory during remote receive")
             return None
 
         if memory_obj.tensor is not None:
             assert metadata_dtype is not None
-            num_elements = reduce(operator.mul, metadata_shape)
-            # check size
-            if len(buffer) != num_elements * metadata_dtype.itemsize:
-                expected_size = num_elements * metadata_dtype.itemsize
-                logger.error(
-                    f"Buffer size mismatch. Expected {expected_size}, got {len(buffer)}"
-                )
-                return None
-            temp_tensor = torch.frombuffer(
-                buffer,
-                dtype=metadata_dtype,
-                offset=0,  # No metadata prefix anymore
-                count=num_elements,
-            ).reshape(metadata_shape)
+            expected_data_size = (
+                reduce(operator.mul, metadata_shape) * metadata_dtype.itemsize
+            )
+            actual_data_size = len(buffer)
+            if expected_data_size == actual_data_size:
+                memory_obj.tensor.copy_(torch.frombuffer(buffer, dtype=metadata_dtype))
+                return memory_obj
+            else:
+                # Chunk is not full, need to reshape
+                if actual_data_size % metadata_dtype.itemsize != 0:
+                    logger.error(
+                        f"Buffer size {actual_data_size} not aligned to dtype size "
+                        f"{metadata_dtype.itemsize}"
+                    )
+                    return None
 
-            memory_obj.tensor.copy_(temp_tensor)
-            return memory_obj
+                actual_elements = actual_data_size // metadata_dtype.itemsize
+                expected_elements = reduce(operator.mul, metadata_shape)
+
+                if actual_elements > expected_elements:
+                    logger.error(
+                        f"Buffer has more elements ({actual_elements}) than expected "
+                        f"({expected_elements})"
+                    )
+                    return None
+
+                source_tensor = torch.frombuffer(
+                    buffer,
+                    dtype=metadata_dtype,
+                    offset=0,
+                    count=actual_elements,
+                )
+
+                # Calculate actual shape for KV_2LTD format:
+                # [2, num_layers, seq_len, hidden_dim]
+                # Only sequence dimension (index 2) changes for unfull chunks
+                actual_shape = list(metadata_shape)
+                other_dims_product = actual_shape[0] * actual_shape[1] * actual_shape[3]
+                actual_seq_len = actual_elements // other_dims_product
+                actual_shape[2] = actual_seq_len
+
+                actual_shape = torch.Size(actual_shape)
+
+                # Validate the calculated shape
+                if reduce(operator.mul, actual_shape) != actual_elements:
+                    logger.error(
+                        f"Cannot reshape {actual_elements} elements to shape "
+                        f"{actual_shape}"
+                    )
+                    return None
+
+                # Reshape source tensor and copy to memory object
+                source_tensor = source_tensor.reshape(actual_shape)
+
+                # Reshape memory object tensor to match actual data
+                memory_obj.tensor = memory_obj.tensor.view(-1)[:actual_elements].view(
+                    actual_shape
+                )
+                memory_obj.tensor.copy_(source_tensor)
+                memory_obj.meta.shape = actual_shape
+                return memory_obj
         else:
             return None
 
