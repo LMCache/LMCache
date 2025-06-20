@@ -229,7 +229,6 @@ class MooncakestoreConnector(RemoteConnector):
         assert self.metadata_context is not None, (
             "Metadata context not set. Cannot store data without metadata."
         )
-        
         memory_shape = memory_obj.get_shape()
         memory_dtype = memory_obj.get_dtype()
         memory_fmt = memory_obj.get_fmt()
