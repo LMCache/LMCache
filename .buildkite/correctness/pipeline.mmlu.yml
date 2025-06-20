@@ -325,14 +325,50 @@ steps:
     command: |
       cd .buildkite/correctness
       
+      # Kill containers using PID files
+      echo "🛑 Stopping containers using PID files..."
+      if [ -f .vllm-server.pid ]; then
+        VLLM_ID=$(cat .vllm-server.pid)
+        echo "Killing vLLM container: $VLLM_ID"
+        sudo docker kill "$VLLM_ID" 2>/dev/null || true
+        sudo docker rm "$VLLM_ID" 2>/dev/null || true
+      fi
+      
+      if [ -f .lmcache-producer.pid ]; then
+        PRODUCER_ID=$(cat .lmcache-producer.pid)
+        echo "Killing LMCache producer: $PRODUCER_ID"
+        sudo docker kill "$PRODUCER_ID" 2>/dev/null || true
+        sudo docker rm "$PRODUCER_ID" 2>/dev/null || true
+      fi
+      
+      if [ -f .lmcache-consumer.pid ]; then
+        CONSUMER_ID=$(cat .lmcache-consumer.pid)
+        echo "Killing LMCache consumer: $CONSUMER_ID"
+        sudo docker kill "$CONSUMER_ID" 2>/dev/null || true
+        sudo docker rm "$CONSUMER_ID" 2>/dev/null || true
+      fi
+      
       # Kill any remaining docker containers
-      sudo docker ps -q | xargs -r sudo docker kill || true
-      sudo docker system prune -f || true
+      echo "🧹 Killing any remaining containers..."
+      sudo docker ps -q | xargs -r sudo docker kill 2>/dev/null || true
       
       # Stop Redis if running
+      echo "🛑 Stopping Redis server..."
       sudo systemctl stop redis-server || true
       
       # Clean up PID files
-      rm -f .vllm-server.pid .lmcache-producer.pid .lmcache-consumer.pid .lmcache-timer.pid || true
+      echo "🗑️ Cleaning up PID files..."
+      rm -f .vllm-server.pid .lmcache-producer.pid .lmcache-consumer.pid || true
+      
+      # Clean up old Docker images (keep only the most recent nightly)
+      echo "🧹 Cleaning up old Docker images..."
+      sudo docker image prune -f || true
+      
+      # Remove old LMCache nightly images (keep only the current one)
+      OLD_IMAGES=$(sudo docker images lmcache/vllm-openai --format "{{.ID}}" | tail -n +2)
+      if [ ! -z "$OLD_IMAGES" ]; then
+        echo "🗑️ Removing old LMCache images..."
+        echo "$OLD_IMAGES" | xargs -r sudo docker rmi -f || true
+      fi
       
       echo "✅ Cleanup completed"

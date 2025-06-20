@@ -1,39 +1,45 @@
 # LMCache MMLU Testing Suite
 
 ## Overview
-Tests LMCache KV transfer correctness using dual-engine setup with MMLU benchmark.
+Tests LMCache KV transfer correctness vs vLLM baseline using MMLU benchmark.
+Compares dense (Llama 3.1 8B) and MLA (DeepSeek V2 Lite) architectures.
+
+## Models Tested
+- **Llama 3.1 8B**: Dense attention architecture
+- **DeepSeek V2 Lite**: Multi-head Latent Attention (MLA)
 
 ## Quick Start
 ```bash
-# Single vLLM baseline
-./deploy-1-vllm.sh "deepseek-ai/DeepSeek-V2-Lite"
+# Test single model
+./deploy-1-vllm.sh "meta-llama/Llama-3.1-8B"
+python3 1-mmlu.py --model "meta-llama/Llama-3.1-8B" --number-of-subjects 15
 
-# Dual LMCache KV transfer setup  
-./deploy-2-lmcache.sh "deepseek-ai/DeepSeek-V2-Lite"
+./deploy-2-lmcache.sh "meta-llama/Llama-3.1-8B"  
+python3 2-mmlu.py --model "meta-llama/Llama-3.1-8B" --number-of-subjects 15
 
-# Run tests
-python3 baseline-mmlu.py --model MODEL --number-of-subjects 12 --result-file baseline.txt
-python3 1-mmlu.py --model MODEL --number-of-subjects 12
-python3 2-mmlu.py --model MODEL --number-of-subjects 12
-
-# Summarize results
+# Summarize all results
 python3 summarize_scores.py
 ```
 
+## Buildkite Pipeline
+```bash
+buildkite-agent pipeline upload .buildkite/correctness/pipeline.mmlu.yml
+```
+
+Pipeline tests both models with vLLM baseline and LMCache KV transfer (4 total tests).
+
 ## Files
-- **`deploy-1-vllm.sh`**: Single vLLM engine (port 8000)
-- **`deploy-2-lmcache.sh`**: Dual LMCache engines (ports 8000/8001) + Redis
-- **`baseline-mmlu.py`**: Standard MMLU test (single engine)
-- **`1-mmlu.py`**: KV transfer test variant 1
-- **`2-mmlu.py`**: KV transfer test variant 2
-- **`summarize_scores.py`**: Results aggregation (handles .txt + .jsonl)
-- **`pipeline.mmlu.yml`**: Buildkite CI pipeline
+- **`deploy-1-vllm.sh`**: Single vLLM engine (port 8000) - for baseline
+- **`deploy-2-lmcache.sh`**: Dual LMCache engines (ports 8000/8001) + Redis - for KV transfer
+- **`1-mmlu.py`**: MMLU test on single vLLM engine (baseline)
+- **`2-mmlu.py`**: MMLU test on dual LMCache engines (KV transfer)
+- **`summarize_scores.py`**: Results comparison and analysis
 
 ## Architecture
-- **Single Engine**: vLLM → port 8000
-- **Dual Engine**: vLLM producer (port 8000) → Redis (port 6379) ← vLLM consumer (port 8001)
+- **Baseline**: Single vLLM → port 8000
+- **KV Transfer**: vLLM producer (port 8000) → Redis (port 6379) ← vLLM consumer (port 8001)
 
 ## Requirements
 - Docker with nvidia runtime
-- Redis server
+- Redis server  
 - HuggingFace token (set `HF_TOKEN` env var)
