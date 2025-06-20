@@ -20,6 +20,9 @@ import asyncio
 import threading
 import time
 
+# Third Party
+import torch
+
 # First Party
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
@@ -27,10 +30,13 @@ from lmcache.observability import LMCStatsMonitor
 from lmcache.utils import CacheEngineKey, _lmcache_nvtx_annotate
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.lookup_server import LookupServerInterface
-from lmcache.v1.memory_management import MemoryObj
+from lmcache.v1.memory_management import MemoryFormat, MemoryObj
 from lmcache.v1.storage_backend.abstract_backend import StorageBackendInterface
 from lmcache.v1.storage_backend.connector import CreateConnector
-from lmcache.v1.storage_backend.connector.base_connector import RemoteConnector
+from lmcache.v1.storage_backend.connector.base_connector import (
+    ConnectorMetadataContext,
+    RemoteConnector,
+)
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.v1.storage_backend.naive_serde import CreateSerde
 
@@ -91,6 +97,29 @@ class RemoteBackend(StorageBackendInterface):
         # we must make decision (whether to send or not) at the local side
 
         self.stats_monitor = LMCStatsMonitor.GetOrCreate()
+
+        # Set up metadata context for the connector
+        self._setup_metadata_context()
+
+    def _setup_metadata_context(self) -> None:
+        """Set up metadata context based on engine metadata."""
+        chunk_size = self.metadata.kv_shape[2]
+        num_kv_head = self.metadata.kv_shape[3]
+        head_size = self.metadata.kv_shape[4]
+        hidden_dim = num_kv_head * head_size
+        chunk_shape = torch.Size([2, self.metadata.kv_shape[0], chunk_size, hidden_dim])
+        memory_format = MemoryFormat.KV_2LTD
+
+        context = ConnectorMetadataContext(
+            shape=chunk_shape,
+            dtype=self.metadata.kv_dtype,
+            fmt=memory_format,
+        )
+
+        if self.connection is not None:
+            self.connection.set_metadata_context(context)
+        else:
+            logger.warning("Remote connection is None, cannot set metadata context")
 
     def __str__(self):
         return self.__class__.__name__

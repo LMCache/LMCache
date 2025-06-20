@@ -21,7 +21,10 @@ from lmcache.logging import init_logger
 from lmcache.observability import LMCStatsMonitor
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.memory_management import MemoryObj
-from lmcache.v1.storage_backend.connector.base_connector import RemoteConnector
+from lmcache.v1.storage_backend.connector.base_connector import (
+    ConnectorMetadataContext,
+    RemoteConnector,
+)
 
 logger = init_logger(__name__)
 
@@ -33,6 +36,7 @@ class InstrumentedRemoteConnector(RemoteConnector):
     """
 
     def __init__(self, connector: RemoteConnector):
+        super().__init__()  # Initialize the base class
         self._connector = connector
         self._stats_monitor = LMCStatsMonitor.GetOrCreate()
 
@@ -76,3 +80,9 @@ class InstrumentedRemoteConnector(RemoteConnector):
 
     async def close(self) -> None:
         await self._connector.close()
+
+    def set_metadata_context(self, context: ConnectorMetadataContext) -> None:
+        """Delegate metadata context setting to the underlying connector."""
+        # Set on both the wrapper and the underlying connector
+        super().set_metadata_context(context)
+        self._connector.set_metadata_context(context)

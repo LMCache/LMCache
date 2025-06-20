@@ -29,13 +29,10 @@ from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import MemoryObj
-from lmcache.v1.protocol import RemoteMetadata
 from lmcache.v1.storage_backend.connector.base_connector import RemoteConnector
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 
 logger = init_logger(__name__)
-
-METADATA_BYTES_LEN = 28
 
 
 @dataclass
@@ -105,6 +102,7 @@ class MooncakestoreConnector(RemoteConnector):
         local_cpu_backend: LocalCPUBackend,
         lmcache_config: Optional[LMCacheEngineConfig],
     ):
+        super().__init__()
         try:
             # Third Party
             from mooncake.store import MooncakeDistributedStore
@@ -152,11 +150,29 @@ class MooncakestoreConnector(RemoteConnector):
 
         self.loop = loop
         self.local_cpu_backend = local_cpu_backend
+        self.lmcache_config = lmcache_config
+
+        # Check if save_unfull_chunk is enabled, throw if disabled
+        if lmcache_config is None or lmcache_config.save_unfull_chunk:
+            raise ValueError(
+                "MooncakestoreConnector requires save_unfull_chunk to be disabled. "
+                "Please set save_unfull_chunk=False in your LMCache configuration."
+            )
 
     async def exists(self, key: CacheEngineKey) -> bool:
         return self.store.is_exist(key.to_string())
 
     async def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
+        if self.metadata_context is None:
+            logger.error(
+                "Metadata context not set. Cannot retrieve data without metadata."
+            )
+            return None
+
+        metadata_shape = self.metadata_context.shape
+        metadata_dtype = self.metadata_context.dtype
+        metadata_fmt = self.metadata_context.fmt
+
         key_str = key.to_string()
 
         try:
@@ -176,33 +192,32 @@ class MooncakestoreConnector(RemoteConnector):
         if buffer is None:
             return None
 
-        retrieved_view = memoryview(buffer)
-        metadata_bytes = retrieved_view[:METADATA_BYTES_LEN]
-        if metadata_bytes is None or len(metadata_bytes) != METADATA_BYTES_LEN:
-            return None
-
-        metadata = RemoteMetadata.deserialize(metadata_bytes)
-
         memory_obj = self.local_cpu_backend.allocate(
-            metadata.shape,
-            metadata.dtype,
-            metadata.fmt,
+            metadata_shape,
+            metadata_dtype,
+            metadata_fmt,
         )
-        assert len(retrieved_view) == metadata.length + METADATA_BYTES_LEN
 
         if memory_obj is None:
             logger.warning("Failed to allocate memory during remote receive")
             return None
 
         if memory_obj.tensor is not None:
-            assert metadata.dtype is not None
-            num_elements = reduce(operator.mul, metadata.shape)
+            assert metadata_dtype is not None
+            num_elements = reduce(operator.mul, metadata_shape)
+            # check size
+            if len(buffer) != num_elements * metadata_dtype.itemsize:
+                expected_size = num_elements * metadata_dtype.itemsize
+                logger.error(
+                    f"Buffer size mismatch. Expected {expected_size}, got {len(buffer)}"
+                )
+                return None
             temp_tensor = torch.frombuffer(
                 buffer,
-                dtype=metadata.dtype,
-                offset=METADATA_BYTES_LEN,
+                dtype=metadata_dtype,
+                offset=0,  # No metadata prefix anymore
                 count=num_elements,
-            ).reshape(metadata.shape)
+            ).reshape(metadata_shape)
 
             memory_obj.tensor.copy_(temp_tensor)
             return memory_obj
@@ -210,23 +225,32 @@ class MooncakestoreConnector(RemoteConnector):
             return None
 
     async def put(self, key: CacheEngineKey, memory_obj: MemoryObj):
-        # Please use a function like `memory_obj.to_meta()`.
+        # Assert that memory object metadata matches metadata context
+        assert self.metadata_context is not None, (
+            "Metadata context not set. Cannot store data without metadata."
+        )
+        
+        memory_shape = memory_obj.get_shape()
+        memory_dtype = memory_obj.get_dtype()
+        memory_fmt = memory_obj.get_fmt()
+        assert memory_shape == self.metadata_context.shape, (
+            f"Memory object shape {memory_shape} does not match "
+            f"metadata context shape {self.metadata_context.shape}"
+        )
+        assert memory_dtype == self.metadata_context.dtype, (
+            f"Memory object dtype {memory_dtype} does not match "
+            f"metadata context dtype {self.metadata_context.dtype}"
+        )
+        assert memory_fmt == self.metadata_context.fmt, (
+            f"Memory object format {memory_fmt} does not match "
+            f"metadata context format {self.metadata_context.fmt}"
+        )
+
         kv_bytes = memory_obj.byte_array
-        kv_shape = memory_obj.get_shape()
-        kv_dtype = memory_obj.get_dtype()
-        memory_format = memory_obj.get_memory_format()
-
-        metadata_bytes = RemoteMetadata(
-            len(kv_bytes), kv_shape, kv_dtype, memory_format
-        ).serialize()
-        assert len(metadata_bytes) == METADATA_BYTES_LEN
         key_str = key.to_string()
-
         try:
             await asyncio.wait_for(
-                asyncio.to_thread(
-                    self.store.put_parts, key_str, metadata_bytes, kv_bytes
-                ),
+                asyncio.to_thread(self.store.put, key_str, kv_bytes),
                 timeout=self.config.transfer_timeout,
             )
         except asyncio.TimeoutError:
@@ -235,11 +259,7 @@ class MooncakestoreConnector(RemoteConnector):
                 "Decode instance may redo prefill."
             )
         except Exception as e:
-            logger.error(
-                f"Failed to put key {key_str},"
-                f"meta type: {type(metadata_bytes)},"
-                f"data: {type(kv_bytes)}: {e}"
-            )
+            logger.error(f"Failed to put key {key_str},data: {type(kv_bytes)}: {e}")
 
     @no_type_check
     async def list(self) -> List[str]:

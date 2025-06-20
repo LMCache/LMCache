@@ -16,18 +16,48 @@
 from typing import List, Optional
 import abc
 
+# Third Party
+import torch
+
 # First Party
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
-from lmcache.v1.memory_management import MemoryObj
+from lmcache.v1.memory_management import MemoryFormat, MemoryObj
 
 logger = init_logger(__name__)
+
+
+class ConnectorMetadataContext:
+    """
+    Metadata context that provides shape, dtype, and format information
+    for KV cache tensors. This eliminates the need to store metadata
+    with each individual key.
+    """
+
+    def __init__(
+        self,
+        shape: torch.Size,
+        dtype: torch.dtype,
+        fmt: MemoryFormat,
+    ):
+        self.shape = shape
+        self.dtype = dtype
+        self.fmt = fmt
 
 
 class RemoteConnector(metaclass=abc.ABCMeta):
     """
     Interface for remote connector
     """
+
+    def __init__(self):
+        self.metadata_context: Optional[ConnectorMetadataContext] = None
+
+    def set_metadata_context(self, context: ConnectorMetadataContext) -> None:
+        """
+        Set the metadata context for this connector.
+        """
+        self.metadata_context = context
 
     @abc.abstractmethod
     async def exists(self, key: CacheEngineKey) -> bool:

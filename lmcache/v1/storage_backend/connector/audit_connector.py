@@ -22,7 +22,10 @@ import time
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.memory_management import MemoryObj
-from lmcache.v1.storage_backend.connector.base_connector import RemoteConnector
+from lmcache.v1.storage_backend.connector.base_connector import (
+    ConnectorMetadataContext,
+    RemoteConnector,
+)
 
 logger = init_logger(__name__)
 
@@ -39,6 +42,7 @@ class AuditConnector(RemoteConnector):
     """
 
     def __init__(self, real_connector: RemoteConnector, verify_checksum: bool = False):
+        super().__init__()  # Initialize the base class
         self.real_connector = real_connector
 
         self.verify_checksum = verify_checksum
@@ -145,3 +149,12 @@ class AuditConnector(RemoteConnector):
         self.logger.debug("[REMOTE_AUDIT]CLOSE|START")
         await self.real_connector.close()
         self.logger.info("[REMOTE_AUDIT]CLOSE|SUCCESS")
+
+    def set_metadata_context(self, context: ConnectorMetadataContext) -> None:
+        """Delegate metadata context setting to the underlying connector."""
+        # Set on both the wrapper and the underlying connector
+        super().set_metadata_context(context)
+        self.real_connector.set_metadata_context(context)
+        self.logger.info(
+            f"[REMOTE_AUDIT]SET_METADATA_CONTEXT|SUCCESS|Shape:{context.shape}|Dtype:{context.dtype}"
+        )
