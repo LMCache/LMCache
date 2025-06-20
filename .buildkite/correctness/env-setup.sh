@@ -38,7 +38,7 @@ uv venv --python 3.12
 source .venv/bin/activate
 
 # Extra dependencies needed for the MMLU scripts
-uv pip install requests pandas numpy tqdm matplotlib fastapi
+uv pip install requests pandas numpy tqdm matplotlib fastapi transformers
 # Install lmcache from source
 # the lmcache wheel also gives us access to:
 # lmcache_server entrypoint

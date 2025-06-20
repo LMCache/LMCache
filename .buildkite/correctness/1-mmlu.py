@@ -30,16 +30,10 @@ def get_llm_response(args, prompt):
         "n": 1,
         "seed": 42,  # Add explicit seed for determinism
     }
-    # first hit the kv producer (this will block)
-    res1 = requests.post("http://localhost:8000/v1/completions", json=data, timeout=30)
-    if res1.status_code != 200:
-        raise Exception(f"Error: {res1.status_code} {res1.text}")
-    # then hit the kv consumer (this will not run until the kv producer is done)
-    res2 = requests.post("http://localhost:8001/v1/completions", json=data, timeout=30)
-    if res2.status_code != 200:
-        raise Exception(f"Error: {res2.status_code} {res2.text}")
-    # the kv consumer response is what we actually care about
-    response_json = res2.json()
+    res = requests.post("http://localhost:8000/v1/completions", json=data, timeout=30)
+    if res.status_code != 200:
+        raise Exception(f"Error: {res.status_code} {res.text}")
+    response_json = res.json()
     return response_json["choices"][0]["text"]
 
 # grab the idx'th row of the df and generate a prompt string 
@@ -65,11 +59,14 @@ def evaluate(args, subject, dev_df, test_df):
     for i in range(dev_df.shape[0]):
         # the multi-shot examples should contain answers
         shared_multi_shot_prefix.append(prompt_string(dev_df, i))
-        shared_multi_shot_prefix_length += len(tokenizer(shared_multi_shot_prefix[-1], add_special_tokens=True, return_tensors="pt")["input_ids"][0])
-        # break early if we exceed 4000 tokens (our models should have 8192 max context length)
+        
+        # Use plain list of token IDs, no torch tensors
+        token_ids = tokenizer(shared_multi_shot_prefix[-1], add_special_tokens=True)["input_ids"]
+        shared_multi_shot_prefix_length += len(token_ids)
+        
         if shared_multi_shot_prefix_length > 4000:
             break
-
+            
     # all already have double newlines at the end
     shared_multi_shot_prefix = "".join(shared_multi_shot_prefix)
 

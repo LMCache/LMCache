@@ -108,18 +108,19 @@ echo "✅ Redis server is running and responding to ping"
 
 # Deploy the first vLLM + LMCache serving engine on port 8000 (KV producer)
 echo "🔧 Starting KV producer on port 8000..."
-PRODUCER_ID=$(sudo docker run -d --runtime=nvidia --gpus all \
+PRODUCER_ID=$(sudo docker run -d --gpus all \
     --name lmcache-producer \
     --env "HF_TOKEN=$HF_TOKEN" \
     --env "LMCACHE_USE_EXPERIMENTAL=True" \
     --env "LMCACHE_CHUNK_SIZE=256" \
     --env "LMCACHE_LOCAL_CPU=True" \
-    --env "LMCACHE_MAX_LOCAL_CPU_SIZE=5.0" \
+    --env "LMCACHE_MAX_LOCAL_CPU_SIZE=1.0" \
     --env "LMCACHE_REMOTE_URL=redis://host.docker.internal:6379" \
     --env "LMCACHE_REMOTE_SERDE=naive" \
     --env "CUDA_VISIBLE_DEVICES=0" \
     --env "PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True" \
     --env "VLLM_MLA_DISABLE=0" \
+    --env "CUDA_LAUNCH_BLOCKING=1" \
     --add-host=host.docker.internal:host-gateway \
     -v ~/.cache/huggingface:/root/.cache/huggingface \
     -p 8000:8000 \
@@ -134,18 +135,19 @@ echo "Started KV producer container: $PRODUCER_ID"
 
 # Deploy the second vLLM + LMCache serving engine on port 8001 (KV consumer)
 echo "🔧 Starting KV consumer on port 8001..."
-CONSUMER_ID=$(sudo docker run -d --runtime=nvidia --gpus all \
+CONSUMER_ID=$(sudo docker run -d --gpus all \
     --name lmcache-consumer \
     --env "HF_TOKEN=$HF_TOKEN" \
     --env "LMCACHE_USE_EXPERIMENTAL=True" \
     --env "LMCACHE_CHUNK_SIZE=256" \
     --env "LMCACHE_LOCAL_CPU=True" \
-    --env "LMCACHE_MAX_LOCAL_CPU_SIZE=5.0" \
+    --env "LMCACHE_MAX_LOCAL_CPU_SIZE=1.0" \
     --env "LMCACHE_REMOTE_URL=redis://host.docker.internal:6379" \
     --env "LMCACHE_REMOTE_SERDE=naive" \
     --env "CUDA_VISIBLE_DEVICES=1" \
     --env "PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True" \
     --env "VLLM_MLA_DISABLE=0" \
+    --env "CUDA_LAUNCH_BLOCKING=1" \
     --add-host=host.docker.internal:host-gateway \
     -v ~/.cache/huggingface:/root/.cache/huggingface \
     -p 8001:8001 \
@@ -155,6 +157,30 @@ CONSUMER_ID=$(sudo docker run -d --runtime=nvidia --gpus all \
     --trust-remote-code \
     --max-model-len 8192 \
     --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}')
+
+# MODEL_URL="meta-llama/Llama-3.1-8B"
+# sudo docker run -d --gpus all \
+#     --env "HF_TOKEN=$HF_TOKEN" \
+#     --env "LMCACHE_USE_EXPERIMENTAL=True" \
+#     --env "LMCACHE_CHUNK_SIZE=256" \
+#     --env "LMCACHE_LOCAL_CPU=True" \
+#     --env "TORCH_USE_CUDA_DSA=1" \
+#     --env "LMCACHE_MAX_LOCAL_CPU_SIZE=5.0" \
+#     --env "LMCACHE_REMOTE_URL=redis://host.docker.internal:6379" \
+#     --env "LMCACHE_REMOTE_SERDE=naive" \
+#     --env "CUDA_VISIBLE_DEVICES=1" \
+#     --env "PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True" \
+#     --env "VLLM_MLA_DISABLE=0" \
+#     --env "CUDA_LAUNCH_BLOCKING=1" \
+#     --add-host=host.docker.internal:host-gateway \
+#     -v ~/.cache/huggingface:/root/.cache/huggingface \
+#     -p 8001:8001 \
+#     lmcache/vllm-openai:latest-nightly \
+#     $MODEL_URL \
+#     --port 8001 \
+#     --trust-remote-code \
+#     --max-model-len 8192 \
+#     --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}'
 
 echo "Started KV consumer container: $CONSUMER_ID"
 

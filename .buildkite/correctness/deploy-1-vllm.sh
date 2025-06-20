@@ -77,7 +77,7 @@ sudo docker rm -f lmcache-consumer 2>/dev/null || true
 
 # Deploy the vLLM serving engine (without LMCache)
 echo "🔧 Starting vLLM serving engine on port 8000..."
-CONTAINER_ID=$(sudo docker run -d --runtime=nvidia --gpus all \
+CONTAINER_ID=$(sudo docker run -d --gpus all \
     --name vllm-server \
     --env "HF_TOKEN=$HF_TOKEN" \
     --env "CUDA_VISIBLE_DEVICES=0" \
@@ -99,6 +99,29 @@ CONTAINER_ID=$(sudo docker run -d --runtime=nvidia --gpus all \
 #     --env "LMCACHE_USE_EXPERIMENTAL=True" \
 #     --env "LMCACHE_CHUNK_SIZE=256" \
 #     --env "TORCH_USE_CUDA_DSA=1" \
+#     --env "LMCACHE_LOCAL_CPU=True" \
+#     --env "LMCACHE_MAX_LOCAL_CPU_SIZE=1.0" \
+#     --env "LMCACHE_REMOTE_SERDE=naive" \
+#     --env "CUDA_VISIBLE_DEVICES=0" \
+#     --env "PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True" \
+#     --env "VLLM_MLA_DISABLE=$VLLM_MLA_DISABLE" \
+#     --env "CUDA_LAUNCH_BLOCKING=1" \
+#     -v ~/.cache/huggingface:/root/.cache/huggingface \
+#     -p 8000:8000 \
+#     lmcache/vllm-openai:latest-nightly \
+#     $MODEL \
+#     --max-model-len $MAX_MODEL_LEN \
+#     --port 8000 \
+#     --trust-remote-code \
+#     --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}'
+
+# MODEL="meta-llama/Llama-3.1-8B"
+# MAX_MODEL_LEN=6000
+# VLLM_MLA_DISABLE=0
+# sudo docker run -d --runtime=nvidia --gpus all \
+#     --env "HF_TOKEN=$HF_TOKEN" \
+#     --env "LMCACHE_USE_EXPERIMENTAL=True" \
+#     --env "LMCACHE_CHUNK_SIZE=256" \
 #     --env "LMCACHE_LOCAL_CPU=True" \
 #     --env "LMCACHE_MAX_LOCAL_CPU_SIZE=1.0" \
 #     --env "LMCACHE_REMOTE_SERDE=naive" \

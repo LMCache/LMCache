@@ -65,8 +65,11 @@ def evaluate(args, subject, dev_df, test_df):
     for i in range(dev_df.shape[0]):
         # the multi-shot examples should contain answers
         shared_multi_shot_prefix.append(prompt_string(dev_df, i))
-        shared_multi_shot_prefix_length += len(tokenizer(shared_multi_shot_prefix[-1], add_special_tokens=True, return_tensors="pt")["input_ids"][0])
-        # break early if we exceed 4000 tokens (our models should have 8192 max context length)
+        
+        # Use plain list of token IDs, no torch tensors
+        token_ids = tokenizer(shared_multi_shot_prefix[-1], add_special_tokens=True)["input_ids"]
+        shared_multi_shot_prefix_length += len(token_ids)
+        
         if shared_multi_shot_prefix_length > 4000:
             break
 
