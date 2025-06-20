@@ -70,7 +70,7 @@ def get_detailed_results_from_jsonl(path):
 
 def main():
     print(f"🔍 Looking for results in: {os.path.abspath(RESULTS_DIR)}")
-    
+
     # Check both possible locations for results
     results_dirs = [RESULTS_DIR]
     if os.path.exists(NESTED_RESULTS_DIR):
@@ -92,17 +92,23 @@ def main():
     # Look for both old format (.txt) and new format (.jsonl) files in all directories
     txt_files = []
     jsonl_files = []
-    
+
     for results_dir in existing_dirs:
         print(f"📁 Checking directory: {results_dir}")
         all_files = os.listdir(results_dir)
         print(f"📁 Files in {results_dir}: {all_files}")
-        
+
         txt_files.extend(sorted(glob.glob(os.path.join(results_dir, "*.txt"))))
         jsonl_files.extend(sorted(glob.glob(os.path.join(results_dir, "*.jsonl"))))
-    
-    print(f"🎯 Found {len(txt_files)} .txt files: {[os.path.basename(f) for f in txt_files]}")
-    print(f"🎯 Found {len(jsonl_files)} .jsonl files: {[os.path.basename(f) for f in jsonl_files]}")
+
+    print(
+        f"🎯 Found {len(txt_files)} .txt files: "
+        f"{[os.path.basename(f) for f in txt_files]}"
+    )
+    print(
+        f"🎯 Found {len(jsonl_files)} .jsonl files: "
+        f"{[os.path.basename(f) for f in jsonl_files]}"
+    )
 
     if not txt_files and not jsonl_files:
         print("❌ No result files found.")
@@ -123,18 +129,21 @@ def main():
         acc_str = f"{acc:.4f}" if acc is not None else "N/A"
         questions_str = f"{num_questions}" if num_questions is not None else "N/A"
         report.append(f"- **{name}** → accuracy: {acc_str}, questions: {questions_str}")
-        
+
         # Optionally add detailed per-subject results
         detailed_results = get_detailed_results_from_jsonl(f)
         if detailed_results and len(detailed_results) > 1:  # More than just "total"
-            report.append(f"  📊 Subject breakdown:")
+            report.append("  📊 Subject breakdown:")
             for subject, metrics in sorted(detailed_results.items()):
                 if subject != "total":  # Skip total as we already showed it
                     subject_acc = metrics.get("accuracy", "N/A")
                     subject_questions = metrics.get("num_questions", "N/A")
                     if isinstance(subject_acc, float):
                         subject_acc = f"{subject_acc:.4f}"
-                    report.append(f"    - {subject}: {subject_acc} ({subject_questions} questions)")
+                    report.append(
+                        f"    - {subject}: {subject_acc} "
+                        f"({subject_questions} questions)"
+                    )
 
     text = "\n".join(report)
     print(text)

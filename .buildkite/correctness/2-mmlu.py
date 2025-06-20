@@ -1,9 +1,13 @@
-# This is a special MMLU test script that will send each query twice (first to 8000 and then to 8001) in order to test the correctness of LMCache KV Transfer
+# This is a special MMLU test script that will send each query twice
+# (first to 8000 and then to 8001) in order to test the correctness
+# of LMCache KV Transfer
 
 # ASSUMPTIONS:
-# 1. two lmcache serving engines are running on ports 8000 (as producer) and 8001 (as consumer) and connected to teh same lmcache server
+# 1. two lmcache serving engines are running on ports 8000 (as producer) and 8001
+#    (as consumer) and connected to the same lmcache server
 # 2. the mmlu dataset is in a "data" directory
-# 3. all invocations of this script should be run in the same directory (for later consolidation)
+# 3. all invocations of this script should be run in the same directory
+#    (for later consolidation)
 
 # Manually Test KV Transfer first with curl:
 """
@@ -11,7 +15,12 @@
 cat > payload.json <<EOF
 {
   "model": "deepseek-ai/DeepSeek-V2-Lite",
-  "prompt": "The capital of France is\nA. Berlin\nB. Madrid\nC. Paris\nD. Rome\nAnswer:",
+  "prompt": "The capital of France is\\n" \
+            "A. Berlin\\n" \
+            "B. Madrid\\n" \
+            "C. Paris\\n" \
+            "D. Rome\\n" \
+            "Answer:",
   "temperature": 0,
   "max_tokens": 3,
   "stop": null,
@@ -29,17 +38,21 @@ curl -X POST http://localhost:8001/v1/completions \
      -d @payload.json
 """
 
-from transformers import AutoTokenizer, set_seed
+# Standard
 import argparse
-import os
 import json
+import os
+
+# Third Party
+from tqdm import tqdm
+from transformers import AutoTokenizer, set_seed
 import numpy as np
 import pandas as pd
-from tqdm import tqdm
 import requests
 
 global tokenizer
 choices = ["A", "B", "C", "D"]
+
 
 # for complete determinism between runs of MMLU, we should:
 # 1. set the seed of LLM requests to a fixed number (42)
@@ -66,12 +79,13 @@ def get_llm_response(args, prompt):
     response_json = res2.json()
     return response_json["choices"][0]["text"]
 
-# grab the idx'th row of the df and generate a prompt string 
-# format of the MMLU csvs: 
-# question,optionA,optionB,optionC,optionD,answer
+
+# grab the idx'th row of the df and generate a prompt string
+# format of the MMLU csvs:
+# question,option_A,option_B,option_C,option_D,answer
 def prompt_string(df, idx, include_answer=True):
     prompt = df.iloc[idx, 0]
-    k = df.shape[1] - 2 # number of columns - 2 (question and answer)
+    k = df.shape[1] - 2  # number of columns - 2 (question and answer)
     for i in range(k):
         prompt += f"\n{choices[i]}. {df.iloc[idx, i + 1]}"
     prompt += "\nAnswer:"
@@ -83,17 +97,21 @@ def prompt_string(df, idx, include_answer=True):
 def evaluate(args, subject, dev_df, test_df):
     prompts, labels = [], []
 
-    shared_multi_shot_prefix = [f"The following are multiple choice questions (with answers) \
-                                about {subject}. \n\n"]
+    shared_multi_shot_prefix = [
+        f"The following are multiple choice questions (with answers) \
+                                about {subject}. \n\n"
+    ]
     shared_multi_shot_prefix_length = 0
     for i in range(dev_df.shape[0]):
         # the multi-shot examples should contain answers
         shared_multi_shot_prefix.append(prompt_string(dev_df, i))
-        
+
         # Use plain list of token IDs, no torch tensors
-        token_ids = tokenizer(shared_multi_shot_prefix[-1], add_special_tokens=True)["input_ids"]
+        token_ids = tokenizer(shared_multi_shot_prefix[-1], add_special_tokens=True)[
+            "input_ids"
+        ]
         shared_multi_shot_prefix_length += len(token_ids)
-        
+
         if shared_multi_shot_prefix_length > 4000:
             break
 
@@ -107,7 +125,7 @@ def evaluate(args, subject, dev_df, test_df):
         prompts.append(prompt)
         label = test_df.iloc[i, test_df.shape[1] - 1]
         labels.append(label)
-    
+
     predictions = []
     for i, prompt in enumerate(prompts):
         prediction = get_llm_response(args, prompt)
@@ -122,10 +140,10 @@ def evaluate(args, subject, dev_df, test_df):
                     break
             else:
                 predictions.append("A")  # Default fallback
-    
 
     accuracy = np.mean(np.array(predictions) == np.array(labels))
     return accuracy
+
 
 def main(args):
     global tokenizer
@@ -139,8 +157,10 @@ def main(args):
     num_questions = []
     output_dict = {}
 
-    for subject_raw in tqdm(subjects[: args.number_of_subjects], desc="Processing subjects"):
-        subject = " ".join(subject_raw.split("_")) # replace underscores with spaces
+    for subject_raw in tqdm(
+        subjects[: args.number_of_subjects], desc="Processing subjects"
+    ):
+        subject = " ".join(subject_raw.split("_"))  # replace underscores with spaces
         dev_df = pd.read_csv(
             os.path.join("data/dev", subject_raw + "_dev.csv"), header=None
         )
@@ -150,16 +170,13 @@ def main(args):
         accuracy = evaluate(args, subject, dev_df, test_df)
         accuracies.append(accuracy)
         num_questions.append(len(test_df))
-        output_dict[subject_raw] = {
-            "accuracy": accuracy,
-            "num_questions": len(test_df)
-        }
-    
+        output_dict[subject_raw] = {"accuracy": accuracy, "num_questions": len(test_df)}
+
     total_accuracy = np.mean(accuracies)
     total_num_questions = sum(num_questions)
     output_dict["total"] = {
         "accuracy": total_accuracy,
-        "num_questions": total_num_questions
+        "num_questions": total_num_questions,
     }
 
     with open(args.result_file, "w") as f:
@@ -167,8 +184,9 @@ def main(args):
         for subject, value in output_dict.items():
             f.write(json.dumps({subject: value}) + "\n")
 
+
 if __name__ == "__main__":
-    set_seed(42) # some tokenizers may have randomness
+    set_seed(42)  # some tokenizers may have randomness
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", type=str, required=True)
     parser.add_argument("--result-file", type=str, required=False)
