@@ -152,6 +152,32 @@ class MooncakestoreConnector(RemoteConnector):
         self.local_cpu_backend = local_cpu_backend
         self.lmcache_config = lmcache_config
 
+        # Register CPU buffer with Mooncake for zero-copy operations
+        self._register_cpu_buffer()
+
+    def _register_cpu_buffer(self):
+        """Register CPU buffer for zero-copy operations."""
+        try:
+            allocator = self.local_cpu_backend.memory_allocator
+            if not hasattr(allocator, "pin_allocator") or not hasattr(
+                allocator.pin_allocator, "buffer"
+            ):
+                logger.warning("Cannot register buffer: incompatible allocator")
+                return
+
+            buffer = allocator.pin_allocator.buffer
+            result = self.store.register_buffer(buffer.data_ptr(), buffer.numel())
+
+            if result == 0:
+                logger.info(
+                    f"Registered CPU buffer: {hex(buffer.data_ptr())}, "
+                    f"{buffer.numel()} bytes"
+                )
+            else:
+                logger.warning(f"Buffer registration failed: error={result}")
+        except Exception as e:
+            logger.error(f"Buffer registration error: {e}")
+
     async def exists(self, key: CacheEngineKey) -> bool:
         return self.store.is_exist(key.to_string())
 
@@ -166,17 +192,28 @@ class MooncakestoreConnector(RemoteConnector):
         metadata_dtype = self.metadata_context.dtype
         metadata_fmt = self.metadata_context.fmt
 
+        # Pre-allocate memory object
         memory_obj = self.local_cpu_backend.allocate(
             metadata_shape,
             metadata_dtype,
             metadata_fmt,
         )
 
+        if memory_obj is None:
+            logger.warning("Failed to allocate memory during remote receive")
+            return None
+
         key_str = key.to_string()
 
         try:
-            buffer = await asyncio.wait_for(
-                asyncio.to_thread(self.store.get_buffer, key_str),
+            # Use get_into for zero-copy reading directly into the allocated buffer
+            buffer_ptr = memory_obj.tensor.data_ptr()
+            buffer_size = memory_obj.tensor.numel() * memory_obj.tensor.element_size()
+
+            bytes_read = await asyncio.wait_for(
+                asyncio.to_thread(
+                    self.store.get_into, key_str, buffer_ptr, buffer_size
+                ),
                 timeout=self.config.transfer_timeout,
             )
         except asyncio.TimeoutError:
@@ -187,25 +224,28 @@ class MooncakestoreConnector(RemoteConnector):
             return None
         except Exception as e:
             logger.error(f"Failed to get key {key_str}. {e}")
-
-        if buffer is None:
             return None
 
-        if memory_obj is None:
-            logger.warning("Failed to allocate memory during remote receive")
+        if bytes_read < 0:
+            logger.error(
+                f"Failed to read data for key {key_str}, error code: {bytes_read}"
+            )
             return None
 
-        if memory_obj.tensor is not None and len(buffer) > 0:
+        if bytes_read == 0:
+            logger.warning(f"No data read for key {key_str}")
+            return None
+
+        if memory_obj.tensor is not None and bytes_read > 0:
             assert metadata_dtype is not None
             expected_data_size = (
                 reduce(operator.mul, metadata_shape) * metadata_dtype.itemsize
             )
-            actual_data_size = len(buffer)
+            actual_data_size = bytes_read
+
             if expected_data_size == actual_data_size:
-                source_tensor = torch.frombuffer(buffer, dtype=metadata_dtype).reshape(
-                    metadata_shape
-                )
-                memory_obj.tensor.copy_(source_tensor)
+                # Data size matches exactly, no need to copy since data is already
+                # in place
                 return memory_obj
             else:
                 # Chunk is not full, need to reshape
@@ -225,12 +265,6 @@ class MooncakestoreConnector(RemoteConnector):
                         f"({expected_elements})"
                     )
                     return None
-                source_tensor = torch.frombuffer(
-                    buffer,
-                    dtype=metadata_dtype,
-                    offset=0,
-                    count=actual_elements,
-                )
 
                 # Calculate actual shape for KV_2LTD format:
                 # [2, num_layers, seq_len, hidden_dim]
@@ -250,9 +284,6 @@ class MooncakestoreConnector(RemoteConnector):
                     )
                     return None
 
-                # Reshape source tensor to match actual data
-                source_tensor = source_tensor.reshape(actual_shape)
-
                 # Update the raw_data buffer to only include the actual elements
                 # This is necessary because the tensor property uses
                 # raw_data.view(dtype).view(shape)
@@ -262,32 +293,48 @@ class MooncakestoreConnector(RemoteConnector):
                 # Update metadata shape to match actual data
                 memory_obj.meta.shape = actual_shape
 
-                # Now copy the data to the correctly sized tensor
-                target_tensor = memory_obj.tensor
-                if target_tensor is not None:
-                    target_tensor.copy_(source_tensor)
-                else:
-                    logger.error("Failed to get tensor view from memory object")
-                    return None
+                # Data is already in the correct location due to get_into
                 return memory_obj
         else:
             return None
 
     async def put(self, key: CacheEngineKey, memory_obj: MemoryObj):
-        kv_bytes = memory_obj.byte_array
         key_str = key.to_string()
         try:
-            await asyncio.wait_for(
-                asyncio.to_thread(self.store.put, key_str, kv_bytes),
-                timeout=self.config.transfer_timeout,
-            )
+            # Check if we can use zero-copy put_from
+            if hasattr(memory_obj, "tensor") and memory_obj.tensor is not None:
+                # Use put_from for zero-copy writing directly from the tensor buffer
+                buffer_ptr = memory_obj.tensor.data_ptr()
+                buffer_size = (
+                    memory_obj.tensor.numel() * memory_obj.tensor.element_size()
+                )
+
+                result = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        self.store.put_from, key_str, buffer_ptr, buffer_size
+                    ),
+                    timeout=self.config.transfer_timeout,
+                )
+
+                if result != 0:
+                    logger.error(
+                        f"Failed to put key {key_str} using put_from, "
+                        f"error code: {result}"
+                    )
+            else:
+                # Fallback to regular put method
+                kv_bytes = memory_obj.byte_array
+                await asyncio.wait_for(
+                    asyncio.to_thread(self.store.put, key_str, kv_bytes),
+                    timeout=self.config.transfer_timeout,
+                )
         except asyncio.TimeoutError:
             logger.warning(
                 f"Timeout when putting key {key_str} from mooncake store."
                 "Decode instance may redo prefill."
             )
         except Exception as e:
-            logger.error(f"Failed to put key {key_str},data: {type(kv_bytes)}: {e}")
+            logger.error(f"Failed to put key {key_str},data: {type(memory_obj)}: {e}")
 
     @no_type_check
     async def list(self) -> List[str]:
