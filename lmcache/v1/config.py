@@ -453,7 +453,7 @@ class LMCacheEngineConfig:
             assert isinstance(res, dict), "value must be a dict"
             return res
 
-        config = LMCacheEngineConfig.from_defaults(remote_url=None, remote_serde=None)
+        config = LMCacheEngineConfig.from_defaults(remote_url=None)
         config.chunk_size = to_int(
             parse_env(get_env_name("chunk_size"), config.chunk_size)
         )
@@ -605,7 +605,7 @@ class LMCacheEngineConfig:
             local_device="cpu" if self.local_cpu else "cuda",
             max_local_cache_size=int(self.max_local_cpu_size),
             remote_url=None,
-            remote_serde=None,
+            remote_serde="naive",
             pipelined_backend=False,
             save_decode_cache=self.save_decode_cache,
             enable_blending=self.enable_blending,
