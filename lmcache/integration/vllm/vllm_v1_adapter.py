@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from __future__ import annotations
+
 # Standard
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional
@@ -32,7 +34,7 @@ import vllm.envs as envs
 import zmq
 
 # First Party
-from lmcache.integration.vllm.utils import ENGINE_NAME, lmcache_get_config
+from lmcache.integration.vllm.utils import ENGINE_NAME, lmcache_get_config, hex_hash_to_int16, apply_mm_hashes_to_token_ids, mask_mm_hashes_in_request
 from lmcache.integration.vllm.vllm_adapter import init_lmcache_engine
 from lmcache.logging import init_logger
 from lmcache.utils import _lmcache_nvtx_annotate
@@ -46,9 +48,9 @@ if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheManager
     from vllm.v1.core.sched.output import CachedRequestData, NewRequestData
     from vllm.v1.request import Request
+    from vllm.multimodal.inputs import PlaceholderRange
 
 logger = init_logger(__name__)
-
 
 def get_zmq_rpc_path_lmcache(
     role: KVConnectorRole,
@@ -168,6 +170,10 @@ class RequestTracker:
     # The number of tokens that has been savd
     num_saved_tokens: int = 0
 
+    # Multimodal hashes and positions
+    mm_hashes: Optional[list[str]] = None
+    mm_positions: Optional[list[PlaceholderRange]] = None
+
     @staticmethod
     def from_new_request(
         new_request: "NewRequestData",
@@ -206,6 +212,8 @@ class RequestTracker:
             token_ids=new_request.prompt_token_ids[:num_tokens_to_compute].copy(),
             allocated_block_ids=unfolded_block_ids,
             num_saved_tokens=0,
+            mm_hashes=new_request.mm_hashes.copy(),
+            mm_positions=new_request.mm_positions.copy(),
         )
 
     def update(
@@ -217,6 +225,14 @@ class RequestTracker:
         """
 
         self.token_ids.extend(cached_request.new_token_ids)
+        
+        # If the request has multimodal hashes, apply them to the token ids
+        apply_mm_hashes_to_token_ids(
+            self.token_ids,
+            self.mm_hashes,
+            self.mm_positions
+        )
+
         new_block_ids: list[int]
 
         if not isinstance(cached_request.new_block_ids[0], list):
@@ -784,6 +800,10 @@ class LMCacheConnectorV1Impl:
             the number of tokens that can be loaded from the
             external KV cache beyond what is already computed.
         """
+
+        # Preprocess the request for multimodal hashes. 
+        request = mask_mm_hashes_in_request(request)
+
         if self.kv_role == "kv_producer":
             return 0
 
@@ -834,6 +854,10 @@ class LMCacheConnectorV1Impl:
         For SharedStorageConnector, update _request_needs_load
         if the CacheManager this allocated blocks for us.
         """
+
+        # Preprocess the request for multimodal hashes. 
+        request = mask_mm_hashes_in_request(request)
+
         if request.request_id not in self.load_specs:
             # No KV tokens from external KV cache, return
             return
@@ -879,6 +903,10 @@ class LMCacheConnectorV1Impl:
             self._request_trackers.pop(finished_req_id, None)
 
         for request in scheduler_output.scheduled_new_reqs:
+
+            # Preprocess the request for multimodal hashes. 
+            request = mask_mm_hashes_in_request(request)
+
             # Right now, we only load KV for new requests
             load_spec = self.load_specs.pop(request.req_id, None)
             num_tokens_to_compute = (
@@ -923,6 +951,10 @@ class LMCacheConnectorV1Impl:
         request: "Request",
         block_ids: list[int],
     ) -> tuple[bool, Optional[dict[str, Any]]]:
+        
+        # Preprocess the request for multimodal hashes. 
+        request = mask_mm_hashes_in_request(request)
+        
         params = request.kv_transfer_params
         return_params = None
 
