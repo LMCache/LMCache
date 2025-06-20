@@ -238,7 +238,9 @@ class RequestTracker:
 
         new_block_ids: list[int]
 
-        if not isinstance(cached_request.new_block_ids[0], list):
+        if len(cached_request.new_block_ids) == 0:
+            new_block_ids = []
+        elif not isinstance(cached_request.new_block_ids[0], list):
             new_block_ids = cached_request.new_block_ids
         else:
             new_block_ids = cached_request.new_block_ids[0]
@@ -389,7 +391,7 @@ class LMCacheConnectorV1Impl:
         is_tp = vllm_config.parallel_config.tensor_parallel_size > 1
 
         config = lmcache_get_config()
-
+        self.layerwise_retrievers = []
         if role == KVConnectorRole.SCHEDULER:
             self.lookup_client = LMCacheLookupClient(role, is_tp, vllm_config)
         else:

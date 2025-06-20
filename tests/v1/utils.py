@@ -91,7 +91,7 @@ def generate_kv_cache_paged(
 
 
 def generate_kv_cache_paged_list_tensors(
-    num_blocks, device, block_size=16, dtype=torch.bfloat16
+    num_blocks, device, block_size=16, dtype=torch.bfloat16, use_mla=False
 ):
     """
     Instead of Tuple[Tuple[Tensor, Tensor]], return List[Tensor]
@@ -99,9 +99,13 @@ def generate_kv_cache_paged_list_tensors(
     """
     ret = []
     num_layers = 32
-    num_heads = 8
+    num_heads = 1 if use_mla else 8
     head_size = 128
-    shape = [2, num_blocks, block_size, num_heads, head_size]
+    shape = (
+        [num_blocks, block_size, head_size]
+        if use_mla
+        else [2, num_blocks, block_size, num_heads, head_size]
+    )
 
     for i in range(num_layers):
         kv = torch.rand(shape, dtype=dtype, device=device)
@@ -223,6 +227,26 @@ def check_paged_kv_cache_equal(
 
         assert (left_k[slot_mapping, :, :] == right_k[slot_mapping, :, :]).all()
         assert (left_v[slot_mapping, :, :] == right_v[slot_mapping, :, :]).all()
+
+
+def check_paged_kv_cache_equal_with_mla(
+    left, right, num_tokens, slot_mapping, head_size=128
+):
+    """
+    check whether two paged kv caches are the same at slot_mapping when use mla
+    """
+    token_dim = 0
+    for left_kv, right_kv in zip(left, right, strict=False):
+        new_left_kv = left_kv.reshape(-1, head_size)
+        new_right_kv = right_kv.reshape(-1, head_size)
+
+        assert len(new_left_kv.shape) == 2
+        assert len(new_right_kv.shape) == 2
+
+        assert new_left_kv.shape[token_dim] >= num_tokens
+        assert new_right_kv.shape[token_dim] >= num_tokens
+
+        assert (new_left_kv[slot_mapping, :] == new_right_kv[slot_mapping, :]).all()
 
 
 def check_kv_cache_device(kvs, device):
