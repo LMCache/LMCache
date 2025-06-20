@@ -284,12 +284,18 @@ class ReqMeta:
         # For save operation: do not save if the following condition is met
         # 1. has already been saved before (num_saved_tokens > 0)
         # 2. number of unsaved tokens is not reached the chunk boundary
+        # 3. if save_decode_cache is False and we are in decode phase (num_saved_tokens > 0)
+        
+        # Skip save if we're in decode phase and save_decode_cache is False
+        config = lmcache_get_config()
+        save_decode_cache = config.save_decode_cache
+        
         skip_leading_tokens = tracker.num_saved_tokens
         chunk_boundary = (
             cdiv(tracker.num_saved_tokens + 1, lmcache_chunk_size) * lmcache_chunk_size
         )
         skip_save = skip_save or (
-            tracker.num_saved_tokens > 0 and input_token_len < chunk_boundary
+            tracker.num_saved_tokens > 0 and input_token_len < chunk_boundary and not save_decode_cache
         )
 
         if skip_save and load_spec is None:
