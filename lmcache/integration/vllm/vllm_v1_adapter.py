@@ -640,11 +640,10 @@ class LMCacheConnectorV1Impl:
                 # return 0 if there is no local storage configured.
                 # In this case, we should rely on the slip_leading_tokens in
                 # save_spec to avoid transmit the already saved tokens again.
-                # skip_leading_tokens = max(
-                #    self.lmcache_engine.lookup(token_ids),
-                #    save_spec.skip_leading_tokens,
-                # )
-                skip_leading_tokens = save_spec.skip_leading_tokens
+                skip_leading_tokens = max(
+                    self.lmcache_engine.lookup(token_ids),
+                    save_spec.skip_leading_tokens,
+                )
 
                 if skip_leading_tokens == len(token_ids):
                     continue  # skip this request
@@ -725,11 +724,10 @@ class LMCacheConnectorV1Impl:
             # 0 if there is no local storage configured. In this case, we
             # should rely on the slip_leading_tokens in save_spec to avoid
             # transmit the already saved tokens again.
-            # skip_leading_tokens = max(
-            #    self.lmcache_engine.lookup(token_ids),
-            #    save_spec.skip_leading_tokens,
-            # )
-            skip_leading_tokens = save_spec.skip_leading_tokens
+            skip_leading_tokens = max(
+                self.lmcache_engine.lookup(token_ids),
+                save_spec.skip_leading_tokens,
+            )
 
             if skip_leading_tokens == len(token_ids):
                 continue  # skip this request
