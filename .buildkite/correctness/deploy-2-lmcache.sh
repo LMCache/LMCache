@@ -158,6 +158,7 @@ CONSUMER_ID=$(sudo docker run -d --gpus all \
     --max-model-len 8192 \
     --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}')
 
+# Working deployment:
 # MODEL_URL="meta-llama/Llama-3.1-8B"
 # sudo docker run -d --gpus all \
 #     --env "HF_TOKEN=$HF_TOKEN" \
@@ -165,7 +166,7 @@ CONSUMER_ID=$(sudo docker run -d --gpus all \
 #     --env "LMCACHE_CHUNK_SIZE=256" \
 #     --env "LMCACHE_LOCAL_CPU=True" \
 #     --env "TORCH_USE_CUDA_DSA=1" \
-#     --env "LMCACHE_MAX_LOCAL_CPU_SIZE=5.0" \
+#     --env "LMCACHE_MAX_LOCAL_CPU_SIZE=1.0" \
 #     --env "LMCACHE_REMOTE_URL=redis://host.docker.internal:6379" \
 #     --env "LMCACHE_REMOTE_SERDE=naive" \
 #     --env "CUDA_VISIBLE_DEVICES=1" \

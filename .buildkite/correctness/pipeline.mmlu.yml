@@ -285,6 +285,13 @@ steps:
       buildkite-agent artifact download ".buildkite/correctness/mmlu-results/deepseek-vllm-baseline.jsonl" . --step "deepseek-vllm" || echo "⚠️ DeepSeek vLLM baseline artifact not found"
       buildkite-agent artifact download ".buildkite/correctness/mmlu-results/deepseek-lmcache.jsonl" . --step "deepseek-lmcache" || echo "⚠️ DeepSeek LMCache artifact not found"
 
+      # Move downloaded files from nested structure to mmlu-results directory
+      echo "📂 Moving downloaded files to mmlu-results directory..."
+      if [ -d ".buildkite/correctness/mmlu-results" ]; then
+        mv .buildkite/correctness/mmlu-results/*.jsonl mmlu-results/ 2>/dev/null || echo "No files to move from nested directory"
+        rmdir -p .buildkite/correctness/mmlu-results 2>/dev/null || true
+      fi
+
       echo "📁 Results contents:"
       ls -la mmlu-results/ || echo "mmlu-results directory not found"
 

@@ -8,6 +8,9 @@ import re
 RESULTS_DIR = os.environ.get("RESULTS_DIR", "mmlu-results")
 OUTFILE = "compare-results/comparison.txt"
 
+# Also check nested buildkite artifact path
+NESTED_RESULTS_DIR = ".buildkite/correctness/mmlu-results"
+
 
 def parse_old_format_file(path):
     """Parse the old text format from mmlu_bench.py"""
@@ -67,25 +70,36 @@ def get_detailed_results_from_jsonl(path):
 
 def main():
     print(f"🔍 Looking for results in: {os.path.abspath(RESULTS_DIR)}")
+    
+    # Check both possible locations for results
+    results_dirs = [RESULTS_DIR]
+    if os.path.exists(NESTED_RESULTS_DIR):
+        results_dirs.append(NESTED_RESULTS_DIR)
+        print(f"🔍 Also checking nested path: {os.path.abspath(NESTED_RESULTS_DIR)}")
 
-    # Check if results directory exists
-    if not os.path.exists(RESULTS_DIR):
-        print(f"❌ Results directory '{RESULTS_DIR}' does not exist")
+    # Check if any results directory exists
+    existing_dirs = [d for d in results_dirs if os.path.exists(d)]
+    if not existing_dirs:
+        print(f"❌ No results directories found. Checked: {results_dirs}")
         print("📁 Current directory contents:")
         for item in os.listdir("."):
             print(f"   - {item}")
         return
 
-    # List all files in results directory
-    all_files = os.listdir(RESULTS_DIR)
-    print(f"📁 Files in {RESULTS_DIR}: {all_files}")
-
     os.makedirs("compare-results", exist_ok=True)
     report = ["🔍 MMLU Benchmark Results\n"]
 
-    # Look for both old format (.txt) and new format (.jsonl) files
-    txt_files = sorted(glob.glob(os.path.join(RESULTS_DIR, "*.txt")))
-    jsonl_files = sorted(glob.glob(os.path.join(RESULTS_DIR, "*.jsonl")))
+    # Look for both old format (.txt) and new format (.jsonl) files in all directories
+    txt_files = []
+    jsonl_files = []
+    
+    for results_dir in existing_dirs:
+        print(f"📁 Checking directory: {results_dir}")
+        all_files = os.listdir(results_dir)
+        print(f"📁 Files in {results_dir}: {all_files}")
+        
+        txt_files.extend(sorted(glob.glob(os.path.join(results_dir, "*.txt"))))
+        jsonl_files.extend(sorted(glob.glob(os.path.join(results_dir, "*.jsonl"))))
     
     print(f"🎯 Found {len(txt_files)} .txt files: {[os.path.basename(f) for f in txt_files]}")
     print(f"🎯 Found {len(jsonl_files)} .jsonl files: {[os.path.basename(f) for f in jsonl_files]}")
