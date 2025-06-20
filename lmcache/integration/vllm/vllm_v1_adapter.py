@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Future
 from __future__ import annotations
 
 # Standard
@@ -34,7 +35,12 @@ import vllm.envs as envs
 import zmq
 
 # First Party
-from lmcache.integration.vllm.utils import ENGINE_NAME, lmcache_get_config, hex_hash_to_int16, apply_mm_hashes_to_token_ids, mask_mm_hashes_in_request
+from lmcache.integration.vllm.utils import (
+    ENGINE_NAME,
+    apply_mm_hashes_to_token_ids,
+    lmcache_get_config,
+    mask_mm_hashes_in_request,
+)
 from lmcache.integration.vllm.vllm_adapter import init_lmcache_engine
 from lmcache.logging import init_logger
 from lmcache.utils import _lmcache_nvtx_annotate
@@ -45,12 +51,13 @@ if TYPE_CHECKING:
     # Third Party
     from vllm.attention.backends.abstract import AttentionMetadata
     from vllm.forward_context import ForwardContext
+    from vllm.multimodal.inputs import PlaceholderRange
     from vllm.v1.core.kv_cache_manager import KVCacheManager
     from vllm.v1.core.sched.output import CachedRequestData, NewRequestData
     from vllm.v1.request import Request
-    from vllm.multimodal.inputs import PlaceholderRange
 
 logger = init_logger(__name__)
+
 
 def get_zmq_rpc_path_lmcache(
     role: KVConnectorRole,
@@ -225,13 +232,9 @@ class RequestTracker:
         """
 
         self.token_ids.extend(cached_request.new_token_ids)
-        
+
         # If the request has multimodal hashes, apply them to the token ids
-        apply_mm_hashes_to_token_ids(
-            self.token_ids,
-            self.mm_hashes,
-            self.mm_positions
-        )
+        apply_mm_hashes_to_token_ids(self.token_ids, self.mm_hashes, self.mm_positions)
 
         new_block_ids: list[int]
 
@@ -801,7 +804,7 @@ class LMCacheConnectorV1Impl:
             external KV cache beyond what is already computed.
         """
 
-        # Preprocess the request for multimodal hashes. 
+        # Preprocess the request for multimodal hashes.
         request = mask_mm_hashes_in_request(request)
 
         if self.kv_role == "kv_producer":
@@ -855,7 +858,7 @@ class LMCacheConnectorV1Impl:
         if the CacheManager this allocated blocks for us.
         """
 
-        # Preprocess the request for multimodal hashes. 
+        # Preprocess the request for multimodal hashes.
         request = mask_mm_hashes_in_request(request)
 
         if request.request_id not in self.load_specs:
@@ -903,8 +906,7 @@ class LMCacheConnectorV1Impl:
             self._request_trackers.pop(finished_req_id, None)
 
         for request in scheduler_output.scheduled_new_reqs:
-
-            # Preprocess the request for multimodal hashes. 
+            # Preprocess the request for multimodal hashes.
             request = mask_mm_hashes_in_request(request)
 
             # Right now, we only load KV for new requests
@@ -951,10 +953,9 @@ class LMCacheConnectorV1Impl:
         request: "Request",
         block_ids: list[int],
     ) -> tuple[bool, Optional[dict[str, Any]]]:
-        
-        # Preprocess the request for multimodal hashes. 
+        # Preprocess the request for multimodal hashes.
         request = mask_mm_hashes_in_request(request)
-        
+
         params = request.kv_transfer_params
         return_params = None
 
