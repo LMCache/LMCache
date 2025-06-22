@@ -1,0 +1,56 @@
+# The vLLM Dockerfile is used to construct vLLM image that can be directly used
+# to run the OpenAI compatible server.
+
+# Please update any changes made here to
+# docs/source/dev/dockerfile/dockerfile.rst and
+# docs/source/assets/dev/dockerfile-stages-dependency.png
+
+#################### BASE BUILD IMAGE ####################
+# prepare basic build environment
+FROM vault.habana.ai/gaudi-docker/1.21.0/ubuntu24.04/habanalabs/pytorch-installer-2.6.0:latest AS base
+ARG PYTHON_VERSION=3.12
+ENV DEBIAN_FRONTEND=noninteractive
+ENV NO_CUDA_EXT=1
+ENV PT_HPU_GPU_MIGRATION=1
+
+
+# install build and runtime dependencies
+# RUN git clone -b dev_hpu git@github.com:intel-sandbox/LMCache-fork.git
+COPY LMCache-fork/requirements/common.txt requirements-common.txt
+COPY LMCache-fork/requirements/hpu.txt requirements-hpu.txt
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python3 -m pip install -r requirements-hpu.txt
+
+#################### BASE BUILD IMAGE ####################
+
+#################### WHEEL BUILD IMAGE ####################
+FROM base AS build
+WORKDIR /workspace
+
+COPY LMCache-fork /workspace/LMCache
+WORKDIR /workspace/LMCache
+
+RUN --mount=type=cache,target=/root/.cache/ccache \
+    --mount=type=cache,target=/root/.cache/pip \
+    python3 setup.py bdist_wheel --dist-dir=dist_lmcache
+
+# max jobs used by Ninja to build extensions
+ARG max_jobs=2
+ENV MAX_JOBS=${max_jobs}
+
+ARG LMCACHE_COMMIT_ID=1
+
+
+#################### vLLM installation IMAGE ####################
+FROM amr-idc-registry.infra-host.com/asv-content/<vllm_hpu_built_image> AS vllm-openai
+RUN --mount=type=bind,from=build,src=/workspace/LMCache/dist_lmcache,target=/workspace/dist_lmcache \
+--mount=type=cache,target=/root/.cache/pip \
+pip install dist_lmcache/*.whl --verbose
+
+ENV no_proxy=localhost,127.0.0.1
+ENV PT_HPU_ENABLE_LAZY_COLLECTIVES=true
+ENV VLLM_SKIP_WARMUP=true
+ENV VLLM_USE_V1=1
+ENV PT_HPU_GPU_MIGRATION=1
+
+ENTRYPOINT ["bash"]

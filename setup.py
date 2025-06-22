@@ -19,6 +19,7 @@ BUILDING_SDIST = "sdist" in sys.argv or os.environ.get("NO_CUDA_EXT", "0") == "1
 BUILD_WITH_HIP = os.environ.get("BUILD_WITH_HIP", "0") == "1"
 
 ENABLE_CXX11_ABI = os.environ.get("ENABLE_CXX11_ABI", "1") == "1"
+BUILD_WITH_HPU = os.environ.get("PT_HPU_GPU_MIGRATION", "0") == "1"
 
 
 def hipify_wrapper() -> None:
@@ -58,6 +59,30 @@ def hipify_wrapper() -> None:
         hipified_sources.append(hipified_s_abs)
 
     assert len(hipified_sources) == len(extra_files)
+
+
+# Taken from https://github.com/vllm-project/vllm/blob/main/setup.py
+def get_requirements() -> list[str]:
+    """Get Python package dependencies from requirements.txt."""
+    requirements_dir = ROOT_DIR / "requirements"
+
+    def _read_requirements(filename: str) -> list[str]:
+        with open(requirements_dir / filename) as f:
+            requirements = f.read().strip().split("\n")
+        resolved_requirements = []
+        for line in requirements:
+            if line.startswith("-r "):
+                resolved_requirements += _read_requirements(line.split()[1])
+            elif (
+                not line.startswith("--")
+                and not line.startswith("#")
+                and line.strip() != ""
+            ):
+                resolved_requirements.append(line)
+        return resolved_requirements
+
+    filename = "hpu.txt" if BUILD_WITH_HPU else "common.txt"
+    return _read_requirements(filename)
 
 
 def cuda_extension() -> tuple[list, dict]:
@@ -153,6 +178,8 @@ if __name__ == "__main__":
         get_extension = source_dist_extension
     elif BUILD_WITH_HIP:
         get_extension = rocm_extension
+    elif BUILD_WITH_HPU:
+        get_extension = lambda: ([], {})
     else:
         get_extension = cuda_extension
 
@@ -162,6 +189,7 @@ if __name__ == "__main__":
         packages=find_packages(
             exclude=("csrc",)
         ),  # Ensure csrc is excluded if it only contains sources
+        install_requires=get_requirements(),
         ext_modules=ext_modules,
         cmdclass=cmdclass,
         include_package_data=True,

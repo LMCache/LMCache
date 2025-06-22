@@ -183,8 +183,20 @@ class RequestTracker:
             new_block_ids = []
         elif isinstance(new_block_ids, tuple):
             new_block_ids = new_block_ids[0]
-        elif isinstance(new_block_ids, list):
+        elif isinstance(new_block_ids, list) and all(
+            isinstance(elem, int) for elem in new_block_ids
+        ):
             pass
+        elif isinstance(new_block_ids, list) and any(
+            isinstance(elem, list) for elem in new_block_ids
+        ):
+            flattened: list[int] = []
+            for elem in new_block_ids:
+                if isinstance(elem, list):
+                    flattened.extend(elem)
+                else:
+                    flattened.append(elem)
+            new_block_ids = flattened
         else:
             raise ValueError(f"Unsupported new_block_ids type {type(new_block_ids)}")
         self.allocated_block_ids.extend(new_block_ids)

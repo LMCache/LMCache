@@ -11,7 +11,7 @@ import torch
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.memory_management import MemoryFormat
 
-MAX_KEY_LENGTH = 150
+MAX_KEY_LENGTH = 250
 
 
 class Constants:

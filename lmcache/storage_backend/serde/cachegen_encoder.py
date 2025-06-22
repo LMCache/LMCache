@@ -15,7 +15,13 @@ from lmcache.storage_backend.serde.cachegen_basics import (
 )
 from lmcache.storage_backend.serde.serde import Serializer
 from lmcache.utils import _lmcache_nvtx_annotate
-import lmcache.c_ops as lmc_ops
+
+try:
+    # First Party
+    import lmcache.c_ops as lmc_ops
+except (ModuleNotFoundError, ImportError):
+    pass
+# First Party
 import lmcache.storage_backend.serde.cachegen_basics as CGBasics
 
 logger = init_logger(__name__)
