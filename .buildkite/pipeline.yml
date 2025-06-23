@@ -10,6 +10,7 @@ steps:
           path: ".venv"
           save: "pipeline"
     command:
+      - echo "${BUILDKITE_BUILD_ID}"
       - bash .buildkite/install-env.sh
 
   - label: ":pytest: Run pytest"
@@ -23,6 +24,7 @@ steps:
           path: ".venv"
           restore: "pipeline"
     command:
+      - echo "${BUILDKITE_BUILD_ID}"
       - bash .buildkite/install-lmcache.sh
       - source .venv/bin/activate
       - |
