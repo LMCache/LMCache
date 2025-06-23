@@ -12,6 +12,9 @@ else
   uv venv --python "$PYTHON_BIN" "$VENV_DIR"
 fi
 
+echo "📦 Installed packages in venv:"
+uv pip freeze
+
 uv pip install -e .
 
 # List installed packages for debugging
