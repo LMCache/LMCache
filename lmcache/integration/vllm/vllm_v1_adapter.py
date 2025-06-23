@@ -127,6 +127,9 @@ class LMCacheLookupServer:
 
         self.thread = threading.Thread(target=process_request, daemon=True)
         self.thread.start()
+        logger.info(
+            f"Started LMCache lookup server for tp = {vllm_config.parallel_config.rank}"
+        )
 
     def close(self):
         self.socket.close(linger=0)
@@ -381,6 +384,7 @@ class LMCacheConnectorV1Impl:
                 vllm_config.parallel_config,
                 vllm_config.cache_config,
                 vllm_config.scheduler_config,
+                vllm_config,
             )
 
             self.use_layerwise = config.use_layerwise
@@ -430,6 +434,12 @@ class LMCacheConnectorV1Impl:
             vllm_config.parallel_config
         )
         self.current_layer = 0
+        logger.info(
+            f"Init LMCacheConnectorV1Impl(role={role}) with "
+            f"discard_partial_chunks: {self._discard_partial_chunks}, "
+            f"skip_last_n_tokens: {self.skip_last_n_tokens}, "
+            f"num_layers: {self.num_layers}"
+        )
 
     def _init_kv_caches_from_forward_context(self, forward_context: "ForwardContext"):
         for layer_name in forward_context.no_compile_layers:
