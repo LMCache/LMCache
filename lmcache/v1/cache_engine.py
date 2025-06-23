@@ -292,6 +292,8 @@ class LMCacheEngine:
                         )
                         memory_obj = future_memory_obj.result()
                     if memory_obj is None:
+                        logger.warn(f"{tg.rank=} retrive memory_obj is None")
+                        tg.broadcast_object(None, tg.first_rank)
                         break
                 #logger.info(f"retrive storage_manager.get {memory_obj.metadata.to_dict()=} {tg.rank=}, cost: {round((time.time()-t)*1000)}")
                 # broadcast
@@ -301,6 +303,9 @@ class LMCacheEngine:
                 #logger.info(f"retrive broadcast tensor {tg.rank=}, cost: {round((time.time()-t)*1000)}")
             else:
                 metadata_dict = tg.broadcast_object(None, tg.first_rank)
+                if metadata_dict is None:
+                    logger.warn(f"retrive broadcast tensor {tg.rank=}, cost: {round((time.time()-t)*1000)}")
+                    break
                 #logger.info(f"retrive broadcast_object metadata {tg.rank=}, cost: {round((time.time()-t)*1000)}")
                 metadata = MemoryObjMetadata.from_dict(metadata_dict)
                 tensor = torch.empty(metadata.shape, dtype=metadata.dtype, device=f"cuda:{tg.rank}")
