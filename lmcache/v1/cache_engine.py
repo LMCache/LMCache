@@ -331,7 +331,6 @@ class LMCacheEngine:
             memory_obj = None
             if tg.is_first_rank:
                 memory_obj = self.storage_manager.get(key)
-                #logger.info(f"retrive storage_manager.get {memory_obj.metadata.to_dict()=} {tg.rank=}, cost: {round((time.time()-t)*1000)}")
 
                 if memory_obj is None:
                     if self.enable_p2p:
@@ -342,6 +341,7 @@ class LMCacheEngine:
                         memory_obj = future_memory_obj.result()
                     if memory_obj is None:
                         break
+                #logger.info(f"retrive storage_manager.get {memory_obj.metadata.to_dict()=} {tg.rank=}, cost: {round((time.time()-t)*1000)}")
                 # broadcast
                 tg.broadcast_object(memory_obj.metadata.to_dict(), tg.first_rank)
                 #logger.info(f"retrive broadcast_object metadata {tg.rank=}, cost: {round((time.time()-t)*1000)}")
