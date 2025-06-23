@@ -168,7 +168,7 @@ class LMCacheEngine:
         """
         tg = get_tp_group()
         if not tg.is_first_rank:
-            logger.info(f"{tg.rank=} ignore store")
+            logger.debug(f"{tg.rank=} ignore store")
             return
 
         if mask is not None:
@@ -271,19 +271,19 @@ class LMCacheEngine:
             num_required_tokens = len(tokens)
         monitor_req_id = self.stats_monitor.on_retrieve_request(num_required_tokens)
         tg = get_tp_group()
-        logger.info(f"retrieve {tg.rank=}")
+        #logger.info(f"retrieve {tg.rank=}")
 
         ret_mask = torch.zeros_like(tokens, dtype=torch.bool, device="cpu")
         for start, end, key in self.token_database.process_tokens(tokens, mask):
             assert isinstance(key, CacheEngineKey)
 
             t = time.time()
-            logger.info(f"retrieve {tg.rank=}, {start=}, {end=}, {key=} start for")
+            #logger.info(f"retrieve {tg.rank=}, {start=}, {end=}, {key=} start for")
             # Get the memory object from the storage backend
             memory_obj = None
             if tg.is_first_rank:
                 memory_obj = self.storage_manager.get(key)
-                logger.info(f"retrive storage_manager.get {memory_obj.metadata.to_dict()=} {tg.rank=}, cost: {round((time.time()-t)*1000)}")
+                #logger.info(f"retrive storage_manager.get {memory_obj.metadata.to_dict()=} {tg.rank=}, cost: {round((time.time()-t)*1000)}")
 
                 if memory_obj is None:
                     if self.enable_p2p:
@@ -296,20 +296,20 @@ class LMCacheEngine:
                         break
                 # broadcast
                 tg.broadcast_object(memory_obj.metadata.to_dict(), tg.first_rank)
-                logger.info(f"retrive broadcast_object metadata {tg.rank=}, cost: {round((time.time()-t)*1000)}")
+                #logger.info(f"retrive broadcast_object metadata {tg.rank=}, cost: {round((time.time()-t)*1000)}")
                 tg.broadcast(memory_obj.tensor.to(f"cuda:{tg.rank}"), tg.first_rank)
-                logger.info(f"retrive broadcast tensor {tg.rank=}, cost: {round((time.time()-t)*1000)}")
+                #logger.info(f"retrive broadcast tensor {tg.rank=}, cost: {round((time.time()-t)*1000)}")
             else:
                 metadata_dict = tg.broadcast_object(None, tg.first_rank)
-                logger.info(f"retrive broadcast_object metadata {tg.rank=}, cost: {round((time.time()-t)*1000)}")
+                #logger.info(f"retrive broadcast_object metadata {tg.rank=}, cost: {round((time.time()-t)*1000)}")
                 metadata = MemoryObjMetadata.from_dict(metadata_dict)
                 tensor = torch.empty(metadata.shape, dtype=metadata.dtype, device=f"cuda:{tg.rank}")
                 tensor = tg.broadcast(tensor, tg.first_rank)
-                logger.info(f"retrive broadcast tensor {tg.rank=}, cost: {round((time.time()-t)*1000)}")
+                #logger.info(f"retrive broadcast tensor {tg.rank=}, cost: {round((time.time()-t)*1000)}")
                 memory_obj = TensorMemoryObj(raw_data=tensor, metadata=metadata)
                 memory_obj.pin()
 
-            logger.info(f"retrive broadcast_object {memory_obj.metadata.to_dict()=} {tg.rank=}, cost: {round((time.time()-t)*1000)}")
+            #logger.info(f"retrive broadcast_object {memory_obj.metadata.to_dict()=} {tg.rank=}, cost: {round((time.time()-t)*1000)}")
 
             ret_mask[start:end] = True
 
