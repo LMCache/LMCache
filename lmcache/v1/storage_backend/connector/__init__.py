@@ -326,7 +326,7 @@ class MooncakestoreConnectorAdapter(ConnectorAdapter):
             dev_name=device_name,
             loop=context.loop,
             local_cpu_backend=context.local_cpu_backend,
-            config=context.config,
+            lmcache_config=context.config,
         )
 
 
@@ -393,7 +393,8 @@ class AuditConnectorAdapter(ConnectorAdapter):
         connector = CreateConnector(
             real_url, context.loop, context.local_cpu_backend, context.config
         )
-        return AuditConnector(connector, verify_checksum)
+        # As the real connector is wrapped, we need to get the wrapped connector
+        return AuditConnector(connector.getWrappedConnector(), verify_checksum)
 
 
 class FsConnectorAdapter(ConnectorAdapter):
@@ -486,7 +487,7 @@ def CreateConnector(
     loop: asyncio.AbstractEventLoop,
     local_cpu_backend: LocalCPUBackend,
     config: Optional[LMCacheEngineConfig] = None,
-) -> Optional[RemoteConnector]:
+) -> Optional[InstrumentedRemoteConnector]:
     """
     Create a remote connector from the given URL.
 
