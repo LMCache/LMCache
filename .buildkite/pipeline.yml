@@ -9,6 +9,7 @@ steps:
           key-extra: "venv-{{ BUILDKITE_BUILD_ID }}"
           path: ".venv"
           save: "pipeline"
+          force: "true"
     command:
       - bash .buildkite/install-env.sh
 
