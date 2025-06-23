@@ -5,12 +5,11 @@ steps:
   - label: ":pip: Prepare venv"
     key: "venv"
     plugins:
-      - cache#v1.5.2:
-          key: "venv-{{ BUILDKITE_BUILD_ID }}-{{ checksum \"requirements/common.txt\" }}-{{ checksum \"requirements/test.txt\" }}"
+      - cache#v1.7.0:
+          key-extra: "venv-{{ BUILDKITE_BUILD_ID }}"
           path: ".venv"
           save: "pipeline"
     command:
-      - echo "${BUILDKITE_BUILD_ID}"
       - bash .buildkite/install-env.sh
 
   - label: ":pytest: Run pytest"
@@ -19,12 +18,11 @@ steps:
       - "venv"
     timeout_in_minutes: 25
     plugins:
-      - cache#v1.5.2:
-          key: "venv-{{ BUILDKITE_BUILD_ID }}-{{ checksum \"requirements/common.txt\" }}-{{ checksum \"requirements/test.txt\" }}"
+      - cache#v1.7.0:
+          key-extra: "venv-{{ BUILDKITE_BUILD_ID }}"
           path: ".venv"
           restore: "pipeline"
     command:
-      - echo "${BUILDKITE_BUILD_ID}"
       - bash .buildkite/install-lmcache.sh
       - source .venv/bin/activate
       - |
