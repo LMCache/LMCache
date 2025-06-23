@@ -159,6 +159,9 @@ class LMCacheConnector:
             offset=offset,
         )
 
+    def chunk_size(self):
+        return self.lmcache_engine.config.chunk_size
+
     def reset(self):
         self.lmcache_engine.clear()
 
