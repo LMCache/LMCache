@@ -358,6 +358,7 @@ class LMCacheConnectorV1Impl:
                 vllm_config.parallel_config,
                 vllm_config.cache_config,
                 vllm_config.scheduler_config,
+                vllm_config,
             )
 
             self.use_layerwise = config.use_layerwise
@@ -411,6 +412,12 @@ class LMCacheConnectorV1Impl:
             vllm_config.parallel_config
         )
         self.current_layer = 0
+        logger.info(
+            f"Init LMCacheConnectorV1Impl(role={role}) with "
+            f"discard_partial_chunks: {self._discard_partial_chunks}, "
+            f"skip_last_n_tokens: {self.skip_last_n_tokens}, "
+            f"num_layers: {self.num_layers}"
+        )
 
         self.force_skip_save = bool(os.environ.get("LMCACHE_FORCE_SKIP_SAVE", False))
 

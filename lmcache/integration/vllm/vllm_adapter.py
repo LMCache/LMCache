@@ -25,6 +25,7 @@ import torch.distributed as dist
 
 if TYPE_CHECKING:
     from vllm.worker.model_runner import ModelInputForGPUWithSamplingMetadata
+    from vllm.config import VllmConfig
 
 # Third Party
 from vllm.attention import AttentionMetadata
@@ -111,6 +112,7 @@ def init_lmcache_engine(
     parallel_config: ParallelConfig,
     cache_config: CacheConfig,
     scheduler_config: SchedulerConfig,
+    vllm_config: Optional["VllmConfig"] = None,
 ) -> Optional[LMCacheEngine]:
     """Initialize the LMCache engine by the given model config and parallel
     config. This function will check the environment variable
@@ -162,11 +164,22 @@ def init_lmcache_engine(
 
     # construct kv shape (for mem pool)
     num_layer = model_config.get_num_layers(parallel_config)
+    num_mtp_layers = 0
+    if vllm_config is not None and vllm_config.speculative_config is not None:
+        logger.info(f"vllm_config.speculative_config: {vllm_config.speculative_config}")
+        # TODO(baoloongmao): Support other MTP methods
+        if vllm_config.speculative_config.method == "deepseek_mtp":
+            num_mtp_layers = getattr(
+                model_config.hf_config, "num_nextn_predict_layers", 0
+            )
+    num_layer += num_mtp_layers
     chunk_size = config.chunk_size
     num_kv_head = model_config.get_num_kv_heads(parallel_config)
     head_size = model_config.get_head_size()
     kv_shape = (num_layer, 1 if use_mla else 2, chunk_size, num_kv_head, head_size)
-    logger.info(f"use mla: {use_mla}, kv shape: {kv_shape}")
+    logger.info(
+        f"use mla: {use_mla}, kv shape: {kv_shape}, num_mtp_layers:{num_mtp_layers}"
+    )
 
     # Change current device.
     torch.cuda.device(parallel_config.rank)
