@@ -35,3 +35,4 @@ steps:
     artifact_paths:
       - "durations/test.html"
       - "coverage-test.xml"
+      - "coverage-test/**/*"

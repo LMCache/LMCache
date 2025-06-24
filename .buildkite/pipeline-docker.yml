@@ -36,6 +36,7 @@ steps:
     artifact_paths:
      - "durations/test.html"
      - "coverage-test.xml"
+     - "coverage-test/**/*"
     plugins:
       - docker#v5.9.0:
           image: "python:3.13"
