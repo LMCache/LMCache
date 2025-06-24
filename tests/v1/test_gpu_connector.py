@@ -173,6 +173,15 @@ def test_layerwise_vllm_paged_connector_with_gpu(use_gpu, use_mla):
 
     gpu_kv_src = generate_kv_cache_paged_list_tensors(num_blocks, device, block_size,use_mla=use_mla)
     gpu_kv_dst = generate_kv_cache_paged_list_tensors(num_blocks, device, block_size,use_mla=use_mla)
+    if use_mla:
+        gpu_kv_src = [
+            (kv.view(num_blocks, block_size, num_heads, head_size), kv.view(num_blocks, block_size, num_heads, head_size))
+            for kv in gpu_kv_src
+        ]
+        gpu_kv_dst = [
+            (kv.view(num_blocks, block_size, num_heads, head_size), kv.view(num_blocks, block_size, num_heads, head_size))
+            for kv in gpu_kv_dst
+        ]
     dtype = gpu_kv_src[0][0].dtype
 
     slot_mapping = random.sample(range(0, num_blocks * block_size), num_tokens)
@@ -250,12 +259,7 @@ def test_layerwise_vllm_paged_connector_with_gpu(use_gpu, use_mla):
 
     assert connector.gpu_buffer_allocator.memcheck()
 
-    if use_mla:
-        check_paged_kv_cache_equal_with_mla(
-            gpu_kv_src, gpu_kv_dst, num_tokens, slot_mapping, head_size
-        )
-    else:
-        check_paged_kv_cache_equal(
+    check_paged_kv_cache_equal(
         gpu_kv_src, gpu_kv_dst, num_tokens, slot_mapping, num_heads, head_size
     )
 
