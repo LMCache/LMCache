@@ -175,7 +175,7 @@ class RequestTracker:
 
     # Multimodal hashes and positions
     mm_hashes: Optional[list[str]] = None
-    mm_positions: Optional[list[PlaceholderRange]] = None
+    mm_positions: Optional[list["PlaceholderRange"]] = None
 
     @staticmethod
     def from_new_request(
@@ -261,8 +261,6 @@ class ReqMeta:
         load_spec: Optional[LoadSpec] = None,
         skip_save: bool = False,
         discard_partial_chunks: bool = True,
-        mm_hashes: Optional[list[str]] = None,
-        mm_positions: Optional[list[PlaceholderRange]] = None,
     ) -> Optional["ReqMeta"]:
         """Create the request metadata from a request tracker.
 
@@ -314,8 +312,10 @@ class ReqMeta:
         token_ids = torch.tensor(input_token_ids)[:num_tokens_to_save]
 
         # If the request has multimodal hashes, apply them to the token ids
-        if mm_hashes:
-            apply_mm_hashes_to_token_ids(token_ids, mm_hashes, mm_positions)
+        if tracker.mm_hashes:
+            apply_mm_hashes_to_token_ids(
+                token_ids, tracker.mm_hashes, tracker.mm_positions
+            )
 
         num_blocks = len(tracker.allocated_block_ids)
 
@@ -926,14 +926,13 @@ class LMCacheConnectorV1Impl:
                 load_spec=load_spec,
                 skip_save=force_skip_save,
                 discard_partial_chunks=self._discard_partial_chunks,
-                mm_hashes=request.mm_hashes,
-                mm_positions=request.mm_positions,
             )
             if req_meta is not None:
                 meta.add_request(req_meta)
 
         for request in scheduler_output.scheduled_cached_reqs:
             request_tracker = self._request_trackers[request.req_id]
+            request_tracker.update(request)
 
             req_meta = ReqMeta.from_request_tracker(
                 request_tracker,
@@ -942,8 +941,6 @@ class LMCacheConnectorV1Impl:
                 load_spec=None,
                 skip_save=force_skip_save,
                 discard_partial_chunks=self._discard_partial_chunks,
-                mm_hashes=request_tracker.mm_hashes,
-                mm_positions=request_tracker.mm_positions,
             )
             if req_meta is not None:
                 meta.add_request(req_meta)

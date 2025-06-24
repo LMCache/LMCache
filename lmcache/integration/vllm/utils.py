@@ -13,10 +13,11 @@
 # limitations under the License.
 
 # Standard
-from typing import TYPE_CHECKING, Union
+from typing import Union
 import os
 
 # Third Party
+from vllm.multimodal.inputs import PlaceholderRange
 import torch
 
 # First Party
@@ -25,10 +26,6 @@ from lmcache.logging import init_logger
 from lmcache.v1.config import (
     LMCacheEngineConfig as V1Config,  # type: ignore[assignment]
 )
-
-if TYPE_CHECKING:
-    # Third Party
-    from vllm.multimodal.inputs import PlaceholderRange
 
 logger = init_logger(__name__)
 ENGINE_NAME = "vllm-instance"
