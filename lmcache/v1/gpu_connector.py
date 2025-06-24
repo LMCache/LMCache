@@ -833,6 +833,7 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
         """ """
         self.hidden_dim_size = hidden_dim_size
         self.num_layers = num_layers
+        self.use_mla = "use_mla" in kwargs and kwargs["use_mla"]
 
         if use_gpu:
             assert "chunk_size" in kwargs, (
@@ -1067,7 +1068,11 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
         yield
 
     def get_shape(self, num_tokens: int) -> torch.Size:
-        return torch.Size([num_tokens, 2, self.hidden_dim_size])
+        return (
+            torch.Size([num_tokens, 2, self.hidden_dim_size])
+            if not self.use_mla
+            else torch.Size([num_tokens, 1, self.hidden_dim_size])
+        )
 
 
 class SGLangGPUConnector(GPUConnectorInterface):
@@ -1250,3 +1255,4 @@ class SGLangGPUConnector(GPUConnectorInterface):
     def batched_from_gpu(self, memory_objs, starts, ends, **kwargs):
         for memory_obj, start, end in zip(memory_objs, starts, ends, strict=False):
             self.from_gpu(memory_obj, start, end, **kwargs)
+

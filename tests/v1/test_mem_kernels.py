@@ -406,33 +406,46 @@ def test_multi_layer_kernel_use_mla(num_tokens):
 
 @pytest.mark.parametrize("num_tokens", [256, 500, 1024, 8000])
 @pytest.mark.parametrize("token_major", [True, False])
-def test_single_layer_kernel(num_tokens, token_major):
+@pytest.mark.parametrize("use_mla", [True, False])
+def test_single_layer_kernel(num_tokens, token_major, use_mla):
     device = "cuda"
 
     num_layers = 32
     num_blocks = 1000
     block_size = 16
-    num_heads = 8
-    head_size = 128
+    num_heads = 8 if not use_mla else 1
+    head_size = 576
     hidden_dim_size = num_heads * head_size
     dtype = torch.bfloat16
     kv_cache = generate_kv_cache_paged_list_tensors(
-        num_blocks, device, block_size, dtype
+        num_blocks, device, block_size, dtype, use_mla=use_mla, num_heads=num_heads, head_size=head_size
     )
     kv_cache_new = generate_kv_cache_paged_list_tensors(
-        num_blocks, device, block_size, dtype
+        num_blocks, device, block_size, dtype, use_mla=use_mla, num_heads=num_heads, head_size=head_size
     )
     slot_mapping = random.sample(range(0, num_blocks * block_size), num_tokens)
     slot_mapping = torch.tensor(slot_mapping, device=device)
 
+    kv_size = 2 if not use_mla else 1
+
     if token_major:
         tmp_gpu_buffer = torch.empty(
-            (num_tokens, 2, hidden_dim_size), dtype=dtype, device=device
+            (num_tokens, kv_size, hidden_dim_size), dtype=dtype, device=device
         )
     else:
         tmp_gpu_buffer = torch.empty(
-            (2, num_tokens, hidden_dim_size), dtype=dtype, device=device
+            (kv_size, num_tokens, hidden_dim_size), dtype=dtype, device=device
         )
+
+    if use_mla:
+        kv_cache = [
+            (kv.view(num_blocks, block_size, num_heads, head_size), kv.view(num_blocks, block_size, num_heads, head_size))
+            for kv in kv_cache
+        ]
+        kv_cache_new = [
+            (kv.view(num_blocks, block_size, num_heads, head_size), kv.view(num_blocks, block_size, num_heads, head_size))
+            for kv in kv_cache_new
+        ]
 
     for layer_id in range(num_layers):
         lmc_ops.single_layer_kv_transfer(
@@ -442,6 +455,7 @@ def test_single_layer_kernel(num_tokens, token_major):
             slot_mapping,
             True,
             token_major,
+            use_mla
         )
         lmc_ops.single_layer_kv_transfer(
             tmp_gpu_buffer,
@@ -450,6 +464,7 @@ def test_single_layer_kernel(num_tokens, token_major):
             slot_mapping,
             False,
             token_major,
+            use_mla
         )
 
     check_paged_kv_cache_equal(
@@ -457,4 +472,6 @@ def test_single_layer_kernel(num_tokens, token_major):
         kv_cache_new,
         num_tokens,
         slot_mapping,
+        num_heads=num_heads,
+        head_size=head_size,
     )

@@ -91,7 +91,13 @@ def generate_kv_cache_paged(
 
 
 def generate_kv_cache_paged_list_tensors(
-    num_blocks, device, block_size=16, dtype=torch.bfloat16, use_mla=False
+    num_blocks,
+    device,
+    block_size=16,
+    dtype=torch.bfloat16,
+    use_mla=False,
+    num_heads=8,
+    head_size=128,
 ):
     """
     Instead of Tuple[Tuple[Tensor, Tensor]], return List[Tensor]
@@ -99,8 +105,7 @@ def generate_kv_cache_paged_list_tensors(
     """
     ret = []
     num_layers = 32
-    num_heads = 1 if use_mla else 8
-    head_size = 128
+    num_heads = 1 if use_mla else num_heads
     shape = (
         [num_blocks, block_size, head_size]
         if use_mla

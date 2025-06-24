@@ -114,7 +114,8 @@ __global__ void reshape_and_cache_back_flash_kernel(
   }
 }
 
-template <typename scalar_t>
+// General template that dispatches to specialized versions
+template <typename scalar_t, bool DIRECTION, bool IS_MLA>
 __global__ void single_layer_kv_transfer_kernel(
     // scalar_t* __restrict__ lmc_key_cache,    // [num_tokens,
     // num_heads*head_size] scalar_t* __restrict__ lmc_value_cache,  //
@@ -131,7 +132,7 @@ __global__ void single_layer_kv_transfer_kernel(
     const int64_t* __restrict__ slot_mapping,    // [num_tokens]
     const int block_stride_in_64bit, const int lmc_stride,
     const int lmc_value_offset, const int num_heads,
-    const int head_size_in_64bit, const int block_size, const bool direction) {
+    const int head_size_in_64bit, const int block_size) {
   const int64_t token_idx = blockIdx.x;
   const int64_t slot_idx = slot_mapping[token_idx];
 
@@ -154,12 +155,18 @@ __global__ void single_layer_kv_transfer_kernel(
         block_offset * num_heads * head_size_in_64bit +
         head_idx * head_size_in_64bit + head_offset;
 
-    if (direction) {
+    if constexpr (DIRECTION) {
       lmc_key_value_cache[lmc_key_idx] = vllm_key_cache[vllm_key_value_idx];
-      lmc_key_value_cache[lmc_value_idx] = vllm_value_cache[vllm_key_value_idx];
+      if constexpr (!IS_MLA) {
+        lmc_key_value_cache[lmc_value_idx] =
+            vllm_value_cache[vllm_key_value_idx];
+      }
     } else {
       vllm_key_cache[vllm_key_value_idx] = lmc_key_value_cache[lmc_key_idx];
-      vllm_value_cache[vllm_key_value_idx] = lmc_key_value_cache[lmc_value_idx];
+      if constexpr (!IS_MLA) {
+        vllm_value_cache[vllm_key_value_idx] =
+            lmc_key_value_cache[lmc_value_idx];
+      }
     }
   }
 }
@@ -463,10 +470,11 @@ void single_layer_kv_transfer(
     torch::Tensor& slot_mapping,  // [num_tokens]
     const bool direction,   // false: LMCache to PagedBuffer, true: PagedBuffer
                             // to LMCache
-    const bool token_major  // true: lmc_key_value_cache is
+    const bool token_major,  // true: lmc_key_value_cache is
                             // [num_tokens, 2, num_heads*head_size]
                             // false: lmc_key_value_cache is
                             // [2, num_tokens, num_heads*head_size]
+    const bool is_mla // true: MLA case where key and value are combined
 ) {
   // int64_t* lmc_key_cache_ptr = get_kernel_ptr<int64_t,
   // torch::Tensor>(lmc_key_cache); int64_t* lmc_value_cache_ptr =
@@ -508,10 +516,35 @@ void single_layer_kv_transfer(
   const at::cuda::OptionalCUDAGuard device_guard(device_of(vllm_key_cache));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
-  lmc::single_layer_kv_transfer_kernel<int64_t><<<grid, block, 0, stream>>>(
-      lmc_key_value_cache_ptr, vllm_key_cache_ptr, vllm_value_cache_ptr,
-      slot_mapping_ptr, block_stride_in_64bit, lmc_stride, lmc_value_offset,
-      num_heads, head_size_in_64bit, block_size, direction);
+  if (is_mla) {
+    if (direction) {
+      lmc::single_layer_kv_transfer_kernel<int64_t, true, true>
+          <<<grid, block, 0, stream>>>(
+              lmc_key_value_cache_ptr, vllm_key_cache_ptr, vllm_value_cache_ptr,
+              slot_mapping_ptr, block_stride_in_64bit, lmc_stride, lmc_value_offset,
+              num_heads, head_size_in_64bit, block_size);
+    } else {
+      lmc::single_layer_kv_transfer_kernel<int64_t, false, true>
+          <<<grid, block, 0, stream>>>(
+              lmc_key_value_cache_ptr, vllm_key_cache_ptr, vllm_value_cache_ptr,
+              slot_mapping_ptr, block_stride_in_64bit, lmc_stride, lmc_value_offset,
+              num_heads, head_size_in_64bit, block_size);
+    }
+  } else {
+    if (direction) {
+      lmc::single_layer_kv_transfer_kernel<int64_t, true, false>
+          <<<grid, block, 0, stream>>>(
+              lmc_key_value_cache_ptr, vllm_key_cache_ptr, vllm_value_cache_ptr,
+              slot_mapping_ptr, block_stride_in_64bit, lmc_stride, lmc_value_offset,
+              num_heads, head_size_in_64bit, block_size);
+    } else {
+      lmc::single_layer_kv_transfer_kernel<int64_t, false, false>
+          <<<grid, block, 0, stream>>>(
+              lmc_key_value_cache_ptr, vllm_key_cache_ptr, vllm_value_cache_ptr,
+              slot_mapping_ptr, block_stride_in_64bit, lmc_stride, lmc_value_offset,
+              num_heads, head_size_in_64bit, block_size);
+    }
+  }
 }
 
 void load_and_reshape_flash(
