@@ -5,10 +5,11 @@ steps:
   - label: ":pip: Prepare venv"
     key: "venv"
     plugins:
-      - cache#v1.5.2:
-          key: "venv-{{ checksum \"requirements/common.txt\" }}-{{ checksum \"requirements/test.txt\" }}"
+      - cache#v1.7.0:
+          key-extra: "venv-{{ BUILDKITE_BUILD_ID }}"
           path: ".venv"
           save: "pipeline"
+          force: "true"
     command:
       - bash .buildkite/install-env.sh
 
@@ -18,8 +19,8 @@ steps:
       - "venv"
     timeout_in_minutes: 25
     plugins:
-      - cache#v1.5.2:
-          key: "venv-{{ checksum \"requirements/common.txt\" }}-{{ checksum \"requirements/test.txt\" }}"
+      - cache#v1.7.0:
+          key-extra: "venv-{{ BUILDKITE_BUILD_ID }}"
           path: ".venv"
           restore: "pipeline"
     command:
@@ -27,18 +28,11 @@ steps:
       - source .venv/bin/activate
       - |
         LMCACHE_TRACK_USAGE="false" \
-        coverage run --source=lmcache/ -m pytest -xsv \
-          --junitxml=junit/test-results.xml \
-          --ignore=tests/disagg \
-          --ignore=tests/v1/test_pos_kernels.py
-      - coverage report -m > coverage.txt
+        pytest --cov=lmcache \
+          --cov-report term --cov-report=html:coverage-test \
+          --cov-report=xml:coverage-test.xml --html=durations/test.html \
+          --ignore=tests/disagg --ignore=tests/v1/test_pos_kernels.py
     artifact_paths:
-      - "junit/test-results.xml"
-      - "coverage.txt"
-
-  - label: ":junit: Annotate"
-    depends_on:
-      - "pytest"
-    plugins:
-      - junit-annotate#v2.4.1:
-          artifacts: "junit/*.xml"
+      - "durations/test.html"
+      - "coverage-test.xml"
+      - "coverage-test/**/*"

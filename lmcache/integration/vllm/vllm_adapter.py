@@ -157,7 +157,7 @@ def init_lmcache_engine(
     ):
         use_mla = True
 
-    if use_mla and config.remote_serde != "naive":
+    if use_mla and (config.remote_serde != "naive" and config.remote_serde is not None):
         raise ValueError("MLA only works with naive serde mode..")
 
     # construct kv shape (for mem pool)
