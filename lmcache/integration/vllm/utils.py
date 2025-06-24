@@ -13,11 +13,13 @@
 # limitations under the License.
 
 # Standard
-from typing import Union
+from typing import TYPE_CHECKING, Union
 import os
 
+if TYPE_CHECKING:
+    from vllm.multimodal.inputs import PlaceholderRange
+
 # Third Party
-from vllm.multimodal.inputs import PlaceholderRange
 import torch
 
 # First Party
@@ -81,7 +83,7 @@ def hex_hash_to_int16(s: str) -> int:
 def apply_mm_hashes_to_token_ids(
     token_ids: torch.Tensor,
     mm_hashes: list[str],
-    mm_positions: list[PlaceholderRange],
+    mm_positions: list["PlaceholderRange"],
 ) -> torch.Tensor:
     """
     Overwrite token_ids in-place for multimodal placeholders using
