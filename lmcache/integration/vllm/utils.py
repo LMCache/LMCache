@@ -81,26 +81,6 @@ def hex_hash_to_int16(s: str) -> int:
     return int(s, 16) & 0xFFFF
 
 
-# def apply_mm_hashes_to_token_ids(
-#     token_ids: list[int], mm_hashes: list[str], mm_positions: list[PlaceholderRange]
-# ) -> None:
-#     """
-#     Overwrite token_ids in-place for multimodal placeholders.
-
-#     Args:
-#         token_ids: The list of token IDs to modify.
-#         mm_hashes: Hexadecimal hash strings for each placeholder.
-#         mm_positions: Corresponding placeholder ranges.
-#     """
-#     for hash_str, placeholder in zip(mm_hashes, mm_positions, strict=False):
-#         start = placeholder.offset
-#         end = start + placeholder.length
-#         hash_int = hex_hash_to_int16(hash_str)
-#         for idx in range(start, end):
-#             if idx < len(token_ids):
-#                 token_ids[idx] = hash_int
-
-
 def apply_mm_hashes_to_token_ids(
     token_ids: torch.Tensor,
     mm_hashes: list[str],
