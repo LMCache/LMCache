@@ -637,6 +637,7 @@ class VLLMBufferLayerwiseGPUConnector(GPUConnectorInterface):
                     slot_mapping_full,
                     False,
                     False,  # shape is [2, num_tokens, hidden_dim]
+                    self.use_mla,
                 )
                 del self.buffer_mapping[layer_id - 2]
 
@@ -789,6 +790,7 @@ class VLLMBufferLayerwiseGPUConnector(GPUConnectorInterface):
                     slot_mapping_full,
                     True,
                     False,  # shape is [2, num_tokens, hidden_dim]
+                    self.use_mla,
                 )
                 for (buf_start, buf_end), memory_obj, old_positions in zip(
                     buf_starts_ends,
@@ -957,6 +959,7 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
                     slot_mapping_full,
                     False,
                     True,
+                    self.use_mla,
                 )
         yield
 
@@ -1048,6 +1051,7 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
                     slot_mapping_full,
                     True,
                     True,
+                    self.use_mla,
                 )
                 for start, end, memory_obj in zip(
                     starts, ends, memory_objs_layer, strict=False

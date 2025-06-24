@@ -193,8 +193,8 @@ def init_lmcache_engine(
         f"Using max_tokens={max_tokens} from scheduler config for GPU buffer allocation"
     )
 
-    if use_mla and config.use_layerwise:
-        raise ValueError("layerwise MLA connector is not supported yet")
+    # if use_mla and config.use_layerwise:
+    #     raise ValueError("layerwise MLA connector is not supported yet")
 
     # When use_mla is True, num_kv_head is 1
     hidden_dim_size = num_kv_head * head_size

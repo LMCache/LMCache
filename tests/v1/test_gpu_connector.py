@@ -155,13 +155,13 @@ def test_vllm_paged_connector_v2_with_gpu_and_mla(use_gpu, use_mla):
             gpu_kv_src, gpu_kv_dst, num_tokens, slot_mapping, num_heads, head_size
         )
 
-
+@pytest.mark.parametrize("use_mla", [True, False])
 @pytest.mark.parametrize("use_gpu", [True])
-def test_layerwise_vllm_paged_connector_with_gpu(use_gpu):
+def test_layerwise_vllm_paged_connector_with_gpu(use_gpu, use_mla):
     num_blocks = 100
     block_size = 16
     num_layers = 32
-    num_heads = 8
+    num_heads = 8 if not use_mla else 1
     head_size = 128
     device = "cuda"
     hidden_dim = num_heads * head_size
@@ -171,8 +171,8 @@ def test_layerwise_vllm_paged_connector_with_gpu(use_gpu):
 
     allocator = PinMemoryAllocator(1024 * 1024 * 1024)
 
-    gpu_kv_src = generate_kv_cache_paged_list_tensors(num_blocks, device, block_size)
-    gpu_kv_dst = generate_kv_cache_paged_list_tensors(num_blocks, device, block_size)
+    gpu_kv_src = generate_kv_cache_paged_list_tensors(num_blocks, device, block_size,use_mla=use_mla)
+    gpu_kv_dst = generate_kv_cache_paged_list_tensors(num_blocks, device, block_size,use_mla=use_mla)
     dtype = gpu_kv_src[0][0].dtype
 
     slot_mapping = random.sample(range(0, num_blocks * block_size), num_tokens)
@@ -191,6 +191,7 @@ def test_layerwise_vllm_paged_connector_with_gpu(use_gpu):
         chunk_size=chunk_size,
         dtype=dtype,
         device=device,
+        use_mla=use_mla,
     )
 
     # from gpu to cpu
@@ -249,7 +250,12 @@ def test_layerwise_vllm_paged_connector_with_gpu(use_gpu):
 
     assert connector.gpu_buffer_allocator.memcheck()
 
-    check_paged_kv_cache_equal(
+    if use_mla:
+        check_paged_kv_cache_equal_with_mla(
+            gpu_kv_src, gpu_kv_dst, num_tokens, slot_mapping, head_size
+        )
+    else:
+        check_paged_kv_cache_equal(
         gpu_kv_src, gpu_kv_dst, num_tokens, slot_mapping, num_heads, head_size
     )
 
