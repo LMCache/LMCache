@@ -12,9 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Future
-from __future__ import annotations
-
 # Standard
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional
@@ -39,7 +36,6 @@ from lmcache.integration.vllm.utils import (
     ENGINE_NAME,
     apply_mm_hashes_to_token_ids,
     lmcache_get_config,
-    mask_mm_hashes_in_request,
 )
 from lmcache.integration.vllm.vllm_adapter import init_lmcache_engine
 from lmcache.logging import init_logger
@@ -233,9 +229,6 @@ class RequestTracker:
 
         self.token_ids.extend(cached_request.new_token_ids)
 
-        # If the request has multimodal hashes, apply them to the token ids
-        apply_mm_hashes_to_token_ids(self.token_ids, self.mm_hashes, self.mm_positions)
-
         new_block_ids: list[int]
 
         if len(cached_request.new_block_ids) == 0:
@@ -268,6 +261,8 @@ class ReqMeta:
         load_spec: Optional[LoadSpec] = None,
         skip_save: bool = False,
         discard_partial_chunks: bool = True,
+        mm_hashes: Optional[list[str]] = None,
+        mm_positions: Optional[list[PlaceholderRange]] = None,
     ) -> Optional["ReqMeta"]:
         """Create the request metadata from a request tracker.
 
@@ -317,6 +312,10 @@ class ReqMeta:
         # OPTIMIZATION: pre-allocate the buffer for token ids and block
         # ids
         token_ids = torch.tensor(input_token_ids)[:num_tokens_to_save]
+
+        # If the request has multimodal hashes, apply them to the token ids
+        if mm_hashes:
+            apply_mm_hashes_to_token_ids(token_ids, mm_hashes, mm_positions)
 
         num_blocks = len(tracker.allocated_block_ids)
 
@@ -806,13 +805,17 @@ class LMCacheConnectorV1Impl:
             external KV cache beyond what is already computed.
         """
 
-        # Preprocess the request for multimodal hashes.
-        request = mask_mm_hashes_in_request(request)
-
         if self.kv_role == "kv_producer":
             return 0
 
         token_ids = torch.tensor(request.prompt_token_ids)
+
+        # If the request has multimodal hashes, apply them to the token ids
+        if request.mm_hashes:
+            apply_mm_hashes_to_token_ids(
+                token_ids, request.mm_hashes, request.mm_positions
+            )
+
         if self.skip_last_n_tokens > 0:
             num_external_hit_tokens = self.lookup_client.lookup(
                 token_ids[: -self.skip_last_n_tokens]
@@ -860,9 +863,6 @@ class LMCacheConnectorV1Impl:
         if the CacheManager this allocated blocks for us.
         """
 
-        # Preprocess the request for multimodal hashes.
-        request = mask_mm_hashes_in_request(request)
-
         if request.request_id not in self.load_specs:
             # No KV tokens from external KV cache, return
             return
@@ -908,9 +908,6 @@ class LMCacheConnectorV1Impl:
             self._request_trackers.pop(finished_req_id, None)
 
         for request in scheduler_output.scheduled_new_reqs:
-            # Preprocess the request for multimodal hashes.
-            request = mask_mm_hashes_in_request(request)
-
             # Right now, we only load KV for new requests
             load_spec = self.load_specs.pop(request.req_id, None)
             num_tokens_to_compute = (
@@ -929,13 +926,14 @@ class LMCacheConnectorV1Impl:
                 load_spec=load_spec,
                 skip_save=force_skip_save,
                 discard_partial_chunks=self._discard_partial_chunks,
+                mm_hashes=request.mm_hashes,
+                mm_positions=request.mm_positions,
             )
             if req_meta is not None:
                 meta.add_request(req_meta)
 
         for request in scheduler_output.scheduled_cached_reqs:
             request_tracker = self._request_trackers[request.req_id]
-            request_tracker.update(request)
 
             req_meta = ReqMeta.from_request_tracker(
                 request_tracker,
@@ -944,6 +942,8 @@ class LMCacheConnectorV1Impl:
                 load_spec=None,
                 skip_save=force_skip_save,
                 discard_partial_chunks=self._discard_partial_chunks,
+                mm_hashes=request_tracker.mm_hashes,
+                mm_positions=request_tracker.mm_positions,
             )
             if req_meta is not None:
                 meta.add_request(req_meta)
@@ -955,9 +955,6 @@ class LMCacheConnectorV1Impl:
         request: "Request",
         block_ids: list[int],
     ) -> tuple[bool, Optional[dict[str, Any]]]:
-        # Preprocess the request for multimodal hashes.
-        request = mask_mm_hashes_in_request(request)
-
         params = request.kv_transfer_params
         return_params = None
 

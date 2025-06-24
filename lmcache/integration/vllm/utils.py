@@ -12,13 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Future
-from __future__ import annotations
-
 # Standard
 from typing import TYPE_CHECKING, Union
 import copy
 import os
+
+# Third Party
+import torch
 
 # First Party
 from lmcache.config import LMCacheEngineConfig as Config  # type: ignore[assignment]
@@ -82,24 +82,43 @@ def hex_hash_to_int16(s: str) -> int:
     return int(s, 16) & 0xFFFF
 
 
-def apply_mm_hashes_to_token_ids(
-    token_ids: list[int], mm_hashes: list[str], mm_positions: list[PlaceholderRange]
-) -> None:
-    """
-    Overwrite token_ids in-place for multimodal placeholders.
+# def apply_mm_hashes_to_token_ids(
+#     token_ids: list[int], mm_hashes: list[str], mm_positions: list[PlaceholderRange]
+# ) -> None:
+#     """
+#     Overwrite token_ids in-place for multimodal placeholders.
 
-    Args:
-        token_ids: The list of token IDs to modify.
-        mm_hashes: Hexadecimal hash strings for each placeholder.
-        mm_positions: Corresponding placeholder ranges.
+#     Args:
+#         token_ids: The list of token IDs to modify.
+#         mm_hashes: Hexadecimal hash strings for each placeholder.
+#         mm_positions: Corresponding placeholder ranges.
+#     """
+#     for hash_str, placeholder in zip(mm_hashes, mm_positions, strict=False):
+#         start = placeholder.offset
+#         end = start + placeholder.length
+#         hash_int = hex_hash_to_int16(hash_str)
+#         for idx in range(start, end):
+#             if idx < len(token_ids):
+#                 token_ids[idx] = hash_int
+
+
+def apply_mm_hashes_to_token_ids(
+    token_ids: torch.Tensor,
+    mm_hashes: list[str],
+    mm_positions: list[PlaceholderRange],
+) -> torch.Tensor:
     """
+    Overwrite token_ids in-place for multimodal placeholders using
+    efficient slice assignments.
+    """
+    n = token_ids.size(0)
     for hash_str, placeholder in zip(mm_hashes, mm_positions, strict=False):
-        start = placeholder.offset
-        end = start + placeholder.length
-        hash_int = hex_hash_to_int16(hash_str)
-        for idx in range(start, end):
-            if idx < len(token_ids):
-                token_ids[idx] = hash_int
+        start, length = placeholder.offset, placeholder.length
+        if start >= n:
+            continue
+        end = min(start + length, n)
+        token_ids[start:end] = hex_hash_to_int16(hash_str)
+    return token_ids
 
 
 def mask_mm_hashes_in_request(request) -> list[int]:
