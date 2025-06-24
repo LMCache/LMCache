@@ -14,7 +14,6 @@
 
 # Standard
 from typing import TYPE_CHECKING, Union
-import copy
 import os
 
 # Third Party
@@ -119,16 +118,3 @@ def apply_mm_hashes_to_token_ids(
         end = min(start + length, n)
         token_ids[start:end] = hex_hash_to_int16(hash_str)
     return token_ids
-
-
-def mask_mm_hashes_in_request(request) -> list[int]:
-    # No multimodal hashes in the request, return the original request
-    if request.mm_hashes is None or len(request.mm_hashes) == 0:
-        return request
-
-    # Mask the multimodal hashes in the request's prompt token ids
-    cloned = copy.deepcopy(request)
-    apply_mm_hashes_to_token_ids(
-        cloned.prompt_token_ids, cloned.mm_hashes, cloned.mm_positions
-    )
-    return cloned
