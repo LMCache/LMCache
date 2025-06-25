@@ -120,6 +120,9 @@ class LMCacheEngineConfig:
     # when calling get_blocking method in remote backend
     blocking_timeout_secs: int = 10
 
+    # Only save kvcaches on tp first_rank
+    save_only_first_rank: bool = False
+
     @staticmethod
     def from_defaults(
         chunk_size: int = 256,
@@ -157,6 +160,7 @@ class LMCacheEngineConfig:
         extra_config: Optional[dict] = None,
         save_unfull_chunk: bool = True,
         blocking_timeout_secs: int = 10,
+        save_only_first_rank: bool = False,
     ) -> "LMCacheEngineConfig":
         # TODO (ApostaC): Add nixl config
         return LMCacheEngineConfig(
@@ -195,6 +199,7 @@ class LMCacheEngineConfig:
             extra_config,
             save_unfull_chunk,
             blocking_timeout_secs,
+            save_only_first_rank,
         ).validate()
 
     @staticmethod
@@ -360,6 +365,8 @@ class LMCacheEngineConfig:
 
         blocking_timeout_secs = config.get("blocking_timeout_secs", 10)
 
+        save_only_first_rank = config.get("save_only_first_rank", False)
+
         local_disk_path = _parse_local_disk(local_disk)
 
         match remote_url:
@@ -407,6 +414,7 @@ class LMCacheEngineConfig:
                 extra_config,
                 save_unfull_chunk,
                 blocking_timeout_secs,
+                save_only_first_rank,
             )
             .validate()
             .log_config()
@@ -679,6 +687,7 @@ class LMCacheEngineConfig:
             "extra_config": self.extra_config,
             "save_unfull_chunk": self.save_unfull_chunk,
             "blocking_timeout_secs": self.blocking_timeout_secs,
+            "save_only_first_rank": self.save_only_first_rank,
         }
         logger.info(f"LMCache Configuration: {config_dict}")
 

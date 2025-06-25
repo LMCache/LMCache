@@ -51,6 +51,7 @@ from vllm.config import (
 )
 from vllm.sequence import IntermediateTensors
 from vllm.utils import cdiv, get_kv_cache_torch_dtype, round_down
+from vllm.distributed.parallel_state import get_tp_group
 
 # First Party
 from lmcache.config import LMCacheEngineMetadata
@@ -243,8 +244,11 @@ def init_lmcache_engine(
             device=device,
             use_mla=use_mla,
         )
+    tpg = None
+    if config.save_only_first_rank:
+        tpg = get_tp_group()
     engine = LMCacheEngineBuilder.get_or_create(
-        ENGINE_NAME, config, metadata, vllm_gpu_connector
+        ENGINE_NAME, config, metadata, vllm_gpu_connector, tpg
     )
 
     return engine
