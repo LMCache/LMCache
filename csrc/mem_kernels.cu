@@ -230,6 +230,7 @@ __global__ void load_and_reshape_multi_layer_kernel(
   }
 }
 
+<<<<<<< Updated upstream
 template <typename scalar_t, bool DIRECTION>
 __global__ void load_and_reshape_multi_layer_kernel_unilateral(
     scalar_t* __restrict__ key_value,    // [2, num_layer, num_tokens,
@@ -239,17 +240,43 @@ __global__ void load_and_reshape_multi_layer_kernel_unilateral(
     scalar_t** __restrict__ value_ptrs,  // [num_layers] * [PAGE_BUFFER_SIZE,
                                          // scalars_per_token]
     const int64_t* __restrict__ slot_mapping,  // [num_tokens]
+=======
+/**
+ * Quickly load KV cache between sglang MHA paged memory and offloading buffer
+ * sglang K or V format is [token_id, head_dim, head_size]
+ * slot_id = slot_mapping[block.x]
+ * key_value[block.z, block.y, block.x, thread.x] <=> ptrs[block.y][block.z,
+ * slot_id, thread.x]
+ * Note: does not support MLA, please use VLLM version
+ */
+template <typename scalar_t, bool DIRECTION>
+__global__ void load_and_reshape_multi_layer_kernel_sglang(
+    scalar_t* __restrict__ key_value,           // [2, num_layer, num_tokens,
+                                                // scalars_per_token]
+    scalar_t** __restrict__ paged_buffer_ptrs,  // [num_layers] * [2,
+                                                // PAGE_BUFFER_SIZE,
+                                                // scalars_per_token]
+    const int64_t* __restrict__ slot_mapping,   // [num_tokens]
+>>>>>>> Stashed changes
     const int scalars_per_token, const int num_tokens, const int num_layers,
     const int page_buffer_size) {
   const int token_id = blockIdx.x;
   const int layer_id = blockIdx.y;
+<<<<<<< Updated upstream
   const int k_or_v = blockIdx.z;
+=======
+>>>>>>> Stashed changes
   const int tid = threadIdx.x;
   const int num_threads = blockDim.x;
 
   const int64_t slot_idx = slot_mapping[token_id];
+<<<<<<< Updated upstream
   int64_t* key_ptr = key_ptrs[layer_id];
   int64_t* value_ptr = value_ptrs[layer_id];
+=======
+  int64_t* key_paged_buffer_ptr = paged_buffer_ptrs[layer_id];
+  int64_t* val_paged_buffer_ptr = paged_buffer_ptrs[layer_id + num_layers];
+>>>>>>> Stashed changes
 
   if (slot_idx < 0) {
     return;
@@ -257,6 +284,7 @@ __global__ void load_and_reshape_multi_layer_kernel_unilateral(
 
   /** Copy the data from page buffer to key_value **/
   for (int i = tid; i < scalars_per_token; i += num_threads) {
+<<<<<<< Updated upstream
     const int64_t lmcache_offset =
         key_value_offset(k_or_v, layer_id, token_id, i, scalars_per_token,
                          num_tokens, num_layers);
@@ -274,6 +302,23 @@ __global__ void load_and_reshape_multi_layer_kernel_unilateral(
         key_value[lmcache_offset] = value_ptr[sgl_offset];
       else  // 0 is LMCache to paged buffer
         value_ptr[sgl_offset] = key_value[lmcache_offset];
+=======
+    const int64_t key_lmcache_offset =
+        layer_id * num_tokens * scalars_per_token +
+        token_id * scalars_per_token + i;
+    const int64_t val_lmcache_offset =
+        num_layers * num_tokens * scalars_per_token + key_lmcache_offset;
+    const int64_t sglang_offset = slot_idx * scalars_per_token + i;
+
+    if (DIRECTION) {
+      // DIRECTION 1 is paged buffer to LMCache
+      key_value[key_lmcache_offset] = key_paged_buffer_ptr[sglang_offset];
+      key_value[val_lmcache_offset] = val_paged_buffer_ptr[sglang_offset];
+    } else {
+      // DIRECTION 0 is LMCache to paged buffer
+      key_paged_buffer_ptr[sglang_offset] = key_value[key_lmcache_offset];
+      val_paged_buffer_ptr[sglang_offset] = key_value[val_lmcache_offset];
+>>>>>>> Stashed changes
     }
   }
 }
@@ -334,7 +379,7 @@ void multi_layer_kv_transfer(
     const torch::Tensor& key_value_ptrs,  // [num_layers]
     const torch::Tensor& slot_mapping,    // [num_tokens],
     const torch::Device& paged_memory_device, const int page_buffer_size,
-    const bool direction, const bool use_mla) {
+    const bool direction, const bool use_mla, const bool is_sglang) {
   int64_t* key_value_ptr = get_kernel_ptr<int64_t, torch::Tensor>(key_value);
   int64_t** page_buffer_ptrs =
       get_kernel_ptr<int64_t*, const torch::Tensor>(key_value_ptrs);
@@ -348,7 +393,7 @@ void multi_layer_kv_transfer(
   int num_qwords = num_origin_elements / elements_per_qword;
 
   int k_or_v_size = 2;
-  if (use_mla) {
+  if (use_mla || is_sglang) {
     k_or_v_size = 1;
   }
 
@@ -358,18 +403,34 @@ void multi_layer_kv_transfer(
   const at::cuda::OptionalCUDAGuard device_guard(paged_memory_device);
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
-  if (not direction) {
-    lmc::load_and_reshape_multi_layer_kernel<int64_t, false>
-        <<<grid, block, 0, stream>>>(key_value_ptr, page_buffer_ptrs,
-                                     slot_mapping_ptr, num_qwords, num_tokens,
-                                     num_layers, page_buffer_size);
-    C10_CUDA_KERNEL_LAUNCH_CHECK();
+  if ((!is_sglang) || use_mla) {
+    if (not direction) {
+      lmc::load_and_reshape_multi_layer_kernel<int64_t, false>
+          <<<grid, block, 0, stream>>>(key_value_ptr, page_buffer_ptrs,
+                                       slot_mapping_ptr, num_qwords, num_tokens,
+                                       num_layers, page_buffer_size);
+      C10_CUDA_KERNEL_LAUNCH_CHECK();
+    } else {
+      lmc::load_and_reshape_multi_layer_kernel<int64_t, true>
+          <<<grid, block, 0, stream>>>(key_value_ptr, page_buffer_ptrs,
+                                       slot_mapping_ptr, num_qwords, num_tokens,
+                                       num_layers, page_buffer_size);
+      C10_CUDA_KERNEL_LAUNCH_CHECK();
+    }
   } else {
-    lmc::load_and_reshape_multi_layer_kernel<int64_t, true>
-        <<<grid, block, 0, stream>>>(key_value_ptr, page_buffer_ptrs,
-                                     slot_mapping_ptr, num_qwords, num_tokens,
-                                     num_layers, page_buffer_size);
-    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    if (not direction) {
+      lmc::load_and_reshape_multi_layer_kernel_sglang<int64_t, false>
+          <<<grid, block, 0, stream>>>(key_value_ptr, page_buffer_ptrs,
+                                       slot_mapping_ptr, num_qwords, num_tokens,
+                                       num_layers, page_buffer_size);
+      C10_CUDA_KERNEL_LAUNCH_CHECK();
+    } else {
+      lmc::load_and_reshape_multi_layer_kernel_sglang<int64_t, true>
+          <<<grid, block, 0, stream>>>(key_value_ptr, page_buffer_ptrs,
+                                       slot_mapping_ptr, num_qwords, num_tokens,
+                                       num_layers, page_buffer_size);
+      C10_CUDA_KERNEL_LAUNCH_CHECK();
+    }
   }
 }
 
