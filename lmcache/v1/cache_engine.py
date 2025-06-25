@@ -217,7 +217,7 @@ class LMCacheEngine:
         tot_time = offload_time + put_time
 
         if self.lookup_server is not None:
-            self.lookup_server.batched_insert(key)
+            self.lookup_server.batched_insert(keys)
 
         logger.debug(
             "Store %d tokens takes: %.4f ms, throughput: %.4f GB/s; "
