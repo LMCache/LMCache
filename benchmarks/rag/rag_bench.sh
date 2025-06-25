@@ -1,8 +1,5 @@
 #!/usr/bin/env bash
 
-# RAG Benchmark Script
-# Parametrized script that can run both vLLM and LMCache benchmarks
-
 # Set script directory
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 cd $SCRIPT_DIR
@@ -22,13 +19,13 @@ show_usage() {
     echo "  --kv-chunk-size SIZE        KV chunk size for LMCache (default: 256)"
     echo "  --qps QPS                   Queries per second (default: 3.5)"
     echo "  --base-url URL              Base URL (default: http://localhost:8000/v1)"
-    echo "  --end-index INDEX           End index for standard mode (default: 32)"
-    echo "  --baseline-name NAME        Baseline name for output file (default: uses mode)"
+    echo "  --end-index INDEX           End index of the RAG JSON datasetfor standard mode (default: 32)"
+    echo "  --baseline-name NAME        Baseline name for output file (default: uses mode i.e. 'standard' or 'cacheblend')"
     echo "  --help                      Show this help message"
     echo ""
     echo "Examples:"
-    echo "  $0 standard --model mistralai/Mistral-7B-Instruct-v0.2 --qps 5.0"
-    echo "  $0 cacheblend --kv-storage-size 50GB --kv-chunk-size 512"
+    echo "  $0 standard --base-url http://localhost:56789/v1"
+    echo "  $0 cacheblend --base-url http://localhost:45678/v1"
 }
 
 # Default values
@@ -148,7 +145,7 @@ if [ "$MODE" = "cacheblend" ]; then
     echo "Running CacheBlend RAG benchmark..."
     python3 rag.py --qps $QPS\
      --model "$MODEL_NAME" --dataset "$DATASET_PATH" \
-     --end-index "$RETURNED_END_INDEX" --separator "# #"\
+     --end-index "$RETURNED_END_INDEX" --separator " # # "\
       --prompt-build-method $PROMPT_BUILD_METHOD --base-url $BASE_URL \
       --max-tokens 32 --output "$OUTPUT_FILE"
 else

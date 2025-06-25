@@ -1,3 +1,7 @@
+chunk_size: 256 # should match the KV_CHUNK_SIZE in rag_bench.sh
+local_cpu: true # default 
+max_local_cpu_size: 30.0 # should match the KV_STORAGE_SIZE in rag_bench.sh
+
 enable_blending: True
 blend_recompute_ratio: 15 # default
 blend_min_tokens: 256 # default

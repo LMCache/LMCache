@@ -42,30 +42,21 @@ class PrecomputeConfig:
     # KV cache precision.
     kv_precision: int
 
-# taken from https://github.com/LMCache/lmcache-vllm/blob/dev/lmcache_vllm/blend_adapter.py
-class KVPreCompute(ABC):
-    def __init__(self):
-        lmcache_config = lmcache_get_config()
-        # blend_add_special_in_precomp is hardcoded to False in the current v1 config
-        self._blend_add_special_in_precomp = False
-    @abstractmethod
-    def precompute_kv(self, text_chunk):
-        pass
-    
-class OnlineKVPreCompute(KVPreCompute):
+# adapted from https://github.com/LMCache/lmcache-vllm/blob/dev/lmcache_vllm/blend_adapter.py 
+# (old integration of lmcache into vllm before upstream changes)    
+class OnlineKVPreCompute():
     def __init__(self, openai_api_key, openai_api_base, tokenizer=None):
         self.client = OpenAI(
             api_key=openai_api_key,
             base_url=openai_api_base,
         )
         self.model = self.client.models.list().data[0].id
-        super().__init__()
         # NOTE: Make sure to configure this tokenizer exactly the same with the one
         # in openai api server.
         self._tokenizer = tokenizer
     def _gen_inputs_for_precompute(self, text_chunk: str, force_special_tokens: bool):
         # online openai server.
-        add_special_tokens = self._blend_add_special_in_precomp or force_special_tokens
+        add_special_tokens = force_special_tokens
         encoded = self._tokenizer(text_chunk, add_special_tokens=add_special_tokens)
         input_ids = encoded.input_ids
         # NOTE: No multi_modal_data here.
@@ -122,7 +113,6 @@ def precompute_all_kv(config: PrecomputeConfig) -> Tuple[int, int, str]:
         f"start_idx {start_idx} >= length of dataset {len(eval_dataset)}"
     )
     precompute_kv = OnlineKVPreCompute(config.api_key, config.base_url, tokenizer)
-    with_bos = precompute_kv._blend_add_special_in_precomp
     current_size_taken = 0
     size_upper_bound = config.kv_storage_size
     assert size_upper_bound > 0, f"size_upper_bound {size_upper_bound} <= 0"
@@ -153,9 +143,8 @@ def precompute_all_kv(config: PrecomputeConfig) -> Tuple[int, int, str]:
             input_comps = tokenizer(doc_prompt).input_ids
             assert len(input_comps) > 0
             temp_cnt = len(input_comps)
-            if not with_bos:
-                if input_comps[0] == tokenizer.bos_token_id:
-                    temp_cnt -= 1
+            if input_comps[0] == tokenizer.bos_token_id:
+                temp_cnt -= 1
             # Add doc token count before round up.
             temp_cnt = (
                 (temp_cnt + round_up_token_cnt - 1) // round_up_token_cnt
