@@ -8,7 +8,6 @@ import random
 import time
 
 # Third Party
-import numpy as np
 from transformers import AutoTokenizer
 from utils import (
     AsyncLoopWrapper,
@@ -19,6 +18,7 @@ from utils import (
     init_logger,
     load_dataset,
 )
+import numpy as np
 import openai
 import pandas as pd
 
@@ -146,7 +146,10 @@ def parse_arguments():
         "--step-interval", type=float, default=0.02, help="Step interval"
     )
     parser.add_argument(
-        "--no-shuffle-docs", action="store_true", help="Disable document shuffling (shuffling is enabled by default to trigger CacheBlend)"
+        "--no-shuffle-docs",
+        action="store_true",
+        help="Disable document shuffling (shuffling is enabled by default \
+            to trigger CacheBlend)",
     )
     args = parser.parse_args()
     return args
@@ -347,7 +350,7 @@ class RAGManager:
         )
         total_time = end_time - start_time
         thput = cnt / total_time
-        
+
         # Calculate statistics for JSON output
         def calc_stats(values):
             values_array = np.array(values)
@@ -355,9 +358,9 @@ class RAGManager:
                 "mean": float(np.mean(values_array)),
                 "median": float(np.median(values_array)),
                 "p99": float(np.percentile(values_array, 99)),
-                "count": len(values)
+                "count": len(values),
             }
-        
+
         json_summary = {
             "overall": {
                 "total_requests": cnt,
@@ -365,7 +368,7 @@ class RAGManager:
                 "throughput_req_per_sec": thput,
                 "average_ttft_seconds": avg_ttft,
                 "average_tpot_seconds": avg_tpot,
-                "average_quality": avg_quality
+                "average_quality": avg_quality,
             },
             "detailed_stats": {
                 "quality": calc_stats(quality),
@@ -373,10 +376,10 @@ class RAGManager:
                 "tpot_seconds": calc_stats(self._tpot),
                 "generation_time_seconds": calc_stats(self._generation_time),
                 "prefill_token_count": calc_stats(self._prefill_tok_cnt),
-                "generation_token_count": calc_stats(self._generation_tok_cnt)
-            }
+                "generation_token_count": calc_stats(self._generation_tok_cnt),
+            },
         }
-        
+
         logger.info(
             f"Summary: {cnt} requests, average_ttft={avg_ttft} (second)\n"
             f" average_tpot={avg_tpot} (second)\n"
@@ -439,15 +442,15 @@ def run_rag(args):
 
     logger.info(f"Finished benchmarking, dumping summary to {args.output}")
     summary_df, json_summary = manager.summary(start_time, time.time())
-    
+
     # Save CSV file
     summary_df.to_csv(args.output, index=False)
-    
+
     # Save JSON file
-    json_output_file = args.output.replace('.csv', '_summary.json')
-    with open(json_output_file, 'w') as f:
+    json_output_file = args.output.replace(".csv", "_summary.json")
+    with open(json_output_file, "w") as f:
         json.dump(json_summary, f, indent=2)
-    
+
     logger.info(f"JSON summary saved to {json_output_file}")
 
 

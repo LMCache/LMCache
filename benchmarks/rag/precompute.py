@@ -2,11 +2,9 @@
 from dataclasses import dataclass
 from typing import Tuple
 import argparse
-from abc import ABC, abstractmethod
-from openai import OpenAI
 
 # Third Party
-from lmcache.integration.vllm.utils import lmcache_get_config
+from openai import OpenAI
 from transformers import AutoConfig, AutoTokenizer
 from utils import (
     PromptBuildMethodType,
@@ -14,6 +12,7 @@ from utils import (
     build_qa_prompt,
     load_dataset,
 )
+
 
 @dataclass
 class PrecomputeConfig:
@@ -42,9 +41,10 @@ class PrecomputeConfig:
     # KV cache precision.
     kv_precision: int
 
-# adapted from https://github.com/LMCache/lmcache-vllm/blob/dev/lmcache_vllm/blend_adapter.py 
-# (old integration of lmcache into vllm before upstream changes)    
-class OnlineKVPreCompute():
+
+# adapted from https://github.com/LMCache/lmcache-vllm/blob/dev/lmcache_vllm/blend_adapter.py
+# (old integration of lmcache into vllm before upstream changes)
+class OnlineKVPreCompute:
     def __init__(self, openai_api_key, openai_api_base, tokenizer=None):
         self.client = OpenAI(
             api_key=openai_api_key,
@@ -54,6 +54,7 @@ class OnlineKVPreCompute():
         # NOTE: Make sure to configure this tokenizer exactly the same with the one
         # in openai api server.
         self._tokenizer = tokenizer
+
     def _gen_inputs_for_precompute(self, text_chunk: str, force_special_tokens: bool):
         # online openai server.
         add_special_tokens = force_special_tokens
@@ -63,7 +64,9 @@ class OnlineKVPreCompute():
         return input_ids
 
     def precompute_kv(self, text_chunk: str, force_special_tokens: bool = False):
-        inputs_precomp = self._gen_inputs_for_precompute(text_chunk, force_special_tokens)
+        inputs_precomp = self._gen_inputs_for_precompute(
+            text_chunk, force_special_tokens
+        )
         # Iterable[Int] as prompt
         self.client.completions.create(
             prompt=inputs_precomp,
@@ -89,12 +92,12 @@ class KVSizeCalculator:
 def precompute_all_kv(config: PrecomputeConfig) -> Tuple[int, int, str]:
     tokenizer = AutoTokenizer.from_pretrained(config.tokenizer)
     model_config = AutoConfig.from_pretrained(config.model_config)
-    
+
     # Get head_dim, calculate if not available
-    head_dim = getattr(model_config, 'head_dim', None)
+    head_dim = getattr(model_config, "head_dim", None)
     if head_dim is None:
         head_dim = model_config.hidden_size // model_config.num_attention_heads
-    
+
     kv_size_calculator = KVSizeCalculator(
         model_config.num_key_value_heads,
         head_dim,
