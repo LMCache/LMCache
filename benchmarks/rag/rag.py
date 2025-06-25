@@ -2,11 +2,13 @@
 from dataclasses import dataclass
 import argparse
 import asyncio
+import json
 import logging
 import random
 import time
 
 # Third Party
+import numpy as np
 from transformers import AutoTokenizer
 from utils import (
     AsyncLoopWrapper,
@@ -297,7 +299,7 @@ class RAGManager:
             )
         return True
 
-    def summary(self, start_time: float, end_time: float) -> pd.DataFrame:
+    def summary(self, start_time: float, end_time: float) -> tuple[pd.DataFrame, dict]:
         cnt = len(self._ttft)
         assert cnt > 0
         avg_ttft = sum(self._ttft) / cnt
@@ -338,13 +340,43 @@ class RAGManager:
         )
         total_time = end_time - start_time
         thput = cnt / total_time
+        
+        # Calculate statistics for JSON output
+        def calc_stats(values):
+            values_array = np.array(values)
+            return {
+                "mean": float(np.mean(values_array)),
+                "median": float(np.median(values_array)),
+                "p99": float(np.percentile(values_array, 99)),
+                "count": len(values)
+            }
+        
+        json_summary = {
+            "overall": {
+                "total_requests": cnt,
+                "total_time_seconds": total_time,
+                "throughput_req_per_sec": thput,
+                "average_ttft_seconds": avg_ttft,
+                "average_tpot_seconds": avg_tpot,
+                "average_quality": avg_quality
+            },
+            "detailed_stats": {
+                "quality": calc_stats(quality),
+                "ttft_seconds": calc_stats(self._ttft),
+                "tpot_seconds": calc_stats(self._tpot),
+                "generation_time_seconds": calc_stats(self._generation_time),
+                "prefill_token_count": calc_stats(self._prefill_tok_cnt),
+                "generation_token_count": calc_stats(self._generation_tok_cnt)
+            }
+        }
+        
         logger.info(
             f"Summary: {cnt} requests, average_ttft={avg_ttft} (second)\n"
             f" average_tpot={avg_tpot} (second)\n"
             f"throughput={thput} (req/s)\n"
             f"average_quality={avg_quality}\n"
         )
-        return df
+        return df, json_summary
 
 
 def run_rag(args):
@@ -398,8 +430,17 @@ def run_rag(args):
     AsyncLoopWrapper.StopLoop()
 
     logger.info(f"Finished benchmarking, dumping summary to {args.output}")
-    summary = manager.summary(start_time, time.time())
-    summary.to_csv(args.output, index=False)
+    summary_df, json_summary = manager.summary(start_time, time.time())
+    
+    # Save CSV file
+    summary_df.to_csv(args.output, index=False)
+    
+    # Save JSON file
+    json_output_file = args.output.replace('.csv', '_summary.json')
+    with open(json_output_file, 'w') as f:
+        json.dump(json_summary, f, indent=2)
+    
+    logger.info(f"JSON summary saved to {json_output_file}")
 
 
 def main():

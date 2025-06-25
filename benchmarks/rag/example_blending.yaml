@@ -1,0 +1,4 @@
+enable_blending: True
+blend_recompute_ratio: 15 # default
+blend_min_tokens: 256 # default
+blend_special_str: " # # " # default
