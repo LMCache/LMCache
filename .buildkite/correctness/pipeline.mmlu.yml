@@ -1,0 +1,381 @@
+# LMCache MMLU Testing Pipeline
+# Tests KV transfer correctness using vLLM baseline vs LMCache setup
+# Tests 2 models: Llama 3.1 8B (dense) and DeepSeek V2 Lite (MLA)
+
+agents:
+  queue: "shaoting-gcp"
+
+env:
+  # HF_TOKEN should be set in Buildkite UI Environment Variables (not in this file for security)
+  LM_CACHE_TEST_DIR: "/home/shaotingf/lmcache-tests"
+  PATH: "/var/lib/buildkite-agent/.local/bin:${PATH}"
+  IMAGE: "lmcache/vllm-openai:latest"
+  # Test models
+  LLAMA_MODEL: "meta-llama/Llama-3.1-8B"
+  DEEPSEEK_MODEL: "deepseek-ai/DeepSeek-V2-Lite"
+  NUM_SUBJECTS: "15"
+
+steps:
+  - label: ":gear: Setup Environment"
+    key: "setup"
+    plugins:
+      - cache#v1.5.2:
+          key: "venv-mmlu-{{ checksum \"requirements/bench.txt\" }}-{{ checksum \"requirements/common.txt\" }}"
+          path: ".venv"
+          save: "pipeline"
+      - cache#v1.5.2:
+          key: "mmlu-data-{{ checksum \".buildkite/correctness/download-data.sh\" }}"
+          path: ".buildkite/correctness/data"
+          save: "pipeline"
+    command: |
+      # Validate required environment variables
+      if [ -z "$${HF_TOKEN}" ]; then
+        echo "❌ ERROR: HF_TOKEN environment variable is not set"
+        echo "Please set HF_TOKEN in Buildkite UI Environment Variables"
+        exit 1
+      fi
+      echo "✅ HF_TOKEN is set"
+
+      # Install uv if not available
+      if ! command -v uv &> /dev/null; then
+        echo "📦 Installing uv..."
+        curl -Ls https://astral.sh/uv/install.sh | bash
+        export PATH="$HOME/.local/bin:$PATH"
+      fi
+
+      # Create venv and install dependencies
+      bash .buildkite/install-env.sh
+      source .venv/bin/activate
+      uv pip install -r requirements/bench.txt
+
+      # Pull Docker image
+      echo "🐳 Pulling Docker image..."
+      sudo docker pull $${IMAGE}
+
+      # Download MMLU data
+      echo "📊 Setting up MMLU data..."
+      bash .buildkite/correctness/download-data.sh
+
+      # Verify data was downloaded correctly
+      if [ ! -d ".buildkite/correctness/data/test" ]; then
+        echo "❌ ERROR: MMLU data download failed - .buildkite/correctness/data/test directory not found"
+        ls -la .buildkite/correctness/data/ || echo ".buildkite/correctness/data directory does not exist"
+        exit 1
+      fi
+
+      echo "✅ Setup completed successfully"
+      echo "📊 MMLU test subjects available: $(ls .buildkite/correctness/data/test/*.csv | wc -l)"
+      echo "🔧 Models to test: $${LLAMA_MODEL}, $${DEEPSEEK_MODEL}"
+
+  # Llama 3.1 8B Tests (Dense Architecture)
+  - label: ":llama: Llama 3.1 8B - vLLM Baseline"
+    key: "llama-vllm"
+    depends_on: ["setup"]
+    plugins:
+      - cache#v1.5.2:
+          key: "venv-mmlu-{{ checksum \"requirements/bench.txt\" }}-{{ checksum \"requirements/common.txt\" }}"
+          path: ".venv"
+          restore: "pipeline"
+      - cache#v1.5.2:
+          key: "mmlu-data-{{ checksum \".buildkite/correctness/download-data.sh\" }}"
+          path: ".buildkite/correctness/data"
+          restore: "pipeline"
+    command: |
+      export PATH="$HOME/.local/bin:$PATH"
+      source .venv/bin/activate
+      cd .buildkite/correctness
+      
+      echo "🔍 Current directory: $(pwd)"
+      echo "🔍 Data directory exists: $([ -d data ] && echo 'YES' || echo 'NO')"
+      echo "🔧 Testing model: $${LLAMA_MODEL}"
+
+      mkdir -p mmlu-results
+
+      # Deploy single vLLM engine
+      echo "🚀 Deploying vLLM baseline for Llama 3.1 8B..."
+      bash deploy-1-vllm.sh "$${LLAMA_MODEL}"
+
+      # Run MMLU baseline test
+      echo "📊 Running MMLU baseline test for Llama 3.1 8B..."
+      python3 1-mmlu.py \
+        --model "$${LLAMA_MODEL}" \
+        --number-of-subjects $${NUM_SUBJECTS} \
+        --result-file mmlu-results/llama-vllm-baseline.jsonl
+
+      # Stop containers
+      echo "🛑 Stopping containers..."
+      CONTAINER_ID=$(cat .vllm-server.pid 2>/dev/null)
+      if [ ! -z "$CONTAINER_ID" ]; then
+        sudo docker kill $CONTAINER_ID || true
+      fi
+
+      echo "📊 Results saved to mmlu-results/llama-vllm-baseline.jsonl"
+    artifact_paths:
+      - ".buildkite/correctness/mmlu-results/llama-vllm-baseline.jsonl"
+
+  - label: ":zap: Llama 3.1 8B - LMCache KV Transfer"
+    key: "llama-lmcache"
+    depends_on: ["setup"]
+    plugins:
+      - cache#v1.5.2:
+          key: "venv-mmlu-{{ checksum \"requirements/bench.txt\" }}-{{ checksum \"requirements/common.txt\" }}"
+          path: ".venv"
+          restore: "pipeline"
+      - cache#v1.5.2:
+          key: "mmlu-data-{{ checksum \".buildkite/correctness/download-data.sh\" }}"
+          path: ".buildkite/correctness/data"
+          restore: "pipeline"
+    command: |
+      export PATH="$HOME/.local/bin:$PATH"
+      source .venv/bin/activate
+      cd .buildkite/correctness
+      
+      echo "🔍 Current directory: $(pwd)"
+      echo "🔍 Data directory exists: $([ -d data ] && echo 'YES' || echo 'NO')"
+      echo "🔧 Testing model: $${LLAMA_MODEL}"
+
+      mkdir -p mmlu-results
+
+      # Deploy dual LMCache engines
+      echo "🚀 Deploying LMCache setup for Llama 3.1 8B..."
+      bash deploy-2-lmcache.sh "$${LLAMA_MODEL}"
+
+      # Run LMCache KV transfer test
+      echo "📊 Running LMCache KV transfer test for Llama 3.1 8B..."
+      python3 2-mmlu.py \
+        --model "$${LLAMA_MODEL}" \
+        --number-of-subjects $${NUM_SUBJECTS} \
+        --result-file mmlu-results/llama-lmcache.jsonl
+
+      # Stop containers
+      echo "🛑 Stopping containers..."
+      PRODUCER_ID=$(cat .lmcache-producer.pid 2>/dev/null)
+      CONSUMER_ID=$(cat .lmcache-consumer.pid 2>/dev/null)
+      if [ ! -z "$PRODUCER_ID" ]; then
+        sudo docker kill $PRODUCER_ID || true
+      fi
+      if [ ! -z "$CONSUMER_ID" ]; then
+        sudo docker kill $CONSUMER_ID || true
+      fi
+      sudo systemctl stop redis-server || true
+
+      echo "📊 Results saved to mmlu-results/llama-lmcache.jsonl"
+    artifact_paths:
+      - ".buildkite/correctness/mmlu-results/llama-lmcache.jsonl"
+
+  # DeepSeek V2 Lite Tests (MLA Architecture)
+  - label: ":robot_face: DeepSeek V2 Lite - vLLM Baseline"
+    key: "deepseek-vllm"
+    depends_on: ["setup"]
+    plugins:
+      - cache#v1.5.2:
+          key: "venv-mmlu-{{ checksum \"requirements/bench.txt\" }}-{{ checksum \"requirements/common.txt\" }}"
+          path: ".venv"
+          restore: "pipeline"
+      - cache#v1.5.2:
+          key: "mmlu-data-{{ checksum \".buildkite/correctness/download-data.sh\" }}"
+          path: ".buildkite/correctness/data"
+          restore: "pipeline"
+    command: |
+      export PATH="$HOME/.local/bin:$PATH"
+      source .venv/bin/activate
+      cd .buildkite/correctness
+      
+      echo "🔍 Current directory: $(pwd)"
+      echo "🔍 Data directory exists: $([ -d data ] && echo 'YES' || echo 'NO')"
+      echo "🔧 Testing model: $${DEEPSEEK_MODEL}"
+
+      mkdir -p mmlu-results
+
+      # Deploy single vLLM engine
+      echo "🚀 Deploying vLLM baseline for DeepSeek V2 Lite..."
+      bash deploy-1-vllm.sh "$${DEEPSEEK_MODEL}"
+
+      # Run MMLU baseline test
+      echo "📊 Running MMLU baseline test for DeepSeek V2 Lite..."
+      python3 1-mmlu.py \
+        --model "$${DEEPSEEK_MODEL}" \
+        --number-of-subjects $${NUM_SUBJECTS} \
+        --result-file mmlu-results/deepseek-vllm-baseline.jsonl
+
+      # Stop containers
+      echo "🛑 Stopping containers..."
+      CONTAINER_ID=$(cat .vllm-server.pid 2>/dev/null)
+      if [ ! -z "$CONTAINER_ID" ]; then
+        sudo docker kill $CONTAINER_ID || true
+      fi
+
+      echo "📊 Results saved to mmlu-results/deepseek-vllm-baseline.jsonl"
+    artifact_paths:
+      - ".buildkite/correctness/mmlu-results/deepseek-vllm-baseline.jsonl"
+
+  - label: ":zap: DeepSeek V2 Lite - LMCache KV Transfer"
+    key: "deepseek-lmcache"
+    depends_on: ["setup"]
+    plugins:
+      - cache#v1.5.2:
+          key: "venv-mmlu-{{ checksum \"requirements/bench.txt\" }}-{{ checksum \"requirements/common.txt\" }}"
+          path: ".venv"
+          restore: "pipeline"
+      - cache#v1.5.2:
+          key: "mmlu-data-{{ checksum \".buildkite/correctness/download-data.sh\" }}"
+          path: ".buildkite/correctness/data"
+          restore: "pipeline"
+    command: |
+      export PATH="$HOME/.local/bin:$PATH"
+      source .venv/bin/activate
+      cd .buildkite/correctness
+      
+      echo "🔍 Current directory: $(pwd)"
+      echo "🔍 Data directory exists: $([ -d data ] && echo 'YES' || echo 'NO')"
+      echo "🔧 Testing model: $${DEEPSEEK_MODEL}"
+
+      mkdir -p mmlu-results
+
+      # Deploy dual LMCache engines
+      echo "🚀 Deploying LMCache setup for DeepSeek V2 Lite..."
+      bash deploy-2-lmcache.sh "$${DEEPSEEK_MODEL}"
+
+      # Run LMCache KV transfer test
+      echo "📊 Running LMCache KV transfer test for DeepSeek V2 Lite..."
+      python3 2-mmlu.py \
+        --model "$${DEEPSEEK_MODEL}" \
+        --number-of-subjects $${NUM_SUBJECTS} \
+        --result-file mmlu-results/deepseek-lmcache.jsonl
+
+      # Stop containers
+      echo "🛑 Stopping containers..."
+      PRODUCER_ID=$(cat .lmcache-producer.pid 2>/dev/null)
+      CONSUMER_ID=$(cat .lmcache-consumer.pid 2>/dev/null)
+      if [ ! -z "$PRODUCER_ID" ]; then
+        sudo docker kill $PRODUCER_ID || true
+      fi
+      if [ ! -z "$CONSUMER_ID" ]; then
+        sudo docker kill $CONSUMER_ID || true
+      fi
+      sudo systemctl stop redis-server || true
+
+      echo "📊 Results saved to mmlu-results/deepseek-lmcache.jsonl"
+    artifact_paths:
+      - ".buildkite/correctness/mmlu-results/deepseek-lmcache.jsonl"
+
+  - label: ":bar_chart: Summarize All Results"
+    key: "summarize"
+    depends_on: ["llama-vllm", "llama-lmcache", "deepseek-vllm", "deepseek-lmcache"]
+    allow_dependency_failure: true
+    plugins:
+      - cache#v1.5.2:
+          key: "venv-mmlu-{{ checksum \"requirements/bench.txt\" }}-{{ checksum \"requirements/common.txt\" }}"
+          path: ".venv"
+          restore: "pipeline"
+    command: |
+      export PATH="$HOME/.local/bin:$PATH"
+      source .venv/bin/activate
+      cd .buildkite/correctness
+      
+      echo "🔍 Current directory: $(pwd)"
+
+      # Create directories
+      mkdir -p mmlu-results compare-results
+
+      # Download artifacts from previous steps
+      echo "📥 Downloading artifacts from previous steps..."
+      buildkite-agent artifact download ".buildkite/correctness/mmlu-results/llama-vllm-baseline.jsonl" . --step "llama-vllm" || echo "⚠️ Llama vLLM baseline artifact not found"
+      buildkite-agent artifact download ".buildkite/correctness/mmlu-results/llama-lmcache.jsonl" . --step "llama-lmcache" || echo "⚠️ Llama LMCache artifact not found"
+      buildkite-agent artifact download ".buildkite/correctness/mmlu-results/deepseek-vllm-baseline.jsonl" . --step "deepseek-vllm" || echo "⚠️ DeepSeek vLLM baseline artifact not found"
+      buildkite-agent artifact download ".buildkite/correctness/mmlu-results/deepseek-lmcache.jsonl" . --step "deepseek-lmcache" || echo "⚠️ DeepSeek LMCache artifact not found"
+
+      # Move downloaded files from nested structure to mmlu-results directory
+      echo "📂 Moving downloaded files to mmlu-results directory..."
+      if [ -d ".buildkite/correctness/mmlu-results" ]; then
+        mv .buildkite/correctness/mmlu-results/*.jsonl mmlu-results/ 2>/dev/null || echo "No files to move from nested directory"
+        rmdir -p .buildkite/correctness/mmlu-results 2>/dev/null || true
+      fi
+
+      echo "📁 Results contents:"
+      ls -la mmlu-results/ || echo "mmlu-results directory not found"
+
+      # Generate comparison report for each model
+      echo "📊 Generating comparison reports..."
+      
+      # The summarize_scores.py script automatically finds and processes all result files
+      # Generate overall comparison report
+      echo "📊 Generating comprehensive comparison report..."
+      RESULTS_DIR="mmlu-results" python3 summarize_scores.py || echo "⚠️ Summary generation failed"
+
+      # Generate PDF report if possible
+      echo "📊 Generating comprehensive PDF report..."
+      RESULTS_DIR="mmlu-results" python3 create_report.py || echo "⚠️ PDF report generation failed"
+
+      echo "✅ Reports generated"
+      
+      # Show summaries
+      echo ""
+      echo "📊 MMLU Test Summary:"
+      echo "===================="
+      echo ""
+      echo "📋 Results for both models (Dense vs MLA architecture):"
+      cat compare-results/comparison.txt 2>/dev/null || echo "No comparison file found"
+    artifact_paths:
+      - ".buildkite/correctness/mmlu-results/llama-vllm-baseline.jsonl"
+      - ".buildkite/correctness/mmlu-results/llama-lmcache.jsonl"
+      - ".buildkite/correctness/mmlu-results/deepseek-vllm-baseline.jsonl"
+      - ".buildkite/correctness/mmlu-results/deepseek-lmcache.jsonl"
+      - ".buildkite/correctness/compare-results/comparison.txt"
+      - ".buildkite/correctness/compare-results/mmlu_benchmark_report.pdf"
+      - ".buildkite/correctness/compare-results/results_summary.json"
+
+  - label: ":wastebasket: Cleanup"
+    key: "cleanup"
+    depends_on: ["summarize"]
+    allow_dependency_failure: true
+    command: |
+      cd .buildkite/correctness
+      
+      # Kill containers using PID files
+      echo "🛑 Stopping containers using PID files..."
+      if [ -f .vllm-server.pid ]; then
+        VLLM_ID=$(cat .vllm-server.pid)
+        echo "Killing vLLM container: $VLLM_ID"
+        sudo docker kill "$VLLM_ID" 2>/dev/null || true
+        sudo docker rm "$VLLM_ID" 2>/dev/null || true
+      fi
+      
+      if [ -f .lmcache-producer.pid ]; then
+        PRODUCER_ID=$(cat .lmcache-producer.pid)
+        echo "Killing LMCache producer: $PRODUCER_ID"
+        sudo docker kill "$PRODUCER_ID" 2>/dev/null || true
+        sudo docker rm "$PRODUCER_ID" 2>/dev/null || true
+      fi
+      
+      if [ -f .lmcache-consumer.pid ]; then
+        CONSUMER_ID=$(cat .lmcache-consumer.pid)
+        echo "Killing LMCache consumer: $CONSUMER_ID"
+        sudo docker kill "$CONSUMER_ID" 2>/dev/null || true
+        sudo docker rm "$CONSUMER_ID" 2>/dev/null || true
+      fi
+      
+      # Kill any remaining docker containers
+      echo "🧹 Killing any remaining containers..."
+      sudo docker ps -q | xargs -r sudo docker kill 2>/dev/null || true
+      
+      # Stop Redis if running
+      echo "🛑 Stopping Redis server..."
+      sudo systemctl stop redis-server || true
+      
+      # Clean up PID files
+      echo "🗑️ Cleaning up PID files..."
+      rm -f .vllm-server.pid .lmcache-producer.pid .lmcache-consumer.pid || true
+      
+      # Clean up old Docker images (keep only the most recent nightly)
+      echo "🧹 Cleaning up old Docker images..."
+      sudo docker image prune -f || true
+      
+      # Remove old LMCache nightly images (keep only the current one)
+      OLD_IMAGES=$(sudo docker images lmcache/vllm-openai --format "{{.ID}}" | tail -n +2)
+      if [ ! -z "$OLD_IMAGES" ]; then
+        echo "🗑️ Removing old LMCache images..."
+        echo "$OLD_IMAGES" | xargs -r sudo docker rmi -f || true
+      fi
+      
+      echo "✅ Cleanup completed"

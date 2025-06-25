@@ -117,6 +117,17 @@ class LMCacheServer:
                                 torch.Size((0, 0, 0, 0)),
                             ).serialize()
                         )
+                    case Constants.CLIENT_HEALTH:
+                        client_socket.sendall(
+                            ServerMetaMessage(
+                                Constants.SERVER_SUCCESS,
+                                0,
+                                MemoryFormat(1),
+                                torch.float16,
+                                torch.Size((0, 0, 0, 0)),
+                            ).serialize()
+                        )
+                        logger.debug("Health check successful")
 
                     # TODO(Jiayi): Implement List
                     # case Constants.CLIENT_LIST:

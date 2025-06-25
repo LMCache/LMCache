@@ -7,7 +7,7 @@ PYTHON_BIN="/usr/bin/python3.10"
 if [[ -d "$VENV_DIR" ]]; then
   echo "⟳ Using existing venv: $(pwd)/$VENV_DIR"
 else
-  echo "⚙️  Creating venv with Python 3.10 at: $(pwd)/$VENV_DIR"
+  echo "⚙️  Creating venv with Python 3.10 at: $(pwd)/$VENV_DIR"
   # use uv for fast venv creation
   uv venv --python "$PYTHON_BIN" "$VENV_DIR"
 fi

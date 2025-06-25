@@ -13,24 +13,16 @@
 # limitations under the License.
 
 # Standard
-from typing import TYPE_CHECKING, Union
+from typing import Union
 import os
 
-if TYPE_CHECKING:
-    from vllm.multimodal.inputs import PlaceholderRange
-
-# Third Party
-import torch
-
 # First Party
-from lmcache.config import LMCacheEngineConfig as Config  # type: ignore[assignment]
+from lmcache.config import LMCacheEngineConfig as Config
 from lmcache.logging import init_logger
-from lmcache.v1.config import (
-    LMCacheEngineConfig as V1Config,  # type: ignore[assignment]
-)
+from lmcache.v1.config import LMCacheEngineConfig as V1Config
 
 logger = init_logger(__name__)
-ENGINE_NAME = "vllm-instance"
+ENGINE_NAME = "sglang-instance"
 
 
 def is_false(value: str) -> bool:
@@ -43,7 +35,8 @@ def lmcache_get_config() -> Union[Config, V1Config]:
     `LMCACHE_CONFIG_FILE`. If the environment variable is not set, this
     function will return the default configuration.
     """
-
+    logger.info(f"LMCACHE_USE_EXPERIMENTAL: {os.getenv('LMCACHE_USE_EXPERIMENTAL')}")
+    logger.info(f"LMCACHE_CONFIG_FILE: {os.getenv('LMCACHE_CONFIG_FILE')}")
     if is_false(os.getenv("LMCACHE_USE_EXPERIMENTAL", "True")):
         logger.warning(
             "Detected LMCACHE_USE_EXPERIMENTAL is set to False. "
@@ -71,29 +64,3 @@ def lmcache_get_config() -> Union[Config, V1Config]:
         config = LMCacheEngineConfig.from_file(config_file)
 
     return config
-
-
-def hex_hash_to_int16(s: str) -> int:
-    """
-    Convert a hex hash string to a 16-bit integer.
-    """
-    return int(s, 16) & 0xFFFF
-
-
-def apply_mm_hashes_to_token_ids(
-    token_ids: torch.Tensor,
-    mm_hashes: list[str],
-    mm_positions: list["PlaceholderRange"],
-) -> torch.Tensor:
-    """
-    Overwrite token_ids in-place for multimodal placeholders using
-    efficient slice assignments.
-    """
-    n = token_ids.size(0)
-    for hash_str, placeholder in zip(mm_hashes, mm_positions, strict=False):
-        start, length = placeholder.offset, placeholder.length
-        if start >= n:
-            continue
-        end = min(start + length, n)
-        token_ids[start:end] = hex_hash_to_int16(hash_str)
-    return token_ids

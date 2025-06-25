@@ -52,6 +52,7 @@ Example ``config.yaml``:
     # CuFile Buffer Size in MiB
     cufile_buffer_size: 8192
 
+
 CuFile Buffer Size Explanation
 ------------------------------
 
@@ -131,3 +132,19 @@ and then comment out the ``LMCACHE_CONFIG_FILE`` below:
         --kv-transfer-config \
         '{"kv_connector":"LMCacheConnectorV1", "kv_role":"kv_both"}'
 
+
+POSIX fallback
+--------------
+
+In some cases, libcufile implements its own internal POSIX fallback without `GdsBackend` being aware.
+In others, an error such as `RuntimeError: cuFileHandleRegister failed (cuFile err=5030, cuda_err=0)` may be throwned.
+Thus, backend can be configured to fallback to its own POSIX implementation when the usage of the libcufile APIs is not successful.
+
+To force `GdsBackend` not use libcufile APIs for any reason, you can override its behavior via `extra_config`,
+e.g:
+
+.. code-block:: yaml
+
+    LMCACHE_EXTRA_CONFIG='{"use_cufile": false}'
+
+Note that under this mode it would still use CUDA APIs to map and do operations the pre-registered GPU memory.

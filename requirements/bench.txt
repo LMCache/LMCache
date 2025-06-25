@@ -1,0 +1,7 @@
+requests
+tqdm
+transformers
+numpy
+pandas
+matplotlib
+seaborn
