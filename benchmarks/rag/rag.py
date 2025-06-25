@@ -66,6 +66,8 @@ class WorkloadConfig:
     prompt_build_method: PromptBuildMethodType
     # Max tokens for each generation.
     max_tokens: int
+    # Shuffle document order in each request.
+    shuffle_docs: bool
 
 
 @dataclass
@@ -142,6 +144,9 @@ def parse_arguments():
     )
     parser.add_argument(
         "--step-interval", type=float, default=0.02, help="Step interval"
+    )
+    parser.add_argument(
+        "--no-shuffle-docs", action="store_true", help="Disable document shuffling (shuffling is enabled by default to trigger CacheBlend)"
     )
     args = parser.parse_args()
     return args
@@ -239,6 +244,7 @@ class RAGManager:
         if end_index < 0:
             end_index = len(eval_dataset)
         eval_dataset = eval_dataset[start_index:end_index]
+        # Shuffling here does not break prefixes
         if workload_config.shuffle:
             random.shuffle(eval_dataset)
         self._prompts = []
@@ -257,6 +263,7 @@ class RAGManager:
                 workload_config.query_prompt,
                 workload_config.separator,
                 workload_config.prompt_build_method,
+                workload_config.shuffle_docs,
             )
             self._prompts.append(prompt)
             self._answers.append(ex["answers"])
@@ -401,6 +408,7 @@ def run_rag(args):
         query_prompt=args.query_prompt,
         prompt_build_method=build_prompt_method,
         max_tokens=args.max_tokens,
+        shuffle_docs=not args.no_shuffle_docs,
     )
     executor = RequestExecutor(
         base_url=args.base_url,

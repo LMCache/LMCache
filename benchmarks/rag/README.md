@@ -9,7 +9,9 @@ Benchmarks RAG workloads on serving engines to measure throughput, TTFT, and qua
 curl -LsSf https://astral.sh/uv/install.sh | sh
 uv venv --python 3.12 && source .venv/bin/activate
 uv pip install -r requirements.txt
-uv pip install vllm lmcache
+uv pip install vllm lmcache # need version >v0.3.0
+# This nightly install will work
+# uv pip install -i https://test.pypi.org/simple/ lmcache==0.3.1.dev75 
 ```
 
 2. **Start your serving engine:**
@@ -52,6 +54,9 @@ VLLM_USE_V1=1 vllm serve mistralai/Mistral-7B-Instruct-v0.2 --disable-log-reques
 
 # Test CacheBlend without precomputation
 ./rag_bench.sh standard --base-url http://localhost:45678/v1 --end-index 100 --baseline-name "lmcache_no_precompute"
+
+# Test without document shuffling (shuffling is enabled by default)
+./rag_bench.sh cacheblend --base-url http://localhost:45678/v1 --no-shuffle-docs
 ```
 
 ## Key Parameters
@@ -62,6 +67,7 @@ VLLM_USE_V1=1 vllm serve mistralai/Mistral-7B-Instruct-v0.2 --disable-log-reques
 - `--end-index`: Request count for standard mode (default: 32)
 - `--kv-storage-size`: Cache size for cacheblend mode (default: 30GB)
 - `--kv-chunk-size`: Chunk size for cacheblend mode (default: 256)
+- `--no-shuffle-docs`: Disable document shuffling (enabled by default to trigger CacheBlend)
 
 ## Output
 

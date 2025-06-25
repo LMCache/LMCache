@@ -5,6 +5,7 @@ import asyncio
 import collections
 import json
 import logging
+import random
 import re
 import string
 import threading
@@ -215,6 +216,7 @@ def build_rag_prompt(
     query_prompt,
     separator: str,
     prompt_build_method: PromptBuildMethodType,
+    shuffle_docs: bool = True,
 ):
     doc_prompts = None
     q_prompt = None
@@ -224,5 +226,11 @@ def build_rag_prompt(
         doc_prompts, q_prompt = build_qa_prompt(example, query_prompt)
     else:
         raise ValueError(f"Invalid prompt build method {prompt_build_method}")
+    
+    # Shuffle document order if requested (similar to blend.py reordering)
+    if shuffle_docs:
+        doc_prompts = doc_prompts.copy()  # Don't modify original
+        random.shuffle(doc_prompts)
+    
     final_prompt = separator.join([system_prompt] + doc_prompts + [q_prompt])
     return final_prompt, doc_prompts

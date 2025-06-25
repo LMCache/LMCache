@@ -1,8 +1,8 @@
-chunk_size: 256 # should match the KV_CHUNK_SIZE in rag_bench.sh
+chunk_size: 256 # should match the KV_CHUNK_SIZE passed to precompute.py in rag_bench.sh
 local_cpu: true # default 
-max_local_cpu_size: 30.0 # should match the KV_STORAGE_SIZE in rag_bench.sh
+max_local_cpu_size: 30.0 # should match the KV_STORAGE_SIZE passed to precompute.py in rag_bench.sh
 
 enable_blending: True
 blend_recompute_ratio: 15 # default
 blend_min_tokens: 256 # default
-blend_special_str: " # # " # default
+blend_special_str: "# #" # default (very important that this matches the separator passed to rag.py in rag_bench.sh)

@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 
+# RAG Benchmark Script
+# Parametrized script that can run both vLLM and LMCache benchmarks
+
 # Set script directory
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 cd $SCRIPT_DIR
@@ -19,13 +22,14 @@ show_usage() {
     echo "  --kv-chunk-size SIZE        KV chunk size for LMCache (default: 256)"
     echo "  --qps QPS                   Queries per second (default: 3.5)"
     echo "  --base-url URL              Base URL (default: http://localhost:8000/v1)"
-    echo "  --end-index INDEX           End index of the RAG JSON datasetfor standard mode (default: 32)"
-    echo "  --baseline-name NAME        Baseline name for output file (default: uses mode i.e. 'standard' or 'cacheblend')"
+    echo "  --end-index INDEX           End index for standard mode (default: 32)"
+    echo "  --baseline-name NAME        Baseline name for output file (default: uses mode)"
+    echo "  --no-shuffle-docs           Disable document shuffling (enabled by default)"
     echo "  --help                      Show this help message"
     echo ""
     echo "Examples:"
-    echo "  $0 standard --base-url http://localhost:56789/v1"
-    echo "  $0 cacheblend --base-url http://localhost:45678/v1"
+    echo "  $0 standard --model mistralai/Mistral-7B-Instruct-v0.2 --qps 5.0"
+    echo "  $0 cacheblend --kv-storage-size 50GB --kv-chunk-size 512"
 }
 
 # Default values
@@ -39,6 +43,7 @@ QPS=3.5
 BASE_URL="http://localhost:8000/v1"
 END_INDEX=32
 BASELINE_NAME=""
+NO_SHUFFLE_DOCS=""
 
 # Parse arguments
 if [ $# -eq 0 ]; then
@@ -95,6 +100,10 @@ while [[ $# -gt 0 ]]; do
             BASELINE_NAME="$2"
             shift 2
             ;;
+        --no-shuffle-docs)
+            NO_SHUFFLE_DOCS="--no-shuffle-docs"
+            shift 1
+            ;;
         --help)
             show_usage
             exit 0
@@ -145,16 +154,16 @@ if [ "$MODE" = "cacheblend" ]; then
     echo "Running CacheBlend RAG benchmark..."
     python3 rag.py --qps $QPS\
      --model "$MODEL_NAME" --dataset "$DATASET_PATH" \
-     --end-index "$RETURNED_END_INDEX" --separator " # # "\
+     --end-index "$RETURNED_END_INDEX" --separator "# #"\
       --prompt-build-method $PROMPT_BUILD_METHOD --base-url $BASE_URL \
-      --max-tokens 32 --output "$OUTPUT_FILE"
+      --max-tokens 32 --output "$OUTPUT_FILE" $NO_SHUFFLE_DOCS
 else
     echo "Standard mode - Running RAG benchmark..."
     python3 rag.py --qps $QPS\
      --model "$MODEL_NAME" --dataset "$DATASET_PATH" \
      --end-index "$END_INDEX" --warmup \
      --prompt-build-method $PROMPT_BUILD_METHOD --base-url $BASE_URL \
-     --max-tokens 32 --output "$OUTPUT_FILE"
+     --max-tokens 32 --output "$OUTPUT_FILE" $NO_SHUFFLE_DOCS
 fi
 
 echo "Benchmark completed. Results saved to: $OUTPUT_FILE"
