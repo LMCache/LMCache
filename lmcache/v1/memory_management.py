@@ -1077,6 +1077,146 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
             return self.pin_allocator.memcheck()
 
 
+class MixedChunkMemoryAllocator(MemoryAllocatorInterface):
+    """
+    Allocates (1) memory in the pre-allocated pinned memory.
+              (2) byte_array buffer memory.
+    """
+
+    def __init__(self, size: int, kv_shape: tuple[int, int, int, int, int], kv_dtype: torch.dtype):
+        """
+        :param int size: The size of the pinned memory in bytes.
+        """
+        self.kv_shape = kv_shape
+        self.kv_dtype = kv_dtype
+        self.shape_elem = self.get_shape_elem(kv_shape)
+        self.buffers = [torch.empty(*kv_shape, dtype=kv_dtype, pin_memory=True)]
+        self.chunk_bytes = self.buffers[0].numel() * self.buffers[0].element_size()
+        buffer_num = size // self.chunk_bytes
+        for i in range(1, buffer_num):
+            self.buffers.append(torch.empty(*kv_shape, dtype=kv_dtype, pin_memory=True))
+
+        self.buffer_allocator = BufferAllocator("cpu")
+        self.host_mem_lock = threading.Lock()
+
+    def get_shape_elem(self, shape):
+        elem_num = 1
+        for elem in shape:
+            elem_num *= int(elem)
+        return elem_num
+
+    @_lmcache_nvtx_annotate
+    def allocate(
+        self,
+        shape: Union[torch.Size, Tuple[int, ...]],
+        dtype: Optional[torch.dtype],
+        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
+    ) -> Optional[MemoryObj]:
+        if fmt == MemoryFormat.BINARY_BUFFER:
+            return self.buffer_allocator.allocate(shape, dtype, fmt)
+        elif fmt in [
+            MemoryFormat.KV_2LTD,
+            MemoryFormat.KV_2TD,
+            MemoryFormat.KV_T2D,
+            MemoryFormat.KV_MLA_FMT,
+        ]:
+            assert self.get_shape_elem(shape) == self.shape_elem
+            assert dtype == self.kv_dtype
+
+            with self.host_mem_lock:
+                if not self.buffers:
+                    return None
+                tensor = self.buffers.pop()
+                return TensorMemoryObj(
+                    raw_data=tensor,
+                    metadata=MemoryObjMetadata(
+                        shape, dtype, 0, self.chunk_bytes, 1, False, fmt
+                    ),
+                    parent_allocator=self,
+                )
+        else:
+            raise ValueError(f"Unsupported memory format: {fmt}")
+
+    @_lmcache_nvtx_annotate
+    def batched_allocate(
+        self,
+        shape: Union[torch.Size, Tuple[int, ...]],
+        dtype: Optional[torch.dtype],
+        batch_size: int,
+        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
+    ) -> Optional[List[MemoryObj]]:
+        if fmt == MemoryFormat.BINARY_BUFFER:
+            return self.buffer_allocator.batched_allocate(shape, dtype, batch_size, fmt)
+        elif fmt in [
+            MemoryFormat.KV_2LTD,
+            MemoryFormat.KV_2TD,
+            MemoryFormat.KV_T2D,
+            MemoryFormat.KV_MLA_FMT,
+        ]:
+            assert self.get_shape_elem(shape) == self.shape_elem
+            assert dtype == self.kv_dtype
+
+            with self.host_mem_lock:
+                alloced_tensors = self.buffers[:batch_size]
+                self.buffers = self.buffers[len(alloced_tensors):]
+
+            alloced = [TensorMemoryObj(
+                raw_data=_tensor,
+                metadata=MemoryObjMetadata(
+                    shape, dtype, 0, self.chunk_bytes, 1, False, fmt
+                ),
+                parent_allocator=self,
+            ) for _tensor in alloced_tensors]
+
+            failed_num = batch_size - len(alloced)
+            alloced = alloced + [None] * failed_num
+            return alloced
+        else:
+            raise ValueError(f"Unsupported memory format: {fmt}")
+
+    @_lmcache_nvtx_annotate
+    def free(self, memory_obj: MemoryObj):
+        fmt = memory_obj.meta.fmt
+        if fmt == MemoryFormat.BINARY_BUFFER:
+            self.buffer_allocator.free(memory_obj)
+        elif fmt in [
+            MemoryFormat.KV_2LTD,
+            MemoryFormat.KV_2TD,
+            MemoryFormat.KV_T2D,
+            MemoryFormat.KV_MLA_FMT,
+        ]:
+            tensor = memory_obj.raw_data
+            tensor_bytes = tensor.numel() * tensor.element_size()
+            assert tensor_bytes == self.chunk_bytes
+            with self.host_mem_lock:
+                self.buffers.append(tensor)
+        else:
+            raise ValueError(f"Unsupported memory format: {fmt}")
+
+    @_lmcache_nvtx_annotate
+    def batched_free(self, memory_objs: List[MemoryObj]):
+        # NOTE: fmts of all memory_objs should be the same
+        fmt = memory_objs[0].meta.fmt
+        if fmt == MemoryFormat.BINARY_BUFFER:
+            self.buffer_allocator.batched_free(memory_objs)
+        elif fmt in [
+            MemoryFormat.KV_2LTD,
+            MemoryFormat.KV_2TD,
+            MemoryFormat.KV_T2D,
+            MemoryFormat.KV_MLA_FMT,
+        ]:
+            for _memory_obj in memory_objs:
+                if _memory_obj is None:
+                    continue
+                self.free(_memory_obj)
+        else:
+            raise ValueError(f"Unsupported memory format: {fmt}")
+
+    def memcheck(self):
+        with self.host_mem_lock:
+            return self.pin_allocator.memcheck()
+
+
 class GPUMemoryAllocator(MemoryAllocatorInterface):
     """Allocates memory in the pre-allocated GPU memory."""
 

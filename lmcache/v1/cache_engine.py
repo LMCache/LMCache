@@ -44,6 +44,7 @@ from lmcache.v1.memory_management import (
     MemoryAllocatorInterface,
     MemoryFormat,
     MixedMemoryAllocator,
+    MixedChunkMemoryAllocator,
 )
 from lmcache.v1.storage_backend.storage_manager import StorageManager
 from lmcache.v1.token_database import (
@@ -653,7 +654,12 @@ class LMCacheEngineBuilder:
             return CuFileMemoryAllocator(config.cufile_buffer_size * 1024**2)
 
         max_local_cpu_size = config.max_local_cpu_size
-        return MixedMemoryAllocator(int(max_local_cpu_size * 1024**3))
+        if config.save_unfull_chunk:
+            return MixedMemoryAllocator(int(max_local_cpu_size * 1024**3))
+        logger.info("using MixedChunkMemoryAllocator.")
+        return MixedChunkMemoryAllocator(int(max_local_cpu_size * 1024**3),
+                                         kv_shape=metadata.kv_shape,
+                                         kv_dtype=metadata.kv_dtype)
 
     @staticmethod
     def _Create_token_database(

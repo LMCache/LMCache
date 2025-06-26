@@ -11,6 +11,7 @@ from lmcache.v1.memory_management import (
     MixedMemoryAllocator,
     PinMemoryAllocator,
     TensorMemoryAllocator,
+    MixedChunkMemoryAllocator,
 )
 
 
@@ -184,3 +185,26 @@ def test_mixed_alloc(alloc_cls):
     assert isinstance(data1, BytesBufferMemoryObj)
 
     assert len(data1.byte_array) == 512
+
+
+def test_mixed_chunk_alloc():
+    total_size = 1 << 25
+
+    kv_shape = [64, 2, 256, 1, 128]
+    kv_dtype = torch.float16
+
+    allocator = MixedChunkMemoryAllocator(total_size, kv_shape, kv_dtype)
+
+    data1 = allocator.allocate([512, 0], None, MemoryFormat.BINARY_BUFFER)
+    data2 = allocator.allocate([64, 2, 256, 1, 128], kv_dtype)
+    data3 = allocator.allocate([2, 64, 256, 1, 128], kv_dtype)
+    assert isinstance(data1, BytesBufferMemoryObj)
+
+    allocator.free(data1)
+    allocator.free(data2)
+    allocator.free(data3)
+
+    batch_size = 8
+    datas = allocator.batched_allocate([2, 64, 256, 1, 128], kv_dtype, batch_size=batch_size)
+    assert len(datas) == batch_size
+    allocator.batched_free(datas)
