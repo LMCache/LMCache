@@ -35,6 +35,18 @@ _METADATA_MAX_SIZE = 4096  # reserve 4K for metadata.
 # TODO: It is possible to read this 4KB block without triggering read-ahead by
 # various means.
 
+THREAD_POOL = None
+
+
+def get_thread_pool(max_workers):
+    # Standard
+    from concurrent.futures import ThreadPoolExecutor
+
+    global THREAD_POOL
+    if not THREAD_POOL:
+        THREAD_POOL = ThreadPoolExecutor(max_workers=max_workers)
+    return THREAD_POOL
+
 
 class UnsupportedMetadataVersion(Exception):
     pass
@@ -154,6 +166,20 @@ def get_extra_config_bool(key, config: LMCacheEngineConfig) -> bool | None:
     return bool_value
 
 
+def get_extra_config_int(key, config: LMCacheEngineConfig) -> int | None:
+    value = config.extra_config.get(key, None)
+    if value is None:
+        return None
+
+    if isinstance(value, str):
+        int_value = int(value)
+    else:
+        raise RuntimeError(f"Invalid value `{value}` for `{key}` in extra_config")
+
+    logger.info(f"Getting {key} = {int_value} from extra_config")
+    return int_value
+
+
 class GdsBackend(StorageBackendInterface):
     """
     Originally based on the open sourced WekaGdsBackend, this is a backend that
@@ -198,11 +224,19 @@ class GdsBackend(StorageBackendInterface):
         self.use_cufile = True
         use_cufile_from_config = False
 
+        # Whether to enable parallel blocking 'get' and and the amount of background
+        # threads that will be serving `get` calls on the backend in parallel
+        self.batched_get_threads = None
+
         if config.extra_config is not None:
             use_cufile = get_extra_config_bool("use_cufile", config)
             if use_cufile is not None:
                 self.use_cufile = use_cufile
                 use_cufile_from_config = True
+
+            self.batched_get_threads = get_extra_config_int(
+                "batched_get_threads", config
+            )
 
         if self.fstype in ["tmpfs", "overlayfs"]:
             # TODO: we can replace the auto-detection of unsupported cufile
@@ -503,6 +537,26 @@ class GdsBackend(StorageBackendInterface):
         assert dtype is not None
         assert shape is not None
         return self._load_bytes_from_disk(key, path, dtype=dtype, shape=shape)
+
+    def batched_get_blocking(
+        self,
+        keys: List[CacheEngineKey],
+    ) -> List[MemoryObj | None]:
+        if self.batched_get_threads is not None:
+            futures = []
+            for key in keys:
+                futures.append(
+                    get_thread_pool(self.batched_get_threads).submit(
+                        self.get_blocking, key
+                    )
+                )
+            mem_objs = [f.result() for f in futures]
+        else:
+            mem_objs = []
+            for key in keys:
+                mem_objs.append(self.get_blocking(key))
+
+        return mem_objs
 
     def _load_bytes_from_disk(
         self,

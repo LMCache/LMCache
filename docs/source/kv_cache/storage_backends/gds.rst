@@ -133,18 +133,17 @@ and then comment out the ``LMCACHE_CONFIG_FILE`` below:
         '{"kv_connector":"LMCacheConnectorV1", "kv_role":"kv_both"}'
 
 
-POSIX fallback
---------------
+Further settings
+-----------------
 
-In some cases, libcufile implements its own internal POSIX fallback without `GdsBackend` being aware.
-In others, an error such as `RuntimeError: cuFileHandleRegister failed (cuFile err=5030, cuda_err=0)` may be throwned.
-Thus, backend can be configured to fallback to its own POSIX implementation when the usage of the libcufile APIs is not successful.
+The `extra_config` configuration variable can support the following:
 
-To force `GdsBackend` not use libcufile APIs for any reason, you can override its behavior via `extra_config`,
-e.g:
+- ``use_cufile`` (type: boolean): POSIX fallback. In some cases, NVIDIA `libcufile` implements its own internal POSIX fallback without `GdsBackend` being aware. In others, an error such as `RuntimeError: cuFileHandleRegister failed (cuFile err=5030, cuda_err=0)` may be throwned. Thus, backend can be configured to fallback to its own POSIX implementation when the usage of the libcufile APIs is not successful. Pass `false` here to enable the fallback. Note that under this mode it would still use CUDA APIs to map and do operations the pre-registered GPU memory. **Default**: true
+
+- ``batched_get_threads`` (type: integer): This is the number of threads that will be spawned for a dedicated blocking call threadpool to service backend ``blocking_get`` requests. This can improve latency on some cases. **Default:** none.
+
+Example config (via environment variable):
 
 .. code-block:: yaml
 
-    LMCACHE_EXTRA_CONFIG='{"use_cufile": false}'
-
-Note that under this mode it would still use CUDA APIs to map and do operations the pre-registered GPU memory.
+    LMCACHE_EXTRA_CONFIG='{"batched_get_threads": 16, "use_cufile": false}'
