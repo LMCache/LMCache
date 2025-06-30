@@ -1135,14 +1135,18 @@ class SGLangGPUConnector(GPUConnectorInterface):
     ):
         self.hidden_dim_size = hidden_dim_size
         self.num_layers = num_layers
-        self.key_pointers = torch.empty(num_layers, dtype=torch.int64, device="cpu")
-        self.value_pointers = torch.empty(num_layers, dtype=torch.int64, device="cpu")
 
-        self.key_pointers_on_gpu: dict[int, torch.Tensor] = {}
-        self.value_pointers_on_gpu: dict[int, torch.Tensor] = {}
+        self.kv_cache_pointers_on_gpu: dict[int, torch.Tensor] = {}
         self.page_buffer_size = 0
 
         self.gpu_buffer: Optional[torch.Tensor] = None
+        self.use_mla = "use_mla" in kwargs and kwargs["use_mla"]
+
+        self.num_kv_cache = num_layers if self.use_mla else num_layers * 2
+        self.kv_cache_pointers = torch.empty(
+            self.num_kv_cache, dtype=torch.int64, device="cpu"
+        )
+
         if use_gpu:
             assert "chunk_size" in kwargs, (
                 "chunk_size should be provided to create a GPU buffer."
@@ -1157,25 +1161,22 @@ class SGLangGPUConnector(GPUConnectorInterface):
             logger.info(f"GPU buffer: {self.gpu_buffer.shape}")
 
     def _initialize_pointers(self, kv_caches: List[torch.Tensor]) -> torch.Tensor:
-        k, v = kv_caches
-        self.key_pointers.numpy()[:] = [t.data_ptr() for t in k]
-        self.value_pointers.numpy()[:] = [t.data_ptr() for t in v]
-        device = k[0].device
+        assert len(kv_caches) == self.num_kv_cache
+
+        self.kv_cache_pointers.numpy()[:] = [t.data_ptr() for t in kv_caches]
+        device = kv_caches[0].device
         assert device.type == "cuda", "The device should be CUDA."
         idx = device.index
-        if idx not in self.key_pointers_on_gpu:
-            self.key_pointers_on_gpu[idx] = torch.empty(
-                self.num_layers, dtype=torch.int64, device=device
+        if idx not in self.kv_cache_pointers_on_gpu:
+            self.kv_cache_pointers_on_gpu[idx] = torch.empty(
+                self.num_kv_cache, dtype=torch.int64, device=device
             )
-        if idx not in self.value_pointers_on_gpu:
-            self.value_pointers_on_gpu[idx] = torch.empty(
-                self.num_layers, dtype=torch.int64, device=device
-            )
-        self.key_pointers_on_gpu[idx].copy_(self.key_pointers)
-        self.value_pointers_on_gpu[idx].copy_(self.value_pointers)
+        self.kv_cache_pointers_on_gpu[idx].copy_(self.kv_cache_pointers)
 
-        self.page_buffer_size = k[0].shape[0]
-        return self.key_pointers_on_gpu[idx], self.value_pointers_on_gpu[idx]
+        # sglang MLA kv_caches[0].shape: [num_pages * page_size, 1, head_size]
+        # sglang MHA kv_caches[0].shape: [num_pages * page_size, num_heads, head_size]
+        self.page_buffer_size = kv_caches[0].shape[0]
+        return self.kv_cache_pointers_on_gpu[idx]
 
     @_lmcache_nvtx_annotate
     def to_gpu(self, memory_obj: MemoryObj, start: int, end: int, **kwargs):
@@ -1197,11 +1198,18 @@ class SGLangGPUConnector(GPUConnectorInterface):
         """
         assert memory_obj.tensor is not None
 
-        if memory_obj.metadata.fmt != MemoryFormat.KV_2LTD:
-            raise ValueError(
-                "The memory object should be in KV_2LTD format in"
-                " order to be processed by VLLMPagedMemGPUConnector"
-            )
+        if self.use_mla:
+            if memory_obj.metadata.fmt != MemoryFormat.KV_MLA_FMT:
+                raise ValueError(
+                    "The memory object should be in KV_MLA_FMT format in"
+                    f" order to be processed by {self.__class__.__name__}"
+                )
+        else:
+            if memory_obj.metadata.fmt != MemoryFormat.KV_2LTD:
+                raise ValueError(
+                    "The memory object should be in KV_2LTD format in"
+                    f" order to be processed by {self.__class__.__name__}"
+                )
 
         if "kvcaches" not in kwargs:
             raise ValueError("'kvcaches' should be provided in kwargs.")
@@ -1214,15 +1222,15 @@ class SGLangGPUConnector(GPUConnectorInterface):
         kvcaches: List[torch.Tensor] = kwargs["kvcaches"]
         slot_mapping: torch.Tensor = kwargs["slot_mapping"]
 
-        key_pointers, value_pointers = self._initialize_pointers(kvcaches)
+        kv_cache_pointers = self._initialize_pointers(kvcaches)
         lmc_ops.multi_layer_kv_transfer_unilateral(
             memory_obj.tensor,
-            key_pointers,
-            value_pointers,
+            kv_cache_pointers,
             slot_mapping[start - offset : end - offset],
             kvcaches[0][0].device,
             self.page_buffer_size,
             False,
+            self.use_mla,
         )
 
     @_lmcache_nvtx_annotate
@@ -1255,17 +1263,17 @@ class SGLangGPUConnector(GPUConnectorInterface):
         kvcaches: List[torch.Tensor] = kwargs["kvcaches"]
         slot_mapping: torch.Tensor = kwargs["slot_mapping"]
 
-        key_pointers, value_pointers = self._initialize_pointers(kvcaches)
+        kv_cache_pointers = self._initialize_pointers(kvcaches)
 
         if self.gpu_buffer is None or end - start != self.gpu_buffer.shape[2]:
             lmc_ops.multi_layer_kv_transfer_unilateral(
                 memory_obj.tensor,
-                key_pointers,
-                value_pointers,
+                kv_cache_pointers,
                 slot_mapping[start:end],
                 kvcaches[0][0].device,
                 self.page_buffer_size,
                 True,
+                self.use_mla,
             )
         else:
             # kvcaches -> gpu_buffer -> memobj
@@ -1273,12 +1281,12 @@ class SGLangGPUConnector(GPUConnectorInterface):
             tmp_gpu_buffer = self.gpu_buffer[:, :, : end - start, :]
             lmc_ops.multi_layer_kv_transfer_unilateral(
                 tmp_gpu_buffer,
-                key_pointers,
-                value_pointers,
+                kv_cache_pointers,
                 slot_mapping[start:end],
                 kvcaches[0][0].device,
                 self.page_buffer_size,
                 True,
+                self.use_mla,
             )
             memory_obj.tensor.copy_(tmp_gpu_buffer, non_blocking=True)
 
@@ -1287,6 +1295,9 @@ class SGLangGPUConnector(GPUConnectorInterface):
             # NOTE: for better performance, we may not want to sync for every
             # memory object
             torch.cuda.synchronize()
+
+        if self.use_mla:
+            memory_obj.metadata.fmt = MemoryFormat.KV_MLA_FMT
 
     def get_shape(self, num_tokens: int) -> torch.Size:
         return torch.Size([2, self.num_layers, num_tokens, self.hidden_dim_size])

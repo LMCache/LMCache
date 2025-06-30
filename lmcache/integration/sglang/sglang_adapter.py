@@ -18,11 +18,6 @@ from lmcache.v1.gpu_connector import (
 logger = init_logger(__name__)
 
 
-def get_kv_cache_torch_dtype(dtype: str) -> torch.dtype:
-    # TODO: add support for other dtypes
-    return torch.bfloat16
-
-
 def need_gpu_interm_buffer(lmcache_config: LMCacheEngineConfig):
     if lmcache_config.enable_nixl:
         return False
@@ -35,6 +30,7 @@ def init_lmcache_engine(
     tp_size: int,
     rank: int,
     world_size: int,
+    kv_dtype: torch.dtype,
 ) -> Optional[LMCacheEngine]:
     """
     TODO: ADD COMMENTS
@@ -46,8 +42,6 @@ def init_lmcache_engine(
     assert isinstance(config, LMCacheEngineConfig), (
         "LMCache v1 configuration is should be passed."
     )
-
-    kv_dtype = get_kv_cache_torch_dtype(model_config.dtype)
 
     # construct kv shape (for mem pool)
     num_layer = model_config.num_hidden_layers
@@ -101,18 +95,19 @@ class LMCacheConnector:
         k_pool: List[torch.Tensor],
         v_pool: List[torch.Tensor],
     ):
+        kv_dtype = k_pool[0].dtype
         self.lmcache_engine = init_lmcache_engine(
             sgl_config,
             tp_size,
             rank,
             world_size,
+            kv_dtype,
         )
         self.sgl_config = sgl_config
         self.tp_size = tp_size
         self.rank = rank
         self.world_size = world_size
-        self.k_pool = k_pool
-        self.v_pool = v_pool
+        self.kvcaches = k_pool + v_pool
 
     ####################
     # Worker side APIs
@@ -132,7 +127,7 @@ class LMCacheConnector:
         ret_token_mask = self.lmcache_engine.retrieve(
             token_ids,
             mask=load_mask,
-            kvcaches=[self.k_pool, self.v_pool],
+            kvcaches=self.kvcaches,
             slot_mapping=slot_mapping,
             offset=offset,
         )
@@ -154,10 +149,17 @@ class LMCacheConnector:
         self.lmcache_engine.store(
             token_ids,
             mask=store_mask,
-            kvcaches=[self.k_pool, self.v_pool],
+            kvcaches=self.kvcaches,
             slot_mapping=slot_mapping,
             offset=offset,
         )
+
+    def prefetch(
+        self,
+        tokens: torch.Tensor,
+        mask: Optional[torch.Tensor] = None,
+    ) -> None:
+        self.lmcache_engine.prefetch(tokens, mask)
 
     def chunk_size(self):
         return self.lmcache_engine.config.chunk_size
