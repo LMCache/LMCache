@@ -23,12 +23,13 @@
   </a>
 </p>
 
-<h3 align="center">
-    Redis for LLMs - Infinite and Ultra-Fast
-</h3>
+<h2 align="center">
+    <!--Redis for LLMs - Infinite and Ultra-Fast-->
+</h2>
 
-----
+## NEW: Check out [vLLM Production Stack](https://github.com/vllm-project/production-stack) for enterprise-scale deployment of LMCache!
 
+---
 
 LMCache is an **LLM** serving engine extension to **reduce TTFT** and **increase throughput**, especially under long-context scenarios. By storing the KV caches of reusable texts across various locations, including (GPU, CPU DRAM, Local Disk), LMCache reuses the KV caches of **_any_** reused text (not necessarily prefix) in **_any_** serving engine instance. Thus, LMCache saves precious GPU cycles and reduces user response delay.  
 
@@ -43,8 +44,6 @@ Try LMCache with pre-built vllm docker images [here](https://docs.lmcache.ai/dev
 # 💻 Installation and Quickstart
 
 Please refer to our detailed documentation for [LMCache V1](https://docs.lmcache.ai/getting_started/installation.html#install-from-source-v1) and [LMCache V0](https://docs.lmcache.ai/getting_started/installation.html#install-from-source-v0)
-
-For large-scale deployment, please refer to [vLLM Production Stack](https://github.com/vllm-project/production-stack)!
 
 # Interested in Connecting?
 Fill out the [interest form](https://forms.gle/mQfQDUXbKfp2St1z7), [sign up for our newsletter](https://mailchi.mp/tensormesh/lmcache-sign-up-newsletter), or [drop an email](contact@lmcache.ai), and our team will reach out to you!
