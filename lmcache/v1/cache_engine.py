@@ -140,6 +140,8 @@ class LMCacheEngine:
             else:
                 self.fmt = MemoryFormat.KV_T2D
 
+        self.lookup_cache = {}
+
         InitializeUsageContext(config.to_original_config(), metadata)
         self.stats_monitor = LMCStatsMonitor.GetOrCreate()
 
@@ -375,29 +377,81 @@ class LMCacheEngine:
         monitor_req_id = self.stats_monitor.on_retrieve_request(num_required_tokens)
 
         ret_mask = torch.zeros_like(tokens, dtype=torch.bool, device="cpu")
+
+        key_mapping: Dict[str, List[CacheEngineKey]] = {}
+        start_mapping: Dict[str, List[int]] = {}
+        end_mapping: Dict[str, List[int]] = {}
+
+        reordered_keys = []
+        reordered_memory_objs = []
+        reordered_starts = []
+        reordered_ends = []
         for start, end, key in self.token_database.process_tokens(tokens, mask):
             assert isinstance(key, CacheEngineKey)
 
-            # Get the memory object from the storage backend
-            memory_obj = self.storage_manager.get(key)
-
-            if memory_obj is None:
-                if self.enable_p2p:
-                    future_memory_obj = asyncio.run_coroutine_threadsafe(
-                        self.distributed_server.issue_get(key),
-                        self.distributed_loop,
-                    )
-                    memory_obj = future_memory_obj.result()
-                if memory_obj is None:
+            if key in self.lookup_cache:
+                # TODO(Jiayi): we can reduce the number of `contains` calls
+                # by checking the lookup cache first (should be updated in `lookup`)
+                pass
+            else:
+                # NOTE: key should always be in the lookup cache once
+                # we support it.
+                location = self.storage_manager.contains(key)
+                if location is None:
+                    # TODO(Jiayi): Need to refactor P2P as a storage backend to
+                    # clean up the following code.
+                    if self.enable_p2p:
+                        future_memory_obj = asyncio.run_coroutine_threadsafe(
+                            self.distributed_server.issue_get(key),
+                            self.distributed_loop,
+                        )
+                        memory_obj = future_memory_obj.result()
+                        reordered_keys.append(key)
+                        reordered_memory_objs.append(memory_obj)
+                        reordered_starts.append(start)
+                        reordered_ends.append(end)
+                        continue
                     break
 
-            ret_mask[start:end] = True
+                # NOTE: Here we make the assumption that the underlying
+                # storage backend support pin operation, and the memory
+                # object is already pinned in the storage backend.
+                ret_mask[start:end] = True
 
-            # NOTE(Jiayi): memory_obj doesn't have to be a pinned
-            # cpu tensor for the sake of performance.
-            # For example, disk->gpu is faster than disk->cpu->gpu.
-            # RDMA is another example.
-            self.gpu_connector.to_gpu(memory_obj, start, end, **kwargs)
+                if location not in key_mapping:
+                    key_mapping[location] = [key]
+                    start_mapping[location] = [start]
+                    end_mapping[location] = [end]
+                    continue
+
+            assert location is not None
+
+            key_mapping[location].append(key)
+            start_mapping[location].append(start)
+            end_mapping[location].append(end)
+
+        # TODO(Jiayi): We can parallelize the retrieval from
+        # different storage backends.
+        for location, keys in key_mapping.items():
+            memory_objs = self.storage_manager.batched_get(
+                keys=keys,
+                storage_backend_name=location,
+            )
+            reordered_memory_objs.extend(memory_objs)
+            reordered_keys.extend(keys)
+            reordered_starts.extend(start_mapping[location])
+            reordered_ends.extend(end_mapping[location])
+
+        # NOTE(Jiayi): memory_obj doesn't have to be a pinned
+        # cpu tensor for the sake of performance.
+        # For example, disk->gpu is faster than disk->cpu->gpu.
+        # RDMA is another example.
+        self.gpu_connector.batched_to_gpu(
+            reordered_memory_objs, reordered_starts, reordered_ends, **kwargs
+        )
+
+        # TODO(Jiayi): Remove the following for loop with batched operations
+        for key, memory_obj in zip(reordered_keys, reordered_memory_objs, strict=False):
             memory_obj.ref_count_down()
 
             # NOTE (ApostaC): This is only for the current implementation:

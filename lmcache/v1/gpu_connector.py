@@ -186,6 +186,11 @@ class VLLMNestedTupleGPUConnector(GPUConnectorInterface):
                 )
         put_stream.synchronize()
 
+    # TODO(Jiayi): need to optimize to enable real batching
+    def batched_to_gpu(self, memory_objs, starts, ends, **kwargs):
+        for memory_obj, start, end in zip(memory_objs, starts, ends, strict=False):
+            self.to_gpu(memory_obj, start, end, **kwargs)
+
     # TODO(Jiayi): need to optimize
     def batched_from_gpu(self, memory_objs, starts, ends, **kwargs):
         for memory_obj, start, end in zip(memory_objs, starts, ends, strict=False):
@@ -282,6 +287,11 @@ class VLLMPagedMemGPUConnector(GPUConnectorInterface):
             )
 
         torch.cuda.synchronize()
+
+    # TODO(Jiayi): need to optimize to enable real batching
+    def batched_to_gpu(self, memory_objs, starts, ends, **kwargs):
+        for memory_obj, start, end in zip(memory_objs, starts, ends, strict=False):
+            self.to_gpu(memory_obj, start, end, **kwargs)
 
     # TODO(Jiayi): need to optimize
     def batched_from_gpu(self, memory_objs, starts, ends, **kwargs):
@@ -481,6 +491,11 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
 
         if self.use_mla:
             memory_obj.metadata.fmt = MemoryFormat.KV_MLA_FMT
+
+    # TODO(Jiayi): need to optimize to enable real batching
+    def batched_to_gpu(self, memory_objs, starts, ends, **kwargs):
+        for memory_obj, start, end in zip(memory_objs, starts, ends, strict=False):
+            self.to_gpu(memory_obj, start, end, **kwargs)
 
     # TODO(Jiayi): need to optimize to enable real batching
     def batched_from_gpu(self, memory_objs, starts, ends, **kwargs):
@@ -1275,6 +1290,11 @@ class SGLangGPUConnector(GPUConnectorInterface):
 
     def get_shape(self, num_tokens: int) -> torch.Size:
         return torch.Size([2, self.num_layers, num_tokens, self.hidden_dim_size])
+
+    # TODO(Jiayi): need to optimize to enable real batching
+    def batched_to_gpu(self, memory_objs, starts, ends, **kwargs):
+        for memory_obj, start, end in zip(memory_objs, starts, ends, strict=False):
+            self.to_gpu(memory_obj, start, end, **kwargs)
 
     # TODO(Yuwei): need to optimize to enable real batching
     def batched_from_gpu(self, memory_objs, starts, ends, **kwargs):
