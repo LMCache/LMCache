@@ -239,6 +239,18 @@ class StorageManager:
                 return task
         return None
 
+    def batched_get(
+        self,
+        keys: List[CacheEngineKey],
+        storage_backend_name: str,
+    ) -> List[MemoryObj]:
+        """
+        Non-blocking function to get the memory objects from the storages.
+        """
+        storage_backend = self.storage_backends[storage_backend_name]
+        memory_objs = storage_backend.batched_get_blocking(keys)
+        return memory_objs
+
     def layerwise_batched_get(
         self,
         keys: List[List[CacheEngineKey]],
@@ -256,7 +268,7 @@ class StorageManager:
         :return: A generator that yields a list of futures for each layer.
         """
         for keys_multi_chunk in keys:
-            # Store all chunks for one layer
+            # Retrieve all chunks for one layer
             tasks = []
             for key in keys_multi_chunk:
                 task = self.get_non_blocking(key)
@@ -329,7 +341,7 @@ class StorageManager:
         key: CacheEngineKey,
         search_range: Optional[List[str]] = None,
         pin: bool = False,
-    ) -> bool:
+    ) -> Optional[str]:
         """
         Check whether the key exists in the storage backend.
 
@@ -350,9 +362,9 @@ class StorageManager:
                 continue
 
             if backend.contains(key, pin):
-                return True
+                return backend_name
 
-        return False
+        return None
 
     def remove(
         self,
