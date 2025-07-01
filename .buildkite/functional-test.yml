@@ -1,8 +1,6 @@
 # .buildkite/pipeline.yml
 steps:
-  - label: ":rocket: LMCache GPU CI"    # 这个 label 你可以换成任意文字或 emoji
-    agents:
-      queue: "gpu"                      # 请根据你的 Agent pool 实际标签修改
+  - label: ":rocket: LMCache GPU CI"
     timeout_in_minutes: 60
     commands:
       - chmod +x scripts/functional-tests.sh
