@@ -49,7 +49,7 @@ if TYPE_CHECKING:
     from vllm.forward_context import ForwardContext
     from vllm.multimodal.inputs import PlaceholderRange
     from vllm.v1.core.kv_cache_manager import KVCacheManager
-    from vllm.v1.core.sched.output import CachedRequestData, NewRequestData
+    from vllm.v1.core.sched.output import NewRequestData
     from vllm.v1.request import Request
 
 logger = init_logger(__name__)
@@ -222,22 +222,23 @@ class RequestTracker:
 
     def update(
         self,
-        cached_request: "CachedRequestData",
+        new_token_ids: list[int],
+        new_block_ids: tuple[list[int], ...],
     ) -> None:
         """Update the request tracker when a running request is
         scheduled again
         """
 
-        self.token_ids.extend(cached_request.new_token_ids)
+        self.token_ids.extend(new_token_ids)
 
-        new_block_ids: list[int]
-
-        if len(cached_request.new_block_ids) == 0:
+        if len(new_block_ids) == 0:
             new_block_ids = []
-        elif not isinstance(cached_request.new_block_ids[0], list):
-            new_block_ids = cached_request.new_block_ids
         else:
-            new_block_ids = cached_request.new_block_ids[0]
+            assert isinstance(new_block_ids[0], list), (
+                "The new_block_ids should be a tuple of lists, "
+                "the vllm version might be too old!"
+            )
+            new_block_ids = new_block_ids[0]
         self.allocated_block_ids.extend(new_block_ids)
 
 
@@ -941,9 +942,13 @@ class LMCacheConnectorV1Impl:
             if req_meta is not None:
                 meta.add_request(req_meta)
 
-        for request in scheduler_output.scheduled_cached_reqs:
-            request_tracker = self._request_trackers[request.req_id]
-            request_tracker.update(request)
+        cached_reqs = scheduler_output.scheduled_cached_reqs
+        for i, req_id in enumerate(cached_reqs.req_ids):
+            request_tracker = self._request_trackers[req_id]
+            new_token_ids = cached_reqs.new_token_ids[i]
+            new_block_ids = cached_reqs.new_block_ids[i]
+
+            request_tracker.update(new_token_ids, new_block_ids)
 
             req_meta = ReqMeta.from_request_tracker(
                 request_tracker,
