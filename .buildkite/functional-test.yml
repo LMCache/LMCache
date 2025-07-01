@@ -1,7 +1,0 @@
-# .buildkite/pipeline.yml
-steps:
-  - label: ":rocket: LMCache GPU CI"
-    timeout_in_minutes: 60
-    commands:
-      - chmod +x scripts/functional-tests.sh
-      - scripts/functional-tests.sh

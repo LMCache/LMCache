@@ -1,0 +1,9 @@
+env:
+  DOCKER_BUILDKIT: 1
+
+steps:
+  - label: ":rocket: Container Image Functional Test"
+    timeout_in_minutes: 60
+    commands:
+      - chmod +x scripts/functional-tests.sh
+      - scripts/functional-tests.sh
