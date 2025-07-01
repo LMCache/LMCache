@@ -170,18 +170,18 @@ class RequestTracker:
     #        preemption
     allocated_block_ids: list[int]
 
-    # The number of tokens that has been saved
+    # The number of tokens that has been savd
     num_saved_tokens: int = 0
 
     # Multimodal hashes and positions
     mm_hashes: Optional[list[str]] = None
     mm_positions: Optional[list["PlaceholderRange"]] = None
+    is_decode_phase = False
 
     @staticmethod
     def from_new_request(
         new_request: "NewRequestData",
         num_tokens_to_compute: int,
-        lmcache_cached_tokens: int,
     ) -> "RequestTracker":
         """Create the request tracker from a new request.
 
@@ -215,7 +215,7 @@ class RequestTracker:
             req_id=new_request.req_id,
             token_ids=new_request.prompt_token_ids[:num_tokens_to_compute].copy(),
             allocated_block_ids=unfolded_block_ids,
-            num_saved_tokens=lmcache_cached_tokens,
+            num_saved_tokens=0,
             mm_hashes=new_request.mm_hashes.copy(),
             mm_positions=new_request.mm_positions.copy(),
         )
@@ -240,6 +240,10 @@ class RequestTracker:
             )
             new_block_ids = new_block_ids[0]
         self.allocated_block_ids.extend(new_block_ids)
+
+        # When a request is scheduled again,
+        # it means that the request is in decode phase
+        self.is_decode_phase = True
 
 
 @dataclass
@@ -286,17 +290,20 @@ class ReqMeta:
         # For save operation: do not save if the following condition is met
         # 1. has already been saved before (num_saved_tokens > 0)
         # 2. number of unsaved tokens is not reached the chunk boundary
-        # 3. if save_decode_cache is False and we are in decode phase (num_saved_tokens > 0)
-        
+        # 3. if save_decode_cache is False in decode phase
+
         # Skip save if we're in decode phase and save_decode_cache is False
         save_decode_cache = lmcache_connector.config.save_decode_cache
-        
+
         skip_leading_tokens = tracker.num_saved_tokens
         chunk_boundary = (
             cdiv(tracker.num_saved_tokens + 1, lmcache_chunk_size) * lmcache_chunk_size
         )
         skip_save = skip_save or (
-            tracker.num_saved_tokens > 0 and not save_decode_cache
+            tracker.num_saved_tokens > 0
+            and input_token_len < chunk_boundary
+            # check whether in decode phase
+            and (tracker.is_decode_phase and not save_decode_cache)
         )
 
         if skip_save and load_spec is None:
@@ -316,7 +323,11 @@ class ReqMeta:
         save_spec = SaveSpec(skip_leading_tokens, not skip_save)
 
         # Calculate the token ids and slot mappings for load and save
-        # OPTIMIZATION: pre-allocate the buffer for token ids and block
+        # OPTIMIZATION: pre-allocate the buffer for token ids
+        # and blocktracker.num_saved_tokens > 0
+        # and input_token_len < chunk_boundary
+        # and not save_decode_cache
+
         # ids
         token_ids = torch.tensor(input_token_ids)[:num_tokens_to_save]
 
@@ -532,14 +543,14 @@ class LMCacheConnectorV1Impl:
                 sync = True
                 # NOTE(Jiayi): Perform blending before layerwise prefix caching
                 if self.enable_blending:
-                    # TODO(Jiayi): Need to make prefix caching and blending compatible
                     self.blender.blend(
-                        tokens[:lmcache_cached_tokens],
-                        token_mask[:lmcache_cached_tokens],
+                        tokens[: request.load_spec.lmcache_cached_tokens],
+                        token_mask[: request.load_spec.lmcache_cached_tokens],
                         kvcaches=kvcaches,
-                        slot_mapping=slot_mapping[:lmcache_cached_tokens],
+                        slot_mapping=slot_mapping,
                     )
                 else:
+                    # TODO(Jiayi): Need to make prefix caching and blending compatible
                     layerwise_retriever = self.lmcache_engine.retrieve_layer(
                         tokens[:lmcache_cached_tokens],
                         token_mask[:lmcache_cached_tokens],
@@ -562,7 +573,9 @@ class LMCacheConnectorV1Impl:
                 # Check the result
                 num_retrieved_tokens = ret_token_mask.sum().item()
                 num_expected_tokens = (
-                    lmcache_cached_tokens - request.load_spec.vllm_cached_tokens
+                    request.load_spec.lmcache_cached_tokens
+                    - request.load_spec.vllm_cached_tokens
+                    - self.skip_last_n_tokens
                 )
                 if num_retrieved_tokens < num_expected_tokens:
                     logger.error(
@@ -768,9 +781,6 @@ class LMCacheConnectorV1Impl:
                 offset=skip_leading_tokens,
             )
 
-            # NOTE(Jiayi): We assume all tokens are saved
-            save_spec.skip_leading_tokens = len(token_ids)
-
     def get_finished(
         self, finished_req_ids: set[str]
     ) -> tuple[Optional[set[str]], Optional[set[str]]]:
@@ -821,11 +831,10 @@ class LMCacheConnectorV1Impl:
         # blocks are cached, we need to recompute the last token.
         # This will be removed in the future if vLLM's scheduler provides
         # a better support for this case.
-        need_to_allocate = num_external_hit_tokens - num_computed_tokens
-
-        # In, full-prompt-hit case, we need to recompute the last token
         if num_external_hit_tokens == request.num_tokens:
-            need_to_allocate -= 1
+            num_external_hit_tokens -= 1
+
+        need_to_allocate = num_external_hit_tokens - num_computed_tokens
 
         logger.info(
             "Reqid: %s, Total tokens %d, LMCache hit tokens: %d, need to load: %d",
@@ -867,22 +876,17 @@ class LMCacheConnectorV1Impl:
             self.load_specs[request.request_id].can_load = False
             return
 
-        # Only check for non-prompt-hit case
-        if (
-            self.load_specs[request.request_id].lmcache_cached_tokens
-            != request.num_tokens
-        ):
-            assert (
-                num_external_tokens > 0
-                and num_external_tokens
-                == self.load_specs[request.request_id].lmcache_cached_tokens
-                - self.load_specs[request.request_id].vllm_cached_tokens
-            ), (
-                f"Mismatch in number of tokens: {num_external_tokens} vs "
-                f"{self.load_specs[request.request_id].lmcache_cached_tokens} - "
-                f"{self.load_specs[request.request_id].vllm_cached_tokens}"
-                f" for request {request.request_id}"
-            )
+        assert (
+            num_external_tokens > 0
+            and num_external_tokens
+            == self.load_specs[request.request_id].lmcache_cached_tokens
+            - self.load_specs[request.request_id].vllm_cached_tokens
+        ), (
+            f"Mismatch in number of tokens: {num_external_tokens} vs "
+            f"{self.load_specs[request.request_id].lmcache_cached_tokens} - "
+            f"{self.load_specs[request.request_id].vllm_cached_tokens}"
+            f" for request {request.request_id}"
+        )
 
         self.load_specs[request.request_id].can_load = True
 
@@ -914,13 +918,8 @@ class LMCacheConnectorV1Impl:
                 request.num_computed_tokens
                 + scheduler_output.num_scheduled_tokens[request.req_id]
             )
-            lmcache_cached_tokens = 0
-            if load_spec is not None:
-                lmcache_cached_tokens = load_spec.lmcache_cached_tokens
             request_tracker = RequestTracker.from_new_request(
-                request,
-                num_tokens_to_compute,
-                lmcache_cached_tokens,
+                request, num_tokens_to_compute
             )
             self._request_trackers[request.req_id] = request_tracker
 
