@@ -12,7 +12,7 @@ requires = [
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "lmcache"
+name = "tx-lmcache"
 authors = [{name = "LMCache Team", email = "lmcacheteam@gmail.com"}]
 license = "Apache-2.0"
 license-files = ["LICENSE"]
