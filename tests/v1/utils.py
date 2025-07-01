@@ -114,6 +114,40 @@ def generate_kv_cache_paged_list_tensors(
     return ret
 
 
+def generate_sglang_kv_cache_paged_list_tensors(
+    num_layers,
+    num_blocks,
+    block_size,
+    num_heads,
+    head_size,
+    use_mla=False,
+    device="cuda",
+    dtype=torch.bfloat16,
+):
+    """
+    Instead of Tuple[Tuple[Tensor, Tensor]], return List[Tensor]
+    where KV are in the same tensor
+    """
+    shape = (
+        [num_blocks * block_size, 1, head_size]
+        if use_mla
+        else [num_blocks * block_size, num_heads, head_size]
+    )
+    if use_mla:
+        kv_cache = [
+            torch.rand(shape, dtype=dtype, device=device) for i in range(num_layers)
+        ]
+    else:
+        k_cache = [
+            torch.rand(shape, dtype=dtype, device=device) for i in range(num_layers)
+        ]
+        v_cache = [
+            torch.rand(shape, dtype=dtype, device=device) for i in range(num_layers)
+        ]
+        kv_cache = k_cache + v_cache
+    return kv_cache
+
+
 def generate_mla_kv_cache_paged_list_tensors(
     num_blocks, device, block_size=64, dtype=torch.bfloat16, num_layers=32
 ):
@@ -227,6 +261,26 @@ def check_paged_kv_cache_equal(
 
         assert (left_k[slot_mapping, :, :] == right_k[slot_mapping, :, :]).all()
         assert (left_v[slot_mapping, :, :] == right_v[slot_mapping, :, :]).all()
+
+
+def check_sglang_paged_kv_cache_equal(
+    left, right, num_tokens, slot_mapping, num_heads=8, head_size=128
+):
+    """
+    check whether two paged kv caches are the same at slot_mapping
+    """
+    token_dim = 0
+    for left_kv, right_kv in zip(left, right, strict=False):
+        _left_kv = left_kv.reshape(-1, num_heads, head_size)
+        _right_kv = right_kv.reshape(-1, num_heads, head_size)
+
+        assert len(_left_kv.shape) == 3
+        assert len(_right_kv.shape) == 3
+
+        assert _left_kv.shape[token_dim] >= num_tokens
+        assert _right_kv.shape[token_dim] >= num_tokens
+
+        assert (_left_kv[slot_mapping, :, :] == _right_kv[slot_mapping, :, :]).all()
 
 
 def check_paged_kv_cache_equal_with_mla(
