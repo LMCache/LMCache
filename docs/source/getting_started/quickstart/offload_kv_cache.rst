@@ -23,8 +23,8 @@ Use CPU offloading in offline inference
 ---------------------------------------
 
 This section demonstrates how to use CPU memory offloading in offline inference scenarios using LMCache with vLLM.
-The example script we use here is available in `vLLM examples <https://github.com/vllm-project/vllm/blob/main/examples/lmcache/cpu_offload_lmcache.py>`_.
-See the `examples README <https://github.com/vllm-project/vllm/tree/main/examples/lmcache#2-cpu-offload-examples>`_ to understand how to run the script for vLLM v1.
+The example script we use here is available in `vLLM examples <https://github.com/vllm-project/vllm/blob/main/examples/others/lmcache/cpu_offload_lmcache.py>`_.
+See the `examples README <https://github.com/vllm-project/vllm/tree/main/examples/others/lmcache#2-cpu-offload-examples>`_ to understand how to run the script for vLLM v1.
 
 First, set up the necessary environment variables for LMCache:
 

@@ -230,15 +230,17 @@ __global__ void load_and_reshape_multi_layer_kernel(
   }
 }
 
+/*
+ * handle sglang MHA offload between CPU and GPU
+ */
 template <typename scalar_t, bool DIRECTION>
 __global__ void load_and_reshape_multi_layer_kernel_unilateral(
-    scalar_t* __restrict__ key_value,    // [2, num_layer, num_tokens,
-                                         // scalars_per_token]
-    scalar_t** __restrict__ key_ptrs,    // [num_layers] * [PAGE_BUFFER_SIZE,
-                                         // scalars_per_token]
-    scalar_t** __restrict__ value_ptrs,  // [num_layers] * [PAGE_BUFFER_SIZE,
-                                         // scalars_per_token]
-    const int64_t* __restrict__ slot_mapping,  // [num_tokens]
+    scalar_t* __restrict__ key_value,           // [2, num_layer, num_tokens,
+                                                // scalars_per_token]
+    scalar_t** __restrict__ paged_buffer_ptrs,  // [num_layers *2] *
+                                                // [PAGE_BUFFER_SIZE,
+                                                // scalars_per_token]
+    const int64_t* __restrict__ slot_mapping,   // [num_tokens]
     const int scalars_per_token, const int num_tokens, const int num_layers,
     const int page_buffer_size) {
   const int token_id = blockIdx.x;
@@ -248,8 +250,8 @@ __global__ void load_and_reshape_multi_layer_kernel_unilateral(
   const int num_threads = blockDim.x;
 
   const int64_t slot_idx = slot_mapping[token_id];
-  int64_t* key_ptr = key_ptrs[layer_id];
-  int64_t* value_ptr = value_ptrs[layer_id];
+  int64_t* key_ptr = paged_buffer_ptrs[layer_id];
+  int64_t* value_ptr = paged_buffer_ptrs[layer_id + num_layers];
 
   if (slot_idx < 0) {
     return;
@@ -404,16 +406,19 @@ void multi_layer_kv_transfer_unilateral(
                     // flash_attn [1, num_layer, num_tokens, aligned_head_size]
                     // for MLA key/value must be on gpu/pinned cpu
 
-    const torch::Tensor& key_ptrs,      // [num_layers]
-    const torch::Tensor& value_ptrs,    // [num_layers]
-    const torch::Tensor& slot_mapping,  // [num_tokens],
+    const torch::Tensor& key_value_ptrs,  // [num_layers*2]
+    const torch::Tensor& slot_mapping,    // [num_tokens],
     const torch::Device& paged_memory_device, const int page_buffer_size,
-    const bool direction) {
+    const bool direction, const bool use_mla) {
+  if (use_mla) {
+    return multi_layer_kv_transfer(key_value, key_value_ptrs, slot_mapping,
+                                   paged_memory_device, page_buffer_size,
+                                   direction, use_mla);
+  }
+
   int64_t* key_value_ptr = get_kernel_ptr<int64_t, torch::Tensor>(key_value);
-  int64_t** key_ptrs_ptr =
-      get_kernel_ptr<int64_t*, const torch::Tensor>(key_ptrs);
-  int64_t** value_ptrs_ptr =
-      get_kernel_ptr<int64_t*, const torch::Tensor>(value_ptrs);
+  int64_t** page_buffer_ptrs =
+      get_kernel_ptr<int64_t*, const torch::Tensor>(key_value_ptrs);
   const int64_t* slot_mapping_ptr =
       get_kernel_ptr<const int64_t, const torch::Tensor>(slot_mapping);
 
@@ -433,15 +438,15 @@ void multi_layer_kv_transfer_unilateral(
 
   if (not direction) {
     lmc::load_and_reshape_multi_layer_kernel_unilateral<int64_t, false>
-        <<<grid, block, 0, stream>>>(
-            key_value_ptr, key_ptrs_ptr, value_ptrs_ptr, slot_mapping_ptr,
-            num_qwords, num_tokens, num_layers, page_buffer_size);
+        <<<grid, block, 0, stream>>>(key_value_ptr, page_buffer_ptrs,
+                                     slot_mapping_ptr, num_qwords, num_tokens,
+                                     num_layers, page_buffer_size);
     C10_CUDA_KERNEL_LAUNCH_CHECK();
   } else {
     lmc::load_and_reshape_multi_layer_kernel_unilateral<int64_t, true>
-        <<<grid, block, 0, stream>>>(
-            key_value_ptr, key_ptrs_ptr, value_ptrs_ptr, slot_mapping_ptr,
-            num_qwords, num_tokens, num_layers, page_buffer_size);
+        <<<grid, block, 0, stream>>>(key_value_ptr, page_buffer_ptrs,
+                                     slot_mapping_ptr, num_qwords, num_tokens,
+                                     num_layers, page_buffer_size);
     C10_CUDA_KERNEL_LAUNCH_CHECK();
   }
 }

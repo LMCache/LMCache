@@ -188,11 +188,6 @@ def init_lmcache_engine(
         VLLMPagedMemLayerwiseGPUConnector,
     ]
 
-    max_tokens = scheduler_config.max_num_batched_tokens if scheduler_config else None
-    logger.info(
-        f"Using max_tokens={max_tokens} from scheduler config for GPU buffer allocation"
-    )
-
     if use_mla and config.use_layerwise:
         raise ValueError("layerwise MLA connector is not supported yet")
 
@@ -208,7 +203,6 @@ def init_lmcache_engine(
                 chunk_size=chunk_size,
                 dtype=kv_dtype,
                 device=device,
-                max_tokens=max_tokens,
             )
         else:
             vllm_gpu_connector = VLLMPagedMemLayerwiseGPUConnector(
@@ -218,7 +212,6 @@ def init_lmcache_engine(
                 chunk_size=chunk_size,
                 dtype=kv_dtype,
                 device=device,
-                max_tokens=max_tokens,
             )
     else:
         vllm_gpu_connector = VLLMPagedMemGPUConnectorV2(
