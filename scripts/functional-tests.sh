@@ -21,6 +21,20 @@ build_lmcache_vllmopenai_image() {
     ./test-build.sh
 }
 
+wait_for_openai_api_server(){
+    if ! timeout 180 bash -c '
+        until curl 127.0.0.1:8000/v1/models |grep "\"id\":\"meta-llama/Llama-3.1-8B-Instruct\""; do
+            echo "waiting for OpenAI API server to start"
+            sleep 30
+        done
+    '; then
+        echo "OpenAI API server did not start"
+        docker logs $1
+        cleanup 1
+        exit 1
+    fi
+}
+
 run_lmcache_vllmopenai_container() {
     CID=$(docker run -d --runtime nvidia --gpus all \
         --env "LMCACHE_CHUNK_SIZE=256" \
@@ -32,7 +46,7 @@ run_lmcache_vllmopenai_container() {
         'meta-llama/Llama-3.1-8B-Instruct' --kv-transfer-config \
         '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}')
 
-    wait_for_openai_api_server
+    wait_for_openai_api_server $CID
 
     if ! timeout 10 bash -c '
         if ! docker logs $0 | grep -i "Starting vLLM API server"; then
@@ -43,19 +57,6 @@ run_lmcache_vllmopenai_container() {
         fi
     ' $CID; then
         echo "container log file was not created"
-        cleanup 1
-        exit 1
-    fi
-}
-
-wait_for_openai_api_server(){
-    if ! timeout 180 bash -c '
-        until curl 127.0.0.1:8000/v1/models |grep "\"id\":\"meta-llama/Llama-3.1-8B-Instruct\""; do
-            echo "waiting for OpenAI API server to start"
-            sleep 30
-        done
-    '; then
-        echo "OpenAI API server did not start"
         cleanup 1
         exit 1
     fi
