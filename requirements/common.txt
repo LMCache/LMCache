@@ -1,0 +1,19 @@
+aiofile
+aiofiles
+aiohttp
+cufile-python
+infinistore
+msgspec
+numpy
+nvtx
+prometheus_client >= 0.18.0
+psutil
+pyyaml
+pyzmq >= 25.0.0
+redis
+safetensors
+setuptools>=77.0.3,<81.0.0
+setuptools_scm>=8
+sortedcontainers
+torch==2.7.0  # Should correspond to the version used by vLLM main branch
+transformers >= 4.51.1

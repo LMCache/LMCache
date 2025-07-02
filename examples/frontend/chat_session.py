@@ -1,10 +1,11 @@
+# Standard
 import time
 
+# Third Party
 from openai import OpenAI
 
 
 class ChatSession:
-
     def __init__(self, port, context_separator="###"):
         openai_api_key = "EMPTY"
         openai_api_base = f"http://localhost:{port}/v1"
@@ -51,10 +52,8 @@ class ChatSession:
         start = time.perf_counter()
         end = None
         chat_completion = self.client.chat.completions.create(
-            messages=self.messages,
-            model=self.model,
-            temperature=0,
-            stream=True)
+            messages=self.messages, model=self.model, temperature=0, stream=True
+        )
 
         server_message = []
         for chunk in chat_completion:

@@ -1,8 +1,0 @@
-chunk_size: 256
-local_device: "cpu"
-remote_url: "redis://localhost:65432"
-remote_serde: "cachegen"
-
-# Whether retrieve() is pipelined or not
-pipelined_backend: False
-

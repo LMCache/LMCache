@@ -18,7 +18,7 @@ Welcome to LMCache!
 .. raw:: html
 
    <p style="text-align:center; font-size:24px;">
-   <strong> Redis for LLMs. </strong>
+   <strong> Supercharge Your LLM with the Fastest KV Cache Layer. </strong>
    </p>
 
 .. note::
@@ -76,10 +76,12 @@ Documentation
 
    kv_cache/cpu_ram
    kv_cache/local_storage
+   kv_cache/gds
    kv_cache/redis
    kv_cache/infinistore
    kv_cache/mooncake
    kv_cache/valkey
+   kv_cache/weka
 
 :raw-html:`<br />`
 
@@ -130,6 +132,7 @@ Documentation
 
    developer_guide/contributing
    developer_guide/docker_file
+   developer_guide/usage/index
 
 :raw-html:`<br />`
 
@@ -139,6 +142,7 @@ Documentation
 
    api_reference/configurations
    api_reference/storage_backends
+   api_reference/dynamic_connector
 
 :raw-html:`<br />`
 
@@ -148,3 +152,6 @@ Documentation
 
    community/meetings
    community/blogs
+
+raw-html:`<br />`
+   

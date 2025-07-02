@@ -17,10 +17,12 @@
 # License: [Apache License 2.0]
 # Modifications: header name
 
+# Standard
 from pathlib import Path
 from typing import Mapping, MutableMapping, Optional
 from urllib.parse import urlparse
 
+# Third Party
 import aiohttp
 import requests
 
@@ -54,8 +56,9 @@ class HTTPConnection:
         parsed_url = urlparse(url)
 
         if parsed_url.scheme not in ("http", "https"):
-            raise ValueError("Invalid HTTP URL: A valid HTTP URL "
-                             "must have scheme 'http' or 'https'.")
+            raise ValueError(
+                "Invalid HTTP URL: A valid HTTP URL must have scheme 'http' or 'https'."
+            )
 
     def _headers(self, **extras: str) -> MutableMapping[str, str]:
         return {"User-Agent": "LMCache", **extras}
@@ -73,10 +76,12 @@ class HTTPConnection:
         client = self.get_sync_client()
         extra_headers = extra_headers or {}
 
-        return client.get(url,
-                          headers=self._headers(**extra_headers),
-                          stream=stream,
-                          timeout=timeout)
+        return client.get(
+            url,
+            headers=self._headers(**extra_headers),
+            stream=stream,
+            timeout=timeout,
+        )
 
     async def get_async_response(
         self,
@@ -90,9 +95,7 @@ class HTTPConnection:
         client = await self.get_async_client()
         extra_headers = extra_headers or {}
 
-        return client.get(url,
-                          headers=self._headers(**extra_headers),
-                          timeout=timeout)
+        return client.get(url, headers=self._headers(**extra_headers), timeout=timeout)
 
     def get_bytes(self, url: str, *, timeout: Optional[float] = None) -> bytes:
         with self.get_response(url, timeout=timeout) as r:

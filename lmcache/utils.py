@@ -12,13 +12,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Future
+from __future__ import annotations
+
+# Standard
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, List, Optional, Tuple
 import hashlib
 import threading
-from dataclasses import dataclass
-from typing import List, Optional, Tuple
 
-import torch
+# Third Party
 from nvtx import annotate  # type: ignore
+import torch
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.memory_management import MemoryFormat
 
 # Type definition
 KVCache = Tuple[Tuple[torch.Tensor, torch.Tensor], ...]
@@ -30,6 +39,7 @@ class DiskCacheMetadata:
     size: int  # in bytes
     shape: Optional[torch.Size] = None
     dtype: Optional[torch.dtype] = None
+    fmt: MemoryFormat = None
     is_pin: bool = False
 
     def pin(self) -> bool:
@@ -68,31 +78,48 @@ class CacheEngineKey:
     chunk_hash: str
 
     def __hash__(self):
-        return hash((
+        return hash(
+            (
+                self.fmt,
+                self.model_name,
+                self.world_size,
+                self.worker_id,
+                self.chunk_hash,
+            )
+        )
+
+    def to_string(self):
+        return (
+            f"{self.fmt}@{self.model_name}@{self.world_size}"
+            f"@{self.worker_id}@{self.chunk_hash}"
+        )
+
+    def split_layers(self, num_layers: int) -> List["LayerCacheEngineKey"]:
+        """Split the key into multiple keys for each layer"""
+        keys = []
+        for layer_id in range(num_layers):
+            keys.append(
+                LayerCacheEngineKey(
+                    self.fmt,
+                    self.model_name,
+                    self.world_size,
+                    self.worker_id,
+                    self.chunk_hash,
+                    layer_id,
+                )
+            )
+        return keys
+
+    def get_first_layer(self) -> "LayerCacheEngineKey":
+        """Return the key for the first layer"""
+        key = LayerCacheEngineKey(
             self.fmt,
             self.model_name,
             self.world_size,
             self.worker_id,
             self.chunk_hash,
-        ))
-
-    def to_string(self):
-        return f"{self.fmt}@{self.model_name}@{self.world_size}"\
-            f"@{self.worker_id}@{self.chunk_hash}"
-
-    def split_layers(self, num_layers: int) -> List["LayerCacheEngineKey"]:
-        """ Split the key into multiple keys for each layer """
-        keys = []
-        for layer_id in range(num_layers):
-            keys.append(
-                LayerCacheEngineKey(self.fmt, self.model_name, self.world_size,
-                                    self.worker_id, self.chunk_hash, layer_id))
-        return keys
-
-    def get_first_layer(self) -> "LayerCacheEngineKey":
-        """ Return the key for the first layer """
-        key = LayerCacheEngineKey(self.fmt, self.model_name, self.world_size,
-                                  self.worker_id, self.chunk_hash, 0)
+            0,
+        )
         return key
 
     @staticmethod
@@ -100,8 +127,9 @@ class CacheEngineKey:
         parts = s.split("@")
         if len(parts) != 5:
             raise ValueError(f"Invalid key string: {s}")
-        return CacheEngineKey(parts[0], parts[1], int(parts[2]), int(parts[3]),
-                              parts[4])
+        return CacheEngineKey(
+            parts[0], parts[1], int(parts[2]), int(parts[3]), parts[4]
+        )
 
     def to_dict(self):
         # Note(Kuntai): this is used for serializing CacheEngineKey via msgpack.
@@ -111,44 +139,73 @@ class CacheEngineKey:
             "model_name": self.model_name,
             "world_size": self.world_size,
             "worker_id": self.worker_id,
-            "chunk_hash": self.chunk_hash
+            "chunk_hash": self.chunk_hash,
         }
 
     @staticmethod
     def from_dict(d):
-        return CacheEngineKey(fmt=d["fmt"],
-                              model_name=d["model_name"],
-                              world_size=d["world_size"],
-                              worker_id=d["worker_id"],
-                              chunk_hash=d["chunk_hash"])
+        return CacheEngineKey(
+            fmt=d["fmt"],
+            model_name=d["model_name"],
+            world_size=d["world_size"],
+            worker_id=d["worker_id"],
+            chunk_hash=d["chunk_hash"],
+        )
 
 
 @dataclass(order=True)
 class LayerCacheEngineKey(CacheEngineKey):
-    """ A key for the layer cache engine """
+    """A key for the layer cache engine"""
+
     layer_id: int
 
     def __hash__(self):
-        return hash((
-            self.fmt,
-            self.model_name,
-            self.world_size,
-            self.worker_id,
-            self.chunk_hash,
-            self.layer_id,
-        ))
+        return hash(
+            (
+                self.fmt,
+                self.model_name,
+                self.world_size,
+                self.worker_id,
+                self.chunk_hash,
+                self.layer_id,
+            )
+        )
 
     def to_string(self):
-        return f"{self.fmt}@{self.model_name}@{self.world_size}"\
+        return (
+            f"{self.fmt}@{self.model_name}@{self.world_size}"
             f"@{self.worker_id}@{self.chunk_hash}@{self.layer_id}"
+        )
+
+    def split_layers(self, num_layers: int) -> List["LayerCacheEngineKey"]:
+        """Split the key into multiple keys for each layer"""
+        keys = []
+        for layer_id in range(num_layers):
+            keys.append(
+                LayerCacheEngineKey(
+                    self.fmt,
+                    self.model_name,
+                    self.world_size,
+                    self.worker_id,
+                    self.chunk_hash,
+                    layer_id,
+                )
+            )
+        return keys
 
     @staticmethod
     def from_string(s):
         parts = s.split("@")
         if len(parts) != 6:
             raise ValueError(f"Invalid key string: {s}")
-        return LayerCacheEngineKey(parts[0], parts[1], int(parts[2]),
-                                   int(parts[3]), parts[4], int(parts[5]))
+        return LayerCacheEngineKey(
+            parts[0],
+            parts[1],
+            int(parts[2]),
+            int(parts[3]),
+            parts[4],
+            int(parts[5]),
+        )
 
 
 ##### NVTX annotation #####
@@ -172,12 +229,14 @@ def _lmcache_nvtx_annotate(func, domain="lmcache"):
     )(func)
 
 
-##### Threading related #####
-def thread_safe(func):
-    lock = threading.Lock()
+##### Observability Threading related #####
+_shared_observability_lock = threading.Lock()
 
+
+def thread_safe(func):
     def wrapper(*args, **kwargs):
-        with lock:
-            return func(*args, **kwargs)
+        with _shared_observability_lock:
+            result = func(*args, **kwargs)
+        return result
 
     return wrapper

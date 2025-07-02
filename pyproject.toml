@@ -1,9 +1,9 @@
 [build-system]
-# Should be mirrored in docker/requirements-build.txt
+# Should be mirrored in requirements/build.txt
 requires = [
     "ninja",
     "packaging>=24.2",
-    "setuptools>=77.0.3,<80.0.0",
+    "setuptools>=77.0.3,<81.0.0",
     "setuptools_scm>=8",
     "torch==2.7.0",
     "wheel",
@@ -32,9 +32,9 @@ requires-python = ">=3.10,<3.13"
 dynamic = ["dependencies", "version"]
 
 [project.scripts]
-lmcache_server="lmcache.server.__main__:main"
-lmcache_experimental_server="lmcache.experimental.server.__main__:main"
-lmcache_controller="lmcache.experimental.api_server.__main__:main"
+lmcache_v0_server="lmcache.server.__main__:main"
+lmcache_server="lmcache.v1.server.__main__:main"
+lmcache_controller="lmcache.v1.api_server.__main__:main"
 
 [project.urls]
 homepage = "https://docs.lmcache.ai"
@@ -47,15 +47,15 @@ version_file = "lmcache/_version.py"
 local_scheme = "no-local-version"
 
 [tool.setuptools.dynamic]
-dependencies = { file = ["requirements.txt"] }
+dependencies = { file = ["requirements/common.txt"] }
 
 [tool.setuptools.packages.find]
 where = [""]
 include = ["lmcache", "lmcache*"]
 
 [tool.ruff]
-# Allow lines to be as long as 80.
-line-length = 80
+# same as Black's default line length
+line-length = 88
 
 [tool.ruff.lint]
 select = [
@@ -67,8 +67,12 @@ select = [
     # "UP",
     # flake8-bugbear
     "B",
-    # isort
+    # flake8-simplify
+    #"SIM",
+    # Ruff does not support isort's import_headings feature, yet.
     # "I",
+    # flake8-logging-format
+    #"G",
 ]
 ignore = [
     # star imports
@@ -81,30 +85,74 @@ ignore = [
     "UP032",
 ]
 
+[tool.ruff.lint.isort]
+# same as .isort.cfg
+from-first = true
+# not supported yet
+# import-heading-future=Future
+# import-heading-stdlib=Standard
+# import-heading-thirdparty=Third Party
+# import-heading-firstparty=First Party
+# import-heading-localfolder=Local
+
 [tool.mypy]
-python_version = "3.10"
+modules = ["lmcache", "tests"]
 
-ignore_missing_imports = true
-check_untyped_defs = true
-follow_imports = "silent"
-
-# After fixing type errors resulting from follow_imports: "skip" -> "silent",
-# move the directory here and remove it from format.sh and mypy.yaml
-files = [
-    "lmcache"
+# TODO: tighten MyPy checks by enabling these checks over time.
+disable_error_code = [
+    "annotation-unchecked",
+    "union-attr",
+    "var-annotated",
+    "arg-type",
+    "call-arg",
+    "import-untyped",
+    "attr-defined",
+    "return-value",
+    "assignment",
+    "call-overload",
+    "misc",
 ]
 
-# use a custom manylinux image for cibuildwheel that contains CUDA 12.4
+ignore_missing_imports = true
+explicit_package_bases = true
+
+# TODO: tighten MyPy checks by enabling these checks over time.
+check_untyped_defs = false
+disallow_incomplete_defs = false
+disallow_untyped_defs = false
+disallow_untyped_calls = false
+warn_return_any = false
+
+follow_imports = "silent"
+
 [tool.cibuildwheel]
-manylinux-x86_64-image = "docker.io/apostab/manylinux-cuda124"
+build = "cp3*-manylinux_x86_64"
+skip = "pp*"
+
+# see https://developer.nvidia.com/cuda-gpus for compute capabilities
+# "CUDA-Enabled Datacenter Products"
+# 7.0: V100
+# 7.5: T4
+# 8.0: A100, A30
+# 8.6: A40, A10, A16, A2
+# 8.9: L4, L40, L40S
+# 9.0: H100
+environment = {TORCH_CUDA_ARCH_LIST = "7.0;7.5;8.0;8.6;8.9;9.0"}
+
+# Use the PyTorch manylinux image version '2_28' that contains CUDA 12.8
+# and torch 2.7 supports (https://pypi.org/project/torch/2.7.0/#files)
+manylinux-x86_64-image = "docker.io/pytorch/manylinux2_28-builder:cuda12.8"
+
+[tool.cibuildwheel.linux]
 repair-wheel-command = """
 auditwheel repair \
-  --plat manylinux_2_17_x86_64 \
+  --plat manylinux_2_28_x86_64 \
   --exclude libtorch.so \
   --exclude libtorch_cuda.so \
   --exclude libtorch_python.so \
   --exclude libtorch_cpu.so \
   --exclude libc10.so \
   --exclude libc10_cuda.so \
+  --exclude libcudart.so.12 \
   -w {dest_dir} {wheel}
 """

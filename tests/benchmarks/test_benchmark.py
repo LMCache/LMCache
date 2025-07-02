@@ -1,6 +1,8 @@
+# Third Party
 import pytest
 import torch
 
+# First Party
 from lmcache.config import LMCacheEngineConfig, LMCacheEngineMetadata
 from lmcache.storage_backend.serde.cachegen_decoder import CacheGenDeserializer
 from lmcache.storage_backend.serde.cachegen_encoder import CacheGenSerializer
@@ -11,8 +13,11 @@ def generate_kv_cache(num_tokens, fmt, device):
     num_layers = 32
     num_heads = 8
     head_size = 128
-    shape = ([num_tokens, num_heads, head_size]
-             if fmt == "vllm" else [num_heads, num_tokens, head_size])
+    shape = (
+        [num_tokens, num_heads, head_size]
+        if fmt == "vllm"
+        else [num_heads, num_tokens, head_size]
+    )
     dtype = torch.bfloat16 if fmt == "vllm" else torch.float16
 
     for i in range(num_layers):
@@ -25,7 +30,8 @@ def generate_kv_cache(num_tokens, fmt, device):
 
 def to_blob(kv_tuples):
     return torch.stack(
-        [torch.stack(inner_tuple, dim=0) for inner_tuple in kv_tuples], dim=0)
+        [torch.stack(inner_tuple, dim=0) for inner_tuple in kv_tuples], dim=0
+    )
 
 
 # @pytest.mark.parametrize("chunk_size", [64, 256, 768])
@@ -53,7 +59,8 @@ def test_cachegen_decoder_bench(benchmark, fmt, chunk_size):
         worker_id=0,
         fmt=fmt,
         kv_dtype=torch.bfloat16,
-        kv_shape=None)
+        kv_shape=None,
+    )
     serializer = CacheGenSerializer(config, metadata)
     deserializer = CacheGenDeserializer(config, metadata, torch.bfloat16)
 

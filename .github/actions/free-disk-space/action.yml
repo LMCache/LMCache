@@ -1,0 +1,27 @@
+name: 'Free Disk Space'
+description: 'Frees disk space on the runner'
+runs:
+  using: "composite"
+  steps:
+    - name: Print disk space before cleanup
+      run: |
+        df -h
+      shell: bash
+    - name: Free Disk Space Linux
+      if: runner.os == 'Linux'
+      run: |
+        sudo docker rmi "$(docker image ls -aq)" >/dev/null 2>&1 || true
+        sudo rm -rf \
+          /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+          /usr/local/share/powershell /usr/share/swift /usr/local/.ghcup \
+          /usr/lib/jvm || true
+        sudo apt install aptitude -y >/dev/null 2>&1
+        sudo aptitude purge '~n ^mysql' -f -y >/dev/null 2>&1
+        sudo aptitude purge '~n ^dotnet' -f -y >/dev/null 2>&1
+        sudo apt-get autoremove -y >/dev/null 2>&1
+        sudo apt-get autoclean -y >/dev/null 2>&1
+      shell: bash
+    - name: Print disk space after cleanup
+      run: |
+        df -h
+      shell: bash

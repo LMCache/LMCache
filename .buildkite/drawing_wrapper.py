@@ -1,13 +1,13 @@
+# Standard
 import argparse
 import glob
 import importlib.util
 import os
 
-base_dir = os.path.abspath('../../lmcache-tests/outputs')
-process_result_path = os.path.join(base_dir, 'process_result.py')
+base_dir = os.path.abspath("../../lmcache-tests/outputs")
+process_result_path = os.path.join(base_dir, "process_result.py")
 
-spec = importlib.util.spec_from_file_location("process_result",
-                                              process_result_path)
+spec = importlib.util.spec_from_file_location("process_result", process_result_path)
 process_result = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(process_result)
 
@@ -26,11 +26,12 @@ def process_all_csv_in_directory(directory):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Process CSV files in a directory")
-    parser.add_argument("output",
-                        type=str,
-                        help="The subdirectory to process under lmcache-tests")
+    parser = argparse.ArgumentParser(description="Process CSV files in a directory")
+    parser.add_argument(
+        "output",
+        type=str,
+        help="The subdirectory to process under lmcache-tests",
+    )
     args = parser.parse_args()
 
     # Specify the directory where the CSV files are located

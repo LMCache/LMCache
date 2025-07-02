@@ -10,7 +10,7 @@ This will use port 8000 for 1 vllm and port 8001 for LMCache controller.
 1. Start the vllm engine at port 8000:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 LMCACHE_USE_EXPERIMENTAL=True LMCACHE_CONFIG_FILE=example.yaml vllm serve meta-llama/Meta-Llama-3.1-8B-Instruct --max-model-len 4096  --gpu-memory-utilization 0.8 --port 8000 --kv-transfer-config '{"kv_connector":"LMCacheConnector", "kv_role":"kv_both"}'
+CUDA_VISIBLE_DEVICES=0 LMCACHE_CONFIG_FILE=example.yaml vllm serve meta-llama/Meta-Llama-3.1-8B-Instruct --max-model-len 4096  --gpu-memory-utilization 0.8 --port 8000 --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1", "kv_role":"kv_both"}'
 ```
 
 2. Start the lmcache controller at port 9000 and the monitor at port 9001:
@@ -39,12 +39,12 @@ curl -X POST http://localhost:9000/lookup \
     "tokens": [128000, 849, 21435, 279, 26431, 315, 85748, 6636, 304, 4221, 4211, 13]
   }'
 ```
-The above request returns the instance with most KV cache hit.
+The above request returns the cache information.
 
 You should be able to see a return message:
 
 ```plaintext
-{"res": "lmcache_default_instance"}
+{"lmcache_default_instance": ("cpu", 12)}
 ```
 
-`lmcache_default_instance` indicates the best `instance_id`.
+`lmcache_default_instance` indicates the `instance_id` and `("cpu", 12)` indicates the cache location and matched prefix length.

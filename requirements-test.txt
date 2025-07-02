@@ -1,4 +1,0 @@
-pytest>=7.0
-pytest-benchmark
-pytest-benchmark[histogram]
-buildkite-test-collector

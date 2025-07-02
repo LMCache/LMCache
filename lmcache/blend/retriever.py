@@ -12,13 +12,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Standard
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import List, Optional, Tuple
 
+# Third Party
 import torch
 
-from lmcache.blend.interfaces import (BlendRetriever, BlendRetrieverResult,
-                                      BlendRetrieverTask)
+# First Party
+from lmcache.blend.interfaces import (
+    BlendRetriever,
+    BlendRetrieverResult,
+    BlendRetrieverTask,
+)
 from lmcache.cache_engine import LMCacheEngine
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
@@ -27,17 +33,18 @@ logger = init_logger(__name__)
 
 
 class SPTBlendRetrieverTask(BlendRetrieverTask):
-
-    def __init__(self, token_segments: List[torch.Tensor], tasks: List[Future],
-                 fmt: str):
-        """Initialize the SBT retriever task by the futures and corresponding 
+    def __init__(
+        self, token_segments: List[torch.Tensor], tasks: List[Future], fmt: str
+    ):
+        """Initialize the SBT retriever task by the futures and corresponding
         token segments.
 
-        The result of tasks should be the Tuple[torch.Tensor, int] and the 
+        The result of tasks should be the Tuple[torch.Tensor, int] and the
         shape of the tensor L2HTD or L2THD
         """
-        assert len(token_segments) == len(tasks), \
-                "The number of token segments and tasks should match."
+        assert len(token_segments) == len(tasks), (
+            "The number of token segments and tasks should match."
+        )
         self.token_segments = token_segments
         self.tasks = tasks
         self.fmt = fmt
@@ -74,9 +81,9 @@ class SPTBlendRetrieverTask(BlendRetrieverTask):
             case _:
                 raise ValueError(f"Unknown KV format {fmt}")
 
-        ret_tensor = torch.empty(ret_shape,
-                                 dtype=input_tensor.dtype,
-                                 device=input_tensor.device)
+        ret_tensor = torch.empty(
+            ret_shape, dtype=input_tensor.dtype, device=input_tensor.device
+        )
 
         match fmt:
             case "vllm":
@@ -89,8 +96,7 @@ class SPTBlendRetrieverTask(BlendRetrieverTask):
         return ret_tensor[:, 0, ...], ret_tensor[:, 1, ...]
 
     def _wait_for_result(self):
-        """Wait for the results of the tasks and rebuild the K and V tensors.
-        """
+        """Wait for the results of the tasks and rebuild the K and V tensors."""
         keys = []
         values = []
         valid_masks = []
@@ -110,25 +116,18 @@ class SPTBlendRetrieverTask(BlendRetrieverTask):
             dtype = kv.dtype
             device = kv.device
 
-        for token_segment, task in zip(self.token_segments,
-                                       self.tasks,
-                                       strict=False):
+        for token_segment, task in zip(self.token_segments, self.tasks, strict=False):
             kv, ret_mask = task.result()
             length = int(torch.sum(ret_mask))
             if length > 0:
                 update_shape(kv, self.fmt)
 
-            k, v = self._PrepareOutputTensor(self.fmt, kv, length,
-                                             len(token_segment))
+            k, v = self._PrepareOutputTensor(self.fmt, kv, length, len(token_segment))
 
-            valid_mask = torch.zeros(len(token_segment),
-                                     dtype=torch.int,
-                                     device="cpu")
+            valid_mask = torch.zeros(len(token_segment), dtype=torch.int, device="cpu")
             valid_mask[:length] = 1
 
-            positions = torch.zeros(len(token_segment),
-                                    dtype=torch.int,
-                                    device="cpu")
+            positions = torch.zeros(len(token_segment), dtype=torch.int, device="cpu")
             positions[:length] = torch.arange(length)
 
             keys.append(k)
@@ -158,13 +157,9 @@ class SPTBlendRetrieverTask(BlendRetrieverTask):
         for i, (k, v) in enumerate(zip(keys, values, strict=False)):
             shape_placeholder[token_dim] = len(self.token_segments[i])
             if k is None:
-                keys[i] = torch.empty(shape_placeholder,
-                                      dtype=dtype,
-                                      device=device)
+                keys[i] = torch.empty(shape_placeholder, dtype=dtype, device=device)
             if v is None:
-                values[i] = torch.empty(shape_placeholder,
-                                        dtype=dtype,
-                                        device=device)
+                values[i] = torch.empty(shape_placeholder, dtype=dtype, device=device)
 
         # NOTE: mypy will complain about the element of rebuilt_key
         #       and rebuilt_value could be None, but it is not the case
@@ -173,10 +168,10 @@ class SPTBlendRetrieverTask(BlendRetrieverTask):
 
     def result(self, layer_id: int) -> BlendRetrieverResult:
         """Blocking function to get a single layer of K and V tensor.
-        The returned the K and V tensor should match the length of the 
+        The returned the K and V tensor should match the length of the
         input tokens passed to the `BlendRetriever.new_request` function.
 
-        :param int layer_id: the layer id 
+        :param int layer_id: the layer id
         :return: Tuple of K and V tensor
         :rtype: Tuple[torch.Tensor, torch.Tensor]
         """
@@ -187,19 +182,18 @@ class SPTBlendRetrieverTask(BlendRetrieverTask):
         assert self.rebuilt_positions is not None
 
         ret = BlendRetrieverResult(
-                k = self.rebuilt_key[layer_id] \
-                        if self.rebuilt_key is not None else None,
-                v = self.rebuilt_value[layer_id] \
-                        if self.rebuilt_value is not None else None,
-                valid_mask = self.valid_mask,
-                original_positions = self.rebuilt_positions)
+            k=self.rebuilt_key[layer_id] if self.rebuilt_key is not None else None,
+            v=self.rebuilt_value[layer_id] if self.rebuilt_value is not None else None,
+            valid_mask=self.valid_mask,
+            original_positions=self.rebuilt_positions,
+        )
         return ret
 
 
 class SPTBlendRetriever(BlendRetriever):
     """Implement the retrieval logic using "SPecial Token" (SPT) as delimiter.
 
-    This implementation assumes that there MUST be a special token at the end 
+    This implementation assumes that there MUST be a special token at the end
     of the input text chunk.
 
     Example:
@@ -211,7 +205,7 @@ class SPTBlendRetriever(BlendRetriever):
         - [y, y]
         - [z, z, z, z]
 
-    Therefore, to use this retriever, the text chunks are better to also be 
+    Therefore, to use this retriever, the text chunks are better to also be
     ended with the special token.
     """
 
@@ -222,7 +216,7 @@ class SPTBlendRetriever(BlendRetriever):
     ):
         """Initialize the SPT retriever.
 
-        :param LMCacheEngine cache_engine: The cache engine to retrieve 
+        :param LMCacheEngine cache_engine: The cache engine to retrieve
             the KV caches
         :param LMCacheEngineMetadata metadata: The metadata of the cache engine
         """
@@ -238,9 +232,9 @@ class SPTBlendRetriever(BlendRetriever):
         It may launch async tasks in the background during the retrieval.
 
         :param List[torch.Tensor] full_prompts: The full prompts for each
-        request in this batch, which will contain the tokens 
+        request in this batch, which will contain the tokens
         hitting the vLLM's internal prefix caching.
-        :param List[List[int]] indices: The indices of where the 
+        :param List[List[int]] indices: The indices of where the
         segmengted requests start in the full prompts.
 
         :return: The retriever task to retrieve the KV caches
@@ -251,19 +245,18 @@ class SPTBlendRetriever(BlendRetriever):
             splitted_tokens: List[torch.Tensor] = []
             for prompt_idx, prompt in enumerate(full_prompts):
                 prompt_indices = indices[prompt_idx]
-                splitted_tokens.extend(
-                    torch.tensor_split(prompt, prompt_indices))
-            logger.debug("Split input tokens into %d requests",
-                         len(splitted_tokens))
+                splitted_tokens.extend(torch.tensor_split(prompt, prompt_indices))
+            logger.debug("Split input tokens into %d requests", len(splitted_tokens))
             tasks = [
                 executor.submit(
                     self.cache_engine.retrieve,
                     tokens,  # tokens
                     None,  # mask
                     False,  # return_tuple
-                ) for tokens in splitted_tokens
+                )
+                for tokens in splitted_tokens
             ]
 
-        return SPTBlendRetrieverTask(token_segments=splitted_tokens,
-                                     tasks=tasks,
-                                     fmt=self.metadata.fmt)
+        return SPTBlendRetrieverTask(
+            token_segments=splitted_tokens, tasks=tasks, fmt=self.metadata.fmt
+        )

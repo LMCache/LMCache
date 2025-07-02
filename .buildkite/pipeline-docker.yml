@@ -1,7 +1,7 @@
 steps:
   - label: ":pip: Install dependencies"
     key: "pip"
-    command: pip install -r requirements.txt
+    command: pip install -r requirements/common.txt
     plugins:
       - docker#v5.9.0:
           image: "python:3.10-slim"
@@ -9,7 +9,7 @@ steps:
   - label: ":pip: Install test dependencies"
     key: "pip-test"
     depends_on: ["pip"]
-    command: pip install -r requirements-test.txt
+    command: pip install -r requirements/test.txt
     plugins:
       - docker#v5.9.0:
           image: "python:3.10-slim"
@@ -28,15 +28,15 @@ steps:
     depends_on: ["pip", "pip-test"]
     command: |
       pip install pytest
-      pytest --junitxml=junit/test-results.xml \
+      pip install pytest-cov
+      pip install pytest-html
+      pytest --cov=lmcache \
+          --cov-report term --cov-report=html:coverage-test \
+          --cov-report=xml:coverage-test.xml --html=durations/test.html
     artifact_paths:
-      - junit/test-results.xml
+     - "durations/test.html"
+     - "coverage-test.xml"
+     - "coverage-test/**/*"
     plugins:
       - docker#v5.9.0:
           image: "python:3.13"
-
-  - label: ":junit: Annotate"
-    depends_on: ["pytest"]
-    plugins:
-      - junit-annotate#v2.4.1:
-          artifacts: junit/*.xml

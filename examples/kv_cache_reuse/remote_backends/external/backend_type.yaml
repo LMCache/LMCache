@@ -1,0 +1,11 @@
+chunk_size: 256
+local_device: "cpu"
+local_cpu: False
+max_local_cpu_size: 10
+remote_url: "external://host:0/adt.adt_kv_connector/?connector_name=AdtKVConnector"
+remote_serde: "naive"
+pipelined_backend: False
+extra_config:
+  adt_kv_secret: "---"
+  adt_kv_connections: 4
+  adt_kv_workers: 32

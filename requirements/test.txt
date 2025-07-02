@@ -1,0 +1,7 @@
+buildkite-test-collector
+pytest>=7.0
+pytest-benchmark
+pytest-benchmark[histogram]
+pytest-cov
+pytest-html
+
