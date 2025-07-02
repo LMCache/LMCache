@@ -45,6 +45,7 @@ class TokenDatabase(metaclass=abc.ABCMeta):
         tokens: Union[torch.Tensor, List[int]],
         mask: Optional[torch.Tensor] = None,
         make_key: bool = True,
+        user: Optional[str] = None,
     ) -> Iterable[Tuple[int, int, Union[CacheEngineKey, str]]]:
         """Process the tokens and return the corresponding cache engine keys.
 
@@ -75,7 +76,8 @@ class ChunkedTokenDatabase(TokenDatabase):
             self.save_unfull_chunk = config.save_unfull_chunk
         self.metadata = metadata
 
-    def _make_key_by_hash(self, chunk_hash: str, layer_id: Optional[int] = None):
+    def _make_key_by_hash(self, chunk_hash: str, layer_id: Optional[int] = None, 
+                          user: Optional[str] = "") -> CacheEngineKey:
         assert self.metadata is not None
         return CacheEngineKey(
             self.metadata.fmt,
@@ -83,6 +85,7 @@ class ChunkedTokenDatabase(TokenDatabase):
             self.metadata.world_size,
             self.metadata.worker_id,
             chunk_hash,
+            user,
         )
 
     def _get_init_hash(self) -> str:
@@ -136,6 +139,7 @@ class ChunkedTokenDatabase(TokenDatabase):
         tokens: Union[torch.Tensor, List[int]],
         mask: Optional[torch.Tensor] = None,
         make_key: bool = True,
+        user: Optional[str] = None,
     ) -> Iterable[Tuple[int, int, Union[CacheEngineKey, str]]]:
         """Process the tokens and return the corresponding cache engine keys.
 
@@ -178,7 +182,7 @@ class ChunkedTokenDatabase(TokenDatabase):
                 continue
             else:
                 if make_key:
-                    yield start_idx, end_idx, self._make_key_by_hash(hash_val)
+                    yield start_idx, end_idx, self._make_key_by_hash(hash_val, user=user)
                 else:
                     yield start_idx, end_idx, hash_val
 
@@ -200,13 +204,14 @@ class SegmentTokenDatabase(TokenDatabase):
         self.sep_len = len(self.sep_tokens)
         self.metadata = metadata
 
-    def _make_key_by_hash(self, chunk_hash: str):
+    def _make_key_by_hash(self, chunk_hash: str, user: Optional[str] = "") -> CacheEngineKey:
         return CacheEngineKey(
             self.metadata.fmt,
             self.metadata.model_name,
             self.metadata.world_size,
             self.metadata.worker_id,
             chunk_hash,
+            user,
         )
 
     def _hash(
@@ -248,6 +253,7 @@ class SegmentTokenDatabase(TokenDatabase):
         tokens: Union[torch.Tensor, List[int]],
         mask: Optional[torch.Tensor] = None,
         make_key: bool = True,
+        user: Optional[str] = "",
     ) -> Iterable[Tuple[int, int, Union[CacheEngineKey, str]]]:
         """Process the tokens and return the corresponding cache engine keys.
 
@@ -291,7 +297,7 @@ class SegmentTokenDatabase(TokenDatabase):
                     yield (
                         start_idx,
                         end_idx,
-                        self._make_key_by_hash(self._hash(token_chunk)),
+                        self._make_key_by_hash(self._hash(token_chunk), user=user),
                     )
                 else:
                     yield start_idx, end_idx, self._hash(token_chunk)

@@ -36,7 +36,8 @@ def generate_random_key() -> CacheEngineKey:
     world_size = 3
     worker_id = random.randint(0, 100)
     chunk_hash = random_string(64)
-    return CacheEngineKey(fmt, model_name, world_size, worker_id, chunk_hash)
+    user = ""
+    return CacheEngineKey(fmt, model_name, world_size, worker_id, chunk_hash, user)
 
 
 def get_config(t, remote_url):
