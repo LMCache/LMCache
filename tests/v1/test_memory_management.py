@@ -9,6 +9,7 @@ from lmcache.v1.memory_management import (
     HostMemoryAllocator,
     MemoryFormat,
     MixedMemoryAllocator,
+    PagedTensorMemoryAllocator,
     PinMemoryAllocator,
     TensorMemoryAllocator,
 )
@@ -61,13 +62,62 @@ def check_allocator(allocator, max_size):
     assert allocator.memcheck()
 
 
-def test_tensor_allocator():
-    total_size = 1024 * 1024 * 32  # 32MB
+def check_paged_allocator(allocator, shape, dtype, fmt, max_num_pages):
+    # Allocate one page
+    data1 = allocator.allocate(shape, dtype, fmt)
+    assert data1 is not None
+    assert data1.tensor.dtype == dtype
+    assert data1.tensor.shape == shape
+
+    # Allocate another 2 pages
+    data2 = allocator.batched_allocate(shape, dtype, 2, fmt)
+
+    for data in data2:
+        assert data is not None
+        assert data.tensor.dtype == dtype
+        assert data.tensor.shape == shape
+
+    # Allocate a smaller page
+    smaller_shape = torch.Size([2, 32, 8, 1024])
+    data3 = allocator.allocate(smaller_shape, dtype, fmt)
+    assert data3 is not None
+    assert data3.tensor.dtype == dtype
+    assert data3.tensor.shape == smaller_shape
+
+    allocator.free(data3)
+    assert allocator.memcheck()
+
+    allocator.batched_free(data2)
+    assert allocator.memcheck()
+
+    allocator.free(data1)
+    assert allocator.memcheck()
+
+    data_fail = allocator.batched_allocate(
+        shape, dtype, max_num_pages + 1, fmt
+    )  # This should fail
+    assert data_fail is None
+
+    assert allocator.memcheck()
+
+
+@pytest.mark.parametrize(
+    "use_paging",
+    [True, False],
+)
+def test_tensor_allocator(use_paging):
+    total_size = 1024 * 1024 * 128  # 128MB
     tensor_buffer = torch.zeros(total_size, dtype=torch.uint8, device="cpu")
-
-    allocator = TensorMemoryAllocator(tensor_buffer)
-
-    check_allocator(allocator, total_size)
+    if use_paging:
+        shape = torch.Size([2, 32, 16, 1024])  # 64 pages
+        dtype = torch.bfloat16
+        fmt = MemoryFormat.KV_2LTD
+        num_pages = 64
+        allocator = PagedTensorMemoryAllocator(tensor_buffer, shape, dtype, fmt)
+        check_paged_allocator(allocator, shape, dtype, fmt, num_pages)
+    else:
+        allocator = TensorMemoryAllocator(tensor_buffer)
+        check_allocator(allocator, total_size)
 
 
 @pytest.mark.parametrize(
@@ -79,10 +129,29 @@ def test_tensor_allocator():
         MixedMemoryAllocator,
     ],
 )
-def test_device_allocators(alloc_cls):
-    total_size = 1 << 25
-    allocator = alloc_cls(total_size)
-    check_allocator(allocator, total_size)
+@pytest.mark.parametrize(
+    "use_paging",
+    [
+        False,
+        True,
+    ],
+)
+def test_device_allocators(alloc_cls, use_paging):
+    total_size = 1024 * 1024 * 128  # 128MB
+
+    shape = torch.Size([2, 32, 16, 1024])  # 64 pages
+    dtype = torch.bfloat16
+    fmt = MemoryFormat.KV_2LTD
+
+    allocator = alloc_cls(
+        total_size, use_paging=use_paging, shape=shape, dtype=dtype, fmt=fmt
+    )
+
+    if use_paging:
+        num_pages = 64
+        check_paged_allocator(allocator, shape, dtype, fmt, num_pages)
+    else:
+        check_allocator(allocator, total_size)
 
 
 @pytest.mark.parametrize(

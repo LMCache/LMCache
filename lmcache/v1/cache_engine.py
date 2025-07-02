@@ -138,6 +138,16 @@ class LMCacheEngine:
                 )
             )
 
+        self.use_layerwise = config.use_layerwise
+        self.num_layers = metadata.kv_shape[0]
+        if self.use_layerwise:
+            if config.enable_blending:
+                self.fmt = MemoryFormat.KV_2TD
+            else:
+                self.fmt = MemoryFormat.KV_T2D
+
+        self.lookup_cache = {}
+
         InitializeUsageContext(config.to_original_config(), metadata)
         self.stats_monitor = LMCStatsMonitor.GetOrCreate()
 
@@ -211,8 +221,7 @@ class LMCacheEngine:
             ends.append(end)
             keys.append(key)
             memory_objs.append(memory_obj)
-
-            tot_kv_size = memory_obj.get_size()
+            tot_kv_size += memory_obj.get_size()
 
         self.gpu_connector.batched_from_gpu(memory_objs, starts, ends, **kwargs)
         offload_time += time.perf_counter() - t
@@ -224,7 +233,7 @@ class LMCacheEngine:
         tot_time = offload_time + put_time
 
         if self.lookup_server is not None:
-            self.lookup_server.batched_insert(key)
+            self.lookup_server.batched_insert(keys)
 
         logger.debug(
             "Store %d tokens takes: %.4f ms, throughput: %.4f GB/s; "
@@ -598,6 +607,136 @@ class LayerwiseLMCacheEngine(LMCacheEngine):
 
     @_lmcache_nvtx_annotate
     @torch.inference_mode()
+    def retrieve(
+        self,
+        tokens: torch.Tensor,
+        mask: Optional[torch.Tensor] = None,
+        **kwargs,
+    ) -> torch.Tensor:
+        """Retrieve the KV caches from the cache engine. And put the retrieved
+        KV cache to the serving engine via the GPU connector.
+
+        :param torch.Tensor tokens: The tokens of the corresponding KV caches.
+
+        :param Optional[torch.Tensor] mask: The mask for the tokens. Should
+            have the same length as tokens. And the mask should ALWAYS be like
+            FFFFFTTTTTTT, where True means the tokens needs to be matched,
+            and the Falses will ALWAYS be at the PREFIX of the tensor.
+
+        :param **kwargs: The additional arguments for the storage backend which
+            will be passed into the gpu_connector.
+            Should include KV cache specific information (e.g., paged KV buffer
+            and the page tables).
+
+        :return: the boolean mask indicating which tokens are retrieved. The
+            length of the mask should be the same as the tokens. On CPU.
+
+        :raises: ValueError if the number of Falses in the mask is not a
+            multiple of the chunk size.
+        """
+        if mask is not None:
+            num_required_tokens = torch.sum(mask).item()
+        else:
+            num_required_tokens = len(tokens)
+        monitor_req_id = self.stats_monitor.on_retrieve_request(num_required_tokens)
+
+        ret_mask = torch.zeros_like(tokens, dtype=torch.bool, device="cpu")
+
+        key_mapping: Dict[str, List[CacheEngineKey]] = {}
+        start_mapping: Dict[str, List[int]] = {}
+        end_mapping: Dict[str, List[int]] = {}
+
+        reordered_keys = []
+        reordered_memory_objs = []
+        reordered_starts = []
+        reordered_ends = []
+        for start, end, key in self.token_database.process_tokens(tokens, mask):
+            assert isinstance(key, CacheEngineKey)
+
+            if key in self.lookup_cache:
+                # TODO(Jiayi): we can reduce the number of `contains` calls
+                # by checking the lookup cache first (should be updated in `lookup`)
+                pass
+            else:
+                # NOTE: key should always be in the lookup cache once
+                # we support it.
+                location = self.storage_manager.contains(key)
+                if location is None:
+                    # TODO(Jiayi): Need to refactor P2P as a storage backend to
+                    # clean up the following code.
+                    if self.enable_p2p:
+                        future_memory_obj = asyncio.run_coroutine_threadsafe(
+                            self.distributed_server.issue_get(key),
+                            self.distributed_loop,
+                        )
+                        memory_obj = future_memory_obj.result()
+                        reordered_keys.append(key)
+                        reordered_memory_objs.append(memory_obj)
+                        reordered_starts.append(start)
+                        reordered_ends.append(end)
+                        continue
+                    break
+
+                # NOTE: Here we make the assumption that the underlying
+                # storage backend support pin operation, and the memory
+                # object is already pinned in the storage backend.
+                ret_mask[start:end] = True
+
+                if location not in key_mapping:
+                    key_mapping[location] = [key]
+                    start_mapping[location] = [start]
+                    end_mapping[location] = [end]
+                    continue
+
+            assert location is not None
+
+            key_mapping[location].append(key)
+            start_mapping[location].append(start)
+            end_mapping[location].append(end)
+
+        # TODO(Jiayi): We can parallelize the retrieval from
+        # different storage backends.
+        for location, keys in key_mapping.items():
+            memory_objs = self.storage_manager.batched_get(
+                keys=keys,
+                storage_backend_name=location,
+            )
+            reordered_memory_objs.extend(memory_objs)
+            reordered_keys.extend(keys)
+            reordered_starts.extend(start_mapping[location])
+            reordered_ends.extend(end_mapping[location])
+
+        # NOTE(Jiayi): memory_obj doesn't have to be a pinned
+        # cpu tensor for the sake of performance.
+        # For example, disk->gpu is faster than disk->cpu->gpu.
+        # RDMA is another example.
+        self.gpu_connector.batched_to_gpu(
+            reordered_memory_objs, reordered_starts, reordered_ends, **kwargs
+        )
+
+        # TODO(Jiayi): Remove the following for loop with batched operations
+        for key, memory_obj in zip(reordered_keys, reordered_memory_objs, strict=False):
+            memory_obj.ref_count_down()
+
+            # NOTE (ApostaC): This is only for the current implementation:
+            # When the object is retrieved back to vLLM, the storage backend
+            # will immediately remove the object from itself
+            if self.remove_after_retrieve:
+                self.storage_manager.remove(key)
+            else:
+                self.storage_manager.batched_unpin([key])
+
+        retrieved_tokens = torch.sum(ret_mask)
+        self.stats_monitor.on_retrieve_finished(monitor_req_id, retrieved_tokens)
+        logger.debug(
+            f"Retrieved {retrieved_tokens} "
+            f"out of {num_required_tokens} "
+            f"out of total {len(tokens)} tokens"
+        )
+        return ret_mask
+
+    @_lmcache_nvtx_annotate
+    @torch.inference_mode()
     def retrieve_layer(
         self,
         tokens: torch.Tensor,
@@ -709,6 +848,20 @@ class LayerwiseLMCacheEngine(LMCacheEngine):
         yield ret_mask
 
     @_lmcache_nvtx_annotate
+    def prefetch(
+        self,
+        tokens: torch.Tensor,
+        mask: Optional[torch.Tensor] = None,
+    ) -> None:
+        """Launch the prefetching process in the storage manager to load the
+        KV to the local CPU memory
+        """
+        for start, end, key in self.token_database.process_tokens(tokens, mask):
+            assert isinstance(key, CacheEngineKey)
+            self.storage_manager.prefetch(key)
+
+    # TODO(Jiayi): Currently, search_range is only used for testing.
+    @_lmcache_nvtx_annotate
     def lookup(
         self,
         tokens: Union[torch.Tensor, List[int]],
@@ -729,22 +882,73 @@ class LayerwiseLMCacheEngine(LMCacheEngine):
 
         :return: An int indicating how many prefix tokens are cached.
         """
-
         end = 0
         old_end = 0
+
+        # secondary lookup on p2p (via lookup_server) if enabled
+        search_p2p = self.enable_p2p and (search_range is None or "p2p" in search_range)
+
         for start, end, key in self.token_database.process_tokens(tokens):
             assert isinstance(key, CacheEngineKey)
 
-            # TODO(Jiayi): Optimize by checking only the existence of the key
-            # of one layer
-            key_all_layers = key.split_layers(self.num_layers)
-            for key_single_layer in key_all_layers:
-                if not self.storage_manager.contains(
-                    key_single_layer, search_range, pin
-                ):
-                    return old_end
-            old_end = end
+            if self.use_layerwise:
+                # TODO(Jiayi): Optimize by checking only the existence of the key
+                # of one layer
+                key_all_layers = key.split_layers(self.num_layers)
+                for key_single_layer in key_all_layers:
+                    if not self.storage_manager.contains(
+                        key_single_layer, search_range, pin
+                    ):
+                        if search_p2p and self.lookup_server.lookup(key_single_layer):
+                            continue
+                        return old_end
+                old_end = end
+            else:
+                if self.storage_manager.contains(key, search_range, pin):
+                    old_end = end
+                    continue
+
+                if search_p2p:
+                    assert self.lookup_server is not None
+                    if self.lookup_server.lookup(key):
+                        old_end = end
+                        continue
+                return old_end
+
+        # all tokens where found, return the maximal end
         return end
+
+    @_lmcache_nvtx_annotate
+    def clear(
+        self,
+        tokens: Optional[Union[torch.Tensor, List[int]]] = None,
+        locations: Optional[List[str]] = None,
+    ) -> int:
+        assert isinstance(self.storage_manager, StorageManager)
+        # Clear all caches if tokens is None
+        if tokens is None or len(tokens) == 0:
+            num_cleared = self.storage_manager.clear(locations)
+            return num_cleared
+
+        num_removed = 0
+        # Only remove the caches for the given tokens
+        for start, end, key in self.token_database.process_tokens(tokens):
+            assert isinstance(key, CacheEngineKey)
+            removed = self.storage_manager.remove(key, locations)
+            num_removed += removed
+        return num_removed
+
+    def close(self) -> None:
+        """Close the cache engine and free all the resources"""
+
+        if self.enable_p2p:
+            self.distributed_server.close()
+
+        if self.lmcache_worker is not None:
+            self.lmcache_worker.close()
+
+        self.storage_manager.close()
+        logger.info("LMCacheEngine closed.")
 
 
 class LMCacheEngineBuilder:
@@ -819,6 +1023,7 @@ class LMCacheEngineBuilder:
                     gpu_connector,
                     tpg,
                 )
+
             cls._instances[instance_id] = engine
             cls._cfgs[instance_id] = config
             cls._metadatas[instance_id] = metadata

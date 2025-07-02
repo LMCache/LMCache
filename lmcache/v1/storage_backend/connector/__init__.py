@@ -232,6 +232,7 @@ def CreateConnector(
     - audit://localhost:8080?verify=true
     - fs:///tmp/lmcache
     - external://host:0/adt.adt_kv_connector/?connector_name=AdtKVConnector
+    - external://host:0/external_log_connector.lmc_external_log_connector/?connector_name=ExternalLogConnector
 
     Args:
         url: The remote URL
