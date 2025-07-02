@@ -131,8 +131,17 @@ def pick_prefill_client(clients, idx):
     return clients[idx % len(clients)]
 
 
-@app.post("/v1/completions")
-async def handle_completions(request: Request):
+async def _handle_proxy_request(request: Request, path: str):
+    """
+    Handles proxy requests for both completions and chat completions.
+
+    Args:
+        request (Request): The incoming FastAPI request.
+        path (str): The API path(e.g., "/completions", "/chat/completions").
+
+    Returns:
+        StreamingResponse: A streaming response from the decode service.
+    """
     global counter, stats_calculator
     counter += 1
 
@@ -145,10 +154,7 @@ async def handle_completions(request: Request):
 
         # Send request to prefill service round robin, ignore the response
         client = pick_prefill_client(app.state.prefill_clients, counter)
-        await send_request_to_service(client, "/completions", req_data)
-
-        # await send_request_to_service(app.state.prefill_client, "/completions",
-        #                              req_data)
+        await send_request_to_service(client, path, req_data)
 
         et = time.time()
         stats_calculator.add(et - st)
@@ -156,7 +162,7 @@ async def handle_completions(request: Request):
         # Stream response from decode service
         async def generate_stream():
             async for chunk in stream_service_response(
-                app.state.decode_client, "/completions", req_data
+                app.state.decode_client, path, req_data
             ):
                 yield chunk
 
@@ -168,55 +174,21 @@ async def handle_completions(request: Request):
         import traceback
 
         exc_info = sys.exc_info()
-        print("Error occurred in disagg prefill proxy server - completions endpoint")
-        print(e)
+        error_msg_suffix = path.replace("/", " ").strip() + " endpoint"
+        print(f"Error occurred in disagg prefill proxy server - {error_msg_suffix}")
+        print(f"Error details: {e}")
         print("".join(traceback.format_exception(*exc_info)))
         raise
+
+
+@app.post("/v1/completions")
+async def handle_completions(request: Request):
+    return await _handle_proxy_request(request, "/completions")
 
 
 @app.post("/v1/chat/completions")
 async def handle_chat_completions(request: Request):
-    global counter, stats_calculator
-    counter += 1
-
-    st = time.time()
-    try:
-        req_data = await request.json()
-
-        stream = req_data.get("stream", False)
-        media_type = "text/event-stream" if stream else "application/json"
-
-        # Send request to prefill service, ignore the response
-        client = pick_prefill_client(app.state.prefill_clients, counter)
-        await send_request_to_service(client, "/chat/completions", req_data)
-
-        # await send_request_to_service(app.state.prefill_client,
-        #                              "/chat/completions", req_data)
-
-        et = time.time()
-        stats_calculator.add(et - st)
-
-        # Stream response from decode service
-        async def generate_stream():
-            async for chunk in stream_service_response(
-                app.state.decode_client, "/chat/completions", req_data
-            ):
-                yield chunk
-
-        return StreamingResponse(generate_stream(), media_type=media_type)
-
-    except Exception as e:
-        # Standard
-        import sys
-        import traceback
-
-        exc_info = sys.exc_info()
-        print(
-            "Error occurred in disagg prefill proxy server  - chat completions endpoint"
-        )
-        print(e)
-        print("".join(traceback.format_exception(*exc_info)))
-        raise
+    return await _handle_proxy_request(request, "/chat/completions")
 
 
 if __name__ == "__main__":
