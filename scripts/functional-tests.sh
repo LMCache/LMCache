@@ -135,4 +135,6 @@ test_lmcache_vllmopenai_server
 
 cleanup
 
+echo ""
+
 exit 0
