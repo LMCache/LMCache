@@ -215,6 +215,8 @@ class RequestTracker:
     mm_positions: Optional[list["PlaceholderRange"]] = None
     # The request user
     user: Optional[str] = None
+    # The request caching flag
+    caching: Optional[bool] = False
 
     # Whether the request is in decode phase
     is_decode_phase: bool = False
@@ -266,6 +268,7 @@ class RequestTracker:
             mm_hashes=new_request.mm_hashes.copy(),
             mm_positions=new_request.mm_positions.copy(),
             user=new_request.user,
+            caching=new_request.caching,
         )
 
     def update(
@@ -311,7 +314,9 @@ class ReqMeta:
     # disagg spec
     disagg_spec: Optional[DisaggSpec] = None
     # user
-    user: Optional[str] = None
+    user: Optional[str] = ""
+    # caching
+    caching: Optional[bool] = False
 
     @staticmethod
     def from_request_tracker(
@@ -433,6 +438,7 @@ class ReqMeta:
             load_spec=load_spec,
             disagg_spec=tracker.disagg_spec,
             user=tracker.user,
+            caching=tracker.caching,
         )
 
 
@@ -594,6 +600,9 @@ class LMCacheConnectorV1Impl:
 
         self.layerwise_retrievers = []
         for idx, request in enumerate(metadata.requests):
+            logger.info(f"start_load_kv: {request.req_id=}, {request.caching=}")
+            if not request.caching:
+                continue
             if request.load_spec is None:
                 continue
 
@@ -723,6 +732,9 @@ class LMCacheConnectorV1Impl:
             is_first = False
 
             for idx, request in enumerate(connector_metadata.requests):
+                logger.info(f"save_kv_layer: {request.req_id=}, {request.caching=}")
+                if not request.caching:
+                    continue
                 save_spec = request.save_spec
                 if save_spec is None or not save_spec.can_save:
                     continue
@@ -810,6 +822,9 @@ class LMCacheConnectorV1Impl:
         assert self.lmcache_engine is not None
 
         for request in connector_metadata.requests:
+            logger.info(f"wait_for_save: {request.req_id=}, {request.caching=}")
+            if not request.caching:
+                continue
             save_spec = request.save_spec
             if save_spec is None or not save_spec.can_save:
                 continue
@@ -911,6 +926,9 @@ class LMCacheConnectorV1Impl:
         if self.kv_role == "kv_producer" and not hasattr(
             self.lookup_client, "supports_producer_reuse"
         ):
+            return 0
+        
+        if not request.caching:
             return 0
 
         token_ids = torch.tensor(request.prompt_token_ids)
