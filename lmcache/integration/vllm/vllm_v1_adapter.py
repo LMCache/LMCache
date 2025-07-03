@@ -92,12 +92,7 @@ class LMCacheLookupClient:
         )
 
     def lookup(self, token_ids: torch.Tensor, user: Optional[str] = "") -> int:
-        #request = self.encoder.encode(token_ids)
-        #self.socket.send_string(user)
-        #self.socket.send_multipart([pickle.dumps(user), request[0]], copy=False)
         self.socket.send_multipart([pickle.dumps(user), pickle.dumps(token_ids)], copy=False)
-        #self.socket.send_multipart([user.encode('utf-8'), safetensors_save(token_ids)], copy=False)
-        #self.socket.send_multipart([pickle.dumps(user), request])
         resp = self.socket.recv()
         result = int.from_bytes(resp, "big")
         return result
@@ -130,16 +125,9 @@ class LMCacheLookupServer:
         def process_request():
             while self.running:
                 # try:
-                # request = self.socket.recv()
-                #user = self.socket.recv_string()
                 frames = self.socket.recv_multipart(copy=False)
                 user = pickle.loads(frames[0])
-                ##token_ids = self.decoder.decode([frames[1]])
                 token_ids = pickle.loads(frames[1])
-                #user = safetensors_load(frames[0])
-                #user = frames[0].decode('utf-8')
-                ##token_ids = self.decoder.decode([frames[1]])
-                #token_ids = safetensors_load(frames[1])
                 result = self.lmcache_engine.lookup(token_ids, pin=True, user=user)
                 response = result.to_bytes(4, "big")
                 self.socket.send(response)
