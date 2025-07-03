@@ -30,6 +30,7 @@ from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 import torch
 import vllm.envs as envs
 import zmq
+import copy
 
 # First Party
 from lmcache.integration.vllm.utils import (
@@ -51,7 +52,7 @@ if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheManager
     from vllm.v1.core.sched.output import NewRequestData
     from vllm.v1.request import Request
-    from vllm.v1.worker import GPUModelRunner
+    from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 logger = init_logger(__name__)
 
@@ -300,7 +301,7 @@ class ReqMeta:
         # Freeze until worker retrieves cached tokens
         if num_cached_tokens > 0:
             frozen_req_meta = FrozenReqMeta(
-                tracker=tracker,
+                tracker=copy.deepcopy(tracker),
                 block_size=block_size,
                 lmcache_chunk_size=lmcache_chunk_size,
                 load_spec=load_spec,
