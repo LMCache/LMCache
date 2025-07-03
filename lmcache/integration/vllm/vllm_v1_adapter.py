@@ -298,11 +298,6 @@ class ReqMeta:
             operations, None otherwise.
         """
 
-        logger.debug("\n--------------------------------")
-        logger.debug(f"DEBUGGING NEW ADAPTER inside of from_request_tracker()!!! num_cached_tokens {num_cached_tokens}")      
-        logger.debug(f"tracker.req_id: {tracker.req_id}")  
-        logger.debug("--------------------------------\n")
-
         
         # Freeze until worker retrieves cached tokens
         if num_cached_tokens > 0:
@@ -421,18 +416,6 @@ class ReqMeta:
         request_tracker = self.frozen_req_meta.tracker
         request_tracker.update(token_ids, ())
         
-        logger.debug("DEBUGGING NEW ADAPTER inside of unfreeze_with_token_ids()!!!")
-        logger.debug("\n--------------------------------")
-        logger.debug(f"self.req_id: {self.req_id}")
-        logger.debug(f"request_tracker {request_tracker}")
-        logger.debug(f"self.frozen_req_meta.block_size {self.frozen_req_meta.block_size}")
-        logger.debug(f"self.frozen_req_meta.lmcache_chunk_size {self.frozen_req_meta.lmcache_chunk_size}")
-        logger.debug(f"self.frozen_req_meta.load_spec {self.frozen_req_meta.load_spec}")
-        logger.debug(f"self.frozen_req_meta.skip_save {self.frozen_req_meta.skip_save}")
-        logger.debug(f"self.frozen_req_meta.discard_partial_chunks {self.frozen_req_meta.discard_partial_chunks}")
-        logger.debug(f"self.frozen_req_meta.num_cached_tokens {self.frozen_req_meta.num_cached_tokens}")
-        logger.debug("--------------------------------\n")
-
         # NOTE(apostab): assumption here is that len(token_ids) == request_tracker.num_cached_tokens
         # so we can set num_cached_tokens to 0
         return ReqMeta.from_request_tracker(
@@ -555,9 +538,7 @@ class LMCacheConnectorV1Impl:
             if num_cached_tokens > 0:
                 req_id = req_meta.req_id
                 req_state = gpu_model_runner.requests[req_id]
-                logger.debug(f"\n\n INDEX DEBUGGING: len(req_state.output_token_ids) {len(req_state.output_token_ids)}, num_cached_tokens {num_cached_tokens}\n\n")
                 cached_token_ids = req_state.output_token_ids[len(req_state.output_token_ids) - num_cached_tokens:]
-                logger.debug(f"\n\n SUCCESSFULLY RETRIEVED CACHED TOKEN_IDS!!!\n\n")
                 new_req_meta = req_meta.unfreeze_with_token_ids(cached_token_ids)
                 if new_req_meta is not None:
                     new_meta.add_request(new_req_meta)
@@ -1030,10 +1011,6 @@ class LMCacheConnectorV1Impl:
         for finished_req_id in scheduler_output.finished_req_ids:
             self._request_trackers.pop(finished_req_id, None)
 
-        logger.debug("\n--------------------------------")
-        logger.debug(f"NEW CALL OF build_connector_meta()!!!")
-        logger.debug(f"--------------------------------\n")
-
         for request in scheduler_output.scheduled_new_reqs:
             # Right now, we only load KV for new requests
             load_spec = self.load_specs.pop(request.req_id, None)
@@ -1070,12 +1047,6 @@ class LMCacheConnectorV1Impl:
             new_token_ids = cached_reqs.new_token_ids[i] if cached_reqs.new_token_ids else []
             new_block_ids = cached_reqs.new_block_ids[i]
             num_cached_tokens = scheduler_output.num_scheduled_tokens[req_id] - len(new_token_ids)
-            logger.debug(f"\n--------------------------------")
-            logger.debug(f"DEBUGGING NEW ADAPTER inside of build_connector_meta()!!! num_cached_tokens {num_cached_tokens}")
-            logger.debug(f"scheduler_output.num_scheduled_tokens[req_id]: {scheduler_output.num_scheduled_tokens[req_id]}")
-            logger.debug(f"len(new_token_ids): {len(new_token_ids)}")
-            logger.debug(f"req_id: {req_id}")
-            logger.debug(f"--------------------------------\n")
 
             request_tracker.update(new_token_ids, new_block_ids)
 
