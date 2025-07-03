@@ -36,15 +36,28 @@ wait_for_openai_api_server(){
 }
 
 run_lmcache_vllmopenai_container() {
-    CID=$(docker run -d --runtime nvidia --gpus all \
-        --env "LMCACHE_CHUNK_SIZE=256" \
-        --env "LMCACHE_LOCAL_CPU=True" \
-        --env "LMCACHE_MAX_LOCAL_CPU_SIZE=5" \
-        --volume ~/.cache/huggingface:/root/.cache/huggingface \
-        --network host \
-        'lmcache/vllm-openai:build-latest' \
-        'meta-llama/Llama-3.1-8B-Instruct' --kv-transfer-config \
-        '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}')
+    if [ -z "$1" ]; then
+        CID=$(docker run -d --runtime nvidia --gpus all \
+            --env "LMCACHE_CHUNK_SIZE=256" \
+            --env "LMCACHE_LOCAL_CPU=True" \
+            --env "LMCACHE_MAX_LOCAL_CPU_SIZE=5" \
+            --volume ~/.cache/huggingface:/root/.cache/huggingface \
+            --network host \
+            'lmcache/vllm-openai:build-latest' \
+            'meta-llama/Llama-3.1-8B-Instruct' --kv-transfer-config \
+            '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}')
+    else
+        CID=$(docker run -d --runtime nvidia --gpus all \
+             --env HF_TOKEN=$1 \
+            --env "LMCACHE_CHUNK_SIZE=256" \
+            --env "LMCACHE_LOCAL_CPU=True" \
+            --env "LMCACHE_MAX_LOCAL_CPU_SIZE=5" \
+            --volume ~/.cache/huggingface:/root/.cache/huggingface \
+            --network host \
+            'lmcache/vllm-openai:build-latest' \
+            'meta-llama/Llama-3.1-8B-Instruct' --kv-transfer-config \
+            '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}')
+    fi
 
     wait_for_openai_api_server $CID
 
@@ -125,7 +138,7 @@ cd docker/
 build_lmcache_vllmopenai_image
 
 # Start the OpenAI API server by running the container image
-run_lmcache_vllmopenai_container
+run_lmcache_vllmopenai_container $1
 
 ########
 # MAIN #
@@ -134,7 +147,5 @@ run_lmcache_vllmopenai_container
 test_lmcache_vllmopenai_server
 
 cleanup
-
-echo ""
 
 exit 0
