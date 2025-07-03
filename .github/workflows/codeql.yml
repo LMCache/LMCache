@@ -45,8 +45,9 @@ jobs:
         include:
         - language: actions
           build-mode: none
-        - language: c-cpp
-          build-mode: autobuild
+        # Disable C/CPP scan for now until GPU runner available for the repo
+        # - language: c-cpp
+        #  build-mode: autobuild
         - language: python
           build-mode: none
         # CodeQL supports the following values keywords for 'language': 'actions', 'c-cpp', 'csharp', 'go', 'java-kotlin', 'javascript-typescript', 'python', 'ruby', 'rust', 'swift'
