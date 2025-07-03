@@ -1,0 +1,6 @@
+- LMCache commit ID: `'f517470'`
+- vLLM commit ID: `6bc7b573153afebe51de036f9b28d37ff6cbb733`
+- server: Lambda gpu_2x_a6000
+- Start LMCache engine: `LMCACHE_CONFIG_FILE="/home/ubuntu/shaotingf/LMBenchmark/synthetic-multi-round-qa/disk.yaml" vllm serve meta-llama/Llama-3.1-8B-Instruct --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1", "kv_role":"kv_both", "kv_connector_extra_config": {"lmcache_rpc_port": "7"}}'  --disable-log-requests`
+- Start vLLM engine: `vllm serve meta-llama/Llama-3.1-8B-Instruct --disable-log-requests`
+- Start query: `bash long_input_short_output_run.sh meta-llama/Llama-3.1-8B-Instruct http://localhost:8000 disk 0.5`
