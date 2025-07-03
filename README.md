@@ -15,6 +15,15 @@
     <img height="30" alt="Documentation" src="https://img.shields.io/badge/docs-blue?logo=readthedocs&logoColor=f0f8ff">
   </a>
 </p>
+
+<p align="center">
+  <img height="20" src="https://badge.buildkite.com/ce25f1819a274b7966273bfa54f0e02f092c3de0d7563c5c9d.svg?branch=dev" alt="Test Status">
+  <img height="20" src="https://github.com/lmcache/lmcache/actions/workflows/code_quality_checks.yml/badge.svg?branch=dev&label=tests" alt="Code Quality Status">
+  <img height="20" alt="Minimum Python Version" src="https://img.shields.io/badge/python-3.10+-blue.svg">
+  <img height="20" alt="Release" src="https://img.shields.io/github/v/release/lmcache/lmcache?include_prereleases&style=">
+  </a>
+</p>
+
 <p align="center">
   <a href="https://deepwiki.com/LMCache/LMCache">
     <img height="20" src="https://deepwiki.com/badge.svg" alt="Ask DeepWiki">
@@ -25,10 +34,6 @@
     <img height="20" alt="YouTube Channel Views" src="https://img.shields.io/youtube/channel/views/UC58zMz55n70rtf1Ak2PULJA">
   </a>
 </p>
-
-<h2 align="center">
-    <!--Redis for LLMs - Infinite and Ultra-Fast-->
-</h2>
 
 ### NEW: Check out [vLLM Production Stack](https://github.com/vllm-project/production-stack) for enterprise-scale deployment of LMCache!
 
