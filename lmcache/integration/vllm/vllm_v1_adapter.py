@@ -51,6 +51,7 @@ if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheManager
     from vllm.v1.core.sched.output import NewRequestData
     from vllm.v1.request import Request
+    from vllm.v1.worker import GPUModelRunner
 
 logger = init_logger(__name__)
 
@@ -163,7 +164,7 @@ class RequestTracker:
 
     # The token ids that has been scheduled so far
     token_ids: list[int]
-
+    
     # The block ids that has been allocated so far
     # NOTE: allocated blocks could be more than the number of tokens
     # FIXME: need to check whether the block ids will be changed after
@@ -241,19 +242,35 @@ class RequestTracker:
             new_block_ids = new_block_ids[0]
         self.allocated_block_ids.extend(new_block_ids)
 
+@dataclass
+class FrozenReqMeta:
+    # The arguments needed to construct the req meta with ReqMeta.from_request_tracker()
+    tracker: RequestTracker
+    block_size: int
+    lmcache_chunk_size: int
+    load_spec: Optional[LoadSpec]
+    skip_save: bool
+    discard_partial_chunks: bool
+    num_cached_tokens: int
+
 
 @dataclass
 class ReqMeta:
     # Request id
     req_id: str
     # Request tokens
-    token_ids: torch.Tensor
+    token_ids: Optional[torch.Tensor] = None
     # Slot mapping
-    slot_mapping: torch.Tensor
+    slot_mapping: Optional[torch.Tensor] = None
     # Skip save or not
     save_spec: Optional[SaveSpec] = None
     # load_spec
     load_spec: Optional[LoadSpec] = None
+    # Number of tokens that are cached and need to be fetched from worker
+    num_cached_tokens: int = 0
+    # Frozen scheduler req meta to be constructed by worker after fetching cached tokens
+    frozen_req_meta: Optional[FrozenReqMeta] = None
+
 
     @staticmethod
     def from_request_tracker(
@@ -263,6 +280,7 @@ class ReqMeta:
         load_spec: Optional[LoadSpec] = None,
         skip_save: bool = False,
         discard_partial_chunks: bool = True,
+        num_cached_tokens: int = 0,
     ) -> Optional["ReqMeta"]:
         """Create the request metadata from a request tracker.
 
@@ -278,6 +296,26 @@ class ReqMeta:
             the request metadata if we need to perform load/save
             operations, None otherwise.
         """
+
+        # Freeze until worker retrieves cached tokens
+        if num_cached_tokens > 0:
+            frozen_req_meta = FrozenReqMeta(
+                tracker=tracker,
+                block_size=block_size,
+                lmcache_chunk_size=lmcache_chunk_size,
+                load_spec=load_spec,
+                skip_save=skip_save,
+                discard_partial_chunks=discard_partial_chunks,
+                num_cached_tokens=num_cached_tokens,
+            )
+            return ReqMeta(
+                req_id=tracker.req_id,
+                num_cached_tokens=num_cached_tokens,
+                frozen_req_meta=frozen_req_meta,
+            )
+
+        assert num_cached_tokens == 0, "retrieve all token ids before constructing metadata for a request"
+
         input_token_ids = tracker.token_ids
         input_token_len = len(input_token_ids)
 
@@ -361,7 +399,49 @@ class ReqMeta:
             slot_mapping=slot_mapping,
             save_spec=save_spec,
             load_spec=load_spec,
+            num_cached_tokens=num_cached_tokens,
         )
+    
+    def unfreeze_with_token_ids(self, token_ids: list[int]):
+        """Unfreeze this ReqMeta by updating its attributes with the cached tokens.
+        
+        Args:
+            token_ids (list[int]): The cached token ids to add to the tracker.
+        """
+        if self.frozen_req_meta is None:
+            raise ValueError("Cannot unfreeze ReqMeta without frozen_req_meta")
+            
+        request_tracker = self.frozen_req_meta.tracker
+        request_tracker.update(token_ids, ())
+        
+        # NOTE(apostab): assumption here is that len(token_ids) == request_tracker.num_cached_tokens
+        # Create the full ReqMeta from the updated tracker
+        full_req_meta = ReqMeta.from_request_tracker(
+            request_tracker,
+            self.frozen_req_meta.block_size,
+            self.frozen_req_meta.lmcache_chunk_size,
+            self.frozen_req_meta.load_spec,
+            self.frozen_req_meta.skip_save,
+            self.frozen_req_meta.discard_partial_chunks,
+            num_cached_tokens=0,
+        )
+        
+        if full_req_meta is None:
+            raise ValueError("Failed to create ReqMeta from request tracker")
+        
+        # Update this object's attributes in place
+        # Keep the existing req_id if it was already set
+        if full_req_meta.req_id is not None:
+            self.req_id = full_req_meta.req_id
+        self.token_ids = full_req_meta.token_ids
+        self.slot_mapping = full_req_meta.slot_mapping
+        self.save_spec = full_req_meta.save_spec
+        self.load_spec = full_req_meta.load_spec
+        self.num_cached_tokens = full_req_meta.num_cached_tokens
+        
+        # Clear the frozen metadata since we're now unfrozen
+        self.frozen_req_meta = None
+
 
 
 @dataclass
@@ -425,7 +505,7 @@ class LMCacheConnectorV1Impl:
 
         self._block_size = vllm_config.cache_config.block_size
 
-        # request_id -> (vllm cached tokes, lmcache cached tokens)
+        # request_id -> (vllm cached tokens, lmcache cached tokens)
         self.load_specs: dict[str, LoadSpec] = {}
 
         self.kv_cache_manager: Optional[KVCacheManager] = None
@@ -463,6 +543,20 @@ class LMCacheConnectorV1Impl:
                     forward_context.virtual_engine
                 ]
 
+    def _update_worker_metadata(self, metadata: LMCacheConnectorMetadata, gpu_model_runner: "GPUModelRunner"):
+        """Update the metadata for the worker connector with cached tokens
+        """
+
+        for req_meta in metadata.requests:
+            num_cached_tokens = req_meta.num_cached_tokens
+            # only cached requests will have cached tokens
+            if num_cached_tokens > 0:
+                req_id = req_meta.req_id
+                req_state = gpu_model_runner.requests[req_id]
+                cached_token_ids = req_state.output_token_ids[len(req_state.output_token_ids) - num_cached_tokens:]
+                req_meta.unfreeze_with_token_ids(cached_token_ids)
+                # do not need to reset the req_meta because it will be cleared
+
     ####################
     # Worker side APIs
     ####################
@@ -476,9 +570,15 @@ class LMCacheConnectorV1Impl:
             forward_context (ForwardContext): the forward context.
             **kwargs: additional arguments for the load operation
 
+            Should pass in a reference to the invoking GPUModelRunner
+            in "gpu_model_runner"
+
         Note:
             The number of elements in kv_caches and layer_names should be
             the same.
+
+            The worker connector needs to enhance its metadata since the scheduler
+            no longer provides new_token_ids.
         """
         self.current_layer = 0
 
@@ -487,6 +587,13 @@ class LMCacheConnectorV1Impl:
 
         metadata = self._parent._get_connector_metadata()
         assert isinstance(metadata, LMCacheConnectorMetadata)
+        
+        # Retrieve the cached tokens from the workers
+        if self._parent.role == KVConnectorRole.WORKER:
+            # Must pass in the gpu_runner reference
+            if "gpu_model_runner" not in kwargs:
+                raise ValueError("'gpu_model_runner' should be provided in kwargs.")
+            self._update_worker_metadata(metadata, kwargs["gpu_model_runner"])
 
         assert len(self.kv_caches) > 0
         kvcaches = list(self.kv_caches.values())
@@ -938,6 +1045,7 @@ class LMCacheConnectorV1Impl:
                 load_spec=load_spec,
                 skip_save=force_skip_save,
                 discard_partial_chunks=self._discard_partial_chunks,
+                num_cached_tokens=0,
             )
             if req_meta is not None:
                 meta.add_request(req_meta)
@@ -945,8 +1053,10 @@ class LMCacheConnectorV1Impl:
         cached_reqs = scheduler_output.scheduled_cached_reqs
         for i, req_id in enumerate(cached_reqs.req_ids):
             request_tracker = self._request_trackers[req_id]
-            new_token_ids = cached_reqs.new_token_ids[i]
+            # new_token_ids will only be non-empty for last layer PP workers
+            new_token_ids = cached_reqs.new_token_ids[i] if cached_reqs.new_token_ids else []
             new_block_ids = cached_reqs.new_block_ids[i]
+            num_cached_tokens = scheduler_output.num_scheduled_tokens[req_id] - len(new_token_ids)
 
             request_tracker.update(new_token_ids, new_block_ids)
 
@@ -957,6 +1067,7 @@ class LMCacheConnectorV1Impl:
                 load_spec=None,
                 skip_save=force_skip_save,
                 discard_partial_chunks=self._discard_partial_chunks,
+                num_cached_tokens=num_cached_tokens,
             )
             if req_meta is not None:
                 meta.add_request(req_meta)
@@ -978,4 +1089,4 @@ class LMCacheConnectorV1Impl:
                 "first_tok": request._output_token_ids[0],
             }
 
-        return 0, return_params
+        return False, return_params
