@@ -16,27 +16,24 @@ cleanup() {
 trap cleanup SIGINT SIGTERM
 
 # --- Configuration arrays (must all be the same length) ---
-ports=(8000 8001 8002 8003 8004)
+ports=(8000 8001 8002 8003)
 configs=(
-  ../config/Jun_19_1_coding/baseline_kivi/02.yaml
-  ../config/Jun_19_1_coding/baseline_kivi/03.yaml
-  ../config/Jun_19_1_coding/baseline_kivi/06.yaml
-  ../config/Jun_19_1_coding/prefill/0.yaml
-  ../config/Jun_19_1_coding/prefill/1.yaml
+  ../config/Jun_19_1_coding/ours/01.yaml
+  ../config/Jun_19_1_coding/ours/05.yaml
+  ../config/Jun_19_1_coding/ours/1.yaml
+  ../config/Jun_19_1_coding/ours/10.yaml
 )
 logs=(
-  results/Jun_19_1_coding/baseline_kivi/tokens/02.log
-  results/Jun_19_1_coding/baseline_kivi/tokens/03.log
-  results/Jun_19_1_coding/baseline_kivi/tokens/06.log
-  results/Jun_19_1_coding/prefill/tokens/0.log
-  results/Jun_19_1_coding/prefill/tokens/1.log
+  results/Jun_19_1_coding/ours/tokens/01.log
+  results/Jun_19_1_coding/ours/tokens/05.log
+  results/Jun_19_1_coding/ours/tokens/1.log
+  results/Jun_19_1_coding/ours/tokens/10.log
 )
 outputs=(
-  results/Jun_19_1_coding/baseline_kivi/02.csv
-  results/Jun_19_1_coding/baseline_kivi/03.csv
-  results/Jun_19_1_coding/baseline_kivi/06.csv
-  results/Jun_19_1_coding/prefill/0.csv
-  results/Jun_19_1_coding/prefill/1.csv
+  results/Jun_19_1_coding/ours/01.csv
+  results/Jun_19_1_coding/ours/05.csv
+  results/Jun_19_1_coding/ours/1.csv
+  results/Jun_19_1_coding/ours/10.csv
 )
 
 # Array to track running PGIDs

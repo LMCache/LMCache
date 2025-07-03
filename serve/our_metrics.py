@@ -32,3 +32,9 @@ def f1_score(prediction, ground_truth):
     recall = 1.0 * num_same / len(ground_truth)
     f1 = (2 * precision * recall) / (precision + recall)
     return f1
+
+from codebleu import calc_codebleu
+
+def codebleu_score(prediction, reference, lang):
+    result = calc_codebleu([reference], [prediction], lang=lang)
+    return result['codebleu']

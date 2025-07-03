@@ -141,4 +141,15 @@ python3 evaluate_similarity_streaming.py \
     --streaming-dir2 ../../press/hotpotqa \
     --dataset2 hotpotqa \
     --rate-1-file results/Jun_5_1_qa/prefill/1_processed.csv
+
+Usage for coding:
+python3 evaluate_similarity_streaming.py \
+    results/Jun_19_1_coding/baseline_kivi/tokens/02.csv \
+    --input-csv results/Jun_19_1_coding/baseline_kivi/02.csv \
+    --prefill-dir results/Jun_19_1_coding/prefill \
+    --streaming-dir1 ../../press/repobench-p_e \
+    --dataset1 repobench-p_e \
+    --streaming-dir2 ../../press/lcc_e \
+    --dataset2 lcc_e \
+    --rate-1-file results/Jun_19_1_coding/prefill/1_processed.csv
 '''

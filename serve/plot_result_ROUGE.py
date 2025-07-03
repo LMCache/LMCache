@@ -14,7 +14,7 @@ parser.add_argument(
 )
 parser.add_argument(
     "--metric",
-    choices=["rouge", "f1"],
+    choices=["rouge", "f1", "codebleu"],
     default="rouge",
     help="Which metric to label on the y-axis: 'rouge' for ROUGE-L, 'f1' for F1 score"
 )
@@ -23,31 +23,36 @@ args = parser.parse_args()
 # Determine y-axis label based on chosen metric
 if args.metric == "f1":
     y_label = "Average F1 Score"
-else:
+    plot_title = "Dataset: triviaqa & hotpotqa"
+elif args.metric == "rouge":
     y_label = "Average ROUGE-L Score"
+    plot_title = "Dataset: qmsum & samsum"
+else:
+    y_label = "Average CodeBLEU Score"
+    plot_title = "Dataset: lcc_e & repobench_p_e"
 
 # File lists
 file_paths_kivi = [
-    'results/Jun_5_1_qa/baseline_kivi/02_processed.csv',
-    'results/Jun_5_1_qa/baseline_kivi/03_processed.csv',
-    'results/Jun_5_1_qa/baseline_kivi/06_processed.csv',
+    'results/Jun_19_1_coding/baseline_kivi/02_processed.csv',
+    'results/Jun_19_1_coding/baseline_kivi/03_processed.csv',
+    'results/Jun_19_1_coding/baseline_kivi/06_processed.csv',
 ]
 file_paths_ours = [
-    'results/Jun_5_1_qa/ours/01_processed_updated.csv',
-    'results/Jun_5_1_qa/ours/04_processed_updated.csv',
-    'results/Jun_5_1_qa/ours/1_processed_updated.csv',
-    # 'results/Jun_5_1_qa/ours/10_processed_updated.csv',
+    'results/Jun_19_1_coding/ours/01_processed_updated.csv',
+    'results/Jun_19_1_coding/ours/05_processed_updated.csv',
+    'results/Jun_19_1_coding/ours/1_processed_updated.csv',
+    'results/Jun_19_1_coding/ours/10_processed_updated.csv',
 ]
 file_paths_prefill = [
-    'results/Jun_5_1_qa/prefill/0_processed.csv'
+    'results/Jun_19_1_coding/prefill/0_processed.csv'
 ]
 file_paths_streaming = [
-    'results/Jun_5_1_qa/baseline_streaming/02_processed.csv',
-    'results/Jun_5_1_qa/baseline_streaming/03_processed.csv',
-    'results/Jun_5_1_qa/baseline_streaming/06_processed.csv',
+    'results/Jun_19_1_coding/baseline_streaming/02_processed.csv',
+    'results/Jun_19_1_coding/baseline_streaming/03_processed.csv',
+    'results/Jun_19_1_coding/baseline_streaming/06_processed.csv',
 ]
 file_paths_offload = [
-    'results/Jun_5_1_qa/prefill/1_processed.csv'
+    'results/Jun_19_1_coding/prefill/1_processed.csv'
 ]
 
 def load_metrics(file_list, filter_first=False):
@@ -137,12 +142,13 @@ if file_paths_offload:
 
 plt.xlabel("Average Delay (s)", fontsize=16)
 plt.ylabel(y_label, fontsize=16)
-plt.title("Dataset: qmsum & samsum", fontsize=16)
+plt.title(plot_title, fontsize=16)
 plt.xticks(fontsize=14)
 plt.yticks(fontsize=14)
 plt.grid(True)
 plt.legend(fontsize=14)
 plt.xlim(xmin=0)
+# plt.ylim(ymax=1)
 
 # Save the "all_results" figure
 plt.savefig(args.plot_filename, dpi=300, bbox_inches="tight")
@@ -215,12 +221,13 @@ if file_paths_offload:
 
 plt.xlabel("Average Delay (s)", fontsize=16)
 plt.ylabel(y_label, fontsize=16)
-plt.title("Dataset: triviaqa & hotpotqa", fontsize=16)
+plt.title(plot_title, fontsize=16)
 plt.xticks(fontsize=14)
 plt.yticks(fontsize=14)
 plt.grid(True)
 plt.legend(fontsize=14)
 plt.xlim(xmin=0)
+# plt.ylim(ymax=1)
 
 # Save the "no_first" figure
 plt.savefig("no_first.pdf", dpi=300, bbox_inches="tight")

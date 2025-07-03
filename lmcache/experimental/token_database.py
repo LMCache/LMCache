@@ -174,25 +174,25 @@ def choose_score_dict(
         score06 = 0.8240
         score1 = 1
     elif dataset == "repobench-p_e" and compression_method == "kivi":
-        score02 = 1
-        score03 = 1
-        score06 = 1
-        score1 = 1
+        score02 = 0.511245682257763
+        score03 = 0.7922134116740783
+        score06 = 0.8573641343615566
+        score1 = 0.877446305448298
     elif dataset == "repobench-p_e" and compression_method == "streaming":
-        score02 = 1
-        score03 = 1
-        score06 = 1
-        score1 = 1
+        score02 = 0.3005799108353483
+        score03 = 0.2996142073205276
+        score06 = 0.31167702012259335
+        score1 = 0.877446305448298
     elif dataset == "lcc_e" and compression_method == "kivi":
-        score02 = 1
-        score03 = 1
-        score06 = 1
-        score1 = 1
+        score02 = 0.4882792096814474
+        score03 = 0.7678517004887556
+        score06 = 0.8692731638733048
+        score1 = 0.9137121644961942
     elif dataset == "lcc_e" and compression_method == "streaming":
-        score02 = 1
-        score03 = 1
-        score06 = 1
-        score1 = 1
+        score02 = 0.3656177247760448
+        score03 = 0.3909506251168819
+        score06 = 0.38142414825154264
+        score1 = 0.9137121644961942
     else:
         raise ValueError(f"Unsupported dataset {dataset} and compression method {compression_method}.")
     return {

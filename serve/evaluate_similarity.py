@@ -1,6 +1,6 @@
 # This script evaluates the similarity of answers in multiple CSV files using the ROUGE metric (or F1 score).
 import pandas as pd
-from our_metrics import evaluate_answer, f1_score
+from our_metrics import evaluate_answer, f1_score, codebleu_score
 import os
 import argparse
 
@@ -22,14 +22,19 @@ def main():
     )
     parser.add_argument(
         "--metric",
-        choices=["rouge", "f1"],
+        choices=["rouge", "f1", "codebleu"],
         default="rouge",
         help="Which metric to use: 'rouge' for ROUGE-L, 'f1' for F1 score"
     )
     args = parser.parse_args()
 
     # Choose metric function based on --metric argument
-    metric_func = f1_score if args.metric == "f1" else evaluate_answer
+    metric_map = {
+        "f1": f1_score,
+        "rouge": evaluate_answer,
+        "codebleu": codebleu_score
+    }
+    metric_func = metric_map[args.metric]
 
     # Gather all input CSVs (e.g. INPUT02, INPUT03, INPUT06, …) and the reference
     input_paths = args.inputs + [args.input0]
@@ -53,13 +58,28 @@ def main():
         df = df.reset_index(drop=True)
 
         # Compute ROUGE-L (or F1) by looking up the reference answer via row number
-        df["ROUGEL"] = df.apply(
-            lambda row: metric_func(
-                row["answer"],
-                reference_answers[row.name]
-            ),
-            axis=1
-        )
+        if args.metric == "codebleu":
+            rougel_scores = []
+            for idx, row in df.iterrows():
+                lang = row["language"]
+                if lang == "csharp":
+                    lang = "c_sharp"
+
+                score = metric_func(
+                    row["answer"],
+                    reference_answers[idx],
+                    lang
+                )
+                rougel_scores.append(score)
+            df["ROUGEL"] = rougel_scores
+        else:
+            df["ROUGEL"] = df.apply(
+                lambda row: metric_func(
+                    row["answer"],
+                    reference_answers[row.name]
+                ),
+                axis=1
+            )
 
         # Save
         df.to_csv(fname, index=False)

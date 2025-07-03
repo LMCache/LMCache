@@ -15,7 +15,15 @@
 #   ../../press/hotpotqa \
 #   triviaqa \
 #   hotpotqa \
-#   "1 01 10 04"
+#   "02 03 05 06 07 08 09"
+
+# bash evaluate_similarity_ours.sh \
+#   results/Jun_19_1_coding \
+#   ../../press/repobench-p_e \
+#   ../../press/lcc_e \
+#   repobench-p_e \
+#   lcc_e \
+#   "01 05 1 10"
 
 # ---------------------------------------------
 #  1) Positional arguments

@@ -1,3 +1,5 @@
 pandas
 matplotlib
 rouge_score
+codebleu[all]
+tree-sitter==0.24.0

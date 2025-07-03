@@ -3,7 +3,7 @@ import csv
 import sys
 csv.field_size_limit(sys.maxsize)
 # Default reference CSV path
-default_reference_csv = 'dataset/qa_processed_v2.csv'
+default_reference_csv = 'dataset/coding_processed_v2.csv'
 
 def extract_token_numbers(input_file, output_csv, reference_csv=default_reference_csv):
     # Patterns
