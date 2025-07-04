@@ -36,3 +36,9 @@ steps:
       - "durations/test.html"
       - "coverage-test.xml"
       - "coverage-test/**/*"
+
+  - label: "Upload Coverage Report"
+    command: |
+      cat << EOF | buildkite-agent annotate --style "info"
+        Read the <a href="artifact://coverage-test/index.html">uploaded coverage report</a>
+      EOF
