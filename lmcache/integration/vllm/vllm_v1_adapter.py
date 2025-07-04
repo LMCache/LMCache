@@ -176,7 +176,7 @@ class RequestTracker:
     # Multimodal hashes and positions
     mm_hashes: Optional[list[str]] = None
     mm_positions: Optional[list["PlaceholderRange"]] = None
-    is_decode_phase = False
+    is_decode_phase: bool = False
 
     @staticmethod
     def from_new_request(
@@ -290,7 +290,8 @@ class ReqMeta:
         # For save operation: do not save if the following condition is met
         # 1. has already been saved before (num_saved_tokens > 0)
         # 2. number of unsaved tokens is not reached the chunk boundary
-        # 3. if save_decode_cache is False in decode phase
+        # Or this condition is met
+        # 3. if save_decode_cache is False and we are in decode phase
 
         # Skip save if we're in decode phase and save_decode_cache is False
         save_decode_cache = lmcache_connector.config.save_decode_cache
@@ -303,7 +304,7 @@ class ReqMeta:
             tracker.num_saved_tokens > 0
             and input_token_len < chunk_boundary
             # check whether in decode phase
-            and (tracker.is_decode_phase and not save_decode_cache)
+            or (tracker.is_decode_phase and not save_decode_cache)
         )
 
         if skip_save and load_spec is None:
