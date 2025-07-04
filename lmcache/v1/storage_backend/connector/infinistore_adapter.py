@@ -12,6 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Third Party
+import infinistore
+
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.storage_backend.connector import (
@@ -46,10 +49,22 @@ class InfinistoreConnectorAdapter(ConnectorAdapter):
 
         parse_url = parse_remote_url(context.url)
         device_name = parse_url.query_params.get("device", ["mlx5_0"])[0]
+
+        link_type_str = "LINK_ETHERNET"
+        if context.config:
+            link_type_str = context.config.infinistore_link_type
+
+        link_type_str = link_type_str.upper()
+        try:
+            link_type = getattr(infinistore, link_type_str)
+        except AttributeError as e:
+            raise ValueError(f"Invalid link_type: {link_type_str}") from e
+
         return InfinistoreConnector(
             host=parse_url.host,
             port=parse_url.port,
             dev_name=device_name,
+            link_type=link_type,
             loop=context.loop,
             memory_allocator=context.local_cpu_backend,
         )
