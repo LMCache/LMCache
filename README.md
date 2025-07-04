@@ -1,7 +1,5 @@
 <div align="center">
 <img src="https://github.com/user-attachments/assets/50c58c75-f37a-45e8-bf82-793439480f0f" width="720" alt="lmcache logo">
-
-</a>
 </div>
 
 <p align="center">
