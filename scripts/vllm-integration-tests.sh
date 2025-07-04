@@ -1,8 +1,11 @@
 #!/usr/bin/bash
 #
-# This test script runs functional tests on the lmcache/vllm-openai container image.
-# The image is built by this script from the LMCache code base the script is running from and
-# the latest nightly build of vLLM. It is laid out as follows:
+# This test script runs integration tests for the LMCache integration with vLLM.
+# A lmcache/vllm-openai container image is built by this script from the LMCache code base 
+# the script is running from and the latest nightly build of vLLM. It is therefore using the
+# latest of both code bases to build the image which it then performs tests on.
+#
+# It is laid out as follows:
 # - UTILITIES:  utility functions
 # - TESTS:      test functions
 # - SETUP:      environment setup steps
@@ -13,7 +16,8 @@
 # - docker engine (daemon running)
 # - NVIDIA Container Toolkit:
 #   https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html
-
+#
+# Note: The script should be run from the LMCache code base root.
 
 set -ex
 
