@@ -8,8 +8,14 @@
 # - SETUP:      environment setup steps
 # - MAIN:       test execution steps
 #
+# It requires the following to be installed to run:
+# - curl
+# - docker engine (daemon running)
+# - NVIDIA Container Toolkit:
+#   https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html
 
-set -e
+
+set -ex
 
 CID=
 HF_TOKEN=
@@ -106,7 +112,7 @@ usage() {
     echo " "
     echo "Options:"
     echo "  --hf-token|-hft              HuggingFace access token for downloading model(s)"
-    echo "  --server-wait-timeout|-swt    Wait time in seconds for vLLM OpenAI server to start"
+    echo "  --server-wait-timeout|-swt   Wait time in seconds for vLLM OpenAI server to start"
     echo "  --help|-h                    Print usage"
 }
 
@@ -114,7 +120,7 @@ usage() {
 # TESTS #
 #########
 
-test_lmcache_vllmopenai_server() {
+test_vllmopenai_server_with_lmcache_integrated() {
     http_status_code=$(curl http://localhost:8000/v1/completions \
             -w "%{http_code}" -o response-file.txt \
             -H "Content-Type: application/json" \
@@ -183,8 +189,8 @@ run_lmcache_vllmopenai_container
 # MAIN #
 ########
 
-# test that can inference model using vLLM OpenAI API
-test_lmcache_vllmopenai_server
+# test that can inference model using vLLM OpenAI API (lmcache integrated)
+test_vllmopenai_server_with_lmcache_integrated
 
 cleanup
 
