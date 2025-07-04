@@ -9,7 +9,11 @@
 # - MAIN:       test execution steps
 #
 
-set -ex
+set -e
+
+CID=
+HF_TOKEN=
+SERVER_WAIT_TIMEOUT=180
 
 #############
 # UTILITIES #
@@ -22,21 +26,21 @@ build_lmcache_vllmopenai_image() {
 }
 
 wait_for_openai_api_server(){
-    if ! timeout 180 bash -c '
+    if ! timeout $SERVER_WAIT_TIMEOUT bash -c '
         until curl 127.0.0.1:8000/v1/models |grep "\"id\":\"meta-llama/Llama-3.1-8B-Instruct\""; do
             echo "waiting for OpenAI API server to start"
             sleep 30
         done
     '; then
         echo "OpenAI API server did not start"
-        docker logs $1
+        docker logs $CID
         cleanup 1
         exit 1
     fi
 }
 
 run_lmcache_vllmopenai_container() {
-    if [ -z "$1" ]; then
+    if [ -z "$HF_TOKEN" ]; then
         CID=$(docker run -d --runtime nvidia --gpus all \
             --env "LMCACHE_CHUNK_SIZE=256" \
             --env "LMCACHE_LOCAL_CPU=True" \
@@ -48,7 +52,7 @@ run_lmcache_vllmopenai_container() {
             '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}')
     else
         CID=$(docker run -d --runtime nvidia --gpus all \
-             --env HF_TOKEN=$1 \
+             --env HF_TOKEN=$HF_TOKEN \
             --env "LMCACHE_CHUNK_SIZE=256" \
             --env "LMCACHE_LOCAL_CPU=True" \
             --env "LMCACHE_MAX_LOCAL_CPU_SIZE=5" \
@@ -59,7 +63,7 @@ run_lmcache_vllmopenai_container() {
             '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}')
     fi
 
-    wait_for_openai_api_server $CID
+    wait_for_openai_api_server
 
     if ! timeout 10 bash -c '
         if ! docker logs $0 | grep -i "Starting vLLM API server"; then
@@ -97,6 +101,14 @@ cleanup() {
     set -e
 }
 
+usage() {
+    echo "Usage: $0 [OPTIONS]"
+    echo " "
+    echo "Options:"
+    echo "  --hf-token|-hft              HuggingFace access token for downloading model(s)"
+    echo "  --server-wait-timeout|-swt    Wait time in seconds for vLLM OpenAI server to start"
+    echo "  --help|-h                    Print usage"
+}
 
 #########
 # TESTS #
@@ -117,6 +129,7 @@ test_lmcache_vllmopenai_server() {
     if [ "$http_status_code" -ne 200 ]; then
         echo "Model prompt request from OpenAI API server failed, HTTP status code: ${http_status_code}."
         cat response-file.txt
+        docker logs -n 20 $CID
         cleanup 1
         exit 1
     else
@@ -129,7 +142,33 @@ test_lmcache_vllmopenai_server() {
 # SETUP #
 #########
 
-CID=
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --hf-token*|-hft*)
+      if [[ "$1" != *=* ]]; then shift; fi # Value is next arg if no `=`
+      HF_TOKEN="${1#*=}"
+      ;;
+    --server-wait-timeout*|-swt*)
+      if [[ "$1" != *=* ]]; then shift; fi
+      SERVER_WAIT_TIMEOUT="${1#*=}"
+      if ! [[ "$SERVER_WAIT_TIMEOUT" =~ ^[0-9]+$ ]]; then
+            echo "server-wait-timeout is wait time in seconds - integer only"
+            exit 1
+      fi
+
+      ;;
+    --help|-h)
+      usage
+      exit 0
+      ;;
+    *)
+      >&2 printf "Error: Invalid argument\n"
+      usage
+      exit 1
+      ;;
+  esac
+  shift
+done
 
 # Need to run from docker directory
 cd docker/
@@ -138,12 +177,13 @@ cd docker/
 build_lmcache_vllmopenai_image
 
 # Start the OpenAI API server by running the container image
-run_lmcache_vllmopenai_container $1
+run_lmcache_vllmopenai_container
 
 ########
 # MAIN #
 ########
 
+# test that can inference model using vLLM OpenAI API
 test_lmcache_vllmopenai_server
 
 cleanup

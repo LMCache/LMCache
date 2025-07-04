@@ -6,4 +6,4 @@ steps:
     timeout_in_minutes: 60
     commands:
       - chmod +x scripts/functional-tests.sh
-      - scripts/functional-tests.sh $HF_TOKEN
+      - scripts/functional-tests.sh --hf-token=$HF_TOKEN --server-wait-timeout=240
