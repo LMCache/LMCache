@@ -114,6 +114,9 @@ class RequestTracker:
     mm_hashes: Optional[list[str]] = None
     mm_positions: Optional[list["PlaceholderRange"]] = None
 
+    # Whether the request is in decode phase
+    is_decode_phase: bool = False
+
     @staticmethod
     def from_new_request(
         new_request: "NewRequestData",
@@ -183,6 +186,8 @@ class RequestTracker:
             raise ValueError(f"Unsupported new_block_ids type {type(new_block_ids)}")
         self.allocated_block_ids.extend(new_block_ids)
 
+        if len(cached_request.new_token_ids) == 1:
+            self.is_decode_phase = True
 
 @dataclass
 class ReqMeta:
@@ -248,8 +253,8 @@ class ReqMeta:
             cdiv(tracker.num_saved_tokens + 1, lmcache_chunk_size) * lmcache_chunk_size
         )
         skip_save = skip_save or (
-            tracker.num_saved_tokens > 0 and not save_decode_cache
-        )
+            tracker.num_saved_tokens > 0 and input_token_len < chunk_boundary
+        ) or (not save_decode_cache and tracker.is_decode_phase)
 
         if skip_save and load_spec is None:
             return None
