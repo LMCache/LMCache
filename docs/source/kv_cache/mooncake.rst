@@ -1,4 +1,4 @@
-MoonCake Store
+MoonCake
 ========
 
 .. _mooncake-overview:
@@ -6,13 +6,13 @@ MoonCake Store
 Overview
 --------
 
-`MooncakeStore <https://github.com/kvcache-ai/Mooncake>`_ is an open-source distributed KV cache storage system designed specifically for LLM inference scenarios. 
+`Mooncake <https://github.com/kvcache-ai/Mooncake>`_ is an open-source distributed KV cache storage system designed specifically for LLM inference scenarios. 
 The system creates a distributed memory pool by aggregating memory space contributed by various client nodes, enabling efficient resource utilization across clusters.
 
 By pooling underutilized DRAM and SSD resources from multiple nodes, the system forms a unified distributed storage service that maximizes resource efficiency.
 
 .. image:: ../assets/mooncake-store-preview.png
-    :alt: MoonCake Store Architecture Diagram
+    :alt: MoonCake Architecture Diagram
 
 Key Features
 ~~~~~~~~~~~~
@@ -22,7 +22,7 @@ Key Features
 - **RDMA optimization**: Built on Transfer Engine with support for TCP, RDMA (InfiniBand/RoCEv2/eRDMA/NVIDIA GPUDirect)
 - **Dynamic resource scaling**: Supports dynamically adding and removing nodes for elastic resource management
 
-For detailed architecture information, see the `Mooncake Store Architecture Guide <https://github.com/kvcache-ai/Mooncake/blob/main/doc/en/mooncake-store-preview.md>`_.
+For detailed architecture information, see the `Mooncake Architecture Guide <https://github.com/kvcache-ai/Mooncake/blob/main/doc/en/mooncake-store-preview.md>`_.
 
 Quick Start
 -----------
