@@ -1,4 +1,4 @@
-MoonCake
+Mooncake
 ========
 
 .. _mooncake-overview:
@@ -12,7 +12,7 @@ The system creates a distributed memory pool by aggregating memory space contrib
 By pooling underutilized DRAM and SSD resources from multiple nodes, the system forms a unified distributed storage service that maximizes resource efficiency.
 
 .. image:: ../assets/mooncake-store-preview.png
-    :alt: MoonCake Architecture Diagram
+    :alt: Mooncake Architecture Diagram
 
 Key Features
 ~~~~~~~~~~~~
@@ -27,7 +27,7 @@ For detailed architecture information, see the `Mooncake Architecture Guide <htt
 Quick Start
 -----------
 
-Install MoonCake via pip:
+Install Mooncake via pip:
 
 .. code-block:: bash
 
@@ -60,7 +60,7 @@ Start the metadata server:
     # HTTP metadata server (recommended for development)
     mooncake_http_metadata_server
 
-Start the MoonCake master service:
+Start the Mooncake master service:
 
 .. code-block:: bash
 
@@ -98,7 +98,7 @@ Create your ``mooncake-config.yaml``:
       local_buffer_size: 1073741824
       transfer_timeout: 1
 
-**Step 3: Start vLLM with MoonCake**
+**Step 3: Start vLLM with Mooncake**
 
 .. code-block:: bash
 
@@ -165,18 +165,18 @@ Configuration
      - Local storage device type
    * - ``remote_url``
      - Required
-     - MoonCake store connection URL (format: ``mooncakestore://host:port/``)
+     - Mooncake store connection URL (format: ``mooncakestore://host:port/``)
    * - ``remote_serde``
      - "naive"
      - Serialization method for remote storage
    * - ``local_cpu``
      - False
-     - Enable/disable local CPU caching (set to False for pure MoonCake evaluation)
+     - Enable/disable local CPU caching (set to False for pure Mooncake evaluation)
    * - ``max_local_cpu_size``
      - Required
      - Maximum local CPU cache size in GB (required even when local_cpu is False)
 
-**MoonCake Parameters (via extra_config):**
+**Mooncake Parameters (via extra_config):**
 
 .. list-table::
    :header-rows: 1
@@ -187,13 +187,13 @@ Configuration
      - Description
    * - ``local_hostname``
      - Required
-     - Hostname/IP of the local node for MoonCake client identification
+     - Hostname/IP of the local node for Mooncake client identification
    * - ``metadata_server``
      - Required
      - Address of metadata coordination server (etcd/Redis/HTTP format)
    * - ``master_server_address``
      - Required
-     - MoonCake master service address (host:port format)
+     - Mooncake master service address (host:port format)
    * - ``protocol``
      - "tcp"
      - Communication protocol ("rdma" for high performance, "tcp" for compatibility)
@@ -219,7 +219,7 @@ Configuration
 Additional Resources
 --------------------
 
-- `MoonCake Store Architecture <https://github.com/kvcache-ai/Mooncake/blob/main/doc/en/mooncake-store-preview.md>`_
+- `Mooncake Store Architecture <https://github.com/kvcache-ai/Mooncake/blob/main/doc/en/mooncake-store-preview.md>`_
 - `Transfer Engine Documentation <https://github.com/kvcache-ai/Mooncake/blob/main/doc/en/transfer-engine.md>`_
 - `Build Instructions <https://github.com/kvcache-ai/Mooncake/blob/main/doc/en/build.md>`_
 - `GitHub Repository <https://github.com/kvcache-ai/Mooncake>`_
