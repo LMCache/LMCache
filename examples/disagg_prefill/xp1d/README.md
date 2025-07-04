@@ -2,6 +2,10 @@
 
 This example demonstrates how to run LMCache with disaggregated prefill using NIXL on a single node.
 
+### Important Limitations
+
+**⚠️ Prefix Caching Compatibility**: Currently, With example disagg_proxy_server_first_token_from_prefiller.py, prefix caching and disaggregated prefill are not compatible. The prefiller just save KV-Cache with the original prompt, but the decoder tries to look up the entire new prompt (original prompt + first token). Due to strict mapping of Prefix Caching, this causes decoder's lookup failures and prevents KV cache reuse from prefillers to decoders.
+
 ### Prerequisites
 
 - Install [LMCache](https://github.com/LMCache/LMCache). You can simply run `pip install lmcache`.
