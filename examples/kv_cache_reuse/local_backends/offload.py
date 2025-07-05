@@ -40,6 +40,8 @@ def setup_environment_variables(vllm_version: str, use_disk: bool = False):
         # Set the maximum size of the local CPU size to 5GB
         os.environ["LMCACHE_MAX_LOCAL_CPU_SIZE"] = "5"
 
+        os.environ["VLLM_ATTENTION_BACKEND"] = "XFOEMERS"
+
     if vllm_version == "v0":
         os.environ["VLLM_USE_V1"] = "0"
 

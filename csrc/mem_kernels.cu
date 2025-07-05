@@ -302,7 +302,6 @@ __global__ void load_and_reshape_multi_layer_page_attn_kernel(
     const int num_tokens, const int num_layers, const int page_size,
     const int num_pages, const int num_heads, const int head_size,
     const int x) {
-    
   const int token_id = blockIdx.x;
   const int layer_id = blockIdx.y;
   const int k_or_v = blockIdx.z;
@@ -310,7 +309,7 @@ __global__ void load_and_reshape_multi_layer_page_attn_kernel(
   const int num_threads = blockDim.x;
 
   if (token_id >= num_tokens) return;
-  
+
   const int64_t slot_idx = slot_mapping[token_id];
   if (slot_idx < 0) return;
 
@@ -318,12 +317,11 @@ __global__ void load_and_reshape_multi_layer_page_attn_kernel(
   const int64_t page_offset = slot_idx % page_size;
   const int n = num_heads * head_size;
   const int head_size_div_x = head_size / x;
-  
+
   scalar_t* __restrict__ paged_buffer_ptr = paged_buffer_ptrs[layer_id];
-  
+
   const int64_t lmcache_base_offset = k_or_v * num_layers * num_tokens * n +
-                                      layer_id * num_tokens * n + 
-                                      token_id * n;
+                                      layer_id * num_tokens * n + token_id * n;
 
   int64_t vllm_base_offset;
   if (k_or_v == 0) {
@@ -338,22 +336,21 @@ __global__ void load_and_reshape_multi_layer_page_attn_kernel(
   for (int i = tid; i < n; i += num_threads) {
     const int head_idx = i / head_size;
     const int head_offset = i % head_size;
-    
+
     int64_t vllm_offset;
     if (k_or_v == 0) {
       const int x_idx = head_offset / x;
       const int x_offset = head_offset % x;
-      vllm_offset = vllm_base_offset + 
+      vllm_offset = vllm_base_offset +
                     head_idx * head_size_div_x * page_size * x +
                     x_idx * page_size * x + x_offset;
     } else {
-      vllm_offset = vllm_base_offset + 
-                    head_idx * head_size * page_size + 
+      vllm_offset = vllm_base_offset + head_idx * head_size * page_size +
                     head_offset * page_size;
     }
 
     const int64_t lmcache_offset = lmcache_base_offset + i;
-    
+
     if (DIRECTION) {
       key_value[lmcache_offset] = paged_buffer_ptr[vllm_offset];
     } else {

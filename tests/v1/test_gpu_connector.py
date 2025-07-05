@@ -5,13 +5,13 @@ import random
 from utils import (
     check_kv_cache_equal,
     check_paged_kv_cache_equal,
+    check_paged_kv_cache_equal_for_paged_attn,
     check_paged_kv_cache_equal_with_mla,
     check_sglang_paged_kv_cache_equal,
-    check_paged_kv_cache_equal_for_paged_attn,
     generate_kv_cache,
     generate_kv_cache_paged_list_tensors,
-    generate_sglang_kv_cache_paged_list_tensors,
     generate_kv_cache_paged_list_tensors_for_paged_attn,
+    generate_sglang_kv_cache_paged_list_tensors,
 )
 import pytest
 import torch
@@ -66,6 +66,7 @@ def test_vllm_nested_gpu_connector():
     # Check gpu_kv becomes the same
     check_kv_cache_equal(gpu_kv_src, gpu_kv_dst, 512, "vllm")
 
+
 @pytest.mark.parametrize("use_gpu", [True, False])
 @pytest.mark.parametrize("use_mla", [True, False])
 def test_vllm_paged_connector_v2_with_gpu_and_mla(use_gpu, use_mla):
@@ -75,7 +76,6 @@ def test_vllm_paged_connector_v2_with_gpu_and_mla(use_gpu, use_mla):
     num_heads = 1 if use_mla else 8
     head_size = 128
     device = "cuda"
-    hidden_dim = num_heads * head_size
 
     num_tokens = 800
     chunk_size = 256
@@ -163,6 +163,7 @@ def test_vllm_paged_connector_v2_with_gpu_and_mla(use_gpu, use_mla):
             gpu_kv_src, gpu_kv_dst, num_tokens, slot_mapping, num_heads, head_size
         )
 
+
 @pytest.mark.parametrize("use_gpu", [True, False])
 def test_vllm_paged_connector_v2_paged_attn_with_gpu(use_gpu):
     num_blocks = 100
@@ -247,6 +248,7 @@ def test_vllm_paged_connector_v2_paged_attn_with_gpu(use_gpu):
         num_heads,
         head_size,
     )
+
 
 @pytest.mark.parametrize("use_gpu", [True])
 def test_layerwise_vllm_paged_connector_with_gpu(use_gpu):
@@ -618,7 +620,6 @@ def test_vllm_paged_connector_v2_to_gpu_bench(benchmark):
     num_heads = 8
     head_size = 128
     device = "cuda"
-    hidden_dim = num_heads * head_size
 
     chunk_size = 256
 

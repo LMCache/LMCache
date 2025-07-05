@@ -191,7 +191,7 @@ def init_lmcache_engine(
         VLLMPagedMemLayerwiseGPUConnector,
     ]
 
-        if use_mla and config.use_layerwise:
+    if use_mla and config.use_layerwise:
         raise ValueError("layerwise MLA connector is not supported yet")
 
     # When use_mla is True, num_kv_head is 1
@@ -605,7 +605,9 @@ def lmcache_store_kv(
                     kvcaches=kv_caches,
                     slot_mapping=slot_mapping_req_full,
                     offset=skip_leading_tokens,
-                    is_paged_attn=isinstance(model_input.attn_metadata, PagedAttentionMetadata),
+                    is_paged_attn=isinstance(
+                        model_input.attn_metadata, PagedAttentionMetadata
+                    ),
                 )
             else:
                 stored_token_num = 0
@@ -772,8 +774,9 @@ def lmcache_retrieve_kv(
                 kvcaches=kv_caches,
                 slot_mapping=slot_mapping_req_full,
                 use_mla=engine.metadata.use_mla,
-                is_paged_attn=isinstance(model_input.attn_metadata, PagedAttentionMetadata),
-
+                is_paged_attn=isinstance(
+                    model_input.attn_metadata, PagedAttentionMetadata
+                ),
             )
             lmc_num_computed_tokens = max(
                 torch.sum(ret_token_mask).item()
