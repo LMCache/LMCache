@@ -18,7 +18,7 @@ Welcome to LMCache!
 .. raw:: html
 
    <p style="text-align:center; font-size:24px;">
-   <strong> Redis for LLMs. </strong>
+   <strong> Supercharge Your LLM with the Fastest KV Cache Layer. </strong>
    </p>
 
 .. note::
