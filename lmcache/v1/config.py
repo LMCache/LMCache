@@ -108,8 +108,6 @@ class LMCacheEngineConfig:
     # (Optional) GDS/CuFile related configurations
     # Size of CuFile Buffer in MiB
     cufile_buffer_size: Optional[int] = None
-    # InfiniStore link type (LINK_ETHERNET or LINK_IB)
-    infinistore_link_type: str = "LINK_ETHERNET"
 
     # The extra config
     extra_config: Optional[dict] = None
@@ -156,7 +154,6 @@ class LMCacheEngineConfig:
         weka_path: Optional[str] = None,
         gds_path: Optional[str] = None,
         cufile_buffer_size: Optional[int] = None,
-        infinistore_link_type: str = "LINK_ETHERNET",
         extra_config: Optional[dict] = None,
         save_unfull_chunk: bool = True,
         blocking_timeout_secs: int = 10,
@@ -195,7 +192,6 @@ class LMCacheEngineConfig:
             weka_path,
             gds_path,
             cufile_buffer_size,
-            infinistore_link_type,
             extra_config,
             save_unfull_chunk,
             blocking_timeout_secs,
@@ -359,7 +355,6 @@ class LMCacheEngineConfig:
         weka_path = config.get("weka_path", None)
         gds_path = config.get("gds_path", None)
         cufile_buffer_size = config.get("cufile_buffer_size", None)
-        infinistore_link_type = config.get("infinistore_link_type", "LINK_ETHERNET")
 
         save_unfull_chunk = config.get("save_unfull_chunk", True)
 
@@ -409,7 +404,6 @@ class LMCacheEngineConfig:
                 weka_path,
                 gds_path,
                 cufile_buffer_size,
-                infinistore_link_type,
                 extra_config,
                 save_unfull_chunk,
                 blocking_timeout_secs,
@@ -593,10 +587,6 @@ class LMCacheEngineConfig:
                 config.cufile_buffer_size,
             )
         )
-        config.infinistore_link_type = parse_env(
-            get_env_name("infinistore_link_type"),
-            config.infinistore_link_type,
-        )
         config.extra_config = to_dict(parse_env(get_env_name("extra_config"), None))
         config.save_unfull_chunk = to_bool(
             parse_env(get_env_name("save_unfull_chunk"), config.save_unfull_chunk)
@@ -686,7 +676,6 @@ class LMCacheEngineConfig:
             "nixl_enable_gc": self.nixl_enable_gc,
             "weka_path": self.weka_path,
             "gds_path": self.gds_path,
-            "infinistore_link_type": self.infinistore_link_type,
             "extra_config": self.extra_config,
             "save_unfull_chunk": self.save_unfull_chunk,
             "blocking_timeout_secs": self.blocking_timeout_secs,

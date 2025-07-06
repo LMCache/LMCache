@@ -12,9 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Third Party
-import infinistore
-
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.storage_backend.connector import (
@@ -37,6 +34,9 @@ class InfinistoreConnectorAdapter(ConnectorAdapter):
         return url.startswith(self.schema)
 
     def create_connector(self, context: ConnectorContext) -> RemoteConnector:
+        # Third Party
+        import infinistore
+
         # Local
         from .infinistore_connector import InfinistoreConnector
 
@@ -51,8 +51,10 @@ class InfinistoreConnectorAdapter(ConnectorAdapter):
         device_name = parse_url.query_params.get("device", ["mlx5_0"])[0]
 
         link_type_str = "LINK_ETHERNET"
-        if context.config:
-            link_type_str = context.config.infinistore_link_type
+        if context.config and context.config.extra_config:
+            link_type_str = context.config.extra_config.get(
+                "infinistore_link_type", link_type_str
+            )
 
         link_type_str = link_type_str.upper()
         try:
