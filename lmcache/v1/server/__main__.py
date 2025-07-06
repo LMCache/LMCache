@@ -30,11 +30,11 @@ logger = init_logger(__name__)
 
 
 class LMCacheServer:
-    def __init__(self, host, port, device):
+    def __init__(self, host, port, device, max_cache_size=10.0):
         self.host = host
         self.port = port
         # self.data_store = {}
-        self.data_store = CreateStorageBackend(device)
+        self.data_store = CreateStorageBackend(device, max_cache_size)
         self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.server_socket.bind((host, port))
         self.server_socket.listen()
@@ -78,9 +78,9 @@ class LMCacheServer:
                                 ServerMetaMessage(
                                     Constants.SERVER_SUCCESS,
                                     lms_memory_obj.length,
-                                    lms_memory_obj.fmt,
-                                    lms_memory_obj.dtype,
-                                    lms_memory_obj.shape,
+                                    lms_memory_obj.get_memory_format(),
+                                    lms_memory_obj.get_dtype(),
+                                    lms_memory_obj.get_shape(),
                                 ).serialize()
                             )
                             t2 = time.perf_counter()
@@ -159,18 +159,26 @@ def main():
     # Standard
     import sys
 
-    if len(sys.argv) not in [3, 4]:
-        logger.error(f"Usage: {sys.argv[0]} <host> <port> <storage>(default:cpu)")
+    if len(sys.argv) not in [3, 4, 5]:
+        logger.error(
+            f"Usage: {sys.argv[0]} <host> <port> <storage>(default:cpu) "
+            f"<max_cache_size_gb>(default:10.0)"
+        )
         exit(1)
 
     host = sys.argv[1]
     port = int(sys.argv[2])
-    if len(sys.argv) == 4:
+    if len(sys.argv) >= 4:
         device = sys.argv[3]
     else:
         device = "cpu"
 
-    server = LMCacheServer(host, port, device)
+    if len(sys.argv) == 5:
+        max_cache_size = float(sys.argv[4])
+    else:
+        max_cache_size = 10.0
+
+    server = LMCacheServer(host, port, device, max_cache_size)
     server.run()
 
 
