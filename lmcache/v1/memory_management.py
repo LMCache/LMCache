@@ -447,6 +447,112 @@ class BytesBufferMemoryObj(MemoryObj):
         return self.metadata.is_pin
 
 
+class LMSMemoryObj(MemoryObj):
+    """
+    Memory object for LMCache server storage backend.
+    Wraps bytearray data with metadata for KV cache storage.
+    """
+
+    def __init__(
+        self,
+        data: bytearray,
+        length: int,
+        fmt: MemoryFormat,
+        dtype: Optional[torch.dtype],
+        shape: torch.Size,
+    ):
+        # Create metadata for the MemoryObj interface
+        metadata = MemoryObjMetadata(
+            shape=shape,
+            dtype=dtype,
+            address=0,  # Not applicable for bytearray
+            phy_size=len(data),
+            ref_count=1,
+            is_pin=False,
+            fmt=fmt,
+        )
+        super().__init__(metadata)
+
+        self.data = data
+        self.length = length
+        self.valid = True
+        self.size: int = len(data) if data else 0
+
+    def invalidate(self):
+        """Invalidate the LMSMemoryObj."""
+        self.valid = False
+
+    def is_valid(self):
+        """Check if the LMSMemoryObj is valid."""
+        return self.valid
+
+    def get_size(self) -> int:
+        """Get the size of the LMSMemoryObj in bytes."""
+        return self.size
+
+    def get_shape(self) -> torch.Size:
+        """Get the shape of the LMSMemoryObj."""
+        return self.meta.shape
+
+    def get_dtype(self) -> Optional[torch.dtype]:
+        """Get the dtype of the LMSMemoryObj."""
+        return self.meta.dtype
+
+    def get_memory_format(self) -> MemoryFormat:
+        """Get the memory format of the LMSMemoryObj."""
+        return self.meta.fmt
+
+    def get_physical_size(self) -> int:
+        """Get the physical size of the LMSMemoryObj in bytes."""
+        return self.meta.phy_size
+
+    def pin(self) -> bool:
+        """Pin the memory obj so that it will not be evicted."""
+        self.meta.is_pin = True
+        return True
+
+    def unpin(self) -> bool:
+        """Unpin the memory obj so that it can be evicted."""
+        self.meta.is_pin = False
+        return True
+
+    def ref_count_up(self):
+        """Increase ref count for the given LMSMemoryObj by one."""
+        self.meta.ref_count += 1
+
+    def ref_count_down(self):
+        """Decrease ref count for the given LMSMemoryObj by one."""
+        self.meta.ref_count -= 1
+
+    def get_ref_count(self) -> int:
+        """Get ref count for the given LMSMemoryObj."""
+        return self.meta.ref_count
+
+    @property
+    def metadata(self) -> MemoryObjMetadata:
+        """Get the metadata of the LMSMemoryObj."""
+        return self.meta
+
+    @property
+    def tensor(self) -> Optional[torch.Tensor]:
+        """
+        Get the tensor from the LMSMemoryObj.
+        LMSMemoryObj primarily stores bytearray data, so tensor access
+        may not be directly supported.
+        """
+        return None
+
+    @property
+    def byte_array(self) -> bytes:
+        """Get the byte array from the LMSMemoryObj."""
+        return bytes(self.data) if self.data else b""
+
+    @property
+    def is_pinned(self) -> bool:
+        """Check whether the memory obj is pinned."""
+        return self.meta.is_pin
+
+
 class MemoryAllocatorInterface(metaclass=abc.ABCMeta):
     @abc.abstractmethod
     def allocate(
