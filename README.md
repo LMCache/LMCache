@@ -19,7 +19,6 @@
   <img height="20" src="https://github.com/lmcache/lmcache/actions/workflows/code_quality_checks.yml/badge.svg?branch=dev&label=tests" alt="Code Quality Status">
   <img height="20" alt="Minimum Python Version" src="https://img.shields.io/badge/python-3.10+-blue.svg">
   <img height="20" alt="Release" src="https://img.shields.io/github/v/release/lmcache/lmcache?include_prereleases&style=">
-  </a>
 </p>
 
 <p align="center">
