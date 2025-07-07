@@ -246,7 +246,8 @@ class LocalCPUBackend(StorageBackendInterface):
                 old_mem_obj = self.hot_cache[evict_key]
                 # If the ref_count > 1, we cannot evict it as the cpu memory
                 # might be used as buffers by other storage backends
-                if old_mem_obj.get_ref_count() > 1:
+                # Also, don't evict pinned objects
+                if old_mem_obj.get_ref_count() > 1 or old_mem_obj.is_pinned:
                     continue
                 evict_keys.append(evict_key)
 
@@ -310,7 +311,8 @@ class LocalCPUBackend(StorageBackendInterface):
                 old_mem_obj = self.hot_cache[evict_key]
                 # If the ref_count > 1, we cannot evict it as the cpu memory
                 # might be used as buffers by other storage backends
-                if old_mem_obj.get_ref_count() > 1 and not old_mem_obj.is_pinned:
+                # Also, don't evict pinned objects
+                if old_mem_obj.get_ref_count() > 1 or old_mem_obj.is_pinned:
                     continue
                 # HACK: We assume batch_size=num_layers here.
                 # We also assume if the one layer's ref_count > 1 or pinned,
