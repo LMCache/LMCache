@@ -521,10 +521,6 @@ class LMCacheConnectorV1Impl:
             )
             token_mask[:masked_token_count] = False
 
-            if self.skip_last_n_tokens > 0:
-                tokens = tokens[: -self.skip_last_n_tokens]
-                token_mask = token_mask[: -self.skip_last_n_tokens]
-
             lmcache_cached_tokens = request.load_spec.lmcache_cached_tokens
             if self.use_layerwise:
                 if idx == last_idx:
