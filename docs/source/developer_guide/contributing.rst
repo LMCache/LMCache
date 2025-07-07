@@ -38,6 +38,8 @@ To contribute to this repo, you'll use the Fork and Pull model common in many op
 
 - Fork the repository
 - Create a branch
+- Run code style checks and fix any issues
+- Run unit tests and fix any broken tests
 - Submit a pull request with detailed descriptions
 
 When your contribution is ready, you can create a pull request. Pull requests are often referred to as "PRs". In general, we follow the standard `GitHub pull request <https://help.github.com/en/articles/about-pull-requests>`_ process. Follow the template to provide details about your pull request to the maintainers. It's best to break your contribution into smaller PRs with incremental changes, and include a good description of the changes. We require new unit tests to be contributed with any new functionality added.
@@ -76,10 +78,16 @@ Development
 Set up your dev environment
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+The following prerequisites are required:
+
+- OS: Linux
+- GPU: NVIDIA compute capability 7.0+ (e.g., V100, T4, RTX20xx, A100, L4, H100, etc.)
+- CUDA 12.8+
+
 The following tools are required:
 
 - `git <https://git-scm.com>`_
-- `python <https://www.python.org>`_ (v3.10+)
+- `python <https://www.python.org>`_ (v3.10 -- v3.12)
 - `pip <https://pypi.org/project/pip/>`_ (v23.0+)
 
 The first step is to install the necessary Python packages required for development. The commands to do this are as follows:
@@ -97,6 +105,9 @@ Before pushing changes to GitHub, you need to run the tests and coding style che
 Unit tests
 ^^^^^^^^^^
 
+.. note::
+    The Unit tests require `NVIDIA Inference Xfer Library (NIXL) <https://github.com/ai-dynamo/nixl>`_ to be installed. Please follow the details in the NIXL GitHub repo to install.
+
 When making changes, run the tests before pushing the changes. Running unit tests ensures your contributions do not break exiting code. We use the `pytest <https://docs.pytest.org/>`_ framework to run unit tests. The framework is setup to run all files in the `tests <https://github.com/LMCache/LMCache/tree/dev/tests>`_ directory which have a prefix or posfix of "test".
 
 Running unit tests is as simple as:
@@ -113,7 +124,7 @@ By default, all tests found within the tests directory are run. However, specifi
 
 .. warning::
 
-    Currently, unit tests do not run on non Nvidia platforms. If you don't have access to a Nvidia platform to run unit tests locally, rely on the continuous integration system to run the tests for now.
+    Currently, unit tests do not run on non Linux NVIDIA GPU platforms. If you don't have access to this platform to run unit tests locally, rely on the continuous integration system to run the tests for now.
 
 Coding style
 ^^^^^^^^^^^^
