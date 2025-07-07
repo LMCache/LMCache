@@ -26,6 +26,14 @@ Press `Ctrl+C` to stop the servers.
 
 to start disaggregated prefill and benchmark the performance.
 
+
+Another Option is to run by K8S + LWS:
+
+1. Install L.W.S on your Kubernetes cluster: refer to https://lws.sigs.k8s.io/
+2. Create a LWS instance with proxy, decoder and prefiller by `kubectl apply -f k8s/1p1d-lws.yaml`
+3. wait for all pods becoming ready: `kubectl get po -w`
+4. curl the API from proxy pod: `kubectl  exec -it vllm-pd-lws-0 -- curl -X POST http://vllm-pd-lws-0.vllm-pd-lws:9000/v1/completions   -H "Content-Type: application/json"   -d '{"model": "Qwen/Qwen-2.5-0.5b","prompt": "What is LMCache and vLLM ?","max_tokens": 50,"temperature": 0.7  }' `
+
 #### Example benchmark command
 
 If you have vLLM [benchmark_serving.py](https://github.com/vllm-project/vllm/blob/main/benchmarks/benchmark_serving.py), you can run the following command to benchmark the serving performance of the disaggregated prefill setup:

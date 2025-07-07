@@ -1,0 +1,89 @@
+apiVersion: leaderworkerset.x-k8s.io/v1
+kind: LeaderWorkerSet
+metadata:
+  name: vllm-pd-lws
+spec:
+  replicas: 1
+  leaderWorkerTemplate:
+    size: 3  # leader + 2 workers
+    restartPolicy: RecreateGroupOnPodRestart
+    leaderTemplate:
+      metadata:
+        labels:
+          role: leader
+          app: pd-proxy
+      spec:
+        containers:
+        - name: pd-proxy
+          image: lmcache/vllm-openai:latest
+          # Pod-0 is the proxy
+          command: ["/bin/bash", "-c"]
+          args:
+          - |
+            source /opt/venv/bin/activate
+            python3 /workspace/LMCache/examples/disagg_prefill/1p1d/disagg_proxy_server_first_token_from_decoder.py \
+              --host 0.0.0.0 \
+              --port 9000 \
+              --decoder-host  vllm-pd-lws-0-1.vllm-pd-lws \
+              --decoder-port 8200 \
+              --prefiller-host vllm-pd-lws-0-2.vllm-pd-lws \
+              --prefiller-port 8200
+          ports:
+          - containerPort: 9000
+    workerTemplate:
+      metadata:
+        labels:
+          role: worker
+          app: vllm-pd-instance
+      spec:
+        containers:
+        - name: vllm-pd-instance
+          image: lmcache/vllm-openai:latest
+          env:
+          - name: MODEL
+            value: "Qwen/Qwen2.5-0.5B"
+          - name: PORT
+            value: "8200"
+          # Pod-0-1 is the Decoder
+          # Pod-0-2 is the Prefiller
+          command: ["/bin/bash", "-c"]
+          args:
+          - |
+            source /opt/venv/bin/activate
+            # Processing config files
+            decoder_svc="vllm-pd-lws-0-1.vllm-pd-lws" # worker-1 svc created by LWS
+            cfg_path="/workspace/LMCache/examples/disagg_prefill/1p1d/configs"
+            prefill_conf="${cfg_path}/lmcache-prefiller-config.yaml"
+            decoder_conf="${cfg_path}/lmcache-decoder-config.yaml"
+            sed -i s/localhost/${decoder_svc}/ $prefill_conf
+            sed -i s/localhost/0.0.0.0/ $decoder_conf
+            # Diff behaviour for decoder and prefiller
+            if [ $LWS_WORKER_INDEX -eq 1 ]; then
+              echo "[INFO] This is a decoder ---------------"
+              LMCACHE_CONFIG_FILE=$decoder_conf
+              kv_config="{\"kv_connector\":\"LMCacheConnectorV1\",\"kv_role\":\"kv_consumer\",\"kv_connector_extra_config\": {\"discard_partial_chunks\": false, \"lmcache_rpc_port\": \"consumer1\"}}"
+            else
+              echo "[INFO] This is a prefiller -------------"
+              LMCACHE_CONFIG_FILE=$prefill_conf
+              kv_config="{\"kv_connector\":\"LMCacheConnectorV1\",\"kv_role\":\"kv_producer\",\"kv_connector_extra_config\": {\"discard_partial_chunks\": false, \"lmcache_rpc_port\": \"producer1\"}}"
+              while [ "$(curl -o /dev/null -s -w '%{http_code}' http://${decoder_svc}:8200/v1/models)" != "200" ]; do
+                 sleep 5;
+                 echo "waiting for decoder 8200 port ready..."
+              done
+            fi
+            # Run vLLM serve
+            UCX_TLS=cuda_ipc,cuda_copy,tcp \
+            VLLM_ENABLE_V1_MULTIPROCESSING=1 \
+            VLLM_WORKER_MULTIPROC_METHOD=spawn \
+            vllm serve $MODEL \
+              --host 0.0.0.0 \
+              --port $PORT \
+              --disable-log-requests \
+              --enforce-eager \
+              --kv-transfer-config  "$kv_config"
+          ports:
+          - containerPort: 8200
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+
