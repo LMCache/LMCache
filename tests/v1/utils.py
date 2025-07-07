@@ -221,12 +221,13 @@ def check_paged_kv_cache_equal(left, right, slot_mapping, num_heads=8, head_size
 
 
 def check_sglang_paged_kv_cache_equal(
-    left, right, num_tokens, slot_mapping, num_heads=8, head_size=128
+    left, right, slot_mapping, num_heads=8, head_size=128
 ):
     """
     check whether two paged kv caches are the same at slot_mapping
     """
     token_dim = 0
+    num_tokens = slot_mapping.shape[0]
     for left_kv, right_kv in zip(left, right, strict=False):
         _left_kv = left_kv.reshape(-1, num_heads, head_size)
         _right_kv = right_kv.reshape(-1, num_heads, head_size)
@@ -240,13 +241,12 @@ def check_sglang_paged_kv_cache_equal(
         assert (_left_kv[slot_mapping, :, :] == _right_kv[slot_mapping, :, :]).all()
 
 
-def check_paged_kv_cache_equal_with_mla(
-    left, right, num_tokens, slot_mapping, head_size=128
-):
+def check_paged_kv_cache_equal_with_mla(left, right, slot_mapping, head_size=128):
     """
     check whether two paged kv caches are the same at slot_mapping when use mla
     """
     token_dim = 0
+    num_tokens = slot_mapping.shape[0]
     for left_kv, right_kv in zip(left, right, strict=False):
         new_left_kv = left_kv.reshape(-1, head_size)
         new_right_kv = right_kv.reshape(-1, head_size)

@@ -726,14 +726,16 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
         slot_mapping_full = torch.cat(slot_mapping_chunks, dim=0)
 
         num_tokens = len(slot_mapping_full)
-        buffer_shape = self.get_shape(num_tokens)
-        tmp_gpu_buffer_obj = self.gpu_buffer_allocator.allocate(
-            buffer_shape, self.dtype, MemoryFormat.KV_T2D
-        )
-        assert tmp_gpu_buffer_obj is not None, (
-            "Failed to allocate GPU buffer in GPUConnector"
-        )
-        assert tmp_gpu_buffer_obj.tensor is not None
+
+        if self.use_gpu:
+            buffer_shape = self.get_shape(num_tokens)
+            tmp_gpu_buffer_obj = self.gpu_buffer_allocator.allocate(
+                buffer_shape, self.dtype, MemoryFormat.KV_T2D
+            )
+            assert tmp_gpu_buffer_obj is not None, (
+                "Failed to allocate GPU buffer in GPUConnector"
+            )
+            assert tmp_gpu_buffer_obj.tensor is not None
 
         offset = starts[0]
         current_stream = torch.cuda.current_stream()
@@ -770,7 +772,7 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
                         tmp_gpu_buffer_obj.tensor,
                         kvcaches[layer_id][0],
                         kvcaches[layer_id][1],
-                        slot_mapping[start:end],
+                        slot_mapping_full,
                         False,
                         True,
                     )
@@ -842,14 +844,16 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
         slot_mapping_full = torch.cat(slot_mapping_chunks, dim=0)
 
         num_tokens = len(slot_mapping_full)
-        buffer_shape = self.get_shape(num_tokens)
-        tmp_gpu_buffer_obj = self.gpu_buffer_allocator.allocate(
-            buffer_shape, self.dtype, MemoryFormat.KV_T2D
-        )
-        assert tmp_gpu_buffer_obj is not None, (
-            "Failed to allocate GPU buffer in GPUConnector"
-        )
-        assert tmp_gpu_buffer_obj.tensor is not None
+
+        if self.use_gpu:
+            buffer_shape = self.get_shape(num_tokens)
+            tmp_gpu_buffer_obj = self.gpu_buffer_allocator.allocate(
+                buffer_shape, self.dtype, MemoryFormat.KV_T2D
+            )
+            assert tmp_gpu_buffer_obj is not None, (
+                "Failed to allocate GPU buffer in GPUConnector"
+            )
+            assert tmp_gpu_buffer_obj.tensor is not None
 
         offset = starts[0]
         current_stream = torch.cuda.current_stream()
