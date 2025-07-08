@@ -9,8 +9,13 @@ Setup using Python
 Prerequisites
 ~~~~~~~~~~~~~
 
-- Python 3.10+
+- OS: Linux
+- Python: 3.10 -- 3.12
+- GPU: NVIDIA compute capability 7.0+ (e.g., V100, T4, RTX20xx, A100, L4, H100, etc.)
 - CUDA 12.8+
+
+.. note::
+    LMCache does not support Windows natively. To run LMCache on Windows, you can use the Windows Subsystem for Linux (WSL) with a compatible Linux distribution, or use some community-maintained forks.
 
 Install Stable LMCache from PyPI
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
