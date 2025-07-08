@@ -334,10 +334,7 @@ class ReqMeta:
         save_spec = SaveSpec(skip_leading_tokens, not skip_save)
 
         # Calculate the token ids and slot mappings for load and save
-        # OPTIMIZATION: pre-allocate the buffer for token ids
-        # and blocktracker.num_saved_tokens > 0
-        # and input_token_len < chunk_boundary
-        # and not save_decode_cache
+        # OPTIMIZATION: pre-allocate the buffer for token ids and block
 
         # ids
         token_ids = torch.tensor(input_token_ids)[:num_tokens_to_save]
