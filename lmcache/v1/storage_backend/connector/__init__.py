@@ -219,6 +219,7 @@ def CreateConnector(
     - blackhole://[any_text]
     - audit://host:port[?verify=true|false]
     - fs://[host:port]/path
+    - external://host:port/module_path/?connector_name=ConnectorName
 
     Examples:
     - redis://localhost:6379
@@ -230,7 +231,7 @@ def CreateConnector(
     - blackhole://
     - audit://localhost:8080?verify=true
     - fs:///tmp/lmcache
-    - external://host:0/external_log_connector.lmc_external_log_connector/?connector_name=ExternalLogConnector
+    - external://host:0/adt.adt_kv_connector/?connector_name=AdtKVConnector
 
     Args:
         url: The remote URL
