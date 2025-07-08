@@ -945,8 +945,7 @@ class LMCacheConnectorV1Impl:
         for i, req_id in enumerate(cached_reqs.req_ids):
             request_tracker = self._request_trackers[req_id]
             num_new_tokens = scheduler_output.num_scheduled_tokens[req_id]
-            if req_id in self._requests_in_step:
-                request = self._requests_in_step[req_id]
+            if request := self._requests_in_step.get(req_id):
                 num_current_tokens = len(request_tracker.token_ids)
                 new_token_ids = request.all_token_ids[
                     num_current_tokens : num_current_tokens + num_new_tokens
