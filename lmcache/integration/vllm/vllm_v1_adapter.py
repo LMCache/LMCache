@@ -619,7 +619,10 @@ class LMCacheConnectorV1Impl:
             )
             token_mask[:masked_token_count] = False
 
-            lmcache_cached_tokens = request.load_spec.lmcache_cached_tokens
+            if self.skip_last_n_tokens > 0:
+                tokens = tokens[: -self.skip_last_n_tokens]
+                token_mask = token_mask[: -self.skip_last_n_tokens]
+
             if self.use_layerwise:
                 sync = True
                 # NOTE(Jiayi): Perform blending before layerwise prefix caching
@@ -633,10 +636,10 @@ class LMCacheConnectorV1Impl:
                     )
                 else:
                     layerwise_retriever = self.lmcache_engine.retrieve_layer(
-                        tokens[:lmcache_cached_tokens],
-                        token_mask[:lmcache_cached_tokens],
+                        tokens,
+                        token_mask,
                         kvcaches=kvcaches,
-                        slot_mapping=slot_mapping[:lmcache_cached_tokens],
+                        slot_mapping=slot_mapping,
                         sync=sync,
                     )
                     # NOTE: retrieve for two layers at the first layer
@@ -645,10 +648,10 @@ class LMCacheConnectorV1Impl:
                     self.layerwise_retrievers.append(layerwise_retriever)
             else:
                 ret_token_mask = self.lmcache_engine.retrieve(
-                    tokens[:lmcache_cached_tokens],
-                    token_mask[:lmcache_cached_tokens],
+                    tokens,
+                    token_mask,
                     kvcaches=kvcaches,
-                    slot_mapping=slot_mapping[:lmcache_cached_tokens],
+                    slot_mapping=slot_mapping,
                     user=request.user,
                 )
 
@@ -927,7 +930,7 @@ class LMCacheConnectorV1Impl:
             self.lookup_client, "supports_producer_reuse"
         ):
             return 0
-        
+
         if not request.caching:
             return 0
 
