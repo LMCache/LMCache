@@ -970,8 +970,6 @@ class LMCacheConnectorV1Impl:
             if req_meta is not None:
                 meta.add_request(req_meta)
 
-        self._requests_in_step.clear()
-
         return meta
 
     def request_finished(
