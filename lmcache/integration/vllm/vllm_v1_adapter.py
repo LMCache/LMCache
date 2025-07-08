@@ -395,6 +395,7 @@ class LMCacheConnectorV1Impl:
         self.layerwise_retrievers = []
         if role == KVConnectorRole.SCHEDULER:
             self.lookup_client = LMCacheLookupClient(role, is_tp, vllm_config)
+            self._requests_in_step: dict[str, Request] = {}
         else:
             self.lmcache_engine = init_lmcache_engine(
                 vllm_config.model_config,
@@ -851,6 +852,8 @@ class LMCacheConnectorV1Impl:
         if the CacheManager this allocated blocks for us.
         """
 
+        self._requests_in_step[request.request_id] = request
+
         if request.request_id not in self.load_specs:
             # No KV tokens from external KV cache, return
             return
@@ -931,7 +934,17 @@ class LMCacheConnectorV1Impl:
         cached_reqs = scheduler_output.scheduled_cached_reqs
         for i, req_id in enumerate(cached_reqs.req_ids):
             request_tracker = self._request_trackers[req_id]
-            new_token_ids = cached_reqs.new_token_ids[i]
+            num_new_tokens = scheduler_output.num_scheduled_tokens[req_id]
+            if request := self._requests_in_step.get(req_id):
+                num_current_tokens = len(request_tracker.token_ids)
+                new_token_ids = request.all_token_ids[
+                    num_current_tokens : num_current_tokens + num_new_tokens
+                ]
+            else:
+                raise ValueError(
+                    f"Request {req_id} is not in _requests_in_step, "
+                    f"but it is scheduled to be cached"
+                )
             new_block_ids = cached_reqs.new_block_ids[i]
 
             request_tracker.update(new_token_ids, new_block_ids)
