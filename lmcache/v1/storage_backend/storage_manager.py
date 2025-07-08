@@ -187,10 +187,7 @@ class StorageManager:
         for memory_obj in memory_objs:
             memory_obj.ref_count_down()
 
-    def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
-        """
-        Blocking function to get the memory object from the storages.
-        """
+    def wait_prefetch(self, key: CacheEngineKey, timeout: float = 0.2):
         # Search in prefetch task
         self.manager_lock.acquire()
         prefetch_task = self.prefetch_tasks.get(key, None)
@@ -206,8 +203,13 @@ class StorageManager:
             # Calling result() twice (already once in callback) will have
             # no effect
             # Tune the timeout for better performance
-            prefetch_task.result(timeout=1)
+            prefetch_task.result(timeout=timeout)
 
+    def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
+        """
+        Blocking function to get the memory object from the storages.
+        """
+        self.wait_prefetch(key, timeout=self.config.prefetch_timeout_secs)
         # Search all backends for blocking get
         for backend_name, backend in self.storage_backends.items():
             # NOTE(Jiayi): bypass the allocator for now
@@ -286,28 +288,16 @@ class StorageManager:
         except Exception as e:
             logger.error(f"Exception captured from future in prefetch_callback: {e}")
             raise e
-        kv_chunk = buffer_memory_obj.tensor
-        kv_shape = kv_chunk.shape
-        kv_dtype = kv_chunk.dtype
-        memory_obj = self.allocator_backend.allocate(kv_shape, kv_dtype)
-        if memory_obj is None:
-            logger.warning("Memory allocation failed in prefetch_callback")
+        if buffer_memory_obj is None:
             return
+        assert isinstance(buffer_memory_obj, MemoryObj)
+        assert buffer_memory_obj.tensor is not None, "Encounter invalid tensor"
+        assert buffer_memory_obj.tensor.device.type == "cpu"
 
-        assert memory_obj.tensor is not None, "Encounter invalid tensor"
-
-        # TODO(Jiayi): this part should be done in another process if
-        # the cpu->pinned cpu copy is blocking.
-        prefetch_stream = torch.cuda.Stream()
-        with torch.cuda.stream(prefetch_stream):
-            memory_obj.tensor.copy_(kv_chunk, non_blocking=True)
-        prefetch_stream.synchronize()
-
-        # NOTE: no need to ref_count_up here because
-        # the memory_obj's ref_count is already 1
-        self.manager_lock.acquire()
-        self.storage_backends["LocalCPUBackend"].submit_put_task(key, memory_obj)
-        self.manager_lock.release()
+        # the buffer_memory_obj is a cpu backend allocated memory obj
+        self.storage_backends["LocalCPUBackend"].submit_put_task(key, buffer_memory_obj)
+        # prefetched memory should also be evictable
+        buffer_memory_obj.ref_count_down()
 
     def prefetch(self, key: CacheEngineKey) -> None:
         """Launch a prefetch request in the storage backend. Non-blocking"""

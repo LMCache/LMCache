@@ -120,6 +120,9 @@ class LMCacheEngineConfig:
     # when calling get_blocking method in remote backend
     blocking_timeout_secs: int = 10
 
+    # Set timeout(seconds) when calling prefetch
+    prefetch_timeout_secs: float = 0.1
+
     @staticmethod
     def from_defaults(
         chunk_size: int = 256,
@@ -157,6 +160,7 @@ class LMCacheEngineConfig:
         extra_config: Optional[dict] = None,
         save_unfull_chunk: bool = True,
         blocking_timeout_secs: int = 10,
+        prefetch_timeout_secs: float = 0.1,
     ) -> "LMCacheEngineConfig":
         # TODO (ApostaC): Add nixl config
         return LMCacheEngineConfig(
@@ -195,6 +199,7 @@ class LMCacheEngineConfig:
             extra_config,
             save_unfull_chunk,
             blocking_timeout_secs,
+            prefetch_timeout_secs,
         ).validate()
 
     @staticmethod
@@ -359,6 +364,7 @@ class LMCacheEngineConfig:
         save_unfull_chunk = config.get("save_unfull_chunk", True)
 
         blocking_timeout_secs = config.get("blocking_timeout_secs", 10)
+        prefetch_timeout_secs = config.get("prefetch_timeout_secs", 0.1)
 
         local_disk_path = _parse_local_disk(local_disk)
 
@@ -407,6 +413,7 @@ class LMCacheEngineConfig:
                 extra_config,
                 save_unfull_chunk,
                 blocking_timeout_secs,
+                prefetch_timeout_secs,
             )
             .validate()
             .log_config()
@@ -596,6 +603,11 @@ class LMCacheEngineConfig:
                 get_env_name("blocking_timeout_secs"), config.blocking_timeout_secs
             )
         )
+        config.prefetch_timeout_secs = to_float(
+            parse_env(
+                get_env_name("prefetch_timeout_secs"), config.prefetch_timeout_secs
+            )
+        )
         return config.validate().log_config()
 
     def to_original_config(self) -> orig_config.LMCacheEngineConfig:
@@ -679,6 +691,7 @@ class LMCacheEngineConfig:
             "extra_config": self.extra_config,
             "save_unfull_chunk": self.save_unfull_chunk,
             "blocking_timeout_secs": self.blocking_timeout_secs,
+            "prefetch_timeout_secs": self.prefetch_timeout_secs,
         }
         logger.info(f"LMCache Configuration: {config_dict}")
 
