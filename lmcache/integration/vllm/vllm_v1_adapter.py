@@ -502,7 +502,6 @@ class LMCacheConnectorV1Impl:
         for idx, request in enumerate(metadata.requests):
             if request.load_spec is None:
                 continue
-            last_idx = idx
 
         self.layerwise_retrievers = []
         for idx, request in enumerate(metadata.requests):
@@ -524,10 +523,7 @@ class LMCacheConnectorV1Impl:
 
             lmcache_cached_tokens = request.load_spec.lmcache_cached_tokens
             if self.use_layerwise:
-                if idx == last_idx:
-                    sync = True
-                else:
-                    sync = False
+                sync = True
                 # NOTE(Jiayi): Perform blending before layerwise prefix caching
                 if self.enable_blending:
                     # TODO(Jiayi): Need to make prefix caching and blending compatible
@@ -632,8 +628,6 @@ class LMCacheConnectorV1Impl:
         if self.current_layer == 0:
             self.layerwise_storers = []
 
-            is_first = False
-
             for idx, request in enumerate(connector_metadata.requests):
                 save_spec = request.save_spec
                 if save_spec is None or not save_spec.can_save:
@@ -679,11 +673,7 @@ class LMCacheConnectorV1Impl:
                     skip_leading_tokens,
                     request.req_id,
                 )
-                if not is_first:
-                    sync = True
-                    is_first = True
-                else:
-                    sync = False
+                sync = True
                 layerwise_storer = self.lmcache_engine.store_layer(
                     token_ids,
                     mask=store_mask,
