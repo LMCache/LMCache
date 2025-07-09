@@ -1,0 +1,247 @@
+# VLLM Prefiller StatefulSet
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: vllm-prefiller
+spec:
+  podManagementPolicy: "Parallel"
+  serviceName: "vllm-prefiller-svc"
+  replicas: 2
+  selector:
+    matchLabels:
+      app: vllm-prefiller
+  template:
+    metadata:
+      labels:
+        app: vllm-prefiller
+    spec:
+      containers:
+      - name: container
+        image: lmcache/vllm-openai:latest-nightly
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: MODEL
+          value: "Qwen/Qwen2.5-0.5B"
+        - name: PORT
+          value: "8100"
+        command: ["/bin/bash", "-c"]
+        args:
+        - |
+          source /opt/venv/bin/activate
+
+          echo "This is a prefiller"
+          POD_ID=$(hostname | awk -F'-' '{print $NF}')
+          configfile="/tmp/prefiller-config.yaml"
+          cp $(ls /etc/lmcache-config/*.yaml) ${configfile}
+          # Use decoder pod DNS as receiver host (should rework for xPyD)
+          decoder_svc="vllm-decoder-0.vllm-decoder-svc"
+          sed -i s/FILL_DECODER_SVC_HERE/${decoder_svc}/ ${configfile}
+          
+          # Wait for decoder to be ready
+          while [ "$(curl -o /dev/null -s -w '%{http_code}' http://${decoder_svc}:8200/v1/models)" != "200" ]; do
+             sleep 5
+             echo "waiting for decoder 8200 port ready..."
+          done
+          
+          # Start VLLM with LMCache configuration
+          UCX_TLS=cuda_ipc,cuda_copy,tcp \
+          LMCACHE_LOG_LEVEL=DEBUG \
+          LMCACHE_CONFIG_FILE=${configfile} \
+          VLLM_ENABLE_V1_MULTIPROCESSING=1 \
+          VLLM_WORKER_MULTIPROC_METHOD=spawn \
+          vllm serve $MODEL \
+            --host 0.0.0.0 \
+            --port $PORT \
+            --disable-log-requests \
+            --enforce-eager \
+            --kv-transfer-config \
+            "{\"kv_connector\":\"LMCacheConnectorV1\",\"kv_role\":\"kv_producer\",\"kv_connector_extra_config\": {\"discard_partial_chunks\": false, \"lmcache_rpc_port\": \"producer-${POD_ID}\"}}"
+        ports:
+        - containerPort: 8100
+          name: http
+        readinessProbe:
+          tcpSocket:
+            port: 8100
+          initialDelaySeconds: 30
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 10
+          successThreshold: 1
+        resources:
+          limits:
+            nvidia.com/gpu: "1"
+        volumeMounts:
+        - name: config-volume
+          mountPath: /etc/lmcache-config/
+      volumes:
+      - name: config-volume
+        configMap:
+          name: lmcache-prefiller-cfg
+
+---
+# VLLM Decoder StatefulSet
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: vllm-decoder
+spec:
+  serviceName: "vllm-decoder-svc"
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vllm-decoder
+  template:
+    metadata:
+      labels:
+        app: vllm-decoder
+    spec:
+      containers:
+      - name: container
+        image: lmcache/vllm-openai:latest-nightly
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: MODEL
+          value: "Qwen/Qwen2.5-0.5B"
+        - name: PORT
+          value: "8200"
+        command: ["/bin/bash", "-c"]
+        args:
+        - |
+          source /opt/venv/bin/activate
+          echo "This is a decoder"
+          configfile=$(ls /etc/lmcache-config/*.yaml)
+          
+          # Start VLLM with LMCache configuration
+          UCX_TLS=cuda_ipc,cuda_copy,tcp \
+          LMCACHE_LOG_LEVEL=DEBUG \
+          LMCACHE_CONFIG_FILE=${configfile} \
+          VLLM_ENABLE_V1_MULTIPROCESSING=1 \
+          VLLM_WORKER_MULTIPROC_METHOD=spawn \
+          vllm serve $MODEL \
+            --host 0.0.0.0 \
+            --port $PORT \
+            --disable-log-requests \
+            --enforce-eager \
+            --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_consumer","kv_connector_extra_config": {"discard_partial_chunks": false, "lmcache_rpc_port": "consumer0"}}'
+        ports:
+        - containerPort: 8200
+          name: http
+        readinessProbe:
+          tcpSocket:
+            port: 8200
+          initialDelaySeconds: 30
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 10
+          successThreshold: 1
+        resources:
+          limits:
+            nvidia.com/gpu: "1"
+        volumeMounts:
+        - name: config-volume
+          mountPath: /etc/lmcache-config/
+      volumes:
+      - name: config-volume
+        configMap:
+          name: lmcache-decoder-cfg
+
+---
+# Prefill-Decode Proxy Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pd-proxy
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: pd-proxy
+  template:
+    metadata:
+      labels:
+        app: pd-proxy
+    spec:
+      containers:
+      - name: container
+        image: lmcache/vllm-openai:latest-nightly
+        imagePullPolicy: IfNotPresent
+        command: ["/bin/bash", "-c"]
+        args:
+        - |
+          source /opt/venv/bin/activate
+          # Put each StatefulSet pod index DNS subdomain in the list, comma separated
+          prefillers="vllm-prefiller-0.vllm-prefiller-svc,vllm-prefiller-1.vllm-prefiller-svc"
+          python3 /mnt/disagg_proxy_server_first_token_from_decoder.py \
+            --host 0.0.0.0 \
+            --port 9000 \
+            --prefiller-host "${prefillers}" \
+            --prefiller-port 8100 \
+            --decoder-host vllm-decoder-0.vllm-decoder-svc \
+            --decoder-port 8200
+        ports:
+        - containerPort: 9000
+          name: http
+        resources:
+          limits:
+            cpu: 1
+            memory: 1G
+        volumeMounts:
+        - name: config-volume
+          mountPath: /mnt/
+      volumes:
+      - name: config-volume
+        configMap:
+          name: proxy-code
+
+---
+# Services
+---
+# VLLM Prefiller Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-prefiller-svc
+spec:
+  type: ClusterIP
+  clusterIP: None  # Headless service for StatefulSet
+  ports:
+  - name: http
+    port: 8100
+    targetPort: 8100
+    protocol: TCP
+  selector:
+    app: vllm-prefiller
+
+---
+# VLLM Decoder Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-decoder-svc
+spec:
+  type: ClusterIP
+  clusterIP: None  # Headless service for StatefulSet
+  ports:
+  - name: http
+    port: 8200
+    targetPort: 8200
+    protocol: TCP
+  selector:
+    app: vllm-decoder
+
+---
+# Prefill-Decode Proxy Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: pd-proxy
+spec:
+  type: NodePort 
+  ports:
+  - name: http
+    port: 9000
+    targetPort: 9000
+    protocol: TCP
+  selector:
+    app: pd-proxy
+
