@@ -509,11 +509,11 @@ class WekaGdsBackend(StorageBackendInterface):
 
     def pin(self, key: CacheEngineKey) -> bool:
         # TODO(Serapheim): Implement this
-        raise NotImplementedError
+        return False
 
     def unpin(self, key: CacheEngineKey) -> bool:
         # TODO(Serapheim): Implement this
-        raise NotImplementedError
+        return False
 
     def close(self) -> None:
         logger.info("Weka backend closed.")

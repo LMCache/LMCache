@@ -122,11 +122,11 @@ Step-by-Step Setup
 
    c. Launch a proxy server to coordinate between prefiller and decoder:
 
-      The code for the proxy server is available `in vLLM repo <https://github.com/vllm-project/vllm/blob/main/examples/lmcache/disagg_prefill_lmcache_v1/disagg_proxy_server.py>`_.
+      The code for the proxy server is available `in vLLM repo <https://github.com/vllm-project/vllm/blob/main/examples/others/lmcache/disagg_prefill_lmcache_v1/disagg_proxy_server.py>`_.
 
       .. code-block:: bash
 
-          wget https://raw.githubusercontent.com/vllm-project/vllm/main/examples/lmcache/disagg_prefill_lmcache_v1/disagg_proxy_server.py
+          wget https://raw.githubusercontent.com/vllm-project/vllm/main/examples/others/lmcache/disagg_prefill_lmcache_v1/disagg_proxy_server.py
 
           python3 disagg_proxy_server.py \
               --host localhost \
