@@ -176,11 +176,13 @@ class LMCStatsMonitor:
         return self.store_request_id - 1
 
     @thread_safe
-    def on_store_finished(self, request_id: int):
+    def on_store_finished(self, request_id: int, num_tokens: int = -1):
         curr_time = time.time()
         assert request_id in self.store_requests
         store_stats = self.store_requests[request_id]
         store_stats.end_time = curr_time
+        if num_tokens >= 0:
+            store_stats.num_tokens = num_tokens
 
     @thread_safe
     def update_local_cache_usage(self, usage: int):
