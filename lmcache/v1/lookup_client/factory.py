@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Optional
 
 # First Party
 from lmcache.integration.vllm.utils import lmcache_get_config
+from LMCache.lmcache.v1.lookup_client.mooncake_lookup_client import MooncakeLookupClient
 from lmcache.logging import init_logger
 from lmcache.v1.cache_engine import LMCacheEngine
 from lmcache.v1.lookup_client.abstract_client import LookupClientInterface
@@ -54,15 +55,10 @@ class LookupClientFactory:
         """
         config = lmcache_get_config()
 
-        # Check if mooncake_lookup_client is configured
-        if config.mooncake_lookup_client is not None:
-            # First Party
-            from lmcache.v1.lookup_client.mooncake_lookup_client import (
-                MooncakeLookupClient,
-            )
-
-            return MooncakeLookupClient(
-                role, is_tp, vllm_config, config.mooncake_lookup_client
+        # Check if external_lookup_client is configured
+        if config.external_lookup_client is not None:
+            return LookupClientFactory._create_external_lookup_client(
+                config.external_lookup_client, role, is_tp, vllm_config
             )
         else:
             # First Party
@@ -94,10 +90,10 @@ class LookupClientFactory:
         config = lmcache_get_config()
 
         # Only create the KV lookup API server on worker rank 0
-        # when there are multiple workers and when not using Mooncake lookup client
+        # when there are multiple workers and when not using external lookup client
         if (
             vllm_config.parallel_config.rank == 0
-            and config.mooncake_lookup_client is None
+            and config.external_lookup_client is None
         ):
             # First Party
             from lmcache.v1.lookup_client.lmcache_lookup_client import (
@@ -107,3 +103,60 @@ class LookupClientFactory:
             return LMCacheLookupServer(lmcache_engine, role, is_tp, vllm_config)
 
         return None
+
+    @staticmethod
+    def _create_external_lookup_client(
+        external_lookup_uri: str,
+        role: "KVConnectorRole",
+        is_tp: bool,
+        vllm_config: "VllmConfig",
+    ) -> LookupClientInterface:
+        """
+        Create an external lookup client based on the URI format.
+
+        Args:
+            external_lookup_uri: URI in format <scheme>://<address>
+            role: The KV connector role
+            is_tp: Whether tensor parallelism is enabled
+            vllm_config: The vLLM configuration
+
+        Returns:
+            A lookup client instance
+
+        Raises:
+            ValueError: If the URI format is unsupported
+        """
+        # Parse URI scheme and address
+        if "://" not in external_lookup_uri:
+            raise ValueError(
+                f"Invalid external lookup client URI format: {external_lookup_uri}. "
+                "Expected format: <scheme>://<address>"
+            )
+
+        scheme, address = external_lookup_uri.split("://", 1)
+
+        # Route to appropriate client based on scheme
+        if scheme == "mooncakestore":
+            return LookupClientFactory._create_mooncake_lookup_client(
+                address, role, is_tp, vllm_config
+            )
+        else:
+            raise ValueError(
+                f"Unsupported external lookup client scheme: {scheme}. "
+                "Supported schemes: mooncakestore"
+            )
+
+    @staticmethod
+    def _create_mooncake_lookup_client(
+        master_address: str,
+        role: "KVConnectorRole",
+        is_tp: bool,
+        vllm_config: "VllmConfig",
+    ) -> "MooncakeLookupClient":
+        """Create a MooncakeLookupClient instance."""
+        # First Party
+        from lmcache.v1.lookup_client.mooncake_lookup_client import (
+            MooncakeLookupClient,
+        )
+
+        return MooncakeLookupClient(role, is_tp, vllm_config, master_address)
