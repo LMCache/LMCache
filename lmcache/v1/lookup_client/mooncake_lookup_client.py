@@ -22,6 +22,7 @@ import torch
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.v1.lookup_client.abstract_client import LookupClientInterface
 
 if TYPE_CHECKING:
     # Third Party
@@ -31,7 +32,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-class MooncakeLookupClient:
+class MooncakeLookupClient(LookupClientInterface):
     def __init__(
         self,
         role: "KVConnectorRole",
