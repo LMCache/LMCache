@@ -16,7 +16,6 @@
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional
 import threading
-import time
 
 # Third Party
 from vllm.config import VllmConfig
@@ -807,7 +806,6 @@ class LMCacheConnectorV1Impl:
             the number of tokens that can be loaded from the
             external KV cache beyond what is already computed.
         """
-        start_time = time.time()
         if self.kv_role == "kv_producer" and not hasattr(
             self.lookup_client, "supports_producer_reuse"
         ):
@@ -845,11 +843,6 @@ class LMCacheConnectorV1Impl:
             num_external_hit_tokens,
             need_to_allocate,
         )
-        logger.info(
-            "get_num_new_matched_tokens time(ms): %.3f",
-            (time.time() - start_time) * 1000,
-        )
-
         if need_to_allocate <= 0:
             return 0
 

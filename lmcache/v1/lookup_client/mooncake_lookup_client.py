@@ -32,7 +32,13 @@ logger = init_logger(__name__)
 
 
 class MooncakeLookupClient:
-    def __init__(self, role: "KVConnectorRole", is_tp: bool, vllm_config: "VllmConfig", master_addr: str):
+    def __init__(
+        self,
+        role: "KVConnectorRole",
+        is_tp: bool,
+        vllm_config: "VllmConfig",
+        master_addr: str,
+    ):
         # Third Party
         from mooncake.store import MooncakeDistributedStore
 
@@ -50,19 +56,20 @@ class MooncakeLookupClient:
         # Initialize token database for processing tokens
         # First Party
         from lmcache.integration.vllm.utils import create_lmcache_metadata
-        
+
         metadata, config = create_lmcache_metadata(vllm_config)
-        
+
         assert isinstance(config, LMCacheEngineConfig), (
             "LMCache v1 configuration is should be passed."
         )
 
+        # First Party
         from lmcache.v1.token_database import ChunkedTokenDatabase, SegmentTokenDatabase
+
         if config.enable_blending:
             self.token_database = SegmentTokenDatabase(config, metadata)
         else:
             self.token_database = ChunkedTokenDatabase(config, metadata)
-
 
     def lookup(self, token_ids: torch.Tensor) -> int:
         # process token_ids to cacheengine keys
