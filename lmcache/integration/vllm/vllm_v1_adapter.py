@@ -394,7 +394,13 @@ class LMCacheConnectorV1Impl:
         config = lmcache_get_config()
         self.layerwise_retrievers = []
         if role == KVConnectorRole.SCHEDULER:
-            self.lookup_client = LMCacheLookupClient(role, is_tp, vllm_config)
+            # Check if mooncake_lookup_client is configured
+            if config.mooncake_lookup_client is not None:
+                # First Party
+                from lmcache.v1.lookup_client.mooncake_lookup_client import MooncakeLookupClient
+                self.lookup_client = MooncakeLookupClient(role, is_tp, vllm_config, config.mooncake_lookup_client)
+            else:
+                self.lookup_client = LMCacheLookupClient(role, is_tp, vllm_config)
             self._requests_in_step: dict[str, Request] = {}
         else:
             self.lmcache_engine = init_lmcache_engine(
@@ -417,7 +423,7 @@ class LMCacheConnectorV1Impl:
             # NOTE: Only create the KV lookup API server on worker rank 0
             # when there are multiple workers
             assert self.lmcache_engine is not None
-            if vllm_config.parallel_config.rank == 0:
+            if vllm_config.parallel_config.rank == 0 and vllm_config.mooncake_lookup_client is None:
                 self.lookup_server = LMCacheLookupServer(
                     self.lmcache_engine, role, is_tp, vllm_config
                 )
@@ -792,8 +798,7 @@ class LMCacheConnectorV1Impl:
             the number of tokens that can be loaded from the
             external KV cache beyond what is already computed.
         """
-
-        if self.kv_role == "kv_producer":
+        if self.kv_role == "kv_producer" and not hasattr(self.lookup_client, 'supports_producer_reuse'):
             return 0
 
         token_ids = torch.tensor(request.prompt_token_ids)

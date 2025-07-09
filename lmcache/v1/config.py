@@ -120,6 +120,10 @@ class LMCacheEngineConfig:
     # when calling get_blocking method in remote backend
     blocking_timeout_secs: int = 10
 
+    # Optional Mooncake lookup client master address
+    # When set, uses MooncakeLookupClient instead of regular lookup server
+    mooncake_lookup_client: Optional[str] = None
+
     @staticmethod
     def from_defaults(
         chunk_size: int = 256,
@@ -157,6 +161,7 @@ class LMCacheEngineConfig:
         extra_config: Optional[dict] = None,
         save_unfull_chunk: bool = True,
         blocking_timeout_secs: int = 10,
+        mooncake_lookup_client: Optional[str] = None,
     ) -> "LMCacheEngineConfig":
         # TODO (ApostaC): Add nixl config
         return LMCacheEngineConfig(
@@ -195,6 +200,7 @@ class LMCacheEngineConfig:
             extra_config,
             save_unfull_chunk,
             blocking_timeout_secs,
+            mooncake_lookup_client,
         ).validate()
 
     @staticmethod
@@ -360,6 +366,8 @@ class LMCacheEngineConfig:
 
         blocking_timeout_secs = config.get("blocking_timeout_secs", 10)
 
+        mooncake_lookup_client = config.get("mooncake_lookup_client", None)
+
         local_disk_path = _parse_local_disk(local_disk)
 
         match remote_url:
@@ -407,6 +415,7 @@ class LMCacheEngineConfig:
                 extra_config,
                 save_unfull_chunk,
                 blocking_timeout_secs,
+                mooncake_lookup_client,
             )
             .validate()
             .log_config()
@@ -596,6 +605,9 @@ class LMCacheEngineConfig:
                 get_env_name("blocking_timeout_secs"), config.blocking_timeout_secs
             )
         )
+        config.mooncake_lookup_client = parse_env(
+            get_env_name("mooncake_lookup_client"), config.mooncake_lookup_client
+        )
         return config.validate().log_config()
 
     def to_original_config(self) -> orig_config.LMCacheEngineConfig:
@@ -679,6 +691,7 @@ class LMCacheEngineConfig:
             "extra_config": self.extra_config,
             "save_unfull_chunk": self.save_unfull_chunk,
             "blocking_timeout_secs": self.blocking_timeout_secs,
+            "mooncake_lookup_client": self.mooncake_lookup_client,
         }
         logger.info(f"LMCache Configuration: {config_dict}")
 
