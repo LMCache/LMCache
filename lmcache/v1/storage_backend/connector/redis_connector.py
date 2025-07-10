@@ -44,13 +44,11 @@ class RedisConnector(RemoteConnector):
 
     def __init__(
         self,
-        host: str,
-        port: int,
+        url: str,
         loop: asyncio.AbstractEventLoop,
         local_cpu_backend: LocalCPUBackend,
     ):
-        self.connection = redis.Redis(host=host, port=port, decode_responses=False)
-
+        self.connection = redis.from_url(url=url, decode_responses=False)
         self.loop = loop
         self.local_cpu_backend = local_cpu_backend
 
@@ -99,7 +97,15 @@ class RedisConnector(RemoteConnector):
                 view = view.cast("B")
         else:
             view = memoryview(memory_obj.byte_array)
-        view[: metadata.length] = kv_bytes
+
+        if isinstance(kv_bytes, (bytes, bytearray)):
+            view[: metadata.length] = kv_bytes
+        elif isinstance(kv_bytes, str):
+            converted = kv_bytes.encode("utf-8")
+            view[: metadata.length] = converted
+        else:
+            converted = bytes(kv_bytes)
+            view[: metadata.length] = converted
 
         return memory_obj
 
@@ -149,6 +155,8 @@ class RedisSentinelConnector(RemoteConnector):
     def __init__(
         self,
         hosts_and_ports: List[Tuple[str, int]],
+        username: str,
+        password: str,
         loop: asyncio.AbstractEventLoop,
         local_cpu_backend: LocalCPUBackend,
     ):
@@ -174,8 +182,12 @@ class RedisSentinelConnector(RemoteConnector):
 
         logger.info(f"Host and ports: {hosts_and_ports}")
         self.sentinel = redis.Sentinel(hosts_and_ports, socket_timeout=timeout)
-        self.master = self.sentinel.master_for(service_name, socket_timeout=timeout)
-        self.slave = self.sentinel.slave_for(service_name, socket_timeout=timeout)
+        self.master = self.sentinel.master_for(
+            service_name, socket_timeout=timeout, username=username, password=password
+        )
+        self.slave = self.sentinel.slave_for(
+            service_name, socket_timeout=timeout, username=username, password=password
+        )
 
         self.local_cpu_backend = local_cpu_backend
 
@@ -219,8 +231,21 @@ class RedisSentinelConnector(RemoteConnector):
             self.master.delete(key_str + "metadata")
             return None
 
-        view = memoryview(memory_obj.byte_array)
-        view[0 : metadata.length] = kv_bytes
+        if isinstance(memory_obj.byte_array, memoryview):
+            view = memory_obj.byte_array
+            if view.format == "<B":
+                view = view.cast("B")
+        else:
+            view = memoryview(memory_obj.byte_array)
+
+        if isinstance(kv_bytes, (bytes, bytearray)):
+            view[0 : metadata.length] = kv_bytes
+        elif isinstance(kv_bytes, str):
+            converted = kv_bytes.encode("utf-8")
+            view[0 : metadata.length] = converted
+        else:
+            converted = bytes(kv_bytes)
+            view[0 : metadata.length] = converted
 
         return memory_obj
 

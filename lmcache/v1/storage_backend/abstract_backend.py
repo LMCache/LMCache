@@ -103,7 +103,7 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
         key: CacheEngineKey,
     ) -> Optional[MemoryObj]:
         """
-        A blcocking function to get the kv cache from the storage backend.
+        A blocking function to get the kv cache from the storage backend.
 
         :param CacheEngineKey key: The key of the MemoryObj.
 
@@ -124,6 +124,24 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
         :return: a future object. None if the key does not exist.
         """
         raise NotImplementedError
+
+    # NOTE(Jiayi): Please re-implement this method if the storage backend
+    # can benefit from batched get.
+    def batched_get_blocking(
+        self,
+        keys: List[CacheEngineKey],
+    ) -> List[MemoryObj]:
+        """
+        A blcocking function to get the kv cache from the storage backend.
+
+        :param List[CacheEngineKey] keys: The keys of the MemoryObjs.
+
+        :return: a list of memory objects.
+        """
+        mem_objs = []
+        for key in keys:
+            mem_objs.append(self.get_blocking(key))
+        return mem_objs
 
     @abc.abstractmethod
     def pin(

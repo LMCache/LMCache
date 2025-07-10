@@ -135,7 +135,12 @@
         function populateModelDropdown() {
             const modelSelect = document.getElementById('model');
             modelSelect.innerHTML = ""; // Clear existing options
-            for (const modelName in modelConfigs) {
+
+            // Sort model names using natural/numeric ordering
+            const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base'});
+            const sortedModelNames = Object.keys(modelConfigs).sort(collator.compare);
+            
+            for (const modelName of sortedModelNames) {
                 const option = document.createElement('option');
                 option.value = modelName;
                 option.textContent = modelName;

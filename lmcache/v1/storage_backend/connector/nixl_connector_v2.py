@@ -123,7 +123,7 @@ class NixlBufferAllocator(MemoryAllocatorInterface):
         """Free the memory object."""
         pass
 
-    def batched_free(self, objs: list[MemoryObj]):
+    def batched_free(self, objs: list[MemoryObj], update_stats: bool = True):
         """Free the memory objects in batch."""
         pass
 

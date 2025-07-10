@@ -128,7 +128,6 @@ def test_extract_and_load_back(num_tokens):
     check_mem_obj_equal(
         memory_obj_old_list,
         memory_obj_new_list,
-        num_tokens,
     )
 
     # Generate new paged kv_cache
@@ -148,7 +147,6 @@ def test_extract_and_load_back(num_tokens):
     check_paged_kv_cache_equal(
         kv_cache,
         kv_cache_new,
-        num_tokens,
         slot_mapping,
     )
 
@@ -241,7 +239,6 @@ def test_multi_layer_kernel(num_tokens):
     check_mem_obj_equal(
         memory_obj_old_list,
         memory_obj_new_list,
-        num_tokens,
     )
 
     # Generate new paged kv_cache
@@ -270,7 +267,6 @@ def test_multi_layer_kernel(num_tokens):
     check_paged_kv_cache_equal(
         kv_cache,
         kv_cache_new,
-        num_tokens,
         slot_mapping,
     )
 
@@ -455,6 +451,5 @@ def test_single_layer_kernel(num_tokens, token_major):
     check_paged_kv_cache_equal(
         kv_cache,
         kv_cache_new,
-        num_tokens,
         slot_mapping,
     )

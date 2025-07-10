@@ -98,8 +98,8 @@ All prefillers share the same configuration via ``configs/lmcache-prefiller-conf
 
    enable_nixl: True
    nixl_role: "sender"
-   nixl_peer_host: "localhost"
-   nixl_peer_port: 55555
+   nixl_receiver_host: "localhost"
+   nixl_receiver_port: 55555
    nixl_buffer_size: 1073741824 # 1GB
    nixl_buffer_device: "cuda"
    nixl_enable_gc: True
@@ -123,8 +123,8 @@ The decoder(s) are configured via ``configs/lmcache-decoder-config.yaml``:
 
    enable_nixl: True
    nixl_role: "receiver"
-   nixl_peer_host: "localhost"
-   nixl_peer_port: 55555
+   nixl_receiver_host: "localhost"
+   nixl_receiver_port: 55555
    nixl_buffer_size: 1073741824 # 1GB
    nixl_buffer_device: "cuda"
    nixl_enable_gc: True

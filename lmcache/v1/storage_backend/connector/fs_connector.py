@@ -107,6 +107,9 @@ class FSConnector(RemoteConnector):
 
             return memory_obj
 
+        except FileNotFoundError:
+            # Key does not exist is normal case
+            return None
         except Exception as e:
             logger.error(f"Failed to read from file {file_path}: {str(e)}")
             return None

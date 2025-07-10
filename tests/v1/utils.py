@@ -10,11 +10,7 @@ import torch
 # First Party
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.utils import CacheEngineKey
-from lmcache.v1.gpu_connector import (
-    VLLMNestedTupleGPUConnector,
-    VLLMPagedMemGPUConnector,
-    VLLMPagedMemGPUConnectorV2,
-)
+from lmcache.v1.gpu_connector import VLLMPagedMemGPUConnectorV2
 
 
 def dumb_metadata(fmt="vllm", kv_shape=(32, 2, 256, 8, 128)):
@@ -69,29 +65,8 @@ def generate_kv_cache(num_tokens, fmt, device):
     return tuple(ret)
 
 
-def generate_kv_cache_paged(
-    num_blocks, device, block_size=16, dtype=torch.bfloat16, use_list=False
-):
-    if use_list:
-        return generate_kv_cache_paged_list_tensors(
-            num_blocks, device, block_size, dtype
-        )
-    ret = []
-    num_layers = 32
-    num_heads = 8
-    head_size = 128
-    shape = [num_blocks, block_size, num_heads, head_size]
-
-    for i in range(num_layers):
-        k = torch.rand(shape, dtype=dtype, device=device)
-        v = torch.rand(shape, dtype=dtype, device=device)
-        ret.append((k, v))
-
-    return tuple(ret)
-
-
 def generate_kv_cache_paged_list_tensors(
-    num_blocks, device, block_size=16, dtype=torch.bfloat16
+    num_blocks, device, block_size=16, dtype=torch.bfloat16, use_mla=False
 ):
     """
     Instead of Tuple[Tuple[Tensor, Tensor]], return List[Tensor]
@@ -99,15 +74,53 @@ def generate_kv_cache_paged_list_tensors(
     """
     ret = []
     num_layers = 32
-    num_heads = 8
+    num_heads = 1 if use_mla else 8
     head_size = 128
-    shape = [2, num_blocks, block_size, num_heads, head_size]
+    shape = (
+        [num_blocks, block_size, head_size]
+        if use_mla
+        else [2, num_blocks, block_size, num_heads, head_size]
+    )
 
     for i in range(num_layers):
         kv = torch.rand(shape, dtype=dtype, device=device)
         ret.append(kv)
 
     return ret
+
+
+def generate_sglang_kv_cache_paged_list_tensors(
+    num_layers,
+    num_blocks,
+    block_size,
+    num_heads,
+    head_size,
+    use_mla=False,
+    device="cuda",
+    dtype=torch.bfloat16,
+):
+    """
+    Instead of Tuple[Tuple[Tensor, Tensor]], return List[Tensor]
+    where KV are in the same tensor
+    """
+    shape = (
+        [num_blocks * block_size, 1, head_size]
+        if use_mla
+        else [num_blocks * block_size, num_heads, head_size]
+    )
+    if use_mla:
+        kv_cache = [
+            torch.rand(shape, dtype=dtype, device=device) for i in range(num_layers)
+        ]
+    else:
+        k_cache = [
+            torch.rand(shape, dtype=dtype, device=device) for i in range(num_layers)
+        ]
+        v_cache = [
+            torch.rand(shape, dtype=dtype, device=device) for i in range(num_layers)
+        ]
+        kv_cache = k_cache + v_cache
+    return kv_cache
 
 
 def generate_mla_kv_cache_paged_list_tensors(
@@ -125,6 +138,21 @@ def generate_mla_kv_cache_paged_list_tensors(
         ret.append(kv)
 
     return ret
+
+
+def generate_kv_cache_paged(num_blocks, device, block_size=16, dtype=torch.bfloat16):
+    ret = []
+    num_layers = 32
+    num_heads = 8
+    head_size = 128
+    shape = [num_blocks, block_size, num_heads, head_size]
+
+    for i in range(num_layers):
+        k = torch.rand(shape, dtype=dtype, device=device)
+        v = torch.rand(shape, dtype=dtype, device=device)
+        ret.append((k, v))
+
+    return tuple(ret)
 
 
 def generate_tokens(num_tokens, device, fixed=False):
@@ -146,39 +174,7 @@ def concatenate_kv_caches(kv_chunks, fmt):
     return tuple(ret)
 
 
-def check_kv_cache_equal(left, right, num_tokens, fmt, offset=0):
-    """
-    check if the first num_tokens of left and right kv cache are the same
-    """
-    dim = 0 if fmt == "vllm" else 1
-    for left_kv, right_kv in zip(left, right, strict=False):
-        left_k, left_v = left_kv
-        right_k, right_v = right_kv
-        right_k = right_k.to(left_k.device)
-        right_v = right_v.to(left_v.device)
-
-        assert len(left_k.shape) == 3
-        assert len(left_v.shape) == 3
-        assert len(right_k.shape) == 3
-        assert len(right_v.shape) == 3
-
-        st = offset
-        ed = offset + num_tokens
-        assert left_k.shape[dim] >= ed
-        assert left_v.shape[dim] >= ed
-        assert right_k.shape[dim] >= ed
-        assert right_v.shape[dim] >= ed
-
-        match fmt:
-            case "huggingface":
-                assert (left_k[:, st:ed, :] == right_k[:, st:ed, :]).all()
-                assert (left_v[:, st:ed, :] == right_v[:, offset:ed, :]).all()
-            case "vllm":
-                assert (left_k[st:ed, :, :] == right_k[st:ed, :, :]).all()
-                assert (left_v[st:ed, :, :] == right_v[st:ed, :, :]).all()
-
-
-def check_mem_obj_equal(left, right, offset=0):
+def check_mem_obj_equal(left, right):
     """
     check whether two memory objects are the same
     """
@@ -198,13 +194,12 @@ def check_mem_obj_equal(left, right, offset=0):
         assert (left_v[:, :, :] == right_v[:, :, :]).all()
 
 
-def check_paged_kv_cache_equal(
-    left, right, num_tokens, slot_mapping, num_heads=8, head_size=128
-):
+def check_paged_kv_cache_equal(left, right, slot_mapping, num_heads=8, head_size=128):
     """
     check whether two paged kv caches are the same at slot_mapping
     """
     token_dim = 0
+    num_tokens = slot_mapping.shape[0]
     for left_kv, right_kv in zip(left, right, strict=False):
         left_k = left_kv[0].reshape(-1, num_heads, head_size)
         left_v = left_kv[1].reshape(-1, num_heads, head_size)
@@ -225,6 +220,46 @@ def check_paged_kv_cache_equal(
         assert (left_v[slot_mapping, :, :] == right_v[slot_mapping, :, :]).all()
 
 
+def check_sglang_paged_kv_cache_equal(
+    left, right, slot_mapping, num_heads=8, head_size=128
+):
+    """
+    check whether two paged kv caches are the same at slot_mapping
+    """
+    token_dim = 0
+    num_tokens = slot_mapping.shape[0]
+    for left_kv, right_kv in zip(left, right, strict=False):
+        _left_kv = left_kv.reshape(-1, num_heads, head_size)
+        _right_kv = right_kv.reshape(-1, num_heads, head_size)
+
+        assert len(_left_kv.shape) == 3
+        assert len(_right_kv.shape) == 3
+
+        assert _left_kv.shape[token_dim] >= num_tokens
+        assert _right_kv.shape[token_dim] >= num_tokens
+
+        assert (_left_kv[slot_mapping, :, :] == _right_kv[slot_mapping, :, :]).all()
+
+
+def check_paged_kv_cache_equal_with_mla(left, right, slot_mapping, head_size=128):
+    """
+    check whether two paged kv caches are the same at slot_mapping when use mla
+    """
+    token_dim = 0
+    num_tokens = slot_mapping.shape[0]
+    for left_kv, right_kv in zip(left, right, strict=False):
+        new_left_kv = left_kv.reshape(-1, head_size)
+        new_right_kv = right_kv.reshape(-1, head_size)
+
+        assert len(new_left_kv.shape) == 2
+        assert len(new_right_kv.shape) == 2
+
+        assert new_left_kv.shape[token_dim] >= num_tokens
+        assert new_right_kv.shape[token_dim] >= num_tokens
+
+        assert (new_left_kv[slot_mapping, :] == new_right_kv[slot_mapping, :]).all()
+
+
 def check_kv_cache_device(kvs, device):
     for kv in kvs:
         k, v = kv
@@ -232,10 +267,5 @@ def check_kv_cache_device(kvs, device):
         assert v.device == torch.device(device)
 
 
-def create_gpu_connector(hidden_dim, num_layers, paged=False, use_list=False):
-    if paged:
-        if use_list:
-            return VLLMPagedMemGPUConnectorV2(hidden_dim, num_layers)
-        return VLLMPagedMemGPUConnector(hidden_dim, num_layers)
-    else:
-        return VLLMNestedTupleGPUConnector(hidden_dim, num_layers)
+def create_gpu_connector(hidden_dim, num_layers):
+    return VLLMPagedMemGPUConnectorV2(hidden_dim, num_layers)
