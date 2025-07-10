@@ -17,10 +17,10 @@ from typing import TYPE_CHECKING, Optional
 
 # First Party
 from lmcache.integration.vllm.utils import lmcache_get_config
-from LMCache.lmcache.v1.lookup_client.mooncake_lookup_client import MooncakeLookupClient
 from lmcache.logging import init_logger
 from lmcache.v1.cache_engine import LMCacheEngine
 from lmcache.v1.lookup_client.abstract_client import LookupClientInterface
+from lmcache.v1.lookup_client.mooncake_lookup_client import MooncakeLookupClient
 
 if TYPE_CHECKING:
     # Third Party
