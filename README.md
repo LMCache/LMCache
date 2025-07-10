@@ -22,8 +22,6 @@
 </div>
 
 
-
-
 --------------------------------------------------------------------------------
 
 | [**Blog**](https://blog.lmcache.ai/)
@@ -31,6 +29,8 @@
 | [**Join Slack**](https://join.slack.com/t/lmcacheworkspace/shared_invite/zt-36x1m765z-8FgDA_73vcXtlZ_4XvpE6Q)
 | [**Interest Form**](https://forms.gle/MHwLiYDU6kcW3dLj7)
 | [**Roadmap**](https://github.com/LMCache/LMCache/issues/574)
+
+🔥 **NEW: For enterprise-scale deployment of LMCache and vLLM, please check out vLLM [Production Stack](https://github.com/vllm-project/production-stack). LMCache is also officially supported in [llm-d](https://github.com/llm-d/llm-d/) and [KServe](https://github.com/kserve/kserve)!**
 
 
 ## Summary
@@ -47,7 +47,7 @@ By combining LMCache with vLLM, developers achieve 3-10x delay savings and GPU c
   * High performance CPU KVCache offloading
   * Disaggregated prefill
   * P2P KVCache sharing
-- [x] LMCache is supported in the [vLLM production stack ecosystem](https://github.com/vllm-project/production-stack/) 
+- [x] LMCache is supported in the [vLLM production stack](https://github.com/vllm-project/production-stack/), [llm-d](https://github.com/llm-d/llm-d/), and [KServe](https://github.com/kserve/kserve) 
 - [x] Stable support for non-prefix KV caches
 - [x] Storage support as follows:
   * CPU
