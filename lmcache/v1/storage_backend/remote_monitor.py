@@ -19,10 +19,11 @@ import time
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.storage_backend.connector import (
-    BlackholeConnector,
+from lmcache.v1.storage_backend.connector.blackhole_connector import BlackholeConnector
+from lmcache.v1.storage_backend.connector.instrumented_connector import (
     InstrumentedRemoteConnector,
 )
+from lmcache.v1.storage_backend.remote_backend import RemoteBackend
 
 logger = init_logger(__name__)
 
@@ -42,7 +43,7 @@ class RemoteMonitor:
     Remote monitor class, encapsulating the monitor logic
     """
 
-    def __init__(self, backend):
+    def __init__(self, backend: RemoteBackend):
         self.backend = backend
 
         # Lock for connector switching
