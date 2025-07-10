@@ -133,8 +133,8 @@ def parse_args():
     parser.add_argument("--num-prefillers", type=int, default=1)
     parser.add_argument("--decoder-host", type=str, default="localhost")
     parser.add_argument("--decoder-port", type=int, default=8200)
-    parser.add_argument("--decoder-init-port", type=int, default=8300)
-    parser.add_argument("--decoder-alloc-port", type=int, default=8400)
+    parser.add_argument("--decoder-init-port", type=list(int), default=8300)
+    parser.add_argument("--decoder-alloc-port", type=list(int), default=8400)
 
     parser.add_argument("--num-decoders", type=int, default=1)
     parser.add_argument("--proxy-host", type=str, default="localhost")
@@ -148,8 +148,8 @@ def parse_args():
 class ClientInfo:
     client: httpx.AsyncClient
     host: Optional[str] = None
-    init_port: Optional[int] = None
-    alloc_port: Optional[int] = None
+    init_port: Optional[list[int]] = None
+    alloc_port: Optional[list[int]] = None
 
 
 # Initialize variables to hold the persistent clients
