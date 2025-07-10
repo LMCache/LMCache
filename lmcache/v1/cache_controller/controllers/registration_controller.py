@@ -124,9 +124,14 @@ class RegistrationController:
         self.instance_mapping.pop(ip, None)
 
         if instance_id in self.worker_mapping:
-            self.worker_mapping[instance_id].remove(worker_id)
-            if not self.worker_mapping[instance_id]:
-                del self.worker_mapping[instance_id]
+            try:
+                self.worker_mapping[instance_id].remove(worker_id)
+                if not self.worker_mapping[instance_id]:
+                    del self.worker_mapping[instance_id]
+            except ValueError:
+                logger.warning(
+                    f"Worker {worker_id} not found for instance {instance_id} during deregister"
+                )
         else:
             logger.warning(f"Instance {instance_id} not registered")
 

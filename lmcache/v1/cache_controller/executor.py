@@ -146,13 +146,13 @@ class LMCacheClusterExecutor:
         :param serialized_msgs: The list of serialized messages to send.
         :return: A list of serialized results received from the sockets.
         """
+
+        async def send_and_receive(s, msg):
+            await s.send(msg)
+            return await s.recv()
+
         tasks = []
-        for socket, serialized_msg in zip(sockets, serialized_msgs, strict=False):
-
-            async def send_and_receive(s, msg):
-                await s.send(msg)
-                return await s.recv()
-
+        for socket, serialized_msg in zip(sockets, serialized_msgs, strict=True):
             tasks.append(send_and_receive(socket, serialized_msg))
 
         serialized_results = await asyncio.gather(*tasks)
