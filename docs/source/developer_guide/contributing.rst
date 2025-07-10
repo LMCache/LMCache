@@ -135,6 +135,7 @@ Unit tests
 
 .. note::
     The Unit tests require `NVIDIA Inference Xfer Library (NIXL) <https://github.com/ai-dynamo/nixl>`_ to be installed. Please follow the details in the NIXL GitHub repo to install.
+    The NIXL unit tests also require `vLLM <https://github.com/vllm-project/vllm>`_ and `msgpack <https://github.com/msgpack/msgpack-python/>`_.
     If you are unable to install NIXL you can circumvent the NIXL unit tests by using the following pytest flags: `--ignore=tests/disagg` and  `--ignore=tests/v1/test_pos_kernels.py`.
 
 When making changes, run the tests before pushing the changes. Running unit tests ensures your contributions do not break exiting code. We use the `pytest <https://docs.pytest.org/>`_ framework to run unit tests. The framework is setup to run all files in the `tests <https://github.com/LMCache/LMCache/tree/dev/tests>`_ directory which have a prefix or posfix of "test".
