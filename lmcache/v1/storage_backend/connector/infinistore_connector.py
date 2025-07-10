@@ -49,7 +49,8 @@ class InfinistoreConnector(RemoteConnector):
         self,
         host: str,
         port: int,
-        dev_name,
+        dev_name: str,
+        link_type: str,
         loop: asyncio.AbstractEventLoop,
         memory_allocator: LocalCPUBackend,
     ):
@@ -59,7 +60,7 @@ class InfinistoreConnector(RemoteConnector):
             log_level="info",
             connection_type=infinistore.TYPE_RDMA,
             ib_port=1,
-            link_type=infinistore.LINK_ETHERNET,
+            link_type=link_type,
             dev_name=dev_name,
         )
 
