@@ -14,9 +14,9 @@
 
 # Standard
 from typing import Dict, Iterable, List, Optional, Tuple, Union
-import hashlib
 import logging
 import time
+import xxhash
 
 # Third Party
 import torch
@@ -85,8 +85,7 @@ class LMCacheEngine:
         tokens: torch.Tensor,
         prefix_hash: str,
     ) -> str:
-        # TODO: change it to a more efficient hash function
-        hasher = hashlib.sha256()
+        hasher = xxhash.xxh64()
         hasher.update(prefix_hash.encode("ascii"))
         hasher.update(tokens.numpy().tobytes())
         return hasher.hexdigest()
