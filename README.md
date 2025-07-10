@@ -1,6 +1,6 @@
 <div align="center">
   <p align="center">
-    <img src="https://raw.githubusercontent.com/lmcache/lmcache/main/asset/logo.png" width="720" alt="lmcache logo">
+    <img src="https://raw.githubusercontent.com/LMCache/LMCache/dev/asset/logo.png" width="720" alt="lmcache logo">
   </p>
   
   [![Docs](https://img.shields.io/badge/docs-live-brightgreen)](https://docs.lmcache.ai/)
