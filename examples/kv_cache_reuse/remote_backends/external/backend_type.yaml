@@ -1,11 +1,12 @@
+# lmcache.yaml
 chunk_size: 256
 local_device: "cpu"
 local_cpu: False
-max_local_cpu_size: 10
-remote_url: "external://host:0/adt.adt_kv_connector/?connector_name=AdtKVConnector"
+max_local_cpu_size: 5
+remote_url: "external://host:0/external_log_connector.lmc_external_log_connector/?connector_name=ExternalLogConnector"
 remote_serde: "naive"
 pipelined_backend: False
 extra_config:
-  adt_kv_secret: "---"
-  adt_kv_connections: 4
-  adt_kv_workers: 32
+  ext_log_connector_support_ping: True
+  ext_log_connector_health_interval: 10.0
+  ext_log_connector_stuck_time: 6.0
