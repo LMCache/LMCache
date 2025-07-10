@@ -14,7 +14,7 @@
 
 # Standard
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Optional, Union
 import json
 import os
 import re
@@ -101,8 +101,8 @@ class LMCacheEngineConfig:
     # (Optional) Experimental Nixl configurations
     enable_xpyd: Optional[bool] = False
     nixl_peer_host: Optional[str] = None
-    nixl_peer_init_port: Optional[int] = None
-    nixl_peer_alloc_port: Optional[int] = None
+    nixl_peer_init_port: Optional[list[int]] = None
+    nixl_peer_alloc_port: Optional[list[int]] = None
     nixl_proxy_host: Optional[str] = None
     nixl_proxy_port: Optional[int] = None
 
@@ -160,8 +160,8 @@ class LMCacheEngineConfig:
         nixl_enable_gc: Optional[bool] = False,
         enable_xpyd: Optional[bool] = False,
         nixl_peer_host: Optional[str] = None,
-        nixl_peer_init_port: Optional[int] = None,
-        nixl_peer_alloc_port: Optional[int] = None,
+        nixl_peer_init_port: Optional[list[int]] = None,
+        nixl_peer_alloc_port: Optional[list[int]] = None,
         nixl_proxy_host: Optional[str] = None,
         nixl_proxy_port: Optional[int] = None,
         audit_actual_remote_url: Optional[str] = None,
@@ -479,6 +479,18 @@ class LMCacheEngineConfig:
                 return 0.0
             return float(value)
 
+        def to_int_list(
+            value: Optional[Union[str, int, list[Any]]]
+        ) -> Optional[list[int]]:
+            if value is None:
+                return None
+            if isinstance(value, list):
+                return [int(x) for x in value]
+            if isinstance(value, int):
+                return [value]
+            parts = [p.strip() for p in str(value).split(",") if p.strip()]
+            return [int(p) for p in parts]
+        
         def to_dict(value: Optional[str]) -> Optional[dict]:
             if value is None:
                 return None
@@ -586,10 +598,10 @@ class LMCacheEngineConfig:
         config.nixl_peer_host = parse_env(
             get_env_name("nixl_peer_host"), config.nixl_peer_host
         )
-        config.nixl_peer_init_port = to_int(
+        config.nixl_peer_init_port = to_int_list(
             parse_env(get_env_name("nixl_peer_init_port"), config.nixl_peer_init_port)
         )
-        config.nixl_peer_alloc_port = to_int(
+        config.nixl_peer_alloc_port = to_int_list(
             parse_env(get_env_name("nixl_peer_alloc_port"), config.nixl_peer_alloc_port)
         )
         config.nixl_proxy_host = parse_env(

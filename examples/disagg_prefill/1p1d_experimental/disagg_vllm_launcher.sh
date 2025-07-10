@@ -24,14 +24,15 @@ if [[ $1 == "prefiller" ]]; then
         LMCACHE_CONFIG_FILE=$prefill_config_file \
         VLLM_ENABLE_V1_MULTIPROCESSING=1 \
         VLLM_WORKER_MULTIPROC_METHOD=spawn \
-        CUDA_VISIBLE_DEVICES=0 \
+        CUDA_VISIBLE_DEVICES=2,3 \
         vllm serve $MODEL \
         --port 7100 \
         --disable-log-requests \
         --enforce-eager \
         --no-enable-prefix-caching \
         --kv-transfer-config \
-        '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_producer","kv_connector_extra_config": {"discard_partial_chunks": false, "lmcache_rpc_port": "producer1"}}'
+        '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_producer","kv_connector_extra_config": {"discard_partial_chunks": false, "lmcache_rpc_port": "producer1"}}' \
+        --tensor-parallel-size 2
 
 
 
@@ -44,14 +45,15 @@ elif [[ $1 == "decoder" ]]; then
         LMCACHE_CONFIG_FILE=$decode_config_file \
         VLLM_ENABLE_V1_MULTIPROCESSING=1 \
         VLLM_WORKER_MULTIPROC_METHOD=spawn \
-        CUDA_VISIBLE_DEVICES=1 \
+        CUDA_VISIBLE_DEVICES=4,5 \
         vllm serve $MODEL \
         --port 7200 \
         --disable-log-requests \
         --enforce-eager \
         --no-enable-prefix-caching \
         --kv-transfer-config \
-        '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_consumer","kv_connector_extra_config": {"discard_partial_chunks": false, "lmcache_rpc_port": "consumer1", "skip_last_n_tokens": 1}}'
+        '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_consumer","kv_connector_extra_config": {"discard_partial_chunks": false, "lmcache_rpc_port": "consumer1", "skip_last_n_tokens": 1}}' \
+        --tensor-parallel-size 2
 
 
 else
