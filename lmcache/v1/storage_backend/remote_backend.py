@@ -32,7 +32,6 @@ from lmcache.v1.storage_backend.connector import CreateConnector
 from lmcache.v1.storage_backend.connector.base_connector import RemoteConnector
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.v1.storage_backend.naive_serde import CreateSerde
-from lmcache.v1.storage_backend.remote_monitor import RemoteMonitor
 
 logger = init_logger(__name__)
 
@@ -94,6 +93,10 @@ class RemoteBackend(StorageBackendInterface):
 
         # Create RemoteMonitor instance, which initializes the
         # connection status and active connector
+        # 动态导入RemoteMonitor，避免循环依赖
+        # First Party
+        from lmcache.v1.storage_backend.remote_monitor import RemoteMonitor
+
         self.remote_monitor = RemoteMonitor(self)
 
         # Start the remote monitor thread (if ping is supported)
