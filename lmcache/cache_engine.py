@@ -16,10 +16,10 @@
 from typing import Dict, Iterable, List, Optional, Tuple, Union
 import logging
 import time
-import xxhash
 
 # Third Party
 import torch
+import xxhash
 
 # First Party
 from lmcache.config import LMCacheEngineConfig, LMCacheEngineMetadata
