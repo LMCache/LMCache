@@ -820,7 +820,9 @@ class LMCacheConnectorV1Impl:
 
         for request in scheduler_output.scheduled_new_reqs:
             # Right now, we only load KV for new requests
-            load_spec = self.load_specs.pop(request.req_id, None)
+            load_spec = self.load_specs.get(
+                request.req_id, None
+            )  # Use get instead of pop
             num_tokens_to_compute = (
                 request.num_computed_tokens
                 + scheduler_output.num_scheduled_tokens[request.req_id]
@@ -864,16 +866,28 @@ class LMCacheConnectorV1Impl:
 
             request_tracker.update(new_token_ids, new_block_ids)
 
+            load_spec = self.load_specs.get(req_id, None)
             req_meta = ReqMeta.from_request_tracker(
                 request_tracker,
                 self._block_size,
                 self._lmcache_chunk_size,
-                load_spec=None,
+                load_spec=load_spec,  # Use the actual load_spec instead of None
                 skip_save=force_skip_save,
                 discard_partial_chunks=self._discard_partial_chunks,
             )
             if req_meta is not None:
                 meta.add_request(req_meta)
+
+        # After processing all requests, clean up load_specs
+        processed_req_ids = set()
+        for request in scheduler_output.scheduled_new_reqs:
+            processed_req_ids.add(request.req_id)
+        for req_id in cached_reqs.req_ids:
+            processed_req_ids.add(req_id)
+
+        # Clean up processed load_specs
+        for req_id in processed_req_ids:
+            self.load_specs.pop(req_id, None)
 
         return meta
 
