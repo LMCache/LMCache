@@ -260,6 +260,13 @@ class RemoteBackend(StorageBackendInterface):
             f"Get takes {(t2 - t1) * 1000:.6f} msec, "
             f"deserialization takes {(t3 - t2) * 1000:.6f} msec"
         )
+
+        # ref count up for caller to avoid situation where the memory_obj
+        # is evicted before the caller calls ref count down themselves
+        # This maintains consistency with LocalCPUBackend behavior
+        if decompressed_memory_obj is not None:
+            decompressed_memory_obj.ref_count_up()
+
         return decompressed_memory_obj
 
     def get_non_blocking(
