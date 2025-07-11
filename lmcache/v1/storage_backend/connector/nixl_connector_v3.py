@@ -227,7 +227,7 @@ class NixlSender:
             mem_objs=mem_objs,
         )
 
-        logger.debug(
+        logger.info(
             "Preparing to send %s objs with request ID: %s to receiver: %s",
             len(sender_task.keys),
             sender_task.req_id,
@@ -264,7 +264,7 @@ class NixlSender:
         remote_indexes = alloc_response.remote_indexes
         self._blocking_send(req_id, receiver_id, local_indexes, remote_indexes)
 
-        logger.debug(f"transfer spec: {transfer_spec}")
+        logger.info(f"transfer spec: {transfer_spec}")
         if transfer_spec.is_last_prefill:
             # Notify the proxy that the transfer is done
             notif_msg = NixlProxyNotif(req_id=req_id)
@@ -310,7 +310,7 @@ class NixlSender:
         """
         Send the KV cache in a blocking manner.
         """
-        logger.debug(
+        logger.info(
             "Blocking send %s objs to receiver %s with request ID: %s",
             len(local_indexes),
             receiver_id,
@@ -336,6 +336,7 @@ class NixlSender:
         wait_time = 0.0007
         decay = 1.1
         while True:
+            time.sleep(wait_time)  # Avoid busy waiting
             status = self._nixl_agent.check_xfer_state(handle)
             logger.debug(f"Transfer status: {status}")
 
@@ -343,7 +344,6 @@ class NixlSender:
                 logger.error("Error in send operation")
                 raise RuntimeError("Failed to send data to remote peer")
             elif status == "PROC":
-                time.sleep(wait_time)  # Avoid busy waiting
                 wait_time /= decay
                 continue
             assert status == "DONE", f"Transfer status is {status}, expected DONE"

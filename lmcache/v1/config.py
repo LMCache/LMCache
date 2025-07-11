@@ -349,10 +349,19 @@ class LMCacheEngineConfig:
         nixl_buffer_device = config.get("nixl_buffer_device", None)
         nixl_enable_gc = config.get("nixl_enable_gc", False)
 
+        def _parse_ports(value):
+            """
+            Convert a comma-separated string of ports into a list of ints.
+            Leave lists, ints or None untouched.
+            """
+            if isinstance(value, str):
+                return [int(item) for item in map(str.strip, value.split(",")) if item]
+            return value
+        
         enable_xpyd = config.get("enable_xpyd", False)
         nixl_peer_host = config.get("nixl_peer_host", None)
-        nixl_peer_init_port = config.get("nixl_peer_init_port", None)
-        nixl_peer_alloc_port = config.get("nixl_peer_alloc_port", None)
+        nixl_peer_init_port = _parse_ports(config.get("nixl_peer_init_port"))
+        nixl_peer_alloc_port = _parse_ports(config.get("nixl_peer_alloc_port"))
         nixl_proxy_host = config.get("nixl_proxy_host", None)
         nixl_proxy_port = config.get("nixl_proxy_port", None)
 
