@@ -260,32 +260,41 @@ class RemoteBackend(StorageBackendInterface):
 
         # For MLA worker id as 0 mode, use worker_id 0
         if self._mla_worker_id_as0_mode:
-            new_keys = []
-            for key in keys:
-                new_key = CacheEngineKey(
+            new_keys = [
+                CacheEngineKey(
                     key.fmt, key.model_name, key.world_size, 0, key.chunk_hash
                 )
-                new_keys.append(new_key)
+                for key in keys
+            ]
         else:
             new_keys = keys
 
         t1 = time.perf_counter()
         # batched get
         if hasattr(self.connection, "batched_get"):
-            future = asyncio.run_coroutine_threadsafe(self.connection.batched_get(new_keys), self.loop)
+            future = asyncio.run_coroutine_threadsafe(
+                self.connection.batched_get(new_keys), self.loop
+            )
             try:
                 memory_objs = future.result(self.blocking_timeout_secs)
             except Exception as e:
                 if isinstance(e, TimeoutError):
-                    logger.warning("batched get blocking timeout, trigger cancel the future task")
+                    logger.warning(
+                        "batched get blocking timeout, trigger cancel the future task"
+                    )
                     future.cancel()
                 with self.lock:
                     self.connection = None
                     self.failure_time = time.time()
-                logger.warning(f"Error occurred in batched_get_blocking: {e}, returning None list")
+                logger.warning(
+                    f"Error occurred in batched_get_blocking: {e}, returning None list"
+                )
                 return [None] * len(keys)
         else:
-            futures = [asyncio.run_coroutine_threadsafe(self.connection.get(key), self.loop) for key in new_keys]
+            futures = [
+                asyncio.run_coroutine_threadsafe(self.connection.get(key), self.loop)
+                for key in new_keys
+            ]
             memory_objs = []
             failed = False
             for future in futures:
@@ -295,12 +304,16 @@ class RemoteBackend(StorageBackendInterface):
                     except Exception as e:
                         failed = True
                         if isinstance(e, TimeoutError):
-                            logger.warning("get blocking timeout, trigger cancel the future task")
+                            logger.warning(
+                                "get blocking timeout, trigger cancel the future task"
+                            )
                             future.cancel()
                         with self.lock:
                             self.connection = None
                             self.failure_time = time.time()
-                        logger.warning(f"Error occurred in get_blocking: {e}, returning None")
+                        logger.warning(
+                            f"Error occurred in get_blocking: {e}, returning None"
+                        )
                         memory_obj = None
                     memory_objs.append(memory_obj)
                 else:
@@ -314,9 +327,14 @@ class RemoteBackend(StorageBackendInterface):
             if memory_obj is None:
                 decompressed_memory_objs.append(None)
             else:
-                decompressed_memory_objs.append(self.deserializer.deserialize(memory_obj))
+                decompressed_memory_objs.append(
+                    self.deserializer.deserialize(memory_obj)
+                )
 
-        assert len(decompressed_memory_objs) == len(keys), f"keys length: {len(keys)}, decompressed memory objs length: {len(decompressed_memory_objs)}"
+        assert len(decompressed_memory_objs) == len(keys), (
+            f"keys length: {len(keys)}, "
+            f"decompressed memory objs length: {len(decompressed_memory_objs)}"
+        )
         return decompressed_memory_objs
 
     def pin(self, key: CacheEngineKey) -> bool:
