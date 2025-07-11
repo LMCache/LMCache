@@ -174,10 +174,16 @@
             let hidden_size, num_attention_heads, num_hidden_layers, num_key_value_heads;
             let kv_lora_rank, qk_rope_head_dim; // for deepseek-ai/DeepSeek-V3
             let head_size;
-            if (model === "deepseek-ai/DeepSeek-V3") {
+
+            // Check for DeepSeek models (exact matching)
+            const isDeepSeekModel = model === "deepseek-ai/DeepSeek-V3" || model === "deepseek-ai/DeepSeek-R1";
+
+            // Check for Qwen3 models (fuzzy matching)
+            const isQwen3Model = model.toLowerCase().includes("qwen/qwen3-");
+
+            if (isDeepSeekModel) {
                 ({ hidden_size, num_attention_heads, num_hidden_layers, num_key_value_heads, kv_lora_rank, qk_rope_head_dim } = config);
-            } else if (model === "Qwen/Qwen3-4B" || model === "Qwen/Qwen3-8B" || 
-                       model === "Qwen/Qwen3-14B" || model === "Qwen/Qwen3-32B") {
+            } else if (isQwen3Model) {
                 // The Qwen3 series use GQA, and `head_dim` needs to be read from config file.
                 ({ hidden_size, num_attention_heads, num_hidden_layers, num_key_value_heads, head_dim } = config);
                 console.log(config);
@@ -202,10 +208,9 @@
 
             // Calculate KV cache size
             let total_elements;
-            if (model === "deepseek-ai/DeepSeek-V3") {
+            if (isDeepSeekModel) {
                 total_elements = num_hidden_layers * tokens * (kv_lora_rank + qk_rope_head_dim);
-            } else if (model === "Qwen/Qwen3-4B" || model === "Qwen/Qwen3-8B" || 
-                       model === "Qwen/Qwen3-14B" || model === "Qwen/Qwen3-32B") {
+            } else if (isQwen3Model) {
                 total_elements = 2 * num_hidden_layers * tokens * num_key_value_heads * head_dim;
             } else {
                 total_elements = 2 * num_hidden_layers * tokens * num_key_value_heads * head_size;
@@ -218,7 +223,7 @@
 
             // Prepare calculation steps
             let steps;
-            if (model === "deepseek-ai/DeepSeek-V3") {
+            if (isDeepSeekModel) {
                 steps = `
                 <strong>Calculation Details:</strong><br><br>
                 <b>Selected Model:</b> ${model}<br>
@@ -230,8 +235,7 @@
                 <b>Total Bytes:</b> ${total_elements} × ${dtype_size} = ${total_bytes} bytes<br>
                 <b>KV Cache Size:</b> ${total_bytes} / (1024³) ≈ ${kvCacheSizeGB.toFixed(4)} GB
                 `;
-            } else if (model === "Qwen/Qwen3-4B" || model === "Qwen/Qwen3-8B" || 
-                       model === "Qwen/Qwen3-14B" || model === "Qwen/Qwen3-32B") {
+            } else if (isQwen3Model) {
                 steps = `
                 <strong>Calculation Details:</strong><br><br>
                 <b>Selected Model:</b> ${model}<br>
