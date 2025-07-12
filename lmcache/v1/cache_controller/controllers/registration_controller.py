@@ -130,7 +130,8 @@ class RegistrationController:
                     del self.worker_mapping[instance_id]
             except ValueError:
                 logger.warning(
-                    f"Worker {worker_id} not found for instance {instance_id} during deregister"
+                    f"Worker {worker_id} not found for instance "
+                    f"{instance_id} during deregister"
                 )
         else:
             logger.warning(f"Instance {instance_id} not registered")
