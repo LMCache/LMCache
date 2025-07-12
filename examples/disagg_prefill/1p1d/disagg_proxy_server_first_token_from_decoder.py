@@ -133,6 +133,9 @@ async def handle_completions(request: Request):
     try:
         req_data = await request.json()
 
+        stream = req_data.get("stream", False)
+        media_type = "text/event-stream" if stream else "application/json"
+
         # Send request to prefill service, ignore the response
         await send_request_to_service(
             app.state.prefill_client, "/completions", req_data
@@ -148,7 +151,7 @@ async def handle_completions(request: Request):
             ):
                 yield chunk
 
-        return StreamingResponse(generate_stream(), media_type="application/json")
+        return StreamingResponse(generate_stream(), media_type=media_type)
 
     except Exception as e:
         # Standard
@@ -171,6 +174,9 @@ async def handle_chat_completions(request: Request):
     try:
         req_data = await request.json()
 
+        stream = req_data.get("stream", False)
+        media_type = "text/event-stream" if stream else "application/json"
+
         # Send request to prefill service, ignore the response
         await send_request_to_service(
             app.state.prefill_client, "/chat/completions", req_data
@@ -186,7 +192,7 @@ async def handle_chat_completions(request: Request):
             ):
                 yield chunk
 
-        return StreamingResponse(generate_stream(), media_type="application/json")
+        return StreamingResponse(generate_stream(), media_type=media_type)
 
     except Exception as e:
         # Standard

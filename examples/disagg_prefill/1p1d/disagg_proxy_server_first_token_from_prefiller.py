@@ -126,6 +126,9 @@ async def handle_completions(request: Request):
     try:
         req_data = await request.json()
 
+        stream = req_data.get("stream", False)
+        media_type = "text/event-stream" if stream else "application/json"
+
         # Round-robin send request to prefill/decode service for tokenization
         if counter % 2 == 0:
             tokenization_client = app.state.prefill_client
@@ -187,7 +190,7 @@ async def handle_completions(request: Request):
             ):
                 yield chunk
 
-        return StreamingResponse(generate_stream(), media_type="application/json")
+        return StreamingResponse(generate_stream(), media_type=media_type)
 
     except Exception as e:
         # Standard
@@ -211,6 +214,9 @@ async def handle_chat_completions(request: Request):
     st = time.time()
     try:
         req_data = await request.json()
+
+        stream = req_data.get("stream", False)
+        media_type = "text/event-stream" if stream else "application/json"
 
         org_max_tokens = req_data["max_tokens"]
         req_data["max_tokens"] = 1
@@ -239,7 +245,7 @@ async def handle_chat_completions(request: Request):
             ):
                 yield chunk
 
-        return StreamingResponse(generate_stream(), media_type="application/json")
+        return StreamingResponse(generate_stream(), media_type=media_type)
 
     except Exception as e:
         # Standard
