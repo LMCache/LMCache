@@ -99,23 +99,16 @@ class LocalCPUBackend(StorageBackendInterface):
         """
         Synchronously put the MemoryObj into the local cpu backend.
         """
-
         with self.cpu_lock:
-            if key in self.hot_cache:
-                old_memory_obj = self.hot_cache.pop(key)
-                old_memory_obj.ref_count_down()
-            self.hot_cache[key] = memory_obj
-            memory_obj.ref_count_up()
-
-            self.usage += memory_obj.get_size()
-            self.stats_monitor.update_local_cache_usage(self.usage)
-
-            # TODO(Jiayi): optimize this with batching?
-            # push kv admit msg
-            if self.lmcache_worker is not None:
-                self.lmcache_worker.put_msg(
-                    KVAdmitMsg(self.instance_id, key.worker_id, key.chunk_hash, "cpu")
-                )
+            size_change = self._unlocked_put(key, memory_obj)
+            self.usage += size_change
+        # Non-critical operations are performed outside the lock to reduce contention
+        self.stats_monitor.update_local_cache_usage(self.usage)
+        # TODO(Jiayi): optimize this with batching?
+        if self.lmcache_worker is not None:
+            self.lmcache_worker.put_msg(
+                KVAdmitMsg(self.instance_id, key.worker_id, key.chunk_hash, "cpu")
+            )
         return None
 
     def batched_submit_put_task(
@@ -128,11 +121,18 @@ class LocalCPUBackend(StorageBackendInterface):
         """
         if not self.use_hot:
             return None
-
-        # TODO(Jiayi): optimize this with batching
-        for key, memory_obj in zip(keys, memory_objs, strict=False):
-            self.submit_put_task(key, memory_obj)
-
+        total_size_change = 0
+        with self.cpu_lock:
+            for key, memory_obj in zip(keys, memory_objs, strict=False):
+                total_size_change += self._unlocked_put(key, memory_obj)
+            self.usage += total_size_change
+        # Non-critical operations are performed outside the lock to reduce contention
+        self.stats_monitor.update_local_cache_usage(self.usage)
+        if self.lmcache_worker is not None:
+            for key in keys:
+                self.lmcache_worker.put_msg(
+                    KVAdmitMsg(self.instance_id, key.worker_id, key.chunk_hash, "cpu")
+                )
         return None
 
     # NOTE (Jiayi): prefetch might be deprecated in the future.
@@ -437,3 +437,18 @@ class LocalCPUBackend(StorageBackendInterface):
 
     def close(self) -> None:
         self.clear()
+
+    def _unlocked_put(self, key: CacheEngineKey, memory_obj: MemoryObj) -> int:
+        """
+        Internal method to put an item in the cache. Assumes the caller holds the lock.
+        Returns the change in cache size (in bytes).
+        """
+        size_change = 0
+        if key in self.hot_cache:
+            old_memory_obj = self.hot_cache.pop(key)
+            old_memory_obj.ref_count_down()
+            size_change -= old_memory_obj.get_size()
+        self.hot_cache[key] = memory_obj
+        memory_obj.ref_count_up()
+        size_change += memory_obj.get_size()
+        return size_change
