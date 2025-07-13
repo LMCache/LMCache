@@ -177,6 +177,3 @@ Example on MI300X (gfx942):
     CXX=hipcc \
     BUILD_WITH_HIP=1 \
     python3 -m pip install --no-build-isolation -e .
-
-
-For now, LMCache is valided using Redis backend. Get started at **KV Cache offloading and sharing > Redis**.
