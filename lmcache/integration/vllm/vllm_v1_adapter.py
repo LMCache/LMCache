@@ -186,7 +186,7 @@ class RequestTracker:
             raise ValueError(f"Unsupported new_block_ids type {type(new_block_ids)}")
         self.allocated_block_ids.extend(new_block_ids)
 
-        if len(cached_request.new_token_ids) == 1:
+        if len(new_token_ids) == 1:
             self.is_decode_phase = True
 
 @dataclass
