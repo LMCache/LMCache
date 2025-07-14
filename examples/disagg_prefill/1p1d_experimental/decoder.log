@@ -1,4 +1,0 @@
-Using default model: meta-llama/Llama-3.1-8B-Instruct
-INFO 07-14 16:55:59 [__init__.py:244] Automatically detected platform cuda.
-INFO 07-14 16:56:07 [api_server.py:1388] vLLM API server version 0.9.2.dev325+g2965c99c8
-INFO 07-14 16:56:07 [cli_args.py:314] non-default args: {'port': 7200, 'model': 'meta-llama/Llama-3.1-8B-Instruct', 'enforce_eager': True, 'tensor_parallel_size': 2, 'enable_prefix_caching': False, 'kv_transfer_config': KVTransferConfig(kv_connector='LMCacheConnectorV1', engine_id='b7ea0721-f248-4090-928a-6ab5e9a5f115', kv_buffer_device='cuda', kv_buffer_size=1000000000.0, kv_role='kv_consumer', kv_rank=None, kv_parallel_size=1, kv_ip='127.0.0.1', kv_port=14579, kv_connector_extra_config={'discard_partial_chunks': False, 'lmcache_rpc_port': 'consumer1', 'skip_last_n_tokens': 1}, kv_connector_module_path=None), 'disable_log_requests': True}
