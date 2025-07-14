@@ -483,8 +483,8 @@ class NixlReceiver:
         self.nixl_config = nixl_config
 
         receiver_host = nixl_config.peer_host
-        receiver_init_port = nixl_config.peer_init_port
-        receiver_alloc_port = nixl_config.peer_alloc_port
+        receiver_init_port = nixl_config.peer_init_port[tp_rank]
+        receiver_alloc_port = nixl_config.peer_alloc_port[tp_rank]
 
         receiver_init_url = f"{receiver_host}:{receiver_init_port}"
         receiver_alloc_url = f"{receiver_host}:{receiver_alloc_port}"
@@ -693,12 +693,7 @@ class NixlChannel:
         if nixl_config.role == NixlRole.SENDER:
             self._sender = NixlSender(nixl_config, config, backend, tp_rank)
         else:
-            nixl_config_per_engine = nixl_config
-            nixl_config_per_engine.peer_init_port = nixl_config.peer_init_port[tp_rank]
-            nixl_config_per_engine.peer_alloc_port = nixl_config.peer_alloc_port[
-                tp_rank
-            ]
-            self._receiver = NixlReceiver(nixl_config_per_engine, config, backend, tp_rank)
+            self._receiver = NixlReceiver(nixl_config, config, backend, tp_rank)
 
     def _check_sender(self):
         """Check if this channel is configured as a sender."""
