@@ -847,6 +847,27 @@ class LMCacheConnectorV1Impl:
                 meta.add_request(req_meta)
 
         cached_reqs = scheduler_output.scheduled_cached_reqs
+
+        # NOTE: For backward compatibility with vllm version < 0.9.2,
+        # In the latest vllm version, the type of scheduled_cached_reqs has
+        # changed from list to object `CachedRequestData`
+        if isinstance(cached_reqs, list):
+            for i, req in enumerate(cached_reqs):
+                request_tracker = self._request_trackers[req.req_id]
+                request_tracker.update(req.new_token_ids, req.new_block_ids)
+
+                req_meta = ReqMeta.from_request_tracker(
+                    request_tracker,
+                    self._block_size,
+                    self._lmcache_chunk_size,
+                    load_spec=None,
+                    skip_save=force_skip_save,
+                    discard_partial_chunks=self._discard_partial_chunks,
+                )
+                if req_meta is not None:
+                    meta.add_request(req_meta)
+            return meta
+
         for i, req_id in enumerate(cached_reqs.req_ids):
             request_tracker = self._request_trackers[req_id]
             num_new_tokens = scheduler_output.num_scheduled_tokens[req_id]
