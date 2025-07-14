@@ -13,7 +13,7 @@ This example demonstrates how to run LMCache with disaggregated prefill using NI
 
 Run
 ```bash
-bash disagg_example_xpyd.sh
+bash disagg_example_1p1d.sh
 ```
 
 to start disaggregated prefill and benchmark the performance.

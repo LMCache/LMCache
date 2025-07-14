@@ -164,6 +164,7 @@ class NixlSender:
         nixl_config: NixlConfigXpYd,
         config: LMCacheEngineConfig,
         backend: StorageBackendInterface,
+        tp_rank: int,
     ):
         assert nixl_config.role == NixlRole.SENDER, (
             "NixlSender should only be initialized with NixlRole.SENDER"
@@ -179,6 +180,7 @@ class NixlSender:
             buffer_ptr=self.memory_allocator.buffer_ptr,
             buffer_size=self.memory_allocator.buffer_size,
             page_size=self.memory_allocator.align_bytes,
+            tp_rank=tp_rank,
         )
         self._nixl_agent = self._sender_nixl_wrapper.agent
 
@@ -349,7 +351,7 @@ class NixlSender:
     def _initialize_nixl_sender_connection(
         self,
         receiver_id: str,
-        receiver_init_url: NixlReceiverInfo,
+        receiver_init_url: str,
     ) -> None:
         """
         Initialize the NIXL sender connection with the receiver.
@@ -459,6 +461,7 @@ class NixlReceiver:
         nixl_config: NixlConfigXpYd,
         config: LMCacheEngineConfig,
         backend: StorageBackendInterface,
+        tp_rank: int,
     ):
         assert nixl_config.role == NixlRole.RECEIVER, (
             "NixlReceiver should only be initialized with NixlRole.RECEIVER"
@@ -472,6 +475,7 @@ class NixlReceiver:
             buffer_ptr=self.memory_allocator.buffer_ptr,
             buffer_size=self.memory_allocator.buffer_size,
             page_size=self.memory_allocator.align_bytes,
+            tp_rank=tp_rank,
         )
 
         self._nixl_agent = self._receiver_nixl_wrapper.agent
@@ -479,8 +483,8 @@ class NixlReceiver:
         self.nixl_config = nixl_config
 
         receiver_host = nixl_config.peer_host
-        receiver_init_port = nixl_config.peer_init_port
-        receiver_alloc_port = nixl_config.peer_alloc_port
+        receiver_init_port = nixl_config.peer_init_port[tp_rank]
+        receiver_alloc_port = nixl_config.peer_alloc_port[tp_rank]
 
         receiver_init_url = f"{receiver_host}:{receiver_init_port}"
         receiver_alloc_url = f"{receiver_host}:{receiver_alloc_port}"
@@ -681,10 +685,17 @@ class NixlChannel:
 
         self._backend = backend
 
+        # Third Party
+        from vllm.distributed.parallel_state import (
+            get_tensor_model_parallel_rank,
+        )
+
+        tp_rank = get_tensor_model_parallel_rank()
+
         if nixl_config.role == NixlRole.SENDER:
-            self._sender = NixlSender(nixl_config, config, backend)
+            self._sender = NixlSender(nixl_config, config, backend, tp_rank)
         else:
-            self._receiver = NixlReceiver(nixl_config, config, backend)
+            self._receiver = NixlReceiver(nixl_config, config, backend, tp_rank)
 
     def _check_sender(self):
         """Check if this channel is configured as a sender."""
@@ -745,6 +756,7 @@ class NixlAgentWrapper:
         buffer_ptr: int,
         buffer_size: int,
         page_size: int,
+        tp_rank: int,
     ):
         """
         Initialize the NIXL agent.
@@ -754,6 +766,7 @@ class NixlAgentWrapper:
             buffer_ptr (int): The pointer to the buffer.
             page_size (int): The page size of NIXL and
                 the lmcache memory allocator.
+            tp_rank (int): The tensor parallel rank.
 
         Returns:
             NixlWrapper: The NIXL agent.
@@ -768,7 +781,7 @@ class NixlAgentWrapper:
         nixl_agent = NixlAgent(str(uuid.uuid4()))
 
         # Register the memory
-        memory_desc = [(buffer_ptr, buffer_size, 0, "")]
+        memory_desc = [(buffer_ptr, buffer_size, tp_rank, "")]
         # TODO(Jiayi): remove hardcode `mem_type`
         reg_descs = nixl_agent.get_reg_descs(memory_desc, mem_type="cuda")
         nixl_agent.register_memory(reg_descs)
@@ -776,7 +789,7 @@ class NixlAgentWrapper:
         # Create xfer handlers
         xfer_desc = []
         for base_addr in range(buffer_ptr, buffer_ptr + buffer_size, page_size):
-            xfer_desc.append((base_addr, page_size, 0))
+            xfer_desc.append((base_addr, page_size, tp_rank))
 
         xfer_descs = nixl_agent.get_xfer_descs(xfer_desc, mem_type="cuda")
         xfer_handler = nixl_agent.prep_xfer_dlist("", xfer_descs, mem_type="cuda")

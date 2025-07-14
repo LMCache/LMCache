@@ -111,11 +111,11 @@ lmcache/experimental/tests
 # Setuptools scm version
 /lmcache/_version.py
 
-# Miscellaneous
-cufile.log
-
 # Generated hip files
 /csrc_hip
 /csrc/*.hip
 /csrc/*_hip.cuh
 /csrc/*_hip.cpp
+
+# Ignore all log files
+*.log

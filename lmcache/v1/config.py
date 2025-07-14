@@ -14,7 +14,7 @@
 
 # Standard
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Optional, Union
 import json
 import os
 import re
@@ -38,6 +38,19 @@ def _parse_local_disk(local_disk) -> Optional[str]:
         case _:
             local_disk_path = local_disk
     return local_disk_path
+
+
+def to_int_list(
+    value: Optional[Union[str, int, list[Any]]],
+) -> Optional[list[int]]:
+    if value is None:
+        return None
+    if isinstance(value, list):
+        return [int(x) for x in value]
+    if isinstance(value, int):
+        return [value]
+    parts = [p.strip() for p in str(value).split(",") if p.strip()]
+    return [int(p) for p in parts]
 
 
 @dataclass
@@ -101,8 +114,8 @@ class LMCacheEngineConfig:
     # (Optional) Experimental Nixl configurations
     enable_xpyd: Optional[bool] = False
     nixl_peer_host: Optional[str] = None
-    nixl_peer_init_port: Optional[int] = None
-    nixl_peer_alloc_port: Optional[int] = None
+    nixl_peer_init_port: Optional[list[int]] = None
+    nixl_peer_alloc_port: Optional[list[int]] = None
     nixl_proxy_host: Optional[str] = None
     nixl_proxy_port: Optional[int] = None
 
@@ -160,8 +173,8 @@ class LMCacheEngineConfig:
         nixl_enable_gc: Optional[bool] = False,
         enable_xpyd: Optional[bool] = False,
         nixl_peer_host: Optional[str] = None,
-        nixl_peer_init_port: Optional[int] = None,
-        nixl_peer_alloc_port: Optional[int] = None,
+        nixl_peer_init_port: Optional[list[int]] = None,
+        nixl_peer_alloc_port: Optional[list[int]] = None,
         nixl_proxy_host: Optional[str] = None,
         nixl_proxy_port: Optional[int] = None,
         audit_actual_remote_url: Optional[str] = None,
@@ -351,8 +364,8 @@ class LMCacheEngineConfig:
 
         enable_xpyd = config.get("enable_xpyd", False)
         nixl_peer_host = config.get("nixl_peer_host", None)
-        nixl_peer_init_port = config.get("nixl_peer_init_port", None)
-        nixl_peer_alloc_port = config.get("nixl_peer_alloc_port", None)
+        nixl_peer_init_port = to_int_list(config.get("nixl_peer_init_port"))
+        nixl_peer_alloc_port = to_int_list(config.get("nixl_peer_alloc_port"))
         nixl_proxy_host = config.get("nixl_proxy_host", None)
         nixl_proxy_port = config.get("nixl_proxy_port", None)
 
@@ -586,10 +599,10 @@ class LMCacheEngineConfig:
         config.nixl_peer_host = parse_env(
             get_env_name("nixl_peer_host"), config.nixl_peer_host
         )
-        config.nixl_peer_init_port = to_int(
+        config.nixl_peer_init_port = to_int_list(
             parse_env(get_env_name("nixl_peer_init_port"), config.nixl_peer_init_port)
         )
-        config.nixl_peer_alloc_port = to_int(
+        config.nixl_peer_alloc_port = to_int_list(
             parse_env(get_env_name("nixl_peer_alloc_port"), config.nixl_peer_alloc_port)
         )
         config.nixl_proxy_host = parse_env(
