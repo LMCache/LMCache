@@ -16,9 +16,6 @@
 from typing import TYPE_CHECKING, List
 import abc
 
-# Third Party
-import torch
-
 if TYPE_CHECKING:
     # Third Party
     pass
@@ -29,8 +26,8 @@ class OffloadServerInterface(metaclass=abc.ABCMeta):
 
     @abc.abstractmethod
     def offload(
-        self, 
-        hashes: List[int], 
+        self,
+        hashes: List[int],
         slot_mapping: List[int],
         offsets: List[int],
     ) -> bool:

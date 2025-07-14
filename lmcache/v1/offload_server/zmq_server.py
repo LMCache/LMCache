@@ -13,33 +13,34 @@
 # limitations under the License.
 
 # Standard
-from typing import TYPE_CHECKING, Optional, List
+from typing import TYPE_CHECKING, List
 import threading
 
 # Third Party
-from vllm.utils import make_zmq_socket
-from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
-import torch
-import vllm.envs as envs
-import zmq
-import msgspec
-
 from offload_server.abstract_server import AbstractOffloadServer
-from lmcache.logging import init_logger
+from vllm.utils import make_zmq_socket
+import msgspec
+import zmq
+
+# First Party
 from lmcache.v1.cache_engine import LMCacheEngine
-from lmcache.v1.rpc_utils import get_zmq_rpc_path_lmcache
 from lmcache.v1.offload_server.message import OffloadMsg, OffloadRetMsg
+from lmcache.v1.rpc_utils import get_zmq_rpc_path_lmcache
+
+if TYPE_CHECKING:
+    # Third Party
+    from vllm.config import VllmConfig
+
 
 class ZMQOffloadServer(AbstractOffloadServer):
     def __init__(
         self,
         lmcache_engine: LMCacheEngine,
-        role: "KVConnectorRole",
-        is_tp: bool,
         vllm_config: "VllmConfig",
+        tp_rank: int,
     ):
         self.ctx = zmq.Context()  # type: ignore[attr-defined]
-        socket_path = get_zmq_rpc_path_lmcache(role, is_tp, vllm_config)
+        socket_path = get_zmq_rpc_path_lmcache(vllm_config, tp_rank)
         self.socket = make_zmq_socket(
             self.ctx,
             socket_path,
@@ -53,9 +54,7 @@ class ZMQOffloadServer(AbstractOffloadServer):
         def process_request():
             while self.running:
                 frame = self.socket.recv(copy=False)
-                offload_msg = msgspec.msgpack.decode(
-                    frame, type=OffloadMsg
-                )
+                offload_msg = msgspec.msgpack.decode(frame, type=OffloadMsg)
                 result = self.offload(
                     offload_msg.hashes,
                     offload_msg.slot_mapping,
@@ -67,16 +66,12 @@ class ZMQOffloadServer(AbstractOffloadServer):
 
         self.thread = threading.Thread(target=process_request, daemon=True)
         self.thread.start()
-    
+
     def offload(
-        self, 
-        hashes: List[int], 
+        self,
+        hashes: List[int],
         slot_mapping: List[int],
         offsets: List[int],
     ) -> bool:
-        self.lmcache_engine.store(
-            hashes, slot_mapping, offsets
-        )
+        self.lmcache_engine.store(hashes, slot_mapping, offsets)
         return True
-        
-    

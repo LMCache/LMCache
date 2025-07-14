@@ -22,17 +22,19 @@ import torch
 
 # First Party
 from lmcache.config import LMCacheEngineMetadata
+from lmcache.logger import init_logger
 from lmcache.utils import CacheEngineKey, _lmcache_nvtx_annotate
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.logger import init_logger
 
 logger = init_logger(__name__)
 
 try:
+    # Third Party
     from vllm.v1.core.kv_cache_utils import NONE_HASH
 except ImportError:
     # Fallback to a default value if vllm is not available
     NONE_HASH = 0
+
 
 class TokenDatabase(metaclass=abc.ABCMeta):
     """TokenDatabase is used to convert input tokens into list of
@@ -53,7 +55,7 @@ class TokenDatabase(metaclass=abc.ABCMeta):
         offsets: Optional[List[int]] = None,
         mask: Optional[torch.Tensor] = None,
         make_key: bool = True,
-    ) -> Iterable[Tuple[int, int, Union[CacheEngineKey, str]]]:
+    ) -> Iterable[Tuple[int, int, Union[CacheEngineKey, int]]]:
         """Process the tokens and return the corresponding cache engine keys.
 
         :param Optional[Union[torch.Tensor, List[int]]] tokens: The tokens to process.
@@ -62,7 +64,7 @@ class TokenDatabase(metaclass=abc.ABCMeta):
             it will be used instead of tokens to generate cache engine keys.
 
         :param Optional[List[int]] offsets: The number of tokens in each chunk.
-            
+
         :param Optional[torch.Tensor] mask: The mask for the tokens. Should
             have the same length as tokens. And the mask should ALWAYS be like
             FFFFFTTTTTTT, where True means the tokens needs to be matched,
@@ -153,14 +155,14 @@ class ChunkedTokenDatabase(TokenDatabase):
         offsets: Optional[List[int]] = None,
         mask: Optional[torch.Tensor] = None,
         make_key: bool = True,
-    ) -> Iterable[Tuple[int, int, Union[CacheEngineKey, str]]]:
+    ) -> Iterable[Tuple[int, int, Union[CacheEngineKey, int]]]:
         """Process the tokens/hashes and return the corresponding cache engine keys.
 
         :param Optional[Union[torch.Tensor, List[int]]] tokens: The tokens to process.
 
         :param Optional[List[int]] hashes: The hashes to process. If provided,
             it will be used instead of tokens to generate cache engine keys.
-        
+
         :param Optional[List[int]] offsets: The number of tokens in each chunk.
 
         :param Optional[torch.Tensor] mask: The mask for the tokens. Should
@@ -188,7 +190,7 @@ class ChunkedTokenDatabase(TokenDatabase):
             raise ValueError(
                 "The number of Falses in the mask is not a multiple of the chunk size."
             )
-        
+
         if tokens is not None:
             total_len = len(tokens)
             token_chunks = self._chunk_tokens(tokens)
@@ -208,7 +210,7 @@ class ChunkedTokenDatabase(TokenDatabase):
                 "If hashes are provided, offsets must also be provided."
             )
             start_idx = 0
-            for hash_val, offset in zip(hashes, offsets):
+            for hash_val, offset in zip(hashes, offsets, strict=False):
                 end_idx = start_idx + offset
                 if make_key:
                     yield start_idx, end_idx, self._make_key_by_hash(hash_val)

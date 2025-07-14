@@ -13,15 +13,20 @@
 # limitations under the License.
 
 # Standard
+from typing import TYPE_CHECKING, Optional
 import socket
 
 # Third Party
+import vllm.envs as envs
 import zmq
 import zmq.asyncio
-import vllm.envs as envs
 
 # First Party
 from lmcache.logging import init_logger
+
+if TYPE_CHECKING:
+    # Third Party
+    from vllm.config import VllmConfig
 
 logger = init_logger(__name__)
 
@@ -81,7 +86,6 @@ def get_ip():
         s.close()
 
 
-
 def get_zmq_rpc_path_lmcache(
     vllm_config: Optional["VllmConfig"] = None,
     rpc_port: int = 0,
@@ -89,13 +93,13 @@ def get_zmq_rpc_path_lmcache(
 ) -> str:
     """Get the ZMQ RPC path for LMCache lookup communication."""
     base_url = envs.VLLM_RPC_BASE_PATH
-    
+
     # Default to 0 if not configured
     if vllm_config is not None:
         rpc_port = vllm_config.kv_transfer_config.get_from_extra_config(
             "lmcache_rpc_port", 0
         )
     rpc_port += tp_rank
-    
+
     logger.debug("Base URL: %s, RPC Port: %s", base_url, rpc_port)
     return f"ipc://{base_url}/lmcache_rpc_port_{rpc_port}"

@@ -27,7 +27,6 @@ from lmcache.v1.lookup_client.abstract_client import LookupClientInterface
 if TYPE_CHECKING:
     # Third Party
     from vllm.config import VllmConfig
-    from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
 
 logger = init_logger(__name__)
 

@@ -13,14 +13,13 @@
 # limitations under the License.
 
 # Standard
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 import threading
 
 # Third Party
 from vllm.utils import make_zmq_socket
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 import torch
-import vllm.envs as envs
 import zmq
 
 # First Party
@@ -34,7 +33,6 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
 logger = init_logger(__name__)
-
 
 
 class LMCacheLookupClient(LookupClientInterface):

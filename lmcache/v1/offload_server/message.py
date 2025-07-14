@@ -33,6 +33,7 @@ class OffloadMsg(msgspec.Struct):
             f"offsets={self.offsets})"
         )
 
+
 class OffloadRetMsg(msgspec.Struct):
     """Return message for Offloading"""
 

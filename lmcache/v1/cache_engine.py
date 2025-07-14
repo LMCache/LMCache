@@ -181,8 +181,9 @@ class LMCacheEngine:
         elif hashes is not None:
             num_to_store_tokens = sum(kwargs["offsets"])
             kwargs["slot_mapping"] = torch.tensor(
-                kwargs["slot_mapping"], dtype=torch.long)
-        
+                kwargs["slot_mapping"], dtype=torch.long
+            )
+
         assert tokens is not None or hashes is not None, (
             "Either 'tokens' or 'hashes' must be provided."
         )
