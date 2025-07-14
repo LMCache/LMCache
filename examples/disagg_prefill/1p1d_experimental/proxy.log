@@ -1,0 +1,13 @@
+INFO 07-14 16:56:00 [__init__.py:244] Automatically detected platform cuda.
+usage: disagg_proxy_server.py [-h] [--port PORT] [--host HOST]
+                              [--prefiller-host PREFILLER_HOST]
+                              [--prefiller-port PREFILLER_PORT]
+                              [--num-prefillers NUM_PREFILLERS]
+                              [--decoder-host DECODER_HOST]
+                              [--decoder-port DECODER_PORT]
+                              [--decoder-init-port DECODER_INIT_PORT]
+                              [--decoder-alloc-port DECODER_ALLOC_PORT]
+                              [--num-decoders NUM_DECODERS]
+                              [--proxy-host PROXY_HOST]
+                              [--proxy-port PROXY_PORT]
+disagg_proxy_server.py: error: argument --decoder-init-port: invalid int value: '7300,7301'
