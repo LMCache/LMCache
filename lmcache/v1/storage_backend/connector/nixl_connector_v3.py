@@ -22,9 +22,6 @@ import uuid
 
 # Third Party
 from nixl._api import nixl_agent as NixlAgent
-from vllm.distributed.parallel_state import (
-    get_tensor_model_parallel_rank,
-)
 import msgspec
 import torch
 import zmq
@@ -167,6 +164,7 @@ class NixlSender:
         nixl_config: NixlConfigXpYd,
         config: LMCacheEngineConfig,
         backend: StorageBackendInterface,
+        tp_rank: int,
     ):
         assert nixl_config.role == NixlRole.SENDER, (
             "NixlSender should only be initialized with NixlRole.SENDER"
@@ -182,6 +180,7 @@ class NixlSender:
             buffer_ptr=self.memory_allocator.buffer_ptr,
             buffer_size=self.memory_allocator.buffer_size,
             page_size=self.memory_allocator.align_bytes,
+            tp_rank=tp_rank,
         )
         self._nixl_agent = self._sender_nixl_wrapper.agent
 
@@ -462,6 +461,7 @@ class NixlReceiver:
         nixl_config: NixlConfigXpYd,
         config: LMCacheEngineConfig,
         backend: StorageBackendInterface,
+        tp_rank: int,
     ):
         assert nixl_config.role == NixlRole.RECEIVER, (
             "NixlReceiver should only be initialized with NixlRole.RECEIVER"
@@ -475,6 +475,7 @@ class NixlReceiver:
             buffer_ptr=self.memory_allocator.buffer_ptr,
             buffer_size=self.memory_allocator.buffer_size,
             page_size=self.memory_allocator.align_bytes,
+            tp_rank=tp_rank,
         )
 
         self._nixl_agent = self._receiver_nixl_wrapper.agent
@@ -684,16 +685,20 @@ class NixlChannel:
 
         self._backend = backend
 
+        from vllm.distributed.parallel_state import (
+                get_tensor_model_parallel_rank,
+            )
+        tp_rank = get_tensor_model_parallel_rank()
+
         if nixl_config.role == NixlRole.SENDER:
-            self._sender = NixlSender(nixl_config, config, backend)
+            self._sender = NixlSender(nixl_config, config, backend, tp_rank)
         else:
-            tp_rank = get_tensor_model_parallel_rank()
             nixl_config_per_engine = nixl_config
             nixl_config_per_engine.peer_init_port = nixl_config.peer_init_port[tp_rank]
             nixl_config_per_engine.peer_alloc_port = nixl_config.peer_alloc_port[
                 tp_rank
             ]
-            self._receiver = NixlReceiver(nixl_config_per_engine, config, backend)
+            self._receiver = NixlReceiver(nixl_config_per_engine, config, backend, tp_rank)
 
     def _check_sender(self):
         """Check if this channel is configured as a sender."""
@@ -754,6 +759,7 @@ class NixlAgentWrapper:
         buffer_ptr: int,
         buffer_size: int,
         page_size: int,
+        tp_rank: int,
     ):
         """
         Initialize the NIXL agent.
@@ -763,6 +769,7 @@ class NixlAgentWrapper:
             buffer_ptr (int): The pointer to the buffer.
             page_size (int): The page size of NIXL and
                 the lmcache memory allocator.
+            tp_rank (int): The tensor parallel rank.
 
         Returns:
             NixlWrapper: The NIXL agent.
@@ -774,11 +781,9 @@ class NixlAgentWrapper:
             raise RuntimeError("NIXL is not available")
 
         # Create a NIXL agent
-        agent_name = str(uuid.uuid4())
-        nixl_agent = NixlAgent(agent_name)
+        nixl_agent = NixlAgent(str(uuid.uuid4()))
 
         # Register the memory
-        tp_rank = get_tensor_model_parallel_rank()
         memory_desc = [(buffer_ptr, buffer_size, tp_rank, "")]
         # TODO(Jiayi): remove hardcode `mem_type`
         reg_descs = nixl_agent.get_reg_descs(memory_desc, mem_type="cuda")

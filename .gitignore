@@ -77,8 +77,6 @@ lmcache/experimental/tests
 /examples/save_decode_cache/offline_inference_outputs.jsonl
 /examples/offline_inference/buggy_example.py
 /examples/test_example
-/examples/disagg_prefill/1p1d_experimental/*.log
-/examples/disagg_prefill/xpyd_experimental/*.log
 
 # disk cache
 /remote_disk
@@ -113,11 +111,11 @@ lmcache/experimental/tests
 # Setuptools scm version
 /lmcache/_version.py
 
-# Miscellaneous
-cufile.log
-
 # Generated hip files
 /csrc_hip
 /csrc/*.hip
 /csrc/*_hip.cuh
 /csrc/*_hip.cpp
+
+# Ignore all log files
+*.log

@@ -18,9 +18,6 @@ from typing import List, Optional
 import threading
 
 # Third Party
-from vllm.distributed.parallel_state import (
-    get_tensor_model_parallel_rank,
-)
 import torch
 
 # First Party
@@ -140,6 +137,9 @@ class NixlBackend(StorageBackendInterface):
         for mem_obj in memory_objs:
             mem_obj.ref_count_up()
 
+        from vllm.distributed.parallel_state import (
+            get_tensor_model_parallel_rank,
+        )
         tp_rank = get_tensor_model_parallel_rank()
 
         transfer_spec_per_engine = transfer_spec
