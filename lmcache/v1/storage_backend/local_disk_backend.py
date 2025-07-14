@@ -126,9 +126,8 @@ class LocalDiskBackend(StorageBackendInterface):
         key: CacheEngineKey,
     ) -> None:
         path = self.dict[key].path
-        self.disk_lock.acquire()
-        self.dict.pop(key)
-        self.disk_lock.release()
+        with self.disk_lock:
+            self.dict.pop(key)
         size = os.path.getsize(path)
         self.usage -= size
         self.stats_monitor.update_local_storage_usage(self.usage)
@@ -183,9 +182,8 @@ class LocalDiskBackend(StorageBackendInterface):
 
         memory_obj.ref_count_up()
 
-        self.disk_lock.acquire()
-        self.put_tasks.append(key)
-        self.disk_lock.release()
+        with self.disk_lock:
+            self.put_tasks.append(key)
 
         future = asyncio.run_coroutine_threadsafe(
             self.async_save_bytes_to_disk(key, memory_obj), self.loop
@@ -204,21 +202,18 @@ class LocalDiskBackend(StorageBackendInterface):
         self,
         key: CacheEngineKey,
     ) -> Optional[Future]:
-        self.disk_lock.acquire()
-        if key not in self.dict:
-            self.disk_lock.release()
-            return None
+        with self.disk_lock:
+            if key not in self.dict:
+                return None
+            # Update cache recency
+            self.evictor.update_on_hit(key, self.dict)
 
-        # Update cache recency
-        self.evictor.update_on_hit(key, self.dict)
+            path = self.dict[key].path
+            dtype = self.dict[key].dtype
+            shape = self.dict[key].shape
+            fmt = self.dict[key].fmt
 
-        path = self.dict[key].path
-        dtype = self.dict[key].dtype
-        shape = self.dict[key].shape
-        fmt = self.dict[key].fmt
-        self.disk_lock.release()
         logger.info(f"Prefetching {key} from disk.")
-
         assert dtype is not None
         assert shape is not None
         future = asyncio.run_coroutine_threadsafe(
@@ -233,22 +228,20 @@ class LocalDiskBackend(StorageBackendInterface):
         """
         Blocking get function.
         """
-        self.disk_lock.acquire()
-        if key not in self.dict:
-            self.disk_lock.release()
-            return None
+        with self.disk_lock:
+            if key not in self.dict:
+                return None
+            # Update cache recency
+            self.evictor.update_on_hit(key, self.dict)
 
-        # Update cache recency
-        self.evictor.update_on_hit(key, self.dict)
+            path = self.dict[key].path
+            dtype = self.dict[key].dtype
+            shape = self.dict[key].shape
+            fmt = self.dict[key].fmt
 
-        path = self.dict[key].path
-        dtype = self.dict[key].dtype
-        shape = self.dict[key].shape
-        fmt = self.dict[key].fmt
         assert dtype is not None
         assert shape is not None
         memory_obj = self.load_bytes_from_disk(path, dtype=dtype, shape=shape, fmt=fmt)
-        self.disk_lock.release()
         return memory_obj
 
     def get_non_blocking(
@@ -288,9 +281,8 @@ class LocalDiskBackend(StorageBackendInterface):
 
         memory_obj.ref_count_down()
 
-        self.disk_lock.acquire()
-        self.put_tasks.remove(key)
-        self.disk_lock.release()
+        with self.disk_lock:
+            self.put_tasks.remove(key)
 
     # TODO(Jiayi): use `bytes_read = await f.readinto(buffer)`
     # for better performance (i.e., fewer copy)
@@ -350,6 +342,5 @@ class LocalDiskBackend(StorageBackendInterface):
 
     def close(self) -> None:
         if self.lookup_server is not None:
-            self.disk_lock.acquire()
-            self.lookup_server.batched_remove(list(self.dict.keys()))
-            self.disk_lock.release()
+            with self.disk_lock:
+                self.lookup_server.batched_remove(list(self.dict.keys()))

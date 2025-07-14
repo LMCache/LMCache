@@ -192,9 +192,8 @@ class StorageManager:
         Blocking function to get the memory object from the storages.
         """
         # Search in prefetch task
-        self.manager_lock.acquire()
-        prefetch_task = self.prefetch_tasks.get(key, None)
-        self.manager_lock.release()
+        with self.manager_lock:
+            prefetch_task = self.prefetch_tasks.get(key, None)
 
         # Wait until prefetch task finishes
         # Here, it is assumed all prefetch tasks load the memoryobj to
@@ -278,9 +277,8 @@ class StorageManager:
         """
         Update metadata after prefetch.
         """
-        self.manager_lock.acquire()
-        prefetch_task = self.prefetch_tasks.pop(key)
-        self.manager_lock.release()
+        with self.manager_lock:
+            prefetch_task = self.prefetch_tasks.pop(key)
         try:
             buffer_memory_obj = prefetch_task.result()
         except Exception as e:
@@ -305,20 +303,16 @@ class StorageManager:
 
         # NOTE: no need to ref_count_up here because
         # the memory_obj's ref_count is already 1
-        self.manager_lock.acquire()
         self.storage_backends["LocalCPUBackend"].submit_put_task(key, memory_obj)
-        self.manager_lock.release()
 
     def prefetch(self, key: CacheEngineKey) -> None:
         """Launch a prefetch request in the storage backend. Non-blocking"""
 
         if self.storage_backends["LocalCPUBackend"].contains(key):
             return
-        self.manager_lock.acquire()
-        if key in self.prefetch_tasks:
-            self.manager_lock.release()
-            return
-        self.manager_lock.release()
+        with self.manager_lock:
+            if key in self.prefetch_tasks:
+                return
 
         for backend in self.storage_backends.values():
             prefetch_task = backend.submit_prefetch_task(key)
@@ -326,10 +320,9 @@ class StorageManager:
                 continue
             lambda_callback = lambda f: self.prefetch_callback(f, key)
 
-            self.manager_lock.acquire()
-            self.prefetch_tasks[key] = prefetch_task
+            with self.manager_lock:
+                self.prefetch_tasks[key] = prefetch_task
             prefetch_task.add_done_callback(lambda_callback)
-            self.manager_lock.release()
             break
 
     # TODO(Jiayi): Currently, search_range is only used for testing.
