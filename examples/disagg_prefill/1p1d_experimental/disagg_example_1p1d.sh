@@ -124,8 +124,8 @@ main() {
         --num-prefillers 1 \
         --decoder-host localhost \
         --decoder-port 7200  \
-        --decoder-init-port 7301,7302 \
-        --decoder-alloc-port 7401,7402 \
+        --decoder-init-port 7300 \
+        --decoder-alloc-port 7400 \
         --proxy-host localhost \
         --proxy-port 7500 \
         --num-decoders 1 \
