@@ -137,29 +137,10 @@ class NixlBackend(StorageBackendInterface):
         for mem_obj in memory_objs:
             mem_obj.ref_count_up()
 
-        # Third Party
-        from vllm.distributed.parallel_state import (
-            get_tensor_model_parallel_rank,
-        )
-
-        tp_rank = get_tensor_model_parallel_rank()
-
-        transfer_spec_per_engine = transfer_spec
-        transfer_spec_per_engine.receiver_info.receiver_init_port = (
-            transfer_spec.receiver_info.receiver_init_port[tp_rank]
-        )
-        transfer_spec_per_engine.receiver_info.receiver_alloc_port = (
-            transfer_spec.receiver_info.receiver_alloc_port[tp_rank]
-        )
-        transfer_spec_per_engine.receiver_info.receiver_id = (
-            transfer_spec_per_engine.receiver_info.receiver_host
-            + str(transfer_spec_per_engine.receiver_info.receiver_init_port)
-        )
-
         self._nixl_channel.prepare_send(
             keys=keys,
             mem_objs=memory_objs,
-            transfer_spec=transfer_spec_per_engine,
+            transfer_spec=transfer_spec,
         )
         return None
 
