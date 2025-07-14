@@ -35,8 +35,6 @@ logger = init_logger(__name__)
 class MooncakeLookupClient(LookupClientInterface):
     def __init__(
         self,
-        role: "KVConnectorRole",
-        is_tp: bool,
         vllm_config: "VllmConfig",
         master_addr: str,
     ):

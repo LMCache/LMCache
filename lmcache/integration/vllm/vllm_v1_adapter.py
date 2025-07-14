@@ -302,14 +302,13 @@ class LMCacheConnectorV1Impl:
     ):
         self._parent = parent
         self.kv_role = vllm_config.kv_transfer_config.kv_role
-        is_tp = vllm_config.parallel_config.tensor_parallel_size > 1
 
         config = lmcache_get_config()
         self.layerwise_retrievers = []
         if role == KVConnectorRole.SCHEDULER:
             # Create lookup client using factory
             self.lookup_client = LookupClientFactory.create_lookup_client(
-                role, is_tp, vllm_config
+                vllm_config
             )
             self._requests_in_step: dict[str, Request] = {}
         else:
@@ -333,7 +332,7 @@ class LMCacheConnectorV1Impl:
             # Create lookup server using factory
             assert self.lmcache_engine is not None
             self.lookup_server = LookupClientFactory.create_lookup_server(
-                self.lmcache_engine, role, is_tp, vllm_config
+                self.lmcache_engine, vllm_config
             )
 
         self.kv_caches: dict[str, torch.Tensor] = {}

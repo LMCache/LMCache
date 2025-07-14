@@ -33,7 +33,7 @@ from lmcache.v1.cache_controller.message import (
     RegisterMsg,
     WorkerMsg,
 )
-from lmcache.v1.cache_controller.rpc_utils import (
+from lmcache.v1.rpc_utils import (
     close_zmq_socket,
     get_ip,
     get_zmq_context,

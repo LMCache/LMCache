@@ -149,13 +149,16 @@ class LMCacheEngine:
     @torch.inference_mode()
     def store(
         self,
-        tokens: torch.Tensor,
+        tokens: Optional[torch.Tensor] = None,
+        hashes: Optional[List[int]] = None,
         mask: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> None:
-        """Store the tokens and mask into the cache engine.
+        """Store the tokens/hashes and mask into the cache engine.
 
-        :param torch.Tensor tokens: The tokens of the corresponding KV caches.
+        :param Optional[torch.Tensor] tokens: The tokens of the corresponding KV caches.
+
+        :param Optional[List[int]] hashes: The hashes of the corresponding KV caches.
 
         :param Optional[torch.Tensor] mask: The mask for the tokens. Should
             have the same length as tokens. And the mask should ALWAYS be like
@@ -173,8 +176,17 @@ class LMCacheEngine:
 
         if mask is not None:
             num_to_store_tokens = torch.sum(mask).item()
-        else:
+        elif tokens is not None:
             num_to_store_tokens = len(tokens)
+        elif hashes is not None:
+            num_to_store_tokens = sum(kwargs["offsets"])
+            kwargs["slot_mapping"] = torch.tensor(
+                kwargs["slot_mapping"], dtype=torch.long)
+        
+        assert tokens is not None or hashes is not None, (
+            "Either 'tokens' or 'hashes' must be provided."
+        )
+
         monitor_req_id = self.stats_monitor.on_store_request(num_to_store_tokens)
 
         starts = []
@@ -188,7 +200,7 @@ class LMCacheEngine:
         tot_token_num = 0
         t = time.perf_counter()
 
-        for start, end, key in self.token_database.process_tokens(tokens, mask):
+        for start, end, key in self.token_database.process_tokens(tokens, hashes, mask):
             assert isinstance(key, CacheEngineKey)
             if self.storage_manager.contains(key):
                 continue

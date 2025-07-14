@@ -1,0 +1,82 @@
+# Copyright 2024-2025 LMCache Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Standard
+from typing import TYPE_CHECKING, Optional, List
+import threading
+
+# Third Party
+from vllm.utils import make_zmq_socket
+from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
+import torch
+import vllm.envs as envs
+import zmq
+import msgspec
+
+from offload_server.abstract_server import AbstractOffloadServer
+from lmcache.logging import init_logger
+from lmcache.v1.cache_engine import LMCacheEngine
+from lmcache.v1.rpc_utils import get_zmq_rpc_path_lmcache
+from lmcache.v1.offload_server.message import OffloadMsg, OffloadRetMsg
+
+class ZMQOffloadServer(AbstractOffloadServer):
+    def __init__(
+        self,
+        lmcache_engine: LMCacheEngine,
+        role: "KVConnectorRole",
+        is_tp: bool,
+        vllm_config: "VllmConfig",
+    ):
+        self.ctx = zmq.Context()  # type: ignore[attr-defined]
+        socket_path = get_zmq_rpc_path_lmcache(role, is_tp, vllm_config)
+        self.socket = make_zmq_socket(
+            self.ctx,
+            socket_path,
+            zmq.REP,  # type: ignore[attr-defined]
+            bind=True,
+        )
+
+        self.lmcache_engine = lmcache_engine
+        self.running = True
+
+        def process_request():
+            while self.running:
+                frame = self.socket.recv(copy=False)
+                offload_msg = msgspec.msgpack.decode(
+                    frame, type=OffloadMsg
+                )
+                result = self.offload(
+                    offload_msg.hashes,
+                    offload_msg.slot_mapping,
+                    offload_msg.offsets,
+                )
+                response = OffloadRetMsg(success=result)
+                response = msgspec.msgpack.encode(response)
+                self.socket.send(response)
+
+        self.thread = threading.Thread(target=process_request, daemon=True)
+        self.thread.start()
+    
+    def offload(
+        self, 
+        hashes: List[int], 
+        slot_mapping: List[int],
+        offsets: List[int],
+    ) -> bool:
+        self.lmcache_engine.store(
+            hashes, slot_mapping, offsets
+        )
+        return True
+        
+    
