@@ -100,6 +100,7 @@ class StorageManager:
         self.worker_id = metadata.worker_id
 
         self.stream = torch.cuda.Stream()
+        self.prefetch_timeout_secs = config.prefetch_timeout_secs
 
     @_lmcache_nvtx_annotate
     def allocate(
@@ -187,14 +188,10 @@ class StorageManager:
         for memory_obj in memory_objs:
             memory_obj.ref_count_down()
 
-    def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
-        """
-        Blocking function to get the memory object from the storages.
-        """
+    def wait_prefetch(self, key: CacheEngineKey, timeout: float = 0.1):
         # Search in prefetch task
-        self.manager_lock.acquire()
-        prefetch_task = self.prefetch_tasks.get(key, None)
-        self.manager_lock.release()
+        with self.manager_lock:
+            prefetch_task = self.prefetch_tasks.get(key, None)
 
         # Wait until prefetch task finishes
         # Here, it is assumed all prefetch tasks load the memoryobj to
@@ -206,8 +203,16 @@ class StorageManager:
             # Calling result() twice (already once in callback) will have
             # no effect
             # Tune the timeout for better performance
-            prefetch_task.result(timeout=1)
+            try:
+                prefetch_task.result(timeout=timeout)
+            except Exception as e:
+                logger.warning(f"prefetch timeout: {e}, key: {key}")
 
+    def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
+        """
+        Blocking function to get the memory object from the storages.
+        """
+        self.wait_prefetch(key, timeout=self.prefetch_timeout_secs)
         # Search all backends for blocking get
         for backend_name, backend in self.storage_backends.items():
             # NOTE(Jiayi): bypass the allocator for now
@@ -278,47 +283,32 @@ class StorageManager:
         """
         Update metadata after prefetch.
         """
-        self.manager_lock.acquire()
-        prefetch_task = self.prefetch_tasks.pop(key)
-        self.manager_lock.release()
+        with self.manager_lock:
+            prefetch_task = self.prefetch_tasks.pop(key)
         try:
             buffer_memory_obj = prefetch_task.result()
         except Exception as e:
             logger.error(f"Exception captured from future in prefetch_callback: {e}")
             raise e
-        kv_chunk = buffer_memory_obj.tensor
-        kv_shape = kv_chunk.shape
-        kv_dtype = kv_chunk.dtype
-        memory_obj = self.allocator_backend.allocate(kv_shape, kv_dtype)
-        if memory_obj is None:
-            logger.warning("Memory allocation failed in prefetch_callback")
+        if buffer_memory_obj is None:
             return
+        assert isinstance(buffer_memory_obj, MemoryObj)
+        assert buffer_memory_obj.tensor is not None, "Encounter invalid tensor"
+        assert buffer_memory_obj.tensor.device.type == "cpu"
 
-        assert memory_obj.tensor is not None, "Encounter invalid tensor"
-
-        # TODO(Jiayi): this part should be done in another process if
-        # the cpu->pinned cpu copy is blocking.
-        prefetch_stream = torch.cuda.Stream()
-        with torch.cuda.stream(prefetch_stream):
-            memory_obj.tensor.copy_(kv_chunk, non_blocking=True)
-        prefetch_stream.synchronize()
-
-        # NOTE: no need to ref_count_up here because
-        # the memory_obj's ref_count is already 1
-        self.manager_lock.acquire()
-        self.storage_backends["LocalCPUBackend"].submit_put_task(key, memory_obj)
-        self.manager_lock.release()
+        # the buffer_memory_obj is a cpu backend allocated memory obj
+        self.storage_backends["LocalCPUBackend"].submit_put_task(key, buffer_memory_obj)
+        # prefetched memory should also be evictable
+        buffer_memory_obj.ref_count_down()
 
     def prefetch(self, key: CacheEngineKey) -> None:
         """Launch a prefetch request in the storage backend. Non-blocking"""
 
         if self.storage_backends["LocalCPUBackend"].contains(key):
             return
-        self.manager_lock.acquire()
-        if key in self.prefetch_tasks:
-            self.manager_lock.release()
-            return
-        self.manager_lock.release()
+        with self.manager_lock:
+            if key in self.prefetch_tasks:
+                return
 
         for backend in self.storage_backends.values():
             prefetch_task = backend.submit_prefetch_task(key)
@@ -326,10 +316,9 @@ class StorageManager:
                 continue
             lambda_callback = lambda f: self.prefetch_callback(f, key)
 
-            self.manager_lock.acquire()
-            self.prefetch_tasks[key] = prefetch_task
+            with self.manager_lock:
+                self.prefetch_tasks[key] = prefetch_task
             prefetch_task.add_done_callback(lambda_callback)
-            self.manager_lock.release()
             break
 
     # TODO(Jiayi): Currently, search_range is only used for testing.

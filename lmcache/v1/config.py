@@ -125,6 +125,9 @@ class LMCacheEngineConfig:
     # When set, uses external lookup client instead of regular lookup server
     external_lookup_client: Optional[str] = None
 
+    # Set timeout(seconds) when calling prefetch
+    prefetch_timeout_secs: float = 0.1
+
     @staticmethod
     def from_defaults(
         chunk_size: int = 256,
@@ -163,6 +166,7 @@ class LMCacheEngineConfig:
         save_unfull_chunk: bool = True,
         blocking_timeout_secs: int = 10,
         external_lookup_client: Optional[str] = None,
+        prefetch_timeout_secs: float = 0.1,
     ) -> "LMCacheEngineConfig":
         # TODO (ApostaC): Add nixl config
         return LMCacheEngineConfig(
@@ -202,6 +206,7 @@ class LMCacheEngineConfig:
             save_unfull_chunk,
             blocking_timeout_secs,
             external_lookup_client,
+            prefetch_timeout_secs,
         ).validate()
 
     @staticmethod
@@ -366,6 +371,7 @@ class LMCacheEngineConfig:
         save_unfull_chunk = config.get("save_unfull_chunk", True)
 
         blocking_timeout_secs = config.get("blocking_timeout_secs", 10)
+        prefetch_timeout_secs = config.get("prefetch_timeout_secs", 0.1)
 
         external_lookup_client = config.get("external_lookup_client", None)
 
@@ -417,6 +423,7 @@ class LMCacheEngineConfig:
                 save_unfull_chunk,
                 blocking_timeout_secs,
                 external_lookup_client,
+                prefetch_timeout_secs,
             )
             .validate()
             .log_config()
@@ -609,6 +616,11 @@ class LMCacheEngineConfig:
         config.external_lookup_client = parse_env(
             get_env_name("external_lookup_client"), config.external_lookup_client
         )
+        config.prefetch_timeout_secs = to_float(
+            parse_env(
+                get_env_name("prefetch_timeout_secs"), config.prefetch_timeout_secs
+            )
+        )
         return config.validate().log_config()
 
     def to_original_config(self) -> orig_config.LMCacheEngineConfig:
@@ -693,6 +705,7 @@ class LMCacheEngineConfig:
             "save_unfull_chunk": self.save_unfull_chunk,
             "blocking_timeout_secs": self.blocking_timeout_secs,
             "external_lookup_client": self.external_lookup_client,
+            "prefetch_timeout_secs": self.prefetch_timeout_secs,
         }
         logger.info(f"LMCache Configuration: {config_dict}")
 

@@ -14,7 +14,7 @@
 
 # Standard
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, List, Optional, Union
 
 # Third Party
 from vllm.config import VllmConfig
@@ -914,3 +914,10 @@ class LMCacheConnectorV1Impl:
             }
 
         return 0, return_params
+
+    def prefetch(
+        self,
+        tokens: Union[torch.Tensor, List[int]],
+        mask: Optional[torch.Tensor] = None,
+    ):
+        return self.lmcache_engine.prefetch(tokens, mask)
