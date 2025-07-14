@@ -44,7 +44,7 @@ elif [[ $1 == "decoder" ]]; then
         LMCACHE_CONFIG_FILE=$decode_config_file \
         VLLM_ENABLE_V1_MULTIPROCESSING=1 \
         VLLM_WORKER_MULTIPROC_METHOD=spawn \
-        CUDA_VISIBLE_DEVICES=2 \
+        CUDA_VISIBLE_DEVICES=1 \
         vllm serve $MODEL \
         --port 7200 \
         --disable-log-requests \
