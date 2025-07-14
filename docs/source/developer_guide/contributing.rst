@@ -64,6 +64,7 @@ Once you've created a pull request, maintainers will review your code and may ma
 - Follow the project coding conventions for consistency and best practices
 - Include sufficient tests to maintain robustness of the code
 - Add or update documentation in :code:`/docs` if PR modifies user facing behavior to help people using LMCache
+- Run coding style checks to ensure consistency and correctness
 - Run tests locally and ensure they pass and don't break the existing code base
 - Write detailed commit messages to help future contributors and maintainers
 - Break large changes into a logical series of smaller patches, which are easy to understand individually and combine to solve a broader issue
@@ -100,31 +101,7 @@ The first step is to install the necessary Python packages required for developm
     pip install -r requirements/lint.txt
     pip install -r requirements/test.txt
 
-Before pushing changes to GitHub, you need to run the tests and coding style checks as shown below.
-
-Unit tests
-^^^^^^^^^^
-
-.. note::
-    The Unit tests require `NVIDIA Inference Xfer Library (NIXL) <https://github.com/ai-dynamo/nixl>`_ to be installed. Please follow the details in the NIXL GitHub repo to install.
-
-When making changes, run the tests before pushing the changes. Running unit tests ensures your contributions do not break exiting code. We use the `pytest <https://docs.pytest.org/>`_ framework to run unit tests. The framework is setup to run all files in the `tests <https://github.com/LMCache/LMCache/tree/dev/tests>`_ directory which have a prefix or posfix of "test".
-
-Running unit tests is as simple as:
-
-.. code-block:: bash
-
-    pytest
-
-By default, all tests found within the tests directory are run. However, specific unit tests can run by passing filenames, classes and/or methods to `pytest`. The following example invokes a single test method "test_lm_connector" that is declared in the "tests/test_connector.py" file:
-
-.. code-block:: bash
-
-    pytest tests/test_connector.py::test_lm_connector
-
-.. warning::
-
-    Currently, unit tests do not run on non Linux NVIDIA GPU platforms. If you don't have access to this platform to run unit tests locally, rely on the continuous integration system to run the tests for now.
+Before pushing changes to GitHub, you need to run the coding style checks and unit tests as shown below.
 
 Coding style
 ^^^^^^^^^^^^
@@ -152,6 +129,38 @@ It will run automatically when you add a commit. You can also run it manually on
 .. note::
 
     For all new code added, please write docstrings in `sphinx-doc format <https://sphinx-rtd-tutorial.readthedocs.io/en/latest/docstrings.html>`_.
+
+Unit tests
+^^^^^^^^^^
+
+.. note::
+    The Unit tests require `NVIDIA Inference Xfer Library (NIXL) <https://github.com/ai-dynamo/nixl>`_ to be installed. Please follow the details in the NIXL GitHub repo to install.
+    The NIXL unit tests also require `vLLM <https://github.com/vllm-project/vllm>`_ and `msgpack <https://github.com/msgpack/msgpack-python/>`_.
+    If you are unable to install NIXL you can circumvent the NIXL unit tests by using the following pytest flags: `--ignore=tests/disagg` and  `--ignore=tests/v1/test_pos_kernels.py`.
+
+When making changes, run the tests before pushing the changes. Running unit tests ensures your contributions do not break exiting code. We use the `pytest <https://docs.pytest.org/>`_ framework to run unit tests. The framework is setup to run all files in the `tests <https://github.com/LMCache/LMCache/tree/dev/tests>`_ directory which have a prefix or posfix of "test".
+
+Running unit tests is as simple as:
+
+.. code-block:: bash
+
+    pytest
+
+Alternatively, running unit tests (minus NIXL tests) is as follows:
+
+.. code-block:: bash
+
+    pytest --ignore=tests/disagg --ignore=tests/v1/test_pos_kernels.py
+
+By default, all tests found within the tests directory are run. However, specific unit tests can run by passing filenames, classes and/or methods to `pytest`. The following example invokes a single test method "test_lm_connector" that is declared in the "tests/test_connector.py" file:
+
+.. code-block:: bash
+
+    pytest tests/test_connector.py::test_lm_connector
+
+.. warning::
+
+    Currently, unit tests do not run on non Linux NVIDIA GPU platforms. If you don't have access to this platform to run unit tests locally, rely on the continuous integration system to run the tests for now.
 
 Building the docs
 ^^^^^^^^^^^^^^^^^
