@@ -12,16 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from vllm.distributed.parallel_state import (
-    get_tensor_model_parallel_rank,
-)
-
 # Standard
 from concurrent.futures import Future
 from typing import List, Optional
 import threading
 
 # Third Party
+from vllm.distributed.parallel_state import (
+    get_tensor_model_parallel_rank,
+)
 import torch
 
 # First Party
@@ -144,9 +143,16 @@ class NixlBackend(StorageBackendInterface):
         tp_rank = get_tensor_model_parallel_rank()
 
         transfer_spec_per_engine = transfer_spec
-        transfer_spec_per_engine.receiver_info.receiver_init_port = transfer_spec.receiver_info.receiver_init_port[tp_rank]
-        transfer_spec_per_engine.receiver_info.receiver_alloc_port = transfer_spec.receiver_info.receiver_alloc_port[tp_rank]
-        transfer_spec_per_engine.receiver_info.receiver_id = transfer_spec_per_engine.receiver_info.receiver_host + str(transfer_spec_per_engine.receiver_info.receiver_init_port)
+        transfer_spec_per_engine.receiver_info.receiver_init_port = (
+            transfer_spec.receiver_info.receiver_init_port[tp_rank]
+        )
+        transfer_spec_per_engine.receiver_info.receiver_alloc_port = (
+            transfer_spec.receiver_info.receiver_alloc_port[tp_rank]
+        )
+        transfer_spec_per_engine.receiver_info.receiver_id = (
+            transfer_spec_per_engine.receiver_info.receiver_host
+            + str(transfer_spec_per_engine.receiver_info.receiver_init_port)
+        )
 
         self._nixl_channel.prepare_send(
             keys=keys,

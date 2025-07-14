@@ -12,10 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from vllm.distributed.parallel_state import (
-    get_tensor_model_parallel_rank,
-)
-
 # Standard
 from dataclasses import dataclass
 from queue import Queue
@@ -26,6 +22,9 @@ import uuid
 
 # Third Party
 from nixl._api import nixl_agent as NixlAgent
+from vllm.distributed.parallel_state import (
+    get_tensor_model_parallel_rank,
+)
 import msgspec
 import torch
 import zmq
@@ -691,7 +690,9 @@ class NixlChannel:
             tp_rank = get_tensor_model_parallel_rank()
             nixl_config_per_engine = nixl_config
             nixl_config_per_engine.peer_init_port = nixl_config.peer_init_port[tp_rank]
-            nixl_config_per_engine.peer_alloc_port = nixl_config.peer_alloc_port[tp_rank]
+            nixl_config_per_engine.peer_alloc_port = nixl_config.peer_alloc_port[
+                tp_rank
+            ]
             self._receiver = NixlReceiver(nixl_config_per_engine, config, backend)
 
     def _check_sender(self):
