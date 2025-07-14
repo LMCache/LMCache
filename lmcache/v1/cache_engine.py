@@ -215,7 +215,6 @@ class LMCacheEngine:
         # memory_objs might be empty, directly return to avoid sending tokens
         if not memory_objs:
             return
-
         self.gpu_connector.batched_from_gpu(memory_objs, starts, ends, **kwargs)
         offload_time += time.perf_counter() - t
 
