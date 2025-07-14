@@ -16,6 +16,7 @@
 from dataclasses import dataclass
 from queue import Queue
 from typing import Any, Optional, Union
+import copy
 import threading
 import time
 import uuid
@@ -208,6 +209,8 @@ class NixlSender:
         self._proxy_side_channel = self._context.socket(zmq.PUSH)
         self._proxy_side_channel.connect(get_zmq_path(proxy_url, protocol="tcp"))
 
+        self.tp_rank = tp_rank
+
     def prepare_send(
         self,
         keys: list[CacheEngineKey],
@@ -218,9 +221,20 @@ class NixlSender:
         Put the sender task into the request queue.
         """
 
+        receiver_info = copy.deepcopy(transfer_spec.receiver_info)
+        receiver_info.receiver_init_port = (
+            transfer_spec.receiver_info.receiver_init_port[self.tp_rank]
+        )
+        receiver_info.receiver_alloc_port = (
+            transfer_spec.receiver_info.receiver_alloc_port[self.tp_rank]
+        )
+        receiver_info.receiver_id = transfer_spec.receiver_info.receiver_host + str(
+            receiver_info.receiver_init_port
+        )
+
         sender_task = NixlSenderTask(
             req_id=transfer_spec.req_id,
-            receiver_info=transfer_spec.receiver_info,
+            receiver_info=receiver_info,
             keys=keys,
             mem_objs=mem_objs,
         )
@@ -229,13 +243,13 @@ class NixlSender:
             "Preparing to send %s objs with request ID: %s to receiver: %s",
             len(sender_task.keys),
             sender_task.req_id,
-            sender_task.receiver_info,
+            receiver_info,
         )
 
         # self.req_queue.put(sender_task)
 
         req_id = sender_task.req_id
-        receiver_id = sender_task.receiver_info.receiver_id
+        receiver_id = receiver_info.receiver_id
 
         # NOTE (Jiayi): Currently, a sender needs to connect to
         # 3 side channels:
@@ -248,7 +262,6 @@ class NixlSender:
 
         # NOTE (Jiayi): `_init_all_comm` checks and initializes
         # _alloc_side_channel and nixl connection.
-        receiver_info = sender_task.receiver_info
         if not self._check_init(receiver_info):
             self._init_all_comm(receiver_info)
 
