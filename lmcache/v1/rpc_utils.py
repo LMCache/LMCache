@@ -17,7 +17,6 @@ from typing import TYPE_CHECKING, Optional
 import socket
 
 # Third Party
-import vllm.envs as envs
 import zmq
 import zmq.asyncio
 
@@ -92,6 +91,9 @@ def get_zmq_rpc_path_lmcache(
     tp_rank: int = 0,
 ) -> str:
     """Get the ZMQ RPC path for LMCache lookup communication."""
+    # Third Party
+    import vllm.envs as envs
+
     base_url = envs.VLLM_RPC_BASE_PATH
 
     # Default to 0 if not configured
