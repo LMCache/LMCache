@@ -685,9 +685,11 @@ class NixlChannel:
 
         self._backend = backend
 
+        # Third Party
         from vllm.distributed.parallel_state import (
-                get_tensor_model_parallel_rank,
-            )
+            get_tensor_model_parallel_rank,
+        )
+
         tp_rank = get_tensor_model_parallel_rank()
 
         if nixl_config.role == NixlRole.SENDER:
