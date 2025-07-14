@@ -105,8 +105,8 @@ class NixlConfigXpYd:
     role: Union[NixlRole, str]
 
     peer_host: str
-    peer_init_port: int
-    peer_alloc_port: int
+    peer_init_port: list[int]
+    peer_alloc_port: list[int]
 
     proxy_host: str
     proxy_port: int

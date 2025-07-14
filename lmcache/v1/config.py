@@ -357,7 +357,7 @@ class LMCacheEngineConfig:
             if isinstance(value, str):
                 return [int(item) for item in map(str.strip, value.split(",")) if item]
             return value
-        
+
         enable_xpyd = config.get("enable_xpyd", False)
         nixl_peer_host = config.get("nixl_peer_host", None)
         nixl_peer_init_port = _parse_ports(config.get("nixl_peer_init_port"))
@@ -489,7 +489,7 @@ class LMCacheEngineConfig:
             return float(value)
 
         def to_int_list(
-            value: Optional[Union[str, int, list[Any]]]
+            value: Optional[Union[str, int, list[Any]]],
         ) -> Optional[list[int]]:
             if value is None:
                 return None
@@ -499,7 +499,7 @@ class LMCacheEngineConfig:
                 return [value]
             parts = [p.strip() for p in str(value).split(",") if p.strip()]
             return [int(p) for p in parts]
-        
+
         def to_dict(value: Optional[str]) -> Optional[dict]:
             if value is None:
                 return None

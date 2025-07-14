@@ -125,8 +125,10 @@ class StatsCalculator:
 stats_calculator = StatsCalculator()
 counter = 0
 
+
 def csv_ints(s):
     return [int(x) for x in s.split(",")]
+
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -138,11 +140,7 @@ def parse_args():
     parser.add_argument("--num-prefillers", type=int, default=1)
     parser.add_argument("--decoder-host", type=str, default="localhost")
     parser.add_argument("--decoder-port", type=int, default=8200)
-    parser.add_argument(
-        "--decoder-init-port",
-        type=csv_ints,
-        default=[8300]
-    )
+    parser.add_argument("--decoder-init-port", type=csv_ints, default=[8300])
     parser.add_argument("--decoder-alloc-port", type=csv_ints, default=[8400])
 
     parser.add_argument("--num-decoders", type=int, default=1)
