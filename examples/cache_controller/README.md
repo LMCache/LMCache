@@ -1,5 +1,5 @@
-# LMCache Controller (lookup as an example)
-This is an example to demonstrate how to check the existence of a request's KV cache in an LMCacheEngine externally.
+# LMCache Controller
+This is an example to demonstrate how to check the existence of and pin a request's KV cache in an LMCacheEngine externally.
 
 ## Prerequisites
 Your server should have at least 1 GPU.  
@@ -48,3 +48,17 @@ You should be able to see a return message:
 ```
 
 `lmcache_default_instance` indicates the `instance_id` and `("cpu", 12)` indicates the cache location and matched prefix length.
+
+5. Pin a request's KV cache in the system:
+```bash
+curl -X POST http://localhost:9000/pin \
+  -H "Content-Type: application/json" \
+  -d '{
+    "tokens": [128000, 849, 21435, 279, 26431, 315, 85748, 6636, 304, 4221, 4211, 13]
+  }'
+```
+You should be able to see a return message indicating the KV cache has been successfully pinned in the system:
+
+```plaintext
+{"success": true}
+```
