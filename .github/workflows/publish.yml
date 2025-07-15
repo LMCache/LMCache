@@ -192,7 +192,8 @@ jobs:
 
             - name: Build lmcache/vllm-openai container image with latest releases
               run: |
-                docker build \
+                docker buildx build \
+                --platform linux/amd64,linux/arm64 \
                 --build-arg CUDA_VERSION=12.8 --build-arg UBUNTU_VERSION=24.04 \
                 --target image-release \
                 --tag lmcache/vllm-openai:latest --tag lmcache/vllm-openai:${{ env.LATEST_TAG }} \

@@ -12,7 +12,17 @@ ARG UBUNTU_VERSION=24.04
 #################### BASE BUILD IMAGE ####################
 # Prepare basic build environment
 
-FROM nvcr.io/nvidia/cuda-dl-base:25.03-cuda${CUDA_VERSION}-devel-ubuntu${UBUNTU_VERSION} AS base
+# Use platform-specific base image
+ARG TARGETPLATFORM
+ARG BUILDPLATFORM
+ARG TARGETARCH
+
+# Select base image based on architecture
+FROM nvcr.io/nvidia/cuda-dl-base:25.03-cuda${CUDA_VERSION}-devel-ubuntu${UBUNTU_VERSION} AS base-amd64
+FROM nvcr.io/nvidia/cuda-dl-base:25.03-cuda${CUDA_VERSION}-devel-ubuntu${UBUNTU_VERSION} AS base-arm64
+
+# Use the appropriate base image
+FROM base-${TARGETARCH} AS base
 
 ARG CUDA_VERSION
 ARG PYTHON_VERSION=3.12
@@ -44,7 +54,7 @@ RUN apt-get update -y && \
     python${PYTHON_VERSION}-dev \
     cmake
 RUN export LD_LIBRARY_PATH=/usr/local/cuda/compat/lib.real:$LD_LIBRARY_PATH
-RUN export NIXL_PLUGIN_DIR=/usr/local/nixl/lib/x86_64-linux-gnu/plugins
+RUN export NIXL_PLUGIN_DIR=/usr/local/nixl/lib/${TARGETARCH}-linux-gnu/plugins
 RUN cd /workspace
 RUN git clone https://github.com/ai-dynamo/nixl && \
     cd nixl && \
@@ -61,13 +71,13 @@ RUN cd /workspace/nixl && \
     cd build && \
     ninja && \
     ninja install
-RUN echo "/usr/local/nixl/lib/x86_64-linux-gnu" > /etc/ld.so.conf.d/nixl.conf
-RUN echo "/usr/local/nixl/lib/x86_64-linux-gnu/plugins" >> /etc/ld.so.conf.d/nixl.conf
+RUN echo "/usr/local/nixl/lib/${TARGETARCH}-linux-gnu" > /etc/ld.so.conf.d/nixl.conf
+RUN echo "/usr/local/nixl/lib/${TARGETARCH}-linux-gnu/plugins" >> /etc/ld.so.conf.d/nixl.conf
 RUN ldconfig
 RUN cd /workspace/nixl/ && \
     . /opt/venv/bin/activate && \
     uv build --wheel --out-dir /tmp/dist && \
-    uv pip install /tmp/dist/nixl-0.3.0-cp312-cp312-linux_x86_64.whl
+    uv pip install /tmp/dist/nixl-0.3.0-cp312-cp312-linux_${TARGETARCH}.whl
 
 # Install runtime dependencies
 COPY ./requirements/common.txt common.txt
