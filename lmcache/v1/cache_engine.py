@@ -414,7 +414,9 @@ class LMCacheEngine:
         reordered_memory_objs = []
         reordered_starts = []
         reordered_ends = []
-        for start, end, key in self.token_database.process_tokens(tokens, mask):
+        for start, end, key in self.token_database.process_tokens(
+            tokens=tokens, mask=mask
+        ):
             assert isinstance(key, CacheEngineKey)
 
             if key in self.lookup_cache:
@@ -492,7 +494,7 @@ class LMCacheEngine:
 
         retrieved_tokens = torch.sum(ret_mask)
         self.stats_monitor.on_retrieve_finished(monitor_req_id, retrieved_tokens)
-        logger.debug(
+        logger.info(
             f"Retrieved {retrieved_tokens} "
             f"out of {num_required_tokens} "
             f"out of total {len(tokens)} tokens"

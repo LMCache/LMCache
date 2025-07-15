@@ -93,8 +93,7 @@ class GPUConnectorInterface(metaclass=abc.ABCMeta):
 
     def initialize_kvcaches_ptr(self, **kwargs):
         """Initialize the kvcaches pointers if not already initialized."""
-        if self.kvcaches is None and "kvcaches" in kwargs:
-            self.kvcaches = kwargs["kvcaches"]
+        self.kvcaches = kwargs["kvcaches"]
 
 
 class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
