@@ -6,3 +6,4 @@ setuptools>=77.0.3,<81.0.0
 setuptools_scm>=8
 torch==2.7.0 # Corresponds to the version used by vLLM main branch
 wheel
+xxhash==3.5.0
