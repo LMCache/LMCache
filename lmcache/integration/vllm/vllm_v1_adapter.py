@@ -258,12 +258,19 @@ class ReqMeta:
         assert slot_mapping.dtype == torch.long  # TODO: this could be removed
 
         # For load operation: check whether the request is scheduled to load
-        if load_spec is not None and load_spec.can_load:
-            logger.debug(
-                "Scheduled to load %d tokens for request %s",
-                load_spec.lmcache_cached_tokens,
-                tracker.req_id,
-            )
+        if load_spec is not None:
+            if load_spec.can_load:
+                logger.debug(
+                    "Scheduled to load %d tokens for request %s",
+                    load_spec.lmcache_cached_tokens,
+                    tracker.req_id,
+                )
+            else:
+                logger.debug(
+                    "Scheduled to unpin %d tokens for request %s",
+                    load_spec.lmcache_cached_tokens,
+                    tracker.req_id,
+                )
         else:
             # Do not load if not in `can_load` state
             load_spec = None
@@ -413,12 +420,8 @@ class LMCacheConnectorV1Impl:
 
         assert self.lmcache_engine is not None
 
-        for idx, request in enumerate(metadata.requests):
-            if request.load_spec is None:
-                continue
-
         self.layerwise_retrievers = []
-        for idx, request in enumerate(metadata.requests):
+        for request in metadata.requests:
             if request.load_spec is None:
                 continue
 
@@ -435,53 +438,59 @@ class LMCacheConnectorV1Impl:
             )
             token_mask[:masked_token_count] = False
 
-            lmcache_cached_tokens = request.load_spec.lmcache_cached_tokens
-            if self.use_layerwise:
-                sync = True
-                # NOTE(Jiayi): Perform blending before layerwise prefix caching
-                if self.enable_blending:
-                    # TODO(Jiayi): Need to make prefix caching and blending compatible
-                    self.blender.blend(
-                        tokens[:lmcache_cached_tokens],
-                        token_mask[:lmcache_cached_tokens],
-                        kvcaches=kvcaches,
-                        slot_mapping=slot_mapping[:lmcache_cached_tokens],
-                    )
+            load_spec = request.load_spec
+            lmcache_cached_tokens = load_spec.lmcache_cached_tokens
+            if load_spec.can_load:
+                if self.use_layerwise:
+                    sync = True
+                    # NOTE(Jiayi): Perform blending before layerwise prefix caching
+                    if self.enable_blending:
+                        # TODO(Jiayi): Need to make prefix caching and
+                        # blending compatible
+                        self.blender.blend(
+                            tokens[:lmcache_cached_tokens],
+                            token_mask[:lmcache_cached_tokens],
+                            kvcaches=kvcaches,
+                            slot_mapping=slot_mapping[:lmcache_cached_tokens],
+                        )
+                    else:
+                        layerwise_retriever = self.lmcache_engine.retrieve_layer(
+                            tokens[:lmcache_cached_tokens],
+                            token_mask[:lmcache_cached_tokens],
+                            kvcaches=kvcaches,
+                            slot_mapping=slot_mapping[:lmcache_cached_tokens],
+                            sync=sync,
+                        )
+                        # NOTE: retrieve for two layers at the first layer
+                        next(layerwise_retriever)
+                        next(layerwise_retriever)
+                        self.layerwise_retrievers.append(layerwise_retriever)
                 else:
-                    layerwise_retriever = self.lmcache_engine.retrieve_layer(
+                    ret_token_mask = self.lmcache_engine.retrieve(
                         tokens[:lmcache_cached_tokens],
                         token_mask[:lmcache_cached_tokens],
                         kvcaches=kvcaches,
                         slot_mapping=slot_mapping[:lmcache_cached_tokens],
-                        sync=sync,
                     )
-                    # NOTE: retrieve for two layers at the first layer
-                    next(layerwise_retriever)
-                    next(layerwise_retriever)
-                    self.layerwise_retrievers.append(layerwise_retriever)
-            else:
-                ret_token_mask = self.lmcache_engine.retrieve(
-                    tokens[:lmcache_cached_tokens],
-                    token_mask[:lmcache_cached_tokens],
-                    kvcaches=kvcaches,
-                    slot_mapping=slot_mapping[:lmcache_cached_tokens],
-                )
 
-                # Check the result
-                num_retrieved_tokens = ret_token_mask.sum().item()
-                num_expected_tokens = (
-                    lmcache_cached_tokens - request.load_spec.vllm_cached_tokens
-                )
-                if num_retrieved_tokens < num_expected_tokens:
-                    logger.error(
-                        "The number of retrieved tokens is less than the "
-                        "expected number of tokens! This should not happen!"
+                    # Check the result
+                    num_retrieved_tokens = ret_token_mask.sum().item()
+                    num_expected_tokens = (
+                        lmcache_cached_tokens - request.load_spec.vllm_cached_tokens
                     )
-                    logger.error(
-                        "Num retrieved tokens: %d, num expected tokens: %d",
-                        num_retrieved_tokens,
-                        num_expected_tokens,
-                    )
+                    if num_retrieved_tokens < num_expected_tokens:
+                        logger.error(
+                            "The number of retrieved tokens is less than the "
+                            "expected number of tokens! This should not happen!"
+                        )
+                        logger.error(
+                            "Num retrieved tokens: %d, num expected tokens: %d",
+                            num_retrieved_tokens,
+                            num_expected_tokens,
+                        )
+            # always unpin since vllm scheduler lookup pinned lmcache_cached_tokens
+            # unpin() works for layerwise and non-layerwise
+            self.lmcache_engine.unpin(tokens[:lmcache_cached_tokens])
 
     @_lmcache_nvtx_annotate
     def wait_for_layer_load(self, layer_name: str) -> None:
@@ -743,9 +752,13 @@ class LMCacheConnectorV1Impl:
             num_external_hit_tokens,
             need_to_allocate,
         )
-        if need_to_allocate <= 0:
+
+        if num_external_hit_tokens == 0:
             return 0
 
+        # NOTE: we create a LoadSpec even if need_to_allocate <= 0 as long
+        # as num_external_hit_tokens > 0 because this means some tokens
+        # were pinned by lookup()
         self.load_specs[request.request_id] = LoadSpec(
             vllm_cached_tokens=num_computed_tokens,
             lmcache_cached_tokens=num_external_hit_tokens,
@@ -755,8 +768,7 @@ class LMCacheConnectorV1Impl:
         # TODO: Align to vLLM block size. Should test whether it can be removed
         # need_to_allocate = need_to_allocate // self._block_size * \
         #        self._block_size
-
-        return need_to_allocate
+        return 0 if need_to_allocate < 0 else need_to_allocate
 
     @_lmcache_nvtx_annotate
     def update_state_after_alloc(self, request: "Request", num_external_tokens: int):
@@ -774,7 +786,7 @@ class LMCacheConnectorV1Impl:
             return
 
         if num_external_tokens == 0:
-            # No need to load anything
+            # No need to load anything but always need to unpin
             self.load_specs[request.request_id].can_load = False
             return
 
@@ -817,6 +829,7 @@ class LMCacheConnectorV1Impl:
 
         for finished_req_id in scheduler_output.finished_req_ids:
             self._request_trackers.pop(finished_req_id, None)
+            self._requests_in_step.pop(finished_req_id, None)
 
         for request in scheduler_output.scheduled_new_reqs:
             # Right now, we only load KV for new requests

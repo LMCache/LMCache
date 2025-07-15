@@ -463,8 +463,6 @@ class LMCacheEngine:
             # will immediately remove the object from itself
             if self.remove_after_retrieve:
                 self.storage_manager.remove(key)
-            else:
-                self.storage_manager.batched_unpin([key])
 
         retrieved_tokens = torch.sum(ret_mask)
         self.stats_monitor.on_retrieve_finished(monitor_req_id, retrieved_tokens)
@@ -560,10 +558,6 @@ class LMCacheEngine:
                 mem_obj_consumer.send(mem_objs_layer)
                 to_count_down.extend(mem_objs_layer)
 
-            # TODO(Jiayi): Need to be done in a modular way
-            for keys_layer in keys_layer_major:
-                self.storage_manager.batched_unpin(keys_layer)
-
             for mem_obj in to_count_down:
                 mem_obj.ref_count_down()
         else:
@@ -586,6 +580,18 @@ class LMCacheEngine:
         )
 
         yield ret_mask
+
+    @_lmcache_nvtx_annotate
+    def unpin(self, tokens: torch.Tensor, mask: Optional[torch.Tensor] = None) -> None:
+        """Unpin the tokens from the cache engine"""
+        for _, _, key in self.token_database.process_tokens(tokens, mask):
+            assert isinstance(key, CacheEngineKey)
+            if self.use_layerwise:
+                keys_multi_layer = key.split_layers(self.num_layers)
+                # NOTE: lookup only pins the first layer
+                self.storage_manager.batched_unpin([keys_multi_layer[0]])
+            else:
+                self.storage_manager.batched_unpin([key])
 
     @_lmcache_nvtx_annotate
     def prefetch(
@@ -632,16 +638,12 @@ class LMCacheEngine:
             assert isinstance(key, CacheEngineKey)
 
             if self.use_layerwise:
-                # TODO(Jiayi): Optimize by checking only the existence of the key
-                # of one layer
+                # Optimize by checking only the existence of the key of one layer
                 key_all_layers = key.split_layers(self.num_layers)
-                for key_single_layer in key_all_layers:
-                    if not self.storage_manager.contains(
-                        key_single_layer, search_range, pin
-                    ):
-                        if search_p2p and self.lookup_server.lookup(key_single_layer):
-                            continue
-                        return old_end
+                if self.storage_manager.contains(key_all_layers[0], search_range, pin):
+                    if search_p2p and self.lookup_server.lookup(key_all_layers[0]):
+                        continue
+                    return old_end
                 old_end = end
             else:
                 if self.storage_manager.contains(key, search_range, pin):
