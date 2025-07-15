@@ -1,0 +1,9 @@
+env:
+  DOCKER_BUILDKIT: 1
+
+steps:
+  - label: ":rocket: vLLM Integration Tests"
+    timeout_in_minutes: 60
+    commands:
+      - chmod +x scripts/vllm-integration-tests.sh
+      - scripts/vllm-integration-tests.sh --hf-token=$HF_TOKEN --server-wait-timeout=240

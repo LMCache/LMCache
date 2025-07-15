@@ -57,30 +57,6 @@ def hipify_wrapper() -> None:
     assert len(hipified_sources) == len(extra_files)
 
 
-# Taken from https://github.com/vllm-project/vllm/blob/main/setup.py
-def get_requirements() -> list[str]:
-    """Get Python package dependencies from requirements.txt."""
-    requirements_dir = ROOT_DIR / "requirements"
-
-    def _read_requirements(filename: str) -> list[str]:
-        with open(requirements_dir / filename) as f:
-            requirements = f.read().strip().split("\n")
-        resolved_requirements = []
-        for line in requirements:
-            if line.startswith("-r "):
-                resolved_requirements += _read_requirements(line.split()[1])
-            elif (
-                not line.startswith("--")
-                and not line.startswith("#")
-                and line.strip() != ""
-            ):
-                resolved_requirements.append(line)
-        return resolved_requirements
-
-    requirements = _read_requirements("common.txt")
-    return requirements
-
-
 def cuda_extension() -> tuple[list, dict]:
     # Third Party
     from torch.utils import cpp_extension  # Import here
@@ -177,7 +153,6 @@ if __name__ == "__main__":
         packages=find_packages(
             exclude=("csrc",)
         ),  # Ensure csrc is excluded if it only contains sources
-        install_requires=get_requirements(),
         ext_modules=ext_modules,
         cmdclass=cmdclass,
         include_package_data=True,

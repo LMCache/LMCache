@@ -37,12 +37,8 @@ def main():
             config_data["kv_lora_rank"] = getattr(config, "kv_lora_rank", None)
             config_data["qk_rope_head_dim"] = getattr(config, "qk_rope_head_dim", None)
 
-        if (
-            args.model == "Qwen/Qwen3-4B"
-            or args.model == "Qwen/Qwen3-8B"
-            or args.model == "Qwen/Qwen3-14B"
-            or args.model == "Qwen/Qwen3-32B"
-        ):
+        # Check for Qwen3 models (fuzzy matching)
+        if "qwen/qwen3-" in args.model.lower():
             config_data["head_dim"] = getattr(config, "head_dim", None)
 
         # Convert to JSON and print

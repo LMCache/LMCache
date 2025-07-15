@@ -10,22 +10,22 @@ LMCache supports custom external storage backends via Python modules. This conne
 ## Configuration
 
 Specify module and class name by `remote_url` in `backend_type.yaml`, and the remote_url should contain
-- **Module Path**: Specify the Python module path (e.g., `adt`)
-- **Connector Name**: Provide the class name of the connector (e.g., `adt_kv_connector`)
+- **Module Path**: Specify the Python module path (e.g., `external_log_connector.lmc_external_log_connector`)
+- **Connector Name**: Provide the class name of the connector (e.g., `ExternalLogConnector`)
 
 ## Example YAML Configuration
 
-This example use adt-kv as an example which is an internal lmcache remote connector.
+This example use lmc_external_log_connector as an example which is an internal lmcache remote connector. Reference [lmc_exernal_log_connector](https://github.com/opendataio/lmc_exernal_log_connector)
 
 ```yaml
-remote_url: "external://host:0/adt.adt_kv_connector/?connector_name=AdtKVConnector"
+remote_url: "external://host:0/external_log_connector.lmc_external_log_connector/?connector_name=ExternalLogConnector"
 extra_config:
-  adt_kv_secret: "---"
-  adt_kv_connections: 4
-  adt_kv_workers: 32
+  ext_log_connector_support_ping: True
+  ext_log_connector_health_interval: 10.0
+  ext_log_connector_stuck_time: 6.0
 ```
 
-## Start vLLM with the external adt-kv connector
+## Start vLLM with the lmc_external_log_connector as an external connector
 
 ```shell
 VLLM_USE_V1=0 \
