@@ -121,3 +121,59 @@ You can get the nightly build of latest code of LMcache and vLLM as follows:
 .. code-block:: bash
 
     docker pull lmcache/vllm-openai:latest-nightly
+
+
+LMCache on ROCm
+------------------
+
+Get started through using vLLM docker image as base image
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The `AMD Infinity hub <https://hub.docker.com/r/rocm/vllm-dev>`__ for vLLM offers a prebuilt, optimized docker image designed for validating inference performance on the AMD Instinct™ MI300X accelerator.
+The image is based on the latest vLLM v1. Please check `LLM inference performance validation on AMD Instinct MI300X <https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference/benchmark-docker/vllm.html?model=pyt_vllm_llama-3.1-8b>`__ for instructions on how to use this prebuilt docker image.
+
+As of the date of writing, the steps are validated on the following environment:
+
+- docker image: rocm/vllm-dev:nightly_0624_rc2_0624_rc2_20250620
+- MI300X
+- vLLM V1
+
+.. code-block:: bash
+
+    #!/bin/bash
+    docker run -it \
+    --network=host \
+    --group-add=video \
+    --ipc=host \
+    --cap-add=SYS_PTRACE \
+    --security-opt seccomp=unconfined \
+    --device /dev/kfd \
+    --device /dev/dri \
+    -v <path_to_your_models>:/app/model \
+    -e HF_HOME="/app/model" \
+    --name lmcache_rocm \
+    rocm/vllm-dev:nightly_0624_rc2_0624_rc2_20250620 \
+    bash
+
+Install Latest LMCache from Source for ROCm
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+To install from source, clone the repository and install in editable mode.
+
+.. code-block:: bash
+
+    PYTORCH_ROCM_ARCH="{your_rocm_arch}" \
+    TORCH_DONT_CHECK_COMPILER_ABI=1 \
+    CXX=hipcc \
+    BUILD_WITH_HIP=1 \
+    python3 -m pip install --no-build-isolation -e .
+
+Example on MI300X (gfx942):
+
+.. code-block:: bash
+
+    PYTORCH_ROCM_ARCH="gfx942" \
+    TORCH_DONT_CHECK_COMPILER_ABI=1 \
+    CXX=hipcc \
+    BUILD_WITH_HIP=1 \
+    python3 -m pip install --no-build-isolation -e .
