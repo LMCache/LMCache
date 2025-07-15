@@ -158,12 +158,12 @@ Settings for Nixl-based disaggregated prefill functionality.
    * - nixl_role
      - LMCACHE_NIXL_ROLE
      - Nixl role. Values: "sender" or "receiver"
-   * - nixl_peer_host
-     - LMCACHE_NIXL_PEER_HOST
-     - Host of the Nixl peer
-   * - nixl_peer_port
-     - LMCACHE_NIXL_PEER_PORT
-     - Base port of the Nixl peer
+   * - nixl_receiver_host
+     - LMCACHE_NIXL_RECEIVER_HOST
+     - Host of the Nixl receiver
+   * - nixl_receiver_port
+     - LMCACHE_NIXL_RECEIVER_PORT
+     - Base port of the Nixl receiver
    * - nixl_buffer_size
      - LMCACHE_NIXL_BUFFER_SIZE
      - Transport buffer size for Nixl in bytes

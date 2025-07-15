@@ -113,3 +113,9 @@ lmcache/experimental/tests
 
 # Miscellaneous
 cufile.log
+
+# Generated hip files
+/csrc_hip
+/csrc/*.hip
+/csrc/*_hip.cuh
+/csrc/*_hip.cpp

@@ -15,12 +15,15 @@
  */
 
 #include <torch/all.h>
-#include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
 #include "mem_kernels.cuh"
 #include <ATen/ATen.h>
 #include <ATen/cuda/CUDAContext.h>
-#include <cuda_fp8.h>
+#ifdef USE_ROCM
+  #include <hip/hip_fp8.h>
+#else
+  #include <cuda_fp8.h>
+#endif
 
 namespace lmc {
 
@@ -118,6 +121,9 @@ __global__ void single_layer_kv_transfer_kernel(
     // [num_tokens, num_heads*head_size]
     scalar_t* __restrict__ lmc_key_value_cache,  // [num_tokens, 2,
                                                  // num_heads*head_size]
+                                                 // or
+                                                 // [2, num_tokens,
+                                                 // num_heads*head_size]
     scalar_t* __restrict__ vllm_key_cache,       // [num_blocks, block_size,
                                                  // num_heads, head_size]
     scalar_t* __restrict__ vllm_value_cache,     // [num_blocks, block_size,
@@ -163,6 +169,11 @@ __device__ __forceinline__ int64_t page_buffer_offset(
     const int scalars_per_token, const int page_buffer_size) {
   return k_or_v * page_buffer_size * scalars_per_token +
          token_idx * scalars_per_token + scalar_offset;
+}
+
+__device__ __forceinline__ int64_t page_buffer_offset_unilateral(
+    const int token_idx, const int scalar_offset, const int scalars_per_token) {
+  return token_idx * scalars_per_token + scalar_offset;
 }
 
 __device__ __forceinline__ int64_t
@@ -216,6 +227,56 @@ __global__ void load_and_reshape_multi_layer_kernel(
       key_value[lmcache_offset] = paged_buffer_ptr[vllm_offset];
     else  // 0 is LMCache to paged buffer
       paged_buffer_ptr[vllm_offset] = key_value[lmcache_offset];
+  }
+}
+
+/*
+ * handle sglang MHA offload between CPU and GPU
+ */
+template <typename scalar_t, bool DIRECTION>
+__global__ void load_and_reshape_multi_layer_kernel_unilateral(
+    scalar_t* __restrict__ key_value,           // [2, num_layer, num_tokens,
+                                                // scalars_per_token]
+    scalar_t** __restrict__ paged_buffer_ptrs,  // [num_layers *2] *
+                                                // [PAGE_BUFFER_SIZE,
+                                                // scalars_per_token]
+    const int64_t* __restrict__ slot_mapping,   // [num_tokens]
+    const int scalars_per_token, const int num_tokens, const int num_layers,
+    const int page_buffer_size) {
+  const int token_id = blockIdx.x;
+  const int layer_id = blockIdx.y;
+  const int k_or_v = blockIdx.z;
+  const int tid = threadIdx.x;
+  const int num_threads = blockDim.x;
+
+  const int64_t slot_idx = slot_mapping[token_id];
+  int64_t* key_ptr = paged_buffer_ptrs[layer_id];
+  int64_t* value_ptr = paged_buffer_ptrs[layer_id + num_layers];
+
+  if (slot_idx < 0) {
+    return;
+  }
+
+  /** Copy the data from page buffer to key_value **/
+  for (int i = tid; i < scalars_per_token; i += num_threads) {
+    const int64_t lmcache_offset =
+        key_value_offset(k_or_v, layer_id, token_id, i, scalars_per_token,
+                         num_tokens, num_layers);
+
+    const int64_t sgl_offset =
+        page_buffer_offset_unilateral(slot_idx, i, scalars_per_token);
+
+    if (k_or_v == 0) {
+      if (DIRECTION)  // 1 is paged buffer to LMCache
+        key_value[lmcache_offset] = key_ptr[sgl_offset];
+      else  // 0 is LMCache to paged buffer
+        key_ptr[sgl_offset] = key_value[lmcache_offset];
+    } else {
+      if (DIRECTION)  // 1 is paged buffer to LMCache
+        key_value[lmcache_offset] = value_ptr[sgl_offset];
+      else  // 0 is LMCache to paged buffer
+        value_ptr[sgl_offset] = key_value[lmcache_offset];
+    }
   }
 }
 
@@ -314,12 +375,90 @@ void multi_layer_kv_transfer(
   }
 }
 
+/**
+ * Quickly offload KV cache from SGLang paged memory to the offloading buffer
+ * Processes all the layers at the same time
+ *
+ * Each layer in SGLang's K/V buffer has a shape of
+ * [PAGE_BUFFER_SIZE, num_heads*head_size]
+ *
+ * Each thread block processes the copy for a token
+ * The grid size should be (num_tokens, num_layers, 2)
+ *
+ * Therefore:
+ *  - k/v -- block.z
+ *  - layer id -- block.y
+ *  - token id -- block.x
+ *  - offset within a token -- thread.x
+ *
+ * The function does:
+ * slot_id = slot_mapping[block.x]
+ * key_value[block.z, block.y, block.x, thread.x] = ptrs[block.y][block.z,
+ * slot_id, thread.x]
+ *
+ * Param:
+ *  - direction: false  means LMCache to PagedBuffer, true  means PagedBuffer to
+ * LMCache
+ */
+void multi_layer_kv_transfer_unilateral(
+    torch::Tensor&
+        key_value,  // [2, num_layer, num_tokens, num_heads*head_size] for
+                    // flash_attn [1, num_layer, num_tokens, aligned_head_size]
+                    // for MLA key/value must be on gpu/pinned cpu
+
+    const torch::Tensor& key_value_ptrs,  // [num_layers*2]
+    const torch::Tensor& slot_mapping,    // [num_tokens],
+    const torch::Device& paged_memory_device, const int page_buffer_size,
+    const bool direction, const bool use_mla) {
+  if (use_mla) {
+    return multi_layer_kv_transfer(key_value, key_value_ptrs, slot_mapping,
+                                   paged_memory_device, page_buffer_size,
+                                   direction, use_mla);
+  }
+
+  int64_t* key_value_ptr = get_kernel_ptr<int64_t, torch::Tensor>(key_value);
+  int64_t** page_buffer_ptrs =
+      get_kernel_ptr<int64_t*, const torch::Tensor>(key_value_ptrs);
+  const int64_t* slot_mapping_ptr =
+      get_kernel_ptr<const int64_t, const torch::Tensor>(slot_mapping);
+
+  int num_layers = key_value.size(1);
+  int num_tokens = slot_mapping.size(0);
+  int num_origin_elements = key_value.size(3);
+  int elements_per_qword = 8 / key_value.element_size();
+  int num_qwords = num_origin_elements / elements_per_qword;
+
+  int k_or_v_size = 2;
+
+  dim3 grid(key_value.size(2), key_value.size(1), k_or_v_size);
+  dim3 block(std::min(num_qwords, 128));
+
+  const at::cuda::OptionalCUDAGuard device_guard(paged_memory_device);
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+
+  if (not direction) {
+    lmc::load_and_reshape_multi_layer_kernel_unilateral<int64_t, false>
+        <<<grid, block, 0, stream>>>(key_value_ptr, page_buffer_ptrs,
+                                     slot_mapping_ptr, num_qwords, num_tokens,
+                                     num_layers, page_buffer_size);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+  } else {
+    lmc::load_and_reshape_multi_layer_kernel_unilateral<int64_t, true>
+        <<<grid, block, 0, stream>>>(key_value_ptr, page_buffer_ptrs,
+                                     slot_mapping_ptr, num_qwords, num_tokens,
+                                     num_layers, page_buffer_size);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+  }
+}
+
 void single_layer_kv_transfer(
     // torch::Tensor& lmc_key_cache,  // [num_tokens, num_heads*head_size]
     //  key/value must be on gpu/pinned cpu
     // torch::Tensor& lmc_value_cache,  // [num_tokens, num_heads*head_size]
 
     torch::Tensor& lmc_key_value_cache,  // [num_tokens, 2, num_heads*head_size]
+                                         // or
+                                         // [2, num_tokens, num_heads*head_size]
 
     torch::Tensor&
         vllm_key_cache,  // [num_blocks, block_size, num_heads, head_size]
@@ -327,8 +466,12 @@ void single_layer_kv_transfer(
         vllm_value_cache,  // [num_blocks, block_size, num_heads, head_size]
                            // key_cache/value_cache must be on gpu
     torch::Tensor& slot_mapping,  // [num_tokens]
-    const bool direction  // false: LMCache to PagedBuffer, true: PagedBuffer to
-                          // LMCache
+    const bool direction,   // false: LMCache to PagedBuffer, true: PagedBuffer
+                            // to LMCache
+    const bool token_major  // true: lmc_key_value_cache is
+                            // [num_tokens, 2, num_heads*head_size]
+                            // false: lmc_key_value_cache is
+                            // [2, num_tokens, num_heads*head_size]
 ) {
   // int64_t* lmc_key_cache_ptr = get_kernel_ptr<int64_t,
   // torch::Tensor>(lmc_key_cache); int64_t* lmc_value_cache_ptr =
@@ -352,8 +495,15 @@ void single_layer_kv_transfer(
 
   int block_size = vllm_key_cache.size(1);
 
-  int lmc_stride = lmc_key_value_cache.stride(0) / elements_per_entry;
-  int lmc_value_offset = lmc_key_value_cache.stride(1) / elements_per_entry;
+  int lmc_stride;
+  int lmc_value_offset;
+  if (token_major) {
+    lmc_stride = lmc_key_value_cache.stride(0) / elements_per_entry;
+    lmc_value_offset = lmc_key_value_cache.stride(1) / elements_per_entry;
+  } else {
+    lmc_stride = lmc_key_value_cache.stride(1) / elements_per_entry;
+    lmc_value_offset = lmc_key_value_cache.stride(0) / elements_per_entry;
+  }
 
   int block_stride_in_64bit = vllm_key_cache.stride(0) / elements_per_entry;
   TORCH_CHECK(vllm_key_cache.stride(0) == vllm_value_cache.stride(0));

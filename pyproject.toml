@@ -3,10 +3,11 @@
 requires = [
     "ninja",
     "packaging>=24.2",
-    "setuptools>=77.0.3,<80.0.0",
+    "setuptools>=77.0.3,<81.0.0",
     "setuptools_scm>=8",
     "torch==2.7.0",
     "wheel",
+    "xxhash==3.5.0",
 ]
 build-backend = "setuptools.build_meta"
 
@@ -125,17 +126,34 @@ warn_return_any = false
 
 follow_imports = "silent"
 
-# use a custom manylinux image for cibuildwheel that contains CUDA 12.4
 [tool.cibuildwheel]
-manylinux-x86_64-image = "docker.io/apostab/manylinux-cuda124"
+build = "cp3*-manylinux_x86_64"
+skip = "pp*"
+
+# see https://developer.nvidia.com/cuda-gpus for compute capabilities
+# "CUDA-Enabled Datacenter Products"
+# 7.0: V100
+# 7.5: T4
+# 8.0: A100, A30
+# 8.6: A40, A10, A16, A2
+# 8.9: L4, L40, L40S
+# 9.0: H100
+environment = {TORCH_CUDA_ARCH_LIST = "7.0;7.5;8.0;8.6;8.9;9.0"}
+
+# Use the PyTorch manylinux image version '2_28' that contains CUDA 12.8
+# and torch 2.7 supports (https://pypi.org/project/torch/2.7.0/#files)
+manylinux-x86_64-image = "docker.io/pytorch/manylinux2_28-builder:cuda12.8"
+
+[tool.cibuildwheel.linux]
 repair-wheel-command = """
 auditwheel repair \
-  --plat manylinux_2_17_x86_64 \
+  --plat manylinux_2_28_x86_64 \
   --exclude libtorch.so \
   --exclude libtorch_cuda.so \
   --exclude libtorch_python.so \
   --exclude libtorch_cpu.so \
   --exclude libc10.so \
   --exclude libc10_cuda.so \
+  --exclude libcudart.so.12 \
   -w {dest_dir} {wheel}
 """

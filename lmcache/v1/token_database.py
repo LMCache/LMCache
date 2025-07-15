@@ -24,7 +24,7 @@ import torch
 
 # First Party
 from lmcache.config import LMCacheEngineMetadata
-from lmcache.utils import CacheEngineKey
+from lmcache.utils import CacheEngineKey, _lmcache_nvtx_annotate
 from lmcache.v1.config import LMCacheEngineConfig
 
 
@@ -72,6 +72,7 @@ class ChunkedTokenDatabase(TokenDatabase):
     ):
         if config is not None:
             self.chunk_size = config.chunk_size
+            self.save_unfull_chunk = config.save_unfull_chunk
         self.metadata = metadata
 
     def _make_key_by_hash(self, chunk_hash: str, layer_id: Optional[int] = None):
@@ -112,7 +113,12 @@ class ChunkedTokenDatabase(TokenDatabase):
         :return: a generator of chunks of tokens, each with
                 shape [chunk_size]
         """
-        for i in range(0, len(tokens), self.chunk_size):
+        end = (
+            len(tokens)
+            if self.save_unfull_chunk
+            else (len(tokens) - len(tokens) % self.chunk_size)
+        )
+        for i in range(0, end, self.chunk_size):
             yield tokens[i : i + self.chunk_size]
 
     def _prefix_hash(
@@ -124,6 +130,7 @@ class ChunkedTokenDatabase(TokenDatabase):
             prefix_hash = self._hash(token_chunk, prefix_hash)
             yield prefix_hash
 
+    @_lmcache_nvtx_annotate
     def process_tokens(
         self,
         tokens: Union[torch.Tensor, List[int]],
@@ -164,7 +171,6 @@ class ChunkedTokenDatabase(TokenDatabase):
         token_chunks = self._chunk_tokens(tokens)
         prefix_hashes = self._prefix_hash(token_chunks)
 
-        start_idx = 0
         for chunk_id, hash_val in enumerate(prefix_hashes):
             start_idx = chunk_id * self.chunk_size
             end_idx = min(start_idx + self.chunk_size, total_len)
@@ -234,6 +240,8 @@ class SegmentTokenDatabase(TokenDatabase):
         for idx in matches:
             yield tokens[start:idx]
             start = idx + self.sep_len
+        # yield last chunk
+        yield tokens[start:]
 
     def process_tokens(
         self,
@@ -268,6 +276,7 @@ class SegmentTokenDatabase(TokenDatabase):
             "The number of Falses in the mask shouldn't "
             "be less than the length of tokens."
         )
+
         token_chunks = self._fast_split_by_subtensor(tokens)
         start_idx = 0
         for idx, token_chunk in enumerate(token_chunks):
@@ -276,6 +285,7 @@ class SegmentTokenDatabase(TokenDatabase):
             if idx > 0:
                 start_idx += self.sep_len
                 end_idx += self.sep_len
+                # end_idx = min(end_idx, len(tokens))
             if start_idx >= num_falses:
                 if make_key:
                     yield (

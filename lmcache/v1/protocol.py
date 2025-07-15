@@ -32,6 +32,7 @@ class Constants:
     CLIENT_GET = 2
     CLIENT_EXIST = 3
     CLIENT_LIST = 4
+    CLIENT_HEALTH = 5
 
     SERVER_SUCCESS = 200
     SERVER_FAIL = 400
