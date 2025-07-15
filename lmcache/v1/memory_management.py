@@ -587,10 +587,14 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
             merge_succ = False
 
         if merge_prev and merge_succ:
-            prev_block.size += curr_block.size + succ_block.size  # type: ignore
+            self.explicit_list.remove(prev_block)
             self.explicit_list.remove(succ_block)
+            prev_block.size += curr_block.size + succ_block.size  # type: ignore
+            self.explicit_list.add(prev_block)
         elif merge_prev:
+            self.explicit_list.remove(prev_block)
             prev_block.size += curr_block.size  # type: ignore
+            self.explicit_list.add(prev_block)
         elif merge_succ:
             # NOTE: logically, this won't change the order of the succ_block,
             #       so we don't need to do a "remove" and "reinsert" here
