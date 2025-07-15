@@ -302,7 +302,9 @@ class LMCacheEngine:
         memory_objs = []
         tot_token_num = 0
         kv_dtype = self.metadata.kv_dtype
-        for start, end, key in self.token_database.process_tokens(tokens, mask):
+        for start, end, key in self.token_database.process_tokens(
+            tokens=tokens, mask=mask
+        ):
             assert isinstance(key, CacheEngineKey)
 
             keys_multi_layer = key.split_layers(self.num_layers)
@@ -543,7 +545,9 @@ class LMCacheEngine:
         starts = []
         ends = []
         keys = []
-        for start, end, key in self.token_database.process_tokens(tokens, mask):
+        for start, end, key in self.token_database.process_tokens(
+            tokens=tokens, mask=mask
+        ):
             assert isinstance(key, CacheEngineKey)
 
             keys_multi_layer = key.split_layers(self.num_layers)
@@ -622,7 +626,9 @@ class LMCacheEngine:
         """Launch the prefetching process in the storage manager to load the
         KV to the local CPU memory
         """
-        for start, end, key in self.token_database.process_tokens(tokens, mask):
+        for start, end, key in self.token_database.process_tokens(
+            tokens=tokens, mask=mask
+        ):
             assert isinstance(key, CacheEngineKey)
             self.storage_manager.prefetch(key)
 
@@ -654,7 +660,7 @@ class LMCacheEngine:
         # secondary lookup on p2p (via lookup_server) if enabled
         search_p2p = self.enable_p2p and (search_range is None or "p2p" in search_range)
 
-        for start, end, key in self.token_database.process_tokens(tokens):
+        for start, end, key in self.token_database.process_tokens(tokens=tokens):
             assert isinstance(key, CacheEngineKey)
 
             if self.use_layerwise:
@@ -698,7 +704,7 @@ class LMCacheEngine:
 
         num_removed = 0
         # Only remove the caches for the given tokens
-        for start, end, key in self.token_database.process_tokens(tokens):
+        for start, end, key in self.token_database.process_tokens(tokens=tokens):
             assert isinstance(key, CacheEngineKey)
             removed = self.storage_manager.remove(key, locations)
             num_removed += removed
