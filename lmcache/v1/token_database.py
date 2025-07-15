@@ -16,11 +16,11 @@
 from typing import Iterable, List, Optional, Tuple, Union
 import abc
 import array
-import hashlib
 
 # Third Party
 from transformers import AutoTokenizer
 import torch
+import xxhash
 
 # First Party
 from lmcache.config import LMCacheEngineMetadata
@@ -85,20 +85,21 @@ class ChunkedTokenDatabase(TokenDatabase):
             chunk_hash,
         )
 
-    def _get_init_hash(self) -> str:
-        return ""
+    def _get_init_hasher(self) -> xxhash.xxh64:
+        # seed defaults to 0
+        return xxhash.xxh64()
 
-    def _hash(
+    def _hash_incremental(
         self,
         tokens: Union[torch.Tensor, List[int]],
-        prefix_hash: str,
+        hasher: xxhash.xxh64,
     ) -> str:
-        # TODO: change it to a more efficient hash function
         if isinstance(tokens, torch.Tensor):
             tokens_bytes = tokens.cpu().to(torch.uint32).numpy().tobytes()
         elif isinstance(tokens, list):
             tokens_bytes = array.array("I", tokens).tobytes()
-        return hashlib.sha256(prefix_hash.encode("ascii") + tokens_bytes).hexdigest()
+        hasher.update(tokens_bytes)
+        return hasher.hexdigest()
 
     def _chunk_tokens(
         self,
@@ -125,10 +126,10 @@ class ChunkedTokenDatabase(TokenDatabase):
         self,
         token_chunks: Iterable[Union[torch.Tensor, List[int]]],
     ) -> Iterable[str]:
-        prefix_hash = self._get_init_hash()
+        hasher = self._get_init_hasher()
         for token_chunk in token_chunks:
-            prefix_hash = self._hash(token_chunk, prefix_hash)
-            yield prefix_hash
+            hash_val = self._hash_incremental(token_chunk, hasher)
+            yield hash_val
 
     @_lmcache_nvtx_annotate
     def process_tokens(
@@ -180,7 +181,7 @@ class ChunkedTokenDatabase(TokenDatabase):
                 if make_key:
                     yield start_idx, end_idx, self._make_key_by_hash(hash_val)
                 else:
-                    yield start_idx, end_idx, hash_val
+                    yield start_idx, end_idx, str(hash_val)
 
 
 class SegmentTokenDatabase(TokenDatabase):
@@ -213,12 +214,11 @@ class SegmentTokenDatabase(TokenDatabase):
         self,
         tokens: Union[torch.Tensor, List[int]],
     ) -> str:
-        # TODO: change it to a more efficient hash function
         if isinstance(tokens, torch.Tensor):
             tokens_bytes = tokens.cpu().to(torch.uint32).numpy().tobytes()
         elif isinstance(tokens, list):
             tokens_bytes = array.array("I", tokens).tobytes()
-        return hashlib.sha256(tokens_bytes).hexdigest()
+        return xxhash.xxh64(tokens_bytes).hexdigest()
 
     def _fast_split_by_subtensor(self, tokens: torch.Tensor) -> Iterable[torch.Tensor]:
         """Match the `sep_tokens` with sliding windows"""

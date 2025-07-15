@@ -1,10 +1,8 @@
-# Standard
-import hashlib
-
 # Third Party
 from utils import dumb_metadata, dumb_metadata_with_model_name, generate_tokens
 import pytest
 import torch
+import xxhash
 
 # First Party
 from lmcache.v1.config import LMCacheEngineConfig
@@ -69,14 +67,14 @@ def test_segment_token_database(prefix_length, chunk_lengths):
     starts = [0]
     ends = [sys_length]
     sys_bytes = sys_tokens.cpu().to(torch.uint32).numpy().tobytes()
-    sys_hash = hashlib.sha256(sys_bytes).hexdigest()
+    sys_hash = xxhash.xxh64(sys_bytes).hexdigest()
     hashes = [sys_hash]
     start = sys_length + len(sep_tokens)
     for idx, chunk_length in enumerate(chunk_lengths):
         token_chunk = generate_tokens(chunk_length, "cpu", fixed=True)
 
         token_bytes = token_chunk.cpu().to(torch.uint32).numpy().tobytes()
-        token_hash = hashlib.sha256(token_bytes).hexdigest()
+        token_hash = xxhash.xxh64(token_bytes).hexdigest()
         hashes.append(token_hash)
 
         token_chunk = torch.cat([sep_tokens, token_chunk])
@@ -86,7 +84,7 @@ def test_segment_token_database(prefix_length, chunk_lengths):
         start += chunk_length + len(sep_tokens)
 
     query_bytes = query_tokens.cpu().to(torch.uint32).numpy().tobytes()
-    query_hash = hashlib.sha256(query_bytes).hexdigest()
+    query_hash = xxhash.xxh64(query_bytes).hexdigest()
     hashes.append(query_hash)
     starts.append(start)
     ends.append(start + query_length)
