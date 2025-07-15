@@ -33,9 +33,10 @@ else:
 
 # File lists
 file_paths_kivi = [
-    'results/Jun_19_1_coding/baseline_kivi/02_processed.csv',
-    'results/Jun_19_1_coding/baseline_kivi/03_processed.csv',
-    'results/Jun_19_1_coding/baseline_kivi/06_processed.csv',
+    'results/Jul_8_ablation/method/01_processed_updated.csv',
+    'results/Jul_8_ablation/method/05_processed_updated.csv',
+    'results/Jul_8_ablation/method/1_processed_updated.csv',
+    'results/Jul_8_ablation/method/10_processed_updated.csv',
 ]
 file_paths_ours = [
     'results/Jun_19_1_coding/ours/01_processed_updated.csv',
@@ -44,15 +45,19 @@ file_paths_ours = [
     'results/Jun_19_1_coding/ours/10_processed_updated.csv',
 ]
 file_paths_prefill = [
-    'results/Jun_19_1_coding/prefill/0_processed.csv'
+    'results/Jul_8_ablation/device/01_processed_updated.csv',
+    'results/Jul_8_ablation/device/05_processed_updated.csv',
+    'results/Jul_8_ablation/device/1_processed_updated.csv',
+    'results/Jul_8_ablation/device/10_processed_updated.csv',
 ]
 file_paths_streaming = [
-    'results/Jun_19_1_coding/baseline_streaming/02_processed.csv',
-    'results/Jun_19_1_coding/baseline_streaming/03_processed.csv',
-    'results/Jun_19_1_coding/baseline_streaming/06_processed.csv',
+    'results/Jul_8_ablation/rate/01_processed_updated.csv',
+    'results/Jul_8_ablation/rate/05_processed_updated.csv',
+    'results/Jul_8_ablation/rate/1_processed_updated.csv',
+    'results/Jul_8_ablation/rate/10_processed_updated.csv',
 ]
 file_paths_offload = [
-    'results/Jun_19_1_coding/prefill/1_processed.csv'
+    # 'results/Jun_19_1_coding/prefill/1_processed.csv'
 ]
 
 def load_metrics(file_list, filter_first=False):

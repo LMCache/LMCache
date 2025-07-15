@@ -1,0 +1,11 @@
+chunk_size: 1024
+local_disk: "file:///home/ubuntu/kvcache/"
+max_local_disk_size: 400
+local_cpu: True
+max_local_cpu_size: 120 # actually 100, set to 120 to avoid bubble
+alpha: 0.5
+policy: "ours"
+rate: 0.728571429
+compression: "mix"
+dataset_csv: "dataset/coding_processed_v2.csv"
+method_output_csv: "results/Jul_8_ablation/rate/05_mode.csv"

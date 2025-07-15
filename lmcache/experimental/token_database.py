@@ -9,6 +9,9 @@ from lmcache.experimental.config import LMCacheEngineConfig
 from lmcache.utils import CacheEngineKey, CacheManagerMetadata
 import os
 import pandas as pd
+import random
+
+random.seed(42)
 
 logger = init_logger(__name__)
 
@@ -315,6 +318,7 @@ class ChunkedTokenDatabase(TokenDatabase):
             )
             kivi_min_unit_quality_drop = compute_min_unit_quality_drop(kivi_score_table, token_len)
             streaming_min_unit_quality_drop = compute_min_unit_quality_drop(streaming_score_table, token_len)
+            # if random.choice([True, False]):
             if kivi_min_unit_quality_drop <= streaming_min_unit_quality_drop:
                 mode = "kivi"
                 score_table = kivi_score_table

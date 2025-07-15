@@ -55,7 +55,7 @@ def plot_selected_weights(csv_path, output_path=None):
 
     # 设置标题与坐标轴标签，增大字体
     ax.set_title('Min TTFT for F1 Score Drop < 5%', fontsize=16)
-    ax.set_xlabel('Hit Rate', fontsize=16)
+    ax.set_xlabel('Reuse Rate', fontsize=16)
     ax.set_ylabel('Average Delay (s)', fontsize=16)
 
     # 坐标轴刻度字体大小

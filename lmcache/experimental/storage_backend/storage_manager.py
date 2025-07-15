@@ -23,6 +23,9 @@ from dataclasses import dataclass
 from lmcache.experimental.storage_backend.naive_serde.kivi_serde import (
     KIVIDeserializer, KIVISerializer)
 
+import random
+random.seed(42)
+
 logger = init_logger(__name__)
 
 def compute_best_rate_and_drop(score_tables, orig_rate, length, disk_score_tables):
@@ -45,6 +48,11 @@ def compute_best_rate_and_drop(score_tables, orig_rate, length, disk_score_table
     best_rate = None
     min_total_drop = float('inf')
 
+    # if orig_rate == 1:
+    #     r_cands = random.choice(list(candidate_rates))
+    # else:
+    #     r_cands = 0
+    # for r_cand in [r_cands]:
     for r_cand in candidate_rates:
         total_drop = 0.0
 
@@ -69,6 +77,7 @@ def compute_best_rate_and_drop(score_tables, orig_rate, length, disk_score_table
                 max_score = float('-inf')
                 for rate, score in disk_score_tables[table_idx]:
                     if rate > baseline_rate:
+                    # if rate != baseline_rate:
                         continue
                     if score > max_score:
                         max_score = score
@@ -159,6 +168,8 @@ class KVCacheManager:
             return KVDecision("cpu", "kivi", self.rate), final_update_dict
             
         elif self.method == "ours":
+            # if random.choice([True, False]):
+            #     return KVDecision("disk", "kivi", key.metadata.rate), {}
             # TODO(Shaoting): save unit quality drop to speed up decisions. Also need to update the storage when retrieval.
             size_kv_cpu = sum(key.metadata.length for key in self.hot_cache.keys())
             size_kv_cpu += size
