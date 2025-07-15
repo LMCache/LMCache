@@ -15,6 +15,7 @@
 # Standard
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional
+import os
 
 # Third Party
 from vllm.config import VllmConfig
@@ -340,7 +341,7 @@ class LMCacheConnectorV1Impl:
             self.offload_server = ZMQOffloadServer(
                 self.lmcache_engine,
                 vllm_config,
-                get_tensor_model_parallel_rank(vllm_config.parallel_config),
+                get_tensor_model_parallel_rank(),
             )
 
         self.kv_caches: dict[str, torch.Tensor] = {}
@@ -372,6 +373,8 @@ class LMCacheConnectorV1Impl:
             vllm_config.parallel_config
         )
         self.current_layer = 0
+
+        self.force_skip_save = bool(os.environ.get("LMCACHE_FORCE_SKIP_SAVE", False))
 
     def _init_kv_caches_from_forward_context(self, forward_context: "ForwardContext"):
         for layer_name in forward_context.no_compile_layers:
@@ -419,6 +422,8 @@ class LMCacheConnectorV1Impl:
             return
 
         assert self.lmcache_engine is not None
+
+        self.lmcache_engine.post_init(kvcaches=kvcaches)
 
         for idx, request in enumerate(metadata.requests):
             if request.load_spec is None:
@@ -818,7 +823,7 @@ class LMCacheConnectorV1Impl:
             scheduler_output (SchedulerOutput): the scheduler output object.
         """
 
-        force_skip_save = self.kv_role == "kv_consumer"
+        force_skip_save = self.kv_role == "kv_consumer" or self.force_skip_save
 
         meta = LMCacheConnectorMetadata()
 

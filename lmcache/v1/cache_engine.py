@@ -145,12 +145,21 @@ class LMCacheEngine:
         InitializeUsageContext(config.to_original_config(), metadata)
         self.stats_monitor = LMCStatsMonitor.GetOrCreate()
 
+        self.post_inited = False
+
+    def post_init(self, **kwargs) -> None:
+        if not self.post_inited:
+            logger.info("Post-initializing LMCacheEngine")
+            self.gpu_connector.initialize_kvcaches_ptr(**kwargs)
+            self.post_inited = True
+
     @_lmcache_nvtx_annotate
     @torch.inference_mode()
     def store(
         self,
         tokens: Optional[torch.Tensor] = None,
         hashes: Optional[List[int]] = None,
+        offsets: Optional[List[int]] = None,
         mask: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> None:
@@ -179,9 +188,9 @@ class LMCacheEngine:
         elif tokens is not None:
             num_to_store_tokens = len(tokens)
         elif hashes is not None:
-            num_to_store_tokens = sum(kwargs["offsets"])
+            num_to_store_tokens = sum(offsets)
             kwargs["slot_mapping"] = torch.tensor(
-                kwargs["slot_mapping"], dtype=torch.long
+                kwargs["slot_mapping"], dtype=torch.long, device="cuda"
             )
 
         assert tokens is not None or hashes is not None, (
@@ -201,7 +210,9 @@ class LMCacheEngine:
         tot_token_num = 0
         t = time.perf_counter()
 
-        for start, end, key in self.token_database.process_tokens(tokens, hashes, mask):
+        for start, end, key in self.token_database.process_tokens(
+            tokens, hashes, offsets, mask
+        ):
             assert isinstance(key, CacheEngineKey)
             if self.storage_manager.contains(key):
                 continue
@@ -240,7 +251,7 @@ class LMCacheEngine:
             "Stored %d out of total %d tokens. size: %.4f gb, cost %.4f ms, "
             "throughput: %.4f GB/s; offload_time: %.4f ms, put_time: %.4f ms",
             tot_token_num,
-            len(tokens),
+            num_to_store_tokens,
             tot_kv_size / 1024**3,
             tot_time * 1000,
             tot_kv_size / tot_time / 1024**3,

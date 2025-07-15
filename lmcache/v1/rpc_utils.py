@@ -96,11 +96,6 @@ def get_zmq_rpc_path_lmcache(
 
     base_url = envs.VLLM_RPC_BASE_PATH
 
-    # Default to 0 if not configured
-    if vllm_config is not None:
-        rpc_port = vllm_config.kv_transfer_config.get_from_extra_config(
-            "lmcache_rpc_port", 0
-        )
     rpc_port += tp_rank
 
     logger.debug("Base URL: %s, RPC Port: %s", base_url, rpc_port)

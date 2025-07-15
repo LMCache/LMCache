@@ -22,7 +22,7 @@ import torch
 
 # First Party
 from lmcache.config import LMCacheEngineMetadata
-from lmcache.logger import init_logger
+from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey, _lmcache_nvtx_annotate
 from lmcache.v1.config import LMCacheEngineConfig
 
@@ -93,7 +93,7 @@ class ChunkedTokenDatabase(TokenDatabase):
             self.save_unfull_chunk = config.save_unfull_chunk
         self.metadata = metadata
 
-    def _make_key_by_hash(self, chunk_hash: str):
+    def _make_key_by_hash(self, chunk_hash: int):
         assert self.metadata is not None
         return CacheEngineKey(
             self.metadata.fmt,

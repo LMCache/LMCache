@@ -91,7 +91,7 @@ class GPUConnectorInterface(metaclass=abc.ABCMeta):
         """Get the shape of the data given the number of tokens."""
         raise NotImplementedError
 
-    def _initialize_kvcaches_ptr(self, **kwargs):
+    def initialize_kvcaches_ptr(self, **kwargs):
         """Initialize the kvcaches pointers if not already initialized."""
         if self.kvcaches is None and "kvcaches" in kwargs:
             self.kvcaches = kwargs["kvcaches"]
@@ -191,7 +191,7 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
         """
         assert memory_obj.tensor is not None
 
-        self._initialize_kvcaches_ptr(kwargs)
+        self.initialize_kvcaches_ptr(**kwargs)
 
         assert self.kvcaches is not None, (
             "kvcaches should be provided in kwargs or initialized beforehand."
@@ -248,7 +248,7 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
         """
         assert memory_obj.tensor is not None
 
-        self._initialize_kvcaches_ptr(kwargs)
+        self.initialize_kvcaches_ptr(**kwargs)
         assert self.kvcaches is not None, (
             "kvcaches should be provided in kwargs or initialized beforehand."
         )
@@ -395,7 +395,7 @@ class VLLMBufferLayerwiseGPUConnector(GPUConnectorInterface):
             token sequence.
         """
 
-        self._initialize_kvcaches_ptr(kwargs)
+        self.initialize_kvcaches_ptr(**kwargs)
         assert self.kvcaches is not None, (
             "kvcaches should be provided in kwargs or initialized beforehand."
         )
@@ -551,7 +551,7 @@ class VLLMBufferLayerwiseGPUConnector(GPUConnectorInterface):
         :raises ValueError: If 'slot_mapping' is not provided in kwargs.
         """
 
-        self._initialize_kvcaches_ptr(kwargs)
+        self.initialize_kvcaches_ptr(**kwargs)
         assert self.kvcaches is not None, (
             "kvcaches should be provided in kwargs or initialized beforehand."
         )
@@ -720,7 +720,7 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
         :raises ValueError: If 'slot_mapping' is not provided in kwargs.
         """
 
-        self._initialize_kvcaches_ptr(kwargs)
+        self.initialize_kvcaches_ptr(**kwargs)
         assert self.kvcaches is not None, (
             "kvcaches should be provided in kwargs or initialized beforehand."
         )
@@ -838,7 +838,7 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
         :raises ValueError: If 'slot_mapping' is not provided in kwargs.
         """
 
-        self._initialize_kvcaches_ptr(kwargs)
+        self.initialize_kvcaches_ptr(**kwargs)
         assert self.kvcaches is not None, (
             "kvcaches should be provided in kwargs or initialized beforehand."
         )
