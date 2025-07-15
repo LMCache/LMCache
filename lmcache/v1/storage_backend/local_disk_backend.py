@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, List, Optional
 import asyncio
 import os
 import threading
+import time
 
 # Third Party
 import aiofiles
@@ -71,12 +72,16 @@ class LocalDiskBackend(StorageBackendInterface):
         self.evictor = LRUEvictor(max_cache_size=config.max_local_disk_size)
 
         self.loop = loop
-        self.put_tasks: List[CacheEngineKey] = []
+        self.put_tasks: OrderedDict[CacheEngineKey, MemoryObj] = OrderedDict()
 
         self.lmcache_worker = lmcache_worker
         self.instance_id = config.lmcache_instance_id
         self.stats_monitor = LMCStatsMonitor.GetOrCreate()
         self.usage = 0
+        self.closed = False
+
+        self.put_thread = threading.Thread(target=self._put_task_worker)
+        self.put_thread.start()
 
     def __str__(self):
         return self.__class__.__name__
@@ -162,35 +167,62 @@ class LocalDiskBackend(StorageBackendInterface):
                 KVAdmitMsg(self.instance_id, key.worker_id, key.chunk_hash, "disk")
             )
 
+    def _put_task_worker(self):
+        while not self.closed:
+            if len(self.put_tasks) == 0:
+                time.sleep(0.001)
+                continue
+
+            with self.disk_lock:
+                key, memory_obj = next(iter(self.put_tasks.items()))
+                del self.put_tasks[key]
+
+            # Update cache recency
+            evict_keys, put_status = self.evictor.update_on_put(
+                self.dict, memory_obj.get_physical_size()
+            )
+            if put_status != PutStatus.ILLEGAL:
+                # evict caches
+                for evict_key in evict_keys:
+                    self.remove(evict_key)
+                if self.lookup_server is not None:
+                    self.lookup_server.batched_remove(evict_keys)
+            else:
+                memory_obj_size = memory_obj.get_physical_size()
+                logger.error(
+                    f"evictor update_on_put failed, memory_obj size: {memory_obj_size}"
+                )
+
+            self.save_bytes_to_disk(key, memory_obj)
+            self.insert_key(key, memory_obj)
+            memory_obj.ref_count_down()
+
+        # clean up after close
+        self.clear_put_tasks()
+
+    def clear_put_tasks(self, num=-1):
+        with self.disk_lock:
+            if num == -1:
+                num = len(self.put_tasks)
+            while self.put_tasks and num > 0:
+                key, memory_obj = next(iter(self.put_tasks.items()))
+                del self.put_tasks[key]
+                memory_obj.ref_count_down()
+                num -= 1
+
     def submit_put_task(
         self,
         key: CacheEngineKey,
         memory_obj: MemoryObj,
     ) -> Optional[Future]:
         assert memory_obj.tensor is not None
-
-        # Update cache recency
-        evict_keys, put_status = self.evictor.update_on_put(
-            self.dict, memory_obj.get_physical_size()
-        )
-        if put_status == PutStatus.ILLEGAL:
+        if not self.put_thread.is_alive():
+            logger.warning("put_thread is not alive")
             return None
-        # evict caches
-        for evict_key in evict_keys:
-            self.remove(evict_key)
-        if self.lookup_server is not None:
-            self.lookup_server.batched_remove(evict_keys)
-
         memory_obj.ref_count_up()
-
-        self.disk_lock.acquire()
-        self.put_tasks.append(key)
-        self.disk_lock.release()
-
-        future = asyncio.run_coroutine_threadsafe(
-            self.async_save_bytes_to_disk(key, memory_obj), self.loop
-        )
-        return future
+        with self.disk_lock:
+            self.put_tasks[key] = memory_obj
+        return None
 
     def batched_submit_put_task(
         self, keys: List[CacheEngineKey], memory_objs: List[MemoryObj]
@@ -288,12 +320,34 @@ class LocalDiskBackend(StorageBackendInterface):
 
         memory_obj.ref_count_down()
 
-        self.disk_lock.acquire()
-        self.put_tasks.remove(key)
-        self.disk_lock.release()
+        with self.disk_lock:
+            del self.put_tasks[key]
+
+    @_lmcache_nvtx_annotate
+    @torch.inference_mode()
+    def save_bytes_to_disk(
+        self,
+        key: CacheEngineKey,
+        memory_obj: MemoryObj,
+    ) -> None:
+        """
+        Convert KV to bytes and async store bytes to disk.
+        """
+        kv_chunk = memory_obj.tensor
+        assert kv_chunk is not None
+        byte_array = memory_obj.byte_array
+        path = self._key_to_path(key)
+
+        size = len(byte_array)
+        self.usage += size
+        self.stats_monitor.update_local_storage_usage(self.usage)
+
+        with open(path, "wb") as f:
+            f.write(byte_array)
 
     # TODO(Jiayi): use `bytes_read = await f.readinto(buffer)`
     # for better performance (i.e., fewer copy)
+
     async def async_load_bytes_from_disk(
         self, path: str, dtype: torch.dtype, shape: torch.Size, fmt: MemoryFormat
     ) -> Optional[MemoryObj]:
@@ -353,3 +407,6 @@ class LocalDiskBackend(StorageBackendInterface):
             self.disk_lock.acquire()
             self.lookup_server.batched_remove(list(self.dict.keys()))
             self.disk_lock.release()
+        self.closed = True
+        if self.put_thread.is_alive():
+            self.put_thread.join()

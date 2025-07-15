@@ -185,9 +185,9 @@ def test_paged_retrieve_prefix(
             torch.cat([slot_mapping, new_slot_mapping])[:expected_length],
         )
 
+    LMCacheEngineBuilder.destroy("test")
     if backend in ["local_disk"]:
         subprocess.run(shlex.split("rm -rf local/disk_test/local_disk/"))
-    LMCacheEngineBuilder.destroy("test")
 
 
 @pytest.mark.parametrize("fmt", ["vllm"])
@@ -280,9 +280,9 @@ def test_paged_store_offset(
         slot_mapping[:expected_length],
     )
 
+    LMCacheEngineBuilder.destroy("test")
     if backend in ["local_disk"]:
         subprocess.run(shlex.split("rm -rf local/disk_test/local_disk/"))
-    LMCacheEngineBuilder.destroy("test")
 
 
 @pytest.mark.parametrize("fmt", ["vllm"])
@@ -411,12 +411,12 @@ def test_paged_mixed_retrieve(fmt, chunk_size, backend, autorelease_v1):
         kv_cache,
         slot_mapping=torch.cat([slot_mapping, new_slot_mapping]),
     )
+    # engine.close()
+    LMCacheEngineBuilder.destroy("test")
+
     """destroy local disk path"""
     if backend in ["local_disk"]:
         subprocess.run(shlex.split("rm -rf local/disk_test/local_disk/"))
-
-    # engine.close()
-    LMCacheEngineBuilder.destroy("test")
 
 
 @pytest.mark.parametrize("fmt", ["vllm"])
@@ -785,9 +785,9 @@ def test_paged_prefetch_retrieve(backend, prefetch_from, autorelease_v1):
         torch.cat([slot_mapping, new_slot_mapping])[:expected_length],
     )
 
+    LMCacheEngineBuilder.destroy("test")
     if backend in ["local_cpu_disk"]:
         subprocess.run(shlex.split("rm -rf local/disk_test/local_disk/"))
-    LMCacheEngineBuilder.destroy("test")
 
 
 @pytest.mark.parametrize("fmt", ["vllm"])
@@ -866,9 +866,9 @@ def test_paged_mem_leak(fmt, chunk_size, backend, lmserver_v1_process, autorelea
     else:
         assert tensor_memory_allocator.total_allocated_size > 0
 
+    LMCacheEngineBuilder.destroy("test")
     if "disk" in backend:
         subprocess.run(shlex.split("rm -rf local/disk_test/local_disk/"))
-    LMCacheEngineBuilder.destroy("test")
 
 
 def test_builder(autorelease_v1):
