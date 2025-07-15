@@ -181,7 +181,7 @@ class ChunkedTokenDatabase(TokenDatabase):
                 if make_key:
                     yield start_idx, end_idx, self._make_key_by_hash(hash_val)
                 else:
-                    yield start_idx, end_idx, str(hash_val)
+                    yield start_idx, end_idx, hash_val
 
 
 class SegmentTokenDatabase(TokenDatabase):
