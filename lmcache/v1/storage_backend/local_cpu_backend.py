@@ -247,7 +247,8 @@ class LocalCPUBackend(StorageBackendInterface):
                 old_mem_obj = self.hot_cache[evict_key]
                 # If the ref_count > 1, we cannot evict it as the cpu memory
                 # might be used as buffers by other storage backends
-                if old_mem_obj.get_ref_count() > 1:
+                # Also, don't evict pinned objects
+                if old_mem_obj.get_ref_count() > 1 or old_mem_obj.is_pinned:
                     continue
                 evict_keys.append(evict_key)
 
@@ -257,7 +258,9 @@ class LocalCPUBackend(StorageBackendInterface):
                 if memory_obj is not None:
                     break
         for evict_key in evict_keys:
-            self.remove(evict_key)
+            # already freed above in order to allocate new memory object
+            # this is to remove the key from the hot cache
+            self.remove(evict_key, free_obj=False)
         if self.lookup_server is not None:
             self.lookup_server.batched_remove(evict_keys)
         return memory_obj
@@ -309,7 +312,8 @@ class LocalCPUBackend(StorageBackendInterface):
                 old_mem_obj = self.hot_cache[evict_key]
                 # If the ref_count > 1, we cannot evict it as the cpu memory
                 # might be used as buffers by other storage backends
-                if old_mem_obj.get_ref_count() > 1 and not old_mem_obj.is_pinned:
+                # Also, don't evict pinned objects
+                if old_mem_obj.get_ref_count() > 1 or old_mem_obj.is_pinned:
                     continue
                 # HACK: We assume batch_size=num_layers here.
                 # We also assume if the one layer's ref_count > 1 or pinned,
@@ -334,6 +338,8 @@ class LocalCPUBackend(StorageBackendInterface):
                     break
                 old_mem_objs = []
         for evict_key in evict_keys:
+            # already freed above in order to allocate new memory objects
+            # this is to remove the key from the hot cache
             self.remove(evict_key, free_obj=False)
         if self.lookup_server is not None:
             self.lookup_server.batched_remove(evict_keys)
@@ -421,7 +427,6 @@ class LocalCPUBackend(StorageBackendInterface):
                 if memory_obj.get_ref_count() > 1:
                     continue
                 clear_keys.append(key)
-                memory_obj.ref_count_down()
 
         for key in clear_keys:
             self.remove(key)

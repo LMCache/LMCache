@@ -15,6 +15,7 @@
 
 # Standard
 from collections import deque
+from contextlib import nullcontext
 from dataclasses import dataclass
 from enum import Enum
 from typing import List, Optional, Tuple, Union
@@ -327,6 +328,14 @@ class TensorMemoryObj(MemoryObj):
     def ref_count_down(self):
         with self.lock:
             self.meta.ref_count -= 1
+            if self.meta.ref_count < 0:
+                logger.warning(
+                    f"Ref count of MemoryObj {self.meta.address}"
+                    f"is negative: {self.meta.ref_count}."
+                    "Double free occurred somewhere."
+                    "Setting ref count back to 0 as a hack but please find the bug."
+                )
+                self.meta.ref_count = 0
             if (
                 self.meta.ref_count == 0
                 and self.parent_allocator is not None
@@ -485,7 +494,7 @@ class MemoryAllocatorInterface(metaclass=abc.ABCMeta):
         dtype: Optional[torch.dtype],
         batch_size: int,
         fmt: MemoryFormat = MemoryFormat.UNDEFINED,
-    ) -> Optional[MemoryObj]:
+    ) -> Optional[List[MemoryObj]]:
         """
         Batched allocate the memory to hold a tensor of the given shape.
 
@@ -513,7 +522,7 @@ class MemoryAllocatorInterface(metaclass=abc.ABCMeta):
         raise NotImplementedError
 
     @abc.abstractmethod
-    def batched_free(self, memory_objs: List[MemoryObj]):
+    def batched_free(self, memory_objs: List[MemoryObj], update_stats: bool = True):
         """
         Frees the memory allocated for the given list of MemoryObjs.
 
@@ -756,7 +765,7 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         self.stats_monitor.update_local_cache_usage(self.total_allocated_size)
 
     @_lmcache_nvtx_annotate
-    def batched_free(self, memory_objs: List[MemoryObj]):
+    def batched_free(self, memory_objs: List[MemoryObj], update_stats: bool = True):
         """
         Batched free memory objs.
         Unlike `batched_allocate`, this function does not
@@ -805,13 +814,14 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
             if not coalesced:
                 self.explicit_list.add(new_free_block)
 
-        # TODO (Jiayi): need a flag to drop these debug ops
-        # Update debug status
-        self.total_allocated_size -= total_freed_size
-        self.num_active_allocations = max(
-            0, self.num_active_allocations - num_valid_blocks
-        )
-        self.stats_monitor.update_local_cache_usage(self.total_allocated_size)
+        if update_stats:
+            # TODO (Jiayi): need a flag to drop these debug ops
+            # Update debug status
+            self.total_allocated_size -= total_freed_size
+            self.num_active_allocations = max(
+                0, self.num_active_allocations - num_valid_blocks
+            )
+            self.stats_monitor.update_local_cache_usage(self.total_allocated_size)
 
     def memcheck(self):
         """For debug purposes.
@@ -950,6 +960,8 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
             free_block.raw_data = free_block.raw_data[:size_in_bytes]
 
         # TODO (Jiayi): need a flag to drop these debug ops
+        # NOTE (Jiayi): the following code is not thread-safe but
+        # is tolerable as this is only used for debugging purposes.
         # Update debug status
         self.num_active_allocations += 1
         self.total_allocated_size += self.align_bytes
@@ -985,7 +997,7 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
                     f"tensor({shape}, {dtype}) because "
                     "no free blocks is available"
                 )
-                self.batched_free(allocated_blocks)
+                self.batched_free(allocated_blocks, update_stats=False)
                 return None
 
             # FIXME: think about whether pareant_allocator
@@ -1001,13 +1013,15 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
             allocated_blocks.append(free_block)
 
         # TODO (Jiayi): need a flag to drop these debug ops
+        # NOTE (Jiayi): the following code is not thread-safe but
+        # is tolerable as this is only used for debugging purposes.
         # Update debug status
         self.num_active_allocations += batch_size
         self.total_allocated_size = self.num_active_allocations * self.align_bytes
         self.stats_monitor.update_local_cache_usage(self.total_allocated_size)
 
         # Allocate the block
-        return free_block
+        return allocated_blocks
 
     @_lmcache_nvtx_annotate
     def free(self, memory_obj: MemoryObj):
@@ -1022,13 +1036,15 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
         # memory_obj.invalidate()
 
         # TODO (Jiayi): need a flag to drop these debug ops
+        # NOTE (Jiayi): the following code is not thread-safe but
+        # is tolerable as this is only used for debugging purposes.
         # Update debug status
         self.total_allocated_size -= self.align_bytes
         self.num_active_allocations = max(0, self.num_active_allocations - 1)
         self.stats_monitor.update_local_cache_usage(self.total_allocated_size)
 
     @_lmcache_nvtx_annotate
-    def batched_free(self, memory_objs: List[MemoryObj]):
+    def batched_free(self, memory_objs: List[MemoryObj], update_stats: bool = True):
         """
         Batched free memory objs.
         Unlike `batched_allocate`, this function does not
@@ -1046,15 +1062,17 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
 
             self.free_blocks.append(memory_obj)
 
-        num_freed_blocks = len(memory_objs)
-
-        # TODO (Jiayi): need a flag to drop these debug ops
-        # Update debug status
-        self.total_allocated_size -= self.align_bytes * num_freed_blocks
-        self.num_active_allocations = max(
-            0, self.num_active_allocations - num_freed_blocks
-        )
-        self.stats_monitor.update_local_cache_usage(self.total_allocated_size)
+        if update_stats:
+            num_freed_blocks = len(memory_objs)
+            # TODO (Jiayi): need a flag to drop these debug ops
+            # NOTE (Jiayi): the following code is not thread-safe but
+            # is tolerable as this is only used for debugging purposes.
+            # Update debug status
+            self.total_allocated_size -= self.align_bytes * num_freed_blocks
+            self.num_active_allocations = max(
+                0, self.num_active_allocations - num_freed_blocks
+            )
+            self.stats_monitor.update_local_cache_usage(self.total_allocated_size)
 
     def memcheck(self):
         """For debug purposes.
@@ -1120,7 +1138,7 @@ class BufferAllocator(MemoryAllocatorInterface):
     def free(self, memory_obj: MemoryObj):
         return
 
-    def batched_free(self, memory_objs: List[MemoryObj]):
+    def batched_free(self, memory_objs: List[MemoryObj], update_stats: bool = True):
         return
 
     def memcheck(self):
@@ -1130,14 +1148,30 @@ class BufferAllocator(MemoryAllocatorInterface):
 class HostMemoryAllocator(MemoryAllocatorInterface):
     """Allocates memory in the pre-allocated Host memory."""
 
-    def __init__(self, size: int):
+    def __init__(self, size: int, use_paging: bool = False, **kwargs):
         """
         :param int size: The size of the pinned memory in bytes.
         """
         buffer = torch.empty(size, dtype=torch.uint8, device="cpu")
-        self.allocator = TensorMemoryAllocator(buffer)
 
-        self.host_mem_lock = threading.Lock()
+        if use_paging:
+            assert "shape" in kwargs, (
+                "shape must be specified for paged memory allocator"
+            )
+            assert "dtype" in kwargs, (
+                "dtype must be specified for paged memory allocator"
+            )
+            assert "fmt" in kwargs, "fmt must be specified for paged memory allocator"
+            self.allocator = PagedTensorMemoryAllocator(
+                tensor=buffer,
+                shape=kwargs["shape"],
+                dtype=kwargs["dtype"],
+                fmt=kwargs["fmt"],
+            )
+        else:
+            self.allocator = TensorMemoryAllocator(buffer)
+
+        self.host_mem_lock = threading.Lock() if not use_paging else nullcontext()
 
     @_lmcache_nvtx_annotate
     def allocate(
@@ -1166,7 +1200,7 @@ class HostMemoryAllocator(MemoryAllocatorInterface):
             self.allocator.free(memory_obj)
 
     @_lmcache_nvtx_annotate
-    def batched_free(self, memory_objs: List[MemoryObj]):
+    def batched_free(self, memory_objs: List[MemoryObj], update_stats: bool = True):
         with self.host_mem_lock:
             self.allocator.batched_free(memory_objs)
 
@@ -1178,15 +1212,30 @@ class HostMemoryAllocator(MemoryAllocatorInterface):
 class PinMemoryAllocator(MemoryAllocatorInterface):
     """Allocates memory in the pre-allocated pinned memory."""
 
-    def __init__(self, size: int):
+    def __init__(self, size: int, use_paging: bool = False, **kwargs):
         """
         :param int size: The size of the pinned memory in bytes.
         """
         buffer = torch.empty(size, dtype=torch.uint8, pin_memory=True)
 
-        self.allocator = TensorMemoryAllocator(buffer)
+        if use_paging:
+            assert "shape" in kwargs, (
+                "shape must be specified for paged memory allocator"
+            )
+            assert "dtype" in kwargs, (
+                "dtype must be specified for paged memory allocator"
+            )
+            assert "fmt" in kwargs, "fmt must be specified for paged memory allocator"
+            self.allocator = PagedTensorMemoryAllocator(
+                tensor=buffer,
+                shape=kwargs["shape"],
+                dtype=kwargs["dtype"],
+                fmt=kwargs["fmt"],
+            )
+        else:
+            self.allocator = TensorMemoryAllocator(buffer)
 
-        self.host_mem_lock = threading.Lock()
+        self.host_mem_lock = threading.Lock() if not use_paging else nullcontext()
 
     @_lmcache_nvtx_annotate
     def allocate(
@@ -1215,7 +1264,7 @@ class PinMemoryAllocator(MemoryAllocatorInterface):
             self.allocator.free(memory_obj)
 
     @_lmcache_nvtx_annotate
-    def batched_free(self, memory_objs: List[MemoryObj]):
+    def batched_free(self, memory_objs: List[MemoryObj], update_stats: bool = True):
         with self.host_mem_lock:
             self.allocator.batched_free(memory_objs)
 
@@ -1230,16 +1279,32 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
               (2) byte_array buffer memory.
     """
 
-    def __init__(self, size: int):
+    def __init__(self, size: int, use_paging: bool = False, **kwargs):
         """
         :param int size: The size of the pinned memory in bytes.
         """
         buffer = torch.empty(size, dtype=torch.uint8, pin_memory=True)
 
-        self.pin_allocator = TensorMemoryAllocator(buffer)
-        self.buffer_allocator = BufferAllocator("cpu")
+        if use_paging:
+            assert "shape" in kwargs, (
+                "shape must be specified for paged memory allocator"
+            )
+            assert "dtype" in kwargs, (
+                "dtype must be specified for paged memory allocator"
+            )
+            assert "fmt" in kwargs, "fmt must be specified for paged memory allocator"
+            self.pin_allocator = PagedTensorMemoryAllocator(
+                tensor=buffer,
+                shape=kwargs["shape"],
+                dtype=kwargs["dtype"],
+                fmt=kwargs["fmt"],
+            )
+        else:
+            self.pin_allocator = TensorMemoryAllocator(buffer)
 
-        self.host_mem_lock = threading.Lock()
+        self.host_mem_lock = threading.Lock() if not use_paging else nullcontext()
+
+        self.buffer_allocator = BufferAllocator("cpu")
 
     @_lmcache_nvtx_annotate
     def allocate(
@@ -1301,7 +1366,7 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
             raise ValueError(f"Unsupported memory format: {fmt}")
 
     @_lmcache_nvtx_annotate
-    def batched_free(self, memory_objs: List[MemoryObj]):
+    def batched_free(self, memory_objs: List[MemoryObj], update_stats: bool = True):
         # NOTE: fmts of all memory_objs should be the same
         fmt = memory_objs[0].meta.fmt
         if fmt == MemoryFormat.BINARY_BUFFER:
@@ -1325,18 +1390,41 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
 class GPUMemoryAllocator(MemoryAllocatorInterface):
     """Allocates memory in the pre-allocated GPU memory."""
 
-    def __init__(self, size: int, device="cuda", align_bytes: Optional[int] = None):
+    def __init__(
+        self,
+        size: int,
+        device="cuda",
+        align_bytes: Optional[int] = None,
+        use_paging: bool = False,
+        **kwargs,
+    ):
         """
         :param int size: The size of the GPU memory in bytes.
         :param Optional[int] align_bytes: The byte alignment for allocations.
         """
         self.tensor = torch.empty(size, dtype=torch.uint8, device=device)
-        kwargs = {}
-        if align_bytes is not None:
-            kwargs["align_bytes"] = align_bytes
-        self.allocator = TensorMemoryAllocator(self.tensor, **kwargs)
 
-        self.device_mem_lock = threading.Lock()
+        if use_paging:
+            assert "shape" in kwargs, (
+                "shape must be specified for paged memory allocator"
+            )
+            assert "dtype" in kwargs, (
+                "dtype must be specified for paged memory allocator"
+            )
+            assert "fmt" in kwargs, "fmt must be specified for paged memory allocator"
+            self.allocator = PagedTensorMemoryAllocator(
+                tensor=self.tensor,
+                shape=kwargs["shape"],
+                dtype=kwargs["dtype"],
+                fmt=kwargs["fmt"],
+            )
+        else:
+            kwargs = {}
+            if align_bytes is not None:
+                kwargs["align_bytes"] = align_bytes
+            self.allocator = TensorMemoryAllocator(self.tensor, **kwargs)
+
+        self.device_mem_lock = threading.Lock() if not use_paging else nullcontext()
 
     @_lmcache_nvtx_annotate
     def allocate(
@@ -1363,7 +1451,7 @@ class GPUMemoryAllocator(MemoryAllocatorInterface):
         with self.device_mem_lock:
             self.allocator.free(memory_obj)
 
-    def batched_free(self, memory_objs: List[MemoryObj]):
+    def batched_free(self, memory_objs: List[MemoryObj], update_stats: bool = True):
         with self.device_mem_lock:
             self.allocator.batched_free(memory_objs)
 
@@ -1429,7 +1517,7 @@ class AdHocMemoryAllocator(MemoryAllocatorInterface):
     def free(self, memory_obj: MemoryObj):
         pass
 
-    def batched_free(self, memory_objs: List[MemoryObj]):
+    def batched_free(self, memory_objs: List[MemoryObj], update_stats: bool = True):
         pass
 
     def ref_count_up(self, memory_obj: MemoryObj):

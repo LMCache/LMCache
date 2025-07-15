@@ -173,10 +173,10 @@ class LMCacheEngine:
         """
 
         if mask is not None:
-            num_stored_tokens = torch.sum(mask).item()
+            num_to_store_tokens = torch.sum(mask).item()
         else:
-            num_stored_tokens = len(tokens)
-        monitor_req_id = self.stats_monitor.on_store_request(num_stored_tokens)
+            num_to_store_tokens = len(tokens)
+        monitor_req_id = self.stats_monitor.on_store_request(num_to_store_tokens)
 
         starts = []
         ends = []
@@ -186,6 +186,7 @@ class LMCacheEngine:
         offload_time = 0.0
         put_time = 0.0
         tot_kv_size = 0
+        tot_token_num = 0
         t = time.perf_counter()
 
         for start, end, key in self.token_database.process_tokens(tokens, mask):
@@ -210,8 +211,9 @@ class LMCacheEngine:
             ends.append(end)
             keys.append(key)
             memory_objs.append(memory_obj)
-
             tot_kv_size += memory_obj.get_size()
+            tot_token_num += num_tokens
+
         # memory_objs might be empty, directly return to avoid sending tokens
         if not memory_objs:
             return
@@ -231,19 +233,19 @@ class LMCacheEngine:
         if self.lookup_server is not None:
             self.lookup_server.batched_insert(keys)
 
-        logger.debug(
-            "Store %d tokens takes: %.4f ms, throughput: %.4f GB/s; "
-            "offload_time: %.4f ms, put_time: %.4f ms",
-            num_stored_tokens,
+        logger.info(
+            "Stored %d out of total %d tokens. size: %.4f gb, cost %.4f ms, "
+            "throughput: %.4f GB/s; offload_time: %.4f ms, put_time: %.4f ms",
+            tot_token_num,
+            len(tokens),
+            tot_kv_size / 1024**3,
             tot_time * 1000,
             tot_kv_size / tot_time / 1024**3,
             offload_time * 1000,
             put_time * 1000,
         )
 
-        self.stats_monitor.on_store_finished(monitor_req_id)
-
-        logger.debug(f"Stored {num_stored_tokens} out of total {len(tokens)} tokens")
+        self.stats_monitor.on_store_finished(monitor_req_id, tot_token_num)
 
     @_lmcache_nvtx_annotate
     @torch.inference_mode()
@@ -275,15 +277,16 @@ class LMCacheEngine:
         """
 
         if mask is not None:
-            num_stored_tokens = torch.sum(mask).item()
+            num_to_store_tokens = torch.sum(mask).item()
         else:
-            num_stored_tokens = len(tokens)
-        monitor_req_id = self.stats_monitor.on_store_request(num_stored_tokens)
+            num_to_store_tokens = len(tokens)
+        monitor_req_id = self.stats_monitor.on_store_request(num_to_store_tokens)
 
         starts = []
         ends = []
         keys = []
         memory_objs = []
+        tot_token_num = 0
         kv_dtype = self.metadata.kv_dtype
         for start, end, key in self.token_database.process_tokens(tokens, mask):
             assert isinstance(key, CacheEngineKey)
@@ -316,6 +319,7 @@ class LMCacheEngine:
             ends.append(end)
             keys.append(keys_multi_layer)
             memory_objs.append(memory_objs_multi_layer)
+            tot_token_num += num_tokens
 
             # Update lookup server
             if self.lookup_server is not None:
@@ -347,8 +351,8 @@ class LMCacheEngine:
             for layer_id in range(self.num_layers):
                 yield
 
-        self.stats_monitor.on_store_finished(monitor_req_id)
-        logger.debug(f"Stored {num_stored_tokens} out of total {len(tokens)} tokens")
+        self.stats_monitor.on_store_finished(monitor_req_id, tot_token_num)
+        logger.debug(f"Stored {tot_token_num} out of total {len(tokens)} tokens")
         yield
 
     @_lmcache_nvtx_annotate
