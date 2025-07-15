@@ -42,6 +42,8 @@ steps:
       - "coverage-test/**/*"
 
   - label: "Upload Coverage Report"
+    depends_on:
+        - "pytest"
     command: |
       cat << EOF | buildkite-agent annotate --style "info"
         Read the <a href="artifact://coverage-test/index.html">uploaded coverage report</a>
