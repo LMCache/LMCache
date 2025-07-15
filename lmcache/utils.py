@@ -75,7 +75,7 @@ class CacheEngineKey:
     model_name: str
     world_size: int
     worker_id: int
-    chunk_hash: str
+    chunk_hash: int
 
     def __hash__(self):
         return hash(
@@ -128,7 +128,7 @@ class CacheEngineKey:
         if len(parts) != 5:
             raise ValueError(f"Invalid key string: {s}")
         return CacheEngineKey(
-            parts[0], parts[1], int(parts[2]), int(parts[3]), parts[4]
+            parts[0], parts[1], int(parts[2]), int(parts[3]), int(parts[4])
         )
 
     def to_dict(self):
@@ -203,7 +203,7 @@ class LayerCacheEngineKey(CacheEngineKey):
             parts[1],
             int(parts[2]),
             int(parts[3]),
-            parts[4],
+            int(parts[4]),
             int(parts[5]),
         )
 

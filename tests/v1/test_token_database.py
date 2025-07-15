@@ -1,6 +1,3 @@
-# Standard
-import hashlib
-
 # Third Party
 from utils import dumb_metadata, dumb_metadata_with_model_name, generate_tokens
 import pytest
@@ -28,7 +25,7 @@ def test_chunked_token_database(chunk_length, save_unfull_chunk):
     db = ChunkedTokenDatabase(cfg, metadata)
 
     # Process without mask
-    original_results = list(db.process_tokens(tokens))
+    original_results = list(db.process_tokens(tokens=tokens))
     end = (
         test_length if save_unfull_chunk else (test_length - test_length % chunk_length)
     )
@@ -42,7 +39,7 @@ def test_chunked_token_database(chunk_length, save_unfull_chunk):
 
     for i in range(0, test_length // chunk_length):
         mask[: num_falses[i]] = False
-        new_results = list(db.process_tokens(tokens, mask))
+        new_results = list(db.process_tokens(tokens=tokens, mask=mask))
         assert len(new_results) == len(original_results) - i
 
         for j in range(len(new_results)):
@@ -68,15 +65,15 @@ def test_segment_token_database(prefix_length, chunk_lengths):
     token_chunks = []
     starts = [0]
     ends = [sys_length]
-    sys_bytes = sys_tokens.cpu().to(torch.uint32).numpy().tobytes()
-    sys_hash = hashlib.sha256(sys_bytes).hexdigest()
+    sys_tuple = tuple(sys_tokens.cpu().tolist())
+    sys_hash = hash(sys_tuple)
     hashes = [sys_hash]
     start = sys_length + len(sep_tokens)
     for idx, chunk_length in enumerate(chunk_lengths):
         token_chunk = generate_tokens(chunk_length, "cpu", fixed=True)
 
-        token_bytes = token_chunk.cpu().to(torch.uint32).numpy().tobytes()
-        token_hash = hashlib.sha256(token_bytes).hexdigest()
+        token_tuple = tuple(token_chunk.cpu().tolist())
+        token_hash = hash(token_tuple)
         hashes.append(token_hash)
 
         token_chunk = torch.cat([sep_tokens, token_chunk])
@@ -85,8 +82,8 @@ def test_segment_token_database(prefix_length, chunk_lengths):
         ends.append(start + chunk_length)
         start += chunk_length + len(sep_tokens)
 
-    query_bytes = query_tokens.cpu().to(torch.uint32).numpy().tobytes()
-    query_hash = hashlib.sha256(query_bytes).hexdigest()
+    query_tuple = tuple(query_tokens.cpu().tolist())
+    query_hash = hash(query_tuple)
     hashes.append(query_hash)
     starts.append(start)
     ends.append(start + query_length)
@@ -108,7 +105,7 @@ def test_segment_token_database(prefix_length, chunk_lengths):
     ends = ends[skip_chunk_num:]
     hashes = hashes[skip_chunk_num:]
 
-    original_results = list(db.process_tokens(tokens, mask))
+    original_results = list(db.process_tokens(tokens=tokens, mask=mask))
     for i in range(len(original_results)):
         st, ed, key = original_results[i]
         assert st == starts[i]

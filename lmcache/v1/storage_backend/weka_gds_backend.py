@@ -276,7 +276,7 @@ class WekaGdsBackend(StorageBackendInterface):
         self,
         key: CacheEngineKey,
     ) -> Tuple[str, str, str, str]:
-        hash = key.chunk_hash
+        hash = str(key.chunk_hash)
         l1_dir = hash[:2]
         l2_dir = hash[2:4]
         key_str = key.to_string()
