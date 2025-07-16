@@ -26,4 +26,3 @@ for pid in "${pids[@]}"; do
 done
 
 echo "Done."
-echo "Test"
