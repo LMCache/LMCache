@@ -96,7 +96,15 @@ def get_zmq_rpc_path_lmcache(
 
     base_url = envs.VLLM_RPC_BASE_PATH
 
-    rpc_port += tp_rank
+    if isinstance(rpc_port, int):
+        rpc_port += tp_rank
+    elif isinstance(rpc_port, str):
+        if rpc_port.isdigit():
+            rpc_port = int(rpc_port) + tp_rank
+        else:
+            raise ValueError(f"rpc_port '{rpc_port}' is not a valid integer and cannot add tp_rank {tp_rank}, please check the config lmcache_rpc_port")
+    else:
+        raise TypeError(f"rpc_port type {type(rpc_port)} not supported, please check the config lmcache_rpc_port")
 
     logger.debug("Base URL: %s, RPC Port: %s", base_url, rpc_port)
     return f"ipc://{base_url}/lmcache_rpc_port_{rpc_port}"
