@@ -24,7 +24,7 @@ def dumb_metadata_with_model_name(
 
 
 def dumb_cache_engine_key():
-    return CacheEngineKey("vllm", "test_model", 3, 123, "hash")
+    return CacheEngineKey("vllm", "test_model", 3, 123, 1234)
 
 
 def random_string(N):

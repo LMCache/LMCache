@@ -1,3 +1,7 @@
+cancel_in_progress: true
+concurrency: 1
+concurrency_group: "pr-${BUILDKITE_PULL_REQUEST}"
+
 env:
   DOCKER_BUILDKIT: 1
 

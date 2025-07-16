@@ -77,7 +77,7 @@ class KVController:
         worker_id = msg.worker_id
         key = msg.key
         location = msg.location
-        if instance_id not in self.kv_pool:
+        if key not in self.kv_pool:
             self.kv_pool[key] = []
         self.kv_pool[key].append(KVChunkMetadata(instance_id, worker_id, location))
 
