@@ -20,12 +20,8 @@ uv pip install -U vllm --pre --extra-index-url https://wheels.vllm.ai/nightly
 echo "📦 Installed packages in venv:"
 uv pip freeze
 
-set -x
-
 orig_dir="$(pwd)"
 cd "$LM_CACHE_TEST_DIR"
-
-set +x
 
 start_port=8000
 max_port=9000

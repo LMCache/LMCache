@@ -26,6 +26,7 @@ steps:
     command:
       - source .venv/bin/activate
       - bash .buildkite/install-lmcache.sh
+      - source scripts/pick-free-gpu.sh
       - |
         LMCACHE_TRACK_USAGE="false" \
         pytest --cov=lmcache \

@@ -50,8 +50,15 @@ wait_for_openai_api_server(){
 }
 
 run_lmcache_vllmopenai_container() {
+    # Pick the GPU with the largest free memory
+    best_gpu=$(nvidia-smi --query-gpu=memory.free,index \
+        --format=csv,noheader,nounits \
+      | sort -t',' -k1 -nr \
+      | head -n1 \
+      | cut -d',' -f2)
+    
     if [ -z "$HF_TOKEN" ]; then
-        CID=$(docker run -d --runtime nvidia --gpus all \
+        CID=$(docker run -d --runtime nvidia --gpus "device=${best_gpu}" \
             --env "LMCACHE_CHUNK_SIZE=256" \
             --env "LMCACHE_LOCAL_CPU=True" \
             --env "LMCACHE_MAX_LOCAL_CPU_SIZE=5" \
@@ -61,7 +68,7 @@ run_lmcache_vllmopenai_container() {
             'meta-llama/Llama-3.1-8B-Instruct' --kv-transfer-config \
             '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}')
     else
-        CID=$(docker run -d --runtime nvidia --gpus all \
+        CID=$(docker run -d --runtime nvidia --gpus "device=${best_gpu}" \
              --env HF_TOKEN=$HF_TOKEN \
             --env "LMCACHE_CHUNK_SIZE=256" \
             --env "LMCACHE_LOCAL_CPU=True" \
