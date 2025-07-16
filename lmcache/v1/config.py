@@ -145,6 +145,8 @@ class LMCacheEngineConfig:
     # Supports URI-style format: mooncakestore://<MASTER_ADDRESS>
     # When set, uses external lookup client instead of regular lookup server
     external_lookup_client: Optional[str] = None
+    # Only save kvcaches on tp first_rank
+    save_only_first_rank: bool = False
 
     @staticmethod
     def from_defaults(
@@ -190,6 +192,7 @@ class LMCacheEngineConfig:
         save_unfull_chunk: bool = True,
         blocking_timeout_secs: int = 10,
         external_lookup_client: Optional[str] = None,
+        save_only_first_rank: bool = False,
     ) -> "LMCacheEngineConfig":
         # TODO (ApostaC): Add nixl config
         return LMCacheEngineConfig(
@@ -235,6 +238,7 @@ class LMCacheEngineConfig:
             save_unfull_chunk,
             blocking_timeout_secs,
             external_lookup_client,
+            save_only_first_rank,
         ).validate()
 
     @staticmethod
@@ -408,6 +412,7 @@ class LMCacheEngineConfig:
         blocking_timeout_secs = config.get("blocking_timeout_secs", 10)
 
         external_lookup_client = config.get("external_lookup_client", None)
+        save_only_first_rank = config.get("save_only_first_rank", False)
 
         local_disk_path = _parse_local_disk(local_disk)
 
@@ -463,6 +468,7 @@ class LMCacheEngineConfig:
                 save_unfull_chunk,
                 blocking_timeout_secs,
                 external_lookup_client,
+                save_only_first_rank,
             )
             .validate()
             .log_config()
@@ -761,6 +767,7 @@ class LMCacheEngineConfig:
             "save_unfull_chunk": self.save_unfull_chunk,
             "blocking_timeout_secs": self.blocking_timeout_secs,
             "external_lookup_client": self.external_lookup_client,
+            "save_only_first_rank": self.save_only_first_rank,
         }
         logger.info(f"LMCache Configuration: {config_dict}")
 
