@@ -616,10 +616,10 @@ class LMCacheConnectorV1Impl:
                 if self.enable_blending:
                     # TODO(Jiayi): Need to make prefix caching and blending compatible
                     self.blender.blend(
-                        tokens[:lmcache_cached_tokens],
-                        token_mask[:lmcache_cached_tokens],
+                        tokens[: request.load_spec.lmcache_cached_tokens],
+                        token_mask[:request.load_spec.lmcache_cached_tokens],
                         kvcaches=kvcaches,
-                        slot_mapping=slot_mapping[:lmcache_cached_tokens],
+                        slot_mapping=slot_mapping[:request.load_spec.lmcache_cached_tokens],
                     )
                 else:
                     layerwise_retriever = self.lmcache_engine.retrieve_layer(
@@ -645,7 +645,9 @@ class LMCacheConnectorV1Impl:
                 # Check the result
                 num_retrieved_tokens = ret_token_mask.sum().item()
                 num_expected_tokens = (
-                    lmcache_cached_tokens - request.load_spec.vllm_cached_tokens
+                    request.load_spec.lmcache_cached_tokens
+                    - request.load_spec.vllm_cached_tokens
+                    - self.skip_last_n_tokens
                 )
                 if num_retrieved_tokens < num_expected_tokens:
                     logger.error(
@@ -1119,7 +1121,6 @@ class LMCacheConnectorV1Impl:
             new_block_ids = cached_reqs.new_block_ids[i]
 
             request_tracker.update(new_token_ids, new_block_ids)
-
             req_meta = ReqMeta.from_request_tracker(
                 self,
                 request_tracker,
