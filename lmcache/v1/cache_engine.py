@@ -673,20 +673,27 @@ class LMCacheEngine:
             assert isinstance(key, CacheEngineKey)
 
             if self.use_layerwise:
-                # Optimize by checking only the existence of the key
+                # TODO(Jiayi): Optimize by checking only the existence of the key
                 # of one layer
                 key_all_layers = key.split_layers(self.num_layers)
-                first_layer_key = key_all_layers[0]
-                self.lookup_pins.append(first_layer_key)
-                if self.storage_manager.contains(first_layer_key, search_range, pin):
+                self.lookup_pins.extend(key_all_layers)
+
+                # NOTE: need to pin all layers so have to call contains() for each layer
+                found = False
+                for key_single_layer in key_all_layers:
+                    if self.storage_manager.contains(
+                        key_single_layer, search_range, pin
+                    ):
+                        found = True
+
+                    if search_p2p:
+                        assert self.lookup_server is not None
+                        if self.lookup_server.lookup(key_single_layer):
+                            found = True
+
+                if found:
                     prev_end = end
                     continue
-
-                if search_p2p:
-                    assert self.lookup_server is not None
-                    if self.lookup_server.lookup(first_layer_key):
-                        prev_end = end
-                        continue
                 return prev_end
             else:
                 self.lookup_pins.append(key)
