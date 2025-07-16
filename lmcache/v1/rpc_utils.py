@@ -14,6 +14,7 @@
 
 # Standard
 from typing import TYPE_CHECKING, Optional
+import re
 import socket
 
 # Third Party
@@ -96,6 +97,9 @@ def get_zmq_rpc_path_lmcache(
 
     base_url = envs.VLLM_RPC_BASE_PATH
 
+    if isinstance(rpc_port, str):
+        m = re.search(r"(\d+)$", rpc_port)
+        rpc_port = int(m.group(1)) if m else 1
     rpc_port += tp_rank
 
     logger.debug("Base URL: %s, RPC Port: %s", base_url, rpc_port)
