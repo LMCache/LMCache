@@ -24,8 +24,8 @@ steps:
           path: ".venv"
           restore: "pipeline"
     command:
-      - bash .buildkite/install-lmcache.sh
       - source .venv/bin/activate
+      - bash .buildkite/install-lmcache.sh
       - |
         LMCACHE_TRACK_USAGE="false" \
         pytest --cov=lmcache \
