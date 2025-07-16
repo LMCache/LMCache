@@ -1,5 +1,6 @@
 [build-system]
-# Should be mirrored in requirements/build.txt
+# Requirements for package build
+# Should be mirrored in requirements/build.txt (for builds external to setuptools)
 requires = [
     "ninja",
     "packaging>=24.2",
@@ -7,7 +8,6 @@ requires = [
     "setuptools_scm>=8",
     "torch==2.7.0",
     "wheel",
-    "xxhash==3.5.0",
 ]
 build-backend = "setuptools.build_meta"
 
