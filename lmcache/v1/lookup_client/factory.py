@@ -84,6 +84,7 @@ class LookupClientFactory:
         # when there are multiple workers and when not using external lookup client
         if (
             vllm_config.parallel_config.rank == 0
+            and getattr(vllm_config.parallel_config, "data_parallel_rank", 0) == 0
             and config.external_lookup_client is None
         ):
             # First Party
