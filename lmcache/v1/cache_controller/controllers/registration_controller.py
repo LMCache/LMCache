@@ -29,7 +29,7 @@ from lmcache.v1.cache_controller.message import (
     QueryInstRetMsg,
     RegisterMsg,
 )
-from lmcache.v1.cache_controller.rpc_utils import (  # noqa: E501
+from lmcache.v1.rpc_utils import (
     close_zmq_socket,
     get_zmq_context,
     get_zmq_socket,
