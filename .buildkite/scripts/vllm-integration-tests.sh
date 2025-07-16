@@ -66,7 +66,8 @@ run_lmcache_vllmopenai_container() {
             --network host \
             'lmcache/vllm-openai:build-latest' \
             'meta-llama/Llama-3.1-8B-Instruct' --kv-transfer-config \
-            '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}')
+            '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}' \
+            --gpu-memory-utilization '0.5')
     else
         CID=$(docker run -d --runtime nvidia --gpus "device=${best_gpu}" \
              --env HF_TOKEN=$HF_TOKEN \
@@ -77,7 +78,8 @@ run_lmcache_vllmopenai_container() {
             --network host \
             'lmcache/vllm-openai:build-latest' \
             'meta-llama/Llama-3.1-8B-Instruct' --kv-transfer-config \
-            '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}')
+            '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}' \
+            --gpu-memory-utilization '0.5')
     fi
 
     wait_for_openai_api_server
