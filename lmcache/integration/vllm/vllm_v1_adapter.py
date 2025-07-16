@@ -15,6 +15,7 @@
 # Standard
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional
+import os
 
 # Third Party
 from vllm.config import VllmConfig
@@ -22,6 +23,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
     KVConnectorRole,
+)
+from vllm.distributed.parallel_state import (
+    get_tensor_model_parallel_rank,
 )
 from vllm.utils import cdiv
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -38,6 +42,7 @@ from lmcache.logging import init_logger
 from lmcache.utils import _lmcache_nvtx_annotate
 from lmcache.v1.compute.blend import LMCBlenderBuilder
 from lmcache.v1.lookup_client import LookupClientFactory
+from lmcache.v1.offload_server.zmq_server import ZMQOffloadServer
 
 if TYPE_CHECKING:
     # Third Party
@@ -302,15 +307,12 @@ class LMCacheConnectorV1Impl:
     ):
         self._parent = parent
         self.kv_role = vllm_config.kv_transfer_config.kv_role
-        is_tp = vllm_config.parallel_config.tensor_parallel_size > 1
 
         config = lmcache_get_config()
         self.layerwise_retrievers = []
         if role == KVConnectorRole.SCHEDULER:
             # Create lookup client using factory
-            self.lookup_client = LookupClientFactory.create_lookup_client(
-                role, is_tp, vllm_config
-            )
+            self.lookup_client = LookupClientFactory.create_lookup_client(vllm_config)
             self._requests_in_step: dict[str, Request] = {}
         else:
             self.lmcache_engine = init_lmcache_engine(
@@ -333,7 +335,13 @@ class LMCacheConnectorV1Impl:
             # Create lookup server using factory
             assert self.lmcache_engine is not None
             self.lookup_server = LookupClientFactory.create_lookup_server(
-                self.lmcache_engine, role, is_tp, vllm_config
+                self.lmcache_engine, vllm_config
+            )
+
+            self.offload_server = ZMQOffloadServer(
+                self.lmcache_engine,
+                vllm_config,
+                get_tensor_model_parallel_rank(),
             )
 
         self.kv_caches: dict[str, torch.Tensor] = {}
@@ -365,6 +373,8 @@ class LMCacheConnectorV1Impl:
             vllm_config.parallel_config
         )
         self.current_layer = 0
+
+        self.force_skip_save = bool(os.environ.get("LMCACHE_FORCE_SKIP_SAVE", False))
 
     def _init_kv_caches_from_forward_context(self, forward_context: "ForwardContext"):
         for layer_name in forward_context.no_compile_layers:
@@ -412,6 +422,8 @@ class LMCacheConnectorV1Impl:
             return
 
         assert self.lmcache_engine is not None
+
+        self.lmcache_engine.post_init(kvcaches=kvcaches)
 
         for idx, request in enumerate(metadata.requests):
             if request.load_spec is None:
@@ -811,7 +823,7 @@ class LMCacheConnectorV1Impl:
             scheduler_output (SchedulerOutput): the scheduler output object.
         """
 
-        force_skip_save = self.kv_role == "kv_consumer"
+        force_skip_save = self.kv_role == "kv_consumer" or self.force_skip_save
 
         meta = LMCacheConnectorMetadata()
 
