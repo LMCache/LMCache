@@ -103,11 +103,10 @@ class MemoryObjMetadata:
     # Reference count
     ref_count: int
 
-    # TODO(Jiayi): Need to differentiate between temporary pin
-    # and persistent pin. Or maybe it's better to use only
-    # `ref_count` to manage these semantics.
     # Whether the object is pinned and cannot be evicted
-    is_pin: bool = False
+    # every vllm step creates temporary pins between the scheduler and worker
+    # the cache controller can create persistent pins
+    pin_count: int = 0
 
     # The 'logical' format of the tensor
     fmt: MemoryFormat = MemoryFormat.UNDEFINED
@@ -348,11 +347,11 @@ class TensorMemoryObj(MemoryObj):
             return self.meta.ref_count
 
     def pin(self) -> bool:
-        self.metadata.is_pin = True
+        self.metadata.pin_count += 1
         return True
 
     def unpin(self) -> bool:
-        self.metadata.is_pin = False
+        self.metadata.pin_count -= 1
         return True
 
     @property
@@ -382,7 +381,7 @@ class TensorMemoryObj(MemoryObj):
 
     @property
     def is_pinned(self) -> bool:
-        return self.metadata.is_pin
+        return self.metadata.pin_count > 0
 
 
 class BytesBufferMemoryObj(MemoryObj):
@@ -400,7 +399,7 @@ class BytesBufferMemoryObj(MemoryObj):
                 address=0,
                 phy_size=0,
                 ref_count=1,
-                is_pin=False,
+                pin_count=0,
                 fmt=MemoryFormat.BINARY_BUFFER,
             )
         else:
@@ -429,11 +428,11 @@ class BytesBufferMemoryObj(MemoryObj):
         return self.metadata.phy_size
 
     def pin(self) -> bool:
-        self.metadata.is_pin = True
+        self.metadata.pin_count += 1
         return True
 
     def unpin(self) -> bool:
-        self.metadata.is_pin = False
+        self.metadata.pin_count -= 1
         return True
 
     def ref_count_up(self):
@@ -462,7 +461,7 @@ class BytesBufferMemoryObj(MemoryObj):
 
     @property
     def is_pinned(self) -> bool:
-        return self.metadata.is_pin
+        return self.metadata.pin_count > 0
 
 
 class MemoryAllocatorInterface(metaclass=abc.ABCMeta):
@@ -906,7 +905,7 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
                 idx,
                 1,  # 1 page
                 1,  # ref_count=1
-                False,  # is_pin=False
+                0,  # pin_count=0
                 self.fmt,
             )
             mem_obj = TensorMemoryObj(
@@ -1495,7 +1494,7 @@ class AdHocMemoryAllocator(MemoryAllocatorInterface):
                 address=0,
                 phy_size=0,
                 ref_count=1,
-                is_pin=False,
+                pin_count=0,
                 fmt=fmt,
             ),
             parent_allocator=self,

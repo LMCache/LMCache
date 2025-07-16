@@ -141,6 +141,8 @@ class LMCacheEngine:
                 self.fmt = MemoryFormat.KV_T2D
 
         self.lookup_cache = {}
+        # per vllm step temporary pinned memory objects
+        self.lookup_pins = []
 
         InitializeUsageContext(config.to_original_config(), metadata)
         self.stats_monitor = LMCStatsMonitor.GetOrCreate()
@@ -491,8 +493,6 @@ class LMCacheEngine:
             # will immediately remove the object from itself
             if self.remove_after_retrieve:
                 self.storage_manager.remove(key)
-            else:
-                self.storage_manager.batched_unpin([key])
 
         retrieved_tokens = torch.sum(ret_mask)
         self.stats_monitor.on_retrieve_finished(monitor_req_id, retrieved_tokens)
@@ -501,6 +501,7 @@ class LMCacheEngine:
             f"out of {num_required_tokens} "
             f"out of total {len(tokens)} tokens"
         )
+        self._lookup_unpin()
         return ret_mask
 
     @_lmcache_nvtx_annotate
@@ -590,10 +591,6 @@ class LMCacheEngine:
                 mem_obj_consumer.send(mem_objs_layer)
                 to_count_down.extend(mem_objs_layer)
 
-            # TODO(Jiayi): Need to be done in a modular way
-            for keys_layer in keys_layer_major:
-                self.storage_manager.batched_unpin(keys_layer)
-
             for mem_obj in to_count_down:
                 mem_obj.ref_count_down()
         else:
@@ -603,6 +600,8 @@ class LMCacheEngine:
                 yield None
 
         yield None
+
+        self._lookup_unpin()
 
         # synchronize the last layer
         next(mem_obj_consumer)
@@ -655,7 +654,7 @@ class LMCacheEngine:
         :return: An int indicating how many prefix tokens are cached.
         """
         end = 0
-        old_end = 0
+        prev_end = 0
 
         # secondary lookup on p2p (via lookup_server) if enabled
         search_p2p = self.enable_p2p and (search_range is None or "p2p" in search_range)
@@ -664,31 +663,45 @@ class LMCacheEngine:
             assert isinstance(key, CacheEngineKey)
 
             if self.use_layerwise:
-                # TODO(Jiayi): Optimize by checking only the existence of the key
+                # Optimize by checking only the existence of the key
                 # of one layer
                 key_all_layers = key.split_layers(self.num_layers)
-                for key_single_layer in key_all_layers:
-                    if not self.storage_manager.contains(
-                        key_single_layer, search_range, pin
-                    ):
-                        if search_p2p and self.lookup_server.lookup(key_single_layer):
-                            continue
-                        return old_end
-                old_end = end
+                first_layer_key = key_all_layers[0]
+                self.lookup_pins.append(first_layer_key)
+                if self.storage_manager.contains(first_layer_key, search_range, pin):
+                    prev_end = end
+                    continue
+
+                if search_p2p:
+                    assert self.lookup_server is not None
+                    if self.lookup_server.lookup(first_layer_key):
+                        prev_end = end
+                        continue
+                return prev_end
             else:
+                self.lookup_pins.append(key)
                 if self.storage_manager.contains(key, search_range, pin):
-                    old_end = end
+                    prev_end = end
                     continue
 
                 if search_p2p:
                     assert self.lookup_server is not None
                     if self.lookup_server.lookup(key):
-                        old_end = end
+                        prev_end = end
                         continue
-                return old_end
+                return prev_end
 
         # all tokens where found, return the maximal end
         return end
+
+    @_lmcache_nvtx_annotate
+    def _lookup_unpin(self) -> None:
+        """
+        Worker unpins all memory objects pinned by lookup by the scheduler.
+        Reset the lookup_pins list for next vllm step
+        """
+        self.storage_manager.batched_unpin(self.lookup_pins)
+        self.lookup_pins = []
 
     @_lmcache_nvtx_annotate
     def clear(
