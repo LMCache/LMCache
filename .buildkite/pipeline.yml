@@ -11,7 +11,7 @@ steps:
           save: "pipeline"
           force: "true"
     command:
-      - bash .buildkite/install-env.sh
+      - bash .buildkite/scripts/install-env.sh
 
   - label: ":pytest: Run pytest"
     key: "pytest"
@@ -25,8 +25,8 @@ steps:
           restore: "pipeline"
     command:
       - source .venv/bin/activate
-      - bash .buildkite/install-lmcache.sh
-      - source scripts/pick-free-gpu.sh
+      - bash .buildkite/scripts/install-lmcache.sh
+      - source .buildkite/scripts/pick-free-gpu.sh
       - |
         LMCACHE_TRACK_USAGE="false" \
         pytest --cov=lmcache \
