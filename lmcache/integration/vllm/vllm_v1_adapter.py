@@ -42,10 +42,10 @@ from lmcache.logging import init_logger
 from lmcache.utils import _lmcache_nvtx_annotate
 from lmcache.v1.compute.blend import LMCBlenderBuilder
 from lmcache.v1.lookup_client import LookupClientFactory
+from lmcache.v1.offload_server.zmq_server import ZMQOffloadServer
 from lmcache.v1.storage_backend.connector.nixl_connector_v3 import (
     NixlReceiverInfo,
 )
-from lmcache.v1.offload_server.zmq_server import ZMQOffloadServer
 
 if TYPE_CHECKING:
     # Third Party
