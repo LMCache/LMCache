@@ -25,6 +25,10 @@ steps:
       - "test_local_cpu_experimental.pdf"
       - "test_local_disk_experimental.csv"
       - "test_local_disk_experimental.pdf"
+      - "lmcache-stdout.log"
+      - "lmcache-stderr.log"
+      - "vllm-stdout.log"
+      - "vllm-stderr.log"
 
   - label: ":wastebasket: Kill all"
     key: "clean"

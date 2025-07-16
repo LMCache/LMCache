@@ -78,3 +78,7 @@ set -x
 LMCACHE_TRACK_USAGE="false" python3 main.py tests/tests.py -f test_local -o outputs/ -p $port1 $port2
 python3 outputs/drawing_wrapper.py ./
 mv outputs/*.{csv,pdf} "$orig_dir"/
+mv /tmp/buildkite-agent-"$port1"-stdout.log "$orig_dir"/lmcache-stdout.log
+mv /tmp/buildkite-agent-"$port1"-stderr.log "$orig_dir"/lmcache-stderr.log
+mv /tmp/buildkite-agent-"$port2"-stdout.log "$orig_dir"/vllm-stdout.log
+mv /tmp/buildkite-agent-"$port2"-stderr.log "$orig_dir"/vllm-stderr.log
