@@ -978,6 +978,7 @@ class LMCacheConnectorV1Impl:
                 request_tracker.update(req.new_token_ids, req.new_block_ids)
 
                 req_meta = ReqMeta.from_request_tracker(
+                    self,
                     request_tracker,
                     self._block_size,
                     self._lmcache_chunk_size,
