@@ -68,7 +68,8 @@ def test_paged_same_retrieve_store(autorelease_v1):
     assert length == 0
     check_paged_kv_cache_equal(retrieved_cache, original_retrieved_cache, slot_mapping)
     """ test store """
-    engine.store(tokens, kvcaches=kv_cache, slot_mapping=slot_mapping)
+    engine.store(tokens=tokens, kvcaches=kv_cache, slot_mapping=slot_mapping)
+
     """ Store is async. Need to wait for the store to finish """
     timeout = 1.5
     start_time = time.time()

@@ -146,17 +146,29 @@ class LMCacheEngine:
         InitializeUsageContext(config.to_original_config(), metadata)
         self.stats_monitor = LMCStatsMonitor.GetOrCreate()
 
+        self.post_inited = False
+
+    def post_init(self, **kwargs) -> None:
+        if not self.post_inited:
+            logger.info("Post-initializing LMCacheEngine")
+            self.gpu_connector.initialize_kvcaches_ptr(**kwargs)
+            self.post_inited = True
+
     @_lmcache_nvtx_annotate
     @torch.inference_mode()
     def store(
         self,
-        tokens: torch.Tensor,
+        tokens: Optional[torch.Tensor] = None,
+        hashes: Optional[List[int]] = None,
+        offsets: Optional[List[int]] = None,
         mask: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> None:
-        """Store the tokens and mask into the cache engine.
+        """Store the tokens/hashes and mask into the cache engine.
 
-        :param torch.Tensor tokens: The tokens of the corresponding KV caches.
+        :param Optional[torch.Tensor] tokens: The tokens of the corresponding KV caches.
+
+        :param Optional[List[int]] hashes: The hashes of the corresponding KV caches.
 
         :param Optional[torch.Tensor] mask: The mask for the tokens. Should
             have the same length as tokens. And the mask should ALWAYS be like
@@ -174,8 +186,18 @@ class LMCacheEngine:
 
         if mask is not None:
             num_to_store_tokens = torch.sum(mask).item()
-        else:
+        elif tokens is not None:
             num_to_store_tokens = len(tokens)
+        elif hashes is not None:
+            num_to_store_tokens = sum(offsets)
+            kwargs["slot_mapping"] = torch.tensor(
+                kwargs["slot_mapping"], dtype=torch.long, device="cuda"
+            )
+
+        assert tokens is not None or hashes is not None, (
+            "Either 'tokens' or 'hashes' must be provided."
+        )
+
         monitor_req_id = self.stats_monitor.on_store_request(num_to_store_tokens)
 
         starts = []
@@ -189,7 +211,9 @@ class LMCacheEngine:
         tot_token_num = 0
         t = time.perf_counter()
 
-        for start, end, key in self.token_database.process_tokens(tokens, mask):
+        for start, end, key in self.token_database.process_tokens(
+            tokens, hashes, offsets, mask
+        ):
             assert isinstance(key, CacheEngineKey)
             if self.storage_manager.contains(key):
                 continue
@@ -237,7 +261,7 @@ class LMCacheEngine:
             "Stored %d out of total %d tokens. size: %.4f gb, cost %.4f ms, "
             "throughput: %.4f GB/s; offload_time: %.4f ms, put_time: %.4f ms",
             tot_token_num,
-            len(tokens),
+            num_to_store_tokens,
             tot_kv_size / 1024**3,
             tot_time * 1000,
             tot_kv_size / tot_time / 1024**3,
@@ -288,7 +312,9 @@ class LMCacheEngine:
         memory_objs = []
         tot_token_num = 0
         kv_dtype = self.metadata.kv_dtype
-        for start, end, key in self.token_database.process_tokens(tokens, mask):
+        for start, end, key in self.token_database.process_tokens(
+            tokens=tokens, mask=mask
+        ):
             assert isinstance(key, CacheEngineKey)
 
             keys_multi_layer = key.split_layers(self.num_layers)
@@ -400,7 +426,9 @@ class LMCacheEngine:
         reordered_memory_objs = []
         reordered_starts = []
         reordered_ends = []
-        for start, end, key in self.token_database.process_tokens(tokens, mask):
+        for start, end, key in self.token_database.process_tokens(
+            tokens=tokens, mask=mask
+        ):
             assert isinstance(key, CacheEngineKey)
 
             if key in self.lookup_cache:
@@ -478,7 +506,7 @@ class LMCacheEngine:
 
         retrieved_tokens = torch.sum(ret_mask)
         self.stats_monitor.on_retrieve_finished(monitor_req_id, retrieved_tokens)
-        logger.debug(
+        logger.info(
             f"Retrieved {retrieved_tokens} "
             f"out of {num_required_tokens} "
             f"out of total {len(tokens)} tokens"
@@ -527,7 +555,9 @@ class LMCacheEngine:
         starts = []
         ends = []
         keys = []
-        for start, end, key in self.token_database.process_tokens(tokens, mask):
+        for start, end, key in self.token_database.process_tokens(
+            tokens=tokens, mask=mask
+        ):
             assert isinstance(key, CacheEngineKey)
 
             keys_multi_layer = key.split_layers(self.num_layers)
@@ -606,7 +636,9 @@ class LMCacheEngine:
         """Launch the prefetching process in the storage manager to load the
         KV to the local CPU memory
         """
-        for start, end, key in self.token_database.process_tokens(tokens, mask):
+        for start, end, key in self.token_database.process_tokens(
+            tokens=tokens, mask=mask
+        ):
             assert isinstance(key, CacheEngineKey)
             self.storage_manager.prefetch(key)
 
@@ -638,7 +670,7 @@ class LMCacheEngine:
         # secondary lookup on p2p (via lookup_server) if enabled
         search_p2p = self.enable_p2p and (search_range is None or "p2p" in search_range)
 
-        for start, end, key in self.token_database.process_tokens(tokens):
+        for start, end, key in self.token_database.process_tokens(tokens=tokens):
             assert isinstance(key, CacheEngineKey)
 
             if self.use_layerwise:
@@ -682,7 +714,7 @@ class LMCacheEngine:
 
         num_removed = 0
         # Only remove the caches for the given tokens
-        for start, end, key in self.token_database.process_tokens(tokens):
+        for start, end, key in self.token_database.process_tokens(tokens=tokens):
             assert isinstance(key, CacheEngineKey)
             removed = self.storage_manager.remove(key, locations)
             num_removed += removed
