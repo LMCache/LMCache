@@ -14,7 +14,7 @@
 
 # Standard
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Optional, Union
 import json
 import os
 import re
@@ -38,6 +38,19 @@ def _parse_local_disk(local_disk) -> Optional[str]:
         case _:
             local_disk_path = local_disk
     return local_disk_path
+
+
+def to_int_list(
+    value: Optional[Union[str, int, list[Any]]],
+) -> Optional[list[int]]:
+    if value is None:
+        return None
+    if isinstance(value, list):
+        return [int(x) for x in value]
+    if isinstance(value, int):
+        return [value]
+    parts = [p.strip() for p in str(value).split(",") if p.strip()]
+    return [int(p) for p in parts]
 
 
 @dataclass
@@ -98,6 +111,14 @@ class LMCacheEngineConfig:
     # HACK: explicit option to enable/disable nixl GC before it's mature enough
     nixl_enable_gc: Optional[bool] = False
 
+    # (Optional) Experimental Nixl configurations
+    enable_xpyd: Optional[bool] = False
+    nixl_peer_host: Optional[str] = None
+    nixl_peer_init_port: Optional[list[int]] = None
+    nixl_peer_alloc_port: Optional[list[int]] = None
+    nixl_proxy_host: Optional[str] = None
+    nixl_proxy_port: Optional[int] = None
+
     # The url of the actual remote lmcache instance for auditing
     audit_actual_remote_url: Optional[str] = None
 
@@ -155,6 +176,12 @@ class LMCacheEngineConfig:
         nixl_buffer_size: Optional[int] = None,
         nixl_buffer_device: Optional[str] = None,
         nixl_enable_gc: Optional[bool] = False,
+        enable_xpyd: Optional[bool] = False,
+        nixl_peer_host: Optional[str] = None,
+        nixl_peer_init_port: Optional[list[int]] = None,
+        nixl_peer_alloc_port: Optional[list[int]] = None,
+        nixl_proxy_host: Optional[str] = None,
+        nixl_proxy_port: Optional[int] = None,
         audit_actual_remote_url: Optional[str] = None,
         weka_path: Optional[str] = None,
         gds_path: Optional[str] = None,
@@ -194,6 +221,12 @@ class LMCacheEngineConfig:
             nixl_buffer_size,
             nixl_buffer_device,
             nixl_enable_gc,
+            enable_xpyd,
+            nixl_peer_host,
+            nixl_peer_init_port,
+            nixl_peer_alloc_port,
+            nixl_proxy_host,
+            nixl_proxy_port,
             audit_actual_remote_url,
             weka_path,
             gds_path,
@@ -336,6 +369,13 @@ class LMCacheEngineConfig:
         nixl_buffer_device = config.get("nixl_buffer_device", None)
         nixl_enable_gc = config.get("nixl_enable_gc", False)
 
+        enable_xpyd = config.get("enable_xpyd", False)
+        nixl_peer_host = config.get("nixl_peer_host", None)
+        nixl_peer_init_port = to_int_list(config.get("nixl_peer_init_port"))
+        nixl_peer_alloc_port = to_int_list(config.get("nixl_peer_alloc_port"))
+        nixl_proxy_host = config.get("nixl_proxy_host", None)
+        nixl_proxy_port = config.get("nixl_proxy_port", None)
+
         extra_config = config.get("extra_config", None)
         if extra_config is not None:
             assert isinstance(extra_config, dict), "extra_config must be a dict"
@@ -409,6 +449,12 @@ class LMCacheEngineConfig:
                 nixl_buffer_size,
                 nixl_buffer_device,
                 nixl_enable_gc,
+                enable_xpyd,
+                nixl_peer_host,
+                nixl_peer_init_port,
+                nixl_peer_alloc_port,
+                nixl_proxy_host,
+                nixl_proxy_port,
                 audit_actual_remote_url,
                 weka_path,
                 gds_path,
@@ -557,6 +603,25 @@ class LMCacheEngineConfig:
             parse_env(get_env_name("nixl_enable_gc"), config.nixl_enable_gc)
         )
 
+        config.enable_xpyd = to_bool(
+            parse_env(get_env_name("enable_xpyd"), config.enable_xpyd)
+        )
+        config.nixl_peer_host = parse_env(
+            get_env_name("nixl_peer_host"), config.nixl_peer_host
+        )
+        config.nixl_peer_init_port = to_int_list(
+            parse_env(get_env_name("nixl_peer_init_port"), config.nixl_peer_init_port)
+        )
+        config.nixl_peer_alloc_port = to_int_list(
+            parse_env(get_env_name("nixl_peer_alloc_port"), config.nixl_peer_alloc_port)
+        )
+        config.nixl_proxy_host = parse_env(
+            get_env_name("nixl_proxy_host"), config.nixl_proxy_host
+        )
+        config.nixl_proxy_port = to_int(
+            parse_env(get_env_name("nixl_proxy_port"), config.nixl_proxy_port)
+        )
+
         # Try getting "legacy" nixl config
         if config.nixl_receiver_host is None:
             config.nixl_receiver_host = parse_env(
@@ -636,11 +701,8 @@ class LMCacheEngineConfig:
 
         if self.enable_nixl:
             assert self.nixl_role is not None
-            assert self.nixl_receiver_host is not None
-            assert self.nixl_receiver_port is not None
             assert self.nixl_buffer_size is not None
             assert self.nixl_buffer_device is not None
-            assert self.nixl_enable_gc is not None
 
             assert self.local_cpu is False, "Nixl only supports local_cpu=False"
             assert self.max_local_cpu_size == 0, (
@@ -687,6 +749,12 @@ class LMCacheEngineConfig:
             "nixl_buffer_size": self.nixl_buffer_size,
             "nixl_buffer_device": self.nixl_buffer_device,
             "nixl_enable_gc": self.nixl_enable_gc,
+            "enable_xpyd": self.enable_xpyd,
+            "nixl_peer_host": self.nixl_peer_host,
+            "nixl_peer_init_port": self.nixl_peer_init_port,
+            "nixl_peer_alloc_port": self.nixl_peer_alloc_port,
+            "nixl_proxy_host": self.nixl_proxy_host,
+            "nixl_proxy_port": self.nixl_proxy_port,
             "weka_path": self.weka_path,
             "gds_path": self.gds_path,
             "extra_config": self.extra_config,
