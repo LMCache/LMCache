@@ -17,3 +17,4 @@ setuptools_scm>=8
 sortedcontainers
 torch==2.7.0  # Should correspond to the version used by vLLM main branch
 transformers >= 4.51.1
+xxhash==3.5.0

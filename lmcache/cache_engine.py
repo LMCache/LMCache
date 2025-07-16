@@ -14,7 +14,6 @@
 
 # Standard
 from typing import Dict, Iterable, List, Optional, Tuple, Union
-import hashlib
 import logging
 import time
 
@@ -64,7 +63,7 @@ class LMCacheEngine:
             self.metadata.model_name,
             self.metadata.world_size,
             self.metadata.worker_id,
-            chunk_hash,
+            int(chunk_hash),
         )
 
     def _num_tokens_in_kv(
@@ -77,19 +76,15 @@ class LMCacheEngine:
         else:
             raise ValueError(f"Invalid format: {fmt}")
 
-    def _get_init_hash(self) -> str:
-        return ""
+    def _get_init_hash(self) -> int:
+        return hash(None)
 
     def _hash(
         self,
         tokens: torch.Tensor,
-        prefix_hash: str,
+        prefix_hash: int,
     ) -> str:
-        # TODO: change it to a more efficient hash function
-        hasher = hashlib.sha256()
-        hasher.update(prefix_hash.encode("ascii"))
-        hasher.update(tokens.numpy().tobytes())
-        return hasher.hexdigest()
+        return hash((prefix_hash, tuple(tokens.tolist())))
 
     def _chunk_tokens(
         self,
