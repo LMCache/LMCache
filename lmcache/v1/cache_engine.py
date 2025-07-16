@@ -44,6 +44,7 @@ from lmcache.v1.memory_management import (
     MemoryAllocatorInterface,
     MemoryFormat,
     MixedMemoryAllocator,
+    PagedTensorMemoryAllocator,
 )
 from lmcache.v1.storage_backend.storage_manager import StorageManager
 from lmcache.v1.token_database import (
@@ -220,6 +221,8 @@ class LMCacheEngine:
             num_tokens = end - start
             kv_shape = self.gpu_connector.get_shape(num_tokens)
             kv_dtype = self.metadata.kv_dtype
+
+            # TODO (Jiayi): should be batched in the future
             memory_obj = self.storage_manager.allocate(kv_shape, kv_dtype)
             if memory_obj is None:
                 logger.warning(
@@ -235,11 +238,18 @@ class LMCacheEngine:
             tot_kv_size += memory_obj.get_size()
             tot_token_num += num_tokens
 
+        # memory_objs might be empty, directly return to avoid sending tokens
+        if not memory_objs:
+            return
         self.gpu_connector.batched_from_gpu(memory_objs, starts, ends, **kwargs)
         offload_time += time.perf_counter() - t
 
         t = time.perf_counter()
-        self.storage_manager.batched_put(keys, memory_objs)
+
+        transfer_spec = None
+        if "transfer_spec" in kwargs:
+            transfer_spec = kwargs["transfer_spec"]
+        self.storage_manager.batched_put(keys, memory_objs, transfer_spec=transfer_spec)
         put_time += time.perf_counter() - t
 
         tot_time = offload_time + put_time
@@ -736,6 +746,30 @@ class LMCacheEngineBuilder:
     ) -> MemoryAllocatorInterface:
         if config.enable_nixl:
             assert config.nixl_buffer_device is not None
+            # TODO (Jiayi): make this less hacky
+            if config.enable_xpyd:
+                # First Party
+                from lmcache.v1.storage_backend.connector.nixl_utils import (
+                    get_correct_nixl_device,
+                )
+
+                corrected_device = get_correct_nixl_device(
+                    config.nixl_buffer_device,
+                    metadata.worker_id,
+                )
+                logger.info(f"Setting cuda device to {corrected_device} ")
+                torch.cuda.set_device(corrected_device)
+                buffer = torch.empty(
+                    config.nixl_buffer_size,
+                    dtype=torch.uint8,
+                    device=corrected_device,
+                )
+                return PagedTensorMemoryAllocator(
+                    buffer,
+                    torch.Size(metadata.kv_shape),
+                    metadata.kv_dtype,
+                    MemoryFormat.KV_T2D,  # TODO: remove this hardcode
+                )
             return AdHocMemoryAllocator(config.nixl_buffer_device)
 
         if config.weka_path is not None or config.gds_path is not None:

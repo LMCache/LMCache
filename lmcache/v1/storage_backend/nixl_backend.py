@@ -346,7 +346,10 @@ class NixlBackend(StorageBackendInterface):
         self._num_payload_added = 0
 
     def batched_submit_put_task(
-        self, keys: List[CacheEngineKey], memory_objs: List[MemoryObj]
+        self,
+        keys: List[CacheEngineKey],
+        memory_objs: List[MemoryObj],
+        transfer_spec=None,
     ) -> Optional[List[Future]]:
         memory_objs_metadatas = [memory_obj.meta for memory_obj in memory_objs]
         self.register_put_tasks(keys, memory_objs_metadatas)
