@@ -67,7 +67,8 @@ run_lmcache_vllmopenai_container() {
             'lmcache/vllm-openai:build-latest' \
             'meta-llama/Llama-3.1-8B-Instruct' --kv-transfer-config \
             '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}' \
-            --gpu-memory-utilization '0.5')
+            --gpu-memory-utilization '0.5' \
+            --max-model-len 2048)
     else
         CID=$(docker run -d --runtime nvidia --gpus "device=${best_gpu}" \
              --env HF_TOKEN=$HF_TOKEN \
@@ -79,19 +80,22 @@ run_lmcache_vllmopenai_container() {
             'lmcache/vllm-openai:build-latest' \
             'meta-llama/Llama-3.1-8B-Instruct' --kv-transfer-config \
             '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}' \
-            --gpu-memory-utilization '0.5')
+            --gpu-memory-utilization '0.5' \
+            --max-model-len 2048)
     fi
 
     wait_for_openai_api_server
 
-    docker logs -f "$CID" 2>&1 \
-    | grep -m1 -i "Starting vLLM API server" \
-    && echo "vLLM API server started." \
-    || {
-        echo "Logging is interrupted."
+    LOGFILE="/tmp/vllm_${CID}.log"
+
+    if timeout 10s bash -c "docker logs -f \"${CID}\" 2>&1 | tee \"${LOGFILE}\" | grep -m1 -i 'Starting vLLM API server'"; then
+        echo "vLLM API server started."
+    else
+        echo "Timeout waiting for startup marker, dumping full log:"
+        cat "${LOGFILE}"
         cleanup 1
         exit 1
-        }
+    fi
 
 }
 
