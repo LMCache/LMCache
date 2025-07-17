@@ -167,6 +167,7 @@ class StorageManager:
         self,
         keys: Sequence[CacheEngineKey],
         memory_objs: List[MemoryObj],
+        transfer_spec=None,  # TODO(Jiayi): add type check
     ) -> None:
         """
         Non-blocking function to batched put the memory objects into the
@@ -182,7 +183,9 @@ class StorageManager:
         for backend in self.storage_backends.values():
             # NOTE: the handling of exists_in_put_tasks
             # is done in the backend
-            backend.batched_submit_put_task(keys, memory_objs)
+            backend.batched_submit_put_task(
+                keys, memory_objs, transfer_spec=transfer_spec
+            )
 
         for memory_obj in memory_objs:
             memory_obj.ref_count_down()

@@ -13,53 +13,38 @@
 # limitations under the License.
 
 # Standard
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 import threading
 
 # Third Party
 from vllm.utils import make_zmq_socket
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 import torch
-import vllm.envs as envs
 import zmq
 
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.cache_engine import LMCacheEngine
 from lmcache.v1.lookup_client.abstract_client import LookupClientInterface
+from lmcache.v1.rpc_utils import get_zmq_rpc_path_lmcache
 
 if TYPE_CHECKING:
     # Third Party
     from vllm.config import VllmConfig
-    from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
 
 logger = init_logger(__name__)
-
-
-def get_zmq_rpc_path_lmcache(
-    role: "KVConnectorRole",
-    is_tp: bool = False,
-    vllm_config: Optional["VllmConfig"] = None,
-) -> str:
-    """Get the ZMQ RPC path for LMCache lookup communication."""
-    base_url = envs.VLLM_RPC_BASE_PATH
-    # Default to 0 if not configured
-    rpc_port = 0
-    if vllm_config is not None:
-        rpc_port = vllm_config.kv_transfer_config.get_from_extra_config(
-            "lmcache_rpc_port", 0
-        )
-    logger.debug("Base URL: %s, RPC Port: %s", base_url, rpc_port)
-    return f"ipc://{base_url}/lmcache_rpc_port_{rpc_port}"
 
 
 class LMCacheLookupClient(LookupClientInterface):
     """ZMQ-based lookup client that communicates with a lookup server."""
 
-    def __init__(self, role: "KVConnectorRole", is_tp: bool, vllm_config: "VllmConfig"):
+    def __init__(self, vllm_config: "VllmConfig"):
         self.encoder = MsgpackEncoder()
         self.ctx = zmq.Context()  # type: ignore[attr-defined]
-        socket_path = get_zmq_rpc_path_lmcache(role, is_tp, vllm_config)
+        rpc_port = vllm_config.kv_transfer_config.get_from_extra_config(
+            "lmcache_rpc_port", 0
+        )
+        socket_path = get_zmq_rpc_path_lmcache(vllm_config, rpc_port)
         self.socket = make_zmq_socket(
             self.ctx,
             socket_path,
@@ -84,13 +69,14 @@ class LMCacheLookupServer:
     def __init__(
         self,
         lmcache_engine: LMCacheEngine,
-        role: "KVConnectorRole",
-        is_tp: bool,
         vllm_config: "VllmConfig",
     ):
         self.decoder = MsgpackDecoder(torch.Tensor)
         self.ctx = zmq.Context()  # type: ignore[attr-defined]
-        socket_path = get_zmq_rpc_path_lmcache(role, is_tp, vllm_config)
+        rpc_port = vllm_config.kv_transfer_config.get_from_extra_config(
+            "lmcache_rpc_port", 0
+        )
+        socket_path = get_zmq_rpc_path_lmcache(vllm_config, rpc_port)
         self.socket = make_zmq_socket(
             self.ctx,
             socket_path,
