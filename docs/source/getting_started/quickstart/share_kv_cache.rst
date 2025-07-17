@@ -51,7 +51,7 @@ Run centralized sharing example
 
 .. code-block:: bash
 
-    LMCACHE_CONFIG_FILE=example.yaml \
+    LMCACHE_CONFIG_FILE=lmcache_config.yaml \
     CUDA_VISIBLE_DEVICES=0 \
     vllm serve mistralai/Mistral-7B-Instruct-v0.2 \
         --gpu-memory-utilization 0.8 \
@@ -62,7 +62,7 @@ In another terminal,
 
 .. code-block:: bash
 
-    LMCACHE_CONFIG_FILE=example.yaml \
+    LMCACHE_CONFIG_FILE=lmcache_config.yaml \
     CUDA_VISIBLE_DEVICES=1 \
     vllm serve mistralai/Mistral-7B-Instruct-v0.2 \
         --gpu-memory-utilization 0.8 \
