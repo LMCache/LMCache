@@ -87,15 +87,24 @@ run_lmcache_vllmopenai_container() {
     wait_for_openai_api_server
 
     LOGFILE="/tmp/vllm_${CID}.log"
+    docker logs -f "$CID" &> "$LOGFILE" &
+    LOG_PID=$!
 
-    if timeout 120s bash -c "docker logs -f \"${CID}\" 2>&1 | tee \"${LOGFILE}\" | grep -m1 -i 'Starting vLLM API server'"; then
-        echo "vLLM API server started."
-    else
-        echo "Timeout waiting for startup marker, dumping full log:"
-        cat "${LOGFILE}"
-        cleanup 1
-        exit 1
-    fi
+    end=$((SECONDS + 120))
+    while [ $SECONDS -lt $end ]; do
+        if grep -qi 'Starting vLLM API server' "$LOGFILE"; then
+            echo "vLLM API server started."
+            kill $LOG_PID
+            exit 0
+        fi
+        sleep 1
+    done
+
+    echo "Timeout waiting for startup marker, dumping full log:"
+    cat "$LOGFILE"
+    kill $LOG_PID
+    cleanup 1
+    exit 1
 
 }
 
