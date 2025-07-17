@@ -84,7 +84,6 @@ run_lmcache_vllmopenai_container() {
             --enforce-eager)
     fi
     buildkite-agent meta-data set "docker-CID" "$CID"
-    echo "$CID" > .buildkite/docker-cid
 
     wait_for_openai_api_server
 
