@@ -13,6 +13,7 @@
 # limitations under the License.
 
 # Standard
+from collections import defaultdict
 from typing import Dict, Generator, List, Optional, Union
 import asyncio
 import multiprocessing
@@ -143,7 +144,7 @@ class LMCacheEngine:
 
         self.lookup_cache = {}
         # request_id -> [pinned keys]
-        self.lookup_pins = {}
+        self.lookup_pins = defaultdict(list)
 
         InitializeUsageContext(config.to_original_config(), metadata)
         self.stats_monitor = LMCStatsMonitor.GetOrCreate()
