@@ -14,7 +14,7 @@
 
 # Standard
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Optional, Union
 import os
 
 # Third Party
@@ -165,7 +165,7 @@ class RequestTracker:
     def update(
         self,
         new_token_ids: list[int],
-        new_block_ids: tuple[list[int], ...],
+        new_block_ids: Union[tuple[list[int], ...], list[int]],
     ) -> None:
         """Update the request tracker when a running request is
         scheduled again
@@ -175,12 +175,12 @@ class RequestTracker:
 
         if len(new_block_ids) == 0:
             new_block_ids = []
-        else:
-            assert isinstance(new_block_ids[0], list), (
-                "The new_block_ids should be a tuple of lists, "
-                "the vllm version might be too old!"
-            )
+        elif isinstance(new_block_ids, tuple):
             new_block_ids = new_block_ids[0]
+        elif isinstance(new_block_ids, list):
+            pass
+        else:
+            raise ValueError(f"Unsupported new_block_ids type {type(new_block_ids)}")
         self.allocated_block_ids.extend(new_block_ids)
 
 
