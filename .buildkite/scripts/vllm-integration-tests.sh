@@ -88,7 +88,7 @@ run_lmcache_vllmopenai_container() {
 
     LOGFILE="/tmp/vllm_${CID}.log"
 
-    if timeout 10s bash -c "docker logs -f \"${CID}\" 2>&1 | tee \"${LOGFILE}\" | grep -m1 -i 'Starting vLLM API server'"; then
+    if timeout 120s bash -c "docker logs -f \"${CID}\" 2>&1 | tee \"${LOGFILE}\" | grep -m1 -i 'Starting vLLM API server'"; then
         echo "vLLM API server started."
     else
         echo "Timeout waiting for startup marker, dumping full log:"
