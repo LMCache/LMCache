@@ -679,7 +679,6 @@ class LMCacheEngine:
                 if pin:
                     self.lookup_pins.extend(key_all_layers)
 
-                # NOTE: need to pin all layers so have to call contains() for each layer
                 found = False
                 for key_single_layer in key_all_layers:
                     if self.storage_manager.contains(
