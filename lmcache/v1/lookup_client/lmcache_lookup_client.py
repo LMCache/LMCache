@@ -13,7 +13,7 @@
 # limitations under the License.
 
 # Standard
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 import threading
 
 # Third Party
@@ -52,7 +52,7 @@ class LMCacheLookupClient(LookupClientInterface):
             bind=False,
         )
 
-    def lookup(self, token_ids: torch.Tensor, request_id: str) -> int:
+    def lookup(self, token_ids: torch.Tensor, request_id: Optional[str] = None) -> int:
         token_bufs = self.encoder.encode(token_ids)
         request_id_buf = request_id.encode("utf-8")
         self.socket.send_multipart(token_bufs + [request_id_buf], copy=False)
