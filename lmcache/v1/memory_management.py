@@ -338,7 +338,7 @@ class TensorMemoryObj(MemoryObj):
             if (
                 self.meta.ref_count == 0
                 and self.parent_allocator is not None
-                and not self.is_pinned
+                and self.meta.pin_count <= 0  # <= 0 to be safe
             ):
                 self.parent_allocator.free(self)
 

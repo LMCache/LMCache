@@ -676,7 +676,8 @@ class LMCacheEngine:
                 # TODO(Jiayi): Optimize by checking only the existence of the key
                 # of one layer
                 key_all_layers = key.split_layers(self.num_layers)
-                self.lookup_pins.extend(key_all_layers)
+                if pin:
+                    self.lookup_pins.extend(key_all_layers)
 
                 # NOTE: need to pin all layers so have to call contains() for each layer
                 found = False
@@ -696,7 +697,8 @@ class LMCacheEngine:
                     continue
                 return prev_end
             else:
-                self.lookup_pins.append(key)
+                if pin:
+                    self.lookup_pins.append(key)
                 if self.storage_manager.contains(key, search_range, pin):
                     prev_end = end
                     continue
