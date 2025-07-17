@@ -15,8 +15,6 @@ cleanup_meta_pid() {
     else
       echo "No running ${label} process with PID ${pid}"
     fi
-    # Remove the meta‑data key now that we’ve cleaned up
-    buildkite-agent meta-data delete "$key"
   fi
 }
 
