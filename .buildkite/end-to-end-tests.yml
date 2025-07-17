@@ -38,4 +38,4 @@ steps:
     key: "clean"
     depends_on: ["test"]
     allow_dependency_failure: true
-    command: bash .buildkite/scripts/clean.sh
+    command: bash .buildkite/scripts/bare-machine-cleanup.sh
