@@ -718,8 +718,9 @@ class LMCacheEngine:
         Worker unpins all memory objects pinned by lookup by the scheduler.
         Reset the lookup_pins list for next vllm step
         """
-        self.storage_manager.batched_unpin(self.lookup_pins)
-        self.lookup_pins = []
+        if self.lookup_pins:
+            self.storage_manager.batched_unpin(self.lookup_pins)
+            self.lookup_pins = []
 
     @_lmcache_nvtx_annotate
     def clear(
