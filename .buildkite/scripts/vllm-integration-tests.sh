@@ -84,6 +84,7 @@ run_lmcache_vllmopenai_container() {
             --enforce-eager)
     fi
     buildkite-agent meta-data set "docker-CID" "$CID"
+    echo "$CID" > .buildkite/docker-cid
 
     wait_for_openai_api_server
 
@@ -91,6 +92,7 @@ run_lmcache_vllmopenai_container() {
     docker logs -f "$CID" &> "$LOGFILE" &
     LOG_PID=$!
 
+    set +x
     end=$((SECONDS + 120))
     while [ $SECONDS -lt $end ]; do
         if grep -qi 'Starting vLLM API server' "$LOGFILE"; then
@@ -100,6 +102,7 @@ run_lmcache_vllmopenai_container() {
         fi
         sleep 1
     done
+    set -x
 
     if [ $SECONDS -ge $end ]; then
         echo "Timeout waiting for startup marker, dumping full log:"

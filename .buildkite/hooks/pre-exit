@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+set -eu
+
+#####################
+# 1) Docker cleanup #
+#####################
+CID_FILE=".buildkite/docker-cid"
+if [[ -f $CID_FILE ]]; then
+  while read -r cid; do
+    if [[ -n "$cid" ]]; then
+      echo "🧹 Stopping container $cid"
+      docker stop "$cid" || true
+      docker rm -v "$cid" || true
+    fi
+  done < "$CID_FILE"
+  rm -f "$CID_FILE"
+fi
+
+########################################
+# 2) Bare‑machine PID‐file cleanup     #
+########################################
+cleanup_pid_file() {
+  local file="$1"
+  local label="$2"
+
+  if [[ -f "$file" ]]; then
+    local pid
+    pid=$(< "$file")
+    if kill -0 "$pid" 2>/dev/null; then
+      echo "🧹 Killing ${label} process ${pid}"
+      kill "$pid" || true
+      wait "$pid" 2>/dev/null || true
+    else
+      echo "⚠️  No running ${label} process with PID ${pid}"
+    fi
+    rm -f "$file"
+  fi
+}
+
+cleanup_pid_file ".buildkite/bare_cpu_pid"  "bare‑machine CPU test"
+cleanup_pid_file ".buildkite/bare_disk_pid" "bare‑machine disk test"
