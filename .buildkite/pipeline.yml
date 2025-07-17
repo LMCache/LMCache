@@ -1,7 +1,3 @@
-cancel_in_progress: true
-concurrency: 1
-concurrency_group: "pr-${BUILDKITE_PULL_REQUEST}"
-
 env:
   PATH: "$HOME/.local/bin:$PATH"
 
@@ -15,7 +11,7 @@ steps:
           save: "pipeline"
           force: "true"
     command:
-      - bash .buildkite/install-env.sh
+      - bash .buildkite/scripts/install-env.sh
 
   - label: ":pytest: Run pytest"
     key: "pytest"
@@ -28,11 +24,12 @@ steps:
           path: ".venv"
           restore: "pipeline"
     command:
-      - bash .buildkite/install-lmcache.sh
       - source .venv/bin/activate
+      - bash .buildkite/scripts/install-lmcache.sh
+      - source .buildkite/scripts/pick-free-gpu.sh
       - |
         LMCACHE_TRACK_USAGE="false" \
-        pytest --cov=lmcache \
+        pytest --maxfail=1 --cov=lmcache \
           --cov-report term --cov-report=html:coverage-test \
           --cov-report=xml:coverage-test.xml --html=durations/test.html \
           --ignore=tests/disagg --ignore=tests/v1/test_pos_kernels.py
