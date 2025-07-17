@@ -37,7 +37,7 @@ build_lmcache_vllmopenai_image() {
 
 wait_for_openai_api_server(){
     if ! timeout $SERVER_WAIT_TIMEOUT bash -c '
-        until curl 127.0.0.1:8000/v1/models |grep "\"id\":\"meta-llama/Llama-3.1-8B-Instruct\""; do
+        until curl 127.0.0.1:8000/v1/models |grep "\"id\":\"meta-llama/Llama-3.2-1B-Instruct\""; do
             echo "waiting for OpenAI API server to start"
             sleep 30
         done
@@ -50,18 +50,27 @@ wait_for_openai_api_server(){
 }
 
 run_lmcache_vllmopenai_container() {
+    # Pick the GPU with the largest free memory
+    best_gpu=$(nvidia-smi --query-gpu=memory.free,index \
+        --format=csv,noheader,nounits \
+      | sort -t',' -k1 -nr \
+      | head -n1 \
+      | cut -d',' -f2)
+    
     if [ -z "$HF_TOKEN" ]; then
-        CID=$(docker run -d --runtime nvidia --gpus all \
+        CID=$(docker run -d --runtime nvidia --gpus "device=${best_gpu}" \
             --env "LMCACHE_CHUNK_SIZE=256" \
             --env "LMCACHE_LOCAL_CPU=True" \
             --env "LMCACHE_MAX_LOCAL_CPU_SIZE=5" \
             --volume ~/.cache/huggingface:/root/.cache/huggingface \
             --network host \
             'lmcache/vllm-openai:build-latest' \
-            'meta-llama/Llama-3.1-8B-Instruct' --kv-transfer-config \
-            '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}')
+            'meta-llama/Llama-3.2-1B-Instruct' --kv-transfer-config \
+            '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}' \
+            --gpu-memory-utilization '0.5' \
+            --enforce-eager)
     else
-        CID=$(docker run -d --runtime nvidia --gpus all \
+        CID=$(docker run -d --runtime nvidia --gpus "device=${best_gpu}" \
              --env HF_TOKEN=$HF_TOKEN \
             --env "LMCACHE_CHUNK_SIZE=256" \
             --env "LMCACHE_LOCAL_CPU=True" \
@@ -69,24 +78,34 @@ run_lmcache_vllmopenai_container() {
             --volume ~/.cache/huggingface:/root/.cache/huggingface \
             --network host \
             'lmcache/vllm-openai:build-latest' \
-            'meta-llama/Llama-3.1-8B-Instruct' --kv-transfer-config \
-            '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}')
+            'meta-llama/Llama-3.2-1B-Instruct' --kv-transfer-config \
+            '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}' \
+            --gpu-memory-utilization '0.5' \
+            --enforce-eager)
     fi
 
     wait_for_openai_api_server
 
-    if ! timeout 10 bash -c '
-        if ! docker logs $0 | grep -i "Starting vLLM API server"; then
-            echo "container log file does not contain server started message"
-            exit 1
-        else
-            docker logs $0
+    LOGFILE="/tmp/vllm_${CID}.log"
+    docker logs -f "$CID" &> "$LOGFILE" &
+    LOG_PID=$!
+
+    end=$((SECONDS + 120))
+    while [ $SECONDS -lt $end ]; do
+        if grep -qi 'Starting vLLM API server' "$LOGFILE"; then
+            echo "vLLM API server started."
+            kill $LOG_PID
+            exit 0
         fi
-    ' $CID; then
-        echo "container log file was not created"
-        cleanup 1
-        exit 1
-    fi
+        sleep 1
+    done
+
+    echo "Timeout waiting for startup marker, dumping full log:"
+    cat "$LOGFILE"
+    kill $LOG_PID
+    cleanup 1
+    exit 1
+
 }
 
 cleanup() {
@@ -129,7 +148,7 @@ test_vllmopenai_server_with_lmcache_integrated() {
             -w "%{http_code}" -o response-file.txt \
             -H "Content-Type: application/json" \
             -d '{
-                "model": "meta-llama/Llama-3.1-8B-Instruct",
+                "model": "meta-llama/Llama-3.2-1B-Instruct",
                 "prompt": "<|begin_of_text|><|system|>\nYou are a helpful AI assistant.\n<|user|>\nWhat is the capital of France?\n<|assistant|>",
                 "max_tokens": 100,
                 "temperature": 0.7

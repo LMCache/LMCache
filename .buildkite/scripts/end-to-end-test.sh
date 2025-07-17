@@ -10,6 +10,7 @@ else
   uv venv --python "$PYTHON_BIN" "$VENV_DIR"
 fi
 
+source .venv/bin/activate
 uv pip install -e .
 uv pip install matplotlib
 uv pip install pandas
@@ -19,13 +20,8 @@ uv pip install -U vllm --pre --extra-index-url https://wheels.vllm.ai/nightly
 echo "📦 Installed packages in venv:"
 uv pip freeze
 
-set -x
-
-source .venv/bin/activate
 orig_dir="$(pwd)"
 cd "$LM_CACHE_TEST_DIR"
-
-set +x
 
 start_port=8000
 max_port=9000
@@ -79,6 +75,19 @@ echo "🎉 Selected ports: port1=$port1, port2=$port2"
 
 set -x
 
-LMCACHE_TRACK_USAGE="false" python3 main.py tests/tests.py -f test_local -o outputs/ -p $port1 $port2
+LMCACHE_TRACK_USAGE="false" python3 main.py tests/tests.py -f test_local_cpu_experimental -o outputs/ -p $port1 $port2
+
+mv /tmp/buildkite-agent-"$port1"-stdout.log "$orig_dir"/lmcache-cpu-stdout.log
+mv /tmp/buildkite-agent-"$port1"-stderr.log "$orig_dir"/lmcache-cpu-stderr.log
+mv /tmp/buildkite-agent-"$port2"-stdout.log "$orig_dir"/vllm-cpu-stdout.log
+mv /tmp/buildkite-agent-"$port2"-stderr.log "$orig_dir"/vllm-cpu-stderr.log
+
+LMCACHE_TRACK_USAGE="false" python3 main.py tests/tests.py -f test_local_disk_experimental -o outputs/ -p $port1 $port2
+
 python3 outputs/drawing_wrapper.py ./
 mv outputs/*.{csv,pdf} "$orig_dir"/
+
+mv /tmp/buildkite-agent-"$port1"-stdout.log "$orig_dir"/lmcache-disk-stdout.log
+mv /tmp/buildkite-agent-"$port1"-stderr.log "$orig_dir"/lmcache-disk-stderr.log
+mv /tmp/buildkite-agent-"$port2"-stdout.log "$orig_dir"/vllm-disk-stdout.log
+mv /tmp/buildkite-agent-"$port2"-stderr.log "$orig_dir"/vllm-disk-stderr.log
