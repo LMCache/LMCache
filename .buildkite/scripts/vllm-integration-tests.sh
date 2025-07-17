@@ -22,17 +22,22 @@
 set -ex
 
 CID=
+DOCKER_BUILD_FILE=
+DOCKER_LOGFILE=
 HF_TOKEN=
+LOG_PID=
 SERVER_WAIT_TIMEOUT=180
+TEST_HTTP_RESPONSE_FILE=
 
 #############
 # UTILITIES #
 #############
 
 build_lmcache_vllmopenai_image() {
-    cp example_build.sh test-build.sh
-    chmod 755 test-build.sh 
-    ./test-build.sh
+    DOCKER_BUILD_FILE="/tmp/lmcache_vllm_build.sh"
+    cp example_build.sh $DOCKER_BUILD_FILE
+    chmod 755 $DOCKER_BUILD_FILE
+    $DOCKER_BUILD_FILE
 }
 
 wait_for_openai_api_server(){
@@ -83,34 +88,58 @@ run_lmcache_vllmopenai_container() {
             --gpu-memory-utilization '0.5' \
             --enforce-eager)
     fi
-    buildkite-agent meta-data set "docker-CID" "$CID"
-
+    
     wait_for_openai_api_server
 
-    LOGFILE="/tmp/vllm_${CID}.log"
-    docker logs -f "$CID" &> "$LOGFILE" &
+    DOCKER_LOGFILE="/tmp/vllm_${CID}.log"
+    docker logs -f "$CID" &> "$DOCKER_LOGFILE" &
     LOG_PID=$!
 
     set +x
     end=$((SECONDS + 120))
+    api_srv_started=false
     while [ $SECONDS -lt $end ]; do
-        if grep -qi 'Starting vLLM API server' "$LOGFILE"; then
+        if grep -qi 'Starting vLLM API server' "$DOCKER_LOGFILE"; then
             echo "vLLM API server started."
-            kill $LOG_PID
+            api_srv_started=true
             break
         fi
         sleep 1
     done
     set -x
 
-    if [ $SECONDS -ge $end ]; then
-        echo "Timeout waiting for startup marker, dumping full log:"
-        cat "$LOGFILE"
-        kill $LOG_PID
+    if [ "$api_srv_started" = false ]; then
+        echo "Timeout waiting for vLLM API server to start, dumping full log:"
+        cat "$DOCKER_LOGFILE"
         cleanup 1
         exit 1
     fi
 
+}
+
+cleanup() {
+    set +e
+    if [ "${1:-0}" -ne 0 ]; then
+        printf "\n\n"
+        printf "\e[31m=%.0s\e[0m" {1..80}
+        printf "\n\e[31mERROR OCCURRED\e[0m\n"
+        printf "\e[31mFunction: %s\e[0m\n" "${FUNCNAME[1]}"
+        printf "\e[31mExit Code: %s\e[0m\n" "$1"
+        printf "\e[31m=%.0s\e[0m" {1..80}
+        printf "\n\n"
+    fi
+    for cid in $CID; do
+        if [ -n "$cid" ]; then
+            docker stop $cid
+            docker rm -v $cid
+        fi
+    done
+    if [ -n "$LOG_PID" ]; then
+        kill $LOG_PID
+    fi
+
+    rm -f $DOCKER_BUILD_FILE $TEST_HTTP_RESPONSE_FILE $DOCKER_LOGFILE
+    set -e
 }
 
 usage() {
@@ -127,8 +156,9 @@ usage() {
 #########
 
 test_vllmopenai_server_with_lmcache_integrated() {
+    TEST_HTTP_RESPONSE_FILE="/tmp/lmcache_vllm_http_response.txt"
     http_status_code=$(curl http://localhost:8000/v1/completions \
-            -w "%{http_code}" -o response-file.txt \
+            -w "%{http_code}" -o $TEST_HTTP_RESPONSE_FILE \
             -H "Content-Type: application/json" \
             -d '{
                 "model": "meta-llama/Llama-3.2-1B-Instruct",
@@ -140,13 +170,15 @@ test_vllmopenai_server_with_lmcache_integrated() {
 
     if [ "$http_status_code" -ne 200 ]; then
         echo "Model prompt request from OpenAI API server failed, HTTP status code: ${http_status_code}."
-        cat response-file.txt
+        echo "HTTP response:"
+        cat $TEST_HTTP_RESPONSE_FILE
+        echo "Snapshot of end of container logs:"
         docker logs -n 20 $CID
         cleanup 1
         exit 1
     else
-         echo "Model prompt request from OpenAI API server succeeded"
-         cat response-file.txt
+         echo "Model prompt request from OpenAI API server succeeded, dumping server response:"
+         cat $TEST_HTTP_RESPONSE_FILE
     fi
 }
 
