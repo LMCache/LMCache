@@ -15,7 +15,7 @@
 # Standard
 from dataclasses import dataclass
 from queue import Queue
-from typing import Any, Optional, Union
+from typing import TYPE_CHECKING, Any, Optional, Union
 import copy
 import threading
 import time
@@ -41,6 +41,10 @@ from lmcache.v1.memory_management import (
 )
 from lmcache.v1.storage_backend.abstract_backend import StorageBackendInterface
 from lmcache.v1.storage_backend.connector.nixl_utils import NixlConfigXpYd, NixlRole
+
+if TYPE_CHECKING:
+    # Third Party
+    from nixl._api import NixlAgent
 
 logger = init_logger(__name__)
 
@@ -758,7 +762,7 @@ def get_zmq_path(url: str, protocol: str = "tcp") -> str:
 
 @dataclass
 class NixlAgentWrapper:
-    agent: Any
+    agent: "NixlAgent"
     reg_descs: Any
     xfer_descs: Any
     xfer_handler: Any
@@ -786,8 +790,11 @@ class NixlAgentWrapper:
             xfer_dlist: the local transfer descriptor list.
             prepped_xfer_handler: the prepped transfer handler.
         """
-        # Third Party
-        from nixl._api import nixl_agent as NixlAgent
+        try:
+            # Third Party
+            from nixl._api import nixl_agent as NixlAgent
+        except ImportError as err:
+            raise RuntimeError("NIXL is not available") from err
 
         # Create a NIXL agent
         nixl_agent = NixlAgent(str(uuid.uuid4()))

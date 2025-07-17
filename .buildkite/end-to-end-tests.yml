@@ -1,0 +1,41 @@
+steps:
+  - label: ":pip: Prepare venv"
+    key: "venv"
+    plugins:
+      - cache#v1.7.0:
+          key-extra: "venv-{{ BUILDKITE_BUILD_ID }}"
+          path: ".venv"
+          save: "pipeline"
+          force: "true"
+    command:
+      - bash .buildkite/scripts/install-env.sh
+
+  - label: ":checkered_flag: Run tests"
+    key: "test"
+    depends_on: ["venv"]
+    plugins:
+      - cache#v1.7.0:
+          key-extra: "venv-{{ BUILDKITE_BUILD_ID }}"
+          path: ".venv"
+          restore: "pipeline"
+    command: |
+      bash .buildkite/scripts/end-to-end-test.sh
+    artifact_paths:
+      - "test_local_cpu_experimental.csv"
+      - "test_local_cpu_experimental.pdf"
+      - "test_local_disk_experimental.csv"
+      - "test_local_disk_experimental.pdf"
+      - "lmcache-cpu-stdout.log"
+      - "lmcache-cpu-stderr.log"
+      - "vllm-cpu-stdout.log"
+      - "vllm-cpu-stderr.log"
+      - "lmcache-disk-stdout.log"
+      - "lmcache-disk-stderr.log"
+      - "vllm-disk-stdout.log"
+      - "vllm-disk-stderr.log"
+
+  - label: ":wastebasket: Kill all"
+    key: "clean"
+    depends_on: ["test"]
+    allow_dependency_failure: true
+    command: bash .buildkite/scripts/clean.sh
