@@ -511,7 +511,6 @@ class LMCacheEngine:
             f"out of {num_required_tokens} "
             f"out of total {len(tokens)} tokens"
         )
-        self._lookup_unpin()
         return ret_mask
 
     @_lmcache_nvtx_annotate
@@ -610,8 +609,6 @@ class LMCacheEngine:
                 yield None
 
         yield None
-
-        self._lookup_unpin()
 
         # synchronize the last layer
         next(mem_obj_consumer)
@@ -713,7 +710,7 @@ class LMCacheEngine:
         return end
 
     @_lmcache_nvtx_annotate
-    def _lookup_unpin(self) -> None:
+    def lookup_unpin(self) -> None:
         """
         Worker unpins all memory objects pinned by lookup by the scheduler.
         Reset the lookup_pins list for next vllm step

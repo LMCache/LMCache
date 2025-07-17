@@ -531,6 +531,9 @@ class LMCacheConnectorV1Impl:
                         num_expected_tokens,
                     )
 
+            # the worker unpins the lookup pins by the scheduler
+            self.lmcache_engine.lookup_unpin()
+
     @_lmcache_nvtx_annotate
     def wait_for_layer_load(self, layer_name: str) -> None:
         """Blocking until the KV for a specific layer is loaded into vLLM's
