@@ -533,7 +533,7 @@ class LMCacheConnectorV1Impl:
                         num_expected_tokens,
                     )
 
-            self.lmcache_engine.lookup_unpin(metadata.lookup_requests_in_step)
+        self.lmcache_engine.lookup_unpin(metadata.lookup_requests_in_step)
 
     @_lmcache_nvtx_annotate
     def wait_for_layer_load(self, layer_name: str) -> None:
