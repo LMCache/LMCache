@@ -40,19 +40,19 @@ class DiskCacheMetadata:
     shape: Optional[torch.Size] = None
     dtype: Optional[torch.dtype] = None
     fmt: MemoryFormat = None
-    is_pin: bool = False
+    pin_count: int = 0
 
     def pin(self) -> bool:
-        self.is_pin = True
+        self.pin_count += 1
         return True
 
     def unpin(self) -> bool:
-        self.is_pin = False
+        self.pin_count -= 1
         return True
 
     @property
     def is_pinned(self) -> bool:
-        return self.is_pin
+        return self.pin_count > 0
 
 
 TORCH_DTYPE_TO_STR_DTYPE = {
