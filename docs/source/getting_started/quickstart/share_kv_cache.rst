@@ -37,9 +37,6 @@ First, create a configuration file named ``lmcache_config.yaml`` with the follow
     local_cpu: true
     remote_url: "lm://localhost:65432"
     remote_serde: "cachegen"
-    
-    # Whether retrieve() is pipelined or not
-    pipelined_backend: false
 
 Run centralized sharing example
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
