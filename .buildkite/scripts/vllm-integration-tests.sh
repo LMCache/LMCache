@@ -83,6 +83,7 @@ run_lmcache_vllmopenai_container() {
             --gpu-memory-utilization '0.5' \
             --enforce-eager)
     fi
+    buildkite-agent meta-data set "docker-CID" "$CID"
 
     wait_for_openai_api_server
 
@@ -108,28 +109,6 @@ run_lmcache_vllmopenai_container() {
         exit 1
     fi
 
-}
-
-cleanup() {
-    set +e
-    if [ "${1:-0}" -ne 0 ]; then
-        printf "\n\n"
-        printf "\e[31m=%.0s\e[0m" {1..80}
-        printf "\n\e[31mERROR OCCURRED\e[0m\n"
-        printf "\e[31mFunction: %s\e[0m\n" "${FUNCNAME[1]}"
-        printf "\e[31mExit Code: %s\e[0m\n" "$1"
-        printf "\e[31m=%.0s\e[0m" {1..80}
-        printf "\n\n"
-    fi
-    for cid in $CID; do
-        if [ -n "$cid" ]; then
-            docker stop $cid
-            docker rm -v $cid
-        fi
-    done
-
-    rm -f test-build.sh response-file.txt
-    set -e
 }
 
 usage() {
@@ -216,7 +195,5 @@ run_lmcache_vllmopenai_container
 
 # test that can inference model using vLLM OpenAI API (lmcache integrated)
 test_vllmopenai_server_with_lmcache_integrated
-
-cleanup
 
 exit 0
