@@ -37,7 +37,7 @@ build_lmcache_vllmopenai_image() {
 
 wait_for_openai_api_server(){
     if ! timeout $SERVER_WAIT_TIMEOUT bash -c '
-        until curl 127.0.0.1:8000/v1/models |grep "\"id\":\"meta-llama/Llama-3.1-8B-Instruct\""; do
+        until curl 127.0.0.1:8000/v1/models |grep "\"id\":\"meta-llama/Llama-3.2-1B-Instruct\""; do
             echo "waiting for OpenAI API server to start"
             sleep 30
         done
@@ -65,10 +65,10 @@ run_lmcache_vllmopenai_container() {
             --volume ~/.cache/huggingface:/root/.cache/huggingface \
             --network host \
             'lmcache/vllm-openai:build-latest' \
-            'meta-llama/Llama-3.1-8B-Instruct' --kv-transfer-config \
+            'meta-llama/Llama-3.2-1B-Instruct' --kv-transfer-config \
             '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}' \
             --gpu-memory-utilization '0.5' \
-            --max-model-len 2048)
+            --enforce-eager)
     else
         CID=$(docker run -d --runtime nvidia --gpus "device=${best_gpu}" \
              --env HF_TOKEN=$HF_TOKEN \
@@ -78,10 +78,10 @@ run_lmcache_vllmopenai_container() {
             --volume ~/.cache/huggingface:/root/.cache/huggingface \
             --network host \
             'lmcache/vllm-openai:build-latest' \
-            'meta-llama/Llama-3.1-8B-Instruct' --kv-transfer-config \
+            'meta-llama/Llama-3.2-1B-Instruct' --kv-transfer-config \
             '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}' \
             --gpu-memory-utilization '0.5' \
-            --max-model-len 2048)
+            --enforce-eager)
     fi
 
     wait_for_openai_api_server
@@ -139,7 +139,7 @@ test_vllmopenai_server_with_lmcache_integrated() {
             -w "%{http_code}" -o response-file.txt \
             -H "Content-Type: application/json" \
             -d '{
-                "model": "meta-llama/Llama-3.1-8B-Instruct",
+                "model": "meta-llama/Llama-3.2-1B-Instruct",
                 "prompt": "<|begin_of_text|><|system|>\nYou are a helpful AI assistant.\n<|user|>\nWhat is the capital of France?\n<|assistant|>",
                 "max_tokens": 100,
                 "temperature": 0.7
