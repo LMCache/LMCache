@@ -15,6 +15,7 @@
 # Standard
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional
+import os
 
 # Third Party
 from vllm.config import VllmConfig
@@ -22,6 +23,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
     KVConnectorRole,
+)
+from vllm.distributed.parallel_state import (
+    get_tensor_model_parallel_rank,
 )
 from vllm.utils import cdiv
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -38,6 +42,10 @@ from lmcache.logging import init_logger
 from lmcache.utils import _lmcache_nvtx_annotate
 from lmcache.v1.compute.blend import LMCBlenderBuilder
 from lmcache.v1.lookup_client import LookupClientFactory
+from lmcache.v1.offload_server.zmq_server import ZMQOffloadServer
+from lmcache.v1.storage_backend.connector.nixl_connector_v3 import (
+    NixlReceiverInfo,
+)
 
 if TYPE_CHECKING:
     # Third Party
@@ -70,9 +78,22 @@ class SaveSpec:
 
 
 @dataclass
+class DisaggSpec:
+    req_id: str
+    receiver_info: NixlReceiverInfo
+    is_last_prefill: bool = False
+
+
+tmp_disagg_tracker: dict[str, DisaggSpec] = {}
+
+
+@dataclass
 class RequestTracker:
     # Request id
     req_id: str
+
+    # Total prompt token length
+    prompt_len: int
 
     # The token ids that has been scheduled so far
     token_ids: list[int]
@@ -85,6 +106,9 @@ class RequestTracker:
 
     # The number of tokens that has been saved
     num_saved_tokens: int = 0
+
+    # Disagg spec for the request
+    disagg_spec: Optional[DisaggSpec] = None
 
     # Multimodal hashes and positions
     mm_hashes: Optional[list[str]] = None
@@ -124,11 +148,16 @@ class RequestTracker:
             # updated accordingly.
             unfolded_block_ids = new_request.block_ids[0].copy()
 
+        # NOTE: Initialized in `update_state_after_alloc`
+        disagg_spec = tmp_disagg_tracker.pop(new_request.req_id, None)
+
         return RequestTracker(
             req_id=new_request.req_id,
+            prompt_len=len(new_request.prompt_token_ids),
             token_ids=new_request.prompt_token_ids[:num_tokens_to_compute].copy(),
             allocated_block_ids=unfolded_block_ids,
             num_saved_tokens=lmcache_cached_tokens,
+            disagg_spec=disagg_spec,
             mm_hashes=new_request.mm_hashes.copy(),
             mm_positions=new_request.mm_positions.copy(),
         )
@@ -163,10 +192,16 @@ class ReqMeta:
     token_ids: torch.Tensor
     # Slot mapping
     slot_mapping: torch.Tensor
+
+    # Whether is last prefill or not
+    is_last_prefill: bool = False
+
     # Skip save or not
     save_spec: Optional[SaveSpec] = None
     # load_spec
     load_spec: Optional[LoadSpec] = None
+    # disagg spec
+    disagg_spec: Optional[DisaggSpec] = None
 
     @staticmethod
     def from_request_tracker(
@@ -193,6 +228,10 @@ class ReqMeta:
         """
         input_token_ids = tracker.token_ids
         input_token_len = len(input_token_ids)
+
+        is_last_prefill = False
+        if input_token_len == tracker.prompt_len:
+            is_last_prefill = True
 
         # For save operation: do not save if the following condition is met
         # 1. has already been saved before (num_saved_tokens > 0)
@@ -272,8 +311,10 @@ class ReqMeta:
             req_id=tracker.req_id,
             token_ids=token_ids,
             slot_mapping=slot_mapping,
+            is_last_prefill=is_last_prefill,
             save_spec=save_spec,
             load_spec=load_spec,
+            disagg_spec=tracker.disagg_spec,
         )
 
 
@@ -302,15 +343,12 @@ class LMCacheConnectorV1Impl:
     ):
         self._parent = parent
         self.kv_role = vllm_config.kv_transfer_config.kv_role
-        is_tp = vllm_config.parallel_config.tensor_parallel_size > 1
 
         config = lmcache_get_config()
         self.layerwise_retrievers = []
         if role == KVConnectorRole.SCHEDULER:
             # Create lookup client using factory
-            self.lookup_client = LookupClientFactory.create_lookup_client(
-                role, is_tp, vllm_config
-            )
+            self.lookup_client = LookupClientFactory.create_lookup_client(vllm_config)
             self._requests_in_step: dict[str, Request] = {}
         else:
             self.lmcache_engine = init_lmcache_engine(
@@ -333,7 +371,13 @@ class LMCacheConnectorV1Impl:
             # Create lookup server using factory
             assert self.lmcache_engine is not None
             self.lookup_server = LookupClientFactory.create_lookup_server(
-                self.lmcache_engine, role, is_tp, vllm_config
+                self.lmcache_engine, vllm_config
+            )
+
+            self.offload_server = ZMQOffloadServer(
+                self.lmcache_engine,
+                vllm_config,
+                get_tensor_model_parallel_rank(),
             )
 
         self.kv_caches: dict[str, torch.Tensor] = {}
@@ -365,6 +409,8 @@ class LMCacheConnectorV1Impl:
             vllm_config.parallel_config
         )
         self.current_layer = 0
+
+        self.force_skip_save = bool(os.environ.get("LMCACHE_FORCE_SKIP_SAVE", False))
 
     def _init_kv_caches_from_forward_context(self, forward_context: "ForwardContext"):
         for layer_name in forward_context.no_compile_layers:
@@ -412,6 +458,8 @@ class LMCacheConnectorV1Impl:
             return
 
         assert self.lmcache_engine is not None
+
+        self.lmcache_engine.post_init(kvcaches=kvcaches)
 
         for idx, request in enumerate(metadata.requests):
             if request.load_spec is None:
@@ -542,6 +590,8 @@ class LMCacheConnectorV1Impl:
         if self.current_layer == 0:
             self.layerwise_storers = []
 
+            is_first = False
+
             for idx, request in enumerate(connector_metadata.requests):
                 save_spec = request.save_spec
                 if save_spec is None or not save_spec.can_save:
@@ -587,7 +637,14 @@ class LMCacheConnectorV1Impl:
                     skip_leading_tokens,
                     request.req_id,
                 )
-                sync = True
+                if not is_first:
+                    sync = True
+                    is_first = True
+                else:
+                    sync = False
+
+                # TODO (Jiayi): need to make layerwise storing
+                # compatible with disagg spec
                 layerwise_storer = self.lmcache_engine.store_layer(
                     token_ids,
                     mask=store_mask,
@@ -642,10 +699,10 @@ class LMCacheConnectorV1Impl:
             # 0 if there is no local storage configured. In this case, we
             # should rely on the slip_leading_tokens in save_spec to avoid
             # transmit the already saved tokens again.
-            # skip_leading_tokens = max(
-            #    self.lmcache_engine.lookup(token_ids),
-            #    save_spec.skip_leading_tokens,
-            # )
+            skip_leading_tokens = max(
+                self.lmcache_engine.lookup(token_ids),
+                save_spec.skip_leading_tokens,
+            )
             skip_leading_tokens = save_spec.skip_leading_tokens
 
             if skip_leading_tokens == len(token_ids):
@@ -668,12 +725,27 @@ class LMCacheConnectorV1Impl:
                 skip_leading_tokens,
                 request.req_id,
             )
+
+            is_last_prefill = request.is_last_prefill
+            if is_last_prefill:
+                if request.disagg_spec:
+                    request.disagg_spec.is_last_prefill = True
+            else:
+                token_len = len(token_ids)
+                aligned_token_len = (
+                    token_len // self._lmcache_chunk_size * self._lmcache_chunk_size
+                )
+                token_ids = token_ids[:aligned_token_len]
+                store_mask = store_mask[:aligned_token_len]
+                slot_mapping = slot_mapping[:aligned_token_len]
+
             self.lmcache_engine.store(
                 token_ids,
                 mask=store_mask,
                 kvcaches=kvcaches,
                 slot_mapping=slot_mapping,
                 offset=skip_leading_tokens,
+                transfer_spec=request.disagg_spec,
             )
 
             # NOTE(Jiayi): We assume all tokens are saved
@@ -767,6 +839,27 @@ class LMCacheConnectorV1Impl:
         if the CacheManager this allocated blocks for us.
         """
 
+        kv_transfer_params = request.kv_transfer_params
+
+        if kv_transfer_params is not None and "disagg_spec" in kv_transfer_params:
+            req_disagg_spec = kv_transfer_params["disagg_spec"]
+
+            receiver_id = req_disagg_spec["receiver_host"] + str(
+                req_disagg_spec["receiver_init_port"]
+            )
+            receiver_info = NixlReceiverInfo(
+                receiver_id=receiver_id,
+                receiver_host=req_disagg_spec["receiver_host"],
+                receiver_init_port=req_disagg_spec["receiver_init_port"],
+                receiver_alloc_port=req_disagg_spec["receiver_alloc_port"],
+            )
+
+            disagg_spec = DisaggSpec(
+                req_id=req_disagg_spec["req_id"],
+                receiver_info=receiver_info,
+            )
+
+            tmp_disagg_tracker[request.request_id] = disagg_spec
         self._requests_in_step[request.request_id] = request
 
         if request.request_id not in self.load_specs:
@@ -811,7 +904,7 @@ class LMCacheConnectorV1Impl:
             scheduler_output (SchedulerOutput): the scheduler output object.
         """
 
-        force_skip_save = self.kv_role == "kv_consumer"
+        force_skip_save = self.kv_role == "kv_consumer" or self.force_skip_save
 
         meta = LMCacheConnectorMetadata()
 
