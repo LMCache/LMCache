@@ -1113,6 +1113,7 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
         return True
 
     def __del__(self):
+        # FIXME: NIXL-related memory leak should be handled somewhere (else).
         del self.buffer
 
 

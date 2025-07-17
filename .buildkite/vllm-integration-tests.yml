@@ -1,7 +1,3 @@
-cancel_in_progress: true
-concurrency: 1
-concurrency_group: "pr-${BUILDKITE_PULL_REQUEST}"
-
 env:
   DOCKER_BUILDKIT: 1
 
@@ -9,5 +5,5 @@ steps:
   - label: ":rocket: vLLM Integration Tests"
     timeout_in_minutes: 60
     commands:
-      - chmod +x scripts/vllm-integration-tests.sh
-      - scripts/vllm-integration-tests.sh --hf-token=$HF_TOKEN --server-wait-timeout=240
+      - chmod +x .buildkite/scripts/vllm-integration-tests.sh
+      - .buildkite/scripts/vllm-integration-tests.sh --hf-token=$HF_TOKEN --server-wait-timeout=240
