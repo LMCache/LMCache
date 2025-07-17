@@ -15,10 +15,12 @@
 # Standard
 from typing import Iterable, List, Optional, Tuple, Union
 import abc
+import array
 
 # Third Party
 from transformers import AutoTokenizer
 import torch
+import xxhash
 
 # First Party
 from lmcache.config import LMCacheEngineMetadata
@@ -86,11 +88,14 @@ class ChunkedTokenDatabase(TokenDatabase):
         metadata: Optional[LMCacheEngineMetadata] = None,
     ):
         # FIXME(Jiayi): cache_config.prefix_caching_hash_algo
-        self.hash_func = hash
+        self.hash_func = xxhash.xxh64()
 
         if config is not None:
             self.chunk_size = config.chunk_size
             self.save_unfull_chunk = config.save_unfull_chunk
+        else:  # Default values
+            self.chunk_size = 256
+            self.save_unfull_chunk = True
         self.metadata = metadata
 
     def _make_key_by_hash(self, chunk_hash: int):
@@ -103,19 +108,21 @@ class ChunkedTokenDatabase(TokenDatabase):
             chunk_hash,
         )
 
-    def _get_init_hash(self) -> int:
-        return NONE_HASH
+    def _get_init_hash(self) -> str:
+        return ""
 
     def _hash(
         self,
         tokens: Union[torch.Tensor, List[int]],
         prefix_hash: int,
-    ) -> int:
+    ) -> Union[int, str]:
         if isinstance(tokens, torch.Tensor):
-            tokens_tuple = tuple(tokens.cpu().tolist())
+            tokens_bytes = tokens.cpu().to(torch.uint32).numpy().tobytes()
         elif isinstance(tokens, list):
-            tokens_tuple = tuple(tokens)
-        return self.hash_func((prefix_hash, tokens_tuple, None))
+            tokens_bytes = array.array("I", tokens).tobytes()
+        self.hash_func.update(prefix_hash.encode("ascii"))
+        self.hash_func.update(tokens_bytes)
+        return self.hash_func.hexdigest()
 
     def _chunk_tokens(
         self,
@@ -231,7 +238,7 @@ class SegmentTokenDatabase(TokenDatabase):
         self.tokenizer = AutoTokenizer.from_pretrained(metadata.model_name)
 
         # FIXME(Jiayi): cache_config.prefix_caching_hash_algo
-        self.hash_func = hash
+        self.hash_func = xxhash.xxh64()
 
         # TODO (Jiayi): figure out how to decide when
         # to use `1:` (whether there's a special starting token
@@ -253,12 +260,9 @@ class SegmentTokenDatabase(TokenDatabase):
     def _hash(
         self,
         tokens: Union[torch.Tensor, List[int]],
-    ) -> int:
-        if isinstance(tokens, torch.Tensor):
-            tokens_tuple = tuple(tokens.cpu().tolist())
-        elif isinstance(tokens, list):
-            tokens_tuple = tuple(tokens)
-        return self.hash_func(tokens_tuple)
+    ) -> Union[int, str]:
+        self.hash_func.update(tokens.numpy().tobytes())
+        return self.hash_func.hexdigest()
 
     def _fast_split_by_subtensor(self, tokens: torch.Tensor) -> Iterable[torch.Tensor]:
         """Match the `sep_tokens` with sliding windows"""

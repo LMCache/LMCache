@@ -61,7 +61,6 @@ class KVController:
 
         # TODO(Jiayi): remove this hardcode
         self.token_database = ChunkedTokenDatabase()
-        self.token_database.chunk_size = 256
 
     def post_init(self, cluster_executor):
         """
