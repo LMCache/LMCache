@@ -22,7 +22,6 @@ import time
 import uuid
 
 # Third Party
-from nixl._api import nixl_agent as NixlAgent
 import msgspec
 import torch
 import zmq
@@ -759,7 +758,7 @@ def get_zmq_path(url: str, protocol: str = "tcp") -> str:
 
 @dataclass
 class NixlAgentWrapper:
-    agent: NixlAgent
+    agent: Any
     reg_descs: Any
     xfer_descs: Any
     xfer_handler: Any
@@ -787,8 +786,8 @@ class NixlAgentWrapper:
             xfer_dlist: the local transfer descriptor list.
             prepped_xfer_handler: the prepped transfer handler.
         """
-        if NixlAgent is None:
-            raise RuntimeError("NIXL is not available")
+        # Third Party
+        from nixl._api import nixl_agent as NixlAgent
 
         # Create a NIXL agent
         nixl_agent = NixlAgent(str(uuid.uuid4()))
