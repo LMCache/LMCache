@@ -95,16 +95,18 @@ run_lmcache_vllmopenai_container() {
         if grep -qi 'Starting vLLM API server' "$LOGFILE"; then
             echo "vLLM API server started."
             kill $LOG_PID
-            exit 0
+            break
         fi
         sleep 1
     done
 
-    echo "Timeout waiting for startup marker, dumping full log:"
-    cat "$LOGFILE"
-    kill $LOG_PID
-    cleanup 1
-    exit 1
+    if [ $SECONDS -ge $end ]; then
+        echo "Timeout waiting for startup marker, dumping full log:"
+        cat "$LOGFILE"
+        kill $LOG_PID
+        cleanup 1
+        exit 1
+    fi
 
 }
 
