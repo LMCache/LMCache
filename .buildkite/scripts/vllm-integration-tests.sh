@@ -84,18 +84,15 @@ run_lmcache_vllmopenai_container() {
 
     wait_for_openai_api_server
 
-    if ! timeout 10 bash -c '
-        if ! docker logs $0 | grep -i "Starting vLLM API server"; then
-            echo "container log file does not contain server started message"
-            exit 1
-        else
-            docker logs $0
-        fi
-    ' $CID; then
-        echo "container log file was not created"
+    docker logs -f "$CID" 2>&1 \
+    | grep -m1 -i "Starting vLLM API server" \
+    && echo "vLLM API server started." \
+    || {
+        echo "Logging is interrupted."
         cleanup 1
         exit 1
-    fi
+        }
+
 }
 
 cleanup() {
