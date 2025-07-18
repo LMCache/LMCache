@@ -323,14 +323,13 @@ class PrometheusLogger:
     _gauge_cls = prometheus_client.Gauge
     _counter_cls = prometheus_client.Counter
     _histogram_cls = prometheus_client.Histogram
-
-    def __init__(self, metadata: LMCacheEngineMetadata):
-        # Ensure PROMETHEUS_MULTIPROC_DIR is set before any metric registration
-        if "PROMETHEUS_MULTIPROC_DIR" not in os.environ:
-            default_dir = "/tmp/lmcache_prometheus"
-            os.environ["PROMETHEUS_MULTIPROC_DIR"] = default_dir
-            if not os.path.exists(default_dir):
-                os.makedirs(default_dir, exist_ok=True)
+    
+    def __init__(self, metadata: LMCacheEngineMetadata, registry=None):
+        # Use the provided registry or default to prometheus_client.REGISTRY
+        self.registry = registry or prometheus_client.REGISTRY
+        
+        # We don't need to set PROMETHEUS_MULTIPROC_DIR here anymore
+        # as we'll use the registry provided by vLLM
 
         self.metadata = metadata
 
@@ -341,24 +340,28 @@ class PrometheusLogger:
             name="lmcache:num_retrieve_requests",
             documentation="Total number of retrieve requests sent to lmcache",
             labelnames=labelnames,
+            registry=self.registry
         )
 
         self.counter_num_store_requests = self._counter_cls(
             name="lmcache:num_store_requests",
             documentation="Total number of store requests sent to lmcache",
             labelnames=labelnames,
+            registry=self.registry
         )
 
         self.counter_num_requested_tokens = self._counter_cls(
             name="lmcache:num_requested_tokens",
             documentation="Total number of tokens requested from lmcache",
             labelnames=labelnames,
+            registry=self.registry
         )
 
         self.counter_num_hit_tokens = self._counter_cls(
             name="lmcache:num_hit_tokens",
             documentation="Total number of tokens hit in lmcache",
             labelnames=labelnames,
+            registry=self.registry
         )
 
         self.counter_num_remote_read_requests = self._counter_cls(
@@ -366,12 +369,14 @@ class PrometheusLogger:
             documentation="Total number of requests read from "
             "remote backends in lmcache",
             labelnames=labelnames,
+            registry=self.registry
         )
 
         self.counter_num_remote_read_bytes = self._counter_cls(
             name="lmcache:num_remote_read_bytes",
             documentation="Total number of bytes read from remote backends in lmcache",
             labelnames=labelnames,
+            registry=self.registry
         )
 
         self.counter_num_remote_write_requests = self._counter_cls(
@@ -379,12 +384,14 @@ class PrometheusLogger:
             documentation="Total number of requests write to "
             "remote backends in lmcache",
             labelnames=labelnames,
+            registry=self.registry
         )
 
         self.counter_num_remote_write_bytes = self._counter_cls(
             name="lmcache:num_remote_write_bytes",
             documentation="Total number of bytes write to remote backends in lmcache",
             labelnames=labelnames,
+            registry=self.registry
         )
 
         self.gauge_cache_hit_rate = self._gauge_cls(
@@ -392,6 +399,7 @@ class PrometheusLogger:
             documentation="Cache hit rate of lmcache since last log",
             labelnames=labelnames,
             multiprocess_mode="livemostrecent",
+            registry=self.registry
         )
 
         self.gauge_local_cache_usage = self._gauge_cls(
@@ -399,6 +407,7 @@ class PrometheusLogger:
             documentation="Local cache usage (bytes) of lmcache",
             labelnames=labelnames,
             multiprocess_mode="sum",
+            registry=self.registry
         )
 
         self.gauge_remote_cache_usage = self._gauge_cls(
@@ -406,6 +415,7 @@ class PrometheusLogger:
             documentation="Remote cache usage (bytes) of lmcache",
             labelnames=labelnames,
             multiprocess_mode="sum",
+            registry=self.registry
         )
 
         self.gauge_local_storage_usage = self._gauge_cls(
@@ -413,6 +423,7 @@ class PrometheusLogger:
             documentation="Local storage usage (bytes) of lmcache",
             labelnames=labelnames,
             multiprocess_mode="sum",
+            registry=self.registry
         )
 
         time_to_retrieve_buckets = [
@@ -438,6 +449,7 @@ class PrometheusLogger:
             documentation="Time to retrieve from lmcache (seconds)",
             labelnames=labelnames,
             buckets=time_to_retrieve_buckets,
+            registry=self.registry
         )
 
         time_to_store_buckets = [
@@ -463,6 +475,7 @@ class PrometheusLogger:
             documentation="Time to store to lmcache (seconds)",
             labelnames=labelnames,
             buckets=time_to_store_buckets,
+            registry=self.registry
         )
 
         retrieve_speed_buckets = [
@@ -487,6 +500,7 @@ class PrometheusLogger:
             documentation="Retrieve speed of lmcache (tokens per second)",
             labelnames=labelnames,
             buckets=retrieve_speed_buckets,
+            registry=self.registry
         )
 
         store_speed_buckets = [
@@ -511,6 +525,7 @@ class PrometheusLogger:
             documentation="Store speed of lmcache (tokens per second)",
             labelnames=labelnames,
             buckets=store_speed_buckets,
+            registry=self.registry
         )
 
         remote_time_to_get = [
@@ -536,6 +551,7 @@ class PrometheusLogger:
             documentation="Time to get from remote backends (ms)",
             labelnames=labelnames,
             buckets=remote_time_to_get,
+            registry=self.registry
         )
 
         remote_time_to_put = [
@@ -561,6 +577,7 @@ class PrometheusLogger:
             documentation="Time to put to remote backends (ms)",
             labelnames=labelnames,
             buckets=remote_time_to_put,
+            registry=self.registry
         )
 
         remote_time_to_get_sync = [
@@ -586,6 +603,7 @@ class PrometheusLogger:
             documentation="Time to get from remote backends synchronously(ms)",
             labelnames=labelnames,
             buckets=remote_time_to_get_sync,
+            registry=self.registry
         )
 
     def _log_gauge(self, gauge, data: Union[int, float]) -> None:
@@ -670,9 +688,9 @@ class PrometheusLogger:
     _instance = None
 
     @staticmethod
-    def GetOrCreate(metadata: LMCacheEngineMetadata) -> "PrometheusLogger":
+    def GetOrCreate(metadata: LMCacheEngineMetadata, registry=None) -> "PrometheusLogger":
         if PrometheusLogger._instance is None:
-            PrometheusLogger._instance = PrometheusLogger(metadata)
+            PrometheusLogger._instance = PrometheusLogger(metadata, registry=registry)
         # assert PrometheusLogger._instance.metadata == metadata, \
         #    "PrometheusLogger instance already created with different metadata"
         if PrometheusLogger._instance.metadata != metadata:
