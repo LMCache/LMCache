@@ -1,0 +1,11 @@
+local_cpu: False
+max_local_cpu_size: 0
+max_local_disk_size: 0
+
+enable_nixl: True
+enable_xpyd: True
+nixl_role: "sender"
+nixl_proxy_host: "localhost"
+nixl_proxy_port: 7500
+nixl_buffer_size: 1073741824 # 1GB
+nixl_buffer_device: "cuda"

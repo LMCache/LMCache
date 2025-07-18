@@ -56,6 +56,16 @@ def CreateStorageBackends(
     storage_backends: OrderedDict[str, StorageBackendInterface] = OrderedDict()
 
     if config.enable_nixl:
+        if config.enable_xpyd:
+            # First Party
+            from lmcache.v1.storage_backend.nixl_backend_v3 import NixlBackend
+
+            storage_backends["NixlBackend"] = NixlBackend.CreateNixlBackend(
+                config, metadata, memory_allocator
+            )
+            assert config.nixl_buffer_device is not None
+            return storage_backends
+
         # First Party
         from lmcache.v1.storage_backend.nixl_backend import NixlBackend
 

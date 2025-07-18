@@ -85,7 +85,6 @@ Create your ``mooncake-config.yaml``:
     local_device: "cpu"
     remote_url: "mooncakestore://127.0.0.1:50051/"
     remote_serde: "naive"
-    pipelined_backend: False
     local_cpu: False
     max_local_cpu_size: 5
 
