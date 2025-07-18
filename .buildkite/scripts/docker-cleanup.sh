@@ -11,4 +11,5 @@ for cid in $CID; do
 done
 
 rm -f test-build.sh response-file.txt
+docker system prune -af
 set -e
