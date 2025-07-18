@@ -1,7 +1,7 @@
 ### Branch
 
 - end-to-end: for main development
-- storage-varieties: for figure to show CacheServe performs under different - caching devices
+- storage-varieties: for figure to show CacheServe performs under different caching devices; for figure to show we need to correctly predict SSD speed
 - cacheserve: for Siddhant's graph
 
 ### Ablation study
