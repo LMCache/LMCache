@@ -13,7 +13,7 @@
 # limitations under the License.
 
 # Standard
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 # Third Party
 import torch
@@ -69,7 +69,7 @@ class MooncakeLookupClient(LookupClientInterface):
         else:
             self.token_database = ChunkedTokenDatabase(config, metadata)
 
-    def lookup(self, token_ids: torch.Tensor) -> int:
+    def lookup(self, token_ids: torch.Tensor, request_id: Optional[str] = None) -> int:
         # process token_ids to cacheengine keys
         keys = []
         ends = []
