@@ -321,6 +321,7 @@ class ReqMeta:
 @dataclass
 class LMCacheConnectorMetadata(KVConnectorMetadata):
     requests: list[ReqMeta]
+    lookup_requests_in_step: list[str]
 
     def __init__(self):
         self.requests = []
@@ -349,7 +350,8 @@ class LMCacheConnectorV1Impl:
         if role == KVConnectorRole.SCHEDULER:
             # Create lookup client using factory
             self.lookup_client = LookupClientFactory.create_lookup_client(vllm_config)
-            self._requests_in_step: dict[str, Request] = {}
+            self._unfinished_requests: dict[str, Request] = {}
+            self._lookup_requests_in_step: list[str] = []
         else:
             self.lmcache_engine = init_lmcache_engine(
                 vllm_config.model_config,
@@ -530,6 +532,8 @@ class LMCacheConnectorV1Impl:
                         num_retrieved_tokens,
                         num_expected_tokens,
                     )
+
+        self.lmcache_engine.lookup_unpin(metadata.lookup_requests_in_step)
 
     @_lmcache_nvtx_annotate
     def wait_for_layer_load(self, layer_name: str) -> None:
@@ -791,12 +795,15 @@ class LMCacheConnectorV1Impl:
                 token_ids, request.mm_hashes, request.mm_positions
             )
 
+        self._lookup_requests_in_step.append(request.request_id)
         if self.skip_last_n_tokens > 0:
             num_external_hit_tokens = self.lookup_client.lookup(
-                token_ids[: -self.skip_last_n_tokens]
+                token_ids[: -self.skip_last_n_tokens], request_id=request.request_id
             )
         else:
-            num_external_hit_tokens = self.lookup_client.lookup(token_ids)
+            num_external_hit_tokens = self.lookup_client.lookup(
+                token_ids, request_id=request.request_id
+            )
 
         # When prompt length is divisible by the block size and all
         # blocks are cached, we need to recompute the last token.
@@ -860,7 +867,7 @@ class LMCacheConnectorV1Impl:
             )
 
             tmp_disagg_tracker[request.request_id] = disagg_spec
-        self._requests_in_step[request.request_id] = request
+        self._unfinished_requests[request.request_id] = request
 
         if request.request_id not in self.load_specs:
             # No KV tokens from external KV cache, return
@@ -910,6 +917,7 @@ class LMCacheConnectorV1Impl:
 
         for finished_req_id in scheduler_output.finished_req_ids:
             self._request_trackers.pop(finished_req_id, None)
+            self._unfinished_requests.pop(finished_req_id, None)
 
         for request in scheduler_output.scheduled_new_reqs:
             # Right now, we only load KV for new requests
@@ -964,14 +972,14 @@ class LMCacheConnectorV1Impl:
         for i, req_id in enumerate(cached_reqs.req_ids):
             request_tracker = self._request_trackers[req_id]
             num_new_tokens = scheduler_output.num_scheduled_tokens[req_id]
-            if request := self._requests_in_step.get(req_id):
+            if request := self._unfinished_requests.get(req_id):
                 num_current_tokens = len(request_tracker.token_ids)
                 new_token_ids = request.all_token_ids[
                     num_current_tokens : num_current_tokens + num_new_tokens
                 ]
             else:
                 raise ValueError(
-                    f"Request {req_id} is not in _requests_in_step, "
+                    f"Request {req_id} is not in _unfinished_requests, "
                     f"but it is scheduled to be cached"
                 )
             new_block_ids = cached_reqs.new_block_ids[i]
@@ -989,6 +997,8 @@ class LMCacheConnectorV1Impl:
             if req_meta is not None:
                 meta.add_request(req_meta)
 
+        meta.lookup_requests_in_step = self._lookup_requests_in_step
+        self._lookup_requests_in_step = []
         return meta
 
     def request_finished(
