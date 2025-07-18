@@ -13,7 +13,7 @@
 # limitations under the License.
 
 # Standard
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 import threading
 
 # Third Party
@@ -52,9 +52,10 @@ class LMCacheLookupClient(LookupClientInterface):
             bind=False,
         )
 
-    def lookup(self, token_ids: torch.Tensor) -> int:
-        request = self.encoder.encode(token_ids)
-        self.socket.send_multipart(request, copy=False)
+    def lookup(self, token_ids: torch.Tensor, request_id: Optional[str] = None) -> int:
+        token_bufs = self.encoder.encode(token_ids)
+        request_id_buf = request_id.encode("utf-8")
+        self.socket.send_multipart(token_bufs + [request_id_buf], copy=False)
         resp = self.socket.recv()
         result = int.from_bytes(resp, "big")
         return result
@@ -92,8 +93,12 @@ class LMCacheLookupServer:
                 # try:
                 # request = self.socket.recv()
                 frames = self.socket.recv_multipart(copy=False)
-                token_ids = self.decoder.decode(frames)
-                result = self.lmcache_engine.lookup(token_ids, pin=True)
+                token_frames = frames[:-1]
+                request_id = frames[-1].bytes.decode("utf-8")
+                token_ids = self.decoder.decode(token_frames)
+                result = self.lmcache_engine.lookup(
+                    token_ids, request_id=request_id, pin=True
+                )
                 response = result.to_bytes(4, "big")
                 self.socket.send(response)
                 # except Exception as e:
