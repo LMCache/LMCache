@@ -82,10 +82,7 @@ class LookupClientFactory:
 
         # Only create the KV lookup API server on worker rank 0
         # when there are multiple workers and when not using external lookup client
-        if (
-            vllm_config.parallel_config.rank == 0
-            and config.external_lookup_client is None
-        ):
+        if config.external_lookup_client is None:
             # First Party
             from lmcache.v1.lookup_client.lmcache_lookup_client import (
                 LMCacheLookupServer,
