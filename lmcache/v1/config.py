@@ -109,6 +109,16 @@ class LMCacheEngineConfig:
     # Size of CuFile Buffer in MiB
     cufile_buffer_size: Optional[int] = None
 
+    # (Optional) SPDK params
+    # The name of the SPDK bdev to use
+    bdev_name: Optional[str] = None
+    # The path to the JSON config file for SPDK
+    json_config_file: Optional[str] = None
+    # The reactor mask for SPDK
+    reactor_mask: Optional[str] = None
+    # The maximum size of the SPDK blobstore in GB
+    spdk_max_size: Optional[int] = None
+
     # The extra config
     extra_config: Optional[dict] = None
 
@@ -154,6 +164,8 @@ class LMCacheEngineConfig:
         weka_path: Optional[str] = None,
         gds_path: Optional[str] = None,
         cufile_buffer_size: Optional[int] = None,
+        bdev_name: Optional[str] = None,
+        spdk_max_size: Optional[int] = None,
         extra_config: Optional[dict] = None,
         save_unfull_chunk: bool = True,
         blocking_timeout_secs: int = 10,
@@ -192,6 +204,8 @@ class LMCacheEngineConfig:
             weka_path,
             gds_path,
             cufile_buffer_size,
+            bdev_name,
+            spdk_max_size,
             extra_config,
             save_unfull_chunk,
             blocking_timeout_secs,
@@ -330,6 +344,10 @@ class LMCacheEngineConfig:
         nixl_enable_gc = config.get("nixl_enable_gc", False)
 
         extra_config = config.get("extra_config", None)
+        
+        bdev_name = config.get("bdev_name", None)
+        spdk_max_size = config.get("spdk_max_size", None)
+        
         if extra_config is not None:
             assert isinstance(extra_config, dict), "extra_config must be a dict"
 
@@ -404,6 +422,8 @@ class LMCacheEngineConfig:
                 weka_path,
                 gds_path,
                 cufile_buffer_size,
+                bdev_name,
+                spdk_max_size,
                 extra_config,
                 save_unfull_chunk,
                 blocking_timeout_secs,
@@ -679,6 +699,8 @@ class LMCacheEngineConfig:
             "extra_config": self.extra_config,
             "save_unfull_chunk": self.save_unfull_chunk,
             "blocking_timeout_secs": self.blocking_timeout_secs,
+            "bdev_name": self.bdev_name,
+            "spdk_max_size": self.spdk_max_size,
         }
         logger.info(f"LMCache Configuration: {config_dict}")
 
