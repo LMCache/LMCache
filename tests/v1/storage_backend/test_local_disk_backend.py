@@ -219,7 +219,7 @@ class TestLocalDiskBackend:
         assert metadata.shape == memory_obj.metadata.shape
         assert metadata.dtype == memory_obj.metadata.dtype
         assert metadata.fmt == memory_obj.metadata.fmt
-        assert not metadata.is_pin
+        assert metadata.pin_count == 0
 
     def test_insert_key_reinsert(self, local_disk_backend):
         """Test insert_key() with reinsertion."""
@@ -313,7 +313,7 @@ class TestLocalDiskBackend:
         assert metadata.shape == memory_obj.metadata.shape
         assert metadata.dtype == memory_obj.metadata.dtype
         assert metadata.fmt == memory_obj.metadata.fmt
-        assert not metadata.is_pin
+        assert metadata.pin_count == 0
 
         # Test that the key is still not in put_tasks
         # (since we used insert_key directly)
