@@ -200,7 +200,7 @@ class TestLocalDiskBackend:
         assert local_disk_backend.dict[key].pin_count > 0
         # Test unpin
         assert local_disk_backend.unpin(key)
-        assert not local_disk_backend.dict[key].pin_count == 0
+        assert local_disk_backend.dict[key].pin_count == 0
 
         # Test pin/unpin non-existent key
         non_existent_key = create_test_key("non_existent")
