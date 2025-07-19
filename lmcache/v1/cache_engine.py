@@ -504,8 +504,6 @@ class LMCacheEngine:
             # will immediately remove the object from itself
             if self.remove_after_retrieve:
                 self.storage_manager.remove(key)
-            else:
-                self.storage_manager.batched_unpin([key])
 
         retrieved_tokens = torch.sum(ret_mask)
         self.stats_monitor.on_retrieve_finished(monitor_req_id, retrieved_tokens)
@@ -602,10 +600,6 @@ class LMCacheEngine:
                 mem_objs_layer = [task.result() for task in tasks]
                 mem_obj_consumer.send(mem_objs_layer)
                 to_count_down.extend(mem_objs_layer)
-
-            # TODO(Jiayi): Need to be done in a modular way
-            for keys_layer in keys_layer_major:
-                self.storage_manager.batched_unpin(keys_layer)
 
             for mem_obj in to_count_down:
                 mem_obj.ref_count_down()
