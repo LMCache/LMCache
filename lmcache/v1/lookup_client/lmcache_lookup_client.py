@@ -44,21 +44,34 @@ class LMCacheLookupClient(LookupClientInterface):
         rpc_port = vllm_config.kv_transfer_config.get_from_extra_config(
             "lmcache_rpc_port", 0
         )
-        socket_path = get_zmq_rpc_path_lmcache(vllm_config, rpc_port)
-        self.socket = make_zmq_socket(
-            self.ctx,
-            socket_path,
-            zmq.REQ,  # type: ignore[attr-defined]
-            bind=False,
-        )
+        self.tensor_parallel_size = vllm_config.parallel_config.tensor_parallel_size
+        for tp_rank in range(self.tensor_parallel_size):
+            socket_path = get_zmq_rpc_path_lmcache(vllm_config, rpc_port, tp_rank)
+            if tp_rank == 0:
+                self.socket = make_zmq_socket(
+                    self.ctx,
+                    socket_path,
+                    zmq.REQ,  # type: ignore[attr-defined]
+                    bind=False,
+                )
+            else:
+                self.socket.connect(socket_path)
 
     def lookup(self, token_ids: torch.Tensor, request_id: Optional[str] = None) -> int:
         token_bufs = self.encoder.encode(token_ids)
         request_id_buf = request_id.encode("utf-8")
-        self.socket.send_multipart(token_bufs + [request_id_buf], copy=False)
-        resp = self.socket.recv()
-        result = int.from_bytes(resp, "big")
-        return result
+        results = []
+        for i in range(self.tensor_parallel_size):
+            self.socket.send_multipart(token_bufs + [request_id_buf], copy=False)
+            resp = self.socket.recv()
+            result = int.from_bytes(resp, "big")
+            results.append(result)
+        if not all(x == results[0] for x in results):
+            raise RuntimeError(
+                f"Lookup results (number of hit tokens) differ "
+                f"across tensor parallel ranks: {results}."
+            )
+        return results[0]
 
     def close(self):
         self.socket.close(linger=0)
@@ -67,17 +80,15 @@ class LMCacheLookupClient(LookupClientInterface):
 class LMCacheLookupServer:
     """ZMQ-based lookup server that handles lookup requests using LMCacheEngine."""
 
-    def __init__(
-        self,
-        lmcache_engine: LMCacheEngine,
-        vllm_config: "VllmConfig",
-    ):
+    def __init__(self, lmcache_engine: LMCacheEngine, vllm_config: "VllmConfig"):
         self.decoder = MsgpackDecoder(torch.Tensor)
         self.ctx = zmq.Context()  # type: ignore[attr-defined]
         rpc_port = vllm_config.kv_transfer_config.get_from_extra_config(
             "lmcache_rpc_port", 0
         )
-        socket_path = get_zmq_rpc_path_lmcache(vllm_config, rpc_port)
+        socket_path = get_zmq_rpc_path_lmcache(
+            vllm_config, rpc_port, vllm_config.parallel_config.rank
+        )
         self.socket = make_zmq_socket(
             self.ctx,
             socket_path,
