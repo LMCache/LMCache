@@ -109,7 +109,7 @@ jobs:
             - name: Harden Runner
               uses: step-security/harden-runner@6c439dc8bdf85cadbbce9ed30d1c7b959517bc49 # v2.12.2
               with:
-                disable-sudo-and-containers: true
+                disable-sudo-and-containers: false
                 egress-policy: block
                 allowed-endpoints: >
                   ghcr.io:443
@@ -150,7 +150,7 @@ jobs:
             - name: Harden Runner
               uses: step-security/harden-runner@6c439dc8bdf85cadbbce9ed30d1c7b959517bc49 # v2.12.2
               with:
-                  disable-sudo-and-containers: true
+                  disable-sudo-and-containers: false
                   egress-policy: block
                   allowed-endpoints: >
                     api.github.com:443
