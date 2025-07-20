@@ -14,7 +14,6 @@
 
 # Standard
 from concurrent.futures import Future, TimeoutError
-from functools import wraps
 from typing import List, Optional
 import asyncio
 import threading
@@ -66,7 +65,7 @@ class RemoteBackend(StorageBackendInterface):
         self.connection: Optional[RemoteConnector] = None
         self.min_reconnect_interval = 10
         self.failure_time = -1000000.0
-        self._init_connection()
+        self.init_connection()
 
         assert config.remote_serde is not None
         self.serializer, self.deserializer = CreateSerde(
@@ -92,10 +91,20 @@ class RemoteBackend(StorageBackendInterface):
 
         self.stats_monitor = LMCStatsMonitor.GetOrCreate()
 
+        # Create RemoteMonitor instance, which initializes the
+        # connection status and active connector dynamically
+        # First Party
+        from lmcache.v1.storage_backend.remote_monitor import RemoteMonitor
+
+        self.remote_monitor = RemoteMonitor(self)
+
+        # Start the remote monitor thread (if ping is supported)
+        self.remote_monitor.start()
+
     def __str__(self):
         return self.__class__.__name__
 
-    def _init_connection(self):
+    def init_connection(self):
         # Initialize connection
         if self.connection is not None:
             return
@@ -123,18 +132,6 @@ class RemoteBackend(StorageBackendInterface):
             logger.warning(f"Failed to initialize/re-establish remote connection: {e}")
             self.connection = None
 
-    @staticmethod
-    def _init_connection_wrapper(func):
-        @wraps(func)
-        def wrapper(self, *args, **kwargs):
-            self._init_connection()
-            result = func(self, *args, **kwargs)
-            return result
-
-        return wrapper
-
-    # TODO(Jiayi): handle `pin` semantics
-    @_init_connection_wrapper
     def contains(self, key: CacheEngineKey, pin: bool = False) -> bool:
         if self.connection is None:
             logger.warning("Connection is None in contains, returning False")
@@ -153,9 +150,6 @@ class RemoteBackend(StorageBackendInterface):
             res = future.result()
             return res
         except Exception as e:
-            with self.lock:
-                self.connection = None
-                self.failure_time = time.time()
             logger.warning(f"Remote connection failed in contains: {e}")
             logger.warning("Returning False")
             return False
@@ -246,9 +240,6 @@ class RemoteBackend(StorageBackendInterface):
             if isinstance(e, TimeoutError):
                 logger.warning("get blocking timeout, trigger cancel the future task")
                 future.cancel()
-            with self.lock:
-                self.connection = None
-                self.failure_time = time.time()
             logger.warning(f"Error occurred in get_blocking: {e}")
             logger.warning("Returning None")
             return None

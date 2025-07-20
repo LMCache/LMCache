@@ -24,7 +24,10 @@ jobs:
       - name: "Harden Runner"
         uses: step-security/harden-runner@002fdce3c6a235733a90a27c80493a3241e56863 # v2.12.1
         with:
-          egress-policy: audit # TODO: change to 'egress-policy: block' after couple of runs
+          disable-sudo-and-containers: true
+          egress-policy: block
+          allowed-endpoints: >
+            api.github.com:443
 
       - name: "Stale Action"
         uses: actions/stale@5bef64f19d7facfb25b37b414482c7164d639639 # v9.1.0
