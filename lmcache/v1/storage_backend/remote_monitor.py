@@ -43,7 +43,7 @@ class RemoteMonitor:
     Remote monitor class, encapsulating the monitor logic
     """
 
-    def __init__(self, backend: "RemoteBackend"):  # 修改为字符串类型提示
+    def __init__(self, backend: "RemoteBackend"):
         self.backend = backend
 
         # Lock for connector switching

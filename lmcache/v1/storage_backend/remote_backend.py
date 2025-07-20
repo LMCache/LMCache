@@ -92,8 +92,7 @@ class RemoteBackend(StorageBackendInterface):
         self.stats_monitor = LMCStatsMonitor.GetOrCreate()
 
         # Create RemoteMonitor instance, which initializes the
-        # connection status and active connector
-        # 动态导入RemoteMonitor，避免循环依赖
+        # connection status and active connector dynamically
         # First Party
         from lmcache.v1.storage_backend.remote_monitor import RemoteMonitor
 
