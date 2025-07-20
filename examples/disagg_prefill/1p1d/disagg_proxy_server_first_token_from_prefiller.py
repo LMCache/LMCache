@@ -140,7 +140,7 @@ async def handle_completions(request: Request):
         )
         tokenize_output = tokenize_output.json()
 
-        org_max_tokens = req_data["max_tokens"]
+        org_max_tokens = req_data.get("max_tokens", None)
         req_data["prompt"] = tokenize_output["tokens"]
         req_data["max_tokens"] = 1
         req_data["kv_transfer_params"] = {"ret_first_tok": True}
@@ -157,7 +157,8 @@ async def handle_completions(request: Request):
         et = time.time()
         stats_calculator.add(et - st)
 
-        req_data["max_tokens"] = org_max_tokens - 1
+        if org_max_tokens is not None:
+            req_data["max_tokens"] = org_max_tokens - 1
         req_data["prompt"].append(prefill_output["kv_transfer_params"]["first_tok"])
         req_data.pop("kv_transfer_params")
         req_data["stream"] = True
@@ -218,7 +219,7 @@ async def handle_chat_completions(request: Request):
         stream = req_data.get("stream", False)
         media_type = "text/event-stream" if stream else "application/json"
 
-        org_max_tokens = req_data["max_tokens"]
+        org_max_tokens = req_data.get("max_tokens", None)
         req_data["max_tokens"] = 1
 
         org_max_completion_tokens = None
@@ -233,8 +234,8 @@ async def handle_chat_completions(request: Request):
 
         et = time.time()
         stats_calculator.add(et - st)
-
-        req_data["max_tokens"] = org_max_tokens
+        if org_max_tokens is not None:
+            req_data["max_tokens"] = org_max_tokens
         if org_max_completion_tokens is not None:
             req_data["max_completion_tokens"] = org_max_completion_tokens
 
