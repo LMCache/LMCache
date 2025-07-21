@@ -21,6 +21,7 @@ from vllm.utils import make_zmq_socket
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 import torch
 import zmq
+import pickle
 
 # First Party
 from lmcache.logging import init_logger
@@ -57,21 +58,11 @@ class LMCacheLookupClient(LookupClientInterface):
             else:
                 self.socket.connect(socket_path)
 
-    def lookup(self, token_ids: torch.Tensor, request_id: Optional[str] = None) -> int:
-        token_bufs = self.encoder.encode(token_ids)
-        request_id_buf = request_id.encode("utf-8")
-        results = []
-        for i in range(self.tensor_parallel_size):
-            self.socket.send_multipart(token_bufs + [request_id_buf], copy=False)
-            resp = self.socket.recv()
-            result = int.from_bytes(resp, "big")
-            results.append(result)
-        if not all(x == results[0] for x in results):
-            raise RuntimeError(
-                f"Lookup results (number of hit tokens) differ "
-                f"across tensor parallel ranks: {results}."
-            )
-        return results[0]
+    def lookup(self, token_ids: torch.Tensor, user: Optional[str] = "") -> int:
+        self.socket.send_multipart([pickle.dumps(user), pickle.dumps(token_ids)], copy=False)
+        resp = self.socket.recv()
+        result = int.from_bytes(resp, "big")
+        return result
 
     def close(self):
         self.socket.close(linger=0)
@@ -104,12 +95,9 @@ class LMCacheLookupServer:
                 # try:
                 # request = self.socket.recv()
                 frames = self.socket.recv_multipart(copy=False)
-                token_frames = frames[:-1]
-                request_id = frames[-1].bytes.decode("utf-8")
-                token_ids = self.decoder.decode(token_frames)
-                result = self.lmcache_engine.lookup(
-                    token_ids, request_id=request_id, pin=True
-                )
+                user = pickle.loads(frames[0])
+                token_ids = pickle.loads(frames[1])
+                result = self.lmcache_engine.lookup(token_ids, pin=True, user=user)
                 response = result.to_bytes(4, "big")
                 self.socket.send(response)
                 # except Exception as e:
