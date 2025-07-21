@@ -415,13 +415,15 @@ class VLLMBufferLayerwiseGPUConnector(GPUConnectorInterface):
         num_all_tokens = ends[-1] - starts[0]
         slot_mapping_full = slot_mapping[starts[0] : ends[-1]]
 
-        # compute gap positions 
-        gap_mask = torch.ones(num_all_tokens, dtype=torch.bool, device=slot_mapping_full.device)
+        # compute gap positions
+        gap_mask = torch.ones(
+            num_all_tokens, dtype=torch.bool, device=slot_mapping_full.device
+        )
         buf_offset = starts[0]
-        
-        for start, end in zip(starts, ends):
+
+        for start, end in zip(starts, ends, strict=False):
             gap_mask[start - buf_offset : end - buf_offset] = False
-        
+
         self.current_gap_positions = torch.where(gap_mask)[0]
 
         buf_offset = starts[0]
