@@ -207,22 +207,18 @@ class StorageManager:
                     cpu_memory_objs.append(cpu_memory_obj)
                 self.nixl_offload_stream.synchronize()
 
+                for memory_obj in memory_objs:
+                    memory_obj.ref_count_down()
+                memory_objs = cpu_memory_objs
+
         for backend_name, backend in self.storage_backends.items():
             if backend_name == "NixlBackend":
                 continue
             # NOTE: the handling of exists_in_put_tasks
             # is done in the backend
-            if self.enable_nixl:
-                backend.batched_submit_put_task(
-                    keys, memory_objs, transfer_spec=transfer_spec
-                )
-            else:
-                backend.batched_submit_put_task(keys, cpu_memory_objs)
+            backend.batched_submit_put_task(keys, memory_objs)
 
         for memory_obj in memory_objs:
-            memory_obj.ref_count_down()
-
-        for memory_obj in cpu_memory_objs:
             memory_obj.ref_count_down()
 
     def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
