@@ -800,7 +800,7 @@ class LMCacheEngineBuilder:
                 )
                 if config.local_cpu:
                     max_local_cpu_size = config.max_local_cpu_size
-                    nixl_cpu_mem_allocator.init_cpu_emory_allocator(
+                    nixl_cpu_mem_allocator.init_cpu_memory_allocator(
                         int(max_local_cpu_size * 1024**3)
                     )
                 return nixl_cpu_mem_allocator
