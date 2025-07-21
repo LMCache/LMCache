@@ -73,6 +73,10 @@ class LMCacheLookupClient(LookupClientInterface):
             )
         return results[0]
 
+    def supports_producer_reuse(self) -> bool:
+        """Return True as LMCacheLookupClient supports producer kvcache reuse"""
+        return True
+
     def close(self):
         self.socket.close(linger=0)
 

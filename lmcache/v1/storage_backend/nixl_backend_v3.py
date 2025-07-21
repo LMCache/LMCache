@@ -123,8 +123,9 @@ class NixlBackend(StorageBackendInterface):
         """
 
         # NOTE: no eviction in PD
-
-        mem_obj = self.memory_allocator.allocate(shape=shape, dtype=dtype, fmt=fmt)
+        mem_obj = self.memory_allocator.allocate(
+            shape=shape, dtype=dtype, fmt=fmt, allocator_type="nixl"
+        )
 
         return mem_obj
 
