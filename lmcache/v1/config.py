@@ -264,6 +264,7 @@ class LMCacheEngineConfig:
         distributed_url: Optional[str] = None,
         error_handling: bool = False,
         save_unfull_chunk: bool = True,
+        save_chunk_meta: bool = True,
     ) -> "LMCacheEngineConfig":
         # TODO (ApostaC): Add nixl config
         if backend == "cpu":
@@ -324,6 +325,7 @@ class LMCacheEngineConfig:
                 distributed_url=distributed_url,
                 error_handling=error_handling,
                 save_unfull_chunk=save_unfull_chunk,
+                save_chunk_meta=save_chunk_meta,
             )
             .validate()
             .log_config()
