@@ -141,8 +141,8 @@ class LocalCPUBackend(StorageBackendInterface):
     def submit_prefetch_task(
         self,
         key: CacheEngineKey,
-    ) -> Optional[Future]:
-        return None
+    ) -> bool:
+        return False
 
     def get_blocking(
         self,
@@ -344,7 +344,6 @@ class LocalCPUBackend(StorageBackendInterface):
         if self.lookup_server is not None:
             self.lookup_server.batched_remove(evict_keys)
         return memory_objs
-
 
     def get_keys(self) -> List[CacheEngineKey]:
         """

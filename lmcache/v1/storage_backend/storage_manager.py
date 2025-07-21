@@ -17,7 +17,6 @@ from collections import OrderedDict
 from concurrent.futures import Future
 from typing import (
     TYPE_CHECKING,
-    Dict,
     Generator,
     List,
     Optional,
@@ -248,7 +247,6 @@ class StorageManager:
                 assert task is not None
                 tasks.append(task)
             yield tasks
-    
 
     def prefetch(self, key: CacheEngineKey) -> None:
         """Launch a prefetch request in the storage backend. Non-blocking"""

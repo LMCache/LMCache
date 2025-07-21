@@ -206,28 +206,31 @@ class LocalDiskBackend(StorageBackendInterface):
     def submit_prefetch_task(
         self,
         key: CacheEngineKey,
-    ) -> Optional[Future]:
-        self.disk_lock.acquire()
-        if key not in self.dict:
-            self.disk_lock.release()
-            return None
+    ) -> bool:
+        # self.disk_lock.acquire()
+        # if key not in self.dict:
+        #     self.disk_lock.release()
+        #     return None
 
-        # Update cache recency
-        self.evictor.update_on_hit(key, self.dict)
+        # # Update cache recency
+        # self.evictor.update_on_hit(key, self.dict)
 
-        path = self.dict[key].path
-        dtype = self.dict[key].dtype
-        shape = self.dict[key].shape
-        fmt = self.dict[key].fmt
-        self.disk_lock.release()
-        logger.info(f"Prefetching {key} from disk.")
+        # path = self.dict[key].path
+        # dtype = self.dict[key].dtype
+        # shape = self.dict[key].shape
+        # fmt = self.dict[key].fmt
+        # self.disk_lock.release()
+        # logger.info(f"Prefetching {key} from disk.")
 
-        assert dtype is not None
-        assert shape is not None
-        future = asyncio.run_coroutine_threadsafe(
-            self.async_load_bytes_from_disk(path, dtype, shape, fmt), self.loop
-        )
-        return future
+        # assert dtype is not None
+        # assert shape is not None
+        # future = asyncio.run_coroutine_threadsafe(
+        #     self.async_load_bytes_from_disk(path, dtype, shape, fmt), self.loop
+        # )
+        # return future
+
+        # TODO(Jiayi): Need to modify this when prefetch interface is determined.
+        return False
 
     def get_blocking(
         self,
