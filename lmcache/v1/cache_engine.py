@@ -600,8 +600,9 @@ class LMCacheEngine:
 
         yield None
 
-        # synchronize the last layer
-        next(mem_obj_consumer)
+        # synchronize the last layer (only if we have cache keys)
+        if keys:
+            next(mem_obj_consumer)
 
         retrieved_tokens = torch.sum(ret_mask)
         self.stats_monitor.on_retrieve_finished(monitor_req_id, retrieved_tokens)
@@ -795,6 +796,12 @@ class LMCacheEngineBuilder:
         if config.weka_path is not None or config.gds_path is not None:
             assert config.cufile_buffer_size is not None
             return CuFileMemoryAllocator(config.cufile_buffer_size * 1024**2)
+
+        if config.kv_service_sm_url is not None:
+            assert config.kv_service_sm_buffer_size is not None, (
+                "Need to specify kv_service_sm_buffer_size for KVServerBackend"
+            )
+            return MixedMemoryAllocator(config.kv_service_sm_buffer_size * 1024**2)
 
         max_local_cpu_size = config.max_local_cpu_size
         return MixedMemoryAllocator(int(max_local_cpu_size * 1024**3))
