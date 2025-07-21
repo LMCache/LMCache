@@ -195,7 +195,7 @@ class StorageManager:
                     cpu_memory_obj = self.local_cpu_backend.allocate(
                         shape=memory_obj.tensor.shape,
                         dtype=memory_obj.tensor.dtype,
-                        fmt=memory_obj.fmt,
+                        fmt=memory_obj.meta.fmt,
                         eviction=True,
                     )
                     if cpu_memory_obj is None:
