@@ -181,9 +181,9 @@ class NixlSender:
         self.memory_allocator = backend.memory_allocator
 
         self._sender_nixl_wrapper = NixlAgentWrapper(
-            buffer_ptr=self.memory_allocator.buffer_ptr,
-            buffer_size=self.memory_allocator.buffer_size,
-            page_size=self.memory_allocator.align_bytes,
+            buffer_ptr=self.memory_allocator.nixl_allocator.buffer_ptr,
+            buffer_size=self.memory_allocator.nixl_allocator.buffer_size,
+            page_size=self.memory_allocator.nixl_allocator.align_bytes,
             tp_rank=tp_rank,
         )
         self._nixl_agent = self._sender_nixl_wrapper.agent
@@ -488,9 +488,9 @@ class NixlReceiver:
 
         self.device = nixl_config.buffer_device
         self._receiver_nixl_wrapper = NixlAgentWrapper(
-            buffer_ptr=self.memory_allocator.buffer_ptr,
-            buffer_size=self.memory_allocator.buffer_size,
-            page_size=self.memory_allocator.align_bytes,
+            buffer_ptr=self.memory_allocator.nixl_allocator.buffer_ptr,
+            buffer_size=self.memory_allocator.nixl_allocator.buffer_size,
+            page_size=self.memory_allocator.nixl_allocator.align_bytes,
             tp_rank=tp_rank,
         )
 
