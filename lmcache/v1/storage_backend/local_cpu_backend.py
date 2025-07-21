@@ -102,8 +102,7 @@ class LocalCPUBackend(StorageBackendInterface):
 
         with self.cpu_lock:
             if key in self.hot_cache:
-                old_memory_obj = self.hot_cache.pop(key)
-                old_memory_obj.ref_count_down()
+                return None
             self.hot_cache[key] = memory_obj
             memory_obj.ref_count_up()
 

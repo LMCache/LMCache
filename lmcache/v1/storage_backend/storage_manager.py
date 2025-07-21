@@ -188,10 +188,13 @@ class StorageManager:
             )
 
             cpu_memory_objs = []
+            cpu_keys = []
             if len(self.storage_backends) > 1:
                 # TODO(Jiayi): Optimize this with batched_allocate
                 # TODO(Jiayi): Refactor this into gpu connector.
-                for memory_obj in memory_objs:
+                for key, memory_obj in zip(keys, memory_objs, strict=False):
+                    if self.local_cpu_backend.contains(key):
+                        continue
                     cpu_memory_obj = self.local_cpu_backend.allocate(
                         shape=memory_obj.tensor.shape,
                         dtype=memory_obj.tensor.dtype,
@@ -205,11 +208,13 @@ class StorageManager:
                             memory_obj.tensor, non_blocking=True
                         )
                     cpu_memory_objs.append(cpu_memory_obj)
+                    cpu_keys.append(key)
                 self.nixl_offload_stream.synchronize()
 
                 for memory_obj in memory_objs:
                     memory_obj.ref_count_down()
                 memory_objs = cpu_memory_objs
+                keys = cpu_keys
 
         for backend_name, backend in self.storage_backends.items():
             if backend_name == "NixlBackend":
