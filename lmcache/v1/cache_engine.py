@@ -13,6 +13,7 @@
 # limitations under the License.
 
 # Standard
+from collections import defaultdict
 from typing import Dict, Generator, List, Optional, Union
 import asyncio
 import multiprocessing
@@ -142,6 +143,8 @@ class LMCacheEngine:
                 self.fmt = MemoryFormat.KV_T2D
 
         self.lookup_cache = {}
+        # request_id -> [pinned keys]
+        self.lookup_pins = defaultdict(list)
 
         InitializeUsageContext(config.to_original_config(), metadata)
         self.stats_monitor = LMCStatsMonitor.GetOrCreate()
@@ -448,10 +451,16 @@ class LMCacheEngine:
                             self.distributed_loop,
                         )
                         memory_obj = future_memory_obj.result()
-                        reordered_keys.append(key)
-                        reordered_memory_objs.append(memory_obj)
-                        reordered_starts.append(start)
-                        reordered_ends.append(end)
+                        if memory_obj:
+                            reordered_keys.append(key)
+                            reordered_memory_objs.append(memory_obj)
+                            reordered_starts.append(start)
+                            reordered_ends.append(end)
+                            ret_mask[start:end] = True
+                        else:
+                            # NOTE: break for P2P retrieve KV because of no required
+                            # memory obj
+                            break
                         continue
                     break
 
@@ -501,8 +510,6 @@ class LMCacheEngine:
             # will immediately remove the object from itself
             if self.remove_after_retrieve:
                 self.storage_manager.remove(key)
-            else:
-                self.storage_manager.batched_unpin([key])
 
         retrieved_tokens = torch.sum(ret_mask)
         self.stats_monitor.on_retrieve_finished(monitor_req_id, retrieved_tokens)
@@ -600,10 +607,6 @@ class LMCacheEngine:
                 mem_obj_consumer.send(mem_objs_layer)
                 to_count_down.extend(mem_objs_layer)
 
-            # TODO(Jiayi): Need to be done in a modular way
-            for keys_layer in keys_layer_major:
-                self.storage_manager.batched_unpin(keys_layer)
-
             for mem_obj in to_count_down:
                 mem_obj.ref_count_down()
         else:
@@ -648,6 +651,7 @@ class LMCacheEngine:
         self,
         tokens: Union[torch.Tensor, List[int]],
         search_range: Optional[List[str]] = None,
+        request_id: Optional[str] = None,
         pin: bool = False,
     ) -> int:
         """
@@ -660,12 +664,17 @@ class LMCacheEngine:
         ["LocalCPUBackend", "LocalDiskBackend"] for now.
         If None, search in all backends.
 
+        :param str request_id: The request ID to associate with the lookup
+
         :param bool pin: If True, pin the KV cache in the storage.
 
         :return: An int indicating how many prefix tokens are cached.
         """
         end = 0
-        old_end = 0
+        prev_end = 0
+
+        if pin:
+            assert request_id is not None, "request_id is required when pin is True"
 
         # secondary lookup on p2p (via lookup_server) if enabled
         search_p2p = self.enable_p2p and (search_range is None or "p2p" in search_range)
@@ -677,28 +686,46 @@ class LMCacheEngine:
                 # TODO(Jiayi): Optimize by checking only the existence of the key
                 # of one layer
                 key_all_layers = key.split_layers(self.num_layers)
+                if pin:
+                    self.lookup_pins[request_id].extend(key_all_layers)
+
+                found = False
                 for key_single_layer in key_all_layers:
-                    if not self.storage_manager.contains(
+                    if self.storage_manager.contains(
                         key_single_layer, search_range, pin
                     ):
-                        if search_p2p and self.lookup_server.lookup(key_single_layer):
-                            continue
-                        return old_end
-                old_end = end
+                        found = True
+                    if search_p2p:
+                        assert self.lookup_server is not None
+                        if self.lookup_server.lookup(key_single_layer):
+                            found = True
+                if found:
+                    prev_end = end
+                    continue
+                return prev_end
             else:
+                if pin:
+                    self.lookup_pins[request_id].append(key)
                 if self.storage_manager.contains(key, search_range, pin):
-                    old_end = end
+                    prev_end = end
                     continue
 
                 if search_p2p:
                     assert self.lookup_server is not None
                     if self.lookup_server.lookup(key):
-                        old_end = end
+                        prev_end = end
                         continue
-                return old_end
+                return prev_end
 
         # all tokens where found, return the maximal end
         return end
+
+    @_lmcache_nvtx_annotate
+    def lookup_unpin(self, request_ids: list[str]) -> None:
+        for request_id in request_ids:
+            if request_id in self.lookup_pins:
+                self.storage_manager.batched_unpin(self.lookup_pins[request_id])
+                del self.lookup_pins[request_id]
 
     @_lmcache_nvtx_annotate
     def clear(

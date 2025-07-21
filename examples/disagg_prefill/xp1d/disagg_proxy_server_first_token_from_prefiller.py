@@ -229,7 +229,7 @@ async def handle_chat_completions(request: Request):
         req_data["max_tokens"] = 1
 
         org_max_completion_tokens = None
-        if "max_completion_tokens" not in req_data:
+        if "max_completion_tokens" in req_data:
             org_max_completion_tokens = req_data["max_completion_tokens"]
             req_data["max_completion_tokens"] = 1
 
