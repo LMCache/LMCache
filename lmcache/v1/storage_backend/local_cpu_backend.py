@@ -107,15 +107,15 @@ class LocalCPUBackend(StorageBackendInterface):
             self.hot_cache[key] = memory_obj
             memory_obj.ref_count_up()
 
-            self.usage += memory_obj.get_size()
-            self.stats_monitor.update_local_cache_usage(self.usage)
+        self.usage += memory_obj.get_size()
+        self.stats_monitor.update_local_cache_usage(self.usage)
 
-            # TODO(Jiayi): optimize this with batching?
-            # push kv admit msg
-            if self.lmcache_worker is not None:
-                self.lmcache_worker.put_msg(
-                    KVAdmitMsg(self.instance_id, key.worker_id, key.chunk_hash, "cpu")
-                )
+        # TODO(Jiayi): optimize this with batching?
+        # push kv admit msg
+        if self.lmcache_worker is not None:
+            self.lmcache_worker.put_msg(
+                KVAdmitMsg(self.instance_id, key.worker_id, key.chunk_hash, "cpu")
+            )
         return None
 
     def batched_submit_put_task(
@@ -197,20 +197,20 @@ class LocalCPUBackend(StorageBackendInterface):
             if key not in self.hot_cache:
                 return False
             memory_obj = self.hot_cache.pop(key)
-            if free_obj:
-                memory_obj.ref_count_down()
+        if free_obj:
+            memory_obj.ref_count_down()
 
-            self.usage -= memory_obj.get_size()
-            self.stats_monitor.update_local_cache_usage(self.usage)
+        self.usage -= memory_obj.get_size()
+        self.stats_monitor.update_local_cache_usage(self.usage)
 
-            if self.lmcache_worker is not None:
-                self.lmcache_worker.put_msg(
-                    KVEvictMsg(self.instance_id, key.worker_id, key.chunk_hash, "cpu")
-                )
-            # NOTE (Jiayi): This `return True` might not accurately reflect
-            # whether the key is removed from the actual memory because
-            # other backends might still (temporarily) hold the memory object.
-            return True
+        if self.lmcache_worker is not None:
+            self.lmcache_worker.put_msg(
+                KVEvictMsg(self.instance_id, key.worker_id, key.chunk_hash, "cpu")
+            )
+        # NOTE (Jiayi): This `return True` might not accurately reflect
+        # whether the key is removed from the actual memory because
+        # other backends might still (temporarily) hold the memory object.
+        return True
 
     @_lmcache_nvtx_annotate
     def allocate(
@@ -350,11 +350,9 @@ class LocalCPUBackend(StorageBackendInterface):
             return
 
         if memory_obj.tensor is not None and memory_obj.tensor.is_cuda:
-            self.cpu_lock.acquire()
-            if key in self.hot_cache:
-                self.cpu_lock.release()
-                return
-            self.cpu_lock.release()
+            with self.cpu_lock:
+                if key in self.hot_cache:
+                    return
 
             # Allocate a cpu memory object
             cpu_memory_obj = self.memory_allocator.allocate(
@@ -375,10 +373,9 @@ class LocalCPUBackend(StorageBackendInterface):
             memory_obj.tensor.record_stream(self.stream)
 
             # Update the hot cache
-            self.cpu_lock.acquire()
-            self.hot_cache[key] = cpu_memory_obj
+            with self.cpu_lock:
+                self.hot_cache[key] = cpu_memory_obj
             cpu_memory_obj.ref_count_up()
-            self.cpu_lock.release()
 
             # Push kv msg
             if self.lmcache_worker is not None:
@@ -388,24 +385,21 @@ class LocalCPUBackend(StorageBackendInterface):
 
             logger.debug("Updated hot cache!")
         else:
-            self.cpu_lock.acquire()
-            if self.use_hot and key not in self.hot_cache:
-                self.hot_cache[key] = memory_obj
-                memory_obj.ref_count_up()
-                self.cpu_lock.release()
+            with self.cpu_lock:
+                if self.use_hot and key not in self.hot_cache:
+                    self.hot_cache[key] = memory_obj
+                    memory_obj.ref_count_up()
 
-                # Push kv msg
-                if self.lmcache_worker is not None:
-                    self.lmcache_worker.put_msg(
-                        KVAdmitMsg(
-                            self.instance_id,
-                            key.worker_id,
-                            key.chunk_hash,
-                            "cpu",
+                    # Push kv msg
+                    if self.lmcache_worker is not None:
+                        self.lmcache_worker.put_msg(
+                            KVAdmitMsg(
+                                self.instance_id,
+                                key.worker_id,
+                                key.chunk_hash,
+                                "cpu",
+                            )
                         )
-                    )
-            else:
-                self.cpu_lock.release()
 
     def get_keys(self) -> List[CacheEngineKey]:
         """

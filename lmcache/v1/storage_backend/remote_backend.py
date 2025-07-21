@@ -162,9 +162,8 @@ class RemoteBackend(StorageBackendInterface):
         """
         Callback function for put tasks.
         """
-        self.lock.acquire()
-        self.put_tasks.remove(key)
-        self.lock.release()
+        with self.lock:
+            self.put_tasks.remove(key)
 
     def submit_put_task(
         self,
@@ -181,9 +180,8 @@ class RemoteBackend(StorageBackendInterface):
 
         memory_obj.ref_count_up()
 
-        self.lock.acquire()
-        self.put_tasks.append(key)
-        self.lock.release()
+        with self.lock:
+            self.put_tasks.append(key)
 
         compressed_memory_obj = self.serializer.serialize(memory_obj)
         memory_obj.ref_count_down()
