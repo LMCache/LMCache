@@ -148,7 +148,10 @@ class KVServiceSMBackend(StorageBackendInterface):
 
     @_lmcache_nvtx_annotate
     def batched_submit_put_task(
-        self, keys: List[CacheEngineKey], memory_objs: List[MemoryObj]
+        self,
+        keys: List[CacheEngineKey],
+        memory_objs: List[MemoryObj],
+        transfer_spec=None,
     ) -> Optional[List[Future]]:
         """Submit a batch of PUT tasks to KVServiceSM."""
         for key, memory_obj in zip(keys, memory_objs, strict=False):
