@@ -78,6 +78,7 @@ class CacheEngineKey:
     world_size: int
     worker_id: int
     chunk_hash: int
+    user: str
 
     def __hash__(self):
         return hash(
@@ -87,13 +88,14 @@ class CacheEngineKey:
                 self.world_size,
                 self.worker_id,
                 self.chunk_hash,
+                self.user,
             )
         )
 
     def to_string(self):
         return (
             f"{self.fmt}@{self.model_name}@{self.world_size}"
-            f"@{self.worker_id}@{self.chunk_hash}"
+            f"@{self.worker_id}@{self.chunk_hash}@{self.user}"
         )
 
     def split_layers(self, num_layers: int) -> List["LayerCacheEngineKey"]:
@@ -107,6 +109,7 @@ class CacheEngineKey:
                     self.world_size,
                     self.worker_id,
                     self.chunk_hash,
+                    self.user,
                     layer_id,
                 )
             )
@@ -120,6 +123,7 @@ class CacheEngineKey:
             self.world_size,
             self.worker_id,
             self.chunk_hash,
+            self.user,
             0,
         )
         return key
@@ -130,7 +134,7 @@ class CacheEngineKey:
         if len(parts) != 5:
             raise ValueError(f"Invalid key string: {s}")
         return CacheEngineKey(
-            parts[0], parts[1], int(parts[2]), int(parts[3]), int(parts[4])
+            parts[0], parts[1], int(parts[2]), int(parts[3]), int(parts[4]), parts[5]
         )
 
     def to_dict(self):
@@ -142,6 +146,7 @@ class CacheEngineKey:
             "world_size": self.world_size,
             "worker_id": self.worker_id,
             "chunk_hash": self.chunk_hash,
+            "user": self.user,
         }
 
     @staticmethod
@@ -152,6 +157,7 @@ class CacheEngineKey:
             world_size=d["world_size"],
             worker_id=d["worker_id"],
             chunk_hash=d["chunk_hash"],
+            user=d.get("user", ""),
         )
 
 
@@ -169,6 +175,7 @@ class LayerCacheEngineKey(CacheEngineKey):
                 self.world_size,
                 self.worker_id,
                 self.chunk_hash,
+                self.user,
                 self.layer_id,
             )
         )
@@ -176,7 +183,7 @@ class LayerCacheEngineKey(CacheEngineKey):
     def to_string(self):
         return (
             f"{self.fmt}@{self.model_name}@{self.world_size}"
-            f"@{self.worker_id}@{self.chunk_hash}@{self.layer_id}"
+            f"@{self.worker_id}@{self.chunk_hash}@{self.user}@{self.layer_id}"
         )
 
     def split_layers(self, num_layers: int) -> List["LayerCacheEngineKey"]:
@@ -190,6 +197,7 @@ class LayerCacheEngineKey(CacheEngineKey):
                     self.world_size,
                     self.worker_id,
                     self.chunk_hash,
+                    self.user,
                     layer_id,
                 )
             )
@@ -206,7 +214,8 @@ class LayerCacheEngineKey(CacheEngineKey):
             int(parts[2]),
             int(parts[3]),
             int(parts[4]),
-            int(parts[5]),
+            parts[5],
+            int(parts[6]),
         )
 
 

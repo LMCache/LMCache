@@ -64,6 +64,7 @@ class LMCacheEngine:
             self.metadata.world_size,
             self.metadata.worker_id,
             int(chunk_hash),
+            "",
         )
 
     def _num_tokens_in_kv(

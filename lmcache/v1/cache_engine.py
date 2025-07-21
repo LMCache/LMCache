@@ -223,9 +223,10 @@ class LMCacheEngine:
         tot_kv_size = 0
         tot_token_num = 0
         t = time.perf_counter()
+        user = kwargs.get("user", "")
 
         for start, end, key in self.token_database.process_tokens(
-            tokens, hashes, offsets, mask
+            tokens, hashes, offsets, mask, user=user
         ):
             assert isinstance(key, CacheEngineKey)
             if self.storage_manager.contains(key):
@@ -319,7 +320,10 @@ class LMCacheEngine:
             num_required_tokens = len(tokens)
         monitor_req_id = self.stats_monitor.on_retrieve_request(num_required_tokens)
         ret_mask = torch.zeros_like(tokens, dtype=torch.bool, device="cpu")
-        for start, end, key in self.token_database.process_tokens(tokens, mask):
+        user = kwargs.get("user", "")
+        logger.info(f"retrieve: {user=}")
+        for start, end, key in self.token_database.process_tokens(tokens, mask, user=user):
+            logger.info(f"retrieve: {user=}, {start=}, {end=}, {key=}")
             assert isinstance(key, CacheEngineKey)
 
             t = time.time()
@@ -415,6 +419,7 @@ class LMCacheEngine:
         tokens: Union[torch.Tensor, List[int]],
         search_range: Optional[List[str]] = None,
         pin: bool = False,
+        user: Optional[str] = "",
     ) -> int:
         """
         Checks the existence of KV cache of the tokens from the cache engine.
@@ -435,7 +440,7 @@ class LMCacheEngine:
         # secondary lookup on p2p (via lookup_server) if enabled
         search_p2p = self.enable_p2p and (search_range is None or "p2p" in search_range)
 
-        for start, end, key in self.token_database.process_tokens(tokens):
+        for start, end, key in self.token_database.process_tokens(tokens, user=user):
             assert isinstance(key, CacheEngineKey)
             if search_local:
                 if self.storage_manager.contains(key, search_range, pin):

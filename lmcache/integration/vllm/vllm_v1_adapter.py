@@ -30,6 +30,9 @@ from vllm.distributed.parallel_state import (
 from vllm.utils import cdiv
 from vllm.v1.core.sched.output import SchedulerOutput
 import torch
+import vllm.envs as envs
+import zmq
+import pickle
 
 # First Party
 from lmcache.integration.vllm.utils import (
@@ -88,9 +91,13 @@ class LMCacheLookupClient:
             bind=False,
         )
 
-    def lookup(self, token_ids: torch.Tensor) -> int:
-        request = self.encoder.encode(token_ids)
-        self.socket.send_multipart(request, copy=False)
+    def lookup(self, token_ids: torch.Tensor, user: Optional[str] = "") -> int:
+        #request = self.encoder.encode(token_ids)
+        #self.socket.send_string(user)
+        #self.socket.send_multipart([pickle.dumps(user), request[0]], copy=False)
+        self.socket.send_multipart([pickle.dumps(user), pickle.dumps(token_ids)], copy=False)
+        #self.socket.send_multipart([user.encode('utf-8'), safetensors_save(token_ids)], copy=False)
+        #self.socket.send_multipart([pickle.dumps(user), request])
         resp = self.socket.recv()
         result = int.from_bytes(resp, "big")
         return result
@@ -124,9 +131,16 @@ class LMCacheLookupServer:
             while self.running:
                 # try:
                 # request = self.socket.recv()
+                #user = self.socket.recv_string()
                 frames = self.socket.recv_multipart(copy=False)
-                token_ids = self.decoder.decode(frames)
-                result = self.lmcache_engine.lookup(token_ids, pin=True)
+                user = pickle.loads(frames[0])
+                ##token_ids = self.decoder.decode([frames[1]])
+                token_ids = pickle.loads(frames[1])
+                #user = safetensors_load(frames[0])
+                #user = frames[0].decode('utf-8')
+                ##token_ids = self.decoder.decode([frames[1]])
+                #token_ids = safetensors_load(frames[1])
+                result = self.lmcache_engine.lookup(token_ids, pin=True, user=user)
                 response = result.to_bytes(4, "big")
                 self.socket.send(response)
                 # except Exception as e:
@@ -199,6 +213,8 @@ class RequestTracker:
     # Multimodal hashes and positions
     mm_hashes: Optional[list[str]] = None
     mm_positions: Optional[list["PlaceholderRange"]] = None
+    # The request user
+    user: Optional[str] = None
 
     # Whether the request is in decode phase
     is_decode_phase: bool = False
@@ -249,6 +265,7 @@ class RequestTracker:
             disagg_spec=disagg_spec,
             mm_hashes=new_request.mm_hashes.copy(),
             mm_positions=new_request.mm_positions.copy(),
+            user=new_request.user,
         )
 
     def update(
@@ -293,6 +310,8 @@ class ReqMeta:
     load_spec: Optional[LoadSpec] = None
     # disagg spec
     disagg_spec: Optional[DisaggSpec] = None
+    # user
+    user: Optional[str] = None
 
     @staticmethod
     def from_request_tracker(
@@ -413,6 +432,7 @@ class ReqMeta:
             save_spec=save_spec,
             load_spec=load_spec,
             disagg_spec=tracker.disagg_spec,
+            user=tracker.user,
         )
 
 
@@ -620,6 +640,7 @@ class LMCacheConnectorV1Impl:
                     token_mask[:lmcache_cached_tokens],
                     kvcaches=kvcaches,
                     slot_mapping=slot_mapping[:lmcache_cached_tokens],
+                    user=request.user,
                 )
 
                 # Check the result
@@ -854,6 +875,7 @@ class LMCacheConnectorV1Impl:
                 slot_mapping=slot_mapping,
                 offset=skip_leading_tokens,
                 transfer_spec=request.disagg_spec,
+                user=request.user,
             )
 
             # NOTE(Jiayi): We assume all tokens are saved
@@ -902,11 +924,11 @@ class LMCacheConnectorV1Impl:
         self._lookup_requests_in_step.append(request.request_id)
         if self.skip_last_n_tokens > 0:
             num_external_hit_tokens = self.lookup_client.lookup(
-                token_ids[: -self.skip_last_n_tokens], request_id=request.request_id
+                token_ids[: -self.skip_last_n_tokens], request_id=request.request_id, user=request.user
             )
         else:
             num_external_hit_tokens = self.lookup_client.lookup(
-                token_ids, request_id=request.request_id
+                token_ids, request_id=request.request_id, user=request.user
             )
 
         # When prompt length is divisible by the block size and all

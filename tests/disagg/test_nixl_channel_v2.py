@@ -38,6 +38,7 @@ def generate_test_data(
                 world_size=1,
                 worker_id=0,
                 chunk_hash=f"test_{i}",
+                user="",
             )
         )
         obj = allocator.allocate(shape, dtype, fmt=MemoryFormat.KV_2LTD)
@@ -308,6 +309,7 @@ def test_allocate_for_send(
             world_size=1,
             worker_id=0,
             chunk_hash=f"test_alloc_{i}",
+            user="",
         )
         for i in range(3)
     ]
