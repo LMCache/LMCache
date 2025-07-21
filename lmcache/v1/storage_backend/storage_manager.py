@@ -89,8 +89,6 @@ class StorageManager:
         else:
             self.allocator_backend = self.storage_backends["LocalCPUBackend"]
 
-        self.prefetch_tasks: Dict[CacheEngineKey, Future] = {}
-
         self.manager_lock = threading.Lock()
 
         self.lookup_server = lookup_server
@@ -184,32 +182,17 @@ class StorageManager:
         """
         Blocking function to get the memory object from the storages.
         """
-        # Search in prefetch task
-        self.manager_lock.acquire()
-        prefetch_task = self.prefetch_tasks.get(key, None)
-        self.manager_lock.release()
-
-        # Wait until prefetch task finishes
-        # Here, it is assumed all prefetch tasks load the memoryobj to
-        # hot cache (pinned cpu buffer)
-        if prefetch_task is not None:
-            logger.debug(
-                "Waiting for prefetching result. Optimally, this should not happen."
-            )
-            # Calling result() twice (already once in callback) will have
-            # no effect
-            # Tune the timeout for better performance
-            prefetch_task.result(timeout=1)
 
         # Search all backends for blocking get
         for backend_name, backend in self.storage_backends.items():
-            # NOTE(Jiayi): bypass the allocator for now
+            # TODO(Jiayi): need to make sure all memory_objs returned
+            # are allocated by the allocator backend.
             memory_obj = backend.get_blocking(key)
             if memory_obj is not None:
                 if backend_name not in ["LocalCPUBackend", "NixlBackend"]:
                     local_cpu_backend = self.storage_backends["LocalCPUBackend"]
                     assert isinstance(local_cpu_backend, LocalCPUBackend)
-                    local_cpu_backend.write_back(key, memory_obj)
+                    local_cpu_backend.submit_put_task(key, memory_obj)
                 return memory_obj
 
         return None
