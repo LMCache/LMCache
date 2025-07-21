@@ -321,9 +321,7 @@ class LMCacheEngine:
         monitor_req_id = self.stats_monitor.on_retrieve_request(num_required_tokens)
         ret_mask = torch.zeros_like(tokens, dtype=torch.bool, device="cpu")
         user = kwargs.get("user", "")
-        logger.info(f"retrieve: {user=}")
         for start, end, key in self.token_database.process_tokens(tokens, mask, user=user):
-            logger.info(f"retrieve: {user=}, {start=}, {end=}, {key=}")
             assert isinstance(key, CacheEngineKey)
 
             t = time.time()
@@ -340,8 +338,6 @@ class LMCacheEngine:
                         )
                         memory_obj = future_memory_obj.result()
                     if memory_obj is None:
-                        logger.warn(f"{self.tpg.rank=} retrive memory_obj is None")
-                        self.tpg.broadcast_object(None, self.tpg.first_rank)
                         break
             else:
                 if self.tpg.is_first_rank:
