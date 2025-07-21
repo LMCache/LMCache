@@ -611,14 +611,9 @@ class LMCacheConnectorV1Impl:
 
                 # TODO: have a pre-allocated buffer to hold the slot_mappings
                 slot_mapping = slot_mapping.cuda()
-                # NOTE: In PD setting, lmcache_engine.lookup() will always
-                # return 0 if there is no local storage configured.
-                # In this case, we should rely on the slip_leading_tokens in
-                # save_spec to avoid transmit the already saved tokens again.
-                # skip_leading_tokens = max(
-                #    self.lmcache_engine.lookup(token_ids),
-                #    save_spec.skip_leading_tokens,
-                # )
+
+                store_mask = torch.ones_like(token_ids, dtype=torch.bool)
+
                 skip_leading_tokens = save_spec.skip_leading_tokens
 
                 if skip_leading_tokens == len(token_ids):
@@ -630,7 +625,6 @@ class LMCacheConnectorV1Impl:
                     * self._lmcache_chunk_size
                 )
 
-                store_mask = torch.ones_like(token_ids, dtype=torch.bool)
                 store_mask[:skip_leading_tokens] = False
 
                 logger.info(

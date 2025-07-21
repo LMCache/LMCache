@@ -45,7 +45,7 @@ from lmcache.v1.memory_management import (
     MemoryAllocatorInterface,
     MemoryFormat,
     MixedMemoryAllocator,
-    PagedTensorMemoryAllocator,
+    NixlCPUMemoryAllocator,
 )
 from lmcache.v1.storage_backend.storage_manager import StorageManager
 from lmcache.v1.token_database import (
@@ -119,6 +119,8 @@ class LMCacheEngine:
         )
 
         # HACK: remove this in the future
+        # NOTE (Jiayi): This is currently used to support
+        # dropping the kv cache in nixl backend at decoder.
         self.remove_after_retrieve = config.enable_nixl
 
         if self.enable_p2p:
@@ -249,9 +251,7 @@ class LMCacheEngine:
 
         t = time.perf_counter()
 
-        transfer_spec = None
-        if "transfer_spec" in kwargs:
-            transfer_spec = kwargs["transfer_spec"]
+        transfer_spec = kwargs.get("transfer_spec", None)
         self.storage_manager.batched_put(keys, memory_objs, transfer_spec=transfer_spec)
         put_time += time.perf_counter() - t
 
@@ -791,12 +791,19 @@ class LMCacheEngineBuilder:
                     dtype=torch.uint8,
                     device=corrected_device,
                 )
-                return PagedTensorMemoryAllocator(
+                nixl_cpu_mem_allocator = NixlCPUMemoryAllocator()
+                nixl_cpu_mem_allocator.init_nixl_memory_allocator(
                     buffer,
                     torch.Size(metadata.kv_shape),
                     metadata.kv_dtype,
-                    MemoryFormat.KV_T2D,  # TODO: remove this hardcode
+                    MemoryFormat.KV_2LTD,  # TODO: remove this hardcode
                 )
+                if config.local_cpu:
+                    max_local_cpu_size = config.max_local_cpu_size
+                    nixl_cpu_mem_allocator.init_cpu_emory_allocator(
+                        int(max_local_cpu_size * 1024**3)
+                    )
+                return nixl_cpu_mem_allocator
             return AdHocMemoryAllocator(config.nixl_buffer_device)
 
         if config.weka_path is not None or config.gds_path is not None:
