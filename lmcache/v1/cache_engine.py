@@ -451,10 +451,16 @@ class LMCacheEngine:
                             self.distributed_loop,
                         )
                         memory_obj = future_memory_obj.result()
-                        reordered_keys.append(key)
-                        reordered_memory_objs.append(memory_obj)
-                        reordered_starts.append(start)
-                        reordered_ends.append(end)
+                        if memory_obj:
+                            reordered_keys.append(key)
+                            reordered_memory_objs.append(memory_obj)
+                            reordered_starts.append(start)
+                            reordered_ends.append(end)
+                            ret_mask[start:end] = True
+                        else:
+                            # NOTE: break for P2P retrieve KV because of no required
+                            # memory obj
+                            break
                         continue
                     break
 
