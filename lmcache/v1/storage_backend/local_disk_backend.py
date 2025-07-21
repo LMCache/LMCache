@@ -169,6 +169,14 @@ class LocalDiskBackend(StorageBackendInterface):
     ) -> Optional[Future]:
         assert memory_obj.tensor is not None
 
+        # write deduplication
+        with self.disk_lock:
+            if key in self.put_tasks:
+                return None
+            if key in self.dict:
+                self.dict.move_to_end(key)
+                return None
+
         # Update cache recency
         evict_keys, put_status = self.evictor.update_on_put(
             self.dict, memory_obj.get_physical_size()
