@@ -146,12 +146,16 @@ class FSConnector(RemoteConnector):
         try:
             # Prepare metadata
             buffer = memory_obj.byte_array
-            metadata = RemoteMetadata(
-                len(buffer),
-                memory_obj.get_shape(),
-                memory_obj.get_dtype(),
-                memory_obj.get_memory_format(),
-            ) if self.save_chunk_meta else None
+            metadata = (
+                RemoteMetadata(
+                    len(buffer),
+                    memory_obj.get_shape(),
+                    memory_obj.get_dtype(),
+                    memory_obj.get_memory_format(),
+                )
+                if self.save_chunk_meta
+                else None
+            )
 
             # Write to file (metadata + data)
             async with aiofiles.open(temp_path, "wb") as f:

@@ -22,8 +22,8 @@ import importlib
 import inspect
 import pkgutil
 
-from lmcache.config import LMCacheEngineMetadata
 # First Party
+from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.storage_backend.connector.base_connector import RemoteConnector

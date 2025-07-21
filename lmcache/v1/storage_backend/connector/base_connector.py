@@ -24,7 +24,7 @@ from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.memory_management import MemoryObj, MemoryFormat
+from lmcache.v1.memory_management import MemoryFormat, MemoryObj
 
 logger = init_logger(__name__)
 
@@ -41,42 +41,66 @@ class RemoteConnector(metaclass=abc.ABCMeta):
     full_chunk_size: Optional[int] = None
     single_token_size: Optional[int] = None
 
-    def init_chunk_meta(self, config: Optional[LMCacheEngineConfig], metadata: Optional[LMCacheEngineMetadata]) -> None:
+    def init_chunk_meta(
+        self,
+        config: Optional[LMCacheEngineConfig],
+        metadata: Optional[LMCacheEngineMetadata],
+    ) -> None:
         if config is None or metadata is None or config.save_chunk_meta:
             return
 
         self.save_chunk_meta = False
         self.meta_shape = torch.Size(
-            [metadata.kv_shape[1], metadata.kv_shape[0], metadata.kv_shape[2],
-             metadata.kv_shape[3] * metadata.kv_shape[4]]
+            [
+                metadata.kv_shape[1],
+                metadata.kv_shape[0],
+                metadata.kv_shape[2],
+                metadata.kv_shape[3] * metadata.kv_shape[4],
+            ]
         )
         self.meta_dtype = metadata.kv_dtype
-        self.meta_fmt = MemoryFormat.KV_MLA_FMT if metadata.use_mla else MemoryFormat.KV_2LTD
+        self.meta_fmt = (
+            MemoryFormat.KV_MLA_FMT if metadata.use_mla else MemoryFormat.KV_2LTD
+        )
         dtype_size = torch.tensor([], dtype=metadata.kv_dtype).element_size()
         num_elements = 1
         for dim in metadata.kv_shape:
             num_elements *= dim
         self.full_chunk_size = dtype_size * num_elements
+        assert self.full_chunk_size is not None
         assert self.full_chunk_size % metadata.kv_shape[2] == 0
         self.single_token_size = self.full_chunk_size // metadata.kv_shape[2]
         logger.info(
-            f"init remote connector metadata info, shape: {self.meta_shape}, dtype: {self.meta_dtype}, fmt: {self.meta_fmt}, full chunk size: {self.full_chunk_size}, single token size: {self.single_token_size}")
+            f"init remote connector metadata info, "
+            f"shape: {self.meta_shape}, "
+            f"dtype: {self.meta_dtype}, "
+            f"fmt: {self.meta_fmt}, "
+            f"full chunk size: {self.full_chunk_size}, "
+            f"single token size: {self.single_token_size}"
+        )
 
     def reshape_partial_chunk(
         self,
         memory_obj: MemoryObj,
         bytes_read: int,
     ) -> MemoryObj:
-        if bytes_read % self.single_token_size != 0 or bytes_read > self.full_chunk_size:
+        assert self.full_chunk_size is not None
+        assert self.single_token_size is not None
+        if (
+            bytes_read % self.single_token_size != 0
+            or bytes_read > self.full_chunk_size
+        ):
             raise ValueError(
-                f"bytes_read: {bytes_read} is illegal, single_token_size: {self.single_token_size}, full_chunk_size: {self.full_chunk_size}"
+                f"bytes_read: {bytes_read} is illegal, "
+                f"single_token_size: {self.single_token_size}, "
+                f"full_chunk_size: {self.full_chunk_size}"
             )
 
         if bytes_read == self.full_chunk_size:
             # full chunk
             return memory_obj
 
-        # NOTE: for unfull chunk, we don't
+        # NOTE: for unfull chunk, we have no way to verify
         shape_list = list(memory_obj.meta.shape)
         shape_list[2] = bytes_read // self.single_token_size
         actual_shape = torch.Size(shape_list)

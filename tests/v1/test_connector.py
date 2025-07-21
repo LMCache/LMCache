@@ -76,10 +76,11 @@ def test_lm_connector(url, autorelease_v1, lmserver_v1_process):
 @pytest.mark.parametrize("use_mla", [True, False])
 def test_fs_connector(autorelease_v1, full_chunk, save_chunk_meta, use_mla):
     """
-        Test FSConnector: exists, put, get, list, and file store with the following conditions:
-        full_chunk: is the block full
-        save_chunk_meta: save the metadata of the chunk or not
-        use_mla: is mla enabled
+    Test FSConnector: exists, put, get, list, and file store
+    with the following conditions:
+    full_chunk: is the block full
+    save_chunk_meta: save the metadata of the chunk or not
+    use_mla: is mla enabled
     """
 
     with tempfile.TemporaryDirectory() as temp_dir:
@@ -90,11 +91,27 @@ def test_fs_connector(autorelease_v1, full_chunk, save_chunk_meta, use_mla):
         # full chunk's kv_shape (num_layer, 2, chunk_size, num_kv_head, head_size)
         kv_shape = (32, 1 if use_mla else 2, 256, 1 if use_mla else 8, 128)
         dtype = torch.bfloat16
-        config = None if save_chunk_meta else LMCacheEngineConfig.from_legacy(save_chunk_meta=save_chunk_meta)
-        metadata = None if save_chunk_meta else LMCacheEngineMetadata(
-            "deepseek/DeepSeek-R1", 1, 0, "vllm", dtype, kv_shape, use_mla,
+        config = (
+            None
+            if save_chunk_meta
+            else LMCacheEngineConfig.from_legacy(save_chunk_meta=save_chunk_meta)
         )
-        connector = autorelease_v1(CreateConnector(url, async_loop, memory_allocator, config, metadata))
+        metadata = (
+            None
+            if save_chunk_meta
+            else LMCacheEngineMetadata(
+                "deepseek/DeepSeek-R1",
+                1,
+                0,
+                "vllm",
+                dtype,
+                kv_shape,
+                use_mla,
+            )
+        )
+        connector = autorelease_v1(
+            CreateConnector(url, async_loop, memory_allocator, config, metadata)
+        )
         random_key = dumb_cache_engine_key()
 
         # Test 1: Verify key doesn't exist initially
@@ -106,7 +123,12 @@ def test_fs_connector(autorelease_v1, full_chunk, save_chunk_meta, use_mla):
         # Test 2: Create and store test data
         # The size of the full chunk is 256.
         # If test unfull chunk, use 100 (<256) to allocate memory_obj.
-        memory_obj_shape = (kv_shape[1], kv_shape[0], kv_shape[2] if full_chunk else 100, kv_shape[3] * kv_shape[4])
+        memory_obj_shape = (
+            kv_shape[1],
+            kv_shape[0],
+            kv_shape[2] if full_chunk else 100,
+            kv_shape[3] * kv_shape[4],
+        )
         memory_obj = memory_allocator.allocate(memory_obj_shape, dtype)
         memory_obj.ref_count_up()
         # Fill with deterministic test data
@@ -136,11 +158,13 @@ def test_fs_connector(autorelease_v1, full_chunk, save_chunk_meta, use_mla):
         future = asyncio.run_coroutine_threadsafe(connector.list(), async_loop)
         assert future.result() == [random_key.to_string()]
 
-        # Test 6: Verify file existence and other attribute(such as name, file size and so on)
+        # Test 6: Verify file existence and other attributes
+        # file name
         files = list(Path(temp_dir).glob("*.data"))
         assert len(files) == 1
         assert files[0].name == f"{random_key.to_string()}.data"
 
+        # file size
         dtype_size = torch.tensor([], dtype=dtype).element_size()
         num_elements = 1
         for dim in memory_obj_shape:
