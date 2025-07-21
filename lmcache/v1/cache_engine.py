@@ -633,7 +633,7 @@ class LMCacheEngine:
     @_lmcache_nvtx_annotate
     def prefetch(
         self,
-        tokens: torch.Tensor,
+        tokens: Union[torch.Tensor, List[int]],
         mask: Optional[torch.Tensor] = None,
     ) -> None:
         """Launch the prefetching process in the storage manager to load the
