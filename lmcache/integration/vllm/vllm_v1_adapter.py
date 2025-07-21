@@ -244,10 +244,10 @@ class ReqMeta:
         # 1. has already been saved before (num_saved_tokens > 0)
         # 2. number of unsaved tokens is not reached the chunk boundary
         # 3. if save_decode_cache is False and we are in decode phase (num_saved_tokens > 0)
-        
+
         # Skip save if we're in decode phase and save_decode_cache is False
         save_decode_cache = lmcache_connector.config.save_decode_cache
-        
+
         skip_leading_tokens = tracker.num_saved_tokens
         chunk_boundary = (
             cdiv(tracker.num_saved_tokens + 1, lmcache_chunk_size) * lmcache_chunk_size
@@ -634,11 +634,10 @@ class LMCacheConnectorV1Impl:
                 # return 0 if there is no local storage configured.
                 # In this case, we should rely on the slip_leading_tokens in
                 # save_spec to avoid transmit the already saved tokens again.
-                # skip_leading_tokens = max(
-                #    self.lmcache_engine.lookup(token_ids),
-                #    save_spec.skip_leading_tokens,
-                # )
-                skip_leading_tokens = save_spec.skip_leading_tokens
+                skip_leading_tokens = max(
+                    self.lmcache_engine.lookup(token_ids),
+                    save_spec.skip_leading_tokens,
+                )
 
                 if skip_leading_tokens == len(token_ids):
                     continue  # skip this request
