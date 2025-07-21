@@ -392,6 +392,10 @@ class StorageManager:
             if search_range is not None and backend_name not in search_range:
                 continue
 
+            # NOTE(Jiayi): We do not pin for NixlBackend
+            if backend_name == "NixlBackend":
+                pin = False
+
             if backend.contains(key, pin):
                 return backend_name
 

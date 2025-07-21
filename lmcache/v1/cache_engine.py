@@ -121,7 +121,7 @@ class LMCacheEngine:
         # HACK: remove this in the future
         # NOTE (Jiayi): This is currently used to support
         # dropping the kv cache in nixl backend at decoder.
-        self.remove_after_retrieve = config.enable_nixl
+        self.remove_after_retrieve = config.nixl_role == "receiver"
 
         if self.enable_p2p:
             self.distributed_loop = asyncio.get_event_loop()
@@ -503,13 +503,9 @@ class LMCacheEngine:
 
         # TODO(Jiayi): Remove the following for loop with batched operations
         for key, memory_obj in zip(reordered_keys, reordered_memory_objs, strict=False):
-            memory_obj.ref_count_down()
-
-            # NOTE (ApostaC): This is only for the current implementation:
-            # When the object is retrieved back to vLLM, the storage backend
-            # will immediately remove the object from itself
             if self.remove_after_retrieve:
                 self.storage_manager.remove(key)
+            memory_obj.ref_count_down()
 
         retrieved_tokens = torch.sum(ret_mask)
         self.stats_monitor.on_retrieve_finished(monitor_req_id, retrieved_tokens)
