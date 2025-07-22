@@ -75,7 +75,9 @@ def CreateStorageBackends(
     # TODO(Jiayi): The hierarchy is fixed for now
     # NOTE(Jiayi): The local_cpu backend is always created because
     # other backends might need it as a buffer.
-    if config.local_cpu:
+    if config.enable_nixl and not config.local_cpu:
+        pass
+    else:
         local_cpu_backend = LocalCPUBackend(
             config,
             memory_allocator,

@@ -121,7 +121,9 @@ class LMCacheEngine:
         # HACK: remove this in the future
         # NOTE (Jiayi): This is currently used to support
         # dropping the kv cache in nixl backend at decoder.
-        self.remove_after_retrieve = config.nixl_role == "receiver"
+        self.remove_after_retrieve = (
+            config.enable_nixl and config.nixl_role == "receiver"
+        )
 
         if self.enable_p2p:
             self.distributed_loop = asyncio.get_event_loop()
