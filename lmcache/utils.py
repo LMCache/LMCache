@@ -40,19 +40,19 @@ class DiskCacheMetadata:
     shape: Optional[torch.Size] = None
     dtype: Optional[torch.dtype] = None
     fmt: MemoryFormat = None
-    is_pin: bool = False
+    pin_count: int = 0
 
     def pin(self) -> bool:
-        self.is_pin = True
+        self.pin_count += 1
         return True
 
     def unpin(self) -> bool:
-        self.is_pin = False
+        self.pin_count -= 1
         return True
 
     @property
     def is_pinned(self) -> bool:
-        return self.is_pin
+        return self.pin_count > 0
 
 
 TORCH_DTYPE_TO_STR_DTYPE = {
@@ -68,6 +68,8 @@ TORCH_DTYPE_TO_STR_DTYPE = {
     torch.float8_e5m2: "fp8_e5m2",
 }
 
+STR_DTYPE_TO_TORCH_DTYPE = {v: k for k, v in TORCH_DTYPE_TO_STR_DTYPE.items()}
+
 
 @dataclass(order=True)
 class CacheEngineKey:
@@ -75,7 +77,7 @@ class CacheEngineKey:
     model_name: str
     world_size: int
     worker_id: int
-    chunk_hash: str
+    chunk_hash: int
 
     def __hash__(self):
         return hash(
@@ -128,7 +130,7 @@ class CacheEngineKey:
         if len(parts) != 5:
             raise ValueError(f"Invalid key string: {s}")
         return CacheEngineKey(
-            parts[0], parts[1], int(parts[2]), int(parts[3]), parts[4]
+            parts[0], parts[1], int(parts[2]), int(parts[3]), int(parts[4])
         )
 
     def to_dict(self):
@@ -203,7 +205,7 @@ class LayerCacheEngineKey(CacheEngineKey):
             parts[1],
             int(parts[2]),
             int(parts[3]),
-            parts[4],
+            int(parts[4]),
             int(parts[5]),
         )
 

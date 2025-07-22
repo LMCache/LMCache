@@ -13,7 +13,7 @@
 # limitations under the License.
 
 # Standard
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 # Third Party
 import torch
@@ -27,7 +27,6 @@ from lmcache.v1.lookup_client.abstract_client import LookupClientInterface
 if TYPE_CHECKING:
     # Third Party
     from vllm.config import VllmConfig
-    from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
 
 logger = init_logger(__name__)
 
@@ -35,8 +34,6 @@ logger = init_logger(__name__)
 class MooncakeLookupClient(LookupClientInterface):
     def __init__(
         self,
-        role: "KVConnectorRole",
-        is_tp: bool,
         vllm_config: "VllmConfig",
         master_addr: str,
     ):
@@ -72,7 +69,7 @@ class MooncakeLookupClient(LookupClientInterface):
         else:
             self.token_database = ChunkedTokenDatabase(config, metadata)
 
-    def lookup(self, token_ids: torch.Tensor) -> int:
+    def lookup(self, token_ids: torch.Tensor, request_id: Optional[str] = None) -> int:
         # process token_ids to cacheengine keys
         keys = []
         ends = []
