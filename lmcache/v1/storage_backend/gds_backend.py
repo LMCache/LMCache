@@ -672,12 +672,14 @@ class GdsBackend(StorageBackendInterface):
             return size_in_bytes
 
     def pin(self, key: CacheEngineKey) -> bool:
-        # TODO: Implement this
-        raise NotImplementedError
+        # NOTE (ApostaC): Since gds doesn't have eviction now, we don't need
+        # to implement pin and unpin
+        return
 
     def unpin(self, key: CacheEngineKey) -> bool:
-        # TODO: Implement this
-        raise NotImplementedError
+        # NOTE (ApostaC): Since gds doesn't have eviction now, we don't need
+        # to implement pin and unpin
+        return
 
     def close(self) -> None:
         logger.info("GDS backend closed.")
