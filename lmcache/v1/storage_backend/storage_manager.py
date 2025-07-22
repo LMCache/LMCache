@@ -86,7 +86,8 @@ class StorageManager:
 
         if self.enable_nixl:
             self.allocator_backend = self.storage_backends["NixlBackend"]
-            self.local_cpu_backend = self.storage_backends["LocalCPUBackend"]
+            if config.local_cpu:
+                self.local_cpu_backend = self.storage_backends["LocalCPUBackend"]
         else:
             self.allocator_backend = self.storage_backends["LocalCPUBackend"]
 

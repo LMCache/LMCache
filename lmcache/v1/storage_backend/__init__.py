@@ -75,14 +75,15 @@ def CreateStorageBackends(
     # TODO(Jiayi): The hierarchy is fixed for now
     # NOTE(Jiayi): The local_cpu backend is always created because
     # other backends might need it as a buffer.
-    local_cpu_backend = LocalCPUBackend(
-        config,
-        memory_allocator,
-        lookup_server,
-        lmcache_worker,
-    )
-    backend_name = str(local_cpu_backend)
-    storage_backends[backend_name] = local_cpu_backend
+    if config.local_cpu:
+        local_cpu_backend = LocalCPUBackend(
+            config,
+            memory_allocator,
+            lookup_server,
+            lmcache_worker,
+        )
+        backend_name = str(local_cpu_backend)
+        storage_backends[backend_name] = local_cpu_backend
 
     if config.local_disk and config.max_local_disk_size > 0:
         local_disk_backend = LocalDiskBackend(
