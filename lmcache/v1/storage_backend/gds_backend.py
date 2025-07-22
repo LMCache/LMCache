@@ -414,7 +414,10 @@ class GdsBackend(StorageBackendInterface):
         return future
 
     def batched_submit_put_task(
-        self, keys: List[CacheEngineKey], memory_objs: List[MemoryObj]
+        self,
+        keys: List[CacheEngineKey],
+        memory_objs: List[MemoryObj],
+        transfer_spec=None,
     ) -> Optional[List[Future]]:
         return [
             self.submit_put_task(key, memory_obj)
@@ -670,12 +673,14 @@ class GdsBackend(StorageBackendInterface):
             return size_in_bytes
 
     def pin(self, key: CacheEngineKey) -> bool:
-        # TODO: Implement this
-        raise NotImplementedError
+        # NOTE (ApostaC): Since gds doesn't have eviction now, we don't need
+        # to implement pin and unpin
+        return
 
     def unpin(self, key: CacheEngineKey) -> bool:
-        # TODO: Implement this
-        raise NotImplementedError
+        # NOTE (ApostaC): Since gds doesn't have eviction now, we don't need
+        # to implement pin and unpin
+        return
 
     def close(self) -> None:
         logger.info("GDS backend closed.")
