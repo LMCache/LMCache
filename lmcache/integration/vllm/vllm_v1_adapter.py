@@ -682,7 +682,9 @@ class LMCacheConnectorV1Impl:
 
         for request in connector_metadata.requests:
             save_spec = request.save_spec
-            if save_spec is None or not save_spec.can_save:
+            if (
+                save_spec is None or not save_spec.can_save
+            ) and self.kv_role != "kv_producer":
                 continue
 
             token_ids = request.token_ids

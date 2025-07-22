@@ -220,8 +220,6 @@ class LMCacheEngine:
             tokens, hashes, offsets, mask
         ):
             assert isinstance(key, CacheEngineKey)
-            if self.storage_manager.contains(key):
-                continue
             # Allocate the memory object
             num_tokens = end - start
             kv_shape = self.gpu_connector.get_shape(num_tokens)
