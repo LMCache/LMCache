@@ -1,5 +1,5 @@
 Community meetings
-==================
+====================================================
 
 LMCache hosts regular community meetings to discuss updates, address new feature requests, 
 and feedback from the community. If you are interested in contributing to the LMCache projects
@@ -20,17 +20,17 @@ The LMCache community meeting is held bi-weekly on **Tuesdays** at **9:00-9:30 A
 Please find the meeting invite link below:
 
 - **Meeting link**: `Zoom link <https://uchicago.zoom.us/j/6603596916?pwd=Z1E5MDRWUSt2am5XbEt4dTFkNGx6QT09>`_
-- **Calendar Invite**: `Google Calendar <https://drive.google.com/file/d/15Xz8-LtpBQ5QgR7KrorOOyfuohCFQmwn/view?usp=sharing>`_
+- **Calendar Invite**: `Google Calendar <https://drive.usercontent.google.com/u/0/uc?id=15Xz8-LtpBQ5QgR7KrorOOyfuohCFQmwn&export=download>`__
 - **Slack Channel**: `#lmcache <https://join.slack.com/t/lmcacheworkspace/shared_invite/zt-2viziwhue-5Amprc9k5hcIdXT7XevTaQ>`_
 
-Production Stack Project
-+++++++++++++++++++++++++
+vLLM Production Stack Project
++++++++++++++++++++++++++++++++
 
 The Production Stack community meeting is held bi-weekly on **Tuesdays** at **5:30-6:00 PM PT**.
 Please find the meeting invite link below:
 
 - **Meeting link**: `Zoom link <https://uchicago.zoom.us/j/6603596916?pwd=Z1E5MDRWUSt2am5XbEt4dTFkNGx6QT09>`_
-- **Calendar Invite**: `Google Calendar <https://drive.usercontent.google.com/u/0/uc?id=1I3WuivUVAq1vZ2XSW4rmqgD5c0bQcxE0&export=download>`_
+- **Calendar Invite**: `Google Calendar <https://drive.usercontent.google.com/u/0/uc?id=1I3WuivUVAq1vZ2XSW4rmqgD5c0bQcxE0&export=download>`__
 - **Slack Channel**: `#production-stack <https://vllm-dev.slack.com/archives/C089SMEAKRA>`_
 
 
