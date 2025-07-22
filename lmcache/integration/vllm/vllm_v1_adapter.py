@@ -13,7 +13,7 @@
 # limitations under the License.
 
 # Standard
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Optional, Union
 import os
 
@@ -320,11 +320,8 @@ class ReqMeta:
 
 @dataclass
 class LMCacheConnectorMetadata(KVConnectorMetadata):
-    requests: list[ReqMeta]
-    lookup_requests_in_step: list[str]
-
-    def __init__(self):
-        self.requests = []
+    requests: list[ReqMeta] = field(default_factory=list)
+    lookup_requests_in_step: list[str] = field(default_factory=list)
 
     def add_request(self, req_meta: ReqMeta) -> None:
         """Add a request to the metadata.
