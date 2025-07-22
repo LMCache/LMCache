@@ -119,7 +119,7 @@ class LMCacheEngine:
         )
 
         # HACK: remove this in the future
-        self.remove_after_retrieve = config.enable_nixl
+        self.remove_after_retrieve = config.enable_nixl and config.nixl_role == "receiver"
 
         if self.enable_p2p:
             self.distributed_loop = asyncio.get_event_loop()

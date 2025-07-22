@@ -84,7 +84,7 @@ class StorageManager:
             )
         )
 
-        if config.enable_nixl:
+        if config.enable_nixl and config.nixl_role == "receiver":
             self.allocator_backend = self.storage_backends["NixlBackend"]
         else:
             self.allocator_backend = self.storage_backends["LocalCPUBackend"]

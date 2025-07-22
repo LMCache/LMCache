@@ -704,19 +704,24 @@ class LMCacheEngineConfig:
             assert self.nixl_buffer_size is not None
             assert self.nixl_buffer_device is not None
 
-            assert self.local_cpu is False, "Nixl only supports local_cpu=False"
-            assert self.max_local_cpu_size == 0, (
-                "Nixl only supports max_local_cpu_size=0"
+            assert self.nixl_role == "sender" or self.local_cpu is False, (
+                "Nixl only supports local_cpu=False for nixl_role=receiver"
             )
 
-            assert self.local_disk is None, "Nixl only supports local_disk=None"
+            assert self.nixl_role == "sender" or self.local_disk is None, (
+                "Nixl only supports local_disk=None for nixl_role=receiver"
+            )
 
-            assert self.remote_url is None, "Nixl only supports remote_url=None"
+            assert self.nixl_role == "sender" or self.remote_url is None, (
+                "Nixl only supports remote_url=None for nixl_role=receiver"
+            )
 
             assert self.save_decode_cache is False, (
                 "Nixl only supports save_decode_cache=False"
             )
-            assert self.enable_p2p is False, "Nixl only supports enable_p2p=False"
+            assert self.nixl_role == "sender" or self.enable_p2p is False, (
+                "Nixl only supports enable_p2p=False for nixl_role=receiver"
+            )
 
         return self
 
