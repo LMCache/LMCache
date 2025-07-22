@@ -1,5 +1,5 @@
-local_cpu: False
-max_local_cpu_size: 0
+local_cpu: True
+max_local_cpu_size: 5
 max_local_disk_size: 0
 
 enable_nixl: True

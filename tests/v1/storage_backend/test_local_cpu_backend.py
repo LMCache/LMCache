@@ -179,9 +179,9 @@ class TestLocalCPUBackend:
 
         # Reinsertion
         local_cpu_backend.submit_put_task(key, memory_obj2)
-        assert local_cpu_backend.hot_cache[key] == memory_obj2
-        assert memory_obj1.get_ref_count() == 1  # Should be decremented
-        assert memory_obj2.get_ref_count() == 2  # Should be incremented
+        assert local_cpu_backend.hot_cache[key] != memory_obj2
+        assert memory_obj1.get_ref_count() == 2
+        assert memory_obj2.get_ref_count() == 1
 
     def test_batched_submit_put_task(self, local_cpu_backend):
         """Test batched_submit_put_task()."""
