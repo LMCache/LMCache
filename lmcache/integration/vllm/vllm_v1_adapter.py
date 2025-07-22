@@ -611,24 +611,20 @@ class LMCacheConnectorV1Impl:
 
                 # TODO: have a pre-allocated buffer to hold the slot_mappings
                 slot_mapping = slot_mapping.cuda()
-                # NOTE: In PD setting, lmcache_engine.lookup() will always
-                # return 0 if there is no local storage configured.
-                # In this case, we should rely on the slip_leading_tokens in
-                # save_spec to avoid transmit the already saved tokens again.
-                # skip_leading_tokens = max(
-                #    self.lmcache_engine.lookup(token_ids),
-                #    save_spec.skip_leading_tokens,
-                # )
-                skip_leading_tokens = save_spec.skip_leading_tokens
 
-                if skip_leading_tokens == len(token_ids):
-                    continue  # skip this request
-                # Align to lmcache chunk size
-                skip_leading_tokens = (
-                    skip_leading_tokens
-                    // self._lmcache_chunk_size
-                    * self._lmcache_chunk_size
-                )
+                if self.kv_role == "kv_producer":
+                    skip_leading_tokens = 0
+                else:
+                    skip_leading_tokens = save_spec.skip_leading_tokens
+
+                    if skip_leading_tokens == len(token_ids):
+                        continue  # skip this request
+                    # Align to lmcache chunk size
+                    skip_leading_tokens = (
+                        skip_leading_tokens
+                        // self._lmcache_chunk_size
+                        * self._lmcache_chunk_size
+                    )
 
                 store_mask = torch.ones_like(token_ids, dtype=torch.bool)
                 store_mask[:skip_leading_tokens] = False
@@ -686,7 +682,9 @@ class LMCacheConnectorV1Impl:
 
         for request in connector_metadata.requests:
             save_spec = request.save_spec
-            if save_spec is None or not save_spec.can_save:
+            if (
+                save_spec is None or not save_spec.can_save
+            ) and self.kv_role != "kv_producer":
                 continue
 
             token_ids = request.token_ids
@@ -699,24 +697,24 @@ class LMCacheConnectorV1Impl:
 
             # TODO: have a pre-allocated buffer to hold the slot_mappings
             slot_mapping = slot_mapping.cuda()
-            # NOTE: In PD setting, lmcache_engine.lookup() will always return
-            # 0 if there is no local storage configured. In this case, we
-            # should rely on the slip_leading_tokens in save_spec to avoid
-            # transmit the already saved tokens again.
-            skip_leading_tokens = max(
-                self.lmcache_engine.lookup(token_ids),
-                save_spec.skip_leading_tokens,
-            )
-            skip_leading_tokens = save_spec.skip_leading_tokens
 
-            if skip_leading_tokens == len(token_ids):
-                continue  # skip this request
-            # Align to lmcache chunk size
-            skip_leading_tokens = (
-                skip_leading_tokens
-                // self._lmcache_chunk_size
-                * self._lmcache_chunk_size
-            )
+            if self.kv_role == "kv_producer":
+                skip_leading_tokens = 0
+            else:
+                skip_leading_tokens = max(
+                    self.lmcache_engine.lookup(token_ids),
+                    save_spec.skip_leading_tokens,
+                )
+                skip_leading_tokens = save_spec.skip_leading_tokens
+
+                if skip_leading_tokens == len(token_ids):
+                    continue  # skip this request
+                # Align to lmcache chunk size
+                skip_leading_tokens = (
+                    skip_leading_tokens
+                    // self._lmcache_chunk_size
+                    * self._lmcache_chunk_size
+                )
 
             store_mask = torch.ones_like(token_ids, dtype=torch.bool)
             store_mask[:skip_leading_tokens] = False

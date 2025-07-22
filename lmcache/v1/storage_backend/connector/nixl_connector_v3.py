@@ -56,7 +56,7 @@ class NixlMsgBase(msgspec.Struct, tag=True):
 
 
 class NixlAllocRequest(NixlMsgBase):
-    """ """
+    """Nixl allocation request message"""
 
     keys: list[str]  # len(keys) indicates num_chunks
     fmt: int
@@ -66,7 +66,10 @@ class NixlAllocRequest(NixlMsgBase):
 
 
 class NixlAllocResponse(NixlMsgBase):
-    """ """
+    """Nixl allocation response message"""
+
+    # Indexes (local) of already sent memory objects
+    already_sent_indexes: list[int]
 
     remote_indexes: list[int]
 
@@ -148,12 +151,17 @@ class NixlSenderTask:
         )
 
     # TODO (Jiayi): reduce for loop
-    def get_local_indexes(self) -> list[int]:
+    def get_local_indexes(self, already_sent_indexes: list[int] = None) -> list[int]:
         """
         Get the page indexes of the memory objects.
         This is needed for nixl transfer.
         """
-        return [mem_obj.meta.address for mem_obj in self.mem_objs]
+        local_indexes = []
+        for idx, mem_obj in enumerate(self.mem_objs):
+            if idx in already_sent_indexes:
+                continue
+            local_indexes.append(mem_obj.meta.address)
+        return local_indexes
 
     def free_mem_objs(self):
         for mem_obj in self.mem_objs:
@@ -181,9 +189,9 @@ class NixlSender:
         self.memory_allocator = backend.memory_allocator
 
         self._sender_nixl_wrapper = NixlAgentWrapper(
-            buffer_ptr=self.memory_allocator.buffer_ptr,
-            buffer_size=self.memory_allocator.buffer_size,
-            page_size=self.memory_allocator.align_bytes,
+            buffer_ptr=self.memory_allocator.nixl_allocator.buffer_ptr,
+            buffer_size=self.memory_allocator.nixl_allocator.buffer_size,
+            page_size=self.memory_allocator.nixl_allocator.align_bytes,
             tp_rank=tp_rank,
         )
         self._nixl_agent = self._sender_nixl_wrapper.agent
@@ -274,7 +282,9 @@ class NixlSender:
         alloc_response = self._remote_allocate(receiver_id, alloc_request)
 
         # send kv
-        local_indexes = sender_task.get_local_indexes()
+        local_indexes = sender_task.get_local_indexes(
+            alloc_response.already_sent_indexes
+        )
         remote_indexes = alloc_response.remote_indexes
         self._blocking_send(req_id, receiver_id, local_indexes, remote_indexes)
 
@@ -488,9 +498,9 @@ class NixlReceiver:
 
         self.device = nixl_config.buffer_device
         self._receiver_nixl_wrapper = NixlAgentWrapper(
-            buffer_ptr=self.memory_allocator.buffer_ptr,
-            buffer_size=self.memory_allocator.buffer_size,
-            page_size=self.memory_allocator.align_bytes,
+            buffer_ptr=self.memory_allocator.nixl_allocator.buffer_ptr,
+            buffer_size=self.memory_allocator.nixl_allocator.buffer_size,
+            page_size=self.memory_allocator.nixl_allocator.align_bytes,
             tp_rank=tp_rank,
         )
 
@@ -545,9 +555,15 @@ class NixlReceiver:
         fmt = MemoryFormat(alloc_request.fmt)
         dtype = STR_DTYPE_TO_TORCH_DTYPE[alloc_request.dtype]
         shape = alloc_request.shape
+
         alloc_indexes = []
+        already_send_indexes = []
 
         for idx, key in enumerate(alloc_request.keys):
+            if self._backend.contains(key, pin=True):
+                already_send_indexes.append(idx)
+                continue
+
             if idx == total_allocs - 1:
                 num_alloc_tokens = alloc_request.last_chunk_toks
                 token_dim = fmt.token_dim()
@@ -572,7 +588,9 @@ class NixlReceiver:
 
             self._backend.put(CacheEngineKey.from_string(key), mem_obj)
 
-        return NixlAllocResponse(remote_indexes=alloc_indexes)
+        return NixlAllocResponse(
+            already_sent_indexes=already_send_indexes, remote_indexes=alloc_indexes
+        )
 
     # TODO: have a loop wrapper to wrap different loops
     def _mem_alloc_loop(self):
