@@ -15,31 +15,22 @@ The LMCache community meetings held separately for each project:
 LMCache Project
 ++++++++++++++++
 
-The LMCache community meeting is held every week at alternating times, first time slot is from 
-**9:00-9:30 AM PT** and the second time slot is from **6:30-7:00 PM PT** on **Tuesdays**. These 
-time slots are designed to accommodate different time zones and schedules of the community members and we alternate
-between the two time slots every week.
+The LMCache community meeting is held bi-weekly on **Tuesdays** at **9:00-9:30 AM PT**. 
 
 Please find the meeting invite link below:
 
 - **Meeting link**: `Zoom link <https://uchicago.zoom.us/j/6603596916?pwd=Z1E5MDRWUSt2am5XbEt4dTFkNGx6QT09>`_
-- **Calendar Invite**: 
-    .. raw:: html
-
-        <ul>
-            <li>Morning slot <a href="https://drive.google.com/file/d/15Xz8-LtpBQ5QgR7KrorOOyfuohCFQmwn/view?usp=sharing">Google Calendar</a></li>
-            <li>Evening slot <a href="https://drive.google.com/file/d/1WMZNFXV24kWzprDjvO-jQ7mOY7whqEdG/view?usp=sharing">Google Calendar</a></li>
-        </ul>
+- **Calendar Invite**: `Google Calendar <https://drive.google.com/file/d/15Xz8-LtpBQ5QgR7KrorOOyfuohCFQmwn/view?usp=sharing>`_
 - **Slack Channel**: `#lmcache <https://join.slack.com/t/lmcacheworkspace/shared_invite/zt-2viziwhue-5Amprc9k5hcIdXT7XevTaQ>`_
 
 Production Stack Project
 +++++++++++++++++++++++++
 
-The Production Stack community meeting is held every week on **Tuesdays from 6:00-6:30 PM PT**.
+The Production Stack community meeting is held bi-weekly on **Tuesdays** at **5:30-6:00 PM PT**.
 Please find the meeting invite link below:
 
 - **Meeting link**: `Zoom link <https://uchicago.zoom.us/j/6603596916?pwd=Z1E5MDRWUSt2am5XbEt4dTFkNGx6QT09>`_
-- **Calendar Invite**: `Google Calendar <https://drive.google.com/file/d/1iKpFrt-grVZSIbIXpnVlZyEvADcxLMj_/view?usp=sharing>`_
+- **Calendar Invite**: `Google Calendar <https://drive.usercontent.google.com/u/0/uc?id=1I3WuivUVAq1vZ2XSW4rmqgD5c0bQcxE0&export=download>`_
 - **Slack Channel**: `#production-stack <https://vllm-dev.slack.com/archives/C089SMEAKRA>`_
 
 
