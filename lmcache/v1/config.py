@@ -148,9 +148,6 @@ class LMCacheEngineConfig:
     # When set, uses external lookup client instead of regular lookup server
     external_lookup_client: Optional[str] = None
 
-    # Whether save the metadata of the chunk
-    save_chunk_meta: bool = True
-
     @staticmethod
     def from_defaults(
         chunk_size: int = 256,
@@ -196,7 +193,6 @@ class LMCacheEngineConfig:
         save_unfull_chunk: bool = True,
         blocking_timeout_secs: int = 10,
         external_lookup_client: Optional[str] = None,
-        save_chunk_meta: bool = True,
     ) -> "LMCacheEngineConfig":
         # TODO (ApostaC): Add nixl config
         return LMCacheEngineConfig(
@@ -243,7 +239,6 @@ class LMCacheEngineConfig:
             save_unfull_chunk,
             blocking_timeout_secs,
             external_lookup_client,
-            save_chunk_meta,
         ).validate()
 
     @staticmethod
@@ -264,7 +259,6 @@ class LMCacheEngineConfig:
         distributed_url: Optional[str] = None,
         error_handling: bool = False,
         save_unfull_chunk: bool = True,
-        save_chunk_meta: bool = True,
     ) -> "LMCacheEngineConfig":
         # TODO (ApostaC): Add nixl config
         if backend == "cpu":
@@ -325,7 +319,6 @@ class LMCacheEngineConfig:
                 distributed_url=distributed_url,
                 error_handling=error_handling,
                 save_unfull_chunk=save_unfull_chunk,
-                save_chunk_meta=save_chunk_meta,
             )
             .validate()
             .log_config()
@@ -422,8 +415,6 @@ class LMCacheEngineConfig:
 
         external_lookup_client = config.get("external_lookup_client", None)
 
-        save_chunk_meta = config.get("save_chunk_meta", True)
-
         local_disk_path = _parse_local_disk(local_disk)
 
         match remote_url:
@@ -479,7 +470,6 @@ class LMCacheEngineConfig:
                 save_unfull_chunk,
                 blocking_timeout_secs,
                 external_lookup_client,
-                save_chunk_meta,
             )
             .validate()
             .log_config()
@@ -697,9 +687,6 @@ class LMCacheEngineConfig:
         config.external_lookup_client = parse_env(
             get_env_name("external_lookup_client"), config.external_lookup_client
         )
-        config.save_chunk_meta = to_bool(
-            parse_env(get_env_name("save_chunk_meta"), config.save_chunk_meta)
-        )
         return config.validate().log_config()
 
     def to_original_config(self) -> orig_config.LMCacheEngineConfig:
@@ -783,7 +770,6 @@ class LMCacheEngineConfig:
             "save_unfull_chunk": self.save_unfull_chunk,
             "blocking_timeout_secs": self.blocking_timeout_secs,
             "external_lookup_client": self.external_lookup_client,
-            "save_chunk_meta": self.save_chunk_meta,
         }
         logger.info(f"LMCache Configuration: {config_dict}")
 

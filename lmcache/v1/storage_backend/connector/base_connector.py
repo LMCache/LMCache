@@ -46,7 +46,12 @@ class RemoteConnector(metaclass=abc.ABCMeta):
         config: Optional[LMCacheEngineConfig],
         metadata: Optional[LMCacheEngineMetadata],
     ) -> None:
-        if config is None or metadata is None or config.save_chunk_meta:
+        if (
+            config is None
+            or metadata is None
+            or config.extra_config is None
+            or config.extra_config.get("save_chunk_meta", True)
+        ):
             return
 
         self.save_chunk_meta = False

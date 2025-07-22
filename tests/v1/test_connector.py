@@ -91,23 +91,17 @@ def test_fs_connector(autorelease_v1, full_chunk, save_chunk_meta, use_mla):
         # full chunk's kv_shape (num_layer, 2, chunk_size, num_kv_head, head_size)
         kv_shape = (32, 1 if use_mla else 2, 256, 1 if use_mla else 8, 128)
         dtype = torch.bfloat16
-        config = (
-            None
-            if save_chunk_meta
-            else LMCacheEngineConfig.from_legacy(save_chunk_meta=save_chunk_meta)
+        config = LMCacheEngineConfig.from_defaults(
+            extra_config={"save_chunk_meta": save_chunk_meta}
         )
-        metadata = (
-            None
-            if save_chunk_meta
-            else LMCacheEngineMetadata(
-                "deepseek/DeepSeek-R1",
-                1,
-                0,
-                "vllm",
-                dtype,
-                kv_shape,
-                use_mla,
-            )
+        metadata = LMCacheEngineMetadata(
+            "deepseek/DeepSeek-R1",
+            1,
+            0,
+            "vllm",
+            dtype,
+            kv_shape,
+            use_mla,
         )
         connector = autorelease_v1(
             CreateConnector(url, async_loop, memory_allocator, config, metadata)
