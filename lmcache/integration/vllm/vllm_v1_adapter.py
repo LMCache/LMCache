@@ -846,7 +846,11 @@ class LMCacheConnectorV1Impl:
         if the CacheManager this allocated blocks for us.
         """
 
-        kv_transfer_params = request.kv_transfer_params
+        kv_transfer_params = (
+            request.kv_transfer_params
+            if hasattr(request, "kv_transfer_params")
+            else None
+        )
 
         if kv_transfer_params is not None and "disagg_spec" in kv_transfer_params:
             req_disagg_spec = kv_transfer_params["disagg_spec"]
@@ -1006,7 +1010,11 @@ class LMCacheConnectorV1Impl:
         request: "Request",
         block_ids: list[int],
     ) -> tuple[bool, Optional[dict[str, Any]]]:
-        params = request.kv_transfer_params
+        params = (
+            request.kv_transfer_params
+            if hasattr(request, "kv_transfer_params")
+            else None
+        )
         return_params = None
 
         # NOTE: Used to stream back the first token
