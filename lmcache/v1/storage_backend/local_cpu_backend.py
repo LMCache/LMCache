@@ -85,6 +85,7 @@ class LocalCPUBackend(StorageBackendInterface):
                 return False
             if pin:
                 self.hot_cache[key].pin()
+            self.hot_cache.move_to_end(key)
             return True
 
     def exists_in_put_tasks(self, key: CacheEngineKey) -> bool:
@@ -156,7 +157,6 @@ class LocalCPUBackend(StorageBackendInterface):
             # is evicted from the local cpu backend before the caller calls
             # ref count up themselves
             memory_obj.ref_count_up()
-            self.hot_cache.move_to_end(key)
             return memory_obj
 
     def get_non_blocking(
@@ -171,7 +171,6 @@ class LocalCPUBackend(StorageBackendInterface):
                 return None
             memory_obj = self.hot_cache[key]
             memory_obj.ref_count_up()
-            self.hot_cache.move_to_end(key)
             f: Future = Future()
             f.set_result(memory_obj)
             return f

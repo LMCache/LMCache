@@ -93,6 +93,8 @@ class LocalDiskBackend(StorageBackendInterface):
                 return False
             if pin:
                 self.dict[key].pin()
+            # Update cache recency
+            self.evictor.update_on_hit(key, self.dict)
             return True
 
     def exists_in_put_tasks(self, key: CacheEngineKey) -> bool:
@@ -240,9 +242,6 @@ class LocalDiskBackend(StorageBackendInterface):
         if key not in self.dict:
             self.disk_lock.release()
             return None
-
-        # Update cache recency
-        self.evictor.update_on_hit(key, self.dict)
 
         path = self.dict[key].path
         dtype = self.dict[key].dtype
