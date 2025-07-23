@@ -366,6 +366,7 @@ class GdsBackend(StorageBackendInterface):
 
     def _try_to_read_metadata(self, key: CacheEngineKey) -> Optional[DiskCacheMetadata]:
         path, subdir_key, _, _ = self._key_to_path(key)
+        path += _METADATA_FILE_SUFFIX
         if os.path.exists(path):
             try:
                 return self._read_metadata(key, path, subdir_key)
