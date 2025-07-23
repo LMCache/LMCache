@@ -302,9 +302,8 @@ class SegmentTokenDatabase(TokenDatabase):
         self.hash_func = (
             sha256_cbor_64bit
             if config.pre_caching_hash_algorithm == "sha256_cbor_64bit"
-            and vllm_is_available
             else sha256
-            if config.pre_caching_hash_algorithm == "sha256" and vllm_is_available
+            if config.pre_caching_hash_algorithm == "sha256"
             else hash
         )
 
