@@ -35,14 +35,6 @@ except ImportError:
     # Fallback to a default value if vllm is not available
     NONE_HASH = 0
 
-vllm_is_available = True
-try:
-    # Third Party
-    from vllm.utils import sha256, sha256_cbor_64bit
-except ImportError:
-    # vLLM sha256, sha256_cbor_64bit not available if vllm is not available
-    vllm_is_available = False
-
 
 class TokenDatabase(metaclass=abc.ABCMeta):
     """TokenDatabase is used to convert input tokens into list of
@@ -54,6 +46,37 @@ class TokenDatabase(metaclass=abc.ABCMeta):
     - SegmentTokenDatabase: It processes tokens into segments based on
     special separators and convert each segment into a cache engine key.
     """
+
+    @abc.abstractmethod
+    def __init__(
+        self,
+        config: Optional[LMCacheEngineConfig] = None,
+        metadata: Optional[LMCacheEngineMetadata] = None,
+    ):
+        vllm_is_available = True
+        try:
+            # Third Party
+            from vllm.utils import sha256, sha256_cbor_64bit
+        except ImportError:
+            # sha256, sha256_cbor_64bit are available through vLLM only
+            vllm_is_available = False
+
+        hash_algorithm: str
+        if config is not None:
+            hash_algorithm = config.pre_caching_hash_algorithm
+        else:  # Default value
+            hash_algorithm = "builtin"  # fallback to builtin hash
+
+        # Need to support vLLM hashing functions at a minimum
+        self.hash_func = (
+            sha256_cbor_64bit
+            if hash_algorithm == "sha256_cbor_64bit" and vllm_is_available
+            else sha256
+            if hash_algorithm == "sha256" and vllm_is_available
+            else hash
+        )
+
+        self.metadata = metadata
 
     @abc.abstractmethod
     def process_tokens(
@@ -93,26 +116,14 @@ class ChunkedTokenDatabase(TokenDatabase):
         config: Optional[LMCacheEngineConfig] = None,
         metadata: Optional[LMCacheEngineMetadata] = None,
     ):
-        hash_algorithm: str
+        super(ChunkedTokenDatabase, self).__init__(config, metadata)
+
         if config is not None:
             self.chunk_size = config.chunk_size
             self.save_unfull_chunk = config.save_unfull_chunk
-            hash_algorithm = config.pre_caching_hash_algorithm
         else:  # Default values
             self.chunk_size = 256
             self.save_unfull_chunk = True
-            hash_algorithm = "builtin"  # hash
-
-        # Need to support vLLM hashing functions at a minimum
-        self.hash_func = (
-            sha256_cbor_64bit
-            if hash_algorithm == "sha256_cbor_64bit" and vllm_is_available
-            else sha256
-            if hash_algorithm == "sha256" and vllm_is_available
-            else hash
-        )
-
-        self.metadata = metadata
 
     def _make_key_by_hash(self, chunk_hash: int):
         assert self.metadata is not None
@@ -249,15 +260,9 @@ class SegmentTokenDatabase(TokenDatabase):
     """
 
     def __init__(self, config: LMCacheEngineConfig, metadata: LMCacheEngineMetadata):
-        self.tokenizer = AutoTokenizer.from_pretrained(metadata.model_name)
+        super(SegmentTokenDatabase, self).__init__(config, metadata)
 
-        self.hash_func = (
-            sha256_cbor_64bit
-            if config.pre_caching_hash_algorithm == "sha256_cbor_64bit"
-            else sha256
-            if config.pre_caching_hash_algorithm == "sha256"
-            else hash
-        )
+        self.tokenizer = AutoTokenizer.from_pretrained(metadata.model_name)
 
         # TODO (Jiayi): figure out how to decide when
         # to use `1:` (whether there's a special starting token
@@ -265,7 +270,6 @@ class SegmentTokenDatabase(TokenDatabase):
         self.sep_tokens = self.tokenizer.encode(config.blend_special_str)[1:]
         self.sep_tokens = torch.tensor(self.sep_tokens, device="cpu")
         self.sep_len = len(self.sep_tokens)
-        self.metadata = metadata
 
     def _make_key_by_hash(self, chunk_hash: str):
         return CacheEngineKey(
