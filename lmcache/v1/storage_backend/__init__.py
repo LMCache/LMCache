@@ -42,6 +42,11 @@ def CreateStorageBackends(
 
     storage_backends: OrderedDict[str, StorageBackendInterface] = OrderedDict()
 
+    extra_config = config.extra_config
+    enable_nixl_storage = extra_config is not None and extra_config.get(
+        "enable_nixl_storage"
+    )
+
     if config.enable_nixl:
         if config.enable_xpyd:
             # First Party
@@ -57,7 +62,8 @@ def CreateStorageBackends(
             storage_backends["NixlBackend"] = NixlBackend.CreateNixlBackend(
                 config, metadata
             )
-            assert config.nixl_buffer_device is not None
+
+        assert config.nixl_buffer_device is not None
 
     # TODO(Jiayi): The hierarchy is fixed for now
     # NOTE(Jiayi): The local_cpu backend is always created because
@@ -73,6 +79,18 @@ def CreateStorageBackends(
         )
         backend_name = str(local_cpu_backend)
         storage_backends[backend_name] = local_cpu_backend
+
+    if enable_nixl_storage:
+        # First Party
+        from lmcache.v1.storage_backend.nixl_storage_backend import (
+            NixlStorageBackend,
+        )
+
+        storage_backends["NixlStorageBackend"] = (
+            NixlStorageBackend.CreateNixlStorageBackend(
+                config, loop, metadata, memory_allocator
+            )
+        )
 
     if config.local_disk and config.max_local_disk_size > 0:
         local_disk_backend = LocalDiskBackend(
