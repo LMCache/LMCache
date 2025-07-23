@@ -15,12 +15,10 @@
 # Standard
 from typing import Iterable, List, Optional, Tuple, Union
 import abc
-import array
 
 # Third Party
 from transformers import AutoTokenizer
 import torch
-import xxhash
 
 # First Party
 from lmcache.config import LMCacheEngineMetadata
@@ -36,6 +34,14 @@ try:
 except ImportError:
     # Fallback to a default value if vllm is not available
     NONE_HASH = 0
+
+vllm_is_available = True
+try:
+    # Third Party
+    from vllm.utils import sha256, sha256_cbor_64bit
+except ImportError:
+    # vLLM sha256, sha256_cbor_64bit not available if vllm is not available
+    vllm_is_available = False
 
 
 class TokenDatabase(metaclass=abc.ABCMeta):
@@ -87,15 +93,25 @@ class ChunkedTokenDatabase(TokenDatabase):
         config: Optional[LMCacheEngineConfig] = None,
         metadata: Optional[LMCacheEngineMetadata] = None,
     ):
-        # FIXME(Jiayi): cache_config.prefix_caching_hash_algo
-        self.hash_func = xxhash.xxh64()
-
+        hash_algorithm: str
         if config is not None:
             self.chunk_size = config.chunk_size
             self.save_unfull_chunk = config.save_unfull_chunk
+            hash_algorithm = config.pre_caching_hash_algorithm
         else:  # Default values
             self.chunk_size = 256
             self.save_unfull_chunk = True
+            hash_algorithm = "builtin"  # hash
+
+        # Need to support vLLM hashing functions at a minimum
+        self.hash_func = (
+            sha256_cbor_64bit
+            if hash_algorithm == "sha256_cbor_64bit" and vllm_is_available
+            else sha256
+            if hash_algorithm == "sha256" and vllm_is_available
+            else hash
+        )
+
         self.metadata = metadata
 
     def _make_key_by_hash(self, chunk_hash: int):
@@ -108,21 +124,23 @@ class ChunkedTokenDatabase(TokenDatabase):
             chunk_hash,
         )
 
-    def _get_init_hash(self) -> str:
-        return ""
+    def _get_init_hash(self) -> int:
+        return NONE_HASH
 
     def _hash(
         self,
         tokens: Union[torch.Tensor, List[int]],
         prefix_hash: int,
-    ) -> Union[int, str]:
+    ) -> int:
         if isinstance(tokens, torch.Tensor):
-            tokens_bytes = tokens.cpu().to(torch.uint32).numpy().tobytes()
+            tokens_tuple = tuple(tokens.cpu().tolist())
         elif isinstance(tokens, list):
-            tokens_bytes = array.array("I", tokens).tobytes()
-        self.hash_func.update(prefix_hash.encode("ascii"))
-        self.hash_func.update(tokens_bytes)
-        return self.hash_func.hexdigest()
+            tokens_tuple = tuple(tokens)
+        print(
+            f"In ChunkedTokenDB:_hash() - hash func type: {type(self.hash_func)}, "
+            f"prefix_hash: {prefix_hash}, tokens_tuple: {tokens_tuple}"
+        )
+        return self.hash_func((prefix_hash, tokens_tuple, None))
 
     def _chunk_tokens(
         self,
@@ -149,9 +167,15 @@ class ChunkedTokenDatabase(TokenDatabase):
         self,
         token_chunks: Iterable[Union[torch.Tensor, List[int]]],
     ) -> Iterable[int]:
+        print("In ChunkedTokenDB:_prefix_hash()")
         prefix_hash = self._get_init_hash()
+        print(f"In ChunkedTokenDB:_prefix_hash(), prefix_hash: {prefix_hash}")
         for token_chunk in token_chunks:
             prefix_hash = self._hash(token_chunk, prefix_hash)
+            print(
+                f"In ChunkedTokenDB:_prefix_hash(), "
+                f"prefix_hash: {prefix_hash} for token_chunk: {token_chunk}"
+            )
             yield prefix_hash
 
     @_lmcache_nvtx_annotate
@@ -188,6 +212,7 @@ class ChunkedTokenDatabase(TokenDatabase):
         :raises: ValueError if the number of Falses in the mask is not a
             multiple of the chunk size.
         """
+        print("In ChunkedTokenDatabase::process_tokens()")
         if mask is not None:
             num_falses = mask.numel() - mask.long().sum().item()
         else:
@@ -201,18 +226,47 @@ class ChunkedTokenDatabase(TokenDatabase):
         if tokens is not None:
             total_len = len(tokens)
             token_chunks = self._chunk_tokens(tokens)
+            print(
+                f"ChunkedTokenDatabase::process_tokens(), token_chunks: {token_chunks}"
+            )
             prefix_hashes = self._prefix_hash(token_chunks)
+            print(
+                f"ChunkedTokenDatabase::process_tokens(), "
+                f"prefix_hashes: {prefix_hashes}"
+            )
             for chunk_id, hash_val in enumerate(prefix_hashes):
+                print(
+                    f"ChunkedTokenDatabase::process_tokens(), "
+                    f"chunk_id: {chunk_id}, hash_val: {hash_val}"
+                )
                 start_idx = chunk_id * self.chunk_size
                 end_idx = min(start_idx + self.chunk_size, total_len)
+                print(
+                    f"ChunkedTokenDatabase::process_tokens(), "
+                    f"start_idx: {start_idx}, end_idx: {end_idx}"
+                )
                 if start_idx < num_falses:
+                    print(
+                        f"In ChunkedTokenDB:process_tokens() - "
+                        f"start_idx: {start_idx}, num_falses: {num_falses}"
+                    )
                     continue
                 else:
                     if make_key:
+                        make_key_hash = self._make_key_by_hash(hash_val)
+                        print(
+                            f"ChunkedTokenDatabase::process_tokens(), "
+                            f"make_key_hash: {make_key_hash}"
+                        )
                         yield start_idx, end_idx, self._make_key_by_hash(hash_val)
                     else:
+                        print(
+                            f"ChunkedTokenDatabase::process_tokens(), "
+                            f"hash_val: {hash_val}"
+                        )
                         yield start_idx, end_idx, hash_val
         elif hashes is not None:
+            print(f"In ChunkedTokenDB:process_tokens() - offsets: {offsets}")
             assert offsets is not None, (
                 "If hashes are provided, offsets must also be provided."
             )
@@ -220,8 +274,16 @@ class ChunkedTokenDatabase(TokenDatabase):
             for hash_val, offset in zip(hashes, offsets, strict=False):
                 end_idx = start_idx + offset
                 if make_key:
+                    make_key_hash = self._make_key_by_hash(hash_val)
+                    print(
+                        f"ChunkedTokenDatabase::process_tokens(), "
+                        f"make_key_hash: {make_key_hash}"
+                    )
                     yield start_idx, end_idx, self._make_key_by_hash(hash_val)
                 else:
+                    print(
+                        f"ChunkedTokenDatabase::process_tokens(), hash_val: {hash_val}"
+                    )
                     yield start_idx, end_idx, hash_val
                 start_idx = end_idx
         else:
@@ -237,8 +299,14 @@ class SegmentTokenDatabase(TokenDatabase):
     def __init__(self, config: LMCacheEngineConfig, metadata: LMCacheEngineMetadata):
         self.tokenizer = AutoTokenizer.from_pretrained(metadata.model_name)
 
-        # FIXME(Jiayi): cache_config.prefix_caching_hash_algo
-        self.hash_func = xxhash.xxh64()
+        self.hash_func = (
+            sha256_cbor_64bit
+            if config.pre_caching_hash_algorithm == "sha256_cbor_64bit"
+            and vllm_is_available
+            else sha256
+            if config.pre_caching_hash_algorithm == "sha256" and vllm_is_available
+            else hash
+        )
 
         # TODO (Jiayi): figure out how to decide when
         # to use `1:` (whether there's a special starting token
@@ -260,9 +328,12 @@ class SegmentTokenDatabase(TokenDatabase):
     def _hash(
         self,
         tokens: Union[torch.Tensor, List[int]],
-    ) -> Union[int, str]:
-        self.hash_func.update(tokens.numpy().tobytes())
-        return self.hash_func.hexdigest()
+    ) -> int:
+        if isinstance(tokens, torch.Tensor):
+            tokens_tuple = tuple(tokens.cpu().tolist())
+        elif isinstance(tokens, list):
+            tokens_tuple = tuple(tokens)
+        return self.hash_func(tokens_tuple)
 
     def _fast_split_by_subtensor(self, tokens: torch.Tensor) -> Iterable[torch.Tensor]:
         """Match the `sep_tokens` with sliding windows"""

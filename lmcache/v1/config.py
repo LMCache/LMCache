@@ -93,6 +93,8 @@ class LMCacheEngineConfig:
     # lmcache worker url
     # NOTE: port number will add `worker_id`
     lmcache_worker_port: Optional[int] = None
+    # Algorithm used to hash tokens pre caching
+    pre_caching_hash_algorithm: str = "builtin"
 
     # (Optional) Nixl configurations
     # whether to enable Nixl
@@ -157,6 +159,7 @@ class LMCacheEngineConfig:
         remote_serde: Optional[str] = "naive",
         use_layerwise: bool = False,
         save_decode_cache: bool = False,
+        pre_caching_hash_algorithm: str = "builtin",
         enable_blending: bool = False,
         blend_recompute_ratio: float = 0.15,
         blend_min_tokens: int = 256,
@@ -214,6 +217,7 @@ class LMCacheEngineConfig:
             lmcache_instance_id,
             controller_url,
             lmcache_worker_port,
+            pre_caching_hash_algorithm,
             enable_nixl,
             nixl_role,
             nixl_receiver_host,
@@ -343,6 +347,8 @@ class LMCacheEngineConfig:
 
         save_decode_cache = config.get("save_decode_cache", False)
 
+        pre_caching_hash_algorithm = config.get("pre_caching_hash_algorithm", "builtin")
+
         enable_blending = config.get("enable_blending", False)
         blend_recompute_ratio = config.get("blend_recompute_ratio", 0.15)
         blend_min_tokens = config.get("blend_min_tokens", 256)
@@ -442,6 +448,7 @@ class LMCacheEngineConfig:
                 lmcache_instance_id,
                 controller_url,
                 lmcache_worker_port,
+                pre_caching_hash_algorithm,
                 enable_nixl,
                 nixl_role,
                 nixl_receiver_host,
@@ -537,6 +544,12 @@ class LMCacheEngineConfig:
         config.save_decode_cache = to_bool(
             parse_env(get_env_name("save_decode_cache"), config.save_decode_cache)
         )
+
+        pre_caching_hash_algorithm = parse_env(
+            get_env_name("pre_caching_hash_algorithm"), "builtin"
+        )
+        assert pre_caching_hash_algorithm is not None
+        config.pre_caching_hash_algorithm = pre_caching_hash_algorithm
 
         config.enable_blending = to_bool(
             parse_env(get_env_name("enable_blending"), config.enable_blending)
@@ -737,6 +750,7 @@ class LMCacheEngineConfig:
             "error_handling": self.error_handling,
             "enable_controller": self.enable_controller,
             "lmcache_instance_id": self.lmcache_instance_id,
+            "pre_caching_hash_algorithm": self.pre_caching_hash_algorithm,
             "enable_nixl": self.enable_nixl,
             "nixl_role": self.nixl_role,
             "nixl_receiver_host": self.nixl_receiver_host,
