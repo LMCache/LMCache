@@ -698,10 +698,6 @@ class LMCacheConnectorV1Impl:
             if self.kv_role == "kv_producer":
                 skip_leading_tokens = 0
             else:
-                skip_leading_tokens = max(
-                    self.lmcache_engine.lookup(token_ids),
-                    save_spec.skip_leading_tokens,
-                )
                 skip_leading_tokens = save_spec.skip_leading_tokens
 
                 if skip_leading_tokens == len(token_ids):
