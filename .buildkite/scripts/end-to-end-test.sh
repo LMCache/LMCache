@@ -102,7 +102,7 @@ mv /tmp/buildkite-agent-"$port2"-stdout.log "$orig_dir"/vllm-disk-stdout.log
 mv /tmp/buildkite-agent-"$port2"-stderr.log "$orig_dir"/vllm-disk-stderr.log
 
 python3 outputs/drawing_wrapper.py ./
-if compgen -G "outputs/*.{csv,pdf}" > /dev/null; then
+if compgen -G outputs/*.{csv,pdf} > /dev/null; then
     mv outputs/*.{csv,pdf} "$orig_dir"/
 else
     echo "Error: no CSV or PDF files found in outputs/" >&2
