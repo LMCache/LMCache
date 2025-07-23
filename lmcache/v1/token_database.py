@@ -136,10 +136,6 @@ class ChunkedTokenDatabase(TokenDatabase):
             tokens_tuple = tuple(tokens.cpu().tolist())
         elif isinstance(tokens, list):
             tokens_tuple = tuple(tokens)
-        print(
-            f"In ChunkedTokenDB:_hash() - hash func type: {type(self.hash_func)}, "
-            f"prefix_hash: {prefix_hash}, tokens_tuple: {tokens_tuple}"
-        )
         return self.hash_func((prefix_hash, tokens_tuple, None))
 
     def _chunk_tokens(
@@ -167,15 +163,9 @@ class ChunkedTokenDatabase(TokenDatabase):
         self,
         token_chunks: Iterable[Union[torch.Tensor, List[int]]],
     ) -> Iterable[int]:
-        print("In ChunkedTokenDB:_prefix_hash()")
         prefix_hash = self._get_init_hash()
-        print(f"In ChunkedTokenDB:_prefix_hash(), prefix_hash: {prefix_hash}")
         for token_chunk in token_chunks:
             prefix_hash = self._hash(token_chunk, prefix_hash)
-            print(
-                f"In ChunkedTokenDB:_prefix_hash(), "
-                f"prefix_hash: {prefix_hash} for token_chunk: {token_chunk}"
-            )
             yield prefix_hash
 
     @_lmcache_nvtx_annotate
@@ -212,7 +202,6 @@ class ChunkedTokenDatabase(TokenDatabase):
         :raises: ValueError if the number of Falses in the mask is not a
             multiple of the chunk size.
         """
-        print("In ChunkedTokenDatabase::process_tokens()")
         if mask is not None:
             num_falses = mask.numel() - mask.long().sum().item()
         else:
@@ -226,47 +215,18 @@ class ChunkedTokenDatabase(TokenDatabase):
         if tokens is not None:
             total_len = len(tokens)
             token_chunks = self._chunk_tokens(tokens)
-            print(
-                f"ChunkedTokenDatabase::process_tokens(), token_chunks: {token_chunks}"
-            )
             prefix_hashes = self._prefix_hash(token_chunks)
-            print(
-                f"ChunkedTokenDatabase::process_tokens(), "
-                f"prefix_hashes: {prefix_hashes}"
-            )
             for chunk_id, hash_val in enumerate(prefix_hashes):
-                print(
-                    f"ChunkedTokenDatabase::process_tokens(), "
-                    f"chunk_id: {chunk_id}, hash_val: {hash_val}"
-                )
                 start_idx = chunk_id * self.chunk_size
                 end_idx = min(start_idx + self.chunk_size, total_len)
-                print(
-                    f"ChunkedTokenDatabase::process_tokens(), "
-                    f"start_idx: {start_idx}, end_idx: {end_idx}"
-                )
                 if start_idx < num_falses:
-                    print(
-                        f"In ChunkedTokenDB:process_tokens() - "
-                        f"start_idx: {start_idx}, num_falses: {num_falses}"
-                    )
                     continue
                 else:
                     if make_key:
-                        make_key_hash = self._make_key_by_hash(hash_val)
-                        print(
-                            f"ChunkedTokenDatabase::process_tokens(), "
-                            f"make_key_hash: {make_key_hash}"
-                        )
                         yield start_idx, end_idx, self._make_key_by_hash(hash_val)
                     else:
-                        print(
-                            f"ChunkedTokenDatabase::process_tokens(), "
-                            f"hash_val: {hash_val}"
-                        )
                         yield start_idx, end_idx, hash_val
         elif hashes is not None:
-            print(f"In ChunkedTokenDB:process_tokens() - offsets: {offsets}")
             assert offsets is not None, (
                 "If hashes are provided, offsets must also be provided."
             )
@@ -274,16 +234,8 @@ class ChunkedTokenDatabase(TokenDatabase):
             for hash_val, offset in zip(hashes, offsets, strict=False):
                 end_idx = start_idx + offset
                 if make_key:
-                    make_key_hash = self._make_key_by_hash(hash_val)
-                    print(
-                        f"ChunkedTokenDatabase::process_tokens(), "
-                        f"make_key_hash: {make_key_hash}"
-                    )
                     yield start_idx, end_idx, self._make_key_by_hash(hash_val)
                 else:
-                    print(
-                        f"ChunkedTokenDatabase::process_tokens(), hash_val: {hash_val}"
-                    )
                     yield start_idx, end_idx, hash_val
                 start_idx = end_idx
         else:

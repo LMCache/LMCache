@@ -72,17 +72,12 @@ class KVController:
         """
         Admit a new kv chunk.
         """
-        print("** In KVController::admit() **")
         instance_id = msg.instance_id
         worker_id = msg.worker_id
         key = msg.key
         location = msg.location
         if key not in self.kv_pool:
             self.kv_pool[key] = []
-        print(
-            f"** In KVController::admit(), append - instance_id: {instance_id}, "
-            f"worker_id: {worker_id}, location: {location} **"
-        )
         self.kv_pool[key].append(KVChunkMetadata(instance_id, worker_id, location))
 
     async def evict(self, msg: KVEvictMsg) -> None:
@@ -164,22 +159,14 @@ class KVController:
     # `instance_id` with longest prefix.
     # TODO(Jiayi): Need to get rid of the hash somehow
     async def lookup(self, msg: LookupMsg) -> LookupRetMsg:
-        print("In KVController:lookup()")
         tokens = msg.tokens
         layout_info = {}
         for start, end, key in self.token_database.process_tokens(
             tokens, make_key=False
         ):
-            print(f"In KVController:lookup() - key: {key}, key type: {type(key)}")
-            # assert isinstance(key, str)
             if key not in self.kv_pool:
-                print(
-                    f"In KVController:lookup() - key: {key} "
-                    f"not in kv_pool: {self.kv_pool}"
-                )
                 break
             matched_instance = self.kv_pool[str(key)][0].instance_id
             matched_location = self.kv_pool[str(key)][0].location
             layout_info[matched_instance] = (matched_location, end)
-            print(f"In KVController:lookup() - layout_info: {layout_info}")
         return LookupRetMsg(layout_info=layout_info)
