@@ -497,15 +497,12 @@ class LMCacheEngine:
 
         # TODO(Jiayi): Remove the following for loop with batched operations
         for key, memory_obj in zip(reordered_keys, reordered_memory_objs, strict=False):
-            memory_obj.ref_count_down()
-
-            # NOTE (ApostaC): This is only for the current implementation:
-            # When the object is retrieved back to vLLM, the storage backend
-            # will immediately remove the object from itself
             if self.remove_after_retrieve:
                 self.storage_manager.remove(key)
-            else:
-                self.storage_manager.batched_unpin([key])
+            # else:
+            #    memory_obj.unpin()
+
+            memory_obj.ref_count_down()
 
         retrieved_tokens = torch.sum(ret_mask)
         self.stats_monitor.on_retrieve_finished(monitor_req_id, retrieved_tokens)

@@ -78,7 +78,7 @@ class KVAdmitMsg(WorkerMsg):
 
     instance_id: str
     worker_id: int
-    key: str
+    key: int
     location: str
 
     def describe(self) -> str:
@@ -90,7 +90,7 @@ class KVEvictMsg(WorkerMsg):
 
     instance_id: str
     worker_id: int
-    key: str
+    key: int
     location: str
 
     def describe(self) -> str:
@@ -145,8 +145,8 @@ class CompressWorkerMsg(ControlMsg):
 class MoveWorkerMsg(ControlMsg):
     """Move message for a single lmcache worker"""
 
-    old_position: Tuple[str, str]
-    new_position: Tuple[str, str]
+    old_position: Tuple[str, str]  # (instance_id, location)
+    new_position: Tuple[str, str]  # (instance_id, location)
     tokens: Optional[list[int]] = None
 
     def describe(self) -> str:
@@ -393,10 +393,10 @@ class CompressRetMsg(OrchRetMsg):
 class MoveRetMsg(OrchRetMsg):
     """Move return message"""
 
-    event_id: str
+    event_ids: list[str]
 
     def describe(self) -> str:
-        return f"Move event id: {self.event_id}"
+        return f"Move event id: {self.event_ids}"
 
 
 class HealthRetMsg(OrchRetMsg):

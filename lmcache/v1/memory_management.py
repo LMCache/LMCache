@@ -347,20 +347,26 @@ class TensorMemoryObj(MemoryObj):
             return self.meta.ref_count
 
     def pin(self) -> bool:
-        self.metadata.pin_count += 1
-        return True
+        with self.lock:
+            self.meta.pin_count += 1
+            return True
 
     def unpin(self) -> bool:
-        self.metadata.pin_count -= 1
-        if self.metadata.pin_count < 0:
-            logger.warning(
-                f"Pin count of MemoryObj {self.meta.address}"
-                f"is negative: {self.meta.pin_count}."
-                "Double unpin occurred somewhere."
-                "Setting pin count back to 0 as a hack but please find the bug."
-            )
-            self.metadata.pin_count = 0
-        return True
+        with self.lock:
+            self.meta.pin_count -= 1
+
+            if self.meta.pin_count <= 0 and self.meta.ref_count <= 0:
+                self.parent_allocator.free(self)
+
+            if self.meta.pin_count < 0:
+                logger.warning(
+                    f"Pin count of MemoryObj {self.meta.address}"
+                    f"is negative: {self.meta.pin_count}."
+                    "Double unpin occurred somewhere."
+                    "Setting pin count back to 0 as a hack but please find the bug."
+                )
+                self.meta.pin_count = 0
+            return True
 
     @property
     def metadata(self) -> MemoryObjMetadata:

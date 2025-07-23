@@ -217,7 +217,7 @@ class StorageManager:
         storage_backend_name: str,
     ) -> List[MemoryObj]:
         """
-        Non-blocking function to get the memory objects from the storages.
+        Blocking function to get the memory objects from the storages.
         """
         storage_backend = self.storage_backends[storage_backend_name]
         memory_objs = storage_backend.batched_get_blocking(keys)
@@ -251,12 +251,16 @@ class StorageManager:
     def prefetch(self, key: CacheEngineKey) -> None:
         """Launch a prefetch request in the storage backend. Non-blocking"""
 
-        if self.storage_backends["LocalCPUBackend"].contains(key):
-            return
+        for backend_name, backend in self.storage_backends.items():
+            if backend_name == "LocalCPUBackend":
+                if backend.contains(key):
+                    logger.debug("Key already in LocalCPUBackend, skipping prefetch")
+                    return
+                continue
 
-        for backend in self.storage_backends.values():
             perform_prefetch = backend.submit_prefetch_task(key)
             if perform_prefetch:
+                logger.debug(f"Prefetching key {key} in backend {backend_name}")
                 break
 
     # TODO(Jiayi): Currently, search_range is only used for testing.

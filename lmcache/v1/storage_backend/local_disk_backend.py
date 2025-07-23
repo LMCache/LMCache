@@ -325,9 +325,11 @@ class LocalDiskBackend(StorageBackendInterface):
         Load bytearray from disk.
         """
         memory_obj = self.local_cpu_backend.allocate(shape, dtype, fmt)
-        if memory_obj is None:
-            logger.debug("Memory allocation failed during async disk load.")
-            return None
+        assert memory_obj is not None, "Memory allocation failed during disk load."
+        # memory_obj.pin()
+        # if memory_obj is None:
+        #    logger.debug("Memory allocation failed during async disk load.")
+        #    return None
         buffer = memory_obj.byte_array
         with open(path, "rb") as f:
             f.readinto(buffer)

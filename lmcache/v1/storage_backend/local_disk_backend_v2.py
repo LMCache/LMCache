@@ -17,6 +17,7 @@ from collections import OrderedDict
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import TYPE_CHECKING, Callable, List, Optional
 import asyncio
+import itertools
 import os
 import queue
 import threading
@@ -60,6 +61,8 @@ class LocalDiskWorker:
         # started yet.
         self.prefetch_tasks: dict[CacheEngineKey, Optional[Future]] = {}
 
+        self.counter = itertools.count()
+
         self.thread = threading.Thread(target=self.process_task, daemon=True)
         self.thread.start()
 
@@ -69,7 +72,6 @@ class LocalDiskWorker:
         task: Callable,
         **kwargs,
     ):
-        task_type, task, kwargs = self.pq.get()
         if task_type == "prefetch":
             priority = 0
             self.insert_prefetch_task(kwargs["key"], None)
@@ -79,11 +81,11 @@ class LocalDiskWorker:
         else:
             raise ValueError(f"Unknown task type: {task_type}")
 
-        self.pq.put((priority, task_type, task, kwargs))
+        self.pq.put((priority, next(self.counter), task_type, task, kwargs))
 
     def process_task(self):
-        while not self.pq.empty():
-            _, task_type, task, kwargs = self.pq.get()
+        while True:
+            _, _, task_type, task, kwargs = self.pq.get(block=True)
 
             future = self.executor.submit(task, **kwargs)
             if task_type == "prefetch":
@@ -136,11 +138,14 @@ class LocalDiskWorker:
                 self.prefetch_lock.release()
                 return None
 
+            logger.debug(f"Waiting for prefetch task for key {key} to complete.")
             future = self.prefetch_tasks[key]
             if future is None:
                 self.prefetch_lock.release()
                 time.sleep(0.01)
                 continue
+
+            self.prefetch_lock.release()
 
             memory_obj = future.result()
             return memory_obj
@@ -214,7 +219,7 @@ class LocalDiskBackendV2(StorageBackendInterface):
             return True
 
     def exists_in_put_tasks(self, key: CacheEngineKey) -> bool:
-        return self.disk_woker.exists_in_put_tasks(key)
+        return self.disk_worker.exists_in_put_tasks(key)
 
     def pin(
         self,
@@ -306,7 +311,7 @@ class LocalDiskBackendV2(StorageBackendInterface):
         memory_obj.ref_count_up()
 
         self.disk_worker.submit_task(
-            "write",
+            "put",
             self.async_save_bytes_to_disk,
             key=key,
             memory_obj=memory_obj,
@@ -329,8 +334,10 @@ class LocalDiskBackendV2(StorageBackendInterface):
         # Need to consider gpu direct cases.
         assert self.use_local_cpu, "prefetch and local_cpu must be enabled together"
 
+        logger.debug("Submitting prefetch task")
+
         self.disk_lock.acquire()
-        if key not in self.dict or key:
+        if key not in self.dict:
             self.disk_lock.release()
             return False
 
@@ -352,6 +359,8 @@ class LocalDiskBackendV2(StorageBackendInterface):
             self.disk_lock.release()
             logger.debug("Memory allocation failed during async disk load.")
             return False
+
+        self.dict[key].pin()
 
         # Update cache recency
         self.evictor.update_on_hit(key, self.dict)
@@ -397,6 +406,7 @@ class LocalDiskBackendV2(StorageBackendInterface):
 
         memory_obj = self.load_bytes_from_disk(path, dtype=dtype, shape=shape, fmt=fmt)
         self.disk_lock.release()
+
         return memory_obj
 
     def get_non_blocking(
@@ -441,6 +451,8 @@ class LocalDiskBackendV2(StorageBackendInterface):
 
         self.insert_key(key, memory_obj)
 
+        # ref count down here because there's a ref_count_up in
+        # `submit_put_task` above
         memory_obj.ref_count_down()
 
         self.disk_worker.remove_put_task(key)
@@ -457,6 +469,7 @@ class LocalDiskBackendV2(StorageBackendInterface):
         Async load bytearray from disk.
         """
 
+        logger.debug("Executing `async_load_bytes` from disk.")
         # FIXME (Jiayi): handle the case where loading fails.
         buffer = memory_obj.byte_array
         size = len(buffer)
@@ -472,13 +485,14 @@ class LocalDiskBackendV2(StorageBackendInterface):
             fdo = os.fdopen(fd, "rb", buffering=0)
             fdo.readinto(buffer)
 
+        self.disk_lock.acquire()
+        self.dict[key].unpin()
+        self.disk_lock.release()
+
+        # Write back to cpu
         self.local_cpu_backend.submit_put_task(key, memory_obj)
 
         self.disk_worker.remove_prefetch_task(key)
-
-        # ref count down here because there's a ref_count_up in
-        # `submit_put_task` above
-        memory_obj.ref_count_down()
 
         return memory_obj
 
@@ -491,10 +505,11 @@ class LocalDiskBackendV2(StorageBackendInterface):
         """
         Load bytearray from disk.
         """
+
+        # TODO(Jiayi): Consider adding write-back here.
         memory_obj = self.local_cpu_backend.allocate(shape, dtype, fmt)
-        if memory_obj is None:
-            logger.debug("Memory allocation failed during async disk load.")
-            return None
+        assert memory_obj is not None, "Memory allocation failed during disk load."
+
         buffer = memory_obj.byte_array
         size = len(buffer)
         if size % self.os_disk_bs != 0:
