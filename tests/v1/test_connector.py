@@ -43,6 +43,10 @@ def test_lm_connector(url, autorelease_v1, lmserver_v1_process):
     memory_obj = memory_allocator.allocate(mem_obj_shape, dtype)
     memory_obj.ref_count_up()
 
+    torch.manual_seed(42)
+    test_tensor = torch.randint(0, 100, memory_obj.raw_data.shape, dtype=torch.int64)
+    memory_obj.raw_data.copy_(test_tensor.to(torch.float32).to(dtype))
+
     future = asyncio.run_coroutine_threadsafe(
         connector.put(random_key, memory_obj), async_loop
     )

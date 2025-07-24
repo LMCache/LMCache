@@ -366,6 +366,7 @@ class GdsBackend(StorageBackendInterface):
 
     def _try_to_read_metadata(self, key: CacheEngineKey) -> Optional[DiskCacheMetadata]:
         path, subdir_key, _, _ = self._key_to_path(key)
+        path += _METADATA_FILE_SUFFIX
         if os.path.exists(path):
             try:
                 return self._read_metadata(key, path, subdir_key)
@@ -672,12 +673,14 @@ class GdsBackend(StorageBackendInterface):
             return size_in_bytes
 
     def pin(self, key: CacheEngineKey) -> bool:
-        # TODO: Implement this
-        raise NotImplementedError
+        # NOTE (ApostaC): Since gds doesn't have eviction now, we don't need
+        # to implement pin and unpin
+        return
 
     def unpin(self, key: CacheEngineKey) -> bool:
-        # TODO: Implement this
-        raise NotImplementedError
+        # NOTE (ApostaC): Since gds doesn't have eviction now, we don't need
+        # to implement pin and unpin
+        return
 
     def close(self) -> None:
         logger.info("GDS backend closed.")

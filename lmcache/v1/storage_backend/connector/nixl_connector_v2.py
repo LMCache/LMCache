@@ -61,6 +61,7 @@ class NixlBufferAllocator(MemoryAllocatorInterface):
         shape: Union[torch.Size, tuple[int, ...]],
         dtype: Optional[torch.dtype],
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
+        allocator_type: Optional[str] = "nixl",
     ) -> Optional[MemoryObj]:
         """
         Allocates the memory to hold a tensor of the given shape.
@@ -114,16 +115,22 @@ class NixlBufferAllocator(MemoryAllocatorInterface):
         dtype: Optional[torch.dtype],
         batch_size: int,
         fmt=MemoryFormat.KV_2LTD,
+        allocator_type: Optional[str] = "nixl",
     ):
         raise NotImplementedError(
             "Batched allocation is not supported in NIXL buffer allocator"
         )
 
-    def free(self, obj: MemoryObj):
+    def free(self, obj: MemoryObj, allocator_type: Optional[str] = "nixl"):
         """Free the memory object."""
         pass
 
-    def batched_free(self, objs: list[MemoryObj], update_stats: bool = True):
+    def batched_free(
+        self,
+        objs: list[MemoryObj],
+        allocator_type: Optional[str] = "nixl",
+        update_stats: bool = True,
+    ):
         """Free the memory objects in batch."""
         pass
 

@@ -70,8 +70,6 @@ class StorageManager:
         self.thread.start()
 
         dst_device = "cuda"
-        # FIXME (Jiayi): The allocator is a dummy allocator in nixl for now.
-        # The real allocator is initialized inside the NixlBackend.
         self.storage_backends: OrderedDict[str, StorageBackendInterface] = (
             CreateStorageBackends(
                 config,
@@ -84,8 +82,12 @@ class StorageManager:
             )
         )
 
-        if config.enable_nixl:
+        self.enable_nixl = config.enable_nixl
+
+        if self.enable_nixl:
             self.allocator_backend = self.storage_backends["NixlBackend"]
+            if config.local_cpu:
+                self.local_cpu_backend = self.storage_backends["LocalCPUBackend"]
         else:
             self.allocator_backend = self.storage_backends["LocalCPUBackend"]
 
@@ -99,7 +101,7 @@ class StorageManager:
         self.instance_id = config.lmcache_instance_id
         self.worker_id = metadata.worker_id
 
-        self.stream = torch.cuda.Stream()
+        self.nixl_offload_stream = torch.cuda.Stream()
 
     @_lmcache_nvtx_annotate
     def allocate(
@@ -180,12 +182,47 @@ class StorageManager:
         # backend if this backend does not have this cache.
         # There's no way to configure a global caching policy
         # among different storage backends.
-        for backend in self.storage_backends.values():
-            # NOTE: the handling of exists_in_put_tasks
-            # is done in the backend
-            backend.batched_submit_put_task(
+
+        if self.enable_nixl:
+            self.allocator_backend.batched_submit_put_task(
                 keys, memory_objs, transfer_spec=transfer_spec
             )
+
+            cpu_memory_objs = []
+            cpu_keys = []
+            if len(self.storage_backends) > 1:
+                # TODO(Jiayi): Optimize this with batched_allocate
+                # TODO(Jiayi): Refactor this into gpu connector.
+                for key, memory_obj in zip(keys, memory_objs, strict=False):
+                    if self.local_cpu_backend.contains(key):
+                        continue
+                    cpu_memory_obj = self.local_cpu_backend.allocate(
+                        shape=memory_obj.tensor.shape,
+                        dtype=memory_obj.tensor.dtype,
+                        fmt=memory_obj.meta.fmt,
+                        eviction=True,
+                    )
+                    if cpu_memory_obj is None:
+                        break
+                    with torch.cuda.stream(self.nixl_offload_stream):
+                        cpu_memory_obj.tensor.copy_(
+                            memory_obj.tensor, non_blocking=True
+                        )
+                    cpu_memory_objs.append(cpu_memory_obj)
+                    cpu_keys.append(key)
+                self.nixl_offload_stream.synchronize()
+
+                for memory_obj in memory_objs:
+                    memory_obj.ref_count_down()
+                memory_objs = cpu_memory_objs
+                keys = cpu_keys
+
+        for backend_name, backend in self.storage_backends.items():
+            if backend_name == "NixlBackend":
+                continue
+            # NOTE: the handling of exists_in_put_tasks
+            # is done in the backend
+            backend.batched_submit_put_task(keys, memory_objs)
 
         for memory_obj in memory_objs:
             memory_obj.ref_count_down()
@@ -360,6 +397,10 @@ class StorageManager:
         for backend_name, backend in self.storage_backends.items():
             if search_range is not None and backend_name not in search_range:
                 continue
+
+            # NOTE(Jiayi): We do not pin for NixlBackend
+            if backend_name == "NixlBackend":
+                pin = False
 
             if backend.contains(key, pin):
                 return backend_name

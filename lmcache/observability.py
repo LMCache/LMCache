@@ -48,6 +48,11 @@ class LMCacheStats:
     interval_remote_time_to_put: List[float]
     interval_remote_time_to_get_sync: List[float]
 
+    interval_remote_ping_latency: float  # Ping latency in milliseconds
+    interval_remote_ping_errors: int  # Number of ping errors
+    interval_remote_ping_success: int  # Number of ping successes
+    interval_remote_ping_error_code: int  # Latest ping error code
+
     # Real time value measurements (will be reset after each log)
     cache_hit_rate: float
 
@@ -121,6 +126,11 @@ class LMCStatsMonitor:
         # the time of get value from remote backends synchronously,
         # which includes rpc and schedule time
         self.interval_remote_time_to_get_sync: List[float] = []
+
+        self.interval_remote_ping_latency = 0
+        self.interval_remote_ping_errors = 0
+        self.interval_remote_ping_success = 0
+        self.interval_remote_ping_error_code = 0  # 0 means success
 
         self.local_cache_usage_bytes = 0
         self.remote_cache_usage_bytes = 0
@@ -218,6 +228,19 @@ class LMCStatsMonitor:
     def update_interval_remote_time_to_get_sync(self, get_time_sync: float):
         self.interval_remote_time_to_get_sync.append(get_time_sync)
 
+    @thread_safe
+    def update_remote_ping_latency(self, latency: float):
+        self.interval_remote_ping_latency = latency
+
+    @thread_safe
+    def update_remote_ping_error_code(self, error_code: int):
+        """Update ping error code"""
+        self.interval_remote_ping_error_code = error_code
+        if error_code != 0:
+            self.interval_remote_ping_errors += 1
+        else:
+            self.interval_remote_ping_success += 1
+
     def _clear(self):
         """
         Clear all the distribution stats
@@ -236,6 +259,11 @@ class LMCStatsMonitor:
         self.interval_remote_time_to_get.clear()
         self.interval_remote_time_to_put.clear()
         self.interval_remote_time_to_get_sync.clear()
+
+        self.interval_remote_ping_latency = 0
+        self.interval_remote_ping_errors = 0
+        self.interval_remote_ping_success = 0
+        self.interval_remote_ping_error_code = 0
 
         new_retrieve_requests = {}
         for request_id, retrieve_stats in self.retrieve_requests.items():
@@ -294,6 +322,10 @@ class LMCStatsMonitor:
             interval_remote_time_to_get=self.interval_remote_time_to_get.copy(),
             interval_remote_time_to_put=self.interval_remote_time_to_put.copy(),
             interval_remote_time_to_get_sync=self.interval_remote_time_to_get_sync.copy(),
+            interval_remote_ping_latency=self.interval_remote_ping_latency,
+            interval_remote_ping_errors=self.interval_remote_ping_errors,
+            interval_remote_ping_success=self.interval_remote_ping_success,
+            interval_remote_ping_error_code=self.interval_remote_ping_error_code,
             cache_hit_rate=cache_hit_rate,
             local_cache_usage_bytes=self.local_cache_usage_bytes,
             remote_cache_usage_bytes=self.remote_cache_usage_bytes,
@@ -588,6 +620,30 @@ class PrometheusLogger:
             buckets=remote_time_to_get_sync,
         )
 
+        # Ping latency metrics: use a gauge to record the latest ping latency
+        self.gauge_remote_ping_latency = self._gauge_cls(
+            name="lmcache:remote_ping_latency",
+            documentation="Latest ping latency to remote backends (ms)",
+            labelnames=labelnames,
+            multiprocess_mode="livemostrecent",
+        )
+        self.counter_remote_ping_errors = self._counter_cls(
+            name="lmcache:remote_ping_errors",
+            documentation="Number of ping errors to remote backends",
+            labelnames=labelnames,
+        )
+        self.counter_remote_ping_successes = self._counter_cls(
+            name="lmcache:remote_ping_successes",
+            documentation="Number of ping successes to remote backends",
+            labelnames=labelnames,
+        )
+        self.gauge_remote_ping_error_code = self._gauge_cls(
+            name="lmcache:remote_ping_error_code",
+            documentation="Latest ping error code to remote backends",
+            labelnames=labelnames,
+            multiprocess_mode="livemostrecent",
+        )
+
     def _log_gauge(self, gauge, data: Union[int, float]) -> None:
         # Convenience function for logging to gauge.
         gauge.labels(**self.labels).set(data)
@@ -658,6 +714,18 @@ class PrometheusLogger:
         self._log_histogram(
             self.histogram_remote_time_to_get_sync,
             stats.interval_remote_time_to_get_sync,
+        )
+        self._log_gauge(
+            self.gauge_remote_ping_latency, stats.interval_remote_ping_latency
+        )
+        self._log_counter(
+            self.counter_remote_ping_errors, stats.interval_remote_ping_errors
+        )
+        self._log_counter(
+            self.counter_remote_ping_successes, stats.interval_remote_ping_success
+        )
+        self._log_gauge(
+            self.gauge_remote_ping_error_code, stats.interval_remote_ping_error_code
         )
 
     @staticmethod
