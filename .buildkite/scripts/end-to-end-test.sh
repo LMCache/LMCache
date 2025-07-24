@@ -96,10 +96,15 @@ CID=$!
 buildkite-agent meta-data set "disk-CID" "$CID"
 wait $CID
 
-python3 outputs/drawing_wrapper.py ./
-mv outputs/*.{csv,pdf} "$orig_dir"/
-
 mv /tmp/buildkite-agent-"$port1"-stdout.log "$orig_dir"/lmcache-disk-stdout.log
 mv /tmp/buildkite-agent-"$port1"-stderr.log "$orig_dir"/lmcache-disk-stderr.log
 mv /tmp/buildkite-agent-"$port2"-stdout.log "$orig_dir"/vllm-disk-stdout.log
 mv /tmp/buildkite-agent-"$port2"-stderr.log "$orig_dir"/vllm-disk-stderr.log
+
+python3 outputs/drawing_wrapper.py ./
+if compgen -G outputs/*.{csv,pdf} > /dev/null; then
+    mv outputs/*.{csv,pdf} "$orig_dir"/
+else
+    echo "Error: no CSV or PDF files found in outputs/" >&2
+    exit 1
+fi

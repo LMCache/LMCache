@@ -45,7 +45,7 @@ from lmcache.v1.memory_management import (
     MemoryAllocatorInterface,
     MemoryFormat,
     MixedMemoryAllocator,
-    PagedTensorMemoryAllocator,
+    NixlCPUMemoryAllocator,
 )
 from lmcache.v1.storage_backend.storage_manager import StorageManager
 from lmcache.v1.token_database import (
@@ -119,7 +119,11 @@ class LMCacheEngine:
         )
 
         # HACK: remove this in the future
-        self.remove_after_retrieve = config.enable_nixl
+        # NOTE (Jiayi): This is currently used to support
+        # dropping the kv cache in nixl backend at decoder.
+        self.remove_after_retrieve = (
+            config.enable_nixl and config.nixl_role == "receiver"
+        )
 
         if self.enable_p2p:
             self.distributed_loop = asyncio.get_event_loop()
@@ -218,8 +222,6 @@ class LMCacheEngine:
             tokens, hashes, offsets, mask
         ):
             assert isinstance(key, CacheEngineKey)
-            if self.storage_manager.contains(key):
-                continue
             # Allocate the memory object
             num_tokens = end - start
             kv_shape = self.gpu_connector.get_shape(num_tokens)
@@ -249,9 +251,7 @@ class LMCacheEngine:
 
         t = time.perf_counter()
 
-        transfer_spec = None
-        if "transfer_spec" in kwargs:
-            transfer_spec = kwargs["transfer_spec"]
+        transfer_spec = kwargs.get("transfer_spec", None)
         self.storage_manager.batched_put(keys, memory_objs, transfer_spec=transfer_spec)
         put_time += time.perf_counter() - t
 
@@ -503,13 +503,9 @@ class LMCacheEngine:
 
         # TODO(Jiayi): Remove the following for loop with batched operations
         for key, memory_obj in zip(reordered_keys, reordered_memory_objs, strict=False):
-            memory_obj.ref_count_down()
-
-            # NOTE (ApostaC): This is only for the current implementation:
-            # When the object is retrieved back to vLLM, the storage backend
-            # will immediately remove the object from itself
             if self.remove_after_retrieve:
                 self.storage_manager.remove(key)
+            memory_obj.ref_count_down()
 
         retrieved_tokens = torch.sum(ret_mask)
         self.stats_monitor.on_retrieve_finished(monitor_req_id, retrieved_tokens)
@@ -791,12 +787,19 @@ class LMCacheEngineBuilder:
                     dtype=torch.uint8,
                     device=corrected_device,
                 )
-                return PagedTensorMemoryAllocator(
+                nixl_cpu_mem_allocator = NixlCPUMemoryAllocator()
+                nixl_cpu_mem_allocator.init_nixl_memory_allocator(
                     buffer,
                     torch.Size(metadata.kv_shape),
                     metadata.kv_dtype,
-                    MemoryFormat.KV_T2D,  # TODO: remove this hardcode
+                    MemoryFormat.KV_2LTD,  # TODO: remove this hardcode
                 )
+                if config.local_cpu:
+                    max_local_cpu_size = config.max_local_cpu_size
+                    nixl_cpu_mem_allocator.init_cpu_memory_allocator(
+                        int(max_local_cpu_size * 1024**3)
+                    )
+                return nixl_cpu_mem_allocator
             return AdHocMemoryAllocator(config.nixl_buffer_device)
 
         if config.weka_path is not None or config.gds_path is not None:
