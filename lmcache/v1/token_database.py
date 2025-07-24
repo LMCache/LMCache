@@ -136,10 +136,14 @@ class ChunkedTokenDatabase(TokenDatabase):
         config: Optional[LMCacheEngineConfig] = None,
         metadata: Optional[LMCacheEngineMetadata] = None,
     ):
-        super().__init__(config, metadata)
+        super(ChunkedTokenDatabase, self).__init__(config, metadata)
+
         if config is not None:
             self.chunk_size = config.chunk_size
             self.save_unfull_chunk = config.save_unfull_chunk
+        else:  # Default values
+            self.chunk_size = 256
+            self.save_unfull_chunk = True
 
     def _get_init_hash(self) -> int:
         return NONE_HASH
@@ -255,7 +259,7 @@ class SegmentTokenDatabase(TokenDatabase):
     """
 
     def __init__(self, config: LMCacheEngineConfig, metadata: LMCacheEngineMetadata):
-        super().__init__(config, metadata)
+        super(SegmentTokenDatabase, self).__init__(config, metadata)
 
         self.tokenizer = AutoTokenizer.from_pretrained(metadata.model_name)
 
