@@ -525,27 +525,29 @@ class LMCacheEngine:
         reordered_starts,
         reordered_ends,
     ):
+        use_parallel = True
+        backend_results = {}
         try:
             backend_results = self._parallel_retrieve_with_timeout(key_mapping)
-            for location in key_mapping.keys():
-                if location in backend_results:
-                    memory_objs = backend_results[location]
-                    reordered_memory_objs.extend(memory_objs)
-                    reordered_keys.extend(key_mapping[location])
-                    reordered_starts.extend(start_mapping[location])
-                    reordered_ends.extend(end_mapping[location])
         except Exception as e:
             logger.warning(
                 f"Parallel retrieval failed, falling back to sequential: {e}"
             )
-            for location, keys in key_mapping.items():
+            use_parallel = False
+        for location, keys in key_mapping.items():
+            if use_parallel:
+                if location in backend_results:
+                    memory_objs = backend_results[location]
+                else:
+                    continue
+            else:
                 memory_objs = self.storage_manager.batched_get(
                     keys=keys, storage_backend_name=location
                 )
-                reordered_memory_objs.extend(memory_objs)
-                reordered_keys.extend(keys)
-                reordered_starts.extend(start_mapping[location])
-                reordered_ends.extend(end_mapping[location])
+            reordered_memory_objs.extend(memory_objs)
+            reordered_keys.extend(keys)
+            reordered_starts.extend(start_mapping[location])
+            reordered_ends.extend(end_mapping[location])
 
     def _parallel_retrieve_with_timeout(self, key_mapping):
         if not self.config.enable_parallel_retrieval or len(key_mapping) == 1:
