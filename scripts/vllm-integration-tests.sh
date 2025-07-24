@@ -137,7 +137,6 @@ cleanup() {
     if [ -n "$LOG_PID" ]; then
         kill $LOG_PID
     fi
-
     rm -f $DOCKER_BUILD_FILE $TEST_HTTP_RESPONSE_FILE $DOCKER_LOGFILE
     set -e
 }
