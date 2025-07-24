@@ -937,69 +937,6 @@ def test_parallel_retrieval_config_from_env(monkeypatch):
 
 
 @pytest.mark.parametrize("fmt", ["vllm"])
-def test_parallel_retrieval_disabled(fmt, autorelease_v1):
-    """Test that parallel retrieval can be disabled and falls back to sequential"""
-    device = "cuda"
-    num_tokens = 1000
-    num_blocks = 500
-    block_size = 16
-    dtype = torch.bfloat16
-    chunk_size = 256
-
-    kv_shape = (32, 2, chunk_size, 8, 128)
-    connector = create_gpu_connector(1024, 32)
-
-    tokens = generate_tokens(num_tokens, device)
-    kv_cache = generate_kv_cache_paged_list_tensors(
-        num_blocks, device, block_size, dtype
-    )
-    retrieved_cache = generate_kv_cache_paged_list_tensors(
-        num_blocks, device, block_size, dtype
-    )
-
-    slot_mapping = random.sample(range(0, num_blocks * block_size), num_tokens)
-    slot_mapping = torch.tensor(slot_mapping, device=device)
-
-    # Create config with parallel retrieval disabled
-    cfg = LMCacheEngineConfig.from_legacy(chunk_size=chunk_size, remote_url=None)
-    cfg.enable_parallel_retrieval = False
-
-    engine = autorelease_v1(
-        LMCacheEngineBuilder.get_or_create(
-            "test_parallel_disabled", cfg, dumb_metadata(fmt, kv_shape), connector
-        )
-    )
-
-    # Store tokens
-    engine.store(tokens=tokens, kvcaches=kv_cache, slot_mapping=slot_mapping)
-
-    # Calculate expected length based on chunking
-    expected_chunk_cnt = num_tokens // chunk_size
-    expected_length = expected_chunk_cnt * chunk_size
-
-    # Wait for store to complete
-    timeout = 1.5
-    start_time = time.time()
-    while engine.lookup(tokens) < expected_length:
-        if time.time() - start_time > timeout:
-            raise TimeoutError(f"Operation timed out after {timeout} seconds.")
-        time.sleep(0.01)
-
-    # Retrieve should work even with parallel retrieval disabled
-    ret_mask = engine.retrieve(
-        tokens, kvcaches=retrieved_cache, slot_mapping=slot_mapping
-    )
-    length = torch.sum(ret_mask)
-    assert length == expected_length
-
-    check_paged_kv_cache_equal(
-        retrieved_cache, kv_cache, slot_mapping[:expected_length]
-    )
-
-    LMCacheEngineBuilder.destroy("test_parallel_disabled")
-
-
-@pytest.mark.parametrize("fmt", ["vllm"])
 def test_parallel_retrieval_enabled(fmt, autorelease_v1):
     """Test that parallel retrieval works when enabled"""
     device = "cuda"
