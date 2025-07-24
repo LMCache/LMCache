@@ -961,9 +961,8 @@ def test_parallel_retrieval_disabled(fmt, autorelease_v1):
     slot_mapping = torch.tensor(slot_mapping, device=device)
 
     # Create config with parallel retrieval disabled
-    cfg = LMCacheEngineConfig.from_defaults(
-        chunk_size=chunk_size, enable_parallel_retrieval=False, remote_url=None
-    )
+    cfg = LMCacheEngineConfig.from_legacy(chunk_size=chunk_size, remote_url=None)
+    cfg.enable_parallel_retrieval = False
 
     engine = autorelease_v1(
         LMCacheEngineBuilder.get_or_create(
@@ -1025,14 +1024,11 @@ def test_parallel_retrieval_enabled(fmt, autorelease_v1):
     slot_mapping = torch.tensor(slot_mapping, device=device)
 
     # Create config with parallel retrieval enabled
-    cfg = LMCacheEngineConfig.from_defaults(
-        chunk_size=chunk_size,
-        enable_parallel_retrieval=True,
-        max_parallel_backends=2,
-        retrieval_timeout=10.0,
-        backend_retry_attempts=3,
-        remote_url=None,
-    )
+    cfg = LMCacheEngineConfig.from_legacy(chunk_size=chunk_size, remote_url=None)
+    cfg.enable_parallel_retrieval = True
+    cfg.max_parallel_backends = 2
+    cfg.retrieval_timeout = 10.0
+    cfg.backend_retry_attempts = 3
 
     engine = autorelease_v1(
         LMCacheEngineBuilder.get_or_create(
