@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # This file is copied from the vLLM project (https://github.com/vllm-project/vllm).
 # Original source file: [vllm/vllm/connections.py]
 # License: [Apache License 2.0]

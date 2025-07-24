@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # Standard
 from collections import deque
 from contextlib import nullcontext

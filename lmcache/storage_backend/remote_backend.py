@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # Standard
 from typing import Iterable, Iterator, List, Optional, Tuple, Union
 import queue

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # Standard
 from typing import List, Optional, no_type_check
 

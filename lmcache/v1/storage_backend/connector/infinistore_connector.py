@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # Standard
 from functools import reduce
 from typing import List, Optional, Union, no_type_check

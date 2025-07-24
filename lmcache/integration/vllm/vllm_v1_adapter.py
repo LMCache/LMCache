@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # Standard
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Optional, Union

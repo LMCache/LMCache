@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # Standard
 from concurrent.futures import Future
 from typing import List, Optional

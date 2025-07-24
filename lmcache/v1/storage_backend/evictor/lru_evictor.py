@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # Standard
 from collections import OrderedDict
 from typing import List, Tuple, Union

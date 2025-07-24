@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # Third Party
 from vllm.attention import Attention
 from vllm.v1.attention.backends.flash_attn import FlashAttentionImpl
