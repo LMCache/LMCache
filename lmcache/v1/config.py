@@ -149,10 +149,16 @@ class LMCacheEngineConfig:
     external_lookup_client: Optional[str] = None
 
     # Parallel retrieval settings
-    enable_parallel_retrieval: bool = True  # whether to enable parallel backend retrieval
+    enable_parallel_retrieval: bool = (
+        True  # whether to enable parallel backend retrieval
+    )
     max_parallel_backends: int = 4  # maximum number of backends to query in parallel
-    retrieval_timeout: float = 5.0  # timeout for parallel retrieval operations in seconds
-    backend_retry_attempts: int = 2  # number of retry attempts for failed backend operations
+    retrieval_timeout: float = (
+        5.0  # timeout for parallel retrieval operations in seconds
+    )
+    backend_retry_attempts: int = (
+        2  # number of retry attempts for failed backend operations
+    )
 
     @staticmethod
     def from_defaults(
@@ -714,16 +720,23 @@ class LMCacheEngineConfig:
 
         # Parallel retrieval settings
         config.enable_parallel_retrieval = to_bool(
-            parse_env(get_env_name("enable_parallel_retrieval"), config.enable_parallel_retrieval)
+            parse_env(
+                get_env_name("enable_parallel_retrieval"),
+                config.enable_parallel_retrieval,
+            )
         )
         config.max_parallel_backends = to_int(
-            parse_env(get_env_name("max_parallel_backends"), config.max_parallel_backends)
+            parse_env(
+                get_env_name("max_parallel_backends"), config.max_parallel_backends
+            )
         )
         config.retrieval_timeout = to_float(
             parse_env(get_env_name("retrieval_timeout"), config.retrieval_timeout)
         )
         config.backend_retry_attempts = to_int(
-            parse_env(get_env_name("backend_retry_attempts"), config.backend_retry_attempts)
+            parse_env(
+                get_env_name("backend_retry_attempts"), config.backend_retry_attempts
+            )
         )
 
         return config.validate().log_config()
