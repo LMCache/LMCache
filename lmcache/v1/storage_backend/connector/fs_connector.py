@@ -76,8 +76,7 @@ class FSConnector(RemoteConnector):
             base_path = self.base_paths[0]
         else:
             # Calculate hash value and modulo to select path
-            hex_str = key.chunk_hash[:16]
-            hash_val = int(hex_str, 16)
+            hash_val = abs(key.chunk_hash)
             idx = hash_val % len(self.base_paths)
             base_path = self.base_paths[idx]
 
