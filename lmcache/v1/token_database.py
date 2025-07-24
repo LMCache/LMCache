@@ -28,12 +28,8 @@ from lmcache.v1.config import LMCacheEngineConfig
 
 logger = init_logger(__name__)
 
-try:
-    # Third Party
-    from vllm.v1.core.kv_cache_utils import NONE_HASH
-except ImportError:
-    # Fallback to a default value if vllm is not available
-    NONE_HASH = 0
+
+NONE_HASH = 0
 
 
 class TokenDatabase(metaclass=abc.ABCMeta):
@@ -109,22 +105,6 @@ class TokenDatabase(metaclass=abc.ABCMeta):
 
         raise NotImplementedError
 
-
-class ChunkedTokenDatabase(TokenDatabase):
-    def __init__(
-        self,
-        config: Optional[LMCacheEngineConfig] = None,
-        metadata: Optional[LMCacheEngineMetadata] = None,
-    ):
-        super(ChunkedTokenDatabase, self).__init__(config, metadata)
-
-        if config is not None:
-            self.chunk_size = config.chunk_size
-            self.save_unfull_chunk = config.save_unfull_chunk
-        else:  # Default values
-            self.chunk_size = 256
-            self.save_unfull_chunk = True
-
     def _make_key_by_hash(self, chunk_hash: int):
         assert self.metadata is not None
         return CacheEngineKey(
@@ -135,19 +115,34 @@ class ChunkedTokenDatabase(TokenDatabase):
             chunk_hash,
         )
 
-    def _get_init_hash(self) -> int:
-        return NONE_HASH
-
-    def _hash(
-        self,
-        tokens: Union[torch.Tensor, List[int]],
-        prefix_hash: int,
+    def _hash_tokens(
+        self, tokens: Union[torch.Tensor, List[int]], prefix_hash: Optional[int] = None
     ) -> int:
         if isinstance(tokens, torch.Tensor):
             tokens_tuple = tuple(tokens.cpu().tolist())
         elif isinstance(tokens, list):
             tokens_tuple = tuple(tokens)
-        return self.hash_func((prefix_hash, tokens_tuple, None))
+        else:
+            raise ValueError(f"Unsupported tokens type: {type(tokens)}")
+
+        if prefix_hash is not None:
+            return self.hash_func((prefix_hash, tokens_tuple))
+        return self.hash_func(tokens_tuple)
+
+
+class ChunkedTokenDatabase(TokenDatabase):
+    def __init__(
+        self,
+        config: Optional[LMCacheEngineConfig] = None,
+        metadata: Optional[LMCacheEngineMetadata] = None,
+    ):
+        super().__init__(config, metadata)
+        if config is not None:
+            self.chunk_size = config.chunk_size
+            self.save_unfull_chunk = config.save_unfull_chunk
+
+    def _get_init_hash(self) -> int:
+        return NONE_HASH
 
     def _chunk_tokens(
         self,
@@ -176,7 +171,7 @@ class ChunkedTokenDatabase(TokenDatabase):
     ) -> Iterable[int]:
         prefix_hash = self._get_init_hash()
         for token_chunk in token_chunks:
-            prefix_hash = self._hash(token_chunk, prefix_hash)
+            prefix_hash = self._hash_tokens(token_chunk, prefix_hash)
             yield prefix_hash
 
     @_lmcache_nvtx_annotate
@@ -260,7 +255,7 @@ class SegmentTokenDatabase(TokenDatabase):
     """
 
     def __init__(self, config: LMCacheEngineConfig, metadata: LMCacheEngineMetadata):
-        super(SegmentTokenDatabase, self).__init__(config, metadata)
+        super().__init__(config, metadata)
 
         self.tokenizer = AutoTokenizer.from_pretrained(metadata.model_name)
 
@@ -270,25 +265,6 @@ class SegmentTokenDatabase(TokenDatabase):
         self.sep_tokens = self.tokenizer.encode(config.blend_special_str)[1:]
         self.sep_tokens = torch.tensor(self.sep_tokens, device="cpu")
         self.sep_len = len(self.sep_tokens)
-
-    def _make_key_by_hash(self, chunk_hash: str):
-        return CacheEngineKey(
-            self.metadata.fmt,
-            self.metadata.model_name,
-            self.metadata.world_size,
-            self.metadata.worker_id,
-            chunk_hash,
-        )
-
-    def _hash(
-        self,
-        tokens: Union[torch.Tensor, List[int]],
-    ) -> int:
-        if isinstance(tokens, torch.Tensor):
-            tokens_tuple = tuple(tokens.cpu().tolist())
-        elif isinstance(tokens, list):
-            tokens_tuple = tuple(tokens)
-        return self.hash_func(tokens_tuple)
 
     def _fast_split_by_subtensor(self, tokens: torch.Tensor) -> Iterable[torch.Tensor]:
         """Match the `sep_tokens` with sliding windows"""
@@ -363,8 +339,8 @@ class SegmentTokenDatabase(TokenDatabase):
                     yield (
                         start_idx,
                         end_idx,
-                        self._make_key_by_hash(self._hash(token_chunk)),
+                        self._make_key_by_hash(self._hash_tokens(token_chunk)),
                     )
                 else:
-                    yield start_idx, end_idx, self._hash(token_chunk)
+                    yield start_idx, end_idx, self._hash_tokens(token_chunk)
             start_idx = end_idx
