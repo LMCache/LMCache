@@ -525,7 +525,6 @@ class LMCacheEngine:
         reordered_starts,
         reordered_ends,
     ):
-        """Retrieve memory objects from storage backends with parallel execution and fallback."""
         try:
             backend_results = self._parallel_retrieve_with_timeout(key_mapping)
             for location in key_mapping.keys():
