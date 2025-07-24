@@ -22,6 +22,7 @@ import threading
 
 # Third Party
 import aiohttp
+import torch
 
 # First Party
 from lmcache.logging import init_logger
@@ -77,11 +78,13 @@ class KVServiceSMBackend(StorageBackendInterface):
 
         # KVServiceSM configuration
         self.base_url = getattr(config, "kv_service_sm_url", "http://localhost:9200")
-        self.shared_memory_name = getattr(
-            config, "kv_service_sm_shared_memory_name", None
+
+        extra_config = getattr(config, "extra_config", None) or {}
+        self.shared_memory_name = extra_config.get(
+            "kv_service_sm_shared_memory_name", "shared_memory"
         )
-        self.bucket_name = getattr(config, "kv_service_sm_bucket", "lmcache")
-        self.timeout_ms = getattr(config, "kv_service_sm_timeout_ms", 5000)
+        self.bucket_name = extra_config.get("kv_service_sm_bucket", "lmcache")
+        self.timeout_ms = extra_config.get("kv_service_sm_timeout_ms", 5000)
 
         # Performance optimizations for scale
         self.max_connections = getattr(config, "kv_service_sm_max_connections", 256)
@@ -425,9 +428,6 @@ class KVServiceSMBackend(StorageBackendInterface):
                 actual_shape_list.append(dim)
 
             # Convert back to torch.Size
-            # Third Party
-            import torch
-
             actual_shape = (
                 torch.Size(actual_shape_list) if actual_shape_list else torch.Size([1])
             )
@@ -594,9 +594,6 @@ class KVServiceSMBackend(StorageBackendInterface):
             padded_shape = list(kv_shape[:4])
 
         # Convert to torch.Size with exactly 4 dimensions
-        # Third Party
-        import torch
-
         padded_torch_shape = torch.Size(padded_shape)
 
         # Use existing RemoteMetadata from protocol.py

@@ -119,17 +119,20 @@ class LMCacheEngineConfig:
     # Size of CuFile Buffer in MiB
     cufile_buffer_size: Optional[int] = None
 
-    # (Optional) KV service daemon configurations
-    # URL of the daemon (e.g., "http://localhost:9200")
-    kv_service_sm_url: Optional[str] = None
-    # Optional name for the shared memory segment
-    kv_service_sm_shared_memory_name: Optional[str] = None
-    # Bucket name for priority/organization (default: "lmcache")
-    kv_service_sm_bucket: Optional[str] = None
-    # Timeout for operations in milliseconds (default: 5000)
-    kv_service_sm_timeout_ms: Optional[int] = None
-    # Size of buffer in MiB (similar to cufile_buffer_size)
-    kv_service_sm_buffer_size: Optional[int] = None
+    # KV Service Daemon Configuration
+    # ------------------------------
+    # Primary settings:
+    kv_service_sm_url: Optional[str] = (
+        None  # URL of the daemon (e.g., "http://localhost:9200")
+    )
+    kv_service_sm_buffer_size: Optional[int] = (
+        None  # Size of buffer in MiB (similar to cufile_buffer_size)
+    )
+
+    # Advanced settings (provided via 'extra_config' dictionary):
+    # - kv_service_sm_shared_memory_name: Memory segment name (default: "shared_memory")
+    # - kv_service_sm_bucket: Bucket name for priority/organization (default: "lmcache")
+    # - kv_service_sm_timeout_ms: Operation timeout in milliseconds (default: 5000)
 
     # The extra config
     extra_config: Optional[dict] = None
@@ -189,9 +192,6 @@ class LMCacheEngineConfig:
         gds_path: Optional[str] = None,
         cufile_buffer_size: Optional[int] = None,
         kv_service_sm_url: Optional[str] = None,
-        kv_service_sm_shared_memory_name: Optional[str] = None,
-        kv_service_sm_bucket: Optional[str] = None,
-        kv_service_sm_timeout_ms: Optional[int] = None,
         kv_service_sm_buffer_size: Optional[int] = None,
         extra_config: Optional[dict] = None,
         save_unfull_chunk: bool = True,
@@ -240,9 +240,6 @@ class LMCacheEngineConfig:
             gds_path,
             cufile_buffer_size,
             kv_service_sm_url,
-            kv_service_sm_shared_memory_name,
-            kv_service_sm_bucket,
-            kv_service_sm_timeout_ms,
             kv_service_sm_buffer_size,
             extra_config,
             save_unfull_chunk,
@@ -419,11 +416,6 @@ class LMCacheEngineConfig:
         cufile_buffer_size = config.get("cufile_buffer_size", None)
 
         kv_service_sm_url = config.get("kv_service_sm_url", None)
-        kv_service_sm_shared_memory_name = config.get(
-            "kv_service_sm_shared_memory_name", None
-        )
-        kv_service_sm_bucket = config.get("kv_service_sm_bucket", None)
-        kv_service_sm_timeout_ms = config.get("kv_service_sm_timeout_ms", None)
         kv_service_sm_buffer_size = config.get("kv_service_sm_buffer_size", None)
 
         save_unfull_chunk = config.get("save_unfull_chunk", True)
@@ -484,9 +476,6 @@ class LMCacheEngineConfig:
                 gds_path,
                 cufile_buffer_size,
                 kv_service_sm_url,
-                kv_service_sm_shared_memory_name,
-                kv_service_sm_bucket,
-                kv_service_sm_timeout_ms,
                 kv_service_sm_buffer_size,
                 extra_config,
                 save_unfull_chunk,
@@ -701,20 +690,6 @@ class LMCacheEngineConfig:
             get_env_name("kv_service_sm_url"),
             config.kv_service_sm_url,
         )
-        config.kv_service_sm_shared_memory_name = parse_env(
-            get_env_name("kv_service_sm_shared_memory_name"),
-            config.kv_service_sm_shared_memory_name,
-        )
-        config.kv_service_sm_bucket = parse_env(
-            get_env_name("kv_service_sm_bucket"),
-            config.kv_service_sm_bucket,
-        )
-        config.kv_service_sm_timeout_ms = to_int(
-            parse_env(
-                get_env_name("kv_service_sm_timeout_ms"),
-                config.kv_service_sm_timeout_ms,
-            )
-        )
         config.kv_service_sm_buffer_size = to_int(
             parse_env(
                 get_env_name("kv_service_sm_buffer_size"),
@@ -813,9 +788,6 @@ class LMCacheEngineConfig:
             "weka_path": self.weka_path,
             "gds_path": self.gds_path,
             "kv_service_sm_url": self.kv_service_sm_url,
-            "kv_service_sm_shared_memory_name": self.kv_service_sm_shared_memory_name,
-            "kv_service_sm_bucket": self.kv_service_sm_bucket,
-            "kv_service_sm_timeout_ms": self.kv_service_sm_timeout_ms,
             "kv_service_sm_buffer_size": self.kv_service_sm_buffer_size,
             "extra_config": self.extra_config,
             "save_unfull_chunk": self.save_unfull_chunk,
