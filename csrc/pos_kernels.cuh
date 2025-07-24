@@ -1,4 +1,4 @@
-
+// SPDX-License-Identifier: Apache-2.0
 
 #include <torch/all.h>
 #include <ATen/ATen.h>

@@ -1,4 +1,4 @@
-
+// SPDX-License-Identifier: Apache-2.0
 
 #include <ATen/ATen.h>
 #include <pybind11/pybind11.h>

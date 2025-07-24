@@ -1,4 +1,4 @@
-
+// SPDX-License-Identifier: Apache-2.0
 
 #include <torch/all.h>
 #include <c10/cuda/CUDAGuard.h>

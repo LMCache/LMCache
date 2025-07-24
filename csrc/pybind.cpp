@@ -1,4 +1,4 @@
-
+// SPDX-License-Identifier: Apache-2.0
 
 #include <pybind11/pybind11.h>
 #include "mem_kernels.cuh"
