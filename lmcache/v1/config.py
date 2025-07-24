@@ -150,7 +150,7 @@ class LMCacheEngineConfig:
 
     # Parallel retrieval settings
     enable_parallel_retrieval: bool = (
-        True  # whether to enable parallel backend retrieval
+        False  # whether to enable parallel backend retrieval
     )
     max_parallel_backends: int = 4  # maximum number of backends to query in parallel
     retrieval_timeout: float = (
@@ -205,7 +205,7 @@ class LMCacheEngineConfig:
         save_unfull_chunk: bool = True,
         blocking_timeout_secs: int = 10,
         external_lookup_client: Optional[str] = None,
-        enable_parallel_retrieval: bool = True,
+        enable_parallel_retrieval: bool = False,
         max_parallel_backends: int = 4,
         retrieval_timeout: float = 5.0,
         backend_retry_attempts: int = 2,
@@ -436,7 +436,7 @@ class LMCacheEngineConfig:
         external_lookup_client = config.get("external_lookup_client", None)
 
         # Parallel retrieval settings
-        enable_parallel_retrieval = config.get("enable_parallel_retrieval", True)
+        enable_parallel_retrieval = config.get("enable_parallel_retrieval", False)
         max_parallel_backends = config.get("max_parallel_backends", 4)
         retrieval_timeout = config.get("retrieval_timeout", 5.0)
         backend_retry_attempts = config.get("backend_retry_attempts", 2)
