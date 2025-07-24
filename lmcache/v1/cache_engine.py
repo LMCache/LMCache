@@ -14,6 +14,7 @@
 
 # Standard
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, Generator, List, Optional, Union
 import asyncio
 import multiprocessing
@@ -481,17 +482,10 @@ class LMCacheEngine:
             start_mapping[location].append(start)
             end_mapping[location].append(end)
 
-        # TODO(Jiayi): We can parallelize the retrieval from
-        # different storage backends.
-        for location, keys in key_mapping.items():
-            memory_objs = self.storage_manager.batched_get(
-                keys=keys,
-                storage_backend_name=location,
-            )
-            reordered_memory_objs.extend(memory_objs)
-            reordered_keys.extend(keys)
-            reordered_starts.extend(start_mapping[location])
-            reordered_ends.extend(end_mapping[location])
+        self._retrieve_from_backends(
+            key_mapping, start_mapping, end_mapping,
+            reordered_memory_objs, reordered_keys, reordered_starts, reordered_ends
+        )
 
         # NOTE(Jiayi): memory_obj doesn't have to be a pinned
         # cpu tensor for the sake of performance.
@@ -515,6 +509,71 @@ class LMCacheEngine:
             f"out of total {len(tokens)} tokens"
         )
         return ret_mask
+
+    def _retrieve_from_backends(self, key_mapping, start_mapping, end_mapping,
+                               reordered_memory_objs, reordered_keys, reordered_starts, reordered_ends):
+        """Retrieve memory objects from storage backends with parallel execution and fallback."""
+        try:
+            backend_results = self._parallel_retrieve_with_timeout(key_mapping)
+            for location in key_mapping.keys():
+                if location in backend_results:
+                    memory_objs = backend_results[location]
+                    reordered_memory_objs.extend(memory_objs)
+                    reordered_keys.extend(key_mapping[location])
+                    reordered_starts.extend(start_mapping[location])
+                    reordered_ends.extend(end_mapping[location])
+        except Exception as e:
+            logger.warning(f"Parallel retrieval failed, falling back to sequential: {e}")
+            for location, keys in key_mapping.items():
+                memory_objs = self.storage_manager.batched_get(keys=keys,
+                                                               storage_backend_name=location)
+                reordered_memory_objs.extend(memory_objs)
+                reordered_keys.extend(keys)
+                reordered_starts.extend(start_mapping[location])
+                reordered_ends.extend(end_mapping[location])
+
+    def _parallel_retrieve_with_timeout(self, key_mapping):
+        if not self.config.enable_parallel_retrieval or len(key_mapping) == 1:
+            # Single backend or parallel retrieval disabled - use sequential approach
+            location, keys = next(iter(key_mapping.items()))
+            return {location: self.storage_manager.batched_get(keys, location)}
+        
+        results = {}
+        max_workers = min(len(key_mapping), self.config.max_parallel_backends)
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_location = {
+                executor.submit(
+                    self._safe_batched_get,
+                    keys, location
+                ): location
+                for location, keys in key_mapping.items()
+            }
+            for future in as_completed(future_to_location, timeout=self.config.retrieval_timeout):
+                location = future_to_location[future]
+                try:
+                    memory_objs = future.result()
+                    results[location] = memory_objs
+                    logger.debug(f"Retrieved {len(memory_objs)} objects from {location}")
+                except Exception as e:
+                    logger.error(f"Failed to retrieve from {location}: {e}")
+                    results[location] = []
+        return results
+
+    def _safe_batched_get(self, keys, location):
+        """Thread-safe wrapper for batched_get with retry logic"""
+        max_retries = self.config.backend_retry_attempts
+        for attempt in range(max_retries + 1):
+            try:
+                return self.storage_manager.batched_get(
+                    keys=keys,
+                    storage_backend_name=location
+                )
+            except Exception as e:
+                if attempt == max_retries:
+                    raise
+                logger.warning(f"Attempt {attempt + 1} failed for {location}: {e}")
+                time.sleep(0.1 * (2 ** attempt))  # Exponential backoff
+        return []
 
     @_lmcache_nvtx_annotate
     @torch.inference_mode()

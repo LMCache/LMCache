@@ -148,6 +148,12 @@ class LMCacheEngineConfig:
     # When set, uses external lookup client instead of regular lookup server
     external_lookup_client: Optional[str] = None
 
+    # Parallel retrieval settings
+    enable_parallel_retrieval: bool = True  # whether to enable parallel backend retrieval
+    max_parallel_backends: int = 4  # maximum number of backends to query in parallel
+    retrieval_timeout: float = 5.0  # timeout for parallel retrieval operations in seconds
+    backend_retry_attempts: int = 2  # number of retry attempts for failed backend operations
+
     @staticmethod
     def from_defaults(
         chunk_size: int = 256,
@@ -193,6 +199,10 @@ class LMCacheEngineConfig:
         save_unfull_chunk: bool = True,
         blocking_timeout_secs: int = 10,
         external_lookup_client: Optional[str] = None,
+        enable_parallel_retrieval: bool = True,
+        max_parallel_backends: int = 4,
+        retrieval_timeout: float = 5.0,
+        backend_retry_attempts: int = 2,
     ) -> "LMCacheEngineConfig":
         # TODO (ApostaC): Add nixl config
         return LMCacheEngineConfig(
@@ -239,6 +249,10 @@ class LMCacheEngineConfig:
             save_unfull_chunk,
             blocking_timeout_secs,
             external_lookup_client,
+            enable_parallel_retrieval,
+            max_parallel_backends,
+            retrieval_timeout,
+            backend_retry_attempts,
         ).validate()
 
     @staticmethod
@@ -415,6 +429,12 @@ class LMCacheEngineConfig:
 
         external_lookup_client = config.get("external_lookup_client", None)
 
+        # Parallel retrieval settings
+        enable_parallel_retrieval = config.get("enable_parallel_retrieval", True)
+        max_parallel_backends = config.get("max_parallel_backends", 4)
+        retrieval_timeout = config.get("retrieval_timeout", 5.0)
+        backend_retry_attempts = config.get("backend_retry_attempts", 2)
+
         local_disk_path = _parse_local_disk(local_disk)
 
         match remote_url:
@@ -470,6 +490,10 @@ class LMCacheEngineConfig:
                 save_unfull_chunk,
                 blocking_timeout_secs,
                 external_lookup_client,
+                enable_parallel_retrieval,
+                max_parallel_backends,
+                retrieval_timeout,
+                backend_retry_attempts,
             )
             .validate()
             .log_config()
@@ -687,6 +711,21 @@ class LMCacheEngineConfig:
         config.external_lookup_client = parse_env(
             get_env_name("external_lookup_client"), config.external_lookup_client
         )
+
+        # Parallel retrieval settings
+        config.enable_parallel_retrieval = to_bool(
+            parse_env(get_env_name("enable_parallel_retrieval"), config.enable_parallel_retrieval)
+        )
+        config.max_parallel_backends = to_int(
+            parse_env(get_env_name("max_parallel_backends"), config.max_parallel_backends)
+        )
+        config.retrieval_timeout = to_float(
+            parse_env(get_env_name("retrieval_timeout"), config.retrieval_timeout)
+        )
+        config.backend_retry_attempts = to_int(
+            parse_env(get_env_name("backend_retry_attempts"), config.backend_retry_attempts)
+        )
+
         return config.validate().log_config()
 
     def to_original_config(self) -> orig_config.LMCacheEngineConfig:
@@ -770,6 +809,10 @@ class LMCacheEngineConfig:
             "save_unfull_chunk": self.save_unfull_chunk,
             "blocking_timeout_secs": self.blocking_timeout_secs,
             "external_lookup_client": self.external_lookup_client,
+            "enable_parallel_retrieval": self.enable_parallel_retrieval,
+            "max_parallel_backends": self.max_parallel_backends,
+            "retrieval_timeout": self.retrieval_timeout,
+            "backend_retry_attempts": self.backend_retry_attempts,
         }
         logger.info(f"LMCache Configuration: {config_dict}")
 
