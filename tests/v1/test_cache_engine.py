@@ -974,10 +974,14 @@ def test_parallel_retrieval_disabled(fmt, autorelease_v1):
     # Store tokens
     engine.store(tokens=tokens, kvcaches=kv_cache, slot_mapping=slot_mapping)
 
+    # Calculate expected length based on chunking
+    expected_chunk_cnt = num_tokens // chunk_size
+    expected_length = expected_chunk_cnt * chunk_size
+
     # Wait for store to complete
     timeout = 1.5
     start_time = time.time()
-    while engine.lookup(tokens) < num_tokens:
+    while engine.lookup(tokens) < expected_length:
         if time.time() - start_time > timeout:
             raise TimeoutError(f"Operation timed out after {timeout} seconds.")
         time.sleep(0.01)
@@ -987,9 +991,11 @@ def test_parallel_retrieval_disabled(fmt, autorelease_v1):
         tokens, kvcaches=retrieved_cache, slot_mapping=slot_mapping
     )
     length = torch.sum(ret_mask)
-    assert length == num_tokens
+    assert length == expected_length
 
-    check_paged_kv_cache_equal(retrieved_cache, kv_cache, slot_mapping)
+    check_paged_kv_cache_equal(
+        retrieved_cache, kv_cache, slot_mapping[:expected_length]
+    )
 
     LMCacheEngineBuilder.destroy("test_parallel_disabled")
 
@@ -1037,10 +1043,14 @@ def test_parallel_retrieval_enabled(fmt, autorelease_v1):
     # Store tokens
     engine.store(tokens=tokens, kvcaches=kv_cache, slot_mapping=slot_mapping)
 
+    # Calculate expected length based on chunking
+    expected_chunk_cnt = num_tokens // chunk_size
+    expected_length = expected_chunk_cnt * chunk_size
+
     # Wait for store to complete
     timeout = 1.5
     start_time = time.time()
-    while engine.lookup(tokens) < num_tokens:
+    while engine.lookup(tokens) < expected_length:
         if time.time() - start_time > timeout:
             raise TimeoutError(f"Operation timed out after {timeout} seconds.")
         time.sleep(0.01)
@@ -1050,9 +1060,11 @@ def test_parallel_retrieval_enabled(fmt, autorelease_v1):
         tokens, kvcaches=retrieved_cache, slot_mapping=slot_mapping
     )
     length = torch.sum(ret_mask)
-    assert length == num_tokens
+    assert length == expected_length
 
-    check_paged_kv_cache_equal(retrieved_cache, kv_cache, slot_mapping)
+    check_paged_kv_cache_equal(
+        retrieved_cache, kv_cache, slot_mapping[:expected_length]
+    )
 
     LMCacheEngineBuilder.destroy("test_parallel_enabled")
 
