@@ -1,5 +1,6 @@
 # Standard
 from copy import deepcopy
+from unittest.mock import Mock, patch
 import random
 import shlex
 import subprocess
@@ -17,7 +18,7 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.cache_engine import LMCacheEngineBuilder
+from lmcache.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
 from lmcache.v1.config import LMCacheEngineConfig
 
 
@@ -889,3 +890,290 @@ def test_builder(autorelease_v1):
         LMCacheEngineBuilder.get_or_create(
             instance_id, cfg2, dumb_metadata(), connector
         )
+
+
+def test_parallel_retrieval_config_defaults():
+    cfg = LMCacheEngineConfig.from_defaults()
+
+    assert cfg.enable_parallel_retrieval is True
+    assert cfg.max_parallel_backends == 4
+    assert cfg.retrieval_timeout == 5.0
+    assert cfg.backend_retry_attempts == 2
+
+
+def test_parallel_retrieval_config_from_file(tmp_path):
+    config_file = tmp_path / "test_config.yaml"
+    config_content = """
+chunk_size: 128
+enable_parallel_retrieval: true
+max_parallel_backends: 8
+retrieval_timeout: 10.0
+backend_retry_attempts: 3
+"""
+    config_file.write_text(config_content)
+
+    cfg = LMCacheEngineConfig.from_file(str(config_file))
+
+    assert cfg.chunk_size == 128
+    assert cfg.enable_parallel_retrieval is True
+    assert cfg.max_parallel_backends == 8
+    assert cfg.retrieval_timeout == 10.0
+    assert cfg.backend_retry_attempts == 3
+
+
+def test_parallel_retrieval_config_from_env(monkeypatch):
+    """Test parallel retrieval configuration loading from environment variables"""
+    monkeypatch.setenv("LMCACHE_ENABLE_PARALLEL_RETRIEVAL", "true")
+    monkeypatch.setenv("LMCACHE_MAX_PARALLEL_BACKENDS", "6")
+    monkeypatch.setenv("LMCACHE_RETRIEVAL_TIMEOUT", "7.5")
+    monkeypatch.setenv("LMCACHE_BACKEND_RETRY_ATTEMPTS", "4")
+
+    cfg = LMCacheEngineConfig.from_env()
+
+    assert cfg.enable_parallel_retrieval is True
+    assert cfg.max_parallel_backends == 6
+    assert cfg.retrieval_timeout == 7.5
+    assert cfg.backend_retry_attempts == 4
+
+
+@pytest.mark.parametrize("fmt", ["vllm"])
+def test_parallel_retrieval_disabled(fmt, autorelease_v1):
+    """Test that parallel retrieval can be disabled and falls back to sequential"""
+    device = "cuda"
+    num_tokens = 1000
+    num_blocks = 500
+    block_size = 16
+    dtype = torch.bfloat16
+    chunk_size = 256
+
+    kv_shape = (32, 2, chunk_size, 8, 128)
+    connector = create_gpu_connector(1024, 32)
+
+    tokens = generate_tokens(num_tokens, device)
+    kv_cache = generate_kv_cache_paged_list_tensors(
+        num_blocks, device, block_size, dtype
+    )
+    retrieved_cache = generate_kv_cache_paged_list_tensors(
+        num_blocks, device, block_size, dtype
+    )
+
+    slot_mapping = random.sample(range(0, num_blocks * block_size), num_tokens)
+    slot_mapping = torch.tensor(slot_mapping, device=device)
+
+    # Create config with parallel retrieval disabled
+    cfg = LMCacheEngineConfig.from_defaults(
+        chunk_size=chunk_size, enable_parallel_retrieval=False, remote_url=None
+    )
+
+    engine = autorelease_v1(
+        LMCacheEngineBuilder.get_or_create(
+            "test_parallel_disabled", cfg, dumb_metadata(fmt, kv_shape), connector
+        )
+    )
+
+    # Store tokens
+    engine.store(tokens=tokens, kvcaches=kv_cache, slot_mapping=slot_mapping)
+
+    # Wait for store to complete
+    timeout = 1.5
+    start_time = time.time()
+    while engine.lookup(tokens) < num_tokens:
+        if time.time() - start_time > timeout:
+            raise TimeoutError(f"Operation timed out after {timeout} seconds.")
+        time.sleep(0.01)
+
+    # Retrieve should work even with parallel retrieval disabled
+    ret_mask = engine.retrieve(
+        tokens, kvcaches=retrieved_cache, slot_mapping=slot_mapping
+    )
+    length = torch.sum(ret_mask)
+    assert length == num_tokens
+
+    check_paged_kv_cache_equal(retrieved_cache, kv_cache, slot_mapping)
+
+    LMCacheEngineBuilder.destroy("test_parallel_disabled")
+
+
+@pytest.mark.parametrize("fmt", ["vllm"])
+def test_parallel_retrieval_enabled(fmt, autorelease_v1):
+    """Test that parallel retrieval works when enabled"""
+    device = "cuda"
+    num_tokens = 1000
+    num_blocks = 500
+    block_size = 16
+    dtype = torch.bfloat16
+    chunk_size = 256
+
+    kv_shape = (32, 2, chunk_size, 8, 128)
+    connector = create_gpu_connector(1024, 32)
+
+    tokens = generate_tokens(num_tokens, device)
+    kv_cache = generate_kv_cache_paged_list_tensors(
+        num_blocks, device, block_size, dtype
+    )
+    retrieved_cache = generate_kv_cache_paged_list_tensors(
+        num_blocks, device, block_size, dtype
+    )
+
+    slot_mapping = random.sample(range(0, num_blocks * block_size), num_tokens)
+    slot_mapping = torch.tensor(slot_mapping, device=device)
+
+    # Create config with parallel retrieval enabled
+    cfg = LMCacheEngineConfig.from_defaults(
+        chunk_size=chunk_size,
+        enable_parallel_retrieval=True,
+        max_parallel_backends=2,
+        retrieval_timeout=10.0,
+        backend_retry_attempts=3,
+        remote_url=None,
+    )
+
+    engine = autorelease_v1(
+        LMCacheEngineBuilder.get_or_create(
+            "test_parallel_enabled", cfg, dumb_metadata(fmt, kv_shape), connector
+        )
+    )
+
+    # Store tokens
+    engine.store(tokens=tokens, kvcaches=kv_cache, slot_mapping=slot_mapping)
+
+    # Wait for store to complete
+    timeout = 1.5
+    start_time = time.time()
+    while engine.lookup(tokens) < num_tokens:
+        if time.time() - start_time > timeout:
+            raise TimeoutError(f"Operation timed out after {timeout} seconds.")
+        time.sleep(0.01)
+
+    # Retrieve should work with parallel retrieval enabled
+    ret_mask = engine.retrieve(
+        tokens, kvcaches=retrieved_cache, slot_mapping=slot_mapping
+    )
+    length = torch.sum(ret_mask)
+    assert length == num_tokens
+
+    check_paged_kv_cache_equal(retrieved_cache, kv_cache, slot_mapping)
+
+    LMCacheEngineBuilder.destroy("test_parallel_enabled")
+
+
+@pytest.mark.parametrize("fmt", ["vllm"])
+@pytest.mark.parametrize("backend", ["local_cpu_disk"])
+def test_parallel_retrieval_multiple_backends(fmt, backend, autorelease_v1):
+    """Test parallel retrieval with multiple storage backends"""
+    device = "cuda"
+    num_tokens = 1000
+    num_blocks = 500
+    block_size = 16
+    dtype = torch.bfloat16
+    chunk_size = 128
+
+    kv_shape = (32, 2, chunk_size, 8, 128)
+    connector = create_gpu_connector(1024, 32)
+
+    tokens = generate_tokens(num_tokens, device)
+    kv_cache = generate_kv_cache_paged_list_tensors(
+        num_blocks, device, block_size, dtype
+    )
+    retrieved_cache = generate_kv_cache_paged_list_tensors(
+        num_blocks, device, block_size, dtype
+    )
+
+    slot_mapping = random.sample(range(0, num_blocks * block_size), num_tokens)
+    slot_mapping = torch.tensor(slot_mapping, device=device)
+
+    # Create config with parallel retrieval enabled and multiple backends
+    cfg = LMCacheEngineConfig.from_legacy(chunk_size=chunk_size, backend=backend)
+    # Override parallel settings
+    cfg.enable_parallel_retrieval = True
+    cfg.max_parallel_backends = 3
+    cfg.retrieval_timeout = 15.0
+    cfg.backend_retry_attempts = 2
+
+    engine = autorelease_v1(
+        LMCacheEngineBuilder.get_or_create(
+            "test_parallel_multi", cfg, dumb_metadata(fmt, kv_shape), connector
+        )
+    )
+
+    # Store tokens
+    engine.store(tokens=tokens, kvcaches=kv_cache, slot_mapping=slot_mapping)
+
+    # Wait for store to complete in CPU backend
+    expected_chunk_cnt = num_tokens // chunk_size
+    expected_length = expected_chunk_cnt * chunk_size
+    timeout = 1
+    start_time = time.time()
+    while engine.lookup(tokens, ["LocalCPUBackend"]) < expected_length:
+        if time.time() - start_time > timeout:
+            raise TimeoutError(f"Operation timed out after {timeout} seconds.")
+        time.sleep(0.01)
+
+    # Wait for disk backend to have data
+    timeout = 30
+    start_time = time.time()
+    while engine.lookup(tokens, ["LocalDiskBackend"]) < expected_length:
+        if time.time() - start_time > timeout:
+            raise TimeoutError(f"Operation timed out after {timeout} seconds.")
+        time.sleep(0.01)
+
+    # Retrieve should work with parallel retrieval from multiple backends
+    ret_mask = engine.retrieve(
+        tokens, kvcaches=retrieved_cache, slot_mapping=slot_mapping
+    )
+    length = torch.sum(ret_mask)
+    assert length == expected_length
+
+    check_paged_kv_cache_equal(
+        retrieved_cache, kv_cache, slot_mapping[:expected_length]
+    )
+
+    # Clean up
+    if backend in ["local_cpu_disk"]:
+        subprocess.run(shlex.split("rm -rf local/disk_test/local_disk/"))
+
+    LMCacheEngineBuilder.destroy("test_parallel_multi")
+
+
+def test_parallel_retrieval_config_validation():
+    """Test that parallel retrieval configuration values are properly validated"""
+    # Test valid configuration
+    cfg = LMCacheEngineConfig.from_defaults(
+        enable_parallel_retrieval=True,
+        max_parallel_backends=4,
+        retrieval_timeout=5.0,
+        backend_retry_attempts=2,
+    )
+    validated_cfg = cfg.validate()
+    assert validated_cfg.enable_parallel_retrieval is True
+    assert validated_cfg.max_parallel_backends == 4
+    assert validated_cfg.retrieval_timeout == 5.0
+    assert validated_cfg.backend_retry_attempts == 2
+
+
+def test_parallel_retrieval_single_backend():
+    """Test that single backend doesn't use parallel execution"""
+    with patch("lmcache.v1.cache_engine.LMCacheEngine") as MockEngine:
+        mock_engine = MockEngine.return_value
+        mock_config = Mock()
+        mock_config.enable_parallel_retrieval = True
+        mock_config.max_parallel_backends = 4
+        mock_config.retrieval_timeout = 5.0
+        mock_config.backend_retry_attempts = 2
+
+        mock_engine.config = mock_config
+        mock_engine.storage_manager = Mock()
+        mock_engine.storage_manager.batched_get.return_value = ["mock_memory_obj"]
+
+        real_engine = LMCacheEngine.__new__(LMCacheEngine)
+        real_engine.config = mock_config
+        real_engine.storage_manager = mock_engine.storage_manager
+
+        key_mapping = {"backend1": ["key1", "key2"]}
+        result = real_engine._parallel_retrieve_with_timeout(key_mapping)
+
+        # Should call batched_get directly for single backend
+        mock_engine.storage_manager.batched_get.assert_called_once_with(
+            ["key1", "key2"], "backend1"
+        )
+        assert result == {"backend1": ["mock_memory_obj"]}
