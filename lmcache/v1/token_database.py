@@ -28,6 +28,9 @@ from lmcache.v1.config import LMCacheEngineConfig
 
 logger = init_logger(__name__)
 
+# NOTE: vLLM's NONE_HASH uses random values,
+# but it is not suitable for LMCache's cross-process cache sharing.
+# We import it for compatibility but override it in _get_init_hash().
 try:
     # Third Party
     from vllm.v1.core.kv_cache_utils import NONE_HASH
@@ -136,7 +139,7 @@ class ChunkedTokenDatabase(TokenDatabase):
         )
 
     def _get_init_hash(self) -> int:
-        return NONE_HASH
+        return 0  # Override vLLM's random NONE_HASH for cross-process cache sharing.
 
     def _hash(
         self,
