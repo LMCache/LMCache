@@ -940,16 +940,17 @@ def test_parallel_retrieval_config_from_env(monkeypatch):
 def test_parallel_retrieval_enabled(fmt, autorelease_v1):
     """Test that parallel retrieval works when enabled"""
     device = "cuda"
-    num_tokens = 1000
-    num_blocks = 500
+    num_tokens = 2000
+    num_blocks = 1000
     block_size = 16
     dtype = torch.bfloat16
     chunk_size = 256
-
     kv_shape = (32, 2, chunk_size, 8, 128)
+
     connector = create_gpu_connector(1024, 32)
 
     tokens = generate_tokens(num_tokens, device)
+
     kv_cache = generate_kv_cache_paged_list_tensors(
         num_blocks, device, block_size, dtype
     )
@@ -957,10 +958,17 @@ def test_parallel_retrieval_enabled(fmt, autorelease_v1):
         num_blocks, device, block_size, dtype
     )
 
+    original_retrieved_cache = deepcopy(retrieved_cache)
+
     slot_mapping = random.sample(range(0, num_blocks * block_size), num_tokens)
     slot_mapping = torch.tensor(slot_mapping, device=device)
 
-    # Create config with parallel retrieval enabled
+    # Check the kv cache and the retrieval buffer are not the same
+    check_paged_kv_cache_equal(retrieved_cache, original_retrieved_cache, slot_mapping)
+    with pytest.raises(AssertionError):
+        check_paged_kv_cache_equal(retrieved_cache, kv_cache, slot_mapping)
+
+    """ initialize the engine with parallel retrieval enabled """
     cfg = LMCacheEngineConfig.from_legacy(chunk_size=chunk_size, remote_url=None)
     cfg.enable_parallel_retrieval = True
     cfg.max_parallel_backends = 2
@@ -973,31 +981,32 @@ def test_parallel_retrieval_enabled(fmt, autorelease_v1):
         )
     )
 
-    # Store tokens
-    engine.store(tokens=tokens, kvcaches=kv_cache, slot_mapping=slot_mapping)
-
-    # Calculate expected length based on chunking
-    expected_chunk_cnt = num_tokens // chunk_size
-    expected_length = expected_chunk_cnt * chunk_size
-
-    # Wait for store to complete
-    timeout = 1.5
-    start_time = time.time()
-    while engine.lookup(tokens) < expected_length:
-        if time.time() - start_time > timeout:
-            raise TimeoutError(f"Operation timed out after {timeout} seconds.")
-        time.sleep(0.01)
-
-    # Retrieve should work with parallel retrieval enabled
+    """ test retrieve empty """
     ret_mask = engine.retrieve(
         tokens, kvcaches=retrieved_cache, slot_mapping=slot_mapping
     )
     length = torch.sum(ret_mask)
-    assert length == expected_length
+    assert length == 0
+    check_paged_kv_cache_equal(retrieved_cache, original_retrieved_cache, slot_mapping)
 
-    check_paged_kv_cache_equal(
-        retrieved_cache, kv_cache, slot_mapping[:expected_length]
+    """ test store """
+    engine.store(tokens=tokens, kvcaches=kv_cache, slot_mapping=slot_mapping)
+
+    """ Store is async. Need to wait for the store to finish """
+    timeout = 1.5
+    start_time = time.time()
+    while engine.lookup(tokens) < num_tokens:
+        if time.time() - start_time > timeout:
+            raise TimeoutError(f"Operation timed out after {timeout} seconds.")
+        time.sleep(0.01)
+
+    """ test retrieve with parallel retrieval enabled """
+    ret_mask = engine.retrieve(
+        tokens, kvcaches=retrieved_cache, slot_mapping=slot_mapping
     )
+    length = torch.sum(ret_mask)
+    assert length == num_tokens
+    check_paged_kv_cache_equal(retrieved_cache, kv_cache, slot_mapping)
 
     LMCacheEngineBuilder.destroy("test_parallel_enabled")
 
@@ -1007,16 +1016,17 @@ def test_parallel_retrieval_enabled(fmt, autorelease_v1):
 def test_parallel_retrieval_multiple_backends(fmt, backend, autorelease_v1):
     """Test parallel retrieval with multiple storage backends"""
     device = "cuda"
-    num_tokens = 1000
-    num_blocks = 500
+    num_tokens = 2000
+    num_blocks = 1000
     block_size = 16
     dtype = torch.bfloat16
-    chunk_size = 128
-
+    chunk_size = 256
     kv_shape = (32, 2, chunk_size, 8, 128)
+
     connector = create_gpu_connector(1024, 32)
 
     tokens = generate_tokens(num_tokens, device)
+
     kv_cache = generate_kv_cache_paged_list_tensors(
         num_blocks, device, block_size, dtype
     )
@@ -1024,12 +1034,18 @@ def test_parallel_retrieval_multiple_backends(fmt, backend, autorelease_v1):
         num_blocks, device, block_size, dtype
     )
 
+    original_retrieved_cache = deepcopy(retrieved_cache)
+
     slot_mapping = random.sample(range(0, num_blocks * block_size), num_tokens)
     slot_mapping = torch.tensor(slot_mapping, device=device)
 
-    # Create config with parallel retrieval enabled and multiple backends
+    # Check the kv cache and the retrieval buffer are not the same
+    check_paged_kv_cache_equal(retrieved_cache, original_retrieved_cache, slot_mapping)
+    with pytest.raises(AssertionError):
+        check_paged_kv_cache_equal(retrieved_cache, kv_cache, slot_mapping)
+
+    """ initialize the engine with multiple backends and parallel retrieval enabled """
     cfg = LMCacheEngineConfig.from_legacy(chunk_size=chunk_size, backend=backend)
-    # Override parallel settings
     cfg.enable_parallel_retrieval = True
     cfg.max_parallel_backends = 3
     cfg.retrieval_timeout = 15.0
@@ -1041,37 +1057,40 @@ def test_parallel_retrieval_multiple_backends(fmt, backend, autorelease_v1):
         )
     )
 
-    # Store tokens
-    engine.store(tokens=tokens, kvcaches=kv_cache, slot_mapping=slot_mapping)
-
-    # Wait for store to complete in CPU backend
-    expected_chunk_cnt = num_tokens // chunk_size
-    expected_length = expected_chunk_cnt * chunk_size
-    timeout = 1
-    start_time = time.time()
-    while engine.lookup(tokens, ["LocalCPUBackend"]) < expected_length:
-        if time.time() - start_time > timeout:
-            raise TimeoutError(f"Operation timed out after {timeout} seconds.")
-        time.sleep(0.01)
-
-    # Wait for disk backend to have data
-    timeout = 30
-    start_time = time.time()
-    while engine.lookup(tokens, ["LocalDiskBackend"]) < expected_length:
-        if time.time() - start_time > timeout:
-            raise TimeoutError(f"Operation timed out after {timeout} seconds.")
-        time.sleep(0.01)
-
-    # Retrieve should work with parallel retrieval from multiple backends
+    """ test retrieve empty """
     ret_mask = engine.retrieve(
         tokens, kvcaches=retrieved_cache, slot_mapping=slot_mapping
     )
     length = torch.sum(ret_mask)
-    assert length == expected_length
+    assert length == 0
+    check_paged_kv_cache_equal(retrieved_cache, original_retrieved_cache, slot_mapping)
 
-    check_paged_kv_cache_equal(
-        retrieved_cache, kv_cache, slot_mapping[:expected_length]
+    """ test store """
+    engine.store(tokens=tokens, kvcaches=kv_cache, slot_mapping=slot_mapping)
+
+    """ Store is async. Need to wait for the store to finish """
+    timeout = 1.5
+    start_time = time.time()
+    while engine.lookup(tokens) < num_tokens:
+        if time.time() - start_time > timeout:
+            raise TimeoutError(f"Operation timed out after {timeout} seconds.")
+        time.sleep(0.01)
+
+    """ Wait for disk backend to have data as well """
+    timeout = 30
+    start_time = time.time()
+    while engine.lookup(tokens, ["LocalDiskBackend"]) < num_tokens:
+        if time.time() - start_time > timeout:
+            raise TimeoutError(f"Operation timed out after {timeout} seconds.")
+        time.sleep(0.01)
+
+    """ test retrieve with parallel retrieval from multiple backends """
+    ret_mask = engine.retrieve(
+        tokens, kvcaches=retrieved_cache, slot_mapping=slot_mapping
     )
+    length = torch.sum(ret_mask)
+    assert length == num_tokens
+    check_paged_kv_cache_equal(retrieved_cache, kv_cache, slot_mapping)
 
     # Clean up
     if backend in ["local_cpu_disk"]:
