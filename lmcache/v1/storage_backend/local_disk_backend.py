@@ -73,6 +73,11 @@ class LocalDiskBackend(StorageBackendInterface):
         self.loop = loop
         self.put_tasks: List[CacheEngineKey] = []
 
+        # to help maintain suffix -> prefix order in the dict
+        # assumption: only one request is looked up at a time 
+        # (only one cache engine per vllm worker)
+        self.keys_in_request: List[CacheEngineKey] = []
+
         self.lmcache_worker = lmcache_worker
         self.instance_id = config.lmcache_instance_id
         self.stats_monitor = LMCStatsMonitor.GetOrCreate()
@@ -93,7 +98,14 @@ class LocalDiskBackend(StorageBackendInterface):
                 return False
             if pin:
                 self.dict[key].pin()
+            self.keys_in_request.append(key)
             return True
+    
+    def post_contains(self):
+        # flip the order of the keys in the request
+        with self.disk_lock:
+            for key in reversed(self.keys_in_request):
+                self.evictor.update_on_hit(key, self.dict)
 
     def exists_in_put_tasks(self, key: CacheEngineKey) -> bool:
         with self.disk_lock:
@@ -212,9 +224,6 @@ class LocalDiskBackend(StorageBackendInterface):
             self.disk_lock.release()
             return None
 
-        # Update cache recency
-        self.evictor.update_on_hit(key, self.dict)
-
         path = self.dict[key].path
         dtype = self.dict[key].dtype
         shape = self.dict[key].shape
@@ -240,9 +249,6 @@ class LocalDiskBackend(StorageBackendInterface):
         if key not in self.dict:
             self.disk_lock.release()
             return None
-
-        # Update cache recency
-        self.evictor.update_on_hit(key, self.dict)
 
         path = self.dict[key].path
         dtype = self.dict[key].dtype
