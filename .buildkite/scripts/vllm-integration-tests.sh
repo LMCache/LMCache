@@ -197,3 +197,5 @@ run_lmcache_vllmopenai_container
 
 # test that can inference model using vLLM OpenAI API (lmcache integrated)
 test_vllmopenai_server_with_lmcache_integrated
+
+exit 0
