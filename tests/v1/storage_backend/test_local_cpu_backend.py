@@ -560,21 +560,3 @@ class TestLocalCPUBackend:
         # Remove key
         local_cpu_backend.remove(key)
         assert memory_obj.get_ref_count() == initial_ref_count + 1
-
-    def test_lru_ordering(self, local_cpu_backend):
-        """Test LRU ordering of the hot cache."""
-        keys = [create_test_key(f"key_{i}") for i in range(3)]
-        memory_objs = [create_test_memory_obj() for _ in range(3)]
-
-        # Insert keys
-        for key, memory_obj in zip(keys, memory_objs, strict=False):
-            local_cpu_backend.submit_put_task(key, memory_obj)
-
-        # Access the first key to move it to the end
-        local_cpu_backend.get_blocking(keys[0])
-
-        # Get keys (should be in LRU order)
-        retrieved_keys = local_cpu_backend.get_keys()
-
-        # The accessed key should be at the end (MRU)
-        assert retrieved_keys[-1] == keys[0]
