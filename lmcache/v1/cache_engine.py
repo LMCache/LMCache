@@ -230,7 +230,7 @@ class LMCacheEngine:
             # TODO (Jiayi): should be batched in the future
             memory_obj = self.storage_manager.allocate(kv_shape, kv_dtype)
             if memory_obj is None:
-                logger.warning(
+                logger.info(
                     "Failed to allocate memory for the KV cache.\n"
                     "The KV cache will not be stored."
                 )

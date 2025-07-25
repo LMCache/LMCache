@@ -697,6 +697,7 @@ class LMCacheConnectorV1Impl:
 
             if self.kv_role == "kv_producer":
                 skip_leading_tokens = 0
+                logger.info("hahaha")
             else:
                 skip_leading_tokens = max(
                     self.lmcache_engine.lookup(token_ids),
