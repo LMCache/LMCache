@@ -15,11 +15,11 @@ Prerequisites
 
 Your server should have at least 2 GPUs.
 
-For Centralized sharing, this will use the port 8000 and 8001 for 2 vllms,
+For Centralized sharing, this will use the port 8000 and 8001 (for vLLM) and port 65432 (for LMCache).  
+
+For P2P sharing, this will use the port 8000 and 8001 for 2 vllms,
 And will use port 8200 and 8201 for 2 distributed cache servers,
 And will use port 8100 for lookup server.
-
-For P2P sharing, this will use the port 8000 and 8001 (for vLLM) and port 65432 (for LMCache).  
 
 Centralized KV cache sharing
 ----------------------------
