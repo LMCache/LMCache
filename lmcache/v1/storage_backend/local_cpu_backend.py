@@ -91,7 +91,7 @@ class LocalCPUBackend(StorageBackendInterface):
                 return False
             if pin:
                 self.hot_cache[key].pin()
-                # contains is called by vllm lookup when pin is True
+                # vllm lookup sets pin to True
                 self.keys_in_request.append(key)
             return True
 
