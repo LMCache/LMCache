@@ -719,7 +719,6 @@ class LMCacheEngine:
             # all tokens where found, return the maximal end
             return end
         finally:
-            # let the backends know that the lookup is completed
             # vllm lookup sets pin to True
             if pin:
                 self.storage_manager.post_lookup()
