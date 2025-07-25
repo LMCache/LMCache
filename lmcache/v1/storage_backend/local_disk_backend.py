@@ -98,10 +98,11 @@ class LocalDiskBackend(StorageBackendInterface):
                 return False
             if pin:
                 self.dict[key].pin()
-            self.keys_in_request.append(key)
+                # contains is called by vllm lookup when pin is True
+                self.keys_in_request.append(key)
             return True
 
-    def post_contains(self):
+    def post_lookup(self):
         # flip the order of the keys in the request
         with self.disk_lock:
             for key in reversed(self.keys_in_request):
