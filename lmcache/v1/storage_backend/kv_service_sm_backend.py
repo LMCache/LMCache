@@ -131,11 +131,11 @@ class KVServiceSMBackend(StorageBackendInterface):
         """Check if key exists in KVServiceSM cache."""
         try:
             key_str = self._key_to_string(key)
-            url = f"{self.base_url}/v1/kv/{self.bucket_name}/{key_str}/locations"
+            url = f"{self.base_url}/v1/kv/{self.bucket_name}/{key_str}"
 
             # Simplified sync check - no local caching complexity
             result = asyncio.run_coroutine_threadsafe(
-                self._http_request("GET", url, timeout=2.0), self.loop
+                self._http_request("HEAD", url, timeout=2.0), self.loop
             ).result()
 
             return result is not None and result.get("status") == 200
