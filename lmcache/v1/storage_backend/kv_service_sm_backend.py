@@ -105,6 +105,10 @@ class KVServiceSMBackend(StorageBackendInterface):
             thread_name_prefix="kv-service-sm-serialize",
         )
 
+        self.lease_lock = threading.Lock()
+        self.leases: Dict[CacheEngineKey, LeaseInfo] = {}
+        self.lease_id_to_key: Dict[str, CacheEngineKey] = {}
+
         # Put task tracking - required by interface
         self.put_lock = threading.Lock()
         self.put_tasks: set[CacheEngineKey] = set()
@@ -130,15 +134,14 @@ class KVServiceSMBackend(StorageBackendInterface):
     def contains(self, key: CacheEngineKey, pin: bool = False) -> bool:
         """Check if key exists in KVServiceSM cache."""
         try:
-            key_str = self._key_to_string(key)
-            url = f"{self.base_url}/v1/kv/{self.bucket_name}/{key_str}"
+            if key in self.leases:
+                return True
 
-            # Simplified sync check - no local caching complexity
-            result = asyncio.run_coroutine_threadsafe(
-                self._http_request("HEAD", url, timeout=2.0), self.loop
+            lease_info = asyncio.run_coroutine_threadsafe(
+                self._acquire_lease(key), self.loop
             ).result()
 
-            return result is not None and result.get("status") == 200
+            return lease_info is not None
         except Exception as e:
             logger.debug(f"Failed to check key existence: {e}")
             return False
@@ -310,8 +313,16 @@ class KVServiceSMBackend(StorageBackendInterface):
 
     async def _get_memory_obj(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         """Unified GET method: lease → read → reconstruct → release."""
+        lease_info = None
+
         # Step 1: Acquire lease
-        lease_info = await self._acquire_lease(key)
+        with self.lease_lock:
+            if key in self.leases:
+                lease_info = self.leases.get(key)
+
+        if lease_info is None:
+            lease_info = await self._acquire_lease(key)
+
         if lease_info is None:
             return None
 
@@ -335,18 +346,47 @@ class KVServiceSMBackend(StorageBackendInterface):
 
         if result and result["status"] == 200 and result["json"]:
             lease_data = result["json"]
-            return LeaseInfo(
+            lease_info = LeaseInfo(
                 lease_id=lease_data["id"],
                 offsets=[(o["offset"], o["len"]) for o in lease_data["offsets"]],
                 total_size=sum(o["len"] for o in lease_data["offsets"]),
             )
+
+            with self.lease_lock:
+                self.leases[key] = lease_info
+                self.lease_id_to_key[lease_info.lease_id] = key
+
+            return lease_info
         return None
 
     async def _release_lease(self, lease_id: str) -> bool:
-        """Release a lease."""
         url = f"{self.base_url}/v1/leases/{lease_id}/release"
         result = await self._http_request("POST", url, timeout=2.0)
-        return result and result["status"] == 200
+
+        # Consider both 200 OK and 404 Not Found as "success" since in both cases
+        # the lease is no longer active on the server
+        success = False
+        if result:
+            if result["status"] == 200:
+                success = True
+            elif result["status"] == 404:
+                logger.debug(f"Lease {lease_id} not found on server, "
+                             f"already released or expired")
+                success = True
+            else:
+                logger.warning(f"Failed to release lease {lease_id}, "
+                               f"status: {result['status']}, "
+                               f"response: {result.get('json', {})}")
+
+        if success:
+            with self.lease_lock:
+                if lease_id in self.lease_id_to_key:
+                    key = self.lease_id_to_key[lease_id]
+                    if key in self.leases:
+                        del self.leases[key]
+                    del self.lease_id_to_key[lease_id]
+
+        return success
 
     async def _read_tensor_from_lease(
         self, key: CacheEngineKey, lease_info: LeaseInfo
@@ -511,6 +551,20 @@ class KVServiceSMBackend(StorageBackendInterface):
 
     def close(self) -> None:
         """Close the backend and release resources."""
+        # Release all leases
+        with self.lease_lock:
+            lease_ids_to_release = list(self.lease_id_to_key.keys())
+
+        try:
+            for lease_id in lease_ids_to_release:
+                asyncio.run_coroutine_threadsafe(
+                    self._release_lease(lease_id), self.loop
+                ).result(timeout=2.0)
+
+            logger.info(f"Released {len(lease_ids_to_release)} key leases")
+        except Exception as e:
+            logger.error(f"Error releasing key leases: {e}")
+
         # Close HTTP session and connection pool
         if self.http_session is not None:
             try:
