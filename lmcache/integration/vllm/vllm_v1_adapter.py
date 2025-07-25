@@ -694,6 +694,7 @@ class LMCacheConnectorV1Impl:
 
             # TODO: have a pre-allocated buffer to hold the slot_mappings
             slot_mapping = slot_mapping.cuda()
+            logger.info("xxxxxxx")
 
             if self.kv_role == "kv_producer":
                 skip_leading_tokens = 0
