@@ -2,6 +2,7 @@
 from dataclasses import asdict
 import argparse
 import contextlib
+import json
 import os
 import time
 
@@ -83,7 +84,7 @@ def print_output(
     print("-" * 50)
     for output in outputs:
         generated_text = output.outputs[0].text
-        print(f"Generated text: {generated_text!r}")
+        # print(f"Generated text: {generated_text!r}")
     print(f"Generation took {time.time() - start:.2f} seconds, {req_str} request done.")
     print("-" * 50)
 
@@ -107,53 +108,69 @@ def parse_args():
     return parser.parse_args()
 
 
+def load_dataset(dataset_path):
+    print("Loading dataset:", dataset_path)
+    with open(dataset_path) as f:
+        return json.load(f)
+
 
 def main():
-    # os.environ["CUDA_VISIBLE_DEVICES"] = "7"
     args = parse_args()
-
+    eval_dataset = load_dataset("/mnt/afs/lihao7/datasets/musique_s.json")
+    eval_dataset = eval_dataset[:5]  # Limit to 10 items for testing
     lmcache_connector = "LMCacheConnectorV1"
     model = "mistralai/Mistral-7B-Instruct-v0.2"
 
     setup_environment_variables(args.use_disk, args.blend_special_str)
 
+    blend_special_str = os.getenv("LMCACHE_BLEND_SPECIAL_STR")
     tokenizer = AutoTokenizer.from_pretrained(model)
 
     with build_llm_with_lmcache(lmcache_connector, model) as llm:
         # This example script runs two requests with a shared prefix.
         # Define the shared prompt and specific prompts
         sys_prompt = tokenizer.encode("You are a very helpful assistant.")
-        chunk1_prompt = tokenizer.encode("Hello, how are you?" * 250)[1:]
-        chunk2_prompt = tokenizer.encode("Hello, what's up?" * 250)[1:]
-        chunk3_prompt = tokenizer.encode("Hey, how can i do" * 250)[1:]
-        blend_special_str = tokenizer.encode(os.getenv("LMCACHE_BLEND_SPECIAL_STR"))[1:]
-        precompute_prompts = [
-            (sys_prompt + blend_special_str + chunk1_prompt),
-            (chunk2_prompt),
-            (chunk3_prompt),
-        ]
-        test_prompt = (
-            sys_prompt
-            + blend_special_str
-            + chunk2_prompt
-            + blend_special_str
-            + chunk1_prompt
-            + blend_special_str
-            + chunk3_prompt
-            + blend_special_str
-            + tokenizer.encode("Hello, how are you?")[1:]
-        )
+        blend_special_prompt = tokenizer.encode(blend_special_str)[1:]
 
+        precompute_prompts = []
+        tests_prompts = []
+
+        for index, item in enumerate(eval_dataset):
+            # if index != 5:
+            #     continue
+            item_precompute_prompts = []
+            item_test_prompt = sys_prompt[:]
+            for doc in item["ctxs"]:
+                # Precompute the prompts for each document
+                item_precompute_prompts.append(
+                    tokenizer.encode(doc["title"] + doc["text"])[1:]
+                )
+
+            for doc in item_precompute_prompts:
+                precompute_prompts.append(sys_prompt + blend_special_prompt + doc)
+
+            item_test_prompt.extend(blend_special_prompt)
+            for doc in item_precompute_prompts:
+                item_test_prompt.extend(doc)
+                item_test_prompt.extend(blend_special_prompt)
+            item_question_prompt = tokenizer.encode(item["question"] + "Answers:")[1:]
+            item_test_prompt.extend(item_question_prompt)
+
+            tests_prompts.append(item_test_prompt)
+        print("[debug] Precompute prompts:", len(precompute_prompts))
+        print("[debug] Tests prompts:", len(tests_prompts))
         sampling_params = SamplingParams(temperature=0, top_p=0.95, max_tokens=10)
 
         for prompt in precompute_prompts:
             # Add the first prompt to the cache
             print_output(llm, prompt, sampling_params, "first")
             # Wait for a while to simulate some delay before the second request
-            time.sleep(1)
-
-        # print the second output
-        print_output(llm, test_prompt, sampling_params, "second")
+        time.sleep(1)
+        print("Precompute prompts done, now running tests...")
+        print("-" * 50)
+        for prompt in tests_prompts:
+            # Print the test prompts
+            print_output(llm, prompt, sampling_params, "test")
 
 
 if __name__ == "__main__":
