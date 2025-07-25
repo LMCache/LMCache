@@ -78,8 +78,8 @@ class LocalCPUBackend(StorageBackendInterface):
         self.enable_blending = config.enable_blending
 
         # to help maintain suffix -> prefix order in the dict
-        # assumption: only one request is looked up at a time 
-        # (only one cache engine per vllm worker)
+        # assumption: only one request is looked up at a time
+        # (only one worker per cache engine)
         self.keys_in_request: List[CacheEngineKey] = []
 
     def __str__(self):
@@ -97,7 +97,7 @@ class LocalCPUBackend(StorageBackendInterface):
     def post_contains(self):
         # flip the order of the keys in the request
         with self.cpu_lock:
-            for key in reversed(self.keys_in_request): 
+            for key in reversed(self.keys_in_request):
                 self.hot_cache.move_to_end(key)
 
     def exists_in_put_tasks(self, key: CacheEngineKey) -> bool:

@@ -406,12 +406,11 @@ class StorageManager:
                 return backend_name
 
         return None
-    
+
     def post_contains(self):
         for backend_name, backend in self.storage_backends.items():
             if backend_name == "LocalCPUBackend" or backend_name == "LocalDiskBackend":
                 backend.post_contains()
-
 
     def remove(
         self,

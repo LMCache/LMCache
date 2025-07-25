@@ -74,8 +74,8 @@ class LocalDiskBackend(StorageBackendInterface):
         self.put_tasks: List[CacheEngineKey] = []
 
         # to help maintain suffix -> prefix order in the dict
-        # assumption: only one request is looked up at a time 
-        # (only one cache engine per vllm worker)
+        # assumption: only one request is looked up at a time
+        # (only one worker per cache engine)
         self.keys_in_request: List[CacheEngineKey] = []
 
         self.lmcache_worker = lmcache_worker
@@ -100,7 +100,7 @@ class LocalDiskBackend(StorageBackendInterface):
                 self.dict[key].pin()
             self.keys_in_request.append(key)
             return True
-    
+
     def post_contains(self):
         # flip the order of the keys in the request
         with self.disk_lock:
