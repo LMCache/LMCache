@@ -720,7 +720,7 @@ class LMCacheEngine:
             return end
         finally:
             # let the backends know that the lookup is completed
-            self.storage_manager.post_contains()
+            self.storage_manager.post_lookup()
 
     @_lmcache_nvtx_annotate
     def lookup_unpin(self, request_ids: list[str]) -> None:
