@@ -61,7 +61,6 @@ class KVController:
 
         # TODO(Jiayi): remove this hardcode
         self.token_database = ChunkedTokenDatabase()
-        self.token_database.chunk_size = 256
 
     def post_init(self, cluster_executor):
         """
@@ -165,10 +164,9 @@ class KVController:
         for start, end, key in self.token_database.process_tokens(
             tokens, make_key=False
         ):
-            assert isinstance(key, str)
             if key not in self.kv_pool:
                 break
-            matched_instance = self.kv_pool[key][0].instance_id
-            matched_location = self.kv_pool[key][0].location
+            matched_instance = self.kv_pool[str(key)][0].instance_id
+            matched_location = self.kv_pool[str(key)][0].location
             layout_info[matched_instance] = (matched_location, end)
         return LookupRetMsg(layout_info=layout_info)
