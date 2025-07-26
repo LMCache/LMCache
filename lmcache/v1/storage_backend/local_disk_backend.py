@@ -107,6 +107,7 @@ class LocalDiskBackend(StorageBackendInterface):
         with self.disk_lock:
             for key in reversed(self.keys_in_request):
                 self.evictor.update_on_hit(key, self.dict)
+            self.keys_in_request = []
 
     def exists_in_put_tasks(self, key: CacheEngineKey) -> bool:
         with self.disk_lock:

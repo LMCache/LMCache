@@ -100,6 +100,7 @@ class LocalCPUBackend(StorageBackendInterface):
         with self.cpu_lock:
             for key in reversed(self.keys_in_request):
                 self.hot_cache.move_to_end(key)
+            self.keys_in_request = []
 
     def exists_in_put_tasks(self, key: CacheEngineKey) -> bool:
         """
