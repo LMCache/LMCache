@@ -20,7 +20,6 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import List, Optional, Tuple, Union
 import abc
-import atexit
 import ctypes
 import threading
 
@@ -1300,8 +1299,6 @@ class PinMemoryAllocator(MemoryAllocatorInterface):
 
         self.host_mem_lock = threading.Lock() if not use_paging else nullcontext()
 
-        atexit.register(self.close)
-
     @_lmcache_nvtx_annotate
     def allocate(
         self,
@@ -1387,8 +1384,6 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
         self.host_mem_lock = threading.Lock() if not use_paging else nullcontext()
 
         self.buffer_allocator = BufferAllocator("cpu")
-
-        atexit.register(self.close)
 
     @_lmcache_nvtx_annotate
     def allocate(
