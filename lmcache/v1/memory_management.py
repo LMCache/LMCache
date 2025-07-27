@@ -1270,7 +1270,10 @@ class PinMemoryAllocator(MemoryAllocatorInterface):
         """
         :param int size: The size of the pinned memory in bytes.
         """
-        buffer = torch.empty(size, dtype=torch.uint8, pin_memory=True)
+
+        buffer = torch.empty(size, dtype=torch.uint8)
+        ptr = buffer.data_ptr()
+        torch.cuda.cudart().cudaHostRegister(ptr, size, 0)
 
         if use_paging:
             assert "shape" in kwargs, (
@@ -1344,7 +1347,10 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
         """
         :param int size: The size of the pinned memory in bytes.
         """
-        buffer = torch.empty(size, dtype=torch.uint8, pin_memory=True)
+
+        buffer = torch.empty(size, dtype=torch.uint8)
+        ptr = buffer.data_ptr()
+        torch.cuda.cudart().cudaHostRegister(ptr, size, 0)
 
         if use_paging:
             assert "shape" in kwargs, (
