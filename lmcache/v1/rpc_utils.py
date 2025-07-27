@@ -15,6 +15,7 @@
 # Standard
 from typing import TYPE_CHECKING, Optional
 import socket
+import os
 
 # Third Party
 import zmq
@@ -95,11 +96,12 @@ def get_zmq_rpc_path_lmcache(
     import vllm.envs as envs
 
     base_url = envs.VLLM_RPC_BASE_PATH
+    pid = os.getpid()
 
     if isinstance(rpc_port, str):
         rpc_port = rpc_port + str(tp_rank)
     else:
         rpc_port += tp_rank
 
-    logger.debug("Base URL: %s, RPC Port: %s", base_url, rpc_port)
-    return f"ipc://{base_url}/lmcache_rpc_port_{rpc_port}"
+    logger.debug("Base URL: %s, PID: %d, RPC Port: %s", base_url, pid, rpc_port)
+    return f"ipc://{base_url}/pid_{pid}_lmcache_rpc_port_{rpc_port}"
