@@ -1344,6 +1344,7 @@ class PinMemoryAllocator(MemoryAllocatorInterface):
             return self.allocator.memcheck()
 
     def close(self):
+        torch.cuda.synchronize()
         torch.cuda.cudart().cudaHostUnregister(self.buffer.data_ptr())
 
 
@@ -1473,6 +1474,7 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
             return self.pin_allocator.memcheck()
 
     def close(self):
+        torch.cuda.synchronize()
         torch.cuda.cudart().cudaHostUnregister(self.buffer.data_ptr())
 
 
