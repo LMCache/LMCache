@@ -1279,6 +1279,7 @@ class PinMemoryAllocator(MemoryAllocatorInterface):
         self.buffer = torch.empty(size, dtype=torch.uint8)
         ptr = self.buffer.data_ptr()
         torch.cuda.cudart().cudaHostRegister(ptr, size, 0)
+        self._unregistered = False
 
         if use_paging:
             assert "shape" in kwargs, (
@@ -1344,8 +1345,10 @@ class PinMemoryAllocator(MemoryAllocatorInterface):
             return self.allocator.memcheck()
 
     def close(self):
-        torch.cuda.synchronize()
-        torch.cuda.cudart().cudaHostUnregister(self.buffer.data_ptr())
+        if not self._unregistered:
+            torch.cuda.synchronize()
+            torch.cuda.cudart().cudaHostUnregister(self.buffer.data_ptr())
+            self._unregistered = True
 
 
 class MixedMemoryAllocator(MemoryAllocatorInterface):
@@ -1362,6 +1365,7 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
         self.buffer = torch.empty(size, dtype=torch.uint8)
         ptr = self.buffer.data_ptr()
         torch.cuda.cudart().cudaHostRegister(ptr, size, 0)
+        self._unregistered = False
 
         if use_paging:
             assert "shape" in kwargs, (
@@ -1474,8 +1478,10 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
             return self.pin_allocator.memcheck()
 
     def close(self):
-        torch.cuda.synchronize()
-        torch.cuda.cudart().cudaHostUnregister(self.buffer.data_ptr())
+        if not self._unregistered:
+            torch.cuda.synchronize()
+            torch.cuda.cudart().cudaHostUnregister(self.buffer.data_ptr())
+            self._unregistered = True
 
 
 class GPUMemoryAllocator(MemoryAllocatorInterface):
