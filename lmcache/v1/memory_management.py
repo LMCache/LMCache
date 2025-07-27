@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import List, Optional, Tuple, Union
 import abc
+import atexit
 import ctypes
 import threading
 
@@ -887,9 +888,6 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
                 clear = False
         return clear
 
-    def __del__(self):
-        del self.buffer
-
 
 class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
     """
@@ -1271,8 +1269,8 @@ class PinMemoryAllocator(MemoryAllocatorInterface):
         :param int size: The size of the pinned memory in bytes.
         """
 
-        buffer = torch.empty(size, dtype=torch.uint8)
-        ptr = buffer.data_ptr()
+        self.buffer = torch.empty(size, dtype=torch.uint8)
+        ptr = self.buffer.data_ptr()
         torch.cuda.cudart().cudaHostRegister(ptr, size, 0)
 
         if use_paging:
@@ -1284,15 +1282,17 @@ class PinMemoryAllocator(MemoryAllocatorInterface):
             )
             assert "fmt" in kwargs, "fmt must be specified for paged memory allocator"
             self.allocator = PagedTensorMemoryAllocator(
-                tensor=buffer,
+                tensor=self.buffer,
                 shape=kwargs["shape"],
                 dtype=kwargs["dtype"],
                 fmt=kwargs["fmt"],
             )
         else:
-            self.allocator = TensorMemoryAllocator(buffer)
+            self.allocator = TensorMemoryAllocator(self.buffer)
 
         self.host_mem_lock = threading.Lock() if not use_paging else nullcontext()
+
+        atexit.register(self.close)
 
     @_lmcache_nvtx_annotate
     def allocate(
@@ -1336,6 +1336,9 @@ class PinMemoryAllocator(MemoryAllocatorInterface):
         with self.host_mem_lock:
             return self.allocator.memcheck()
 
+    def close(self):
+        torch.cuda.cudart().cudaHostUnregister(self.buffer.data_ptr())
+
 
 class MixedMemoryAllocator(MemoryAllocatorInterface):
     """
@@ -1348,8 +1351,8 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
         :param int size: The size of the pinned memory in bytes.
         """
 
-        buffer = torch.empty(size, dtype=torch.uint8)
-        ptr = buffer.data_ptr()
+        self.buffer = torch.empty(size, dtype=torch.uint8)
+        ptr = self.buffer.data_ptr()
         torch.cuda.cudart().cudaHostRegister(ptr, size, 0)
 
         if use_paging:
@@ -1361,17 +1364,19 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
             )
             assert "fmt" in kwargs, "fmt must be specified for paged memory allocator"
             self.pin_allocator = PagedTensorMemoryAllocator(
-                tensor=buffer,
+                tensor=self.buffer,
                 shape=kwargs["shape"],
                 dtype=kwargs["dtype"],
                 fmt=kwargs["fmt"],
             )
         else:
-            self.pin_allocator = TensorMemoryAllocator(buffer)
+            self.pin_allocator = TensorMemoryAllocator(self.buffer)
 
         self.host_mem_lock = threading.Lock() if not use_paging else nullcontext()
 
         self.buffer_allocator = BufferAllocator("cpu")
+
+        atexit.register(self.close)
 
     @_lmcache_nvtx_annotate
     def allocate(
@@ -1459,6 +1464,9 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
     def memcheck(self):
         with self.host_mem_lock:
             return self.pin_allocator.memcheck()
+
+    def close(self):
+        torch.cuda.cudart().cudaHostUnregister(self.buffer.data_ptr())
 
 
 class GPUMemoryAllocator(MemoryAllocatorInterface):
