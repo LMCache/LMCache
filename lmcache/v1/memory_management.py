@@ -558,6 +558,13 @@ class MemoryAllocatorInterface(metaclass=abc.ABCMeta):
         """
         raise NotImplementedError
 
+    def close(self):
+        """
+        Closes the memory allocator.
+        This is called when the LMCacheEngine is closed.
+        """
+        return
+
 
 class TensorMemoryAllocator(MemoryAllocatorInterface):
     """
