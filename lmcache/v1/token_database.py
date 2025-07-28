@@ -152,7 +152,7 @@ class ChunkedTokenDatabase(TokenDatabase):
             # Standard
             import os
 
-            if config.remote_url is not None:
+            if config.remote_url is not None or config.enable_nixl:
                 pythonhashseed = os.getenv("PYTHONHASHSEED")
                 if pythonhashseed is None:
                     logger.warning(
