@@ -28,8 +28,14 @@ from lmcache.v1.config import LMCacheEngineConfig
 
 logger = init_logger(__name__)
 
-
-NONE_HASH = 0
+# NOTE: For centralized cache sharing, ensure PYTHONHASHSEED is
+# set consistently across all processes (e.g., export PYTHONHASHSEED=0).
+try:
+    # Third Party
+    from vllm.v1.core.kv_cache_utils import NONE_HASH
+except ImportError:
+    # Fallback to a default value if vllm is not available
+    NONE_HASH = 0
 
 
 class TokenDatabase(metaclass=abc.ABCMeta):
@@ -141,6 +147,20 @@ class ChunkedTokenDatabase(TokenDatabase):
         if config is not None:
             self.chunk_size = config.chunk_size
             self.save_unfull_chunk = config.save_unfull_chunk
+
+            # Check for cross-process cache sharing setup
+            # Standard
+            import os
+
+            if config.remote_url is not None:
+                pythonhashseed = os.getenv("PYTHONHASHSEED")
+                if pythonhashseed is None:
+                    logger.warning(
+                        "Centralized cache sharing detected "
+                        "but PYTHONHASHSEED not set. "
+                        "For consistent caching, set: export PYTHONHASHSEED=0 "
+                        "before the engine starts."
+                    )
         else:  # Default values
             self.chunk_size = 256
             self.save_unfull_chunk = True

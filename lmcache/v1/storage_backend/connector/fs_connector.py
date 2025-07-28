@@ -44,29 +44,44 @@ class FSConnector(RemoteConnector):
 
     def __init__(
         self,
-        base_path: str,
+        base_paths_str: str,
         loop: asyncio.AbstractEventLoop,
         local_cpu_backend: LocalCPUBackend,
     ):
         """
         Args:
-            base_path: Root directory to store all cache files
+            base_paths_str: Comma separated storage paths
             loop: Asyncio event loop
-            memory_allocator: Memory allocator interface
+            local_cpu_backend: Memory allocator interface
         """
-        self.base_path = Path(base_path)
+        # Parse comma separated paths
+        self.base_paths = (
+            [Path(p.strip()) for p in base_paths_str.split(",")]
+            if "," in base_paths_str
+            else [Path(base_paths_str)]
+        )
+
         self.loop = loop
         self.local_cpu_backend = local_cpu_backend
 
-        logger.info(f"Initialized FSConnector with base path {base_path}")
-        # Create base directory if not exists
-        self.base_path.mkdir(parents=True, exist_ok=True)
+        logger.info(f"Initialized FSConnector with base paths {self.base_paths}")
+        # Create directories for all paths
+        for path in self.base_paths:
+            path.mkdir(parents=True, exist_ok=True)
 
     def _get_file_path(self, key: CacheEngineKey) -> Path:
         """Get file path for the given key"""
+        # If there's only one path, use it directly
+        if len(self.base_paths) == 1:
+            base_path = self.base_paths[0]
+        else:
+            # Calculate hash value and modulo to select path
+            hash_val = abs(key.chunk_hash)
+            idx = hash_val % len(self.base_paths)
+            base_path = self.base_paths[idx]
+
         key_path = key.to_string().replace("/", "-") + ".data"
-        # Use key's string representation as filename
-        return self.base_path / key_path
+        return base_path / key_path
 
     async def exists(self, key: CacheEngineKey) -> bool:
         """Check if key exists in file system"""
@@ -146,7 +161,10 @@ class FSConnector(RemoteConnector):
     @no_type_check
     async def list(self) -> List[str]:
         """List all keys in file system"""
-        return [f.stem for f in self.base_path.glob("*.data")]
+        keys = []
+        for base_path in self.base_paths:
+            keys.extend([f.stem for f in base_path.glob("*.data")])
+        return keys
 
     async def close(self):
         """Clean up resources"""
