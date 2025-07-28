@@ -152,14 +152,21 @@ class ChunkedTokenDatabase(TokenDatabase):
             # Standard
             import os
 
-            if config.remote_url is not None or config.enable_nixl:
-                pythonhashseed = os.getenv("PYTHONHASHSEED")
-                if pythonhashseed is None:
+            if os.getenv("PYTHONHASHSEED") is None:
+                if config.remote_url is not None:
                     logger.warning(
                         "Centralized cache sharing detected "
                         "but PYTHONHASHSEED not set. "
                         "For consistent caching, set: export PYTHONHASHSEED=0 "
                         "before the engine starts."
+                    )
+                if config.enable_nixl:
+                    logger.error(
+                        "P/D Disaggregation detected "
+                        "but PYTHONHASHSEED not set. "
+                        "For consistent caching, set: export PYTHONHASHSEED=0 "
+                        "before the engine starts. "
+                        "This will cause incorrect KV cache transfer."
                     )
         else:  # Default values
             self.chunk_size = 256
