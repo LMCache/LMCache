@@ -15,7 +15,6 @@
 # Standard
 from typing import TYPE_CHECKING, Optional
 import socket
-import os
 
 # Third Party
 import zmq
@@ -95,13 +94,17 @@ def get_zmq_rpc_path_lmcache(
     # Third Party
     import vllm.envs as envs
 
+    if vllm_config is None or vllm_config.kv_transfer_config is None:
+        raise ValueError("vllm_config with kv_transfer_config is required to determine the engine_id.")
+
     base_url = envs.VLLM_RPC_BASE_PATH
-    pid = os.getpid()
+
+    engine_id = vllm_config.kv_transfer_config.engine_id
 
     if isinstance(rpc_port, str):
         rpc_port = rpc_port + str(tp_rank)
     else:
         rpc_port += tp_rank
 
-    logger.debug("Base URL: %s, PID: %d, RPC Port: %s", base_url, pid, rpc_port)
-    return f"ipc://{base_url}/pid_{pid}_lmcache_rpc_port_{rpc_port}"
+    logger.debug("Base URL: %s, Engine: %d, RPC Port: %s", base_url, engine_id, rpc_port)
+    return f"ipc://{base_url}/engine_{engine_id}_lmcache_rpc_port_{rpc_port}"
