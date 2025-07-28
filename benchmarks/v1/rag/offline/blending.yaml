@@ -1,0 +1,15 @@
+# LMCache is set to use 256 tokens per chunk
+chunk_size: 256
+# Blending related config
+enable_blending: true
+blend_special_str: " # # "
+use_layerwise: true
+
+# Enable local CPU backend in LMCache
+local_cpu: true
+max_local_cpu_size: 30
+
+
+# Enable local disk backend in LMCache (if use)
+# local_disk: "file://local_disk/"
+# max_local_disk_size: 30
