@@ -45,7 +45,7 @@ from lmcache.v1.memory_management import (
     MemoryAllocatorInterface,
     MemoryFormat,
     MixedMemoryAllocator,
-    PagedTensorMemoryAllocator,
+    NixlCPUMemoryAllocator,
 )
 from lmcache.v1.storage_backend.storage_manager import StorageManager
 from lmcache.v1.token_database import (
@@ -119,7 +119,11 @@ class LMCacheEngine:
         )
 
         # HACK: remove this in the future
-        self.remove_after_retrieve = config.enable_nixl
+        # NOTE (Jiayi): This is currently used to support
+        # dropping the kv cache in nixl backend at decoder.
+        self.remove_after_retrieve = (
+            config.enable_nixl and config.nixl_role == "receiver"
+        )
 
         if self.enable_p2p:
             self.distributed_loop = asyncio.get_event_loop()
@@ -218,8 +222,6 @@ class LMCacheEngine:
             tokens, hashes, offsets, mask
         ):
             assert isinstance(key, CacheEngineKey)
-            if self.storage_manager.contains(key):
-                continue
             # Allocate the memory object
             num_tokens = end - start
             kv_shape = self.gpu_connector.get_shape(num_tokens)
@@ -249,9 +251,7 @@ class LMCacheEngine:
 
         t = time.perf_counter()
 
-        transfer_spec = None
-        if "transfer_spec" in kwargs:
-            transfer_spec = kwargs["transfer_spec"]
+        transfer_spec = kwargs.get("transfer_spec", None)
         self.storage_manager.batched_put(keys, memory_objs, transfer_spec=transfer_spec)
         put_time += time.perf_counter() - t
 
@@ -451,10 +451,16 @@ class LMCacheEngine:
                             self.distributed_loop,
                         )
                         memory_obj = future_memory_obj.result()
-                        reordered_keys.append(key)
-                        reordered_memory_objs.append(memory_obj)
-                        reordered_starts.append(start)
-                        reordered_ends.append(end)
+                        if memory_obj:
+                            reordered_keys.append(key)
+                            reordered_memory_objs.append(memory_obj)
+                            reordered_starts.append(start)
+                            reordered_ends.append(end)
+                            ret_mask[start:end] = True
+                        else:
+                            # NOTE: break for P2P retrieve KV because of no required
+                            # memory obj
+                            break
                         continue
                     break
 
@@ -499,9 +505,6 @@ class LMCacheEngine:
         for key, memory_obj in zip(reordered_keys, reordered_memory_objs, strict=False):
             if self.remove_after_retrieve:
                 self.storage_manager.remove(key)
-            # else:
-            #    memory_obj.unpin()
-
             memory_obj.ref_count_down()
 
         retrieved_tokens = torch.sum(ret_mask)
@@ -599,10 +602,6 @@ class LMCacheEngine:
                 mem_objs_layer = [task.result() for task in tasks]
                 mem_obj_consumer.send(mem_objs_layer)
                 to_count_down.extend(mem_objs_layer)
-
-            # TODO(Jiayi): Need to be done in a modular way
-            for keys_layer in keys_layer_major:
-                self.storage_manager.batched_unpin(keys_layer)
 
             for mem_obj in to_count_down:
                 mem_obj.ref_count_down()
@@ -754,6 +753,9 @@ class LMCacheEngine:
             self.lmcache_worker.close()
 
         self.storage_manager.close()
+
+        self.memory_allocator.close()
+
         logger.info("LMCacheEngine closed.")
 
 
@@ -788,12 +790,19 @@ class LMCacheEngineBuilder:
                     dtype=torch.uint8,
                     device=corrected_device,
                 )
-                return PagedTensorMemoryAllocator(
+                nixl_cpu_mem_allocator = NixlCPUMemoryAllocator()
+                nixl_cpu_mem_allocator.init_nixl_memory_allocator(
                     buffer,
                     torch.Size(metadata.kv_shape),
                     metadata.kv_dtype,
-                    MemoryFormat.KV_T2D,  # TODO: remove this hardcode
+                    MemoryFormat.KV_2LTD,  # TODO: remove this hardcode
                 )
+                if config.local_cpu:
+                    max_local_cpu_size = config.max_local_cpu_size
+                    nixl_cpu_mem_allocator.init_cpu_memory_allocator(
+                        int(max_local_cpu_size * 1024**3)
+                    )
+                return nixl_cpu_mem_allocator
             return AdHocMemoryAllocator(config.nixl_buffer_device)
 
         if config.weka_path is not None or config.gds_path is not None:

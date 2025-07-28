@@ -86,3 +86,24 @@ class RemoteConnector(metaclass=abc.ABCMeta):
 
         """
         raise NotImplementedError
+
+    def support_ping(self) -> bool:
+        """
+        Check if the connector supports ping operation
+
+        Returns:
+            True if ping is supported, False otherwise
+        """
+        return False
+
+    async def ping(self) -> int:
+        """
+        Ping the remote server
+
+        Returns:
+            The error code, 0 means success
+        """
+        raise NotImplementedError
+
+    def __repr__(self) -> str:
+        return f"<{self.__class__.__name__}>"

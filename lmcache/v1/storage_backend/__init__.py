@@ -63,29 +63,29 @@ def CreateStorageBackends(
             storage_backends["NixlBackend"] = NixlBackend.CreateNixlBackend(
                 config, metadata, memory_allocator
             )
+        else:
+            # First Party
+            from lmcache.v1.storage_backend.nixl_backend import NixlBackend
+
+            storage_backends["NixlBackend"] = NixlBackend.CreateNixlBackend(
+                config, metadata
+            )
             assert config.nixl_buffer_device is not None
-            return storage_backends
-
-        # First Party
-        from lmcache.v1.storage_backend.nixl_backend import NixlBackend
-
-        storage_backends["NixlBackend"] = NixlBackend.CreateNixlBackend(
-            config, metadata
-        )
-        assert config.nixl_buffer_device is not None
-        return storage_backends
 
     # TODO(Jiayi): The hierarchy is fixed for now
     # NOTE(Jiayi): The local_cpu backend is always created because
     # other backends might need it as a buffer.
-    local_cpu_backend = LocalCPUBackend(
-        config,
-        memory_allocator,
-        lookup_server,
-        lmcache_worker,
-    )
-    backend_name = str(local_cpu_backend)
-    storage_backends[backend_name] = local_cpu_backend
+    if config.enable_nixl and not config.local_cpu:
+        pass
+    else:
+        local_cpu_backend = LocalCPUBackend(
+            config,
+            memory_allocator,
+            lookup_server,
+            lmcache_worker,
+        )
+        backend_name = str(local_cpu_backend)
+        storage_backends[backend_name] = local_cpu_backend
 
     if config.local_disk and config.max_local_disk_size > 0:
         local_disk_backend = LocalDiskBackend(

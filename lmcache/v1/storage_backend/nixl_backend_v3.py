@@ -90,7 +90,11 @@ class NixlBackend(StorageBackendInterface):
         :return: True if the key exists, False otherwise
         """
         with self._data_lock:
-            return key in self._data
+            if mem_obj := self._data.get(key, None):
+                if pin:
+                    mem_obj.ref_count_up()
+                return True
+            return False
 
     def exists_in_put_tasks(self, key: CacheEngineKey) -> bool:
         """
@@ -123,8 +127,9 @@ class NixlBackend(StorageBackendInterface):
         """
 
         # NOTE: no eviction in PD
-
-        mem_obj = self.memory_allocator.allocate(shape=shape, dtype=dtype, fmt=fmt)
+        mem_obj = self.memory_allocator.allocate(
+            shape=shape, dtype=dtype, fmt=fmt, allocator_type="nixl"
+        )
 
         return mem_obj
 
@@ -195,7 +200,11 @@ class NixlBackend(StorageBackendInterface):
         :param key: The key to remove.
         """
         with self._data_lock:
-            return self._data.pop(key, None) is not None
+            if mem_obj := self._data.get(key, None):
+                if mem_obj.get_ref_count() == 1:
+                    del self._data[key]
+                return True
+            return False
 
     def close(self) -> None:
         """
@@ -204,10 +213,10 @@ class NixlBackend(StorageBackendInterface):
         self._nixl_channel.close()
 
     def pin(self, key: CacheEngineKey) -> bool:
-        raise NotImplementedError
+        return True
 
     def unpin(self, key: CacheEngineKey) -> bool:
-        raise NotImplementedError
+        return True
 
     # TODO (Jiayi): put this in _init__.py later
     @staticmethod
