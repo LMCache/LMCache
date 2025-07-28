@@ -16,7 +16,6 @@
 from collections import OrderedDict
 from typing import TYPE_CHECKING, Optional
 import asyncio
-import os
 
 # Third Party
 import torch
@@ -30,8 +29,7 @@ from lmcache.v1.memory_management import MemoryAllocatorInterface
 from lmcache.v1.storage_backend.abstract_backend import StorageBackendInterface
 from lmcache.v1.storage_backend.gds_backend import GdsBackend
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
-from lmcache.v1.storage_backend.local_disk_backend import LocalDiskBackend
-from lmcache.v1.storage_backend.local_disk_backend_v2 import LocalDiskBackendV2
+from lmcache.v1.storage_backend.local_disk_backend_v2 import LocalDiskBackend
 from lmcache.v1.storage_backend.remote_backend import RemoteBackend
 from lmcache.v1.storage_backend.weka_gds_backend import WekaGdsBackend
 
@@ -90,25 +88,15 @@ def CreateStorageBackends(
     storage_backends[backend_name] = local_cpu_backend
 
     if config.local_disk and config.max_local_disk_size > 0:
-        enable_disk_optim = bool(os.environ.get("LMCACHE_ENABLE_DISK_OPTIM", False))
-        if enable_disk_optim:
-            local_disk_backend = LocalDiskBackendV2(
-                config,
-                loop,
-                local_cpu_backend,
-                dst_device,
-                lmcache_worker,
-                lookup_server,
-            )
-        else:
-            local_disk_backend = LocalDiskBackend(
-                config,
-                loop,
-                local_cpu_backend,
-                dst_device,
-                lmcache_worker,
-                lookup_server,
-            )
+        local_disk_backend = LocalDiskBackend(
+            config,
+            loop,
+            local_cpu_backend,
+            dst_device,
+            lmcache_worker,
+            lookup_server,
+        )
+
         backend_name = str(local_disk_backend)
         storage_backends[backend_name] = local_disk_backend
 

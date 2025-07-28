@@ -158,7 +158,7 @@ class LocalDiskWorker:
 # FIXME(Jiayi): need batched prefetch
 
 
-class LocalDiskBackendV2(StorageBackendInterface):
+class LocalDiskBackend(StorageBackendInterface):
     def __init__(
         self,
         config: LMCacheEngineConfig,
@@ -390,10 +390,18 @@ class LocalDiskBackendV2(StorageBackendInterface):
             self.disk_lock.release()
             return None
 
-        if memory_obj := self.disk_worker.wait_prefetch_task(key):
-            self.disk_lock.release()
-            return memory_obj
+        self.disk_lock.release()
 
+        if memory_obj := self.disk_worker.wait_prefetch_task(key):
+            # NOTE(Jiayi): We don't directly use pin here as
+            # the memory_obj could be evicted from cpu backend
+            # before pin.
+            # TODO(Jiayi): Cache recency is not strictly
+            # handled in prefetching.
+            if self.local_cpu_backend.contains(key, pin=True):
+                return memory_obj
+
+        self.disk_lock.acquire()
         # Update cache recency
         self.evictor.update_on_hit(key, self.dict)
 
