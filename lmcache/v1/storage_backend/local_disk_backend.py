@@ -194,6 +194,9 @@ class LocalDiskBackend(StorageBackendInterface):
         stat = os.statvfs(self.path)
         self.os_disk_bs = stat.f_bsize
 
+        if config.extra_config is not None:
+            self.use_orirect = config.extra_config.get("use_os_direct", False)
+
         self.disk_worker = LocalDiskWorker()
 
         self.lmcache_worker = lmcache_worker
@@ -450,7 +453,7 @@ class LocalDiskBackend(StorageBackendInterface):
         self.stats_monitor.update_local_storage_usage(self.usage)
 
         # FIXME(Jiayi): need to add ref count in disk memory object
-        if size % self.os_disk_bs != 0:
+        if size % self.os_disk_bs != 0 or not self.use_orirect:
             with open(path, "wb") as f:
                 f.write(byte_array)
         else:
@@ -481,7 +484,7 @@ class LocalDiskBackend(StorageBackendInterface):
         # FIXME (Jiayi): handle the case where loading fails.
         buffer = memory_obj.byte_array
         size = len(buffer)
-        if size % self.os_disk_bs != 0:
+        if size % self.os_disk_bs != 0 or not self.use_orirect:
             logger.warning(
                 "Cannot use O_DIRECT for this file, "
                 "size is not aligned to disk block size."
@@ -520,7 +523,7 @@ class LocalDiskBackend(StorageBackendInterface):
 
         buffer = memory_obj.byte_array
         size = len(buffer)
-        if size % self.os_disk_bs != 0:
+        if size % self.os_disk_bs != 0 or not self.use_orirect:
             logger.warning(
                 "Cannot use O_DIRECT for this file, "
                 "size is not aligned to disk block size."
