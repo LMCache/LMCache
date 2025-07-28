@@ -150,6 +150,8 @@ def test_extract_and_load_back(num_tokens):
         slot_mapping,
     )
 
+    mem_allocator.close()
+
 
 @pytest.mark.parametrize("num_tokens", [256, 500, 1024, 8000])
 def test_multi_layer_kernel(num_tokens):
@@ -269,6 +271,8 @@ def test_multi_layer_kernel(num_tokens):
         kv_cache_new,
         slot_mapping,
     )
+
+    mem_allocator.close()
 
 
 @pytest.mark.parametrize("num_tokens", [256, 500, 1024, 8000])
@@ -398,6 +402,8 @@ def test_multi_layer_kernel_use_mla(num_tokens):
         )
 
         assert (left_reshaped[slot_mapping, :] == right_reshaped[slot_mapping, :]).all()
+
+    mem_allocator.close()
 
 
 @pytest.mark.parametrize("num_tokens", [256, 500, 1024, 8000])

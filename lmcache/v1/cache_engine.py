@@ -760,6 +760,9 @@ class LMCacheEngine:
             self.lmcache_worker.close()
 
         self.storage_manager.close()
+
+        self.memory_allocator.close()
+
         logger.info("LMCacheEngine closed.")
 
 
