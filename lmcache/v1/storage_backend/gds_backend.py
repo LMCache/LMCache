@@ -489,6 +489,8 @@ class GdsBackend(StorageBackendInterface):
         # )
 
         # TODO(Jiayi): Need to modify this when prefetch interface is determined.
+
+        # TODO(Jiayi): add `test_gds_backend_sanity` back after implementing this
         return False
 
     async def _async_load_bytes_from_disk(
