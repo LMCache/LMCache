@@ -360,6 +360,12 @@ class TensorMemoryObj(MemoryObj):
                 "Setting pin count back to 0 as a hack but please find the bug."
             )
             self.metadata.pin_count = 0
+        if (
+            self.meta.ref_count == 0
+            and self.parent_allocator is not None
+            and self.meta.pin_count == 0
+        ):
+            self.parent_allocator.free(self)
         return True
 
     @property
@@ -449,6 +455,12 @@ class BytesBufferMemoryObj(MemoryObj):
                 "Setting pin count back to 0 as a hack but please find the bug."
             )
             self.metadata.pin_count = 0
+        if (
+            self.meta.ref_count == 0
+            and self.parent_allocator is not None
+            and self.meta.pin_count == 0
+        ):
+            self.parent_allocator.free(self)
         return True
 
     def ref_count_up(self):
