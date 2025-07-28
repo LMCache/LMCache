@@ -41,7 +41,7 @@ def create_test_config(
     local_cpu: bool = True, use_layerwise: bool = False, enable_blending: bool = False
 ):
     """Create a test configuration for LocalCPUBackend."""
-    config = LMCacheEngineConfig.from_defaults(
+    config = LMCacheEngineConfig(
         chunk_size=256,
         local_cpu=local_cpu,
         use_layerwise=use_layerwise,

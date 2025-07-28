@@ -39,7 +39,7 @@ class MockLMCacheWorker:
 
 def create_test_config(disk_path: str, max_disk_size: float = 1.0):
     """Create a test configuration for LocalDiskBackend."""
-    config = LMCacheEngineConfig.from_defaults(
+    config = LMCacheEngineConfig(
         chunk_size=256,
         local_disk=disk_path,
         max_local_disk_size=max_disk_size,

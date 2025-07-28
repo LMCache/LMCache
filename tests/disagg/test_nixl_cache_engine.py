@@ -96,7 +96,7 @@ def calculate_throughput(total_bytes: int, elapsed_time: float) -> float:
 
 def create_config(role: str, host: str, port: int) -> LMCacheEngineConfig:
     """Create a configuration for the LMCacheEngine with Nixl backend."""
-    config = LMCacheEngineConfig.from_defaults(
+    config = LMCacheEngineConfig(
         chunk_size=256,
         local_cpu=False,  # Nixl requires local_cpu=False
         max_local_cpu_size=0,  # Nixl requires max_local_cpu_size=0
