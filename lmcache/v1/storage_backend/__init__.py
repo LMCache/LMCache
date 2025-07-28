@@ -29,7 +29,7 @@ from lmcache.v1.memory_management import MemoryAllocatorInterface
 from lmcache.v1.storage_backend.abstract_backend import StorageBackendInterface
 from lmcache.v1.storage_backend.gds_backend import GdsBackend
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
-from lmcache.v1.storage_backend.local_disk_backend_v2 import LocalDiskBackend
+from lmcache.v1.storage_backend.local_disk_backend import LocalDiskBackend
 from lmcache.v1.storage_backend.remote_backend import RemoteBackend
 from lmcache.v1.storage_backend.weka_gds_backend import WekaGdsBackend
 
