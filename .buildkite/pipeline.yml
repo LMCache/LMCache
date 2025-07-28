@@ -28,6 +28,7 @@ steps:
       - bash .buildkite/scripts/install-lmcache.sh
       - source .buildkite/scripts/pick-free-gpu.sh
       - |
+        CUDA_LAUNCH_BLOCKING=1 \
         LMCACHE_TRACK_USAGE="false" \
         pytest --maxfail=1 --cov=lmcache \
           --cov-report term --cov-report=html:coverage-test \

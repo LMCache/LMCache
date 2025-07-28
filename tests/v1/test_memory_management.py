@@ -61,6 +61,8 @@ def check_allocator(allocator, max_size):
 
     assert allocator.memcheck()
 
+    allocator.close()
+
 
 def check_paged_allocator(allocator, shape, dtype, fmt, max_num_pages):
     # Allocate one page
@@ -100,6 +102,8 @@ def check_paged_allocator(allocator, shape, dtype, fmt, max_num_pages):
 
     assert allocator.memcheck()
 
+    allocator.close()
+
 
 @pytest.mark.parametrize(
     "use_paging",
@@ -118,6 +122,8 @@ def test_tensor_allocator(use_paging):
     else:
         allocator = TensorMemoryAllocator(tensor_buffer)
         check_allocator(allocator, total_size)
+
+    allocator.close()
 
 
 @pytest.mark.parametrize(
@@ -153,6 +159,8 @@ def test_device_allocators(alloc_cls, use_paging):
     else:
         check_allocator(allocator, total_size)
 
+    allocator.close()
+
 
 @pytest.mark.parametrize(
     "alloc_cls",
@@ -178,6 +186,8 @@ def test_inplace_modification(alloc_cls):
     data.tensor[1] = 2.0
     assert data.tensor[1] == 2.0
 
+    allocator.close()
+
 
 @pytest.mark.parametrize(
     "alloc_cls",
@@ -202,6 +212,8 @@ def test_boundary_alloc(alloc_cls):
         assert len(allocator.pin_allocator.explicit_list) == 1
     else:
         assert len(allocator.allocator.explicit_list) == 1
+
+    allocator.close()
 
 
 @pytest.mark.parametrize(
@@ -234,6 +246,8 @@ def test_batched_alloc(alloc_cls):
     else:
         assert len(allocator.allocator.explicit_list) == 1
 
+    allocator.close()
+
 
 @pytest.mark.parametrize(
     "alloc_cls",
@@ -253,3 +267,5 @@ def test_mixed_alloc(alloc_cls):
     assert isinstance(data1, BytesBufferMemoryObj)
 
     assert len(data1.byte_array) == 512
+
+    allocator.close()
