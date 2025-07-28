@@ -395,7 +395,8 @@ class LMCacheConnectorV1Impl:
         self._discard_partial_chunks = (
             vllm_config.kv_transfer_config.get_from_extra_config(
                 "discard_partial_chunks", False
-            ) or not config.save_unfull_chunk
+            )
+            or not config.save_unfull_chunk
         )
 
         self._lmcache_chunk_size = config.chunk_size
