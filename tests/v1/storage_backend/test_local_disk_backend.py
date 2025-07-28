@@ -124,7 +124,6 @@ class TestLocalDiskBackend:
         assert backend.instance_id == "test_instance"
         assert backend.usage == 0
         assert len(backend.dict) == 0
-        assert len(backend.put_tasks) == 0
 
         local_cpu_backend.memory_allocator.close()
 
@@ -183,22 +182,6 @@ class TestLocalDiskBackend:
 
         assert local_disk_backend.contains(key)
         assert local_disk_backend.contains(key, pin=True)
-
-        local_disk_backend.local_cpu_backend.memory_allocator.close()
-
-    def test_exists_in_put_tasks(self, local_disk_backend):
-        """Test exists_in_put_tasks()."""
-        key = create_test_key("test_key")
-
-        # Initially not in put tasks
-        assert not local_disk_backend.exists_in_put_tasks(key)
-
-        # Add to put tasks
-        local_disk_backend.disk_lock.acquire()
-        local_disk_backend.put_tasks.append(key)
-        local_disk_backend.disk_lock.release()
-
-        assert local_disk_backend.exists_in_put_tasks(key)
 
         local_disk_backend.local_cpu_backend.memory_allocator.close()
 
@@ -372,29 +355,12 @@ class TestLocalDiskBackend:
 
         local_cpu_backend.memory_allocator.close()
 
-    def test_batched_submit_put_task(self, local_disk_backend):
-        """Test batched_submit_put_task()."""
-        keys = [create_test_key(f"key_{i}") for i in range(3)]
-        memory_objs = [create_test_memory_obj() for _ in range(3)]
-
-        futures = local_disk_backend.batched_submit_put_task(keys, memory_objs)
-
-        assert futures is not None
-        assert len(futures) == 3
-
-        # Wait for all tasks to complete
-        for future in futures:
-            assert future is not None
-            # Don't call future.result() to avoid blocking
-
-        local_disk_backend.local_cpu_backend.memory_allocator.close()
-
     def test_submit_prefetch_task_key_not_exists(self, local_disk_backend):
         """Test submit_prefetch_task() when key doesn't exist."""
         key = create_test_key("nonexistent")
-        future = local_disk_backend.submit_prefetch_task(key)
+        res = local_disk_backend.submit_prefetch_task(key)
 
-        assert future is None
+        assert not res
 
         local_disk_backend.local_cpu_backend.memory_allocator.close()
 
@@ -446,25 +412,6 @@ class TestLocalDiskBackend:
         assert isinstance(result, MemoryObj)
         assert result.metadata.shape == memory_obj.metadata.shape
         assert result.metadata.dtype == memory_obj.metadata.dtype
-
-        local_disk_backend.local_cpu_backend.memory_allocator.close()
-
-    def test_get_non_blocking(self, local_disk_backend):
-        """Test get_non_blocking()."""
-        key = create_test_key("test_key")
-        memory_obj = create_test_memory_obj()
-
-        # Insert key first
-        local_disk_backend.insert_key(key, memory_obj)
-
-        # Create the actual file on disk
-        path = local_disk_backend._key_to_path(key)
-        with open(path, "wb") as f:
-            f.write(memory_obj.byte_array)
-
-        future = local_disk_backend.get_non_blocking(key)
-
-        assert future is not None
 
         local_disk_backend.local_cpu_backend.memory_allocator.close()
 
@@ -533,36 +480,6 @@ class TestLocalDiskBackend:
 
         local_disk_backend.local_cpu_backend.memory_allocator.close()
 
-    def test_load_disk_bytes_backend(self, local_disk_backend):
-        """Test load_disk() with bytes backend."""
-        key = create_test_key("test_key")
-        memory_obj = create_test_memory_obj()
-
-        # Create the file first
-        path = local_disk_backend._key_to_path(key)
-        with open(path, "wb") as f:
-            f.write(memory_obj.byte_array)
-
-        result = local_disk_backend.load_disk(
-            path,
-            "bytes",
-            memory_obj.metadata.dtype,
-            memory_obj.metadata.shape,
-            memory_obj.metadata.fmt,
-        )
-
-        assert result is not None
-        assert isinstance(result, MemoryObj)
-
-        local_disk_backend.local_cpu_backend.memory_allocator.close()
-
-    def test_load_disk_invalid_backend(self, local_disk_backend):
-        """Test load_disk() with invalid backend."""
-        with pytest.raises(ValueError, match="Invalid backend"):
-            local_disk_backend.load_disk("dummy_path", "invalid_backend")
-
-        local_disk_backend.local_cpu_backend.memory_allocator.close()
-
     def test_close(self, temp_disk_path, async_loop, local_cpu_backend):
         """Test close()."""
         config = create_test_config(temp_disk_path)
@@ -610,29 +527,6 @@ class TestLocalDiskBackend:
             thread.join()
 
         local_disk_backend.local_cpu_backend.memory_allocator.close()
-
-    def test_memory_allocation_failure(
-        self, temp_disk_path, async_loop, local_cpu_backend
-    ):
-        """Test behavior when memory allocation fails."""
-        config = create_test_config(temp_disk_path)
-        backend = LocalDiskBackend(
-            config=config,
-            loop=async_loop,
-            local_cpu_backend=local_cpu_backend,
-            dst_device="cuda",
-        )
-
-        # Test the interface without triggering actual allocation
-        memory_obj = create_test_memory_obj()
-
-        # Test that the submit_put_task interface works
-        future = backend.submit_put_task(create_test_key("test_key"), memory_obj)
-
-        # The operation should not crash
-        assert future is not None
-
-        local_cpu_backend.memory_allocator.close()
 
     def test_file_operations_error_handling(self, local_disk_backend):
         """Test error handling in file operations."""

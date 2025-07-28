@@ -369,20 +369,23 @@ class WekaGdsBackend(StorageBackendInterface):
     def submit_prefetch_task(
         self,
         key: CacheEngineKey,
-    ) -> Optional[Future]:
-        with self.hot_lock:
-            entry = self.hot_cache.get(key)
-        if entry is None:
-            return None
+    ) -> bool:
+        # with self.hot_lock:
+        #     entry = self.hot_cache.get(key)
+        # if entry is None:
+        #     return None
 
-        path = entry.path
-        dtype = entry.dtype
-        shape = entry.shape
-        assert dtype is not None
-        assert shape is not None
-        return asyncio.run_coroutine_threadsafe(
-            self._async_load_bytes_from_disk(key, path, dtype, shape), self.loop
-        )
+        # path = entry.path
+        # dtype = entry.dtype
+        # shape = entry.shape
+        # assert dtype is not None
+        # assert shape is not None
+        # return asyncio.run_coroutine_threadsafe(
+        #     self._async_load_bytes_from_disk(key, path, dtype, shape), self.loop
+        # )
+
+        # TODO(Jiayi): Need to modify this when prefetch interface is determined.
+        return False
 
     async def _async_load_bytes_from_disk(
         self,

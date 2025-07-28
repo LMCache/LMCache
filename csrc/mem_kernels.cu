@@ -289,14 +289,13 @@ T* get_kernel_ptr(TENSOR_TYPE& tensor) {
   torch::Device device = tensor.device();
   if (device.is_cuda()) {
     return static_cast<T*>(tensor.data_ptr());
-  } else if (device.is_cpu() && tensor.is_pinned()) {
-    T* ptr;
-    cudaHostGetDevicePointer((void**)&ptr,
-                             static_cast<void*>(tensor.data_ptr()), 0);
-    return ptr;
   } else if (device.is_cpu()) {
-    // return NULL;
-    TORCH_CHECK(false, "Invalid device. Device must be cuda or pinned cpu.");
+    T* ptr;
+    auto st = cudaHostGetDevicePointer(
+        (void**)&ptr, static_cast<void*>(tensor.data_ptr()), 0);
+    TORCH_CHECK(st == cudaSuccess,
+                "Host tensor not registered/pinned (or bad ptr)");
+    return ptr;
   } else {
     TORCH_CHECK(false, "Invalid device. Device must be cuda or pinned cpu.");
   }
