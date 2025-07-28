@@ -46,11 +46,13 @@ class RemoteConnector(metaclass=abc.ABCMeta):
         config: Optional[LMCacheEngineConfig],
         metadata: Optional[LMCacheEngineMetadata],
     ) -> None:
+        # TODO: support layerwise later
         if (
             config is None
             or metadata is None
             or config.extra_config is None
             or config.extra_config.get("save_chunk_meta", True)
+            or config.use_layerwise
         ):
             return
 
@@ -102,7 +104,7 @@ class RemoteConnector(metaclass=abc.ABCMeta):
             )
 
         if bytes_read == self.full_chunk_size:
-            # full chunk
+            # full chunk, return directly
             return memory_obj
 
         # NOTE: for unfull chunk, we have no way to verify
