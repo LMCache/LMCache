@@ -13,7 +13,7 @@
 # limitations under the License.
 
 # Standard
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Optional, Literal
 import socket
 
 # Third Party
@@ -28,6 +28,8 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
 logger = init_logger(__name__)
+
+ServiceKind = Literal["lookup", "offload"]
 
 
 def get_zmq_context():
@@ -87,24 +89,29 @@ def get_ip():
 
 def get_zmq_rpc_path_lmcache(
     vllm_config: Optional["VllmConfig"] = None,
-    rpc_port: int = 0,
+    service_name: ServiceKind = "lookup",
     tp_rank: int = 0,
 ) -> str:
-    """Get the ZMQ RPC path for LMCache lookup communication."""
+    """Get the ZMQ RPC path for LMCache lookup and offload communication."""
     # Third Party
     import vllm.envs as envs
 
     if vllm_config is None or vllm_config.kv_transfer_config is None:
-        raise ValueError("vllm_config with kv_transfer_config is required to determine the engine_id.")
+        raise ValueError(
+            "vllm_config with kv_transfer_config is required to determine the engine_id."
+        )
+
+    if service_name not in {"lookup", "offload"}:
+        raise ValueError(
+            f"service_name must be 'lookup' or 'offload', got {service_name!r}"
+        )
 
     base_url = envs.VLLM_RPC_BASE_PATH
 
     engine_id = vllm_config.kv_transfer_config.engine_id
 
-    if isinstance(rpc_port, str):
-        rpc_port = rpc_port + str(tp_rank)
-    else:
-        rpc_port += tp_rank
-
-    logger.debug("Base URL: %s, Engine: %d, RPC Port: %s", base_url, engine_id, rpc_port)
-    return f"ipc://{base_url}/engine_{engine_id}_lmcache_rpc_port_{rpc_port}"
+    logger.debug(
+        "Base URL: %s, Engine: %d, Service Name: %s, TP Rank: %s", 
+        base_url, engine_id, service_name, tp_rank
+    )
+    return f"ipc://{base_url}/engine_{engine_id}_service_{service_name}_tp_rank_{tp_rank}"
