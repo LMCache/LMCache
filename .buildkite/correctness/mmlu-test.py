@@ -29,7 +29,10 @@ def prompt_string(df, idx, include_answer=True):
     k = df.shape[1] - 2  # number of columns - 2 (question and answer)
     for i in range(k):
         prompt += f"\n{choices[i]}. {df.iloc[idx, i + 1]}"
-    prompt += "\nAnswer:"
+    prompt += '\n You must answer with a single letter only. \
+                Either "A", "B", "C", or "D". \
+                Do not include any other text in your response. \
+                Answer:'
     if include_answer:
         prompt += f" {df.iloc[idx, k]}\n\n"
     return prompt
