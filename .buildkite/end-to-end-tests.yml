@@ -2,9 +2,9 @@ steps:
   - label: ":pip: Prepare venv"
     key: "venv"
     command: |
-      - bash .buildkite/scripts/install-env.sh
-      - tar -czf venv.tar.gz .venv
-      - buildkite-agent artifact upload venv.tar.gz
+      bash .buildkite/scripts/install-env.sh
+      tar -czf venv.tar.gz .venv
+      buildkite-agent artifact upload venv.tar.gz
 
   - label: ":checkered_flag: Run tests"
     key: "test"
