@@ -347,20 +347,26 @@ class TensorMemoryObj(MemoryObj):
             return self.meta.ref_count
 
     def pin(self) -> bool:
-        self.metadata.pin_count += 1
-        return True
+        with self.lock:
+            self.meta.pin_count += 1
+            return True
 
     def unpin(self) -> bool:
-        self.metadata.pin_count -= 1
-        if self.metadata.pin_count < 0:
-            logger.warning(
-                f"Pin count of MemoryObj {self.meta.address}"
-                f"is negative: {self.meta.pin_count}."
-                "Double unpin occurred somewhere."
-                "Setting pin count back to 0 as a hack but please find the bug."
-            )
-            self.metadata.pin_count = 0
-        return True
+        with self.lock:
+            self.meta.pin_count -= 1
+
+            if self.meta.pin_count <= 0 and self.meta.ref_count <= 0:
+                self.parent_allocator.free(self)
+
+            if self.meta.pin_count < 0:
+                logger.warning(
+                    f"Pin count of MemoryObj {self.meta.address}"
+                    f"is negative: {self.meta.pin_count}."
+                    "Double unpin occurred somewhere."
+                    "Setting pin count back to 0 as a hack but please find the bug."
+                )
+                self.meta.pin_count = 0
+            return True
 
     @property
     def metadata(self) -> MemoryObjMetadata:
@@ -556,6 +562,13 @@ class MemoryAllocatorInterface(metaclass=abc.ABCMeta):
             to free.
         """
         raise NotImplementedError
+
+    def close(self):
+        """
+        Closes the memory allocator.
+        This is called when the LMCacheEngine is closed.
+        """
+        return
 
 
 class TensorMemoryAllocator(MemoryAllocatorInterface):
@@ -886,9 +899,6 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
                 logger.error("This implies a bug in the memory allocator")
                 clear = False
         return clear
-
-    def __del__(self):
-        del self.buffer
 
 
 class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
@@ -1270,7 +1280,14 @@ class PinMemoryAllocator(MemoryAllocatorInterface):
         """
         :param int size: The size of the pinned memory in bytes.
         """
-        buffer = torch.empty(size, dtype=torch.uint8, pin_memory=True)
+
+        self.buffer = torch.empty(size, dtype=torch.uint8)
+        ptr = self.buffer.data_ptr()
+        err = torch.cuda.cudart().cudaHostRegister(ptr, size, 0)
+        assert err == 0, (
+            f"cudaHostRegister failed: {torch.cuda.cudart().cudaGetErrorString(err)}"
+        )
+        self._unregistered = False
 
         if use_paging:
             assert "shape" in kwargs, (
@@ -1281,13 +1298,13 @@ class PinMemoryAllocator(MemoryAllocatorInterface):
             )
             assert "fmt" in kwargs, "fmt must be specified for paged memory allocator"
             self.allocator = PagedTensorMemoryAllocator(
-                tensor=buffer,
+                tensor=self.buffer,
                 shape=kwargs["shape"],
                 dtype=kwargs["dtype"],
                 fmt=kwargs["fmt"],
             )
         else:
-            self.allocator = TensorMemoryAllocator(buffer)
+            self.allocator = TensorMemoryAllocator(self.buffer)
 
         self.host_mem_lock = threading.Lock() if not use_paging else nullcontext()
 
@@ -1333,6 +1350,12 @@ class PinMemoryAllocator(MemoryAllocatorInterface):
         with self.host_mem_lock:
             return self.allocator.memcheck()
 
+    def close(self):
+        if not self._unregistered:
+            torch.cuda.synchronize()
+            torch.cuda.cudart().cudaHostUnregister(self.buffer.data_ptr())
+            self._unregistered = True
+
 
 class MixedMemoryAllocator(MemoryAllocatorInterface):
     """
@@ -1344,7 +1367,14 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
         """
         :param int size: The size of the pinned memory in bytes.
         """
-        buffer = torch.empty(size, dtype=torch.uint8, pin_memory=True)
+
+        self.buffer = torch.empty(size, dtype=torch.uint8)
+        ptr = self.buffer.data_ptr()
+        err = torch.cuda.cudart().cudaHostRegister(ptr, size, 0)
+        assert err == 0, (
+            f"cudaHostRegister failed: {torch.cuda.cudart().cudaGetErrorString(err)}"
+        )
+        self._unregistered = False
 
         if use_paging:
             assert "shape" in kwargs, (
@@ -1355,13 +1385,13 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
             )
             assert "fmt" in kwargs, "fmt must be specified for paged memory allocator"
             self.pin_allocator = PagedTensorMemoryAllocator(
-                tensor=buffer,
+                tensor=self.buffer,
                 shape=kwargs["shape"],
                 dtype=kwargs["dtype"],
                 fmt=kwargs["fmt"],
             )
         else:
-            self.pin_allocator = TensorMemoryAllocator(buffer)
+            self.pin_allocator = TensorMemoryAllocator(self.buffer)
 
         self.host_mem_lock = threading.Lock() if not use_paging else nullcontext()
 
@@ -1453,6 +1483,12 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
     def memcheck(self):
         with self.host_mem_lock:
             return self.pin_allocator.memcheck()
+
+    def close(self):
+        if not self._unregistered:
+            torch.cuda.synchronize()
+            torch.cuda.cudart().cudaHostUnregister(self.buffer.data_ptr())
+            self._unregistered = True
 
 
 class GPUMemoryAllocator(MemoryAllocatorInterface):

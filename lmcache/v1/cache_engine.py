@@ -629,7 +629,7 @@ class LMCacheEngine:
     @_lmcache_nvtx_annotate
     def prefetch(
         self,
-        tokens: torch.Tensor,
+        tokens: Union[torch.Tensor, List[int]],
         mask: Optional[torch.Tensor] = None,
     ) -> None:
         """Launch the prefetching process in the storage manager to load the
@@ -753,6 +753,9 @@ class LMCacheEngine:
             self.lmcache_worker.close()
 
         self.storage_manager.close()
+
+        self.memory_allocator.close()
+
         logger.info("LMCacheEngine closed.")
 
 
