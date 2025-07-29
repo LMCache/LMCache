@@ -263,38 +263,38 @@ class LMCacheEngineConfig:
         # TODO (ApostaC): Add nixl config
         if backend == "cpu":
             local_cpu = True
-            max_local_cpu_size = 5
+            max_local_cpu_size = 2
             local_disk = None
             max_local_disk_size = 0
             remote_url = None
         elif backend == "local_disk":
             local_cpu = False
-            max_local_cpu_size = 5
+            max_local_cpu_size = 2
             local_disk = "local/disk_test/local_disk/"
             max_local_disk_size = 5
             remote_url = None
         elif backend == "local_cpu_disk":
             local_cpu = True
-            max_local_cpu_size = 5
+            max_local_cpu_size = 2
             local_disk = "local/disk_test/local_disk/"
             max_local_disk_size = 5
             remote_url = None
         elif backend == "remote":
             local_cpu = False
-            max_local_cpu_size = 5
+            max_local_cpu_size = 2
             local_disk = None
         elif backend == "local_cpu_remote":
             local_cpu = True
-            max_local_cpu_size = 5
+            max_local_cpu_size = 2
             local_disk = None
         elif backend == "local_disk_remote":
             local_cpu = False
-            max_local_cpu_size = 5
+            max_local_cpu_size = 2
             local_disk = "local/disk_test/local_disk/"
             max_local_disk_size = 5
         elif backend == "local_cpu_disk_remote":
             local_cpu = True
-            max_local_cpu_size = 5
+            max_local_cpu_size = 2
             local_disk = "local/disk_test/local_disk/"
             max_local_disk_size = 5
         else:
