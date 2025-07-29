@@ -13,7 +13,7 @@
 # limitations under the License.
 
 # Standard
-from typing import TYPE_CHECKING, Optional, Literal
+from typing import TYPE_CHECKING, Literal, Optional
 import socket
 
 # Third Party
@@ -90,6 +90,7 @@ def get_ip():
 def get_zmq_rpc_path_lmcache(
     vllm_config: Optional["VllmConfig"] = None,
     service_name: ServiceKind = "lookup",
+    rpc_port: int = 0,
     tp_rank: int = 0,
 ) -> str:
     """Get the ZMQ RPC path for LMCache lookup and offload communication."""
@@ -110,8 +111,19 @@ def get_zmq_rpc_path_lmcache(
 
     engine_id = vllm_config.kv_transfer_config.engine_id
 
+    if isinstance(rpc_port, str):
+        rpc_port = rpc_port + str(tp_rank)
+    else:
+        rpc_port += tp_rank
+
     logger.debug(
-        "Base URL: %s, Engine: %d, Service Name: %s, TP Rank: %s", 
-        base_url, engine_id, service_name, tp_rank
+        "Base URL: %s, Engine: %s, Service Name: %s, RPC Port: %s", 
+        base_url, 
+        engine_id, 
+        service_name, 
+        rpc_port
     )
-    return f"ipc://{base_url}/engine_{engine_id}_service_{service_name}_tp_rank_{tp_rank}"
+
+    return (
+        f"ipc://{base_url}/engine_{engine_id}_service_{service_name}_lmcache_rpc_port_{rpc_port}"
+    )
