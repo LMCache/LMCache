@@ -61,7 +61,7 @@ class KVController:
         """
         instance_id = msg.instance_id
         worker_id = msg.worker_id
-        key = msg.key
+        key = str(msg.key)
         location = msg.location
         if key not in self.kv_pool:
             self.kv_pool[key] = []
@@ -73,7 +73,7 @@ class KVController:
         """
         instance_id = msg.instance_id
         worker_id = msg.worker_id
-        key = msg.key
+        key = str(msg.key)
         location = msg.location
 
         if key not in self.kv_pool:

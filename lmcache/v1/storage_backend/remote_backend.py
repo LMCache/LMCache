@@ -198,7 +198,7 @@ class RemoteBackend(StorageBackendInterface):
     def submit_prefetch_task(
         self,
         key: CacheEngineKey,
-    ) -> Optional[Future]:
+    ) -> bool:
         raise NotImplementedError
 
     @_lmcache_nvtx_annotate
