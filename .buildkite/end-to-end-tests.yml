@@ -3,8 +3,8 @@ steps:
     key: "venv"
     plugins:
       - cache#v1.7.0:
-          key-extra: "venv-{{ BUILDKITE_BUILD_ID }}"
-          path: ".venv-{{ BUILDKITE_BUILD_ID }}"
+          key-extra: "venv-$BUILDKITE_BUILD_ID"
+          path: ".venv-$BUILDKITE_BUILD_ID"
           save: "pipeline"
           force: "true"
     command:
@@ -15,8 +15,8 @@ steps:
     depends_on: ["venv"]
     plugins:
       - cache#v1.7.0:
-          key-extra: "venv-{{ BUILDKITE_BUILD_ID }}"
-          path: ".venv-{{ BUILDKITE_BUILD_ID }}"
+          key-extra: "venv-$BUILDKITE_BUILD_ID"
+          path: ".venv-$BUILDKITE_BUILD_ID"
           restore: "pipeline"
     command: |
       bash .buildkite/scripts/end-to-end-test.sh $BUILDKITE_BUILD_ID
