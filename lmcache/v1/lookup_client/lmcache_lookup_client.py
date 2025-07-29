@@ -46,7 +46,9 @@ class LMCacheLookupClient(LookupClientInterface):
         )
         self.tensor_parallel_size = vllm_config.parallel_config.tensor_parallel_size
         for tp_rank in range(self.tensor_parallel_size):
-            socket_path = get_zmq_rpc_path_lmcache(vllm_config, "lookup", rpc_port, tp_rank)
+            socket_path = get_zmq_rpc_path_lmcache(
+                vllm_config, "lookup", rpc_port, tp_rank
+            )
             if tp_rank == 0:
                 self.socket = make_zmq_socket(
                     self.ctx,

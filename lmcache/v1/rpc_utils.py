@@ -98,9 +98,7 @@ def get_zmq_rpc_path_lmcache(
     import vllm.envs as envs
 
     if vllm_config is None or vllm_config.kv_transfer_config is None:
-        raise ValueError(
-            "vllm_config with kv_transfer_config is required to determine the engine_id."
-        )
+        raise ValueError("A valid kv_transfer_config with engine_id is required.")
 
     if service_name not in {"lookup", "offload"}:
         raise ValueError(
@@ -117,13 +115,16 @@ def get_zmq_rpc_path_lmcache(
         rpc_port += tp_rank
 
     logger.debug(
-        "Base URL: %s, Engine: %s, Service Name: %s, RPC Port: %s", 
-        base_url, 
-        engine_id, 
-        service_name, 
-        rpc_port
+        "Base URL: %s, Engine: %s, Service Name: %s, RPC Port: %s",
+        base_url,
+        engine_id,
+        service_name,
+        rpc_port,
     )
 
-    return (
-        f"ipc://{base_url}/engine_{engine_id}_service_{service_name}_lmcache_rpc_port_{rpc_port}"
+    socket_path = (
+        f"{base_url}/engine_{engine_id}_service_{service_name}_"
+        f"lmcache_rpc_port_{rpc_port}"
     )
+
+    return socket_path
