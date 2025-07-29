@@ -93,8 +93,9 @@ def evaluate(args, llm, subject, dev_df, test_df):
         time.sleep(0.5)
 
     predictions = []
-    for output in outputs:
-        prediction = output.outputs[0].text
+    for output_list in outputs:
+        prediction = output_list[0].text
+        print(f"Model prediction: {prediction}")
         prediction_stripped = prediction.strip()
         if prediction_stripped and prediction_stripped[0] in choices:
             predictions.append(prediction_stripped[0])
