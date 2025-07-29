@@ -127,7 +127,7 @@ usage() {
 #########
 
 test_vllmopenai_server_with_lmcache_integrated() {
-    http_status_code=$(curl http://localhost:8000/v1/completions \
+    http_status_code=$(curl --max-time 60 http://localhost:8000/v1/completions \
             -w "%{http_code}" -o response-file.txt \
             -H "Content-Type: application/json" \
             -d '{
