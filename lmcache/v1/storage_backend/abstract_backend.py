@@ -90,7 +90,7 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
     def submit_prefetch_task(
         self,
         key: CacheEngineKey,
-    ) -> Optional[Future]:
+    ) -> bool:
         """
         An async function to get the MemoryObj from the storage backend.
 

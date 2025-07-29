@@ -42,7 +42,9 @@ class ZMQOffloadServer(OffloadServerInterface):
     ):
         self.ctx = zmq.Context()  # type: ignore[attr-defined]
         offload_rpc_port = int(os.environ.get("LMCACHE_OFFLOAD_RPC_PORT", 100))
-        socket_path = get_zmq_rpc_path_lmcache(vllm_config, offload_rpc_port, tp_rank)
+        socket_path = get_zmq_rpc_path_lmcache(
+            vllm_config, "offload", offload_rpc_port, tp_rank
+        )
         self.socket = make_zmq_socket(
             self.ctx,
             socket_path,
