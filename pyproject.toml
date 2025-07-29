@@ -6,7 +6,7 @@ requires = [
     "packaging>=24.2",
     "setuptools>=77.0.3,<81.0.0",
     "setuptools_scm>=8",
-    "torch==2.7.0",
+    "torch==2.7.1",
     "wheel",
 ]
 build-backend = "setuptools.build_meta"
@@ -141,7 +141,7 @@ skip = "pp*"
 environment = {TORCH_CUDA_ARCH_LIST = "7.0;7.5;8.0;8.6;8.9;9.0"}
 
 # Use the PyTorch manylinux image version '2_28' that contains CUDA 12.8
-# and torch 2.7 supports (https://pypi.org/project/torch/2.7.0/#files)
+# and torch 2.7 supports (https://pypi.org/project/torch/2.7.1/#files)
 manylinux-x86_64-image = "docker.io/pytorch/manylinux2_28-builder:cuda12.8"
 
 [tool.cibuildwheel.linux]
