@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # Third Party
 from utils import dumb_metadata, dumb_metadata_with_model_name, generate_tokens
 import pytest
