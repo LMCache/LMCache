@@ -176,7 +176,7 @@ if __name__ == "__main__":
     set_seed(42)  # some tokenizers may have randomness
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", type=str, required=True)
-    parser.add_argument("--number-of-subjects", type=int, default=8)
+    parser.add_argument("--number-of-subjects", type=int, default=6)
     parser.add_argument("--use-lmcache", action="store_true", default=False)
     args = parser.parse_args()
     if args.use_lmcache:
