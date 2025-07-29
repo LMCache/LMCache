@@ -680,6 +680,8 @@ def test_paged_hierarchy_retrieve(
     if backend in ["local_cpu_disk"]:
         subprocess.run(shlex.split("rm -rf local/disk_test/local_disk/"))
 
+    LMCacheEngineBuilder.destroy("test")
+
 
 @pytest.mark.parametrize(
     "backend",
