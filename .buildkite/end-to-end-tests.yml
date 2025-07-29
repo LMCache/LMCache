@@ -1,18 +1,11 @@
 steps:
-  - label: ":pip: Prepare venv"
-    key: "venv"
-    command: |
-      bash .buildkite/scripts/install-env.sh
-      tar -czf venv.tar.gz .venv
-      buildkite-agent artifact upload venv.tar.gz
-
-  - label: ":checkered_flag: Run tests"
+  - label: ":checkered_flag: Prepare venv + Run tests"
     key: "test"
-    depends_on: ["venv"]
-    command: |
-      buildkite-agent artifact download venv.tar.gz .
-      tar -xzf venv.tar.gz
-      bash .buildkite/scripts/end-to-end-test.sh
+    command:
+      - bash .buildkite/scripts/install-env.sh
+      - tar -czf venv.tar.gz .venv
+      - tar -xzf venv.tar.gz
+      - bash .buildkite/scripts/end-to-end-test.sh
     artifact_paths:
       - "test_local_cpu_experimental.csv"
       - "test_local_cpu_experimental.pdf"

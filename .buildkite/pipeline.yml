@@ -2,38 +2,27 @@ env:
   PATH: "$HOME/.local/bin:$PATH"
 
 steps:
-  - label: ":pip: Prepare venv"
-    key: "venv"
-    command: |
-      bash .buildkite/scripts/install-env.sh
-      tar -czf venv.tar.gz .venv
-      buildkite-agent artifact upload venv.tar.gz
-
-  - label: ":pytest: Run pytest"
+  - label: ":pytest: Prepare venv + Run pytest"
     key: "pytest"
-    depends_on:
-      - "venv"
     timeout_in_minutes: 25
     command: |
-      # Download and extract venv
-      buildkite-agent artifact download venv.tar.gz .
-      tar -xzf venv.tar.gz
-      
-      # Activate venv and set up environment
+      # Install env and activate
+      bash .buildkite/scripts/install-env.sh
       source .venv/bin/activate
-      
-      # Install LMCache in the activated environment
+
+      # Install LMCache
       bash .buildkite/scripts/install-lmcache.sh
-      
-      # Set up CUDA environment (from install-env.sh)
+
+      # Set up CUDA environment
       export CUDA_VERSION="12.1"
       export CUDA_HOME="/usr/local/cuda-${CUDA_VERSION}"
       export LD_LIBRARY_PATH="${CUDA_HOME}/lib64:${LD_LIBRARY_PATH:-}"
       export PATH="${CUDA_HOME}/bin:${PATH}"
-      
-      # Pick GPU and run tests in the same shell session
+
+      # Pick GPU
       source .buildkite/scripts/pick-free-gpu.sh
-      
+
+      # Run pytest
       CUDA_LAUNCH_BLOCKING=1 \
       LMCACHE_TRACK_USAGE="false" \
       pytest --maxfail=1 --cov=lmcache \
