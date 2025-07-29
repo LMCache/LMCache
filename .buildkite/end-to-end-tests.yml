@@ -1,24 +1,17 @@
 steps:
   - label: ":pip: Prepare venv"
     key: "venv"
-    plugins:
-      - cache#v1.7.0:
-          key-extra: "venv-{{ BUILDKITE_BUILD_ID }}"
-          path: ".venv"
-          save: "pipeline"
-          force: "true"
-    command:
+    command: |
       - bash .buildkite/scripts/install-env.sh
+      - tar -czf venv.tar.gz .venv
+      - buildkite-agent artifact upload venv.tar.gz
 
   - label: ":checkered_flag: Run tests"
     key: "test"
     depends_on: ["venv"]
-    plugins:
-      - cache#v1.7.0:
-          key-extra: "venv-{{ BUILDKITE_BUILD_ID }}"
-          path: ".venv"
-          restore: "pipeline"
     command: |
+      buildkite-agent artifact download venv.tar.gz .
+      tar -xzf venv.tar.gz
       bash .buildkite/scripts/end-to-end-test.sh
     artifact_paths:
       - "test_local_cpu_experimental.csv"

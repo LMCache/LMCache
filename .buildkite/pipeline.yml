@@ -4,26 +4,20 @@ env:
 steps:
   - label: ":pip: Prepare venv"
     key: "venv"
-    plugins:
-      - cache#v1.7.0:
-          key-extra: "venv-{{ BUILDKITE_BUILD_ID }}"
-          path: ".venv"
-          save: "pipeline"
-          force: "true"
-    command:
+    command: |
       - bash .buildkite/scripts/install-env.sh
+      - tar -czf venv.tar.gz .venv
+      - buildkite-agent artifact upload venv.tar.gz
+
 
   - label: ":pytest: Run pytest"
     key: "pytest"
     depends_on:
       - "venv"
     timeout_in_minutes: 25
-    plugins:
-      - cache#v1.7.0:
-          key-extra: "venv-{{ BUILDKITE_BUILD_ID }}"
-          path: ".venv"
-          restore: "pipeline"
-    command:
+    command: |
+      buildkite-agent artifact download venv.tar.gz .
+      tar -xzf venv.tar.gz
       - source .venv/bin/activate
       - bash .buildkite/scripts/install-lmcache.sh
       - source .buildkite/scripts/pick-free-gpu.sh

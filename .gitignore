@@ -119,3 +119,6 @@ lmcache/experimental/tests
 
 # Ignore all log files
 *.log
+
+# Data files
+**/*jsonl*
