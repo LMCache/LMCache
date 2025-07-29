@@ -2,7 +2,6 @@
 import argparse
 import json
 import os
-import time
 
 # Third Party
 from tqdm import tqdm
@@ -16,6 +15,7 @@ import pandas as pd
 
 # setting PYTHONHASHSEED derandomizes token chunking
 os.environ["PYTHONHASHSEED"] = "0"
+os.environ["LMCACHE_MAX_LOCAL_CPU_SIZE"] = "30"
 
 global tokenizer
 choices = ["A", "B", "C", "D"]
@@ -84,20 +84,14 @@ def evaluate(args, llm, subject, dev_df, test_df):
         stop=None,
     )
 
-    # even though offline serving can batch all the prompts, we do them one at a time
-    # to keep the vllm scheduler deterministic
-    outputs = []
-    for prompt in prompts:
-        # if we use lmcache, we need to first populate the kv cache
-        if args.use_lmcache:
-            llm.generate(prompt, sampling_params)
-            time.sleep(0.5)
-        outputs.append(llm.generate(prompt, sampling_params))
-        time.sleep(0.5)
+    # if using lmcache, we need to first populate the kv cache
+    if args.use_lmcache:
+        llm.generate(prompts, sampling_params)
+    outputs = llm.generate(prompts, sampling_params)
 
     predictions = []
-    for output_list in outputs:
-        prediction = output_list[0].outputs[0].text
+    for output in outputs:
+        prediction = output.outputs[0].text
         print(f"Model raw prediction: {prediction}")
         prediction_stripped = prediction.strip()
         if prediction_stripped and prediction_stripped[0] in choices:
@@ -182,7 +176,7 @@ if __name__ == "__main__":
     set_seed(42)  # some tokenizers may have randomness
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", type=str, required=True)
-    parser.add_argument("--number-of-subjects", type=int, default=25)
+    parser.add_argument("--number-of-subjects", type=int, default=8)
     parser.add_argument("--use-lmcache", action="store_true", default=False)
     args = parser.parse_args()
     if args.use_lmcache:
