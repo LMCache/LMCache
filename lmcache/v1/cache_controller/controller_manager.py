@@ -168,5 +168,4 @@ class LMCacheControllerManager:
     async def start_all(self):
         await asyncio.gather(
             self.handle_batched_request(self.controller_socket),
-            # self.handle_batched_request(other socket),
         )
