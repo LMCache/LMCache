@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
 
 # This script implements a health check probe for the LMCache server.
 # It performs the following functions:
