@@ -2,7 +2,14 @@
 
 set -euo pipefail
 
-VENV_DIR=".venv"
+if [[ -z "${1:-}" ]]; then
+  echo "Usage: $0 <BUILDKITE_BUILD_ID>" >&2
+  exit 1
+fi
+
+BUILDKITE_BUILD_ID="$1"
+
+VENV_DIR=".venv-$BUILDKITE_BUILD_ID"
 PYTHON_BIN="/usr/bin/python3.10"
 if [[ -d "$VENV_DIR" ]]; then
   echo "⟳ Using existing venv: $(pwd)/$VENV_DIR"
