@@ -1368,7 +1368,7 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
         :param int size: The size of the pinned memory in bytes.
         """
 
-        self.buffer = torch.empty(size, dtype=torch.uint8)
+        self.buffer = torch.empty(size, dtype=torch.uint8, device="cpu")
         ptr = self.buffer.data_ptr()
         err = torch.cuda.cudart().cudaHostRegister(ptr, size, 0)
         assert err == 0, (
