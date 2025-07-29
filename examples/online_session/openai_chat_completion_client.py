@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
 """
 Interactive TTFT‑benchmark with optional (opt‑in) KV‑cache flush + repeats.
 

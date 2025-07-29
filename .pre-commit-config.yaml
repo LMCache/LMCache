@@ -1,4 +1,11 @@
 repos:
+- repo: local
+  hooks:
+  - id: check-spdx-header
+    name: Check SPDX headers
+    entry: python tools/check_spdx_header.py
+    language: python
+    types: [python]
 - repo: https://github.com/PyCQA/isort
   rev: 6.0.1
   hooks:
