@@ -6,9 +6,10 @@ steps:
     key: "test"
     timeout_in_minutes: 60
     soft_fail: true  # Continue pipeline even if this fails
-    commands:
-      - chmod +x .buildkite/scripts/vllm-integration-tests.sh
-      - .buildkite/scripts/vllm-integration-tests.sh --hf-token=$HF_TOKEN --server-wait-timeout=240
+    commands |
+      echo "BUILDKITE_BUILD_ID: $BUILDKITE_BUILD_ID"
+      chmod +x .buildkite/scripts/vllm-integration-tests.sh
+      .buildkite/scripts/vllm-integration-tests.sh --hf-token=$HF_TOKEN --server-wait-timeout=240
   
   - label: ":broom: Cleanup Docker"
     key: "clean"
