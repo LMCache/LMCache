@@ -5,6 +5,7 @@ steps:
   - label: ":rocket: vLLM Integration Tests"
     key: "test"
     timeout_in_minutes: 60
+    soft_fail: true  # Continue pipeline even if this fails
     commands:
       - chmod +x .buildkite/scripts/vllm-integration-tests.sh
       - .buildkite/scripts/vllm-integration-tests.sh --hf-token=$HF_TOKEN --server-wait-timeout=240

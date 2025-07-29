@@ -1,5 +1,12 @@
 #!/bin/bash
 
+if [[ -z "${1:-}" ]]; then
+  echo "Usage: $0 <BUILDKITE_BUILD_ID>" >&2
+  exit 1
+fi
+
+BUILDKITE_BUILD_ID="$1"
+
 VENV_DIR=".venv"
 PYTHON_BIN="/usr/bin/python3.10"
 if [[ -d "$VENV_DIR" ]]; then
@@ -10,7 +17,7 @@ else
   uv venv --python "$PYTHON_BIN" "$VENV_DIR"
 fi
 
-source .venv/bin/activate
+source .venv-$BUILDKITE_BUILD_ID/bin/activate
 uv pip install -e .
 uv pip install matplotlib
 uv pip install pandas

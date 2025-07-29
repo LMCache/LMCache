@@ -4,7 +4,7 @@ steps:
     plugins:
       - cache#v1.7.0:
           key-extra: "venv-{{ BUILDKITE_BUILD_ID }}"
-          path: ".venv"
+          path: ".venv-{{ BUILDKITE_BUILD_ID }}"
           save: "pipeline"
           force: "true"
     command:
@@ -16,10 +16,10 @@ steps:
     plugins:
       - cache#v1.7.0:
           key-extra: "venv-{{ BUILDKITE_BUILD_ID }}"
-          path: ".venv"
+          path: ".venv-{{ BUILDKITE_BUILD_ID }}"
           restore: "pipeline"
     command: |
-      bash .buildkite/scripts/end-to-end-test.sh
+      bash .buildkite/scripts/end-to-end-test.sh {{ BUILDKITE_BUILD_ID }}
     artifact_paths:
       - "test_local_cpu_experimental.csv"
       - "test_local_cpu_experimental.pdf"
