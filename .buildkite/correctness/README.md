@@ -25,6 +25,12 @@ To ensure the speed of the MMLU Correctness tests, please conduct the following 
 
 1. Create a virtual environment at `your_absolute_path/correctness_venv` (please use an absolute path as the default `~` of your buildkite agent is `/var/lib/buildkite-agent`)
 
+Manually run:
+```bash
+git config --global --add safe.directory /home/slshen/correctness_repositories/LMCache
+git config --global --add safe.directory /home/slshen/correctness_repositories/vllm
+```
+
 2. Please run the following commands (these will be run by `setup.sh` every time):
 ```bash
 cd your_absolute_path

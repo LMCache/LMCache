@@ -3,6 +3,9 @@
 unxz data.tar.xz
 tar xf data.tar
 
+git config --global --add safe.directory /home/slshen/correctness_repositories/LMCache
+git config --global --add safe.directory /home/slshen/correctness_repositories/vllm
+
 # see README.md for pre-configuring your CI runner
 source /home/slshen/correctness_venv/bin/activate
 cd /home/slshen/correctness_repositories/LMCache
