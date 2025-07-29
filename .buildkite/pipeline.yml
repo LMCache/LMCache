@@ -10,10 +10,11 @@ steps:
           path: ".venv-{{ BUILDKITE_BUILD_ID }}"
           save: "pipeline"
           force: "true"
-    command:
-      - echo "BUILDKITE_BUILD_ID: $BUILDKITE_BUILD_ID"
-      - bash .buildkite/scripts/install-env.sh $BUILDKITE_BUILD_ID
-      - echo "finished installing env"
+    command: |
+      echo "Starting install env"
+      echo "BUILDKITE_BUILD_ID: $BUILDKITE_BUILD_ID"
+      bash .buildkite/scripts/install-env.sh $BUILDKITE_BUILD_ID
+      echo "finished installing env"
 
   - label: ":pytest: Run pytest"
     key: "pytest"
