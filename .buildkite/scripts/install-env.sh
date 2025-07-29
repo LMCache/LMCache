@@ -18,6 +18,7 @@ else
   # use uv for fast venv creation
   uv venv --python "$PYTHON_BIN" "$VENV_DIR"
 fi
+source "$VENV_DIR/bin/activate"
 
 # CUDA version
 CUDA_VERSION="12.1"
