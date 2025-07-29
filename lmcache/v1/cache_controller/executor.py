@@ -35,6 +35,7 @@ from lmcache.v1.cache_controller.message import (  # noqa: E501
     HealthRetMsg,
     MoveMsg,
     MoveRetMsg,
+    MoveWorkerMsg,
     Msg,
     MsgBase,
     PinMsg,
@@ -64,7 +65,7 @@ class LMCacheClusterExecutor:
 
     async def clear(self, msg: ClearMsg) -> Union[ClearRetMsg, ErrorMsg]:
         """
-        Execute a cache operation with error handling.
+        Execute a clear cache operation with error handling.
         """
         instance_id = msg.instance_id
         tokens = msg.tokens
@@ -107,7 +108,49 @@ class LMCacheClusterExecutor:
         raise NotImplementedError
 
     async def move(self, msg: MoveMsg) -> Union[MoveRetMsg, ErrorMsg]:
-        raise NotImplementedError
+        """
+        Execute a move cache operation with error handling.
+        """
+
+        # NOTE(Jiayi): Currently we assume the transfer is push-based.
+        src_instance_id = msg.old_position[0]
+
+        worker_ids = self.reg_controller.get_workers(src_instance_id)
+        assert worker_ids is not None
+        sockets = []
+        serialized_msgs = []
+        for worker_id in worker_ids:
+            socket = self.reg_controller.get_socket(src_instance_id, worker_id)
+            if socket is None:
+                return ErrorMsg(
+                    error=(
+                        f"Worker {worker_id} not registered for "
+                        "instance {src_instance_id}"
+                    )
+                )
+            sockets.append(socket)
+            serialized_msg = msgspec.msgpack.encode(
+                MoveWorkerMsg(
+                    old_position=msg.old_position,
+                    new_position=msg.new_position,
+                    tokens=msg.tokens,
+                )
+            )
+            serialized_msgs.append(serialized_msg)
+            logger.debug(
+                f"Sending move operation to worker ({src_instance_id}, {worker_id})"
+            )
+        serialized_results = await self.execute_workers(
+            sockets=sockets,
+            serialized_msgs=serialized_msgs,
+        )
+
+        event_ids = []
+        for i, serialized_result in enumerate(serialized_results):
+            result = msgspec.msgpack.decode(serialized_result, type=Msg)
+            event_ids.append(result.worker_event_id)
+
+        return MoveRetMsg(event_ids=event_ids)
 
     async def health(self, msg: HealthMsg) -> Union[HealthRetMsg, ErrorMsg]:
         raise NotImplementedError
