@@ -17,7 +17,6 @@ from collections import OrderedDict
 from concurrent.futures import Future
 from typing import (
     TYPE_CHECKING,
-    Dict,
     Generator,
     List,
     Optional,
@@ -91,8 +90,6 @@ class StorageManager:
         else:
             self.allocator_backend = self.storage_backends["LocalCPUBackend"]
 
-        self.prefetch_tasks: Dict[CacheEngineKey, Future] = {}
-
         self.manager_lock = threading.Lock()
 
         self.lookup_server = lookup_server
@@ -149,16 +146,6 @@ class StorageManager:
         Do not store if the same object is being stored (handled here by
         storage manager) or has been stored (handled by storage backend).
         """
-
-        # TODO(Jiayi): currently, the entire put task will be cancelled
-        # if one of the backend is already storing this cache.
-        # This might not be ideal. We need a caching policy to
-        # configure caching policies (e.g., write-through,
-        # write-back, etc.)
-        for storage_backend in self.storage_backends.values():
-            if storage_backend.exists_in_put_tasks(key):
-                memory_obj.ref_count_down()
-                return
 
         for backend_name, backend in self.storage_backends.items():
             backend.submit_put_task(key, memory_obj)
@@ -231,32 +218,17 @@ class StorageManager:
         """
         Blocking function to get the memory object from the storages.
         """
-        # Search in prefetch task
-        self.manager_lock.acquire()
-        prefetch_task = self.prefetch_tasks.get(key, None)
-        self.manager_lock.release()
-
-        # Wait until prefetch task finishes
-        # Here, it is assumed all prefetch tasks load the memoryobj to
-        # hot cache (pinned cpu buffer)
-        if prefetch_task is not None:
-            logger.debug(
-                "Waiting for prefetching result. Optimally, this should not happen."
-            )
-            # Calling result() twice (already once in callback) will have
-            # no effect
-            # Tune the timeout for better performance
-            prefetch_task.result(timeout=1)
 
         # Search all backends for blocking get
         for backend_name, backend in self.storage_backends.items():
-            # NOTE(Jiayi): bypass the allocator for now
+            # TODO(Jiayi): need to make sure all memory_objs returned
+            # are allocated by the allocator backend.
             memory_obj = backend.get_blocking(key)
             if memory_obj is not None:
                 if backend_name not in ["LocalCPUBackend", "NixlBackend"]:
                     local_cpu_backend = self.storage_backends["LocalCPUBackend"]
                     assert isinstance(local_cpu_backend, LocalCPUBackend)
-                    local_cpu_backend.write_back(key, memory_obj)
+                    local_cpu_backend.submit_put_task(key, memory_obj)
                 return memory_obj
 
         return None
@@ -282,7 +254,7 @@ class StorageManager:
         storage_backend_name: str,
     ) -> List[MemoryObj]:
         """
-        Non-blocking function to get the memory objects from the storages.
+        Blocking function to get the memory objects from the storages.
         """
         storage_backend = self.storage_backends[storage_backend_name]
         memory_objs = storage_backend.batched_get_blocking(keys)
@@ -313,64 +285,20 @@ class StorageManager:
                 tasks.append(task)
             yield tasks
 
-    # TODO(Jiayi): we need to consider eviction in prefetch
-    def prefetch_callback(self, future, key):
-        """
-        Update metadata after prefetch.
-        """
-        self.manager_lock.acquire()
-        prefetch_task = self.prefetch_tasks.pop(key)
-        self.manager_lock.release()
-        try:
-            buffer_memory_obj = prefetch_task.result()
-        except Exception as e:
-            logger.error(f"Exception captured from future in prefetch_callback: {e}")
-            raise e
-        kv_chunk = buffer_memory_obj.tensor
-        kv_shape = kv_chunk.shape
-        kv_dtype = kv_chunk.dtype
-        memory_obj = self.allocator_backend.allocate(kv_shape, kv_dtype)
-        if memory_obj is None:
-            logger.warning("Memory allocation failed in prefetch_callback")
-            return
-
-        assert memory_obj.tensor is not None, "Encounter invalid tensor"
-
-        # TODO(Jiayi): this part should be done in another process if
-        # the cpu->pinned cpu copy is blocking.
-        prefetch_stream = torch.cuda.Stream()
-        with torch.cuda.stream(prefetch_stream):
-            memory_obj.tensor.copy_(kv_chunk, non_blocking=True)
-        prefetch_stream.synchronize()
-
-        # NOTE: no need to ref_count_up here because
-        # the memory_obj's ref_count is already 1
-        self.manager_lock.acquire()
-        self.storage_backends["LocalCPUBackend"].submit_put_task(key, memory_obj)
-        self.manager_lock.release()
-
     def prefetch(self, key: CacheEngineKey) -> None:
         """Launch a prefetch request in the storage backend. Non-blocking"""
 
-        if self.storage_backends["LocalCPUBackend"].contains(key):
-            return
-        self.manager_lock.acquire()
-        if key in self.prefetch_tasks:
-            self.manager_lock.release()
-            return
-        self.manager_lock.release()
-
-        for backend in self.storage_backends.values():
-            prefetch_task = backend.submit_prefetch_task(key)
-            if prefetch_task is None:
+        for backend_name, backend in self.storage_backends.items():
+            if backend_name == "LocalCPUBackend":
+                if backend.contains(key):
+                    logger.debug("Key already in LocalCPUBackend, skipping prefetch")
+                    return
                 continue
-            lambda_callback = lambda f: self.prefetch_callback(f, key)
 
-            self.manager_lock.acquire()
-            self.prefetch_tasks[key] = prefetch_task
-            prefetch_task.add_done_callback(lambda_callback)
-            self.manager_lock.release()
-            break
+            perform_prefetch = backend.submit_prefetch_task(key)
+            if perform_prefetch:
+                logger.debug(f"Prefetching key {key} in backend {backend_name}")
+                break
 
     # TODO(Jiayi): Currently, search_range is only used for testing.
     def contains(
