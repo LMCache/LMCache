@@ -23,15 +23,11 @@ MLA (multi-head latent attention) will use `deepseek-ai/DeepSeek-V2-Lite` with t
 
 To ensure the speed of the MMLU Correctness tests, please conduct the following set up on your runner beforehand (only need to do once and `setup.sh` will renew your environment afterwards). 
 
-1. Create a virtual environment at `~/correctness_venv`
-
-```bash
-pip install pandas
-```
+1. Create a virtual environment at `your_absolute_path/correctness_venv` (please use an absolute path as the default `~` of your buildkite agent is `/var/lib/buildkite-agent`)
 
 2. Please run the following commands (these will be run by `setup.sh` every time):
 ```bash
-cd ~
+cd your_absolute_path
 mkdir correctness_repositories
 cd correctness_repositories
 git clone https://github.com/LMCache/LMCache.git
