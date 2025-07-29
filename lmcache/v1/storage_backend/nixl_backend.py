@@ -356,7 +356,7 @@ class NixlBackend(StorageBackendInterface):
         self.flush_put_tasks()
         return None
 
-    def submit_prefetch_task(self, key: CacheEngineKey) -> Optional[Future]:
+    def submit_prefetch_task(self, key: CacheEngineKey) -> bool:
         """
         An async function to get the MemoryObj from the storage backend.
 

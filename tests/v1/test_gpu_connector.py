@@ -118,6 +118,7 @@ def test_vllm_paged_connector_v2_with_gpu_and_mla(use_gpu, use_mla):
         check_paged_kv_cache_equal(
             gpu_kv_src, gpu_kv_dst, slot_mapping, num_heads, head_size
         )
+    allocator.close()
 
 
 @pytest.mark.parametrize("use_gpu", [True])
@@ -216,6 +217,8 @@ def test_layerwise_vllm_paged_connector_with_gpu(use_gpu):
     check_paged_kv_cache_equal(
         gpu_kv_src, gpu_kv_dst, slot_mapping, num_heads, head_size
     )
+
+    allocator.close()
 
 
 @pytest.mark.parametrize("use_gpu", [True])
@@ -377,6 +380,8 @@ def test_batched_layerwise_vllm_paged_connector_with_gpu(use_gpu):
         head_size,
     )
 
+    allocator.close()
+
 
 @pytest.mark.skip(reason="This test is skipped due to vllm dependency")
 @pytest.mark.parametrize("use_gpu", [True])
@@ -473,6 +478,8 @@ def test_layerwise_vllm_buffer_connector_with_gpu(use_gpu):
         gpu_kv_src, gpu_kv_dst, slot_mapping, num_heads, head_size
     )
 
+    allocator.close()
+
 
 def test_vllm_paged_connector_v2_to_gpu_bench(benchmark):
     """
@@ -527,6 +534,8 @@ def test_vllm_paged_connector_v2_to_gpu_bench(benchmark):
     )
     allocator.free(memory_obj)
     assert allocator.memcheck()
+
+    allocator.close()
 
 
 @pytest.mark.parametrize("use_gpu", [True, False])
@@ -636,3 +645,5 @@ def test_sglang_connector_with_gpu_and_mla(use_gpu, use_mla):
         check_sglang_paged_kv_cache_equal(
             gpu_kv_src, gpu_kv_dst, slot_mapping, num_heads, head_size
         )
+
+    allocator.close()

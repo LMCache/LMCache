@@ -33,6 +33,7 @@ from lmcache.v1.memory_management import (
     MemoryFormat,
     MemoryObj,
     MixedMemoryAllocator,
+    NixlCPUMemoryAllocator,
 )
 from lmcache.v1.storage_backend.abstract_backend import StorageBackendInterface
 
@@ -102,8 +103,7 @@ class LocalCPUBackend(StorageBackendInterface):
 
         with self.cpu_lock:
             if key in self.hot_cache:
-                old_memory_obj = self.hot_cache.pop(key)
-                old_memory_obj.ref_count_down()
+                return None
             self.hot_cache[key] = memory_obj
             memory_obj.ref_count_up()
 
@@ -141,8 +141,8 @@ class LocalCPUBackend(StorageBackendInterface):
     def submit_prefetch_task(
         self,
         key: CacheEngineKey,
-    ) -> Optional[Future]:
-        return None
+    ) -> bool:
+        return False
 
     def get_blocking(
         self,
@@ -239,7 +239,9 @@ class LocalCPUBackend(StorageBackendInterface):
         if memory_obj is not None or not eviction:
             return memory_obj
 
-        assert isinstance(self.memory_allocator, MixedMemoryAllocator)
+        assert isinstance(self.memory_allocator, MixedMemoryAllocator) or isinstance(
+            self.memory_allocator, NixlCPUMemoryAllocator
+        )
 
         evict_keys = []
         with self.cpu_lock:
@@ -295,7 +297,9 @@ class LocalCPUBackend(StorageBackendInterface):
         if memory_objs is not None or not eviction:
             return memory_objs
 
-        assert isinstance(self.memory_allocator, MixedMemoryAllocator)
+        assert isinstance(self.memory_allocator, MixedMemoryAllocator) or isinstance(
+            self.memory_allocator, NixlCPUMemoryAllocator
+        )
 
         # NOTE: Tune this number for performance.
         # Setting it to small will cause more eviction overhead.
@@ -344,68 +348,6 @@ class LocalCPUBackend(StorageBackendInterface):
         if self.lookup_server is not None:
             self.lookup_server.batched_remove(evict_keys)
         return memory_objs
-
-    def write_back(self, key: CacheEngineKey, memory_obj: MemoryObj):
-        if memory_obj is None or not self.use_hot:
-            return
-
-        if memory_obj.tensor is not None and memory_obj.tensor.is_cuda:
-            self.cpu_lock.acquire()
-            if key in self.hot_cache:
-                self.cpu_lock.release()
-                return
-            self.cpu_lock.release()
-
-            # Allocate a cpu memory object
-            cpu_memory_obj = self.memory_allocator.allocate(
-                memory_obj.get_shape(),
-                memory_obj.get_dtype(),
-                fmt=memory_obj.get_memory_format(),
-            )
-
-            if cpu_memory_obj is None:
-                logger.warning("Memory allocation failed in cachegen deserializer")
-                return None
-
-            # Copy the tensor to the cpu memory object
-            assert cpu_memory_obj.tensor is not None
-            self.stream.wait_stream(torch.cuda.default_stream())
-            with torch.cuda.stream(self.stream):
-                cpu_memory_obj.tensor.copy_(memory_obj.tensor, non_blocking=True)
-            memory_obj.tensor.record_stream(self.stream)
-
-            # Update the hot cache
-            self.cpu_lock.acquire()
-            self.hot_cache[key] = cpu_memory_obj
-            cpu_memory_obj.ref_count_up()
-            self.cpu_lock.release()
-
-            # Push kv msg
-            if self.lmcache_worker is not None:
-                self.lmcache_worker.put_msg(
-                    KVAdmitMsg(self.instance_id, key.worker_id, key.chunk_hash, "cpu")
-                )
-
-            logger.debug("Updated hot cache!")
-        else:
-            self.cpu_lock.acquire()
-            if self.use_hot and key not in self.hot_cache:
-                self.hot_cache[key] = memory_obj
-                memory_obj.ref_count_up()
-                self.cpu_lock.release()
-
-                # Push kv msg
-                if self.lmcache_worker is not None:
-                    self.lmcache_worker.put_msg(
-                        KVAdmitMsg(
-                            self.instance_id,
-                            key.worker_id,
-                            key.chunk_hash,
-                            "cpu",
-                        )
-                    )
-            else:
-                self.cpu_lock.release()
 
     def get_keys(self) -> List[CacheEngineKey]:
         """
