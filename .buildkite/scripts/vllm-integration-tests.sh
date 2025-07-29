@@ -20,6 +20,7 @@
 # Note: The script should be run from the LMCache code base root.
 
 set -ex
+trap 'cleanup $?' EXIT
 
 CID=
 HF_TOKEN=
@@ -35,6 +36,18 @@ build_lmcache_vllmopenai_image() {
     ./test-build.sh
 }
 
+cleanup() {
+    local code="${1:-0}"
+
+    echo "→ Cleaning up Docker container and port..."
+    if [[ -n "${CID:-}" ]]; then
+        docker kill "$CID" &>/dev/null || true
+        docker rm "$CID" &>/dev/null || true
+    fi
+
+    fuser -k 8000/tcp &>/dev/null || true
+}
+
 wait_for_openai_api_server(){
     if ! timeout $SERVER_WAIT_TIMEOUT bash -c '
         until curl 127.0.0.1:8000/v1/models |grep "\"id\":\"meta-llama/Llama-3.2-1B-Instruct\""; do
@@ -44,8 +57,7 @@ wait_for_openai_api_server(){
     '; then
         echo "OpenAI API server did not start"
         docker logs $CID
-        cleanup 1
-        exit 1
+        return 1
     fi
 }
 
@@ -107,8 +119,7 @@ run_lmcache_vllmopenai_container() {
         echo "Timeout waiting for startup marker, dumping full log:"
         cat "$LOGFILE"
         kill $LOG_PID
-        cleanup 1
-        exit 1
+        return 1
     fi
 
 }
@@ -142,8 +153,7 @@ test_vllmopenai_server_with_lmcache_integrated() {
         echo "Model prompt request from OpenAI API server failed, HTTP status code: ${http_status_code}."
         cat response-file.txt
         docker logs -n 20 $CID
-        cleanup 1
-        exit 1
+        return 1
     else
          echo "Model prompt request from OpenAI API server succeeded"
          cat response-file.txt
