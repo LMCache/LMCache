@@ -5,11 +5,12 @@ steps:
   - label: "Run MMLU KV Transfer Test"
     command: |
       echo "Starting MMLU test"
-      echo "Running setup.sh"
-      bash setup.sh
       
       # buildkite agents start at the root of the Git checkout
       cd .buildkite/correctness
+
+      echo "Running setup.sh"
+      bash setup.sh
   
       echo "Starting Dense KV Transfer Test with meta-llama/Llama-3.1-8B-Instruct"
       # produces Llama-3.1-8B-Instruct-baseline.jsonl
