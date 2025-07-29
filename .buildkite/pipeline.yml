@@ -11,7 +11,7 @@ steps:
           save: "pipeline"
           force: "true"
     command:
-      - bash .buildkite/scripts/install-env.sh {{ BUILDKITE_BUILD_ID }}
+      - bash .buildkite/scripts/install-env.sh $BUILDKITE_BUILD_ID
 
   - label: ":pytest: Run pytest"
     key: "pytest"
