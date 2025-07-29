@@ -27,8 +27,11 @@ To ensure the speed of the MMLU Correctness tests, please conduct the following 
 
 Manually run:
 ```bash
+# /home/slshen is an example absolute path
 git config --global --add safe.directory /home/slshen/correctness_repositories/LMCache
 git config --global --add safe.directory /home/slshen/correctness_repositories/vllm
+sudo chown -R buildkite-agent:buildkite-agent /home/slshen/correctness_repositories/LMCache
+sudo chown -R buildkite-agent:buildkite-agent /home/slshen/correctness_repositories/vllm
 ```
 
 2. Please run the following commands (these will be run by `setup.sh` every time):

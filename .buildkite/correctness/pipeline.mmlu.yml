@@ -13,6 +13,7 @@ steps:
       bash setup.sh
   
       echo "Starting Dense KV Transfer Test with meta-llama/Llama-3.1-8B-Instruct"
+      source /home/slshen/correctness_venv/bin/activate
       # produces Llama-3.1-8B-Instruct-baseline.jsonl
       python mmlu-test.py --model meta-llama/Llama-3.1-8B-Instruct --number-of-subjects 25
       # produces Llama-3.1-8B-Instruct-lmcache.jsonl
