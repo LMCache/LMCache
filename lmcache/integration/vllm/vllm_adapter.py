@@ -50,7 +50,14 @@ from vllm.utils import cdiv, round_down
 from lmcache.integration.vllm.utils import ENGINE_NAME
 from lmcache.logging import init_logger
 from lmcache.utils import _lmcache_nvtx_annotate
-from lmcache.v1.cache_engine import LMCacheEngineBuilder
+from lmcache.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
+from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.v1.gpu_connector import (
+    VLLMBufferLayerwiseGPUConnector,
+    VLLMPagedMemGPUConnectorV2,
+    VLLMPagedMemLayerwiseGPUConnector,
+)
+from lmcache.v1.hpu_connector import VLLMPagedMemHPUConnectorV2
 
 # FIXME(Jiayi): temporarily comment this out
 # from lmcache_vllm.blend_adapter import remove_request_id_indices
@@ -179,6 +186,7 @@ def init_lmcache_engine(
         VLLMBufferLayerwiseGPUConnector,
         VLLMPagedMemGPUConnectorV2,
         VLLMPagedMemLayerwiseGPUConnector,
+        VLLMPagedMemHPUConnectorV2
     ]
 
     if use_mla and config.use_layerwise:
@@ -207,15 +215,26 @@ def init_lmcache_engine(
                 device=device,
             )
     else:
-        vllm_gpu_connector = VLLMPagedMemGPUConnectorV2(
-            hidden_dim_size,
-            num_layer,
-            use_gpu=use_gpu,
-            chunk_size=chunk_size,
-            dtype=kv_dtype,
-            device=device,
-            use_mla=use_mla,
-        )
+        if device.type == "hpu":
+            vllm_gpu_connector = VLLMPagedMemHPUConnectorV2(
+                hidden_dim_size,
+                num_layer,
+                use_gpu=use_gpu,
+                chunk_size=chunk_size,
+                dtype=kv_dtype,
+                device=device,
+                use_mla=use_mla,
+            )
+        else:
+            vllm_gpu_connector = VLLMPagedMemGPUConnectorV2(
+                hidden_dim_size,
+                num_layer,
+                use_gpu=use_gpu,
+                chunk_size=chunk_size,
+                dtype=kv_dtype,
+                device=device,
+                use_mla=use_mla,
+            )
     engine = LMCacheEngineBuilder.get_or_create(
         ENGINE_NAME, config, metadata, vllm_gpu_connector
     )
