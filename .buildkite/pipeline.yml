@@ -2,6 +2,11 @@ env:
   PATH: "$HOME/.local/bin:$PATH"
 
 steps:
+  - label: ":bomb: Clean up buildkite cache"
+    key: "pre-clean"
+    command: |
+      sudo rm -rf /var/cache/buildkite/*
+      
   - label: ":pip: Prepare venv"
     key: "venv"
     plugins:
@@ -39,14 +44,6 @@ steps:
       - "durations/test.html"
       - "coverage-test.xml"
       - "coverage-test/**/*"
-  
-  - label: ":trash: Clean up buildkite caches"
-    key: "cleanup_buildkite_caches"
-    depends_on: 
-      - "pytest"
-    command: |
-      sudo rm -rf /var/cache/buildkite/*
-      # make sure that your buildkite-agent has sudo access
 
   - label: "Upload Coverage Report"
     depends_on:
