@@ -39,7 +39,9 @@ class MockLMCacheWorker:
 
 
 def create_test_config(
-    local_cpu: bool = True, use_layerwise: bool = False, enable_blending: bool = False
+    local_cpu: bool = True,
+    use_layerwise: bool = False,
+    enable_blending: bool = False,
 ):
     """Create a test configuration for LocalCPUBackend."""
     config = LMCacheEngineConfig.from_defaults(
@@ -57,11 +59,33 @@ def create_test_key(key_id: str = "test_key") -> CacheEngineKey:
     return CacheEngineKey("vllm", "test_model", 3, 123, key_id)
 
 
-def create_test_memory_obj(shape=(2, 16, 8, 128), dtype=torch.bfloat16) -> MemoryObj:
+def create_test_memory_obj(
+    shape=(2, 16, 8, 128),
+    dtype=torch.bfloat16,
+) -> MemoryObj:
     """Create a test MemoryObj using AdHocMemoryAllocator for testing."""
     allocator = AdHocMemoryAllocator(device="cpu")
     memory_obj = allocator.allocate(shape, dtype, fmt=MemoryFormat.KV_T2D)
+    # Store allocator reference to ensure cleanup
+    memory_obj._test_allocator = allocator
     return memory_obj
+
+
+@pytest.fixture(autouse=True)
+def cleanup_test_allocators():
+    """Cleanup any test allocators created during the test."""
+    yield
+    import gc
+
+    # Force garbage collection to trigger cleanup
+    # of any memory objects with test allocators
+    for obj in gc.get_objects():
+        if hasattr(obj, "_test_allocator"):
+            try:
+                obj._test_allocator.close()
+            except Exception:
+                pass  # Ignore errors during cleanup
+    gc.collect()
 
 
 @pytest.fixture
@@ -226,7 +250,10 @@ class TestLocalCPUBackend:
         keys = [create_test_key(f"key_{i}") for i in range(3)]
         memory_objs = [create_test_memory_obj() for _ in range(3)]
 
-        futures = local_cpu_backend_disabled.batched_submit_put_task(keys, memory_objs)
+        futures = local_cpu_backend_disabled.batched_submit_put_task(
+            keys,
+            memory_objs,
+        )
 
         # Should return None when local_cpu is disabled
         assert futures is None

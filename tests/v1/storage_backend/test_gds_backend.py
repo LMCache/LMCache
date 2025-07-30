@@ -36,7 +36,26 @@ def create_test_memory_obj(
 ) -> MemoryObj:
     allocator = AdHocMemoryAllocator(device=device)
     memory_obj = allocator.allocate(shape, dtype, fmt=MemoryFormat.KV_T2D)
+    # Store allocator reference to ensure cleanup
+    memory_obj._test_allocator = allocator
     return memory_obj
+
+
+@pytest.fixture(autouse=True)
+def cleanup_test_allocators():
+    """Cleanup any test allocators created during the test."""
+    yield
+    import gc
+
+    # Force garbage collection to trigger cleanup of any memory objects
+    # with test allocators
+    for obj in gc.get_objects():
+        if hasattr(obj, "_test_allocator"):
+            try:
+                obj._test_allocator.close()
+            except Exception:
+                pass  # Ignore errors during cleanup
+    gc.collect()
 
 
 @pytest.fixture
