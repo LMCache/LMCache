@@ -1,8 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
+
 # Standard
 from dataclasses import dataclass
 from typing import Callable, Optional, Union
 import abc
+import atexit
+import signal
 import threading
 import time
 import uuid
@@ -27,8 +30,66 @@ from lmcache.v1.storage_backend.connector.nixl_utils import NixlConfig, NixlRole
 
 logger = init_logger(__name__)
 
+# Global registry for NIXL instances to ensure proper cleanup
+
+
+class NixlCleanupManager:
+    """Global manager to track and cleanup NIXL instances on signal."""
+
+    def __init__(self):
+        self._instances = set()
+        self._lock = threading.Lock()
+        # Register signal handlers immediately upon initialization
+        self._register_signal_handlers()
+
+    def register(self, instance):
+        """Register a NIXL instance for cleanup."""
+        with self._lock:
+            self._instances.add(instance)
+
+    def unregister(self, instance):
+        """Unregister a NIXL instance."""
+        with self._lock:
+            self._instances.discard(instance)
+
+    def _register_signal_handlers(self):
+        """Register signal handlers for graceful shutdown."""
+
+        def signal_handler(signum, frame):
+            logger.info(f"Received signal {signum}, cleaning up NIXL instances...")
+            self.cleanup_all()
+            # Re-raise the signal to allow normal shutdown
+            signal.signal(signum, signal.SIG_DFL)
+            signal.raise_signal(signum)
+
+        # Register handlers for common termination signals
+        signal.signal(signal.SIGINT, signal_handler)
+        signal.signal(signal.SIGTERM, signal_handler)
+        # Also register atexit handler as fallback
+        atexit.register(self.cleanup_all)
+
+    def cleanup_all(self):
+        """Cleanup all registered NIXL instances."""
+        with self._lock:
+            instances_to_cleanup = list(self._instances)
+        for instance in instances_to_cleanup:
+            try:
+                if hasattr(instance, "close"):
+                    logger.debug(f"Cleaning up NIXL instance: {instance}")
+                    instance.close()
+            except Exception as e:
+                logger.warning(f"Error cleaning up NIXL instance {instance}: {e}")
+        with self._lock:
+            self._instances.clear()
+
+
+# Global cleanup manager instance
+_nixl_cleanup_manager = NixlCleanupManager()
+
 
 # TODO(Jiayi): Make this part of memory_management.py
+
+
 class NixlBufferAllocator(MemoryAllocatorInterface):
     """The memory allocator on NIXL transfer buffer."""
 
@@ -273,19 +334,19 @@ class NixlPipe:
                 self._agent.get_serialized_descs(self._local_xfer_descs)
             )
             logger.info("Sent local transfer descriptors to sender")
-
         # UUID for communication
         self._uuid = None
         if nixl_config.role == NixlRole.RECEIVER:
             # Receiver send an initial uuid to sender
             self._uuid = uuid.uuid4().hex
             self.ack_receive()
+        # Register this instance for cleanup on signal
+        _nixl_cleanup_manager.register(self)
 
     @_lmcache_nvtx_annotate
     def _spin_check_for_ack(self) -> str:
         """
         Spin until receives an ack from the peer.
-
         Returns:
             The uuid extracted from the ack message.
         """
@@ -458,18 +519,34 @@ class NixlPipe:
     ###########################
     # Common functions
     ###########################
+
     def get_allocator(self) -> MemoryAllocatorInterface:
         """Get the underlying allocator for the NIXL pipe"""
         return self._allocator
 
     def close(self):
         """Close the NIXL pipe"""
-        self._agent.deregister_memory(self._reg_descs)
-        self._agent.remove_remote_agent(self.peer_name)
-        if self._local_xfer_handlers is not None:
-            self._agent.release_dlist_handle(self._local_xfer_handlers)
-        if self._remote_xfer_handlers is not None:
-            self._agent.release_dlist_handle(self._remote_xfer_handlers)
+        try:
+            # Unregister from cleanup manager first
+            _nixl_cleanup_manager.unregister(self)
+            # Clean up NIXL resources
+            if hasattr(self, "_agent") and self._agent is not None:
+                if hasattr(self, "_reg_descs") and self._reg_descs is not None:
+                    self._agent.deregister_memory(self._reg_descs)
+                if hasattr(self, "peer_name") and self.peer_name is not None:
+                    self._agent.remove_remote_agent(self.peer_name)
+                if (
+                    hasattr(self, "_local_xfer_handlers")
+                    and self._local_xfer_handlers is not None
+                ):
+                    self._agent.release_dlist_handle(self._local_xfer_handlers)
+                if (
+                    hasattr(self, "_remote_xfer_handlers")
+                    and self._remote_xfer_handlers is not None
+                ):
+                    self._agent.release_dlist_handle(self._remote_xfer_handlers)
+        except Exception as e:
+            logger.warning(f"Error during NIXL pipe cleanup: {e}")
 
 
 class NixlObserverInterface(metaclass=abc.ABCMeta):
@@ -609,9 +686,15 @@ class NixlSender:
 
     def close(self):
         """Close the sender resources."""
-        self._side_channel.close()
-        self._context.term()
-        self._pipe.close()
+        try:
+            if hasattr(self, "_pipe") and self._pipe is not None:
+                self._pipe.close()
+            if hasattr(self, "_side_channel") and self._side_channel is not None:
+                self._side_channel.close()
+            if hasattr(self, "_context") and self._context is not None:
+                self._context.term()
+        except Exception as e:
+            logger.warning(f"Error during NIXL sender cleanup: {e}")
 
 
 class NixlReceiver:
@@ -619,7 +702,6 @@ class NixlReceiver:
 
     def __init__(self, nixl_config: NixlConfig):
         self.nixl_config = nixl_config
-
         # Initialize the ZeroMQ context and side channel
         self._context = zmq.Context()  # type: ignore
         # Change from PAIR to ROUTER socket
@@ -781,22 +863,36 @@ class NixlReceiver:
 
     def close(self):
         """Close the receiver resources."""
-        self._running = False
-        # Wait for the receiver thread to finish with timeout
-        self._receiver_thread.join(timeout=3.0)  # 3 second timeout
-        if self._receiver_thread.is_alive():
-            logger.warning("Receiver thread did not shut down cleanly within timeout")
-
-        # Close all pipes
-        for sender_id, pipe in self._sender_pipes.items():
-            logger.info(f"Closing pipe for sender: {sender_id.decode()}")
-            pipe.close()
-
-        self._side_channel.close()
-        self._context.term()
+        try:
+            self._running = False
+            # Wait for the receiver thread to finish with timeout
+            if hasattr(self, "_receiver_thread") and self._receiver_thread is not None:
+                self._receiver_thread.join(timeout=3.0)  # 3 second timeout
+                if self._receiver_thread.is_alive():
+                    logger.warning(
+                        "Receiver thread did not shut down cleanly within timeout"
+                    )
+            # Close all pipes
+            if hasattr(self, "_sender_pipes"):
+                for sender_id, pipe in self._sender_pipes.items():
+                    try:
+                        logger.info(f"Closing pipe for sender: {sender_id.decode()}")
+                        pipe.close()
+                    except Exception as e:
+                        logger.warning(
+                            f"Error closing pipe for sender {sender_id}: {e}"
+                        )
+            if hasattr(self, "_side_channel") and self._side_channel is not None:
+                self._side_channel.close()
+            if hasattr(self, "_context") and self._context is not None:
+                self._context.term()
+        except Exception as e:
+            logger.warning(f"Error during NIXL receiver cleanup: {e}")
 
 
 # Helper class to route messages to specific senders
+
+
 class SenderSpecificSocket:
     """A wrapper around a ROUTER socket that only communicates with a specific
     sender.
@@ -837,15 +933,15 @@ class NixlChannel:
     def __init__(self, nixl_config: NixlConfig):
         self.nixl_config = nixl_config
         self.role = nixl_config.role
-
         # Create sender or receiver based on role
         self._sender = None
         self._receiver = None
-
         if nixl_config.role == NixlRole.SENDER:
             self._sender = NixlSender(nixl_config)
         else:
             self._receiver = NixlReceiver(nixl_config)
+        # Register this channel for cleanup on signal
+        _nixl_cleanup_manager.register(self)
 
     def _check_sender(self):
         """Check if this channel is configured as a sender."""
@@ -907,10 +1003,16 @@ class NixlChannel:
 
     def close(self):
         """Close all resources."""
-        if self._sender:
-            self._sender.close()
-        if self._receiver:
-            self._receiver.close()
+        try:
+            # Unregister from cleanup manager first
+            _nixl_cleanup_manager.unregister(self)
+            # Close sender and receiver
+            if self._sender:
+                self._sender.close()
+            if self._receiver:
+                self._receiver.close()
+        except Exception as e:
+            logger.warning(f"Error during NIXL channel cleanup: {e}")
 
 
 ############################################################
