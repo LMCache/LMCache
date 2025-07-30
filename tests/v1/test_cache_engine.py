@@ -114,17 +114,17 @@ def test_paged_same_retrieve_store(autorelease_v1):
             if var_name in locals():
                 del locals()[var_name]
 
-        # Third: Multiple aggressive CUDA cleanup cycles
+        # Third: Optimized CUDA cleanup (fast but effective)
         if torch.cuda.is_available():
             # Standard
             import gc
 
-            for _ in range(10):  # More cycles for massive allocations
-                torch.cuda.synchronize()
+            # Just 3 cycles is enough for massive allocations
+            for _ in range(3):
                 torch.cuda.empty_cache()
                 gc.collect()
                 torch.cuda.synchronize()
-                time.sleep(0.1)  # Allow time for deregistration
+                # No sleep needed - synchronize ensures completion
 
 
 @pytest.mark.parametrize("fmt", ["vllm"])
@@ -259,17 +259,17 @@ def test_paged_retrieve_prefix(
             if var_name in locals():
                 del locals()[var_name]
 
-        # Third: Multiple aggressive CUDA cleanup cycles
+        # Third: Optimized CUDA cleanup (fast but effective)
         if torch.cuda.is_available():
             # Standard
             import gc
 
-            for _ in range(10):  # More cycles for massive allocations
-                torch.cuda.synchronize()
+            # Just 3 cycles is enough for massive allocations
+            for _ in range(3):
                 torch.cuda.empty_cache()
                 gc.collect()
                 torch.cuda.synchronize()
-                time.sleep(0.1)  # Allow time for deregistration
+                # No sleep needed - synchronize ensures completion
 
 
 @pytest.mark.parametrize("fmt", ["vllm"])
@@ -790,17 +790,17 @@ def test_paged_hierarchy_retrieve(
             if var_name in locals():
                 del locals()[var_name]
 
-        # Third: Multiple aggressive CUDA cleanup cycles
+        # Third: Optimized CUDA cleanup (fast but effective)
         if torch.cuda.is_available():
             # Standard
             import gc
 
-            for _ in range(10):  # More cycles for massive allocations
-                torch.cuda.synchronize()
+            # Just 3 cycles is enough for massive allocations
+            for _ in range(3):
                 torch.cuda.empty_cache()
                 gc.collect()
                 torch.cuda.synchronize()
-                time.sleep(0.1)  # Allow time for deregistration
+                # No sleep needed - synchronize ensures completion
 
 
 @pytest.mark.parametrize(
@@ -1018,17 +1018,17 @@ def test_paged_mem_leak(fmt, chunk_size, backend, lmserver_v1_process, autorelea
             if var_name in locals():
                 del locals()[var_name]
 
-        # Third: Multiple aggressive CUDA cleanup cycles
+        # Third: Optimized CUDA cleanup (fast but effective)
         if torch.cuda.is_available():
             # Standard
             import gc
 
-            for _ in range(10):  # More cycles for massive allocations
-                torch.cuda.synchronize()
+            # Just 3 cycles is enough for massive allocations
+            for _ in range(3):
                 torch.cuda.empty_cache()
                 gc.collect()
                 torch.cuda.synchronize()
-                time.sleep(0.1)  # Allow time for deregistration
+                # No sleep needed - synchronize ensures completion
 
 
 def test_builder(autorelease_v1):
