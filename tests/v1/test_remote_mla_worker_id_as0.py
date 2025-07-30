@@ -176,3 +176,6 @@ def test_remote_mla_worker_id_as0(mock_stream):
         # Wait for the loop thread to finish
         loop_thread.join(timeout=1.0)
         loop.close()
+
+        # Clean up the memory allocator
+        pin_allocator.close()

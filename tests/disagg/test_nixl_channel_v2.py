@@ -25,7 +25,7 @@ logger = init_logger(__name__)
 
 def generate_test_data(
     num_objs: int, shape: torch.Size, dtype: torch.dtype = torch.bfloat16
-) -> Tuple[List[CacheEngineKey], List[MemoryObj]]:
+) -> Tuple[List[CacheEngineKey], List[MemoryObj], AdHocMemoryAllocator]:
     keys = []
     objs = []
     allocator = AdHocMemoryAllocator(
@@ -46,7 +46,7 @@ def generate_test_data(
             (i + 1) / num_objs
         )  # Fill with some test data, e.g., the index
         objs.append(obj)
-    return keys, objs
+    return keys, objs, allocator
 
 
 def calculate_throughput(total_bytes: int, elapsed_time: float) -> float:
@@ -329,6 +329,9 @@ def test_allocate_for_send(
 
     # Finish send
     channel.finish_send()
+
+    # Clean up the allocator
+    allocator.close()
     logger.info("allocate_for_send test completed")
 
 
@@ -374,7 +377,9 @@ def main():
     args = parser.parse_args()
 
     # Generate test data
-    keys, objs = generate_test_data(args.num_objs, torch.Size([32, 2, 256, 1024]))
+    keys, objs, allocator = generate_test_data(
+        args.num_objs, torch.Size([32, 2, 256, 1024])
+    )
     total_size = sum(obj.get_size() for obj in objs)
     logger.info(
         f"Generated {len(objs)} objects with total size "
@@ -418,6 +423,9 @@ def main():
     # Wait a bit before closing
     time.sleep(2)
     channel.close()
+
+    # Clean up the memory allocator
+    allocator.close()
     logger.info("Test completed")
 
 

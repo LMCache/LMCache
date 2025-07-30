@@ -67,7 +67,9 @@ def create_test_memory_obj(shape=(2, 16, 8, 128), dtype=torch.bfloat16) -> Memor
 @pytest.fixture
 def memory_allocator():
     """Create a memory allocator for testing."""
-    return MixedMemoryAllocator(1024 * 1024 * 1024)  # 1GB
+    allocator = MixedMemoryAllocator(1024 * 1024 * 1024)  # 1GB
+    yield allocator
+    allocator.close()
 
 
 @pytest.fixture

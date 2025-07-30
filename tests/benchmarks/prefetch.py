@@ -9,3 +9,6 @@ if __name__ == "__main__":
         "mistralai/Mistral-7B-Instruct-v0.2", 1, 0, "vllm", "bfloat16"
     )
     engine = LMCacheEngine(config, meta)
+
+    # Clean up the engine
+    engine.close()

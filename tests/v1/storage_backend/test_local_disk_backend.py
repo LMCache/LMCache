@@ -88,7 +88,9 @@ def local_cpu_backend():
     """Create a LocalCPUBackend for testing."""
     config = LMCacheEngineConfig.from_legacy(chunk_size=256)
     memory_allocator = MixedMemoryAllocator(1024 * 1024 * 1024)  # 1GB
-    return LocalCPUBackend(config, memory_allocator)
+    backend = LocalCPUBackend(config, memory_allocator)
+    yield backend
+    memory_allocator.close()
 
 
 @pytest.fixture

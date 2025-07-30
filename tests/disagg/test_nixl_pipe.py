@@ -23,7 +23,7 @@ logger = init_logger(__name__)
 
 def generate_test_data(
     num_objs: int, shape: torch.Size, dtype: torch.dtype = torch.bfloat16
-) -> Tuple[List[CacheEngineKey], List[MemoryObj]]:
+) -> Tuple[List[CacheEngineKey], List[MemoryObj], AdHocMemoryAllocator]:
     keys = []
     objs = []
     allocator = AdHocMemoryAllocator(
@@ -42,7 +42,7 @@ def generate_test_data(
         obj = allocator.allocate(shape, dtype, fmt=MemoryFormat.KV_2LTD)
         obj.tensor.fill_(i + 1)  # Fill with some test data, e.g., the index
         objs.append(obj)
-    return keys, objs
+    return keys, objs, allocator
 
 
 def calculate_throughput(total_bytes: int, elapsed_time: float) -> float:
@@ -82,7 +82,7 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    keys, objs = generate_test_data(100, torch.Size([32, 2, 256, 1024]))
+    keys, objs, allocator = generate_test_data(100, torch.Size([32, 2, 256, 1024]))
 
     # Common configuration
     config = NixlConfig(
@@ -189,4 +189,7 @@ if __name__ == "__main__":
     # Wait a bit before closing
     time.sleep(2)
     pipe.close()
+
+    # Clean up the memory allocator
+    allocator.close()
     logger.info("Test completed successfully")

@@ -15,3 +15,6 @@ if __name__ == "__main__":
     for key in keys:
         data = remote_store.connection.get(remote_store._combine_key(key))
     print("Job done")
+
+    # Clean up the engine
+    engine.close()

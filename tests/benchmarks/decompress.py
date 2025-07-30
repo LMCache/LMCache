@@ -25,3 +25,6 @@ if __name__ == "__main__":
         _ = remote_store.deserializer.from_bytes(data)
 
     print("Job done")
+
+    # Clean up the engine
+    engine.close()
