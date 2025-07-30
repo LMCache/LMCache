@@ -68,12 +68,14 @@ def memory_allocator():
 @pytest.fixture
 def gds_backend(temp_gds_path, async_loop, memory_allocator):
     config = create_test_config(temp_gds_path)
-    return GdsBackend(
+    backend = GdsBackend(
         config=config,
         loop=async_loop,
         memory_allocator=memory_allocator,
         dst_device="cuda" if torch.cuda.is_available() else "cpu",
     )
+    yield backend
+    backend.close()
 
 
 # Optionally skip async tests if pytest-asyncio is not available

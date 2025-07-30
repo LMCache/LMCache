@@ -9,7 +9,9 @@ from lmcache.observability import LMCStatsMonitor
 @pytest.fixture(scope="function")
 def stats_monitor():
     LMCStatsMonitor.DestroyInstance()
-    return LMCStatsMonitor.GetOrCreate()
+    monitor = LMCStatsMonitor.GetOrCreate()
+    yield monitor
+    LMCStatsMonitor.DestroyInstance()
 
 
 def test_on_retrieve_request(stats_monitor):

@@ -76,7 +76,9 @@ def memory_allocator():
 def local_cpu_backend(memory_allocator):
     """Create a LocalCPUBackend for testing."""
     config = create_test_config()
-    return LocalCPUBackend(config=config, memory_allocator=memory_allocator)
+    backend = LocalCPUBackend(config=config, memory_allocator=memory_allocator)
+    yield backend
+    backend.close()
 
 
 @pytest.fixture
