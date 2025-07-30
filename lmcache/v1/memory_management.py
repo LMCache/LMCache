@@ -1267,13 +1267,15 @@ class PinMemoryAllocator(MemoryAllocatorInterface):
         :param int size: The size of the pinned memory in bytes.
         """
 
-        self.buffer = torch.ones(size, dtype=torch.uint8, device="cpu")
-        ptr = self.buffer.data_ptr()
-        err = torch.cuda.cudart().cudaHostRegister(ptr, size, 0)
-        assert err == 0, (
-            f"cudaHostRegister failed: {torch.cuda.cudart().cudaGetErrorString(err)}"
-        )
+        # self.buffer = torch.ones(size, dtype=torch.uint8, device="cpu")
+        # ptr = self.buffer.data_ptr()
+        # err = torch.cuda.cudart().cudaHostRegister(ptr, size, 0)
+        # assert err == 0, (
+        #     f"cudaHostRegister failed: {torch.cuda.cudart().cudaGetErrorString(err)}"
+        # )
         self._unregistered = False
+
+        self.buffer = torch.empty(size, dtype=torch.uint8, pin_memory=True)
 
         if use_paging:
             assert "shape" in kwargs, (
@@ -1339,7 +1341,7 @@ class PinMemoryAllocator(MemoryAllocatorInterface):
     def close(self):
         if not self._unregistered:
             torch.cuda.synchronize()
-            torch.cuda.cudart().cudaHostUnregister(self.buffer.data_ptr())
+            # torch.cuda.cudart().cudaHostUnregister(self.buffer.data_ptr())
             self._unregistered = True
 
 
@@ -1354,13 +1356,14 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
         :param int size: The size of the pinned memory in bytes.
         """
 
-        self.buffer = torch.ones(size, dtype=torch.uint8, device="cpu")
-        ptr = self.buffer.data_ptr()
-        err = torch.cuda.cudart().cudaHostRegister(ptr, size, 0)
-        assert err == 0, (
-            f"cudaHostRegister failed: {torch.cuda.cudart().cudaGetErrorString(err)}"
-        )
+        # self.buffer = torch.ones(size, dtype=torch.uint8, device="cpu")
+        # ptr = self.buffer.data_ptr()
+        # err = torch.cuda.cudart().cudaHostRegister(ptr, size, 0)
+        # assert err == 0, (
+        #     f"cudaHostRegister failed: {torch.cuda.cudart().cudaGetErrorString(err)}"
+        # )
         self._unregistered = False
+        self.buffer = torch.empty(size, dtype=torch.uint8, pin_memory=True)
 
         if use_paging:
             assert "shape" in kwargs, (
@@ -1473,7 +1476,7 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
     def close(self):
         if not self._unregistered:
             torch.cuda.synchronize()
-            torch.cuda.cudart().cudaHostUnregister(self.buffer.data_ptr())
+            # torch.cuda.cudart().cudaHostUnregister(self.buffer.data_ptr())
             self._unregistered = True
 
 
