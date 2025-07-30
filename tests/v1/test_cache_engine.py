@@ -24,6 +24,7 @@ import torch
 from lmcache.v1.cache_engine import LMCacheEngineBuilder
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import (
+    BufferAllocator,
     PagedTensorMemoryAllocator,
     TensorMemoryAllocator,
 )
@@ -60,16 +61,18 @@ def patch_mixed_allocator():
                 "dtype must be specified for paged memory allocator"
             )
             assert "fmt" in kwargs, "fmt must be specified for paged memory allocator"
-            self.allocator = PagedTensorMemoryAllocator(
+            self.pin_allocator = PagedTensorMemoryAllocator(
                 tensor=self.buffer,
                 shape=kwargs["shape"],
                 dtype=kwargs["dtype"],
                 fmt=kwargs["fmt"],
             )
         else:
-            self.allocator = TensorMemoryAllocator(self.buffer)
+            self.pin_allocator = TensorMemoryAllocator(self.buffer)
 
         self.host_mem_lock = threading.Lock() if not use_paging else nullcontext()
+
+        self.buffer_allocator = BufferAllocator("cpu")
 
     def fake_mixed_close(self):
         if not self._unregistered:
