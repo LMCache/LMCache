@@ -259,12 +259,13 @@ def ensure_no_active_allocators():
     if torch.cuda.is_available():
         print("🔥 [GPU] Starting optimized CUDA memory cleanup...")
 
-        # Just 3 efficient cycles instead of 30 slow ones
-        for i in range(3):
+        # Just 7 efficient cycles - balanced for thoroughness vs speed
+        for i in range(7):
             torch.cuda.empty_cache()
             gc.collect()
             torch.cuda.synchronize()
-            # No sleep needed - synchronize ensures completion
+            # Small delay for CUDA driver to complete deregistration
+            time.sleep(0.02)
 
         # Reset CUDA states once
         try:

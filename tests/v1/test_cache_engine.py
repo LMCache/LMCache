@@ -119,12 +119,12 @@ def test_paged_same_retrieve_store(autorelease_v1):
             # Standard
             import gc
 
-            # Just 3 cycles is enough for massive allocations
-            for _ in range(3):
+            # Just 7 cycles for balance between speed and thoroughness
+            for _ in range(7):
                 torch.cuda.empty_cache()
                 gc.collect()
                 torch.cuda.synchronize()
-                # No sleep needed - synchronize ensures completion
+                time.sleep(0.02)  # Small delay for CUDA driver
 
 
 @pytest.mark.parametrize("fmt", ["vllm"])
@@ -264,12 +264,12 @@ def test_paged_retrieve_prefix(
             # Standard
             import gc
 
-            # Just 3 cycles is enough for massive allocations
-            for _ in range(3):
+            # Just 7 cycles for balance between speed and thoroughness
+            for _ in range(7):
                 torch.cuda.empty_cache()
                 gc.collect()
                 torch.cuda.synchronize()
-                # No sleep needed - synchronize ensures completion
+                time.sleep(0.02)  # Small delay for CUDA driver
 
 
 @pytest.mark.parametrize("fmt", ["vllm"])
@@ -795,12 +795,12 @@ def test_paged_hierarchy_retrieve(
             # Standard
             import gc
 
-            # Just 3 cycles is enough for massive allocations
-            for _ in range(3):
+            # Just 7 cycles for balance between speed and thoroughness
+            for _ in range(7):
                 torch.cuda.empty_cache()
                 gc.collect()
                 torch.cuda.synchronize()
-                # No sleep needed - synchronize ensures completion
+                time.sleep(0.02)  # Small delay for CUDA driver
 
 
 @pytest.mark.parametrize(
@@ -1023,12 +1023,12 @@ def test_paged_mem_leak(fmt, chunk_size, backend, lmserver_v1_process, autorelea
             # Standard
             import gc
 
-            # Just 3 cycles is enough for massive allocations
-            for _ in range(3):
+            # Just 7 cycles for balance between speed and thoroughness
+            for _ in range(7):
                 torch.cuda.empty_cache()
                 gc.collect()
                 torch.cuda.synchronize()
-                # No sleep needed - synchronize ensures completion
+                time.sleep(0.02)  # Small delay for CUDA driver
 
 
 def test_builder(autorelease_v1):
