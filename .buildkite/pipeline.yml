@@ -36,9 +36,10 @@ steps:
         pytest --maxfail=1 --cov=lmcache \
           --cov-report term --cov-report=html:coverage-test \
           --cov-report=xml:coverage-test.xml --html=durations/test.html \
-          --ignore=tests/disagg --ignore=tests/v1/test_pos_kernels.py \
-          --ignore=tests/v1/storage_backend/test_local_cpu_backend.py \
-          --ignore=tests/v1/storage_backend/test_local_disk_backend.py
+          tests/v1/test_cache_engine.py
+          # --ignore=tests/disagg --ignore=tests/v1/test_pos_kernels.py \
+          # --ignore=tests/v1/storage_backend/test_local_cpu_backend.py \
+          # --ignore=tests/v1/storage_backend/test_local_disk_backend.py
     artifact_paths:
       - "durations/test.html"
       - "coverage-test.xml"
