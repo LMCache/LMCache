@@ -868,6 +868,8 @@ def test_builder(autorelease_v1):
     _engine2 = autorelease_v1(LMCacheEngineBuilder.get(instance_id))  # noqa
 
     with pytest.raises(ValueError):
-        LMCacheEngineBuilder.get_or_create(
-            instance_id, cfg2, dumb_metadata(), connector
+        autorelease_v1(
+            LMCacheEngineBuilder.get_or_create(
+                instance_id, cfg2, dumb_metadata(), connector
+            )
         )

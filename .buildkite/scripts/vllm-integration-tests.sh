@@ -73,6 +73,7 @@ run_lmcache_vllmopenai_container() {
     
     if [ -z "$HF_TOKEN" ]; then
         CID=$(docker run -d --runtime nvidia --gpus "device=${best_gpu}" \
+            --env VLLM_USE_FLASHINFER_SAMPLER=0 \
             --env "LMCACHE_CHUNK_SIZE=256" \
             --env "LMCACHE_LOCAL_CPU=True" \
             --env "LMCACHE_MAX_LOCAL_CPU_SIZE=5" \
@@ -85,7 +86,8 @@ run_lmcache_vllmopenai_container() {
             --enforce-eager)
     else
         CID=$(docker run -d --runtime nvidia --gpus "device=${best_gpu}" \
-             --env HF_TOKEN=$HF_TOKEN \
+            --env HF_TOKEN=$HF_TOKEN \
+            --env VLLM_USE_FLASHINFER_SAMPLER=0 \
             --env "LMCACHE_CHUNK_SIZE=256" \
             --env "LMCACHE_LOCAL_CPU=True" \
             --env "LMCACHE_MAX_LOCAL_CPU_SIZE=5" \
