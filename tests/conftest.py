@@ -1,4 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
+
+# Set smaller memory allocation for tests at import time to avoid CUDA limits
+# Standard
+import os
+
+if "LMCACHE_MAX_LOCAL_CPU_SIZE" not in os.environ:
+    os.environ["LMCACHE_MAX_LOCAL_CPU_SIZE"] = "0.5"  # 512MB instead of 2GB
+
 # Standard
 from concurrent.futures import TimeoutError
 from dataclasses import dataclass
@@ -8,6 +16,9 @@ import random
 import shlex
 import socket
 import subprocess
+
+# Global allocator tracking to ensure only one allocator active at any time
+import threading
 import time
 
 # Third Party
@@ -15,6 +26,87 @@ import pytest
 
 # First Party
 from lmcache.v1.cache_engine import LMCacheEngineBuilder
+
+_allocator_lock = threading.Lock()
+
+
+def ensure_no_active_allocators():
+    """Ensure no allocators are currently active before proceeding."""
+    # Standard
+    import gc
+
+    # Third Party
+    import torch
+
+    # Use a timeout to avoid infinite deadlocks
+    lock_acquired = _allocator_lock.acquire(timeout=30)
+    if not lock_acquired:
+        print("⚠️ [LOCK] Failed to acquire allocator lock within 30s, proceeding anyway")
+        return
+
+    try:
+        # Find and close any existing allocators
+        allocator_types = [
+            "AdHocMemoryAllocator",
+            "PinMemoryAllocator",
+            "MixedMemoryAllocator",
+            "GPUMemoryAllocator",
+            "HostMemoryAllocator",
+            "PagedTensorMemoryAllocator",
+            "TensorMemoryAllocator",
+            "CuFileMemoryAllocator",  # MISSING: calls cuFileBufRegister!
+            "NixlBufferAllocator",  # MISSING: Nixl allocator
+            "NixlCPUMemoryAllocator",  # MISSING: Another Nixl allocator
+        ]
+
+        # Collect allocators first (minimize lock time)
+        allocators_to_close = []
+        test_allocators_to_close = []
+
+        for obj in gc.get_objects():
+            try:
+                if (
+                    hasattr(obj, "__class__")
+                    and obj.__class__.__name__ in allocator_types
+                ):
+                    if hasattr(obj, "close"):
+                        allocators_to_close.append(obj)
+                elif hasattr(obj, "_test_allocator") and hasattr(
+                    obj._test_allocator, "close"
+                ):
+                    test_allocators_to_close.append(obj._test_allocator)
+            except Exception:
+                pass
+
+    finally:
+        _allocator_lock.release()
+
+    # Close allocators OUTSIDE the lock to avoid deadlocks
+    cleanup_count = 0
+    for allocator in allocators_to_close:
+        try:
+            allocator.close()
+            cleanup_count += 1
+        except Exception:
+            pass
+
+    for test_allocator in test_allocators_to_close:
+        try:
+            test_allocator.close()
+            cleanup_count += 1
+        except Exception:
+            pass
+
+    # Force CUDA cleanup (outside lock)
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+    gc.collect()
+
+    if cleanup_count > 0:
+        print(
+            f"🧹 [LOCK] Forcibly closed {cleanup_count} allocators for exclusive access"
+        )
 
 
 # Monkey patch RemoteBackend.close() to add timeout for tests only
@@ -274,76 +366,14 @@ def lmserver_process(request):
 @pytest.fixture(scope="session", autouse=True)
 def global_cuda_cleanup():
     """Global CUDA cleanup at session start and end."""
-    # Standard
-    import gc
-
-    # Third Party
-    import torch
-
-    print("🚀 [DEBUG] Session startup - aggressive CUDA cleanup starting...")
-
-    # Set smaller memory allocation for tests to avoid CUDA limits
-    # Standard
-    import os
-
-    original_cpu_size = os.environ.get("LMCACHE_MAX_LOCAL_CPU_SIZE")
-    os.environ["LMCACHE_MAX_LOCAL_CPU_SIZE"] = "0.5"  # 512MB instead of 2GB
-
-    # Force cleanup any lingering allocators from previous runs
-    allocator_types = [
-        "AdHocMemoryAllocator",
-        "PinMemoryAllocator",
-        "MixedMemoryAllocator",
-        "GPUMemoryAllocator",
-        "HostMemoryAllocator",
-        "PagedTensorMemoryAllocator",
-        "TensorMemoryAllocator",
-    ]
-
-    cleanup_count = 0
-    for obj in gc.get_objects():
-        try:
-            if hasattr(obj, "__class__") and obj.__class__.__name__ in allocator_types:
-                if hasattr(obj, "close"):
-                    obj.close()
-                    cleanup_count += 1
-        except Exception:
-            pass
-
-    if cleanup_count > 0:
-        print(f"🧹 [DEBUG] Session startup: closed {cleanup_count} leaked allocators")
-
-    # Aggressive CUDA cleanup at start of session
-    if torch.cuda.is_available():
-        print("🔧 [DEBUG] Session startup: CUDA device cleanup...")
-        torch.cuda.empty_cache()
-        torch.cuda.synchronize()
-        # Reset all CUDA devices
-        for i in range(torch.cuda.device_count()):
-            with torch.cuda.device(i):
-                torch.cuda.empty_cache()
-                torch.cuda.synchronize()
-        print("✅ [DEBUG] Session startup: CUDA cleanup complete")
-
-    gc.collect()
+    print("🚀 [DEBUG] Session startup - ensuring exclusive allocator access...")
+    ensure_no_active_allocators()
+    print("✅ [DEBUG] Session startup complete")
 
     yield
 
-    print("🏁 [DEBUG] Session teardown - final CUDA cleanup...")
-
-    # Restore original environment variable
-    if original_cpu_size is not None:
-        os.environ["LMCACHE_MAX_LOCAL_CPU_SIZE"] = original_cpu_size
-        print(f"🔄 [DEBUG] Restored LMCACHE_MAX_LOCAL_CPU_SIZE={original_cpu_size}")
-    else:
-        os.environ.pop("LMCACHE_MAX_LOCAL_CPU_SIZE", None)
-        print("🔄 [DEBUG] Removed LMCACHE_MAX_LOCAL_CPU_SIZE")
-
-    # Cleanup at end of session
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-        torch.cuda.synchronize()
-    gc.collect()
+    print("🏁 [DEBUG] Session teardown - final cleanup...")
+    ensure_no_active_allocators()
     print("🎉 [DEBUG] Session teardown complete")
 
 
@@ -352,59 +382,8 @@ def module_level_allocator_cleanup():
     """Cleanup allocators between test modules to prevent cross-module leaks."""
     yield  # Let the module run first
 
-    # Aggressive cleanup after each test module
-    # Standard
-    import gc
-
-    # Third Party
-    import torch
-
     print("🧹 [DEBUG] Module-level allocator cleanup starting...")
-
-    # Force cleanup of any remaining allocators
-    allocator_types = [
-        "AdHocMemoryAllocator",
-        "PinMemoryAllocator",
-        "MixedMemoryAllocator",
-        "GPUMemoryAllocator",
-        "HostMemoryAllocator",
-        "PagedTensorMemoryAllocator",
-        "TensorMemoryAllocator",
-    ]
-
-    cleanup_count = 0
-    for obj in gc.get_objects():
-        try:
-            if hasattr(obj, "__class__") and obj.__class__.__name__ in allocator_types:
-                if hasattr(obj, "close"):
-                    print(f"🔧 [DEBUG] Force-closing leaked {obj.__class__.__name__}")
-                    obj.close()
-                    cleanup_count += 1
-        except Exception:
-            # Ignore errors during force cleanup
-            pass
-
-    # Additional cleanup for test allocators
-    for obj in gc.get_objects():
-        try:
-            if hasattr(obj, "_test_allocator"):
-                if hasattr(obj._test_allocator, "close"):
-                    print("🔧 [DEBUG] Force-closing _test_allocator")
-                    obj._test_allocator.close()
-                    cleanup_count += 1
-        except Exception:
-            pass
-
-    print(f"🧹 [DEBUG] Module cleanup: closed {cleanup_count} allocators")
-
-    # Force CUDA cleanup
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-        torch.cuda.synchronize()
-        print("🔧 [DEBUG] CUDA cache cleared between modules")
-
-    # Force garbage collection
-    gc.collect()
+    ensure_no_active_allocators()
     print("🧹 [DEBUG] Module-level cleanup complete")
 
 
@@ -433,54 +412,8 @@ def autorelease(request):
 
 @pytest.fixture(scope="function", autouse=True)
 def aggressive_allocator_cleanup():
-    """Force cleanup ALL allocators BEFORE every single test."""
-    # Standard
-    import gc
-
-    # Third Party
-    import torch
-
-    # Force cleanup of ANY allocator in memory BEFORE the test starts
-    allocator_types = [
-        "AdHocMemoryAllocator",
-        "PinMemoryAllocator",
-        "MixedMemoryAllocator",
-        "GPUMemoryAllocator",
-        "HostMemoryAllocator",
-        "PagedTensorMemoryAllocator",
-        "TensorMemoryAllocator",
-    ]
-
-    cleanup_count = 0
-    for obj in gc.get_objects():
-        try:
-            if hasattr(obj, "__class__") and obj.__class__.__name__ in allocator_types:
-                if hasattr(obj, "close"):
-                    obj.close()
-                    cleanup_count += 1
-        except Exception:
-            pass
-
-    # Cleanup test allocators too
-    for obj in gc.get_objects():
-        try:
-            if hasattr(obj, "_test_allocator") and hasattr(
-                obj._test_allocator, "close"
-            ):
-                obj._test_allocator.close()
-                cleanup_count += 1
-        except Exception:
-            pass
-
-    if cleanup_count > 0:
-        print(f"🧹 [DEBUG] Cleaned up {cleanup_count} allocators BEFORE test")
-
-    # Force CUDA cleanup before every test
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-        torch.cuda.synchronize()
-    gc.collect()
-
+    """Ensure exclusive allocator access BEFORE every single test."""
+    ensure_no_active_allocators()
     yield  # Now let the test run with a clean slate
 
 
