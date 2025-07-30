@@ -282,6 +282,13 @@ def global_cuda_cleanup():
 
     print("🚀 [DEBUG] Session startup - aggressive CUDA cleanup starting...")
 
+    # Set smaller memory allocation for tests to avoid CUDA limits
+    # Standard
+    import os
+
+    original_cpu_size = os.environ.get("LMCACHE_MAX_LOCAL_CPU_SIZE")
+    os.environ["LMCACHE_MAX_LOCAL_CPU_SIZE"] = "0.5"  # 512MB instead of 2GB
+
     # Force cleanup any lingering allocators from previous runs
     allocator_types = [
         "AdHocMemoryAllocator",
@@ -323,6 +330,15 @@ def global_cuda_cleanup():
     yield
 
     print("🏁 [DEBUG] Session teardown - final CUDA cleanup...")
+
+    # Restore original environment variable
+    if original_cpu_size is not None:
+        os.environ["LMCACHE_MAX_LOCAL_CPU_SIZE"] = original_cpu_size
+        print(f"🔄 [DEBUG] Restored LMCACHE_MAX_LOCAL_CPU_SIZE={original_cpu_size}")
+    else:
+        os.environ.pop("LMCACHE_MAX_LOCAL_CPU_SIZE", None)
+        print("🔄 [DEBUG] Removed LMCACHE_MAX_LOCAL_CPU_SIZE")
+
     # Cleanup at end of session
     if torch.cuda.is_available():
         torch.cuda.empty_cache()

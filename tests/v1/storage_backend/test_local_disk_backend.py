@@ -162,7 +162,7 @@ def async_loop():
 def local_cpu_backend():
     """Create a LocalCPUBackend for testing."""
     config = LMCacheEngineConfig.from_legacy(chunk_size=256)
-    memory_allocator = MixedMemoryAllocator(1024 * 1024 * 1024)  # 1GB
+    memory_allocator = MixedMemoryAllocator(512 * 1024 * 1024)  # 512MB
     backend = LocalCPUBackend(config, memory_allocator)
     yield backend
     backend.close()
