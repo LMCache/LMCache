@@ -31,7 +31,7 @@ def test_lm_connector(url, autorelease_v1, lmserver_v1_process):
         url = lmserver_v1_process.server_url
 
     async_loop, async_thread = init_asyncio_loop()
-    memory_allocator = PinMemoryAllocator(1024 * 1024 * 1024)
+    memory_allocator = PinMemoryAllocator(128 * 1024 * 1024)
     connector = autorelease_v1(CreateConnector(url, async_loop, memory_allocator))
 
     random_key = dumb_cache_engine_key()
@@ -78,7 +78,7 @@ def test_fs_connector(lmserver_v1_process, autorelease_v1):
         # Setup
         url = f"fs://host:0/{temp_dir}/"
         async_loop, async_thread = init_asyncio_loop()
-        memory_allocator = PinMemoryAllocator(1024 * 1024 * 1024)
+        memory_allocator = PinMemoryAllocator(128 * 1024 * 1024)
         connector = autorelease_v1(CreateConnector(url, async_loop, memory_allocator))
         random_key = dumb_cache_engine_key()
 
@@ -147,7 +147,7 @@ def test_redis_connector(url, autorelease_v1):
     """
 
     async_loop, async_thread = init_asyncio_loop()
-    memory_allocator = PinMemoryAllocator(1024 * 1024 * 1024)
+    memory_allocator = PinMemoryAllocator(128 * 1024 * 1024)
     connector = autorelease_v1(CreateConnector(url, async_loop, memory_allocator))
 
     random_key = dumb_cache_engine_key()
@@ -214,7 +214,7 @@ def test_redis_sentinel_connector(url, autorelease_v1):
     os.environ["REDIS_TIMEOUT"] = "5"
 
     async_loop, async_thread = init_asyncio_loop()
-    memory_allocator = PinMemoryAllocator(1024 * 1024 * 1024)
+    memory_allocator = PinMemoryAllocator(128 * 1024 * 1024)
     connector = autorelease_v1(CreateConnector(url, async_loop, memory_allocator))
 
     random_key = dumb_cache_engine_key()

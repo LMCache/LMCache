@@ -147,7 +147,7 @@ def cleanup_test_allocators():
 @pytest.fixture
 def memory_allocator():
     """Create a memory allocator for testing."""
-    allocator = MixedMemoryAllocator(512 * 1024 * 1024)  # 512MB
+    allocator = MixedMemoryAllocator(128 * 1024 * 1024)  # 128MB
     yield allocator
     allocator.close()
 

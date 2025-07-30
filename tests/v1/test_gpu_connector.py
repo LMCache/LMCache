@@ -41,7 +41,7 @@ def test_vllm_paged_connector_v2_with_gpu_and_mla(use_gpu, use_mla):
     num_tokens = 800
     chunk_size = 256
 
-    allocator = PinMemoryAllocator(1024 * 1024 * 1024)
+    allocator = PinMemoryAllocator(128 * 1024 * 1024)
 
     gpu_kv_src = generate_kv_cache_paged_list_tensors(
         num_blocks=num_blocks, device=device, block_size=block_size, use_mla=use_mla
@@ -135,7 +135,7 @@ def test_layerwise_vllm_paged_connector_with_gpu(use_gpu):
     num_tokens = 800
     chunk_size = 256
 
-    allocator = PinMemoryAllocator(1024 * 1024 * 1024)
+    allocator = PinMemoryAllocator(128 * 1024 * 1024)
 
     gpu_kv_src = generate_kv_cache_paged_list_tensors(num_blocks, device, block_size)
     gpu_kv_dst = generate_kv_cache_paged_list_tensors(num_blocks, device, block_size)
@@ -237,7 +237,7 @@ def test_batched_layerwise_vllm_paged_connector_with_gpu(use_gpu):
     num_tokens_total = num_tokens_1 + num_tokens_2
     chunk_size = 256
 
-    allocator = PinMemoryAllocator(1024 * 1024 * 1024)
+    allocator = PinMemoryAllocator(128 * 1024 * 1024)
 
     gpu_kv_src = generate_kv_cache_paged_list_tensors(num_blocks, device, block_size)
     gpu_kv_dst = generate_kv_cache_paged_list_tensors(num_blocks, device, block_size)
@@ -398,7 +398,7 @@ def test_layerwise_vllm_buffer_connector_with_gpu(use_gpu):
     num_tokens = 800
     chunk_size = 256
 
-    allocator = PinMemoryAllocator(1024 * 1024 * 1024)
+    allocator = PinMemoryAllocator(128 * 1024 * 1024)
 
     gpu_kv_src = generate_kv_cache_paged_list_tensors(num_blocks, device, block_size)
     gpu_kv_dst = generate_kv_cache_paged_list_tensors(num_blocks, device, block_size)
@@ -501,7 +501,7 @@ def test_vllm_paged_connector_v2_to_gpu_bench(benchmark):
 
     chunk_size = 256
 
-    allocator = GPUMemoryAllocator(1024 * 1024 * 1024)
+    allocator = GPUMemoryAllocator(128 * 1024 * 1024)
 
     gpu_kv_src = generate_kv_cache_paged_list_tensors(num_blocks, device, block_size)
     gpu_kv_dst = generate_kv_cache_paged_list_tensors(num_blocks, device, block_size)
@@ -554,7 +554,7 @@ def test_sglang_connector_with_gpu_and_mla(use_gpu, use_mla):
     num_tokens = num_blocks * block_size // 2
     chunk_size = 256
 
-    allocator = PinMemoryAllocator(1024 * 1024 * 1024)
+    allocator = PinMemoryAllocator(128 * 1024 * 1024)
 
     gpu_kv_src = generate_sglang_kv_cache_paged_list_tensors(
         num_layers=num_layers,

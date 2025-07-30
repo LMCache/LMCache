@@ -63,14 +63,20 @@ def ensure_no_active_allocators():
     # Third Party
     import torch
 
-    # Use a timeout to avoid infinite deadlocks
+    # Force CUDA cleanup BEFORE checking for allocators
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+        # Give CUDA time to process deregistrations
+        time.sleep(0.1)
+
     lock_acquired = _allocator_lock.acquire(timeout=30)
     if not lock_acquired:
         print("⚠️ [LOCK] Failed to acquire allocator lock within 30s, proceeding anyway")
         return
 
     try:
-        # Find and close any existing allocators
+        # Comprehensive list of all allocator types
         allocator_types = [
             "AdHocMemoryAllocator",
             "PinMemoryAllocator",
@@ -79,12 +85,13 @@ def ensure_no_active_allocators():
             "HostMemoryAllocator",
             "PagedTensorMemoryAllocator",
             "TensorMemoryAllocator",
-            "CuFileMemoryAllocator",  # MISSING: calls cuFileBufRegister!
-            "NixlBufferAllocator",  # MISSING: Nixl allocator
-            "NixlCPUMemoryAllocator",  # MISSING: Another Nixl allocator
+            "CuFileMemoryAllocator",
+            "NixlBufferAllocator",
+            "NixlCPUMemoryAllocator",
         ]
 
-        # Collect allocators first (minimize lock time)
+        # Collect all allocators to close
+        # (separate collection from closing to minimize lock time)
         allocators_to_close = []
         test_allocators_to_close = []
 
@@ -101,12 +108,12 @@ def ensure_no_active_allocators():
                 ):
                     test_allocators_to_close.append(obj._test_allocator)
             except Exception:
+                # Ignore objects that raise exceptions during attribute access
                 pass
-
     finally:
         _allocator_lock.release()
 
-    # Close allocators OUTSIDE the lock to avoid deadlocks
+    # Close allocators outside the lock
     cleanup_count = 0
     for allocator in allocators_to_close:
         try:
@@ -122,16 +129,29 @@ def ensure_no_active_allocators():
         except Exception:
             pass
 
-    # Force CUDA cleanup (outside lock)
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-        torch.cuda.synchronize()
-    gc.collect()
-
     if cleanup_count > 0:
         print(
             f"🧹 [LOCK] Forcibly closed {cleanup_count} allocators for exclusive access"
         )
+
+    # Force multiple rounds of CUDA cleanup after closing allocators
+    if torch.cuda.is_available():
+        for _ in range(3):  # Multiple cleanup cycles
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+            time.sleep(0.05)  # Small delay between cycles
+
+        # Try to reset CUDA context if possible
+        try:
+            # This might help clear any lingering registrations
+            torch.cuda.reset_peak_memory_stats()
+        except Exception as e:
+            print(f"Failed to reset CUDA peak memory stats: {e}")
+
+    # Force garbage collection multiple times
+    for _ in range(3):
+        gc.collect()
+        time.sleep(0.02)
 
 
 # Monkey patch RemoteBackend.close() to add timeout for tests only

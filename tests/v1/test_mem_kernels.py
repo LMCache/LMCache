@@ -68,7 +68,7 @@ def test_extract_and_load_back(num_tokens):
     slot_mapping = random.sample(range(0, num_blocks * block_size), num_tokens)
     slot_mapping = torch.tensor(slot_mapping, device=device)
 
-    pinned_cpu_size = 4 * 1024 * 1024 * 1024  # 4GB
+    pinned_cpu_size = 256 * 1024 * 1024  # 256MB
     mem_allocator = PinMemoryAllocator(pinned_cpu_size)
 
     # Old extract
@@ -172,7 +172,7 @@ def test_multi_layer_kernel(num_tokens):
     slot_mapping = random.sample(range(0, num_blocks * block_size), num_tokens)
     slot_mapping = torch.tensor(slot_mapping, device=device)
 
-    pinned_cpu_size = 4 * 1024 * 1024 * 1024  # 4GB
+    pinned_cpu_size = 256 * 1024 * 1024  # 256MB
     mem_allocator = PinMemoryAllocator(pinned_cpu_size)
 
     # lmc_ops.multi_layer_kv_transfer(memory_obj_new.tensor,
@@ -293,7 +293,7 @@ def test_multi_layer_kernel_use_mla(num_tokens):
     slot_mapping = random.sample(range(0, num_blocks * block_size), num_tokens)
     slot_mapping = torch.tensor(slot_mapping, device=device)
 
-    pinned_cpu_size = 4 * 1024 * 1024 * 1024  # 4GB
+    pinned_cpu_size = 256 * 1024 * 1024  # 256MB
     mem_allocator = PinMemoryAllocator(pinned_cpu_size)
 
     # layer by layer extract
