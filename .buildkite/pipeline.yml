@@ -2,10 +2,10 @@ env:
   PATH: "$HOME/.local/bin:$PATH"
 
 steps:
-  - label: ":bomb: Clean up buildkite cache"
-    key: "pre-clean"
-    command: |
-      sudo rm -rf /var/cache/buildkite/*
+  # - label: ":bomb: Clean up buildkite cache"
+  #   key: "pre-clean"
+  #   command: |
+  #     sudo rm -rf /var/cache/buildkite/*
       
   - label: ":pip: Prepare venv"
     key: "venv"
