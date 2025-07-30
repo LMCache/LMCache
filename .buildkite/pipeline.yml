@@ -41,7 +41,7 @@ steps:
       - "coverage-test/**/*"
   
   - label: ":trash: Clean up buildkite caches"
-    key: "cleanup buildkite caches"
+    key: "cleanup_buildkite_caches"
     command: |
       sudo rm -rf /var/cache/buildkite
       # make sure that your buildkite-agent has sudo access
