@@ -5,6 +5,7 @@ import os
 import shutil
 import tempfile
 import threading
+import weakref
 
 # Third Party
 import pytest
@@ -16,6 +17,40 @@ from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj, MixedMemoryAllocator
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.v1.storage_backend.local_disk_backend import LocalDiskBackend
+
+# Global registry for tracking test allocators
+_test_allocators = weakref.WeakSet()
+
+
+@pytest.fixture(scope="session", autouse=True)
+def session_cuda_cleanup():
+    """Clean up any CUDA state at the start and end of test session."""
+    # Standard
+    import gc
+
+    # Third Party
+    import torch
+
+    # Aggressive cleanup at start of session
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+        # Force device context reset
+        for i in range(torch.cuda.device_count()):
+            with torch.cuda.device(i):
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+
+    # Force garbage collection
+    gc.collect()
+
+    yield
+
+    # Clean up at end of session
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+    gc.collect()
 
 
 class MockLookupServer:
@@ -60,6 +95,8 @@ def create_test_memory_obj(shape=(2, 16, 8, 128), dtype=torch.bfloat16) -> Memor
     from lmcache.v1.memory_management import AdHocMemoryAllocator, MemoryFormat
 
     allocator = AdHocMemoryAllocator(device="cpu")
+    # Register allocator in global registry for cleanup
+    _test_allocators.add(allocator)
     memory_obj = allocator.allocate(shape, dtype, fmt=MemoryFormat.KV_T2D)
     # Store allocator reference to ensure cleanup
     memory_obj._test_allocator = allocator
@@ -74,6 +111,16 @@ def cleanup_test_allocators():
 
     # Third Party
     import torch
+
+    # Clean up allocators from global registry first
+    for allocator in list(_test_allocators):
+        try:
+            allocator.close()
+        except Exception:
+            pass  # Ignore errors during cleanup
+
+    # Clear the registry
+    _test_allocators.clear()
 
     # Force garbage collection to trigger cleanup of any memory objects
     # with test allocators
