@@ -301,6 +301,67 @@ def global_cuda_cleanup():
     gc.collect()
 
 
+@pytest.fixture(scope="module", autouse=True)
+def module_level_allocator_cleanup():
+    """Cleanup allocators between test modules to prevent cross-module leaks."""
+    yield  # Let the module run first
+
+    # Aggressive cleanup after each test module
+    # Standard
+    import gc
+
+    # Third Party
+    import torch
+
+    print("🧹 [DEBUG] Module-level allocator cleanup starting...")
+
+    # Force cleanup of any remaining allocators
+    allocator_types = [
+        "AdHocMemoryAllocator",
+        "PinMemoryAllocator",
+        "MixedMemoryAllocator",
+        "GPUMemoryAllocator",
+        "HostMemoryAllocator",
+        "PagedTensorMemoryAllocator",
+        "TensorMemoryAllocator",
+    ]
+
+    cleanup_count = 0
+    for obj in gc.get_objects():
+        try:
+            if hasattr(obj, "__class__") and obj.__class__.__name__ in allocator_types:
+                if hasattr(obj, "close"):
+                    print(f"🔧 [DEBUG] Force-closing leaked {obj.__class__.__name__}")
+                    obj.close()
+                    cleanup_count += 1
+        except Exception:
+            # Ignore errors during force cleanup
+            pass
+
+    # Additional cleanup for test allocators
+    for obj in gc.get_objects():
+        try:
+            if hasattr(obj, "_test_allocator"):
+                if hasattr(obj._test_allocator, "close"):
+                    print("🔧 [DEBUG] Force-closing _test_allocator")
+                    obj._test_allocator.close()
+                    cleanup_count += 1
+        except Exception:
+            pass
+
+    print(f"🧹 [DEBUG] Module cleanup: closed {cleanup_count} allocators")
+
+    # Force CUDA cleanup
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+        print("🔧 [DEBUG] CUDA cache cleared between modules")
+
+    # Force garbage collection
+    gc.collect()
+    print("🧹 [DEBUG] Module-level cleanup complete")
+
+
 @pytest.fixture(scope="function")
 def autorelease(request):
     objects = []
@@ -335,14 +396,47 @@ def autorelease_v1(request):
     yield _factory
 
     print("🧹 [DEBUG] autorelease_v1 cleanup starting - destroying engine 'test'")
-    LMCacheEngineBuilder.destroy("test")
-    print("✅ [DEBUG] Engine 'test' destroyed")
+
+    # Force cleanup any existing engines first
+    try:
+        # Destroy all possible engine names that might exist
+        for engine_name in ["test", "test_engine"]:
+            try:
+                LMCacheEngineBuilder.destroy(engine_name)
+                print(f"✅ [DEBUG] Engine '{engine_name}' destroyed")
+            except Exception as e:
+                print(
+                    f"⚠️ [DEBUG] Engine '{engine_name}' destroy failed "
+                    f"(may not exist): {e}"
+                )
+    except Exception as e:
+        print(f"⚠️ [DEBUG] Engine destruction failed: {e}")
 
     # Cleanup all objects created by the factory
     print(f"🧹 [DEBUG] Cleaning up {len(objects)} objects...")
     for i, obj in enumerate(objects):
         if hasattr(obj, "close"):
+            print(
+                f"🔄 [DEBUG] Closing object \
+                    {i + 1}/{len(objects)}: {type(obj).__name__}"
+            )
             try:
                 obj.close()
+                print(f"✅ [DEBUG] Object {i + 1} closed successfully")
             except Exception as e:
-                print(f"[DEBUG] Error closing object {i + 1}: {e}")
+                print(f"⚠️ [DEBUG] Error closing object {i + 1}: {e}")
+
+    # Additional CUDA cleanup after each test
+    # Standard
+    import gc
+
+    # Third Party
+    import torch
+
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+        print("🔧 [DEBUG] CUDA cleanup after test")
+    gc.collect()
+
+    print("🎉 [DEBUG] autorelease_v1 cleanup complete!")
