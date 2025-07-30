@@ -10,4 +10,4 @@ torch
 # Required for phi3v processor. See https://github.com/pytorch/vision?tab=readme-ov-file#installation for corresponding version
 torchvision
 # platform_system == 'Linux' and platform_machine == 'x86_64' 
-xformer 
+xformers
