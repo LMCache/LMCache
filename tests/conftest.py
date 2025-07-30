@@ -255,23 +255,29 @@ def ensure_no_active_allocators():
 
     _log_cuda_memory_status("MID-CLEANUP")
 
-    # Optimized CUDA cleanup after closing allocators
+    # SUPER AGGRESSIVE CUDA cleanup after closing allocators
     if torch.cuda.is_available():
-        print("🔥 [GPU] Starting optimized CUDA memory cleanup...")
+        print("🔥 [GPU] Starting super aggressive CUDA memory cleanup...")
 
-        # 20 cycles with slightly longer delays for full test suite reliability
-        for i in range(20):
-            torch.cuda.empty_cache()
-            gc.collect()
+        # Phase 1: Multiple sync + empty cycles
+        for i in range(15):  # Increased from 10 to 15 cycles
             torch.cuda.synchronize()
-            # Longer delay for CUDA driver to complete deregistration
+            torch.cuda.empty_cache()
+            time.sleep(0.1)  # Longer delay
+
+        # Phase 2: Interleaved GC and CUDA cleanup
+        for i in range(15):  # Increased from 10 to 15 cycles
+            gc.collect()
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
             time.sleep(0.05)
 
-        # Reset CUDA states once
+        # Phase 3: Try to reset all CUDA states
         try:
             torch.cuda.reset_peak_memory_stats()
             if hasattr(torch.cuda, "reset_accumulated_memory_stats"):
                 torch.cuda.reset_accumulated_memory_stats()
+            # Try to reset memory stats multiple ways
             if hasattr(torch.cuda, "reset_max_memory_allocated"):
                 torch.cuda.reset_max_memory_allocated()
             if hasattr(torch.cuda, "reset_max_memory_cached"):
@@ -279,7 +285,23 @@ def ensure_no_active_allocators():
         except Exception as e:
             print(f"Failed to reset CUDA stats: {e}")
 
-        print("🔥 [GPU] Optimized cleanup complete")
+        # Phase 4: Final ultra-aggressive cleanup
+        for i in range(10):
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+            gc.collect()
+            time.sleep(0.02)
+
+        # Phase 5: Try manual memory freeing if available
+        try:
+            # Force release of cached memory
+            if hasattr(torch.cuda, "memory"):
+                if hasattr(torch.cuda.memory, "empty_cache"):
+                    torch.cuda.memory.empty_cache()
+        except Exception:
+            pass
+
+        print("🔥 [GPU] Super aggressive cleanup complete")
 
     _log_cuda_memory_status("POST-CLEANUP")
 
