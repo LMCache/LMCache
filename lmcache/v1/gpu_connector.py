@@ -8,7 +8,7 @@ import torch
 try:
     from torch_npu.contrib import transfer_to_npu
 except (ModuleNotFoundError, ImportError):
-    print("Not importing NPU packages. We are not running on Ascend")
+    pass
 
 # First Party
 from lmcache.integration.vllm.utils import ENGINE_NAME
