@@ -126,10 +126,10 @@ class LocalDiskBackend(StorageBackendInterface):
         key: CacheEngineKey,
     ) -> None:
         path = self.dict[key].path
+        size = self.dict[key].size
         self.disk_lock.acquire()
         self.dict.pop(key)
         self.disk_lock.release()
-        size = os.path.getsize(path)
         self.usage -= size
         self.stats_monitor.update_local_storage_usage(self.usage)
         os.remove(path)
