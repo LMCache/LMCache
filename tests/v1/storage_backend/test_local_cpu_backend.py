@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 import threading
+import weakref
 
 # Third Party
 import pytest
@@ -16,6 +17,9 @@ from lmcache.v1.memory_management import (
     MixedMemoryAllocator,
 )
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
+
+# Global registry for tracking test allocators
+_test_allocators = weakref.WeakSet()
 
 
 class MockLookupServer:
@@ -65,6 +69,8 @@ def create_test_memory_obj(
 ) -> MemoryObj:
     """Create a test MemoryObj using AdHocMemoryAllocator for testing."""
     allocator = AdHocMemoryAllocator(device="cpu")
+    # Register allocator in global registry for cleanup
+    _test_allocators.add(allocator)
     memory_obj = allocator.allocate(shape, dtype, fmt=MemoryFormat.KV_T2D)
     # Store allocator reference to ensure cleanup
     memory_obj._test_allocator = allocator
@@ -77,6 +83,19 @@ def cleanup_test_allocators():
     yield
     import gc
 
+    # Third Party
+    import torch
+
+    # Clean up allocators from global registry first
+    for allocator in list(_test_allocators):
+        try:
+            allocator.close()
+        except Exception:
+            pass  # Ignore errors during cleanup
+
+    # Clear the registry
+    _test_allocators.clear()
+
     # Force garbage collection to trigger cleanup
     # of any memory objects with test allocators
     for obj in gc.get_objects():
@@ -85,6 +104,12 @@ def cleanup_test_allocators():
                 obj._test_allocator.close()
         except Exception:
             pass  # Ignore errors during cleanup or hasattr checks
+
+    # Force CUDA context cleanup
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+
     gc.collect()
 
 

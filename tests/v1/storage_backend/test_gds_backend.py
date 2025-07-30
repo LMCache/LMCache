@@ -47,6 +47,9 @@ def cleanup_test_allocators():
     yield
     import gc
 
+    # Third Party
+    import torch
+
     # Force garbage collection to trigger cleanup of any memory objects
     # with test allocators
     for obj in gc.get_objects():
@@ -55,6 +58,12 @@ def cleanup_test_allocators():
                 obj._test_allocator.close()
         except Exception:
             pass  # Ignore errors during cleanup or hasattr checks
+
+    # Force CUDA context cleanup
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+
     gc.collect()
 
 
