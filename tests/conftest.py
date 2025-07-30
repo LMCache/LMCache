@@ -218,6 +218,36 @@ def lmserver_process(request):
         subprocess.run(shlex.split(f"rm -rf {device}"))
 
 
+@pytest.fixture(scope="session", autouse=True)
+def global_cuda_cleanup():
+    """Global CUDA cleanup at session start and end."""
+    # Standard
+    import gc
+
+    # Third Party
+    import torch
+
+    # Aggressive cleanup at start of session
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+        # Reset all CUDA devices
+        for i in range(torch.cuda.device_count()):
+            with torch.cuda.device(i):
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+
+    gc.collect()
+
+    yield
+
+    # Cleanup at end of session
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+    gc.collect()
+
+
 @pytest.fixture(scope="function")
 def autorelease(request):
     objects = []
@@ -231,6 +261,14 @@ def autorelease(request):
     # Cleanup all objects created by the factory
     for obj in objects:
         obj.close()
+
+    # Add CUDA cleanup after each test using legacy engines
+    # Third Party
+    import torch
+
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
 
 
 @pytest.fixture(scope="function")

@@ -22,6 +22,37 @@ from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 _test_allocators = weakref.WeakSet()
 
 
+@pytest.fixture(scope="session", autouse=True)
+def session_cuda_cleanup():
+    """Clean up any CUDA state at the start and end of test session."""
+    # Standard
+    import gc
+
+    # Third Party
+    import torch
+
+    # Aggressive cleanup at start of session
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+        # Force device context reset
+        for i in range(torch.cuda.device_count()):
+            with torch.cuda.device(i):
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+
+    # Force garbage collection
+    gc.collect()
+
+    yield
+
+    # Clean up at end of session
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+    gc.collect()
+
+
 class MockLookupServer:
     def __init__(self):
         self.removed_keys = []
