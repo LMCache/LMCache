@@ -15,11 +15,11 @@ Prerequisites
 
 Your server should have at least 2 GPUs.
 
-For Centralized sharing, this will use the port 8000 and 8001 for 2 vllms,
+For Centralized sharing, this will use the port 8000 and 8001 (for vLLM) and port 65432 (for LMCache).  
+
+For P2P sharing, this will use the port 8000 and 8001 for 2 vllms,
 And will use port 8200 and 8201 for 2 distributed cache servers,
 And will use port 8100 for lookup server.
-
-For P2P sharing, this will use the port 8000 and 8001 (for vLLM) and port 65432 (for LMCache).  
 
 Centralized KV cache sharing
 ----------------------------
@@ -37,9 +37,6 @@ First, create a configuration file named ``lmcache_config.yaml`` with the follow
     local_cpu: true
     remote_url: "lm://localhost:65432"
     remote_serde: "cachegen"
-    
-    # Whether retrieve() is pipelined or not
-    pipelined_backend: false
 
 Run centralized sharing example
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -54,7 +51,7 @@ Run centralized sharing example
 
 .. code-block:: bash
 
-    LMCACHE_CONFIG_FILE=example.yaml \
+    LMCACHE_CONFIG_FILE=lmcache_config.yaml \
     CUDA_VISIBLE_DEVICES=0 \
     vllm serve mistralai/Mistral-7B-Instruct-v0.2 \
         --gpu-memory-utilization 0.8 \
@@ -65,7 +62,7 @@ In another terminal,
 
 .. code-block:: bash
 
-    LMCACHE_CONFIG_FILE=example.yaml \
+    LMCACHE_CONFIG_FILE=lmcache_config.yaml \
     CUDA_VISIBLE_DEVICES=1 \
     vllm serve mistralai/Mistral-7B-Instruct-v0.2 \
         --gpu-memory-utilization 0.8 \

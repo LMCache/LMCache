@@ -1,20 +1,7 @@
-# Copyright 2024-2025 LMCache Authors.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
+# SPDX-License-Identifier: Apache-2.0
 # Standard
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Optional
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any, Optional, Union
 import os
 
 # Third Party
@@ -165,7 +152,7 @@ class RequestTracker:
     def update(
         self,
         new_token_ids: list[int],
-        new_block_ids: tuple[list[int], ...],
+        new_block_ids: Union[tuple[list[int], ...], list[int]],
     ) -> None:
         """Update the request tracker when a running request is
         scheduled again
@@ -175,12 +162,12 @@ class RequestTracker:
 
         if len(new_block_ids) == 0:
             new_block_ids = []
-        else:
-            assert isinstance(new_block_ids[0], list), (
-                "The new_block_ids should be a tuple of lists, "
-                "the vllm version might be too old!"
-            )
+        elif isinstance(new_block_ids, tuple):
             new_block_ids = new_block_ids[0]
+        elif isinstance(new_block_ids, list):
+            pass
+        else:
+            raise ValueError(f"Unsupported new_block_ids type {type(new_block_ids)}")
         self.allocated_block_ids.extend(new_block_ids)
 
 
@@ -320,10 +307,8 @@ class ReqMeta:
 
 @dataclass
 class LMCacheConnectorMetadata(KVConnectorMetadata):
-    requests: list[ReqMeta]
-
-    def __init__(self):
-        self.requests = []
+    requests: list[ReqMeta] = field(default_factory=list)
+    lookup_requests_in_step: list[str] = field(default_factory=list)
 
     def add_request(self, req_meta: ReqMeta) -> None:
         """Add a request to the metadata.
@@ -349,7 +334,8 @@ class LMCacheConnectorV1Impl:
         if role == KVConnectorRole.SCHEDULER:
             # Create lookup client using factory
             self.lookup_client = LookupClientFactory.create_lookup_client(vllm_config)
-            self._requests_in_step: dict[str, Request] = {}
+            self._unfinished_requests: dict[str, Request] = {}
+            self._lookup_requests_in_step: list[str] = []
         else:
             self.lmcache_engine = init_lmcache_engine(
                 vllm_config.model_config,
@@ -531,6 +517,8 @@ class LMCacheConnectorV1Impl:
                         num_expected_tokens,
                     )
 
+        self.lmcache_engine.lookup_unpin(metadata.lookup_requests_in_step)
+
     @_lmcache_nvtx_annotate
     def wait_for_layer_load(self, layer_name: str) -> None:
         """Blocking until the KV for a specific layer is loaded into vLLM's
@@ -607,24 +595,20 @@ class LMCacheConnectorV1Impl:
 
                 # TODO: have a pre-allocated buffer to hold the slot_mappings
                 slot_mapping = slot_mapping.cuda()
-                # NOTE: In PD setting, lmcache_engine.lookup() will always
-                # return 0 if there is no local storage configured.
-                # In this case, we should rely on the slip_leading_tokens in
-                # save_spec to avoid transmit the already saved tokens again.
-                # skip_leading_tokens = max(
-                #    self.lmcache_engine.lookup(token_ids),
-                #    save_spec.skip_leading_tokens,
-                # )
-                skip_leading_tokens = save_spec.skip_leading_tokens
 
-                if skip_leading_tokens == len(token_ids):
-                    continue  # skip this request
-                # Align to lmcache chunk size
-                skip_leading_tokens = (
-                    skip_leading_tokens
-                    // self._lmcache_chunk_size
-                    * self._lmcache_chunk_size
-                )
+                if self.kv_role == "kv_producer":
+                    skip_leading_tokens = 0
+                else:
+                    skip_leading_tokens = save_spec.skip_leading_tokens
+
+                    if skip_leading_tokens == len(token_ids):
+                        continue  # skip this request
+                    # Align to lmcache chunk size
+                    skip_leading_tokens = (
+                        skip_leading_tokens
+                        // self._lmcache_chunk_size
+                        * self._lmcache_chunk_size
+                    )
 
                 store_mask = torch.ones_like(token_ids, dtype=torch.bool)
                 store_mask[:skip_leading_tokens] = False
@@ -682,7 +666,9 @@ class LMCacheConnectorV1Impl:
 
         for request in connector_metadata.requests:
             save_spec = request.save_spec
-            if save_spec is None or not save_spec.can_save:
+            if (
+                save_spec is None or not save_spec.can_save
+            ) and self.kv_role != "kv_producer":
                 continue
 
             token_ids = request.token_ids
@@ -695,24 +681,24 @@ class LMCacheConnectorV1Impl:
 
             # TODO: have a pre-allocated buffer to hold the slot_mappings
             slot_mapping = slot_mapping.cuda()
-            # NOTE: In PD setting, lmcache_engine.lookup() will always return
-            # 0 if there is no local storage configured. In this case, we
-            # should rely on the slip_leading_tokens in save_spec to avoid
-            # transmit the already saved tokens again.
-            skip_leading_tokens = max(
-                self.lmcache_engine.lookup(token_ids),
-                save_spec.skip_leading_tokens,
-            )
-            skip_leading_tokens = save_spec.skip_leading_tokens
 
-            if skip_leading_tokens == len(token_ids):
-                continue  # skip this request
-            # Align to lmcache chunk size
-            skip_leading_tokens = (
-                skip_leading_tokens
-                // self._lmcache_chunk_size
-                * self._lmcache_chunk_size
-            )
+            if self.kv_role == "kv_producer":
+                skip_leading_tokens = 0
+            else:
+                skip_leading_tokens = max(
+                    self.lmcache_engine.lookup(token_ids),
+                    save_spec.skip_leading_tokens,
+                )
+                skip_leading_tokens = save_spec.skip_leading_tokens
+
+                if skip_leading_tokens == len(token_ids):
+                    continue  # skip this request
+                # Align to lmcache chunk size
+                skip_leading_tokens = (
+                    skip_leading_tokens
+                    // self._lmcache_chunk_size
+                    * self._lmcache_chunk_size
+                )
 
             store_mask = torch.ones_like(token_ids, dtype=torch.bool)
             store_mask[:skip_leading_tokens] = False
@@ -791,12 +777,15 @@ class LMCacheConnectorV1Impl:
                 token_ids, request.mm_hashes, request.mm_positions
             )
 
+        self._lookup_requests_in_step.append(request.request_id)
         if self.skip_last_n_tokens > 0:
             num_external_hit_tokens = self.lookup_client.lookup(
-                token_ids[: -self.skip_last_n_tokens]
+                token_ids[: -self.skip_last_n_tokens], request_id=request.request_id
             )
         else:
-            num_external_hit_tokens = self.lookup_client.lookup(token_ids)
+            num_external_hit_tokens = self.lookup_client.lookup(
+                token_ids, request_id=request.request_id
+            )
 
         # When prompt length is divisible by the block size and all
         # blocks are cached, we need to recompute the last token.
@@ -815,14 +804,15 @@ class LMCacheConnectorV1Impl:
             num_external_hit_tokens,
             need_to_allocate,
         )
-        if need_to_allocate <= 0:
-            return 0
 
         self.load_specs[request.request_id] = LoadSpec(
             vllm_cached_tokens=num_computed_tokens,
             lmcache_cached_tokens=num_external_hit_tokens,
             can_load=False,
         )
+
+        if need_to_allocate <= 0:
+            return 0
 
         # TODO: Align to vLLM block size. Should test whether it can be removed
         # need_to_allocate = need_to_allocate // self._block_size * \
@@ -839,7 +829,11 @@ class LMCacheConnectorV1Impl:
         if the CacheManager this allocated blocks for us.
         """
 
-        kv_transfer_params = request.kv_transfer_params
+        kv_transfer_params = (
+            request.kv_transfer_params
+            if hasattr(request, "kv_transfer_params")
+            else None
+        )
 
         if kv_transfer_params is not None and "disagg_spec" in kv_transfer_params:
             req_disagg_spec = kv_transfer_params["disagg_spec"]
@@ -860,7 +854,7 @@ class LMCacheConnectorV1Impl:
             )
 
             tmp_disagg_tracker[request.request_id] = disagg_spec
-        self._requests_in_step[request.request_id] = request
+        self._unfinished_requests[request.request_id] = request
 
         if request.request_id not in self.load_specs:
             # No KV tokens from external KV cache, return
@@ -910,6 +904,7 @@ class LMCacheConnectorV1Impl:
 
         for finished_req_id in scheduler_output.finished_req_ids:
             self._request_trackers.pop(finished_req_id, None)
+            self._unfinished_requests.pop(finished_req_id, None)
 
         for request in scheduler_output.scheduled_new_reqs:
             # Right now, we only load KV for new requests
@@ -964,14 +959,14 @@ class LMCacheConnectorV1Impl:
         for i, req_id in enumerate(cached_reqs.req_ids):
             request_tracker = self._request_trackers[req_id]
             num_new_tokens = scheduler_output.num_scheduled_tokens[req_id]
-            if request := self._requests_in_step.get(req_id):
+            if request := self._unfinished_requests.get(req_id):
                 num_current_tokens = len(request_tracker.token_ids)
                 new_token_ids = request.all_token_ids[
                     num_current_tokens : num_current_tokens + num_new_tokens
                 ]
             else:
                 raise ValueError(
-                    f"Request {req_id} is not in _requests_in_step, "
+                    f"Request {req_id} is not in _unfinished_requests, "
                     f"but it is scheduled to be cached"
                 )
             new_block_ids = cached_reqs.new_block_ids[i]
@@ -989,6 +984,8 @@ class LMCacheConnectorV1Impl:
             if req_meta is not None:
                 meta.add_request(req_meta)
 
+        meta.lookup_requests_in_step = self._lookup_requests_in_step
+        self._lookup_requests_in_step = []
         return meta
 
     def request_finished(
@@ -996,7 +993,11 @@ class LMCacheConnectorV1Impl:
         request: "Request",
         block_ids: list[int],
     ) -> tuple[bool, Optional[dict[str, Any]]]:
-        params = request.kv_transfer_params
+        params = (
+            request.kv_transfer_params
+            if hasattr(request, "kv_transfer_params")
+            else None
+        )
         return_params = None
 
         # NOTE: Used to stream back the first token

@@ -1,17 +1,4 @@
-# Copyright 2024-2025 LMCache Authors.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
+# SPDX-License-Identifier: Apache-2.0
 # Standard
 from concurrent.futures import Future
 from typing import List, Optional
@@ -90,7 +77,11 @@ class NixlBackend(StorageBackendInterface):
         :return: True if the key exists, False otherwise
         """
         with self._data_lock:
-            return key in self._data
+            if mem_obj := self._data.get(key, None):
+                if pin:
+                    mem_obj.ref_count_up()
+                return True
+            return False
 
     def exists_in_put_tasks(self, key: CacheEngineKey) -> bool:
         """
@@ -123,8 +114,9 @@ class NixlBackend(StorageBackendInterface):
         """
 
         # NOTE: no eviction in PD
-
-        mem_obj = self.memory_allocator.allocate(shape=shape, dtype=dtype, fmt=fmt)
+        mem_obj = self.memory_allocator.allocate(
+            shape=shape, dtype=dtype, fmt=fmt, allocator_type="nixl"
+        )
 
         return mem_obj
 
@@ -144,7 +136,7 @@ class NixlBackend(StorageBackendInterface):
         )
         return None
 
-    def submit_prefetch_task(self, key: CacheEngineKey) -> Optional[Future]:
+    def submit_prefetch_task(self, key: CacheEngineKey) -> bool:
         """
         An async function to get the MemoryObj from the storage backend.
 
@@ -195,7 +187,11 @@ class NixlBackend(StorageBackendInterface):
         :param key: The key to remove.
         """
         with self._data_lock:
-            return self._data.pop(key, None) is not None
+            if mem_obj := self._data.get(key, None):
+                if mem_obj.get_ref_count() == 1:
+                    del self._data[key]
+                return True
+            return False
 
     def close(self) -> None:
         """
@@ -204,10 +200,10 @@ class NixlBackend(StorageBackendInterface):
         self._nixl_channel.close()
 
     def pin(self, key: CacheEngineKey) -> bool:
-        raise NotImplementedError
+        return True
 
     def unpin(self, key: CacheEngineKey) -> bool:
-        raise NotImplementedError
+        return True
 
     # TODO (Jiayi): put this in _init__.py later
     @staticmethod

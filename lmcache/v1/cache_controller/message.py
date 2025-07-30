@@ -1,17 +1,4 @@
-# Copyright 2024-2025 LMCache Authors.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
+# SPDX-License-Identifier: Apache-2.0
 # Standard
 from typing import Dict, Optional, Tuple, Union
 
@@ -78,7 +65,7 @@ class KVAdmitMsg(WorkerMsg):
 
     instance_id: str
     worker_id: int
-    key: str
+    key: int
     location: str
 
     def describe(self) -> str:
@@ -90,7 +77,7 @@ class KVEvictMsg(WorkerMsg):
 
     instance_id: str
     worker_id: int
-    key: str
+    key: int
     location: str
 
     def describe(self) -> str:
@@ -145,8 +132,8 @@ class CompressWorkerMsg(ControlMsg):
 class MoveWorkerMsg(ControlMsg):
     """Move message for a single lmcache worker"""
 
-    old_position: Tuple[str, str]
-    new_position: Tuple[str, str]
+    old_position: Tuple[str, str]  # (instance_id, location)
+    new_position: Tuple[str, str]  # (instance_id, location)
     tokens: Optional[list[int]] = None
 
     def describe(self) -> str:
@@ -393,10 +380,10 @@ class CompressRetMsg(OrchRetMsg):
 class MoveRetMsg(OrchRetMsg):
     """Move return message"""
 
-    event_id: str
+    event_ids: list[str]
 
     def describe(self) -> str:
-        return f"Move event id: {self.event_id}"
+        return f"Move event id: {self.event_ids}"
 
 
 class HealthRetMsg(OrchRetMsg):

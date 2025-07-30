@@ -1,17 +1,4 @@
-# Copyright 2024-2025 LMCache Authors.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
+# SPDX-License-Identifier: Apache-2.0
 # Standard
 from collections import OrderedDict
 from typing import TYPE_CHECKING, Optional
@@ -63,29 +50,29 @@ def CreateStorageBackends(
             storage_backends["NixlBackend"] = NixlBackend.CreateNixlBackend(
                 config, metadata, memory_allocator
             )
+        else:
+            # First Party
+            from lmcache.v1.storage_backend.nixl_backend import NixlBackend
+
+            storage_backends["NixlBackend"] = NixlBackend.CreateNixlBackend(
+                config, metadata
+            )
             assert config.nixl_buffer_device is not None
-            return storage_backends
-
-        # First Party
-        from lmcache.v1.storage_backend.nixl_backend import NixlBackend
-
-        storage_backends["NixlBackend"] = NixlBackend.CreateNixlBackend(
-            config, metadata
-        )
-        assert config.nixl_buffer_device is not None
-        return storage_backends
 
     # TODO(Jiayi): The hierarchy is fixed for now
     # NOTE(Jiayi): The local_cpu backend is always created because
     # other backends might need it as a buffer.
-    local_cpu_backend = LocalCPUBackend(
-        config,
-        memory_allocator,
-        lookup_server,
-        lmcache_worker,
-    )
-    backend_name = str(local_cpu_backend)
-    storage_backends[backend_name] = local_cpu_backend
+    if config.enable_nixl and not config.local_cpu:
+        pass
+    else:
+        local_cpu_backend = LocalCPUBackend(
+            config,
+            memory_allocator,
+            lookup_server,
+            lmcache_worker,
+        )
+        backend_name = str(local_cpu_backend)
+        storage_backends[backend_name] = local_cpu_backend
 
     if config.local_disk and config.max_local_disk_size > 0:
         local_disk_backend = LocalDiskBackend(
@@ -96,6 +83,7 @@ def CreateStorageBackends(
             lmcache_worker,
             lookup_server,
         )
+
         backend_name = str(local_disk_backend)
         storage_backends[backend_name] = local_disk_backend
 

@@ -1,17 +1,4 @@
-# Copyright 2025 Ilya Yanok, Serapheim Dimitropoulos.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
+# SPDX-License-Identifier: Apache-2.0
 # Standard
 from collections import OrderedDict
 from concurrent.futures import Future
@@ -265,6 +252,7 @@ class WekaGdsBackend(StorageBackendInterface):
 
     def _try_to_read_metadata(self, key: CacheEngineKey) -> Optional[DiskCacheMetadata]:
         path, subdir_key, _, _ = self._key_to_path(key)
+        path += _METADATA_FILE_SUFFIX
         if os.path.exists(path):
             try:
                 return self._read_metadata(key, path, subdir_key)
@@ -368,20 +356,23 @@ class WekaGdsBackend(StorageBackendInterface):
     def submit_prefetch_task(
         self,
         key: CacheEngineKey,
-    ) -> Optional[Future]:
-        with self.hot_lock:
-            entry = self.hot_cache.get(key)
-        if entry is None:
-            return None
+    ) -> bool:
+        # with self.hot_lock:
+        #     entry = self.hot_cache.get(key)
+        # if entry is None:
+        #     return None
 
-        path = entry.path
-        dtype = entry.dtype
-        shape = entry.shape
-        assert dtype is not None
-        assert shape is not None
-        return asyncio.run_coroutine_threadsafe(
-            self._async_load_bytes_from_disk(key, path, dtype, shape), self.loop
-        )
+        # path = entry.path
+        # dtype = entry.dtype
+        # shape = entry.shape
+        # assert dtype is not None
+        # assert shape is not None
+        # return asyncio.run_coroutine_threadsafe(
+        #     self._async_load_bytes_from_disk(key, path, dtype, shape), self.loop
+        # )
+
+        # TODO(Jiayi): Need to modify this when prefetch interface is determined.
+        return False
 
     async def _async_load_bytes_from_disk(
         self,

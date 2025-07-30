@@ -1,17 +1,4 @@
-# Copyright 2024-2025 LMCache Authors.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
+# SPDX-License-Identifier: Apache-2.0
 # Standard
 from dataclasses import dataclass
 from typing import Callable, Optional, Union
@@ -61,6 +48,7 @@ class NixlBufferAllocator(MemoryAllocatorInterface):
         shape: Union[torch.Size, tuple[int, ...]],
         dtype: Optional[torch.dtype],
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
+        allocator_type: Optional[str] = "nixl",
     ) -> Optional[MemoryObj]:
         """
         Allocates the memory to hold a tensor of the given shape.
@@ -114,16 +102,22 @@ class NixlBufferAllocator(MemoryAllocatorInterface):
         dtype: Optional[torch.dtype],
         batch_size: int,
         fmt=MemoryFormat.KV_2LTD,
+        allocator_type: Optional[str] = "nixl",
     ):
         raise NotImplementedError(
             "Batched allocation is not supported in NIXL buffer allocator"
         )
 
-    def free(self, obj: MemoryObj):
+    def free(self, obj: MemoryObj, allocator_type: Optional[str] = "nixl"):
         """Free the memory object."""
         pass
 
-    def batched_free(self, objs: list[MemoryObj], update_stats: bool = True):
+    def batched_free(
+        self,
+        objs: list[MemoryObj],
+        allocator_type: Optional[str] = "nixl",
+        update_stats: bool = True,
+    ):
         """Free the memory objects in batch."""
         pass
 

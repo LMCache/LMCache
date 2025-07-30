@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # Standard
 from pathlib import Path
 import asyncio
@@ -43,6 +44,10 @@ def test_lm_connector(url, autorelease_v1, lmserver_v1_process):
     memory_obj = memory_allocator.allocate(mem_obj_shape, dtype)
     memory_obj.ref_count_up()
 
+    torch.manual_seed(42)
+    test_tensor = torch.randint(0, 100, memory_obj.raw_data.shape, dtype=torch.int64)
+    memory_obj.raw_data.copy_(test_tensor.to(torch.float32).to(dtype))
+
     future = asyncio.run_coroutine_threadsafe(
         connector.put(random_key, memory_obj), async_loop
     )
@@ -61,6 +66,8 @@ def test_lm_connector(url, autorelease_v1, lmserver_v1_process):
     )
 
     close_asyncio_loop(async_loop, async_thread)
+
+    memory_allocator.close()
 
 
 @pytest.mark.parametrize("lmserver_v1_process", ["cpu"], indirect=True)
@@ -118,6 +125,8 @@ def test_fs_connector(lmserver_v1_process, autorelease_v1):
         assert files[0].name == f"{random_key.to_string()}.data"
 
         close_asyncio_loop(async_loop, async_thread)
+
+        memory_allocator.close()
 
 
 @pytest.mark.parametrize(
@@ -180,6 +189,8 @@ def test_redis_connector(url, autorelease_v1):
 
     close_asyncio_loop(async_loop, async_thread)
 
+    memory_allocator.close()
+
 
 @pytest.mark.parametrize(
     "url",
@@ -239,3 +250,5 @@ def test_redis_sentinel_connector(url, autorelease_v1):
     future.result()
 
     close_asyncio_loop(async_loop, async_thread)
+
+    memory_allocator.close()

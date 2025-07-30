@@ -1,18 +1,4 @@
-# Copyright 2024-2025 LMCache Authors.
-# Copyright 2025 Ilya Yanok, Serapheim Dimitropoulos.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
+# SPDX-License-Identifier: Apache-2.0
 # Standard
 from collections import deque
 from contextlib import nullcontext
@@ -103,11 +89,10 @@ class MemoryObjMetadata:
     # Reference count
     ref_count: int
 
-    # TODO(Jiayi): Need to differentiate between temporary pin
-    # and persistent pin. Or maybe it's better to use only
-    # `ref_count` to manage these semantics.
     # Whether the object is pinned and cannot be evicted
-    is_pin: bool = False
+    # lookup pins are temporary
+    # cache controller pins are persistent
+    pin_count: int = 0
 
     # The 'logical' format of the tensor
     fmt: MemoryFormat = MemoryFormat.UNDEFINED
@@ -339,7 +324,7 @@ class TensorMemoryObj(MemoryObj):
             if (
                 self.meta.ref_count == 0
                 and self.parent_allocator is not None
-                and self.meta.is_pin is False
+                and self.meta.pin_count == 0
             ):
                 self.parent_allocator.free(self)
 
@@ -348,12 +333,26 @@ class TensorMemoryObj(MemoryObj):
             return self.meta.ref_count
 
     def pin(self) -> bool:
-        self.metadata.is_pin = True
-        return True
+        with self.lock:
+            self.meta.pin_count += 1
+            return True
 
     def unpin(self) -> bool:
-        self.metadata.is_pin = False
-        return True
+        with self.lock:
+            self.meta.pin_count -= 1
+
+            if self.meta.pin_count <= 0 and self.meta.ref_count <= 0:
+                self.parent_allocator.free(self)
+
+            if self.meta.pin_count < 0:
+                logger.warning(
+                    f"Pin count of MemoryObj {self.meta.address}"
+                    f"is negative: {self.meta.pin_count}."
+                    "Double unpin occurred somewhere."
+                    "Setting pin count back to 0 as a hack but please find the bug."
+                )
+                self.meta.pin_count = 0
+            return True
 
     @property
     def metadata(self) -> MemoryObjMetadata:
@@ -382,7 +381,7 @@ class TensorMemoryObj(MemoryObj):
 
     @property
     def is_pinned(self) -> bool:
-        return self.metadata.is_pin
+        return self.metadata.pin_count > 0
 
 
 class BytesBufferMemoryObj(MemoryObj):
@@ -400,7 +399,7 @@ class BytesBufferMemoryObj(MemoryObj):
                 address=0,
                 phy_size=0,
                 ref_count=1,
-                is_pin=False,
+                pin_count=0,
                 fmt=MemoryFormat.BINARY_BUFFER,
             )
         else:
@@ -429,11 +428,19 @@ class BytesBufferMemoryObj(MemoryObj):
         return self.metadata.phy_size
 
     def pin(self) -> bool:
-        self.metadata.is_pin = True
+        self.metadata.pin_count += 1
         return True
 
     def unpin(self) -> bool:
-        self.metadata.is_pin = False
+        self.metadata.pin_count -= 1
+        if self.metadata.pin_count < 0:
+            logger.warning(
+                f"Pin count of MemoryObj {self.meta.address}"
+                f"is negative: {self.meta.pin_count}."
+                "Double unpin occurred somewhere."
+                "Setting pin count back to 0 as a hack but please find the bug."
+            )
+            self.metadata.pin_count = 0
         return True
 
     def ref_count_up(self):
@@ -462,7 +469,7 @@ class BytesBufferMemoryObj(MemoryObj):
 
     @property
     def is_pinned(self) -> bool:
-        return self.metadata.is_pin
+        return self.metadata.pin_count > 0
 
 
 class MemoryAllocatorInterface(metaclass=abc.ABCMeta):
@@ -472,6 +479,7 @@ class MemoryAllocatorInterface(metaclass=abc.ABCMeta):
         shape: Union[torch.Size, Tuple[int, ...]],
         dtype: Optional[torch.dtype],
         fmt: MemoryFormat = MemoryFormat.UNDEFINED,
+        allocator_type: Optional[str] = None,
     ) -> Optional[MemoryObj]:
         """
         Allocates the memory to hold a tensor of the given shape.
@@ -494,6 +502,7 @@ class MemoryAllocatorInterface(metaclass=abc.ABCMeta):
         dtype: Optional[torch.dtype],
         batch_size: int,
         fmt: MemoryFormat = MemoryFormat.UNDEFINED,
+        allocator_type: Optional[str] = None,
     ) -> Optional[List[MemoryObj]]:
         """
         Batched allocate the memory to hold a tensor of the given shape.
@@ -511,7 +520,11 @@ class MemoryAllocatorInterface(metaclass=abc.ABCMeta):
         raise NotImplementedError
 
     @abc.abstractmethod
-    def free(self, memory_obj: MemoryObj):
+    def free(
+        self,
+        memory_obj: MemoryObj,
+        allocator_type: Optional[str] = None,
+    ):
         """
         Frees the memory allocated for the given MemoryObj.
         Note that this function shouldn't be explicitly called.
@@ -522,7 +535,12 @@ class MemoryAllocatorInterface(metaclass=abc.ABCMeta):
         raise NotImplementedError
 
     @abc.abstractmethod
-    def batched_free(self, memory_objs: List[MemoryObj], update_stats: bool = True):
+    def batched_free(
+        self,
+        memory_objs: List[MemoryObj],
+        allocator_type: Optional[str] = None,
+        update_stats: bool = True,
+    ):
         """
         Frees the memory allocated for the given list of MemoryObjs.
 
@@ -530,6 +548,13 @@ class MemoryAllocatorInterface(metaclass=abc.ABCMeta):
             to free.
         """
         raise NotImplementedError
+
+    def close(self):
+        """
+        Closes the memory allocator.
+        This is called when the LMCacheEngine is closed.
+        """
+        return
 
 
 class TensorMemoryAllocator(MemoryAllocatorInterface):
@@ -608,6 +633,7 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         dtype: Optional[torch.dtype],
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
         parent_allocator: Optional["MemoryAllocatorInterface"] = None,
+        allocator_type: Optional[str] = None,
     ) -> Optional[TensorMemoryObj]:
         if not isinstance(shape, torch.Size):
             shape = torch.Size(shape)
@@ -668,6 +694,7 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         batch_size: int,
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
         parent_allocator: Optional["MemoryAllocatorInterface"] = None,
+        allocator_type: Optional[str] = None,
     ) -> Optional[List[TensorMemoryObj]]:
         """
         Batched allocate tensor memory objs with equal sizes.
@@ -739,7 +766,7 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         return tensor_mem_objs
 
     @_lmcache_nvtx_annotate
-    def free(self, memory_obj: MemoryObj):
+    def free(self, memory_obj: MemoryObj, allocator_type: Optional[str] = None):
         if not memory_obj.is_valid():
             return
 
@@ -765,7 +792,12 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         self.stats_monitor.update_local_cache_usage(self.total_allocated_size)
 
     @_lmcache_nvtx_annotate
-    def batched_free(self, memory_objs: List[MemoryObj], update_stats: bool = True):
+    def batched_free(
+        self,
+        memory_objs: List[MemoryObj],
+        allocator_type: Optional[str] = None,
+        update_stats: bool = True,
+    ):
         """
         Batched free memory objs.
         Unlike `batched_allocate`, this function does not
@@ -854,9 +886,6 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
                 clear = False
         return clear
 
-    def __del__(self):
-        del self.buffer
-
 
 class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
     """
@@ -906,7 +935,7 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
                 idx,
                 1,  # 1 page
                 1,  # ref_count=1
-                False,  # is_pin=False
+                0,  # pin_count=0
                 self.fmt,
             )
             mem_obj = TensorMemoryObj(
@@ -934,6 +963,7 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
         dtype: Optional[torch.dtype],
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
         parent_allocator: Optional["MemoryAllocatorInterface"] = None,
+        allocator_type: Optional[str] = None,
     ) -> Optional[TensorMemoryObj]:
         if not isinstance(shape, torch.Size):
             shape = torch.Size(shape)
@@ -978,6 +1008,7 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
         batch_size: int,
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
         parent_allocator: Optional["MemoryAllocatorInterface"] = None,
+        allocator_type: Optional[str] = None,
     ) -> Optional[List[TensorMemoryObj]]:
         """
         Batched allocate tensor memory objs with pre-defined equal sizes.
@@ -1024,7 +1055,7 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
         return allocated_blocks
 
     @_lmcache_nvtx_annotate
-    def free(self, memory_obj: MemoryObj):
+    def free(self, memory_obj: MemoryObj, allocator_type: Optional[str] = None):
         if not memory_obj.is_valid():
             return
         if memory_obj.meta.shape != self.shape:
@@ -1044,7 +1075,12 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
         self.stats_monitor.update_local_cache_usage(self.total_allocated_size)
 
     @_lmcache_nvtx_annotate
-    def batched_free(self, memory_objs: List[MemoryObj], update_stats: bool = True):
+    def batched_free(
+        self,
+        memory_objs: List[MemoryObj],
+        allocator_type: Optional[str] = None,
+        update_stats: bool = True,
+    ):
         """
         Batched free memory objs.
         Unlike `batched_allocate`, this function does not
@@ -1117,6 +1153,7 @@ class BufferAllocator(MemoryAllocatorInterface):
         shape: Union[torch.Size, Tuple[int, ...]],
         dtype: Optional[torch.dtype],
         fmt: MemoryFormat = MemoryFormat.BINARY_BUFFER,
+        allocator_type: Optional[str] = None,
     ) -> BytesBufferMemoryObj:
         n = shape[0]
         byte_array = bytearray(n)
@@ -1129,16 +1166,22 @@ class BufferAllocator(MemoryAllocatorInterface):
         dtype: Optional[torch.dtype],
         batch_size: int,
         fmt: MemoryFormat = MemoryFormat.BINARY_BUFFER,
+        allocator_type: Optional[str] = None,
     ) -> List[BytesBufferMemoryObj]:
         n = shape[0]
         # TODO(Jiayi): Optimize the following loop.
         byte_arrays = [bytearray(n) for _ in range(batch_size)]
         return [BytesBufferMemoryObj(byte_array) for byte_array in byte_arrays]
 
-    def free(self, memory_obj: MemoryObj):
+    def free(self, memory_obj: MemoryObj, allocator_type: Optional[str] = None):
         return
 
-    def batched_free(self, memory_objs: List[MemoryObj], update_stats: bool = True):
+    def batched_free(
+        self,
+        memory_objs: List[MemoryObj],
+        allocator_type: Optional[str] = None,
+        update_stats: bool = True,
+    ):
         return
 
     def memcheck(self):
@@ -1179,6 +1222,7 @@ class HostMemoryAllocator(MemoryAllocatorInterface):
         shape: Union[torch.Size, Tuple[int, ...]],
         dtype: Optional[torch.dtype],
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
+        allocator_type: Optional[str] = None,
     ) -> Optional[MemoryObj]:
         with self.host_mem_lock:
             return self.allocator.allocate(shape, dtype, fmt, self)
@@ -1190,17 +1234,23 @@ class HostMemoryAllocator(MemoryAllocatorInterface):
         dtype: Optional[torch.dtype],
         batch_size: int,
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
+        allocator_type: Optional[str] = None,
     ) -> Optional[List[MemoryObj]]:
         with self.host_mem_lock:
             return self.allocator.batched_allocate(shape, dtype, batch_size, fmt, self)
 
     @_lmcache_nvtx_annotate
-    def free(self, memory_obj: MemoryObj):
+    def free(self, memory_obj: MemoryObj, allocator_type: Optional[str] = None):
         with self.host_mem_lock:
             self.allocator.free(memory_obj)
 
     @_lmcache_nvtx_annotate
-    def batched_free(self, memory_objs: List[MemoryObj], update_stats: bool = True):
+    def batched_free(
+        self,
+        memory_objs: List[MemoryObj],
+        allocator_type: Optional[str] = None,
+        update_stats: bool = True,
+    ):
         with self.host_mem_lock:
             self.allocator.batched_free(memory_objs)
 
@@ -1216,7 +1266,14 @@ class PinMemoryAllocator(MemoryAllocatorInterface):
         """
         :param int size: The size of the pinned memory in bytes.
         """
-        buffer = torch.empty(size, dtype=torch.uint8, pin_memory=True)
+
+        self.buffer = torch.empty(size, dtype=torch.uint8)
+        ptr = self.buffer.data_ptr()
+        err = torch.cuda.cudart().cudaHostRegister(ptr, size, 0)
+        assert err == 0, (
+            f"cudaHostRegister failed: {torch.cuda.cudart().cudaGetErrorString(err)}"
+        )
+        self._unregistered = False
 
         if use_paging:
             assert "shape" in kwargs, (
@@ -1227,13 +1284,13 @@ class PinMemoryAllocator(MemoryAllocatorInterface):
             )
             assert "fmt" in kwargs, "fmt must be specified for paged memory allocator"
             self.allocator = PagedTensorMemoryAllocator(
-                tensor=buffer,
+                tensor=self.buffer,
                 shape=kwargs["shape"],
                 dtype=kwargs["dtype"],
                 fmt=kwargs["fmt"],
             )
         else:
-            self.allocator = TensorMemoryAllocator(buffer)
+            self.allocator = TensorMemoryAllocator(self.buffer)
 
         self.host_mem_lock = threading.Lock() if not use_paging else nullcontext()
 
@@ -1243,6 +1300,7 @@ class PinMemoryAllocator(MemoryAllocatorInterface):
         shape: Union[torch.Size, Tuple[int, ...]],
         dtype: Optional[torch.dtype],
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
+        allocator_type: Optional[str] = None,
     ) -> Optional[MemoryObj]:
         with self.host_mem_lock:
             return self.allocator.allocate(shape, dtype, fmt, self)
@@ -1254,23 +1312,35 @@ class PinMemoryAllocator(MemoryAllocatorInterface):
         dtype: Optional[torch.dtype],
         batch_size: int,
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
+        allocator_type: Optional[str] = None,
     ) -> Optional[List[MemoryObj]]:
         with self.host_mem_lock:
             return self.allocator.batched_allocate(shape, dtype, batch_size, fmt, self)
 
     @_lmcache_nvtx_annotate
-    def free(self, memory_obj: MemoryObj):
+    def free(self, memory_obj: MemoryObj, allocator_type: Optional[str] = None):
         with self.host_mem_lock:
             self.allocator.free(memory_obj)
 
     @_lmcache_nvtx_annotate
-    def batched_free(self, memory_objs: List[MemoryObj], update_stats: bool = True):
+    def batched_free(
+        self,
+        memory_objs: List[MemoryObj],
+        allocator_type: Optional[str] = None,
+        update_stats: bool = True,
+    ):
         with self.host_mem_lock:
             self.allocator.batched_free(memory_objs)
 
     def memcheck(self):
         with self.host_mem_lock:
             return self.allocator.memcheck()
+
+    def close(self):
+        if not self._unregistered:
+            torch.cuda.synchronize()
+            torch.cuda.cudart().cudaHostUnregister(self.buffer.data_ptr())
+            self._unregistered = True
 
 
 class MixedMemoryAllocator(MemoryAllocatorInterface):
@@ -1283,7 +1353,14 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
         """
         :param int size: The size of the pinned memory in bytes.
         """
-        buffer = torch.empty(size, dtype=torch.uint8, pin_memory=True)
+
+        self.buffer = torch.empty(size, dtype=torch.uint8)
+        ptr = self.buffer.data_ptr()
+        err = torch.cuda.cudart().cudaHostRegister(ptr, size, 0)
+        assert err == 0, (
+            f"cudaHostRegister failed: {torch.cuda.cudart().cudaGetErrorString(err)}"
+        )
+        self._unregistered = False
 
         if use_paging:
             assert "shape" in kwargs, (
@@ -1294,13 +1371,13 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
             )
             assert "fmt" in kwargs, "fmt must be specified for paged memory allocator"
             self.pin_allocator = PagedTensorMemoryAllocator(
-                tensor=buffer,
+                tensor=self.buffer,
                 shape=kwargs["shape"],
                 dtype=kwargs["dtype"],
                 fmt=kwargs["fmt"],
             )
         else:
-            self.pin_allocator = TensorMemoryAllocator(buffer)
+            self.pin_allocator = TensorMemoryAllocator(self.buffer)
 
         self.host_mem_lock = threading.Lock() if not use_paging else nullcontext()
 
@@ -1312,6 +1389,7 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
         shape: Union[torch.Size, Tuple[int, ...]],
         dtype: Optional[torch.dtype],
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
+        allocator_type: Optional[str] = None,
     ) -> Optional[MemoryObj]:
         if fmt == MemoryFormat.BINARY_BUFFER:
             return self.buffer_allocator.allocate(shape, dtype, fmt)
@@ -1333,6 +1411,7 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
         dtype: Optional[torch.dtype],
         batch_size: int,
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
+        allocator_type: Optional[str] = None,
     ) -> Optional[List[MemoryObj]]:
         if fmt == MemoryFormat.BINARY_BUFFER:
             return self.buffer_allocator.batched_allocate(shape, dtype, batch_size, fmt)
@@ -1350,7 +1429,7 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
             raise ValueError(f"Unsupported memory format: {fmt}")
 
     @_lmcache_nvtx_annotate
-    def free(self, memory_obj: MemoryObj):
+    def free(self, memory_obj: MemoryObj, allocator_type: Optional[str] = None):
         fmt = memory_obj.meta.fmt
         if fmt == MemoryFormat.BINARY_BUFFER:
             self.buffer_allocator.free(memory_obj)
@@ -1366,7 +1445,12 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
             raise ValueError(f"Unsupported memory format: {fmt}")
 
     @_lmcache_nvtx_annotate
-    def batched_free(self, memory_objs: List[MemoryObj], update_stats: bool = True):
+    def batched_free(
+        self,
+        memory_objs: List[MemoryObj],
+        allocator_type: Optional[str] = None,
+        update_stats: bool = True,
+    ):
         # NOTE: fmts of all memory_objs should be the same
         fmt = memory_objs[0].meta.fmt
         if fmt == MemoryFormat.BINARY_BUFFER:
@@ -1385,6 +1469,12 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
     def memcheck(self):
         with self.host_mem_lock:
             return self.pin_allocator.memcheck()
+
+    def close(self):
+        if not self._unregistered:
+            torch.cuda.synchronize()
+            torch.cuda.cudart().cudaHostUnregister(self.buffer.data_ptr())
+            self._unregistered = True
 
 
 class GPUMemoryAllocator(MemoryAllocatorInterface):
@@ -1432,6 +1522,7 @@ class GPUMemoryAllocator(MemoryAllocatorInterface):
         shape: Union[torch.Size, Tuple[int, ...]],
         dtype: Optional[torch.dtype],
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
+        allocator_type: Optional[str] = None,
     ) -> Optional[MemoryObj]:
         with self.device_mem_lock:
             return self.allocator.allocate(shape, dtype, fmt, self)
@@ -1443,15 +1534,21 @@ class GPUMemoryAllocator(MemoryAllocatorInterface):
         dtype: Optional[torch.dtype],
         batch_size: int,
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
+        allocator_type: Optional[str] = None,
     ) -> Optional[List[MemoryObj]]:
         with self.device_mem_lock:
             return self.allocator.batched_allocate(shape, dtype, batch_size, fmt, self)
 
-    def free(self, memory_obj: MemoryObj):
+    def free(self, memory_obj: MemoryObj, allocator_type: Optional[str] = None):
         with self.device_mem_lock:
             self.allocator.free(memory_obj)
 
-    def batched_free(self, memory_objs: List[MemoryObj], update_stats: bool = True):
+    def batched_free(
+        self,
+        memory_objs: List[MemoryObj],
+        allocator_type: Optional[str] = None,
+        update_stats: bool = True,
+    ):
         with self.device_mem_lock:
             self.allocator.batched_free(memory_objs)
 
@@ -1478,6 +1575,7 @@ class AdHocMemoryAllocator(MemoryAllocatorInterface):
         shape: Union[torch.Size, Tuple[int, ...]],
         dtype: Optional[torch.dtype],
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
+        allocator_type: Optional[str] = None,
     ) -> Optional[MemoryObj]:
         """
         Returns a dummy MemoryObj for testing purposes.
@@ -1496,7 +1594,7 @@ class AdHocMemoryAllocator(MemoryAllocatorInterface):
                 address=0,
                 phy_size=0,
                 ref_count=1,
-                is_pin=False,
+                pin_count=0,
                 fmt=fmt,
             ),
             parent_allocator=self,
@@ -1509,15 +1607,21 @@ class AdHocMemoryAllocator(MemoryAllocatorInterface):
         dtype: Optional[torch.dtype],
         batch_size: int,
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
+        allocator_type: Optional[str] = None,
     ) -> Optional[List[MemoryObj]]:
         raise NotImplementedError(
             "Batched allocation is not supported in AdHocMemoryAllocator"
         )
 
-    def free(self, memory_obj: MemoryObj):
+    def free(self, memory_obj: MemoryObj, allocator_type: Optional[str] = None):
         pass
 
-    def batched_free(self, memory_objs: List[MemoryObj], update_stats: bool = True):
+    def batched_free(
+        self,
+        memory_objs: List[MemoryObj],
+        allocator_type: Optional[str] = None,
+        update_stats: bool = True,
+    ):
         pass
 
     def ref_count_up(self, memory_obj: MemoryObj):
@@ -1551,3 +1655,83 @@ class CuFileMemoryAllocator(GPUMemoryAllocator):
 
     def __del__(self):
         self.cuFileBufDeregister(ctypes.c_void_p(self.base_pointer))
+
+
+class NixlCPUMemoryAllocator(MemoryAllocatorInterface):
+    """
+    NIXL + CPU Memory Allocator
+    This is a special allocator makes pd and cpu compatible.
+    """
+
+    def __init__(self):
+        pass
+
+    def init_nixl_memory_allocator(
+        self,
+        tensor: torch.Tensor,
+        shape: torch.Size,
+        dtype: torch.dtype,
+        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
+    ):
+        self.nixl_allocator = PagedTensorMemoryAllocator(
+            tensor,
+            shape,
+            dtype,
+            fmt,
+        )
+
+    def init_cpu_memory_allocator(
+        self,
+        size: int,
+    ):
+        self.cpu_allocator = MixedMemoryAllocator(size)
+
+    def allocate(
+        self,
+        shape: Union[torch.Size, Tuple[int, ...]],
+        dtype: Optional[torch.dtype],
+        fmt: MemoryFormat = MemoryFormat.UNDEFINED,
+        allocator_type: Optional[str] = "cpu",
+    ) -> Optional[MemoryObj]:
+        if allocator_type == "nixl":
+            return self.nixl_allocator.allocate(shape, dtype, fmt)
+        elif allocator_type == "cpu":
+            return self.cpu_allocator.allocate(shape, dtype, fmt)
+        else:
+            raise ValueError(f"Unsupported allocator type: {allocator_type}")
+
+    def batched_allocate(
+        self,
+        shape: Union[torch.Size, Tuple[int, ...]],
+        dtype: Optional[torch.dtype],
+        batch_size: int,
+        fmt: MemoryFormat = MemoryFormat.UNDEFINED,
+        allocator_type: Optional[str] = "cpu",
+    ) -> Optional[List[MemoryObj]]:
+        if allocator_type == "nixl":
+            return self.nixl_allocator.batched_allocate(shape, dtype, batch_size, fmt)
+        elif allocator_type == "cpu":
+            return self.cpu_allocator.batched_allocate(shape, dtype, batch_size, fmt)
+        else:
+            raise ValueError(f"Unsupported allocator type: {allocator_type}")
+
+    def free(self, memory_obj: MemoryObj, allocator_type: Optional[str] = "cpu"):
+        if allocator_type == "nixl":
+            self.nixl_allocator.free(memory_obj)
+        elif allocator_type == "cpu":
+            self.cpu_allocator.free(memory_obj)
+        else:
+            raise ValueError(f"Unsupported allocator type: {allocator_type}")
+
+    def batched_free(
+        self,
+        memory_objs: List[MemoryObj],
+        allocator_type: Optional[str] = None,
+        update_stats: bool = True,
+    ):
+        if allocator_type == "nixl":
+            self.nixl_allocator.batched_free(memory_objs, update_stats=update_stats)
+        elif allocator_type == "cpu":
+            self.cpu_allocator.batched_free(memory_objs, update_stats=update_stats)
+        else:
+            raise ValueError(f"Unsupported allocator type: {allocator_type}")

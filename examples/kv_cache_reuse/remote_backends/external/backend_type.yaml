@@ -5,7 +5,6 @@ local_cpu: False
 max_local_cpu_size: 5
 remote_url: "external://host:0/external_log_connector.lmc_external_log_connector/?connector_name=ExternalLogConnector"
 remote_serde: "naive"
-pipelined_backend: False
 extra_config:
   ext_log_connector_support_ping: True
   ext_log_connector_health_interval: 10.0

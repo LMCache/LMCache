@@ -1,17 +1,4 @@
-# Copyright 2024-2025 LMCache Authors.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
+# SPDX-License-Identifier: Apache-2.0
 # Standard
 from typing import Iterable, List, Optional, Tuple, Union
 import abc
@@ -28,6 +15,8 @@ from lmcache.v1.config import LMCacheEngineConfig
 
 logger = init_logger(__name__)
 
+# NOTE: For centralized cache sharing, ensure PYTHONHASHSEED is
+# set consistently across all processes (e.g., export PYTHONHASHSEED=0).
 try:
     # Third Party
     from vllm.v1.core.kv_cache_utils import NONE_HASH
@@ -46,6 +35,37 @@ class TokenDatabase(metaclass=abc.ABCMeta):
     - SegmentTokenDatabase: It processes tokens into segments based on
     special separators and convert each segment into a cache engine key.
     """
+
+    @abc.abstractmethod
+    def __init__(
+        self,
+        config: Optional[LMCacheEngineConfig] = None,
+        metadata: Optional[LMCacheEngineMetadata] = None,
+    ):
+        vllm_is_available = True
+        try:
+            # Third Party
+            from vllm.utils import sha256, sha256_cbor_64bit
+        except ImportError:
+            # sha256, sha256_cbor_64bit are available through vLLM only
+            vllm_is_available = False
+
+        hash_algorithm: str
+        if config is not None:
+            hash_algorithm = config.pre_caching_hash_algorithm
+        else:  # Default value
+            hash_algorithm = "builtin"  # fallback to builtin hash
+
+        # Need to support vLLM hashing functions at a minimum
+        self.hash_func = (
+            sha256_cbor_64bit
+            if hash_algorithm == "sha256_cbor_64bit" and vllm_is_available
+            else sha256
+            if hash_algorithm == "sha256" and vllm_is_available
+            else hash
+        )
+
+        self.metadata = metadata
 
     @abc.abstractmethod
     def process_tokens(
@@ -78,21 +98,6 @@ class TokenDatabase(metaclass=abc.ABCMeta):
 
         raise NotImplementedError
 
-
-class ChunkedTokenDatabase(TokenDatabase):
-    def __init__(
-        self,
-        config: Optional[LMCacheEngineConfig] = None,
-        metadata: Optional[LMCacheEngineMetadata] = None,
-    ):
-        # FIXME(Jiayi): cache_config.prefix_caching_hash_algo
-        self.hash_func = hash
-
-        if config is not None:
-            self.chunk_size = config.chunk_size
-            self.save_unfull_chunk = config.save_unfull_chunk
-        self.metadata = metadata
-
     def _make_key_by_hash(self, chunk_hash: int):
         assert self.metadata is not None
         return CacheEngineKey(
@@ -103,19 +108,59 @@ class ChunkedTokenDatabase(TokenDatabase):
             chunk_hash,
         )
 
-    def _get_init_hash(self) -> int:
-        return NONE_HASH
-
-    def _hash(
-        self,
-        tokens: Union[torch.Tensor, List[int]],
-        prefix_hash: int,
+    def _hash_tokens(
+        self, tokens: Union[torch.Tensor, List[int]], prefix_hash: Optional[int] = None
     ) -> int:
         if isinstance(tokens, torch.Tensor):
             tokens_tuple = tuple(tokens.cpu().tolist())
         elif isinstance(tokens, list):
             tokens_tuple = tuple(tokens)
-        return self.hash_func((prefix_hash, tokens_tuple, None))
+        else:
+            raise ValueError(f"Unsupported tokens type: {type(tokens)}")
+
+        if prefix_hash is not None:
+            return self.hash_func((prefix_hash, tokens_tuple))
+        return self.hash_func(tokens_tuple)
+
+
+class ChunkedTokenDatabase(TokenDatabase):
+    def __init__(
+        self,
+        config: Optional[LMCacheEngineConfig] = None,
+        metadata: Optional[LMCacheEngineMetadata] = None,
+    ):
+        super(ChunkedTokenDatabase, self).__init__(config, metadata)
+
+        if config is not None:
+            self.chunk_size = config.chunk_size
+            self.save_unfull_chunk = config.save_unfull_chunk
+
+            # Check for cross-process cache sharing setup
+            # Standard
+            import os
+
+            if os.getenv("PYTHONHASHSEED") is None:
+                if config.remote_url is not None:
+                    logger.warning(
+                        "Centralized cache sharing detected "
+                        "but PYTHONHASHSEED not set. "
+                        "For consistent caching, set: export PYTHONHASHSEED=0 "
+                        "before the engine starts."
+                    )
+                if config.enable_nixl:
+                    logger.error(
+                        "P/D Disaggregation detected "
+                        "but PYTHONHASHSEED not set. "
+                        "For consistent caching, set: export PYTHONHASHSEED=0 "
+                        "before the engine starts. "
+                        "This will cause incorrect KV cache transfer."
+                    )
+        else:  # Default values
+            self.chunk_size = 256
+            self.save_unfull_chunk = True
+
+    def _get_init_hash(self) -> int:
+        return NONE_HASH
 
     def _chunk_tokens(
         self,
@@ -144,7 +189,7 @@ class ChunkedTokenDatabase(TokenDatabase):
     ) -> Iterable[int]:
         prefix_hash = self._get_init_hash()
         for token_chunk in token_chunks:
-            prefix_hash = self._hash(token_chunk, prefix_hash)
+            prefix_hash = self._hash_tokens(token_chunk, prefix_hash)
             yield prefix_hash
 
     @_lmcache_nvtx_annotate
@@ -228,10 +273,9 @@ class SegmentTokenDatabase(TokenDatabase):
     """
 
     def __init__(self, config: LMCacheEngineConfig, metadata: LMCacheEngineMetadata):
-        self.tokenizer = AutoTokenizer.from_pretrained(metadata.model_name)
+        super(SegmentTokenDatabase, self).__init__(config, metadata)
 
-        # FIXME(Jiayi): cache_config.prefix_caching_hash_algo
-        self.hash_func = hash
+        self.tokenizer = AutoTokenizer.from_pretrained(metadata.model_name)
 
         # TODO (Jiayi): figure out how to decide when
         # to use `1:` (whether there's a special starting token
@@ -239,26 +283,6 @@ class SegmentTokenDatabase(TokenDatabase):
         self.sep_tokens = self.tokenizer.encode(config.blend_special_str)[1:]
         self.sep_tokens = torch.tensor(self.sep_tokens, device="cpu")
         self.sep_len = len(self.sep_tokens)
-        self.metadata = metadata
-
-    def _make_key_by_hash(self, chunk_hash: str):
-        return CacheEngineKey(
-            self.metadata.fmt,
-            self.metadata.model_name,
-            self.metadata.world_size,
-            self.metadata.worker_id,
-            chunk_hash,
-        )
-
-    def _hash(
-        self,
-        tokens: Union[torch.Tensor, List[int]],
-    ) -> int:
-        if isinstance(tokens, torch.Tensor):
-            tokens_tuple = tuple(tokens.cpu().tolist())
-        elif isinstance(tokens, list):
-            tokens_tuple = tuple(tokens)
-        return self.hash_func(tokens_tuple)
 
     def _fast_split_by_subtensor(self, tokens: torch.Tensor) -> Iterable[torch.Tensor]:
         """Match the `sep_tokens` with sliding windows"""
@@ -333,8 +357,8 @@ class SegmentTokenDatabase(TokenDatabase):
                     yield (
                         start_idx,
                         end_idx,
-                        self._make_key_by_hash(self._hash(token_chunk)),
+                        self._make_key_by_hash(self._hash_tokens(token_chunk)),
                     )
                 else:
-                    yield start_idx, end_idx, self._hash(token_chunk)
+                    yield start_idx, end_idx, self._hash_tokens(token_chunk)
             start_idx = end_idx

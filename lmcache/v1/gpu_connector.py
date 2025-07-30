@@ -1,17 +1,4 @@
-# Copyright 2024-2025 LMCache Authors.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
+# SPDX-License-Identifier: Apache-2.0
 # Standard
 from typing import List, Optional, Tuple, Union
 import abc
@@ -93,7 +80,8 @@ class GPUConnectorInterface(metaclass=abc.ABCMeta):
 
     def initialize_kvcaches_ptr(self, **kwargs):
         """Initialize the kvcaches pointers if not already initialized."""
-        self.kvcaches = kwargs["kvcaches"]
+        if "kvcaches" in kwargs:
+            self.kvcaches = kwargs["kvcaches"]
 
 
 class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
@@ -356,6 +344,9 @@ class VLLMBufferLayerwiseGPUConnector(GPUConnectorInterface):
 
         self.buffer_mapping = {}
 
+        # track gap positions between blended chunks
+        self.current_gap_positions = None
+
     def get_kv(self, layer_id: int) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Get the KV cache for the given layer ID.
@@ -411,6 +402,17 @@ class VLLMBufferLayerwiseGPUConnector(GPUConnectorInterface):
 
         num_all_tokens = ends[-1] - starts[0]
         slot_mapping_full = slot_mapping[starts[0] : ends[-1]]
+
+        # compute gap positions
+        gap_mask = torch.ones(
+            num_all_tokens, dtype=torch.bool, device=slot_mapping_full.device
+        )
+        buf_offset = starts[0]
+
+        for start, end in zip(starts, ends, strict=False):
+            gap_mask[start - buf_offset : end - buf_offset] = False
+
+        self.current_gap_positions = torch.where(gap_mask)[0]
 
         buf_offset = starts[0]
         if self.cache_positions:
@@ -472,6 +474,10 @@ class VLLMBufferLayerwiseGPUConnector(GPUConnectorInterface):
                         new_positions_full,
                         compute_gpu_buffer_obj.tensor[0],
                     )
+
+                # gap zeroing after RoPE
+                if self.current_gap_positions.numel():
+                    compute_gpu_buffer_obj.tensor[:, self.current_gap_positions] = 0.0
 
                 self.buffer_mapping[layer_id - 1] = compute_gpu_buffer_obj
 

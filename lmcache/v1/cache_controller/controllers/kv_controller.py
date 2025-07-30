@@ -1,17 +1,4 @@
-# Copyright 2024-2025 LMCache Authors.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
+# SPDX-License-Identifier: Apache-2.0
 # Standard
 from dataclasses import dataclass
 
@@ -61,7 +48,6 @@ class KVController:
 
         # TODO(Jiayi): remove this hardcode
         self.token_database = ChunkedTokenDatabase()
-        self.token_database.chunk_size = 256
 
     def post_init(self, cluster_executor):
         """
@@ -75,7 +61,7 @@ class KVController:
         """
         instance_id = msg.instance_id
         worker_id = msg.worker_id
-        key = msg.key
+        key = str(msg.key)
         location = msg.location
         if key not in self.kv_pool:
             self.kv_pool[key] = []
@@ -87,7 +73,7 @@ class KVController:
         """
         instance_id = msg.instance_id
         worker_id = msg.worker_id
-        key = msg.key
+        key = str(msg.key)
         location = msg.location
 
         if key not in self.kv_pool:
@@ -165,10 +151,9 @@ class KVController:
         for start, end, key in self.token_database.process_tokens(
             tokens, make_key=False
         ):
-            assert isinstance(key, str)
             if key not in self.kv_pool:
                 break
-            matched_instance = self.kv_pool[key][0].instance_id
-            matched_location = self.kv_pool[key][0].location
+            matched_instance = self.kv_pool[str(key)][0].instance_id
+            matched_location = self.kv_pool[str(key)][0].location
             layout_info[matched_instance] = (matched_location, end)
         return LookupRetMsg(layout_info=layout_info)

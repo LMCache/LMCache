@@ -1,17 +1,4 @@
-# Copyright 2024-2025 LMCache Authors.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
+# SPDX-License-Identifier: Apache-2.0
 # Standard
 from typing import List, Optional
 import time
@@ -35,6 +22,7 @@ class InstrumentedRemoteConnector(RemoteConnector):
     def __init__(self, connector: RemoteConnector):
         self._connector = connector
         self._stats_monitor = LMCStatsMonitor.GetOrCreate()
+        self.name = self.__repr__()
 
     async def put(self, key: CacheEngineKey, memory_obj: MemoryObj) -> None:
         obj_size = memory_obj.get_size()
@@ -49,7 +37,7 @@ class InstrumentedRemoteConnector(RemoteConnector):
         self._stats_monitor.update_interval_remote_time_to_put((end - begin) * 1000)
         self._stats_monitor.update_interval_remote_write_metrics(obj_size)
         logger.debug(
-            f"Bytes offloaded: {obj_size / 1e6:.3f} MBytes "
+            f"[{self.name}]Bytes offloaded: {obj_size / 1e6:.3f} MBytes "
             f"in {(end - begin) * 1000:.3f}ms"
         )
 
@@ -62,7 +50,7 @@ class InstrumentedRemoteConnector(RemoteConnector):
             obj_size = memory_obj.get_size()
             self._stats_monitor.update_interval_remote_read_metrics(obj_size)
             logger.debug(
-                f"Bytes loaded: {obj_size / 1e6:.3f} MBytes "
+                f"[{self.name}]Bytes loaded: {obj_size / 1e6:.3f} MBytes "
                 f"in {(end - begin) * 1000:.3f}ms"
             )
         return memory_obj
@@ -79,3 +67,12 @@ class InstrumentedRemoteConnector(RemoteConnector):
 
     def getWrappedConnector(self) -> RemoteConnector:
         return self._connector
+
+    def support_ping(self) -> bool:
+        return self._connector.support_ping()
+
+    async def ping(self) -> int:
+        return await self._connector.ping()
+
+    def __repr__(self) -> str:
+        return f"InstrumentedRemoteConnector({self._connector})"
