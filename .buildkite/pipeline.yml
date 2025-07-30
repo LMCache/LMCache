@@ -34,11 +34,17 @@ steps:
           --cov-report term --cov-report=html:coverage-test \
           --cov-report=xml:coverage-test.xml --html=durations/test.html \
           tests/v1/test_cache_engine.py
-          # --ignore=tests/disagg --ignore=tests/v1/test_pos_kernels.py
+          --ignore=tests/disagg --ignore=tests/v1/test_pos_kernels.py
     artifact_paths:
       - "durations/test.html"
       - "coverage-test.xml"
       - "coverage-test/**/*"
+  
+  - label: ":trash: Clean up buildkite caches"
+    key: "cleanup buildkite caches"
+    command: |
+      sudo rm -rf /var/cache/buildkite
+      # make sure that your buildkite-agent has sudo access
 
   - label: "Upload Coverage Report"
     depends_on:

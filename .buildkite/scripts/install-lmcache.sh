@@ -12,6 +12,7 @@ else
   uv venv --python "$PYTHON_BIN" "$VENV_DIR"
 fi
 
+source "$VENV_DIR/bin/activate"
 uv pip install -e .
 
 # List installed packages for debugging
