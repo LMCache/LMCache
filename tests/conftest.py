@@ -280,8 +280,35 @@ def global_cuda_cleanup():
     # Third Party
     import torch
 
-    # Aggressive cleanup at start of session
+    print("🚀 [DEBUG] Session startup - aggressive CUDA cleanup starting...")
+
+    # Force cleanup any lingering allocators from previous runs
+    allocator_types = [
+        "AdHocMemoryAllocator",
+        "PinMemoryAllocator",
+        "MixedMemoryAllocator",
+        "GPUMemoryAllocator",
+        "HostMemoryAllocator",
+        "PagedTensorMemoryAllocator",
+        "TensorMemoryAllocator",
+    ]
+
+    cleanup_count = 0
+    for obj in gc.get_objects():
+        try:
+            if hasattr(obj, "__class__") and obj.__class__.__name__ in allocator_types:
+                if hasattr(obj, "close"):
+                    obj.close()
+                    cleanup_count += 1
+        except Exception:
+            pass
+
+    if cleanup_count > 0:
+        print(f"🧹 [DEBUG] Session startup: closed {cleanup_count} leaked allocators")
+
+    # Aggressive CUDA cleanup at start of session
     if torch.cuda.is_available():
+        print("🔧 [DEBUG] Session startup: CUDA device cleanup...")
         torch.cuda.empty_cache()
         torch.cuda.synchronize()
         # Reset all CUDA devices
@@ -289,16 +316,19 @@ def global_cuda_cleanup():
             with torch.cuda.device(i):
                 torch.cuda.empty_cache()
                 torch.cuda.synchronize()
+        print("✅ [DEBUG] Session startup: CUDA cleanup complete")
 
     gc.collect()
 
     yield
 
+    print("🏁 [DEBUG] Session teardown - final CUDA cleanup...")
     # Cleanup at end of session
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
         torch.cuda.synchronize()
     gc.collect()
+    print("🎉 [DEBUG] Session teardown complete")
 
 
 @pytest.fixture(scope="module", autouse=True)
