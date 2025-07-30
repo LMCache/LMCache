@@ -9,6 +9,7 @@ steps:
     commands: |
       echo "Starting vllm integration tests"
       echo "BUILDKITE_BUILD_ID: $BUILDKITE_BUILD_ID"
+      export VLLM_USE_FLASHINFER_SAMPLER=0
       chmod +x .buildkite/scripts/vllm-integration-tests.sh
       .buildkite/scripts/vllm-integration-tests.sh --hf-token=$HF_TOKEN --server-wait-timeout=240
       echo "Finished vllm integration tests"

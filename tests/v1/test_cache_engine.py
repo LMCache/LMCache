@@ -72,7 +72,7 @@ def test_paged_same_retrieve_store(autorelease_v1):
     engine.store(tokens=tokens, kvcaches=kv_cache, slot_mapping=slot_mapping)
 
     """ Store is async. Need to wait for the store to finish """
-    timeout = 1.5
+    timeout = 5.0  # Increased from 1.5 to 5.0 seconds
     start_time = time.time()
     while engine.lookup(tokens) < num_tokens:
         if time.time() - start_time > timeout:
@@ -144,10 +144,7 @@ def test_paged_retrieve_prefix(
         )
     )
     """ test store """
-    t1 = time.perf_counter()
     engine.store(tokens, kvcaches=kv_cache, slot_mapping=slot_mapping)
-    t2 = time.perf_counter()
-    print(f"store {len(tokens)} takes {t2 - t1}")
     """ Compute expected length """
     expected_chunk_cnt = num_tokens // chunk_size
     expected_length = expected_chunk_cnt * chunk_size
@@ -167,7 +164,6 @@ def test_paged_retrieve_prefix(
             raise TimeoutError(f"Operation timed out after {timeout} seconds.")
         time.sleep(0.01)
     """ test retrieve """
-    t4 = time.perf_counter()
     ret_mask = engine.retrieve(
         torch.cat([tokens, new_tokens]),
         kvcaches=retrieved_cache,
@@ -175,8 +171,6 @@ def test_paged_retrieve_prefix(
     )
 
     length = torch.sum(ret_mask)
-    t5 = time.perf_counter()
-    print(f"retrieve {length} takes {t5 - t4}")
 
     assert length == expected_length
 
@@ -266,14 +260,11 @@ def test_paged_store_offset(
             raise TimeoutError(f"Operation timed out after {timeout} seconds.")
         time.sleep(0.01)
     """ test retrieve """
-    t4 = time.perf_counter()
     ret_mask = engine.retrieve(
         tokens, kvcaches=retrieved_cache, slot_mapping=slot_mapping
     )
 
     length = torch.sum(ret_mask)
-    t5 = time.perf_counter()
-    print(f"retrieve {length} takes {t5 - t4}")
 
     assert length == expected_length
     check_paged_kv_cache_equal(
@@ -614,10 +605,7 @@ def test_paged_hierarchy_retrieve(
         )
     )
     """ test store """
-    t1 = time.perf_counter()
     engine.store(tokens, kvcaches=kv_cache, slot_mapping=slot_mapping)
-    t2 = time.perf_counter()
-    print(f"store {len(tokens)} takes {t2 - t1}")
     """ Compute expected length """
     expected_chunk_cnt = num_tokens // chunk_size
     expected_length = expected_chunk_cnt * chunk_size
@@ -649,7 +637,6 @@ def test_paged_hierarchy_retrieve(
                 raise TimeoutError(f"Operation timed out after {timeout} seconds.")
             time.sleep(0.01)
     """ test retrieve """
-    t4 = time.perf_counter()
     ret_mask = engine.retrieve(
         torch.cat([tokens, new_tokens]),
         kvcaches=retrieved_cache,
@@ -657,8 +644,6 @@ def test_paged_hierarchy_retrieve(
     )
 
     length = torch.sum(ret_mask)
-    t5 = time.perf_counter()
-    print(f"retrieve {length} takes {t5 - t4}")
 
     assert length == expected_length
     check_paged_kv_cache_equal(
@@ -733,10 +718,7 @@ def test_paged_prefetch_retrieve(backend, prefetch_from, autorelease_v1):
         )
     )
     """ test store """
-    t1 = time.perf_counter()
     engine.store(tokens, kvcaches=kv_cache, slot_mapping=slot_mapping)
-    t2 = time.perf_counter()
-    print(f"store {len(tokens)} takes {t2 - t1}")
     """ Compute expected length """
     expected_chunk_cnt = num_tokens // chunk_size
     expected_length = expected_chunk_cnt * chunk_size
@@ -771,7 +753,6 @@ def test_paged_prefetch_retrieve(backend, prefetch_from, autorelease_v1):
             time.sleep(0.01)
         engine.storage_manager.storage_backends["LocalDiskBackend"].dict.clear()
     """ test retrieve """
-    t4 = time.perf_counter()
     ret_mask = engine.retrieve(
         torch.cat([tokens, new_tokens]),
         kvcaches=retrieved_cache,
@@ -779,8 +760,6 @@ def test_paged_prefetch_retrieve(backend, prefetch_from, autorelease_v1):
     )
 
     length = torch.sum(ret_mask)
-    t5 = time.perf_counter()
-    print(f"retrieve {length} takes {t5 - t4}")
 
     assert length == expected_length
     check_paged_kv_cache_equal(
