@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # Third Party
 from transformers import AutoTokenizer
 import chat_session
