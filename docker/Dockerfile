@@ -34,6 +34,10 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
     && . /opt/venv/bin/activate \
     && python3 --version
 
+# Create non-root user
+RUN groupadd -g 1000 lmcache && \
+    useradd -u 1000 -g lmcache -s /bin/bash -m lmcache
+
 WORKDIR /workspace
 
 # Install and setup nixl
@@ -138,4 +142,20 @@ uv pip install vllm[runai,tensorizer] && \
     uv pip install lmcache --verbose
 
 WORKDIR /workspace
+
+# Change ownership of the working directory to the non-root user
+RUN chown -R lmcache:lmcache /workspace || true
+
+# Switch to non-root user
+USER lmcache
+
+
+# Create non-root user for security
+RUN groupadd -g 1000 appuser && \
+    useradd -r -u 1000 -g appuser appuser && \
+    chown -R appuser:appuser /workspace
+
+# Switch to non-root user
+USER appuser
+
 ENTRYPOINT ["/opt/venv/bin/vllm", "serve"]
