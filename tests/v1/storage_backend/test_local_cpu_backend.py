@@ -65,9 +65,10 @@ def create_test_memory_obj(shape=(2, 16, 8, 128), dtype=torch.bfloat16) -> Memor
 
 
 @pytest.fixture
-def memory_allocator():
+def memory_allocator(has_npu):
     """Create a memory allocator for testing."""
-    return MixedMemoryAllocator(1024 * 1024 * 1024)  # 1GB
+    device = "npu" if has_npu else "cuda"
+    return MixedMemoryAllocator(1024 * 1024 * 1024, device=device)  # 1GB
 
 
 @pytest.fixture

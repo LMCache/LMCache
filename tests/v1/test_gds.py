@@ -21,7 +21,7 @@ from lmcache.v1.storage_backend import CreateStorageBackends
 from lmcache.v1.storage_backend.gds_backend import pack_metadata, unpack_metadata
 
 
-def test_gds_backend_metadata():
+def test_gds_backend_metadata(skip_if_npu):
     # This is a sanity check that packing and unpacking works. We can add
     # more tensor types to be sure.
     for [tensor, expected_nbytes] in [(torch.randn(3, 10), 120)]:
@@ -47,7 +47,7 @@ def test_gds_backend_metadata():
 
 
 @pytest.mark.skip(reason="We need to add this test back after implementing prefetch")
-def test_gds_backend_sanity():
+def test_gds_backend_sanity(skip_if_npu):
     BASE_DIR = Path(__file__).parent
     GDS_DIR = "/tmp/gds/test-cache"
     TEST_KEY = CacheEngineKey(

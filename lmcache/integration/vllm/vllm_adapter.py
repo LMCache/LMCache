@@ -10,25 +10,35 @@ from torch.nn.utils.rnn import pad_sequence
 import torch
 import torch.distributed as dist
 
-if TYPE_CHECKING:
-    from vllm.worker.model_runner import ModelInputForGPUWithSamplingMetadata
-
 # Third Party
 from vllm.attention import AttentionMetadata
 
-# from vllm.attention.backends.flash_attn import FlashAttentionMetadata
-try:
-    # Third Party
-    from vllm.attention.backends.flash_attn import FlashAttentionMetadata
-except (ModuleNotFoundError, ImportError):
-    # vllm_flash_attn is not installed, try the ROCm FA metadata
-    from vllm.attention.backends.rocm_flash_attn import (
-        ROCmFlashAttentionMetadata as FlashAttentionMetadata,
-    )
+from vllm.platforms import current_platform
+if current_platform.is_cuda() or current_platform.device_type == "cuda":
+    if TYPE_CHECKING:
+        from vllm.worker.model_runner import ModelInputForGPUWithSamplingMetadata
 
-# Third Party
-from vllm.attention.backends.flashmla import FlashMLAMetadata
-from vllm.attention.backends.mla.common import MLACommonMetadata
+    # from vllm.attention.backends.flash_attn import FlashAttentionMetadata
+    try:
+        # Third Party
+        from vllm.attention.backends.flash_attn import FlashAttentionMetadata
+    except (ModuleNotFoundError, ImportError):
+        # vllm_flash_attn is not installed, try the ROCm FA metadata
+        from vllm.attention.backends.rocm_flash_attn import (
+            ROCmFlashAttentionMetadata as FlashAttentionMetadata,
+        )
+
+    # Third Party
+    from vllm.attention.backends.flashmla import FlashMLAMetadata
+    from vllm.attention.backends.mla.common import MLACommonMetadata
+elif current_platform.device_name == "npu":
+    if TYPE_CHECKING:
+        from vllm_ascend.worker.model_runner import ModelInputForNPUWithSamplingMetadata as ModelInputForGPUWithSamplingMetadata
+    from vllm_ascend.attention.attention_v1 import AscendMetadata as FlashAttentionMetadata
+    from vllm_ascend.attention.mla_v1 import AscendMLAMetadata as FlashMLAMetadata, AscendMLAMetadata as MLACommonMetadata
+    from torch_npu.contrib import transfer_to_npu
+    import lmcache.c_ops as lmc_ops
+
 from vllm.config import (
     CacheConfig,
     ModelConfig,
@@ -211,9 +221,9 @@ def init_lmcache_engine(
             use_mla=use_mla,
         )
     engine = LMCacheEngineBuilder.get_or_create(
-        ENGINE_NAME, config, metadata, vllm_gpu_connector
+        ENGINE_NAME, config, metadata, vllm_gpu_connector, device=current_platform.device_name
     )
-
+    
     return engine
 
 

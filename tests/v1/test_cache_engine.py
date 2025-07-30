@@ -20,10 +20,11 @@ import torch
 # First Party
 from lmcache.v1.cache_engine import LMCacheEngineBuilder
 from lmcache.v1.config import LMCacheEngineConfig
+import lmcache.c_ops as lmc_ops
 
 
-def test_paged_same_retrieve_store(autorelease_v1):
-    device = "cuda"
+def test_paged_same_retrieve_store(autorelease_v1, has_npu):
+    device = "npu" if has_npu else "cuda"
     fmt = "vllm"
     num_tokens = 2000
     num_blocks = 1000
@@ -58,9 +59,10 @@ def test_paged_same_retrieve_store(autorelease_v1):
 
     engine = autorelease_v1(
         LMCacheEngineBuilder.get_or_create(
-            "test", cfg, dumb_metadata(fmt, kv_shape), connector
+            "test", cfg, dumb_metadata(fmt, kv_shape), connector, device=device 
         )
     )
+
     """ test retrieve empty """
     ret_mask = engine.retrieve(
         tokens, kvcaches=retrieved_cache, slot_mapping=slot_mapping
@@ -94,7 +96,7 @@ def test_paged_same_retrieve_store(autorelease_v1):
 @pytest.mark.parametrize("backend", ["cpu", "local_disk", "remote", "remote_cachegen"])
 @pytest.mark.parametrize("lmserver_v1_process", ["cpu"], indirect=True)
 def test_paged_retrieve_prefix(
-    fmt, chunk_size, backend, lmserver_v1_process, autorelease_v1
+    fmt, chunk_size, backend, lmserver_v1_process, autorelease_v1, has_npu
 ):
     url = None
     remote_serde = None
@@ -102,12 +104,14 @@ def test_paged_retrieve_prefix(
     if "remote" in backend:
         url = lmserver_v1_process.server_url
         if backend == "remote_cachegen":
+            if has_npu:
+                pytest.skip("NPU backend: Not implemented for cachegen")
             backend = "remote"
             remote_serde = "cachegen"
             check_equality = False
         else:
             remote_serde = "naive"
-    device = "cuda"
+    device = "npu" if has_npu else "cuda"
     num_tokens = 2000
     new_num_tokens = 1000
     kv_shape = (32, 2, chunk_size, 8, 128)
@@ -140,9 +144,10 @@ def test_paged_retrieve_prefix(
 
     engine = autorelease_v1(
         LMCacheEngineBuilder.get_or_create(
-            "test", cfg, dumb_metadata(fmt, kv_shape), connector
+            "test", cfg, dumb_metadata(fmt, kv_shape), connector, device=device
         )
     )
+
     """ test store """
     t1 = time.perf_counter()
     engine.store(tokens, kvcaches=kv_cache, slot_mapping=slot_mapping)
@@ -200,12 +205,12 @@ def test_paged_retrieve_prefix(
 )
 @pytest.mark.parametrize("lmserver_v1_process", ["cpu"], indirect=True)
 def test_paged_store_offset(
-    fmt, chunk_size, backend, lmserver_v1_process, autorelease_v1
+    fmt, chunk_size, backend, lmserver_v1_process, autorelease_v1, has_npu
 ):
     url = None
     if backend == "remote":
         url = lmserver_v1_process.server_url
-    device = "cuda"
+    device = "npu" if has_npu else "cuda"
     num_tokens = 2000
     num_suffix_tokens = 500
     num_total_tokens = 3000
@@ -232,9 +237,10 @@ def test_paged_store_offset(
 
     engine = autorelease_v1(
         LMCacheEngineBuilder.get_or_create(
-            "test", cfg, dumb_metadata(fmt, kv_shape), connector
+            "test", cfg, dumb_metadata(fmt, kv_shape), connector, device=device
         )
     )
+
     """ test store """
     engine.store(
         tokens[:num_tokens],
@@ -296,8 +302,8 @@ def test_paged_store_offset(
         "local_disk"
     ],
 )
-def test_paged_mixed_retrieve(fmt, chunk_size, backend, autorelease_v1):
-    device = "cuda"
+def test_paged_mixed_retrieve(fmt, chunk_size, backend, autorelease_v1, has_npu):
+    device = "npu" if has_npu else "cuda"
     num_tokens = 2000
     new_num_tokens = 1000
     num_blocks = 1000
@@ -328,9 +334,10 @@ def test_paged_mixed_retrieve(fmt, chunk_size, backend, autorelease_v1):
 
     engine = autorelease_v1(
         LMCacheEngineBuilder.get_or_create(
-            "test", cfg, dumb_metadata(fmt, kv_shape), connector
+            "test", cfg, dumb_metadata(fmt, kv_shape), connector, device=device
         )
     )
+
     """ test store """
     engine.store(tokens, kvcaches=kv_cache, slot_mapping=slot_mapping)
     engine.store(new_tokens, kvcaches=kv_cache, slot_mapping=new_slot_mapping)
@@ -422,8 +429,8 @@ def test_paged_mixed_retrieve(fmt, chunk_size, backend, autorelease_v1):
 
 
 @pytest.mark.parametrize("fmt", ["vllm"])
-def test_paged_store_kv_tensors_mask(fmt, autorelease_v1):
-    device = "cuda"
+def test_paged_store_kv_tensors_mask(fmt, autorelease_v1, has_npu):
+    device = "npu" if has_npu else "cuda"
     num_tokens = 1000
     new_num_tokens = 2000
     num_blocks = 1000
@@ -453,9 +460,10 @@ def test_paged_store_kv_tensors_mask(fmt, autorelease_v1):
 
     engine = autorelease_v1(
         LMCacheEngineBuilder.get_or_create(
-            "test", cfg, dumb_metadata(fmt, kv_shape), connector
+            "test", cfg, dumb_metadata(fmt, kv_shape), connector, device=device
         )
     )
+
     """ Store some tokens with mask """
     engine.store(tokens, kvcaches=kv_cache, slot_mapping=slot_mapping)
     """Wait until store finishes"""
@@ -571,12 +579,12 @@ def test_paged_store_kv_tensors_mask(fmt, autorelease_v1):
 )
 @pytest.mark.parametrize("lmserver_v1_process", ["cpu"], indirect=True)
 def test_paged_hierarchy_retrieve(
-    fmt, chunk_size, backend, retrieve_from, lmserver_v1_process, autorelease_v1
+    fmt, chunk_size, backend, retrieve_from, lmserver_v1_process, autorelease_v1, has_npu
 ):
     url = None
     if backend == "local_cpu_disk_remote":
         url = lmserver_v1_process.server_url
-    device = "cuda"
+    device = "npu" if has_npu else "cuda"
     num_tokens = 2000
     new_num_tokens = 1000
     kv_shape = (32, 2, chunk_size, 8, 128)
@@ -610,9 +618,10 @@ def test_paged_hierarchy_retrieve(
 
     engine = autorelease_v1(
         LMCacheEngineBuilder.get_or_create(
-            "test", cfg, dumb_metadata(fmt, kv_shape), connector
+            "test", cfg, dumb_metadata(fmt, kv_shape), connector, device=device
         )
     )
+
     """ test store """
     t1 = time.perf_counter()
     engine.store(tokens, kvcaches=kv_cache, slot_mapping=slot_mapping)
@@ -693,8 +702,8 @@ def test_paged_hierarchy_retrieve(
         "local_disk",
     ],
 )
-def test_paged_prefetch_retrieve(backend, prefetch_from, autorelease_v1):
-    device = "cuda"
+def test_paged_prefetch_retrieve(backend, prefetch_from, autorelease_v1, has_npu):
+    device = "npu" if has_npu else "cuda"
     num_tokens = 2000
     new_num_tokens = 1000
     num_blocks = 1000
@@ -727,7 +736,7 @@ def test_paged_prefetch_retrieve(backend, prefetch_from, autorelease_v1):
 
     engine = autorelease_v1(
         LMCacheEngineBuilder.get_or_create(
-            "test", cfg, dumb_metadata(fmt, kv_shape), connector
+            "test", cfg, dumb_metadata(fmt, kv_shape), connector, device=device
         )
     )
     """ test store """
@@ -805,12 +814,12 @@ def test_paged_prefetch_retrieve(backend, prefetch_from, autorelease_v1):
     ],
 )
 @pytest.mark.parametrize("lmserver_v1_process", ["cpu"], indirect=True)
-def test_paged_mem_leak(fmt, chunk_size, backend, lmserver_v1_process, autorelease_v1):
+def test_paged_mem_leak(fmt, chunk_size, backend, lmserver_v1_process, autorelease_v1, has_npu):
     url = None
     if "remote" in backend:
         url = lmserver_v1_process.server_url
 
-    device = "cuda"
+    device = "npu" if has_npu else "cuda"
     num_tokens = 2000
     kv_shape = (32, 2, chunk_size, 8, 128)
     num_blocks = 1000
@@ -831,7 +840,7 @@ def test_paged_mem_leak(fmt, chunk_size, backend, lmserver_v1_process, autorelea
 
     engine = autorelease_v1(
         LMCacheEngineBuilder.get_or_create(
-            "test", cfg, dumb_metadata(fmt, kv_shape), connector
+            "test", cfg, dumb_metadata(fmt, kv_shape), connector, device=device
         )
     )
 
@@ -873,20 +882,20 @@ def test_paged_mem_leak(fmt, chunk_size, backend, lmserver_v1_process, autorelea
     LMCacheEngineBuilder.destroy("test")
 
 
-def test_builder(autorelease_v1):
+def test_builder(autorelease_v1, has_npu):
     instance_id = "test"
     cfg = LMCacheEngineConfig.from_legacy(chunk_size=256)
     cfg2 = LMCacheEngineConfig.from_legacy(chunk_size=512)
     connector = None
     should_be_none = LMCacheEngineBuilder.get(instance_id)
     assert should_be_none is None
-
+    device = "npu" if has_npu else "cuda"
     _engine = autorelease_v1(
-        LMCacheEngineBuilder.get_or_create(instance_id, cfg, dumb_metadata(), connector)
+        LMCacheEngineBuilder.get_or_create(instance_id, cfg, dumb_metadata(), connector, device=device)
     )
     _engine2 = autorelease_v1(LMCacheEngineBuilder.get(instance_id))  # noqa
 
     with pytest.raises(ValueError):
         LMCacheEngineBuilder.get_or_create(
-            instance_id, cfg2, dumb_metadata(), connector
+            instance_id, cfg2, dumb_metadata(), connector, device=device
         )

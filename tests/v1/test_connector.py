@@ -17,7 +17,7 @@ import torch
 # First Party
 from lmcache.v1.memory_management import PinMemoryAllocator
 from lmcache.v1.storage_backend.connector import CreateConnector
-
+import lmcache.c_ops as lmc_ops
 
 @pytest.mark.parametrize("lmserver_v1_process", ["cpu"], indirect=True)
 @pytest.mark.parametrize(
@@ -26,12 +26,14 @@ from lmcache.v1.storage_backend.connector import CreateConnector
         "lm://localhost:65000",
     ],
 )
-def test_lm_connector(url, autorelease_v1, lmserver_v1_process):
+def test_lm_connector(url, autorelease_v1, lmserver_v1_process, has_npu):
     if url.startswith("lm"):
         url = lmserver_v1_process.server_url
 
     async_loop, async_thread = init_asyncio_loop()
-    memory_allocator = PinMemoryAllocator(1024 * 1024 * 1024)
+    device = "npu" if has_npu else "cuda"
+    memory_allocator = PinMemoryAllocator(1024 * 1024 * 1024, device=device)
+
     connector = autorelease_v1(CreateConnector(url, async_loop, memory_allocator))
 
     random_key = dumb_cache_engine_key()
@@ -71,14 +73,15 @@ def test_lm_connector(url, autorelease_v1, lmserver_v1_process):
 
 
 @pytest.mark.parametrize("lmserver_v1_process", ["cpu"], indirect=True)
-def test_fs_connector(lmserver_v1_process, autorelease_v1):
+def test_fs_connector(lmserver_v1_process, autorelease_v1, has_npu):
     """Test filesystem connector: exists, put, get, list, and file store."""
 
     with tempfile.TemporaryDirectory() as temp_dir:
         # Setup
         url = f"fs://host:0/{temp_dir}/"
         async_loop, async_thread = init_asyncio_loop()
-        memory_allocator = PinMemoryAllocator(1024 * 1024 * 1024)
+        device = "npu" if has_npu else "cuda"
+        memory_allocator = PinMemoryAllocator(1024 * 1024 * 1024, device=device)
         connector = autorelease_v1(CreateConnector(url, async_loop, memory_allocator))
         random_key = dumb_cache_engine_key()
 
@@ -139,7 +142,7 @@ def test_fs_connector(lmserver_v1_process, autorelease_v1):
         "unix:///tmp/redis.sock",
     ],
 )
-def test_redis_connector(url, autorelease_v1):
+def test_redis_connector(url, autorelease_v1, has_npu):
     """Test Redis connector: exists, put, get operations.
 
     This test uses the MockRedis from conftest.py to simulate
@@ -147,7 +150,8 @@ def test_redis_connector(url, autorelease_v1):
     """
 
     async_loop, async_thread = init_asyncio_loop()
-    memory_allocator = PinMemoryAllocator(1024 * 1024 * 1024)
+    device = "npu" if has_npu else "cuda"
+    memory_allocator = PinMemoryAllocator(1024 * 1024 * 1024, device=device)
     connector = autorelease_v1(CreateConnector(url, async_loop, memory_allocator))
 
     random_key = dumb_cache_engine_key()
@@ -200,7 +204,7 @@ def test_redis_connector(url, autorelease_v1):
         "redis-sentinel://localhost:26379",
     ],
 )
-def test_redis_sentinel_connector(url, autorelease_v1):
+def test_redis_sentinel_connector(url, autorelease_v1, has_npu):
     """Test Redis Sentinel connector: exists, put, get operations.
 
     This test uses the MockRedisSentinel from conftest.py to simulate
@@ -214,7 +218,8 @@ def test_redis_sentinel_connector(url, autorelease_v1):
     os.environ["REDIS_TIMEOUT"] = "5"
 
     async_loop, async_thread = init_asyncio_loop()
-    memory_allocator = PinMemoryAllocator(1024 * 1024 * 1024)
+    device = "npu" if has_npu else "cuda"
+    memory_allocator = PinMemoryAllocator(1024 * 1024 * 1024, device=device)
     connector = autorelease_v1(CreateConnector(url, async_loop, memory_allocator))
 
     random_key = dumb_cache_engine_key()

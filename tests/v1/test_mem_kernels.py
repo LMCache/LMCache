@@ -14,6 +14,7 @@ from utils import (
 import pytest
 import torch
 
+
 # First Party
 from lmcache.v1.memory_management import PinMemoryAllocator
 import lmcache.c_ops as lmc_ops
@@ -55,7 +56,7 @@ def _slice_kv_at(
 
 
 @pytest.mark.parametrize("num_tokens", [256, 500, 1024, 8000])
-def test_extract_and_load_back(num_tokens):
+def test_extract_and_load_back(num_tokens, has_npu):
     device = "cuda"
 
     num_blocks = 1000
@@ -69,7 +70,8 @@ def test_extract_and_load_back(num_tokens):
     slot_mapping = torch.tensor(slot_mapping, device=device)
 
     pinned_cpu_size = 4 * 1024 * 1024 * 1024  # 4GB
-    mem_allocator = PinMemoryAllocator(pinned_cpu_size)
+    device = "npu" if has_npu else "cuda"
+    mem_allocator = PinMemoryAllocator(pinned_cpu_size, device=device)
 
     # Old extract
     kv_tuple_list = []
@@ -155,7 +157,7 @@ def test_extract_and_load_back(num_tokens):
 
 
 @pytest.mark.parametrize("num_tokens", [256, 500, 1024, 8000])
-def test_multi_layer_kernel(num_tokens):
+def test_multi_layer_kernel(num_tokens, has_npu):
     device = "cuda"
 
     num_blocks = 1000
@@ -173,7 +175,8 @@ def test_multi_layer_kernel(num_tokens):
     slot_mapping = torch.tensor(slot_mapping, device=device)
 
     pinned_cpu_size = 4 * 1024 * 1024 * 1024  # 4GB
-    mem_allocator = PinMemoryAllocator(pinned_cpu_size)
+    device = "npu" if has_npu else "cuda"
+    mem_allocator = PinMemoryAllocator(pinned_cpu_size, device=device)
 
     # lmc_ops.multi_layer_kv_transfer(memory_obj_new.tensor,
     #                                kv_cache_pointers, # TODO: initialize this
@@ -210,8 +213,12 @@ def test_multi_layer_kernel(num_tokens):
     kv_cache_pointers = torch.empty(
         32, dtype=torch.int64, device="cpu", pin_memory=True
     )
+        
     for i in range(32):
         kv_cache_pointers[i] = kv_cache[i].data_ptr()
+    
+    if has_npu:
+        kv_cache_pointers = kv_cache_pointers.to(device)
 
     memory_obj_new_list = []
     start_event = torch.cuda.Event(enable_timing=True)
@@ -254,6 +261,9 @@ def test_multi_layer_kernel(num_tokens):
     )
     for i in range(32):
         kv_cache_pointers_new[i] = kv_cache_new[i].data_ptr()
+        
+    if has_npu:
+        kv_cache_pointers_new = kv_cache_pointers_new.to(device)
 
     for chunk_id, slot_mapping_temp in enumerate(slot_mapping_chunked):
         memory_obj_new = memory_obj_new_list[chunk_id]
@@ -277,7 +287,7 @@ def test_multi_layer_kernel(num_tokens):
 
 
 @pytest.mark.parametrize("num_tokens", [256, 500, 1024, 8000])
-def test_multi_layer_kernel_use_mla(num_tokens):
+def test_multi_layer_kernel_use_mla(num_tokens, has_npu):
     device = "cuda"
 
     num_blocks = 1000
@@ -294,8 +304,9 @@ def test_multi_layer_kernel_use_mla(num_tokens):
     slot_mapping = torch.tensor(slot_mapping, device=device)
 
     pinned_cpu_size = 4 * 1024 * 1024 * 1024  # 4GB
-    mem_allocator = PinMemoryAllocator(pinned_cpu_size)
-
+    device = "npu" if has_npu else "cuda"
+    mem_allocator = PinMemoryAllocator(pinned_cpu_size, device=device)
+        
     # layer by layer extract
     memory_obj_old_list = []
     start_event = torch.cuda.Event(enable_timing=True)
@@ -330,6 +341,8 @@ def test_multi_layer_kernel_use_mla(num_tokens):
     )
     for i in range(num_layers):
         kv_cache_pointers[i] = kv_cache[i].data_ptr()
+    if has_npu:
+        kv_cache_pointers = kv_cache_pointers.to(device)
 
     memory_obj_new_list = []
     start_event = torch.cuda.Event(enable_timing=True)
@@ -378,6 +391,9 @@ def test_multi_layer_kernel_use_mla(num_tokens):
     )
     for i in range(num_layers):
         kv_cache_pointers_new[i] = kv_cache_new[i].data_ptr()
+    
+    if has_npu:
+        kv_cache_pointers_new = kv_cache_pointers_new.to(device)
 
     for chunk_id, slot_mapping_temp in enumerate(slot_mapping_chunked):
         memory_obj_new = memory_obj_new_list[chunk_id]

@@ -19,7 +19,7 @@ from lmcache.v1.storage_backend import CreateStorageBackends
 
 
 @pytest.mark.skip(reason="We need to add this test back after implementing prefetch")
-def test_weka_backend_sanity():
+def test_weka_backend_sanity(skip_if_npu):
     BASE_DIR = Path(__file__).parent
     WEKA_DIR = "/tmp/weka/test-cache"
     TEST_KEY = CacheEngineKey(

@@ -17,6 +17,10 @@ import torch
 from lmcache.logging import init_logger
 from lmcache.observability import LMCStatsMonitor
 from lmcache.utils import _lmcache_nvtx_annotate
+import lmcache.c_ops as lmc_ops
+
+# Third Party
+from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
@@ -549,6 +553,19 @@ class MemoryAllocatorInterface(metaclass=abc.ABCMeta):
         """
         raise NotImplementedError
 
+    @abc.abstractmethod
+    def registerHostPtr(
+        self,
+        device: str = "cuda",
+        size: int = 0
+    ):
+        """
+        Register the host ptr with the device using device specific APIs.
+        
+        :param str device: The device type to register the host ptr with.
+        """
+        raise NotImplementedError
+
     def close(self):
         """
         Closes the memory allocator.
@@ -886,6 +903,10 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
                 clear = False
         return clear
 
+    def registerHostPtr(self, device: str = "cuda", size: int = 0):
+        # do nothing for tensor memory allocator
+        pass
+
 
 class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
     """
@@ -1137,6 +1158,10 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
         # FIXME: NIXL-related memory leak should be handled somewhere (else).
         del self.buffer
 
+    def registerHostPtr(self, device: str = "cuda", size: int = 0):
+        # do nothing for paged tensor memory allocator
+        pass
+
 
 class BufferAllocator(MemoryAllocatorInterface):
     """Allocates memory in the pre-allocated pinned memory."""
@@ -1186,6 +1211,9 @@ class BufferAllocator(MemoryAllocatorInterface):
 
     def memcheck(self):
         return True
+
+    def registerHostPtr(self, device: str = "cuda", size: int = 0):
+        pass
 
 
 class HostMemoryAllocator(MemoryAllocatorInterface):
@@ -1258,21 +1286,20 @@ class HostMemoryAllocator(MemoryAllocatorInterface):
         with self.host_mem_lock:
             return self.allocator.memcheck()
 
+    def registerHostPtr(self, device: str = "cuda", size: int = 0):
+        pass
 
 class PinMemoryAllocator(MemoryAllocatorInterface):
     """Allocates memory in the pre-allocated pinned memory."""
 
-    def __init__(self, size: int, use_paging: bool = False, **kwargs):
+    def __init__(self, size: int, use_paging: bool = False, device: str = "cuda", **kwargs):
         """
         :param int size: The size of the pinned memory in bytes.
         """
 
         self.buffer = torch.empty(size, dtype=torch.uint8)
-        ptr = self.buffer.data_ptr()
-        err = torch.cuda.cudart().cudaHostRegister(ptr, size, 0)
-        assert err == 0, (
-            f"cudaHostRegister failed: {torch.cuda.cudart().cudaGetErrorString(err)}"
-        )
+        self._device = device
+        self.registerHostPtr(device, size)
         self._unregistered = False
 
         if use_paging:
@@ -1339,9 +1366,22 @@ class PinMemoryAllocator(MemoryAllocatorInterface):
     def close(self):
         if not self._unregistered:
             torch.cuda.synchronize()
-            torch.cuda.cudart().cudaHostUnregister(self.buffer.data_ptr())
+            if self._device == "cuda":
+                torch.cuda.cudart().cudaHostUnregister(self.buffer.data_ptr())
             self._unregistered = True
 
+    def registerHostPtr(self, device: str = "cuda", size: int = 0):
+        ptr = self.buffer.data_ptr()
+        if device == "cuda":
+            assert size >= 0, ("size must be non-negative and greater than 0.")
+            err = torch.cuda.cudart().cudaHostRegister(ptr, size, 0)
+            assert err == 0, (
+                f"cudaHostRegister failed: {torch.cuda.cudart().cudaGetErrorString(err)}"
+            )
+        elif device == "npu":
+            # Ascend need to manually manage host register API and memory is pinned
+            self.buffer = self.buffer.pin_memory()
+            lmc_ops.host_register(self.buffer)
 
 class MixedMemoryAllocator(MemoryAllocatorInterface):
     """
@@ -1349,17 +1389,14 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
               (2) byte_array buffer memory.
     """
 
-    def __init__(self, size: int, use_paging: bool = False, **kwargs):
+    def __init__(self, size: int, use_paging: bool = False, device: str = "cuda", **kwargs):
         """
         :param int size: The size of the pinned memory in bytes.
         """
 
         self.buffer = torch.empty(size, dtype=torch.uint8)
-        ptr = self.buffer.data_ptr()
-        err = torch.cuda.cudart().cudaHostRegister(ptr, size, 0)
-        assert err == 0, (
-            f"cudaHostRegister failed: {torch.cuda.cudart().cudaGetErrorString(err)}"
-        )
+        self._device = device
+        self.registerHostPtr(device, size)
         self._unregistered = False
 
         if use_paging:
@@ -1473,8 +1510,22 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
     def close(self):
         if not self._unregistered:
             torch.cuda.synchronize()
-            torch.cuda.cudart().cudaHostUnregister(self.buffer.data_ptr())
+            if self._device == "cuda":
+                torch.cuda.cudart().cudaHostUnregister(self.buffer.data_ptr())
             self._unregistered = True
+    
+    def registerHostPtr(self, device: str = "cuda", size: int = 0):
+        ptr = self.buffer.data_ptr()
+        if device == "cuda":
+            assert size >= 0, ("size must be non-negative and greater than 0.")
+            err = torch.cuda.cudart().cudaHostRegister(ptr, size, 0)
+            assert err == 0, (
+                f"cudaHostRegister failed: {torch.cuda.cudart().cudaGetErrorString(err)}"
+            )
+        elif device == "npu":
+            # Ascend need to manually manage host register API and memory is pinned
+            self.buffer = self.buffer.pin_memory()
+            lmc_ops.host_register(self.buffer)
 
 
 class GPUMemoryAllocator(MemoryAllocatorInterface):
@@ -1556,6 +1607,8 @@ class GPUMemoryAllocator(MemoryAllocatorInterface):
         with self.device_mem_lock:
             return self.allocator.memcheck()
 
+    def registerHostPtr(self, device: str = "cuda", size: int = 0):
+        pass
 
 class AdHocMemoryAllocator(MemoryAllocatorInterface):
     """
@@ -1635,6 +1688,9 @@ class AdHocMemoryAllocator(MemoryAllocatorInterface):
 
     def memcheck(self):
         return True
+
+    def registerHostPtr(self, device: str = "cuda", size: int = 0):
+        pass
 
 
 class CuFileMemoryAllocator(GPUMemoryAllocator):
@@ -1735,3 +1791,6 @@ class NixlCPUMemoryAllocator(MemoryAllocatorInterface):
             self.cpu_allocator.batched_free(memory_objs, update_stats=update_stats)
         else:
             raise ValueError(f"Unsupported allocator type: {allocator_type}")
+
+    def registerHostPtr(self, device: str = "cuda", size: int = 0):
+        pass

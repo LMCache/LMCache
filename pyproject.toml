@@ -6,7 +6,7 @@ requires = [
     "packaging>=24.2",
     "setuptools>=77.0.3,<81.0.0",
     "setuptools_scm>=8",
-    "torch==2.7.0",
+    "torch>=2.5.1",
     "wheel",
 ]
 build-backend = "setuptools.build_meta"
@@ -14,8 +14,8 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "lmcache"
 authors = [{name = "LMCache Team", email = "lmcacheteam@gmail.com"}]
-license = "Apache-2.0"
-license-files = ["LICENSE"]
+license = { file = "LICENSE" } 
+
 readme = "README.md"
 description = "A LLM serving engine extension to reduce TTFT and increase throughput, especially under long-context scenarios."
 classifiers = [

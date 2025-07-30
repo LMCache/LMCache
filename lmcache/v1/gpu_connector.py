@@ -5,6 +5,10 @@ import abc
 
 # Third Party
 import torch
+try:
+    from torch_npu.contrib import transfer_to_npu
+except (ModuleNotFoundError, ImportError):
+    print("Not importing NPU packages. We are not running on Ascend")
 
 # First Party
 from lmcache.integration.vllm.utils import ENGINE_NAME
@@ -140,7 +144,8 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
     def _initialize_pointers(self, kv_caches: List[torch.Tensor]) -> torch.Tensor:
         self.kv_cache_pointers.numpy()[:] = [t.data_ptr() for t in kv_caches]
         device = kv_caches[0].device
-        assert device.type == "cuda", "The device should be CUDA."
+        from vllm.platforms import current_platform
+        assert device.type == current_platform.device_name  # The device should be CUDA or Ascend based on vllm.
         idx = device.index
         if idx not in self.kv_cache_pointers_on_gpu:
             self.kv_cache_pointers_on_gpu[idx] = torch.empty(
@@ -148,9 +153,9 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
             )
         self.kv_cache_pointers_on_gpu[idx].copy_(self.kv_cache_pointers)
         if self.use_mla:
-            # kv_caches[0].shape: [num_pages, page_size, head_size]
-            assert kv_caches[0].dim() == 3
-            self.page_buffer_size = kv_caches[0].shape[0] * kv_caches[0].shape[1]
+            # kv_caches[0].shape: [num_pages, page_size, head_size] (vllm) or 
+            # kv_caches[0].shape: [1, num_pages, page_size, head_size] (vllm-Ascend)
+            self.page_buffer_size = kv_caches[0].shape[-3] * kv_caches[0].shape[-2]
         else:
             # kv_caches[0].shape: [2, num_pages, page_size, num_heads, head_size]
             assert kv_caches[0].dim() == 5
@@ -785,7 +790,7 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
                             memory_obj.tensor,
                             self.kvcaches[layer_id][0],
                             self.kvcaches[layer_id][1],
-                            slot_mapping_full,
+                            slot_mapping[start:end],
                             False,
                             True,
                         )
@@ -806,7 +811,8 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
             current_stream.wait_stream(self.load_stream)
 
         # free the buffer memory
-        tmp_gpu_buffer_obj.ref_count_down()
+        if self.use_gpu:
+            tmp_gpu_buffer_obj.ref_count_down()
 
         logger.debug(f"Finished loading layer {layer_id}")
         yield
@@ -919,7 +925,8 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
             logger.debug(f"Finished offloading layer {layer_id}")
 
         # free the buffer memory
-        tmp_gpu_buffer_obj.ref_count_down()
+        if self.use_gpu:
+            tmp_gpu_buffer_obj.ref_count_down()
         yield
 
     def get_shape(self, num_tokens: int) -> torch.Size:

@@ -248,3 +248,18 @@ def autorelease_v1(request):
     # Cleanup all objects created by the factory
     # for obj in objects:
     #    obj.close()
+
+@pytest.fixture(scope="module")
+def has_npu(request):
+    try:
+        import torch_npu
+        from torch_npu.contrib import transfer_to_npu
+        return True
+    except ImportError as ie:
+        return False
+    
+@pytest.fixture(scope="module")
+def skip_if_npu(has_npu):
+    if has_npu:
+        pytest.skip("Skipped. NPU does not support current function.")
+    return has_npu

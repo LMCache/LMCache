@@ -756,6 +756,7 @@ class LMCacheEngineBuilder:
     def _Create_memory_allocator(
         config: LMCacheEngineConfig,
         metadata: LMCacheEngineMetadata,
+        device: str = "cuda",
     ) -> MemoryAllocatorInterface:
         if config.enable_nixl:
             assert config.nixl_buffer_device is not None
@@ -797,7 +798,7 @@ class LMCacheEngineBuilder:
             return CuFileMemoryAllocator(config.cufile_buffer_size * 1024**2)
 
         max_local_cpu_size = config.max_local_cpu_size
-        return MixedMemoryAllocator(int(max_local_cpu_size * 1024**3))
+        return MixedMemoryAllocator(int(max_local_cpu_size * 1024**3), device=device)
 
     @staticmethod
     def _Create_token_database(
@@ -815,6 +816,7 @@ class LMCacheEngineBuilder:
         config: LMCacheEngineConfig,
         metadata: LMCacheEngineMetadata,
         gpu_connector: GPUConnectorInterface,
+        device: str = "cuda"
     ) -> LMCacheEngine:
         """
         Builds a new LMCacheEngine instance if it doesn't already exist for the
@@ -825,7 +827,7 @@ class LMCacheEngineBuilder:
         """
         logger.info(f"Creating LMCacheEngine instance {instance_id}")
         if instance_id not in cls._instances:
-            memory_allocator = cls._Create_memory_allocator(config, metadata)
+            memory_allocator = cls._Create_memory_allocator(config, metadata, device=device)
             token_database = cls._Create_token_database(config, metadata)
             stat_logger = LMCacheStatsLogger(metadata, log_interval=10)
 

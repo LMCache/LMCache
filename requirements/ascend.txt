@@ -1,0 +1,7 @@
+torch>=2.5.1
+# Common project dependencies
+-r common.txt
+
+
+# These must be updated alongside torch to correspond to vLLM-ascend versions
+torch-npu>=2.5.1.post1.dev20250619

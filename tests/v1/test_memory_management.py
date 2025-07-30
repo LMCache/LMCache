@@ -143,15 +143,15 @@ def test_tensor_allocator(use_paging):
         True,
     ],
 )
-def test_device_allocators(alloc_cls, use_paging):
+def test_device_allocators(alloc_cls, use_paging, has_npu):
     total_size = 1024 * 1024 * 128  # 128MB
 
     shape = torch.Size([2, 32, 16, 1024])  # 64 pages
     dtype = torch.bfloat16
     fmt = MemoryFormat.KV_2LTD
-
+    device = "npu" if has_npu else "cuda"
     allocator = alloc_cls(
-        total_size, use_paging=use_paging, shape=shape, dtype=dtype, fmt=fmt
+        total_size, use_paging=use_paging, shape=shape, dtype=dtype, fmt=fmt, device=device
     )
 
     if use_paging:
@@ -172,9 +172,10 @@ def test_device_allocators(alloc_cls, use_paging):
         MixedMemoryAllocator,
     ],
 )
-def test_inplace_modification(alloc_cls):
+def test_inplace_modification(alloc_cls, has_npu):
     total_size = 1024
-    allocator = alloc_cls(total_size)
+    device = "npu" if has_npu else "cuda"
+    allocator = alloc_cls(total_size, device=device)
 
     data = allocator.allocate([10], torch.float)
     assert data is not None
@@ -199,9 +200,10 @@ def test_inplace_modification(alloc_cls):
         MixedMemoryAllocator,
     ],
 )
-def test_boundary_alloc(alloc_cls):
+def test_boundary_alloc(alloc_cls, has_npu):
     total_size = 1 << 25
-    allocator = alloc_cls(total_size)
+    device = "npu" if has_npu else "cuda"
+    allocator = alloc_cls(total_size, device=device)
     data1 = allocator.allocate([512, 10], torch.float)
     allocator.allocate([512, 10], torch.float)
     allocator.free(data1)
@@ -226,10 +228,11 @@ def test_boundary_alloc(alloc_cls):
         MixedMemoryAllocator,
     ],
 )
-def test_batched_alloc(alloc_cls):
+def test_batched_alloc(alloc_cls, has_npu):
     total_size = 32 * 100 * 2 * 1024 * 2
     batch_size = 32
-    allocator = alloc_cls(total_size)
+    device = "npu" if has_npu else "cuda"
+    allocator = alloc_cls(total_size, device=device)
     objs = allocator.batched_allocate(
         [100, 2, 1024], torch.bfloat16, batch_size, MemoryFormat.KV_T2D
     )
@@ -256,9 +259,10 @@ def test_batched_alloc(alloc_cls):
         MixedMemoryAllocator,
     ],
 )
-def test_mixed_alloc(alloc_cls):
+def test_mixed_alloc(alloc_cls, has_npu):
     total_size = 1 << 25
-    allocator = alloc_cls(total_size)
+    device = "npu" if has_npu else "cuda"
+    allocator = alloc_cls(total_size, device=device)
     data1 = allocator.allocate([512, 0], None, MemoryFormat.BINARY_BUFFER)
     allocator.allocate([512, 10], torch.float)
     allocator.free(data1)
