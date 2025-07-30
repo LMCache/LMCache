@@ -86,8 +86,6 @@ def test_paged_same_retrieve_store(autorelease_v1):
     assert length == num_tokens
     check_paged_kv_cache_equal(retrieved_cache, kv_cache, slot_mapping)
 
-    LMCacheEngineBuilder.destroy("test")
-
 
 @pytest.mark.parametrize("fmt", ["vllm"])
 @pytest.mark.parametrize("chunk_size", [128, 256])
@@ -189,7 +187,6 @@ def test_paged_retrieve_prefix(
 
     if backend in ["local_disk"]:
         subprocess.run(shlex.split("rm -rf local/disk_test/local_disk/"))
-    LMCacheEngineBuilder.destroy("test")
 
 
 @pytest.mark.parametrize("fmt", ["vllm"])
@@ -284,7 +281,6 @@ def test_paged_store_offset(
 
     if backend in ["local_disk"]:
         subprocess.run(shlex.split("rm -rf local/disk_test/local_disk/"))
-    LMCacheEngineBuilder.destroy("test")
 
 
 @pytest.mark.parametrize("fmt", ["vllm"])
@@ -417,9 +413,6 @@ def test_paged_mixed_retrieve(fmt, chunk_size, backend, autorelease_v1):
     if backend in ["local_disk"]:
         subprocess.run(shlex.split("rm -rf local/disk_test/local_disk/"))
 
-    # engine.close()
-    LMCacheEngineBuilder.destroy("test")
-
 
 @pytest.mark.parametrize("fmt", ["vllm"])
 def test_paged_store_kv_tensors_mask(fmt, autorelease_v1):
@@ -549,8 +542,6 @@ def test_paged_store_kv_tensors_mask(fmt, autorelease_v1):
             kvcaches=retrieved_cache,
             slot_mapping=torch.cat([slot_mapping, new_slot_mapping]),
         )
-
-    LMCacheEngineBuilder.destroy("test")
 
 
 @pytest.mark.parametrize("fmt", ["vllm"])
@@ -789,7 +780,6 @@ def test_paged_prefetch_retrieve(backend, prefetch_from, autorelease_v1):
 
     if backend in ["local_cpu_disk"]:
         subprocess.run(shlex.split("rm -rf local/disk_test/local_disk/"))
-    LMCacheEngineBuilder.destroy("test")
 
 
 @pytest.mark.parametrize("fmt", ["vllm"])
@@ -870,7 +860,6 @@ def test_paged_mem_leak(fmt, chunk_size, backend, lmserver_v1_process, autorelea
 
     if "disk" in backend:
         subprocess.run(shlex.split("rm -rf local/disk_test/local_disk/"))
-    LMCacheEngineBuilder.destroy("test")
 
 
 def test_builder(autorelease_v1):
