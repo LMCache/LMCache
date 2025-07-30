@@ -80,6 +80,14 @@ jobs:
           azure.archive.ubuntu.com:80
           security.ubuntu.com:80
           storage.googleapis.com:443
+          *.github.com:443
+          *.githubusercontent.com:443
+          pypi.org:443
+          files.pythonhosted.org:443
+          registry.npmjs.org:443
+          *.docker.io:443
+          *.ubuntu.com:80
+          storage.googleapis.com:443
 
     - name: Checkout repository
       uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
