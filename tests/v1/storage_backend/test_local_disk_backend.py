@@ -75,11 +75,11 @@ def cleanup_test_allocators():
     # Force garbage collection to trigger cleanup of any memory objects
     # with test allocators
     for obj in gc.get_objects():
-        if hasattr(obj, "_test_allocator"):
-            try:
+        try:
+            if hasattr(obj, "_test_allocator"):
                 obj._test_allocator.close()
-            except Exception:
-                pass  # Ignore errors during cleanup
+        except Exception:
+            pass  # Ignore errors during cleanup or hasattr checks
     gc.collect()
 
 
