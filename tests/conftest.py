@@ -4,8 +4,8 @@
 # Standard
 import os
 
-if "LMCACHE_MAX_LOCAL_CPU_SIZE" not in os.environ:
-    os.environ["LMCACHE_MAX_LOCAL_CPU_SIZE"] = "0.5"  # 512MB instead of 2GB
+# Force small allocation for tests regardless of CI environment settings
+os.environ["LMCACHE_MAX_LOCAL_CPU_SIZE"] = "0.5"  # 512MB instead of 2GB
 
 # Standard
 from concurrent.futures import TimeoutError
@@ -27,7 +27,32 @@ import pytest
 # First Party
 from lmcache.v1.cache_engine import LMCacheEngineBuilder
 
+# Global allocator tracking to ensure only one allocator active at any time
 _allocator_lock = threading.Lock()
+
+
+# Monkey patch from_legacy to respect LMCACHE_MAX_LOCAL_CPU_SIZE for tests
+def _patch_from_legacy():
+    """Patch LMCacheEngineConfig.from_legacy to respect environment variables."""
+    # First Party
+    from lmcache.v1.config import LMCacheEngineConfig
+
+    original_from_legacy = LMCacheEngineConfig.from_legacy
+
+    @staticmethod
+    def from_legacy_with_env(*args, **kwargs):
+        config = original_from_legacy(*args, **kwargs)
+        # Override with environment variable if set
+        env_cpu_size = os.environ.get("LMCACHE_MAX_LOCAL_CPU_SIZE")
+        if env_cpu_size is not None:
+            config.max_local_cpu_size = float(env_cpu_size)
+        return config
+
+    LMCacheEngineConfig.from_legacy = from_legacy_with_env
+
+
+# Apply the patch at import time
+_patch_from_legacy()
 
 
 def ensure_no_active_allocators():
