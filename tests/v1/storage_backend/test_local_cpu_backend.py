@@ -147,29 +147,9 @@ def cleanup_test_allocators():
 @pytest.fixture
 def memory_allocator():
     """Create a memory allocator for testing."""
-    try:
-        allocator = MixedMemoryAllocator(1024 * 1024 * 1024)  # 1GB
-        print("✅ [DEBUG] MixedMemoryAllocator 1GB created successfully")
-        yield allocator
-        allocator.close()
-        print("✅ [DEBUG] MixedMemoryAllocator closed successfully")
-    except Exception as e:
-        print(f"⚠️ [DEBUG] MixedMemoryAllocator creation failed: {e}")
-        print("🔄 [DEBUG] Trying smaller allocation (512MB)...")
-        try:
-            allocator = MixedMemoryAllocator(512 * 1024 * 1024)  # 512MB fallback
-            print("✅ [DEBUG] MixedMemoryAllocator 512MB created successfully")
-            yield allocator
-            allocator.close()
-            print("✅ [DEBUG] MixedMemoryAllocator closed successfully")
-        except Exception as e2:
-            print(f"⚠️ [DEBUG] MixedMemoryAllocator 512MB also failed: {e2}")
-            print("🔄 [DEBUG] Trying even smaller allocation (256MB)...")
-            allocator = MixedMemoryAllocator(256 * 1024 * 1024)  # 256MB final fallback
-            print("✅ [DEBUG] MixedMemoryAllocator 256MB created successfully")
-            yield allocator
-            allocator.close()
-            print("✅ [DEBUG] MixedMemoryAllocator closed successfully")
+    allocator = MixedMemoryAllocator(1024 * 1024 * 1024)  # 1GB
+    yield allocator
+    allocator.close()
 
 
 @pytest.fixture

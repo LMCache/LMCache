@@ -417,16 +417,14 @@ def autorelease(request):
 
 @pytest.fixture(scope="function", autouse=True)
 def aggressive_allocator_cleanup():
-    """Force cleanup ALL allocators after every single test."""
-    yield  # Let the test run first
-
+    """Force cleanup ALL allocators BEFORE every single test."""
     # Standard
     import gc
 
     # Third Party
     import torch
 
-    # Force cleanup of ANY allocator in memory
+    # Force cleanup of ANY allocator in memory BEFORE the test starts
     allocator_types = [
         "AdHocMemoryAllocator",
         "PinMemoryAllocator",
@@ -459,13 +457,15 @@ def aggressive_allocator_cleanup():
             pass
 
     if cleanup_count > 0:
-        print(f"🧹 [DEBUG] Cleaned up {cleanup_count} allocators after test")
+        print(f"🧹 [DEBUG] Cleaned up {cleanup_count} allocators BEFORE test")
 
-    # Force CUDA cleanup after every test
+    # Force CUDA cleanup before every test
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
         torch.cuda.synchronize()
     gc.collect()
+
+    yield  # Now let the test run with a clean slate
 
 
 @pytest.fixture(scope="function")
