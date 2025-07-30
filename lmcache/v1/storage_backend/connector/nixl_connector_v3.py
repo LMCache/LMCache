@@ -3,7 +3,9 @@
 from dataclasses import dataclass
 from queue import Queue
 from typing import TYPE_CHECKING, Any, Optional, Union
+import atexit
 import copy
+import signal
 import threading
 import time
 import uuid
@@ -32,8 +34,62 @@ from lmcache.v1.storage_backend.connector.nixl_utils import NixlConfigXpYd, Nixl
 if TYPE_CHECKING:
     # Third Party
     from nixl._api import NixlAgent
-
 logger = init_logger(__name__)
+
+
+# Global registry for NIXL instances to ensure proper cleanup
+class NixlCleanupManager:
+    """Global manager to track and cleanup NIXL instances on signal."""
+
+    def __init__(self):
+        self._instances = set()
+        self._lock = threading.Lock()
+        # Register signal handlers immediately upon initialization
+        self._register_signal_handlers()
+
+    def register(self, instance):
+        """Register a NIXL instance for cleanup."""
+        with self._lock:
+            self._instances.add(instance)
+
+    def unregister(self, instance):
+        """Unregister a NIXL instance."""
+        with self._lock:
+            self._instances.discard(instance)
+
+    def _register_signal_handlers(self):
+        """Register signal handlers for graceful shutdown."""
+
+        def signal_handler(signum, frame):
+            logger.info(f"Received signal {signum}, cleaning up NIXL instances...")
+            self.cleanup_all()
+            # Re-raise the signal to allow normal shutdown
+            signal.signal(signum, signal.SIG_DFL)
+            signal.raise_signal(signum)
+
+        # Register handlers for common termination signals
+        signal.signal(signal.SIGINT, signal_handler)
+        signal.signal(signal.SIGTERM, signal_handler)
+        # Also register atexit handler as fallback
+        atexit.register(self.cleanup_all)
+
+    def cleanup_all(self):
+        """Cleanup all registered NIXL instances."""
+        with self._lock:
+            instances_to_cleanup = list(self._instances)
+        for instance in instances_to_cleanup:
+            try:
+                if hasattr(instance, "close"):
+                    logger.debug(f"Cleaning up NIXL instance: {instance}")
+                    instance.close()
+            except Exception as e:
+                logger.warning(f"Error cleaning up NIXL instance {instance}: {e}")
+        with self._lock:
+            self._instances.clear()
+
+
+# Global cleanup manager instance
+_nixl_cleanup_manager = NixlCleanupManager()
 
 
 class NixlMsgBase(msgspec.Struct, tag=True):
@@ -182,32 +238,25 @@ class NixlSender:
             tp_rank=tp_rank,
         )
         self._nixl_agent = self._sender_nixl_wrapper.agent
-
         # Initialize the ZeroMQ context
         self._context = zmq.Context()
-
         self._mem_alloc_sockets: dict[str, zmq.Socket] = {}
-
         self.req_queue = Queue()
-
         self._remote_xfer_handlers_dict = {}
-
         # Start the seder thread
         self._running = True
-
         # self._sender_thread = threading.Thread(
         #     target=self._sender_loop, daemon=True
         # )
         # self._sender_thread.start()
-
         proxy_host = nixl_config.proxy_host
         proxy_port = nixl_config.proxy_port
         proxy_url = f"{proxy_host}:{proxy_port}"
-
         self._proxy_side_channel = self._context.socket(zmq.PUSH)
         self._proxy_side_channel.connect(get_zmq_path(proxy_url, protocol="tcp"))
-
         self.tp_rank = tp_rank
+        # Register this instance for cleanup on signal
+        _nixl_cleanup_manager.register(self)
 
     def prepare_send(
         self,
@@ -433,37 +482,45 @@ class NixlSender:
             "Initializing all communication channels with receiver %s",
             receiver_info,
         )
-
         receiver_id = receiver_info.receiver_id
         receiver_host = receiver_info.receiver_host
         receiver_init_port = receiver_info.receiver_init_port
         receiver_alloc_port = receiver_info.receiver_alloc_port
-
         receiver_init_url = f"{receiver_host}:{receiver_init_port}"
         receiver_mem_alloc_url = f"{receiver_host}:{receiver_alloc_port}"
-
         # Initialize the nixl sender connection
         self._initialize_nixl_sender_connection(receiver_id, receiver_init_url)
-
         # Initialize the memory allocation side channel
         self._initialize_mem_alloc_side_channel(receiver_id, receiver_mem_alloc_url)
 
     def close(self):
         """Close the sender resources."""
-        # Wait for the receiver thread to finish with timeout
-        # self._sender_thread.join(timeout=3.0)  # 3 second timeout
-
-        # self._running = False
-        # if self._sender_thread.is_alive():
-        #     logger.warning(
-        #         "Sender thread did not shut down cleanly within timeout"
-        #     )
-
-        for s in self._mem_alloc_sockets.values():
-            s.close()
-        self._context.term()
-
-        self._sender_nixl_wrapper.close(self._remote_xfer_handlers_dict)
+        # Unregister from cleanup manager
+        _nixl_cleanup_manager.unregister(self)
+        try:
+            # Wait for the receiver thread to finish with timeout
+            # self._sender_thread.join(timeout=3.0)  # 3 second timeout
+            # self._running = False
+            # if self._sender_thread.is_alive():
+            #     logger.warning(
+            #         "Sender thread did not shut down cleanly within timeout"
+            #     )
+            if (
+                hasattr(self, "_mem_alloc_sockets")
+                and self._mem_alloc_sockets is not None
+            ):
+                for s in self._mem_alloc_sockets.values():
+                    if s is not None:
+                        s.close()
+            if hasattr(self, "_context") and self._context is not None:
+                self._context.term()
+            if (
+                hasattr(self, "_sender_nixl_wrapper")
+                and self._sender_nixl_wrapper is not None
+            ):
+                self._sender_nixl_wrapper.close(self._remote_xfer_handlers_dict)
+        except Exception as e:
+            logger.warning(f"Error during NixlSender cleanup: {e}")
 
 
 class NixlReceiver:
@@ -490,76 +547,61 @@ class NixlReceiver:
             page_size=self.memory_allocator.nixl_allocator.align_bytes,
             tp_rank=tp_rank,
         )
-
         self._nixl_agent = self._receiver_nixl_wrapper.agent
-
         self.nixl_config = nixl_config
-
         receiver_host = nixl_config.peer_host
         receiver_init_port = nixl_config.peer_init_port[tp_rank]
         receiver_alloc_port = nixl_config.peer_alloc_port[tp_rank]
-
         receiver_init_url = f"{receiver_host}:{receiver_init_port}"
         receiver_alloc_url = f"{receiver_host}:{receiver_alloc_port}"
-
         self.full_chunk_size = config.chunk_size
-
         # TODO (Jiayi)" make it async?"
         # Initialize the ZeroMQ context and side channel
         self._context = zmq.Context()  # type: ignore
-
         self._side_channels = []
-
         # TODO (Jiayi): have a util func to do this
         # Create/listen initialization side channel
         self._init_side_channel = self._context.socket(zmq.REP)
         self._init_side_channel.bind(get_zmq_path(receiver_init_url, protocol="tcp"))
         self._side_channels.append(self._init_side_channel)
-
         # Create/listen allocation side channel
         self._alloc_side_channel = self._context.socket(zmq.REP)
         self._alloc_side_channel.bind(get_zmq_path(receiver_alloc_url, protocol="tcp"))
         self._side_channels.append(self._alloc_side_channel)
-
         # TODO: might be better to put them into one thread
         # and use asyncio to manage.
         # Start the receiver threads
         self._running = True
         self._running_threads = []
-
         self._mem_alloc_thread = threading.Thread(
             target=self._mem_alloc_loop, daemon=True
         )
         self._mem_alloc_thread.start()
         self._running_threads.append(self._mem_alloc_thread)
-
         self._init_thread = threading.Thread(target=self._init_loop, daemon=True)
         self._init_thread.start()
         self._running_threads.append(self._init_thread)
+        # Register this instance for cleanup on signal
+        _nixl_cleanup_manager.register(self)
 
     def _allocate_and_put(self, alloc_request: NixlAllocRequest) -> NixlAllocResponse:
         total_allocs = len(alloc_request.keys)
         fmt = MemoryFormat(alloc_request.fmt)
         dtype = STR_DTYPE_TO_TORCH_DTYPE[alloc_request.dtype]
         shape = alloc_request.shape
-
         alloc_indexes = []
         already_send_indexes = []
-
         for idx, key in enumerate(alloc_request.keys):
             if self._backend.contains(key, pin=True):
                 already_send_indexes.append(idx)
                 continue
-
             if idx == total_allocs - 1:
                 num_alloc_tokens = alloc_request.last_chunk_toks
                 token_dim = fmt.token_dim()
                 shape[token_dim] = num_alloc_tokens
             else:
                 num_alloc_tokens = self.full_chunk_size
-
             mem_obj = self._backend.allocate(torch.Size(shape), dtype, fmt)
-
             # TODO(Jiayi): tune this hyperparameters
             wait_time = 0.01
             decay = 1.1
@@ -635,33 +677,23 @@ class NixlReceiver:
         while self._running:
             try:
                 req_bytes = self._init_side_channel.recv()
-
                 logger.debug("Received initialization request")
-
                 req = msgspec.msgpack.decode(req_bytes, type=NixlMsg)
-
                 if isinstance(req, NixlInitRequest):
                     self._nixl_agent.add_remote_agent(req.sender_meta_bytes)
-
                     resp = NixlInitResponse(
                         receiver_meta_bytes=local_meta,
                     )
-
                     logger.debug("Replying initialization response")
-
                 elif isinstance(req, NixlMemRegRequest):
                     local_xfer_descs = self._nixl_agent.get_serialized_descs(
                         self._receiver_nixl_wrapper.xfer_descs
                     )
-
                     resp = NixlMemRegResponse(
                         receiver_xfer_dlist_bytes=local_xfer_descs,
                     )
-
                     logger.debug("Replying mem register response")
-
                 self._init_side_channel.send(msgspec.msgpack.encode(resp))
-
             except Exception as e:
                 logger.error("Failed to process initialization loop: %s", str(e))
                 if self._running:
@@ -669,21 +701,33 @@ class NixlReceiver:
 
     def close(self):
         """Close the receiver resources."""
-        self._running = False
-
-        for t in self._running_threads:
-            # Wait for the receiver thread to finish with timeout
-            t.join(timeout=3.0)  # 3 second timeout
-
-            if t.is_alive():
-                logger.warning(
-                    "Receiver thread did not shut down cleanly within timeout"
-                )
-        for side_channel in self._side_channels:
-            side_channel.close()
-        self._context.term()
-
-        self._receiver_nixl_wrapper.close()
+        # Unregister from cleanup manager
+        _nixl_cleanup_manager.unregister(self)
+        try:
+            self._running = False
+            if hasattr(self, "_running_threads") and self._running_threads is not None:
+                for t in self._running_threads:
+                    if t is not None:
+                        # Wait for the receiver thread to finish with timeout
+                        t.join(timeout=3.0)  # 3 second timeout
+                        if t.is_alive():
+                            logger.warning(
+                                "Receiver thread did not shut down cleanly "
+                                "within timeout"
+                            )
+            if hasattr(self, "_side_channels") and self._side_channels is not None:
+                for side_channel in self._side_channels:
+                    if side_channel is not None:
+                        side_channel.close()
+            if hasattr(self, "_context") and self._context is not None:
+                self._context.term()
+            if (
+                hasattr(self, "_receiver_nixl_wrapper")
+                and self._receiver_nixl_wrapper is not None
+            ):
+                self._receiver_nixl_wrapper.close()
+        except Exception as e:
+            logger.warning(f"Error during NixlReceiver cleanup: {e}")
 
 
 class NixlChannel:
@@ -699,24 +743,22 @@ class NixlChannel:
     ):
         self.nixl_config = nixl_config
         self.role = nixl_config.role
-
         # Create sender or receiver based on role
         self._sender = None
         self._receiver = None
-
         self._backend = backend
-
         # Third Party
         from vllm.distributed.parallel_state import (
             get_tensor_model_parallel_rank,
         )
 
         tp_rank = get_tensor_model_parallel_rank()
-
         if nixl_config.role == NixlRole.SENDER:
             self._sender = NixlSender(nixl_config, config, backend, tp_rank)
         else:
             self._receiver = NixlReceiver(nixl_config, config, backend, tp_rank)
+        # Register this instance for cleanup on signal
+        _nixl_cleanup_manager.register(self)
 
     def _check_sender(self):
         """Check if this channel is configured as a sender."""
@@ -746,17 +788,20 @@ class NixlChannel:
 
     def close(self):
         """Close all resources."""
-        if self._sender:
-            self._sender.close()
-        if self._receiver:
-            self._receiver.close()
+        # Unregister from cleanup manager
+        _nixl_cleanup_manager.unregister(self)
+        try:
+            if self._sender:
+                self._sender.close()
+            if self._receiver:
+                self._receiver.close()
+        except Exception as e:
+            logger.warning(f"Error during NixlChannel cleanup: {e}")
 
 
 ############################################################
 # helper functions
 ############################################################
-
-
 # TODO (Jiayi): support multiple protocols
 def get_zmq_path(url: str, protocol: str = "tcp") -> str:
     """Get the ZeroMQ path for the given base path and suffix."""
