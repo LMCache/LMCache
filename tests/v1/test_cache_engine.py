@@ -23,7 +23,7 @@ import torch
 # First Party
 from lmcache.v1.cache_engine import LMCacheEngineBuilder
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.memory_allocator import (
+from lmcache.v1.memory_management import (
     PagedTensorMemoryAllocator,
     TensorMemoryAllocator,
 )
@@ -79,10 +79,11 @@ def patch_mixed_allocator():
 
     with (
         patch(
-            "lmcache.v1.memory_allocator.MixedMemoryAllocator.__init__", fake_mixed_init
+            "lmcache.v1.memory_management.MixedMemoryAllocator.__init__",
+            fake_mixed_init,
         ),
         patch(
-            "lmcache.v1.memory_allocator.MixedMemoryAllocator.close", fake_mixed_close
+            "lmcache.v1.memory_management.MixedMemoryAllocator.close", fake_mixed_close
         ),
     ):
         yield
@@ -130,8 +131,10 @@ def patch_pin_allocator():
             self._unregistered = True
 
     with (
-        patch("lmcache.v1.memory_allocator.PinMemoryAllocator.__init__", fake_pin_init),
-        patch("lmcache.v1.memory_allocator.PinMemoryAllocator.close", fake_pin_close),
+        patch(
+            "lmcache.v1.memory_management.PinMemoryAllocator.__init__", fake_pin_init
+        ),
+        patch("lmcache.v1.memory_management.PinMemoryAllocator.close", fake_pin_close),
     ):
         yield
 
