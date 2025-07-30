@@ -45,7 +45,7 @@ steps:
     depends_on: 
       - "pytest"
     command: |
-      sudo rm -rf /var/cache/buildkite
+      sudo rm -rf /var/cache/buildkite/*
       # make sure that your buildkite-agent has sudo access
 
   - label: "Upload Coverage Report"
