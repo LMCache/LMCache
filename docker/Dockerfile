@@ -138,4 +138,11 @@ uv pip install vllm[runai,tensorizer] && \
     uv pip install lmcache --verbose
 
 WORKDIR /workspace
+
+# Create non-root user for security
+RUN groupadd -r lmcache --gid=1000 && \
+    useradd -r -g lmcache --uid=1000 --home-dir=/home/lmcache --create-home lmcache
+
+# Switch to non-root user
+USER lmcache
 ENTRYPOINT ["/opt/venv/bin/vllm", "serve"]
