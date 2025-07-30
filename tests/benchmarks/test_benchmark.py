@@ -65,7 +65,19 @@ def test_cachegen_decoder_bench(benchmark, fmt, chunk_size):
     serializer = CacheGenSerializer(config, metadata)
     deserializer = CacheGenDeserializer(config, metadata, torch.bfloat16)
 
-    kv = to_blob(generate_kv_cache(chunk_size, fmt, "cuda"))
-    output = serializer.to_bytes(kv)
+    try:
+        kv = to_blob(generate_kv_cache(chunk_size, fmt, "cuda"))
+        output = serializer.to_bytes(kv)
 
-    benchmark(deserializer.from_bytes, output)
+        benchmark(deserializer.from_bytes, output)
+    finally:
+        # Explicit cleanup of GPU tensors to prevent memory leaks
+        if "kv" in locals():
+            del kv
+        if "output" in locals():
+            del output
+
+        # Force GPU memory cleanup
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()

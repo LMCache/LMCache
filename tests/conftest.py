@@ -62,6 +62,10 @@ def _patch_from_legacy():
         # Override with environment variable if set
         env_cpu_size = os.environ.get("LMCACHE_MAX_LOCAL_CPU_SIZE")
         if env_cpu_size is not None:
+            print(
+                f"🔧 [PATCH] Overriding max_local_cpu_size \
+                    from {config.max_local_cpu_size} to {env_cpu_size}"
+            )
             config.max_local_cpu_size = float(env_cpu_size)
         return config
 
@@ -70,6 +74,36 @@ def _patch_from_legacy():
 
 # Apply the patch at import time
 _patch_from_legacy()
+
+
+# Also try a more aggressive approach - patch the hardcoded values in from_legacy method
+def _patch_from_legacy_aggressive():
+    """More aggressive patch that modifies the source code constants."""
+    # First Party
+    from lmcache.v1 import config as config_module
+
+    # Override the hardcoded values if they exist
+    if hasattr(config_module, "LMCacheEngineConfig"):
+        original_method = config_module.LMCacheEngineConfig.from_legacy
+
+        @staticmethod
+        def from_legacy_override(*args, **kwargs):
+            # Call original method
+            result = original_method(*args, **kwargs)
+
+            # Force override if environment variable is set
+            env_cpu_size = os.environ.get("LMCACHE_MAX_LOCAL_CPU_SIZE")
+            if env_cpu_size is not None:
+                print(f"🔧 [AGGRESSIVE] Forcing max_local_cpu_size to {env_cpu_size}")
+                result.max_local_cpu_size = float(env_cpu_size)
+
+            return result
+
+        config_module.LMCacheEngineConfig.from_legacy = from_legacy_override
+
+
+# Apply aggressive patch as backup
+_patch_from_legacy_aggressive()
 
 
 def ensure_no_active_allocators():

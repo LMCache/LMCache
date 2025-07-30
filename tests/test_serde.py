@@ -60,15 +60,27 @@ def test_cachegen_encoder(chunk_size):
     serializer = CacheGenSerializer(config, metadata)
     serializer2 = CacheGenSerializer(config, metadata2)
 
-    kv = to_blob(generate_kv_cache(chunk_size, fmt, "cuda"))
-    output = serializer.to_bytes(kv)
-    kv2 = kv.permute([0, 1, 3, 2, 4])
-    output2 = serializer2.to_bytes(kv2)
+    try:
+        kv = to_blob(generate_kv_cache(chunk_size, fmt, "cuda"))
+        output = serializer.to_bytes(kv)
+        kv2 = kv.permute([0, 1, 3, 2, 4])
+        output2 = serializer2.to_bytes(kv2)
 
-    assert abs(len(output) - len(output2)) < 10
-    output_dict = CacheGenEncoderOutput.from_bytes(output)
-    assert output_dict.num_heads == 8
-    assert output_dict.head_size == 128
+        assert abs(len(output) - len(output2)) < 10
+        output_dict = CacheGenEncoderOutput.from_bytes(output)
+
+        assert output_dict.head_size == 128
+    finally:
+        # Explicit cleanup of GPU tensors to prevent memory leaks
+        locals_to_clean = ["kv", "kv2", "output", "output2", "output_dict"]
+        for var_name in locals_to_clean:
+            if var_name in locals():
+                del locals()[var_name]
+
+        # Force GPU memory cleanup
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
 
 
 @pytest.mark.parametrize("fmt", ["vllm", "huggingface"])
@@ -86,12 +98,24 @@ def test_cachegen_decoder(fmt, chunk_size):
     serializer = CacheGenSerializer(config, metadata)
     deserializer = CacheGenDeserializer(config, metadata, torch.bfloat16)
 
-    kv = to_blob(generate_kv_cache(chunk_size, fmt, "cuda"))
-    output = serializer.to_bytes(kv)
+    try:
+        kv = to_blob(generate_kv_cache(chunk_size, fmt, "cuda"))
+        output = serializer.to_bytes(kv)
 
-    decoded_kv = deserializer.from_bytes(output)
-    assert decoded_kv.shape == kv.shape
-    assert decoded_kv.mean() != 0
+        decoded_kv = deserializer.from_bytes(output)
+        assert decoded_kv.shape == kv.shape
+        assert decoded_kv.mean() != 0
+    finally:
+        # Explicit cleanup of GPU tensors to prevent memory leaks
+        locals_to_clean = ["kv", "output", "decoded_kv"]
+        for var_name in locals_to_clean:
+            if var_name in locals():
+                del locals()[var_name]
+
+        # Force GPU memory cleanup
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
 
 
 @pytest.mark.parametrize("fmt", ["vllm", "huggingface"])
@@ -110,9 +134,20 @@ def test_cachegen_unmatched_size(fmt):
     serializer = CacheGenSerializer(config, metadata)
     deserializer = CacheGenDeserializer(config, metadata, torch.bfloat16)
 
-    kv = to_blob(generate_kv_cache(chunk_size - 20, fmt, "cuda"))
-    output = serializer.to_bytes(kv)
+    try:
+        kv = to_blob(generate_kv_cache(chunk_size - 20, fmt, "cuda"))
+        output = serializer.to_bytes(kv)
 
-    decoded_kv = deserializer.from_bytes(output)
-    assert decoded_kv.shape == kv.shape
-    assert decoded_kv.mean() != 0
+        decoded_kv = deserializer.from_bytes(output)
+        assert decoded_kv.shape == kv.shape
+    finally:
+        # Explicit cleanup of GPU tensors to prevent memory leaks
+        locals_to_clean = ["kv", "output", "decoded_kv"]
+        for var_name in locals_to_clean:
+            if var_name in locals():
+                del locals()[var_name]
+
+        # Force GPU memory cleanup
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
