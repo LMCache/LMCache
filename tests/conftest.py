@@ -147,7 +147,8 @@ def ensure_no_active_allocators():
         # (separate collection from closing to minimize lock time)
         allocators_to_close = []
         test_allocators_to_close = []
-        gpu_tensors_to_clear = []
+        gpu_tensors_to_clear = []  # New list for GPU tensors
+        cuda_contexts_to_clear = []  # New list for CUDA contexts
 
         for obj in gc.get_objects():
             try:
@@ -161,11 +162,18 @@ def ensure_no_active_allocators():
                     obj._test_allocator, "close"
                 ):
                     test_allocators_to_close.append(obj._test_allocator)
-                # Clean up GPU tensors that might interfere with CUDA registration
+                # Enhanced GPU tensor detection
                 elif hasattr(obj, "__class__") and obj.__class__.__name__ == "Tensor":
                     if hasattr(obj, "device") and str(obj.device).startswith("cuda"):
-                        if hasattr(obj, "is_pinned") and obj.is_pinned():
-                            gpu_tensors_to_clear.append(obj)
+                        # Include ALL GPU tensors, not just pinned ones
+                        gpu_tensors_to_clear.append(obj)
+                # Look for CUDA context objects
+                elif (
+                    hasattr(obj, "__class__")
+                    and "cuda" in obj.__class__.__name__.lower()
+                ):
+                    if hasattr(obj, "device") or hasattr(obj, "_device"):
+                        cuda_contexts_to_clear.append(obj)
             except Exception:
                 # Ignore objects that raise exceptions during attribute access
                 pass
@@ -188,11 +196,25 @@ def ensure_no_active_allocators():
         except Exception:
             pass
 
-    # Clear references to pinned GPU tensors
+    # Enhanced GPU tensor cleanup
     tensor_count = len(gpu_tensors_to_clear)
+    context_count = len(cuda_contexts_to_clear)
     if tensor_count > 0:
-        print(f"🧹 [GPU] Found {tensor_count} pinned GPU tensors, clearing references")
+        print(f"🧹 [GPU] Found {tensor_count} GPU tensors, clearing references")
+        # Clear references in batches to avoid overwhelming
+        for i in range(0, len(gpu_tensors_to_clear), 100):
+            batch = gpu_tensors_to_clear[i : i + 100]
+            del batch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
         del gpu_tensors_to_clear  # Clear the list holding references
+
+    if context_count > 0:
+        print(
+            f"🧹 [CUDA] Found {context_count} CUDA context objects, clearing references"
+        )
+        del cuda_contexts_to_clear
 
     if cleanup_count > 0:
         print(
@@ -201,24 +223,32 @@ def ensure_no_active_allocators():
 
     _log_cuda_memory_status("MID-CLEANUP")
 
-    # Force multiple rounds of CUDA cleanup after closing allocators
+    # Enhanced aggressive CUDA cleanup after closing allocators
     if torch.cuda.is_available():
-        for i in range(5):  # More cleanup cycles
+        # Multiple cleanup cycles with increasing intensity
+        for i in range(10):  # Increased from 5 to 10 cycles
             torch.cuda.empty_cache()
             torch.cuda.synchronize()
             time.sleep(0.05)  # Small delay between cycles
 
-        # Try to reset CUDA context if possible
-        try:
-            # This might help clear any lingering registrations
-            torch.cuda.reset_peak_memory_stats()
-        except Exception as e:
-            print(f"Failed to reset CUDA peak memory stats: {e}")
+        # Force multiple GC cycles interleaved with CUDA cleanup
+        for i in range(10):  # Increased from 5 to 10 cycles
+            gc.collect()
+            torch.cuda.empty_cache()
+            time.sleep(0.02)
 
-    # Force garbage collection multiple times with delays
-    for i in range(5):  # More GC cycles
-        gc.collect()
-        time.sleep(0.02)
+        # Final aggressive cleanup attempts
+        try:
+            torch.cuda.reset_peak_memory_stats()
+            # Force CUDA context reset if available
+            if hasattr(torch.cuda, "reset_accumulated_memory_stats"):
+                torch.cuda.reset_accumulated_memory_stats()
+        except Exception as e:
+            print(f"Failed to reset CUDA stats: {e}")
+
+        # Final cleanup cycle
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
 
     _log_cuda_memory_status("POST-CLEANUP")
 

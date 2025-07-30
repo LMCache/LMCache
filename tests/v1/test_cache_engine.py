@@ -33,60 +33,75 @@ def test_paged_same_retrieve_store(autorelease_v1):
     chunk_size = 256
     kv_shape = (32, 2, chunk_size, 8, 128)
 
-    connector = create_gpu_connector(1024, 32)
+    try:
+        connector = create_gpu_connector(1024, 32)
 
-    tokens = generate_tokens(num_tokens, device)
+        tokens = generate_tokens(num_tokens, device)
 
-    kv_cache = generate_kv_cache_paged_list_tensors(
-        num_blocks, device, block_size, dtype
-    )
-    retrieved_cache = generate_kv_cache_paged_list_tensors(
-        num_blocks, device, block_size, dtype
-    )
-
-    original_retrieved_cache = deepcopy(retrieved_cache)
-
-    slot_mapping = random.sample(range(0, num_blocks * block_size), num_tokens)
-    slot_mapping = torch.tensor(slot_mapping, device=device)
-
-    # Check the kv cache and the retrieval buffer are not the same
-    check_paged_kv_cache_equal(retrieved_cache, original_retrieved_cache, slot_mapping)
-    with pytest.raises(AssertionError):
-        check_paged_kv_cache_equal(retrieved_cache, kv_cache, slot_mapping)
-    """ initialize the engine """
-    cfg = LMCacheEngineConfig.from_legacy(chunk_size=chunk_size, remote_url=None)
-
-    engine = autorelease_v1(
-        LMCacheEngineBuilder.get_or_create(
-            "test", cfg, dumb_metadata(fmt, kv_shape), connector
+        kv_cache = generate_kv_cache_paged_list_tensors(
+            num_blocks, device, block_size, dtype
         )
-    )
-    """ test retrieve empty """
-    ret_mask = engine.retrieve(
-        tokens, kvcaches=retrieved_cache, slot_mapping=slot_mapping
-    )
-    length = torch.sum(ret_mask)
-    assert length == 0
-    check_paged_kv_cache_equal(retrieved_cache, original_retrieved_cache, slot_mapping)
-    """ test store """
-    engine.store(tokens=tokens, kvcaches=kv_cache, slot_mapping=slot_mapping)
+        retrieved_cache = generate_kv_cache_paged_list_tensors(
+            num_blocks, device, block_size, dtype
+        )
 
-    """ Store is async. Need to wait for the store to finish """
-    timeout = 5.0  # Increased from 1.5 to 5.0 seconds
-    start_time = time.time()
-    while engine.lookup(tokens) < num_tokens:
-        if time.time() - start_time > timeout:
-            raise TimeoutError(f"Operation timed out after {timeout} seconds.")
-        time.sleep(0.01)
-    """ test retrieve """
-    ret_mask = engine.retrieve(
-        tokens, kvcaches=retrieved_cache, slot_mapping=slot_mapping
-    )
-    length = torch.sum(ret_mask)
-    assert length == num_tokens
-    check_paged_kv_cache_equal(retrieved_cache, kv_cache, slot_mapping)
+        original_retrieved_cache = deepcopy(retrieved_cache)
 
-    LMCacheEngineBuilder.destroy("test")
+        slot_mapping = random.sample(range(0, num_blocks * block_size), num_tokens)
+        slot_mapping = torch.tensor(slot_mapping, device=device)
+
+        # Check the kv cache and the retrieval buffer are not the same
+        check_paged_kv_cache_equal(
+            retrieved_cache, original_retrieved_cache, slot_mapping
+        )
+        with pytest.raises(AssertionError):
+            check_paged_kv_cache_equal(retrieved_cache, kv_cache, slot_mapping)
+        """ initialize the engine """
+        cfg = LMCacheEngineConfig.from_legacy(chunk_size=chunk_size, remote_url=None)
+
+        engine = autorelease_v1(
+            LMCacheEngineBuilder.get_or_create(
+                "test", cfg, dumb_metadata(fmt, kv_shape), connector
+            )
+        )
+        """ test retrieve empty """
+        ret_mask = engine.retrieve(
+            tokens, kvcaches=retrieved_cache, slot_mapping=slot_mapping
+        )
+        length = torch.sum(ret_mask)
+        assert length == 0
+        check_paged_kv_cache_equal(
+            retrieved_cache, original_retrieved_cache, slot_mapping
+        )
+        """ test store """
+        engine.store(tokens, kvcaches=kv_cache, slot_mapping=slot_mapping)
+        """ test retrieve """
+        ret_mask = engine.retrieve(
+            tokens, kvcaches=retrieved_cache, slot_mapping=slot_mapping
+        )
+        length = torch.sum(ret_mask)
+        assert length == num_tokens
+        check_paged_kv_cache_equal(retrieved_cache, kv_cache, slot_mapping)
+    finally:
+        # Explicit cleanup of GPU tensors to prevent memory leaks
+        locals_to_clean = [
+            "connector",
+            "tokens",
+            "kv_cache",
+            "retrieved_cache",
+            "original_retrieved_cache",
+            "slot_mapping",
+            "ret_mask",
+            "length",
+        ]
+        for var_name in locals_to_clean:
+            if var_name in locals():
+                del locals()[var_name]
+
+        # Force GPU memory cleanup
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
 
 
 @pytest.mark.parametrize("fmt", ["vllm"])
@@ -190,7 +205,11 @@ def test_paged_retrieve_prefix(
 @pytest.mark.parametrize("chunk_size", [256])
 @pytest.mark.parametrize(
     "backend",
-    ["cpu", "local_disk", "remote"],
+    [
+        "cpu",
+        "local_disk",
+        "remote",
+    ],
 )
 @pytest.mark.parametrize("lmserver_v1_process", ["cpu"], indirect=True)
 def test_paged_store_offset(
@@ -575,97 +594,119 @@ def test_paged_hierarchy_retrieve(
     block_size = 16
     dtype = torch.bfloat16
 
-    connector = create_gpu_connector(1024, 32)
+    try:
+        connector = create_gpu_connector(1024, 32)
 
-    tokens = generate_tokens(num_tokens, device)
-    kv_cache = generate_kv_cache_paged_list_tensors(
-        num_blocks, device, block_size, dtype=dtype
-    )
-
-    new_tokens = generate_tokens(new_num_tokens, device)
-    retrieved_cache = generate_kv_cache_paged_list_tensors(
-        num_blocks, device, block_size, dtype=dtype
-    )
-
-    slot_mapping = random.sample(
-        range(0, num_blocks * block_size), num_tokens + new_num_tokens
-    )
-    slot_mapping = torch.tensor(slot_mapping[:num_tokens], device=device)
-
-    new_slot_mapping = torch.tensor(slot_mapping[-new_num_tokens:], device=device)
-
-    """ initialize the engine """
-    cfg = LMCacheEngineConfig.from_legacy(
-        chunk_size=chunk_size, backend=backend, remote_url=url
-    )
-
-    engine = autorelease_v1(
-        LMCacheEngineBuilder.get_or_create(
-            "test", cfg, dumb_metadata(fmt, kv_shape), connector
+        tokens = generate_tokens(num_tokens, device)
+        kv_cache = generate_kv_cache_paged_list_tensors(
+            num_blocks, device, block_size, dtype=dtype
         )
-    )
-    """ test store """
-    engine.store(tokens, kvcaches=kv_cache, slot_mapping=slot_mapping)
-    """ Compute expected length """
-    expected_chunk_cnt = num_tokens // chunk_size
-    expected_length = expected_chunk_cnt * chunk_size
-    """ Store is async. Need to wait for the store to finish """
-    timeout = 1
-    start_time = time.time()
-    while engine.lookup(tokens) < expected_length:
-        if time.time() - start_time > timeout:
-            raise TimeoutError(f"Operation timed out after {timeout} seconds.")
-        time.sleep(0.01)
-    """ Wait until disk save is finished """
-    if retrieve_from in ["local_disk", "remote"]:
-        engine.storage_manager.clear(locations=["LocalCPUBackend"])
-        timeout = 30
-        start_time = time.time()
-        while engine.lookup(tokens, ["LocalDiskBackend"]) < expected_length:
-            if time.time() - start_time > timeout:
-                raise TimeoutError(f"Operation timed out after {timeout} seconds.")
-            time.sleep(0.01)
-    """ Wait until remote save is finished """
-    if retrieve_from == "remote":
-        engine.storage_manager.clear(locations=["LocalCPUBackend"])
-        # FIXME: change this `clear`
-        engine.storage_manager.storage_backends["LocalDiskBackend"].dict.clear()
-        timeout = 30
-        start_time = time.time()
-        while engine.lookup(tokens, ["RemoteBackend"]) < expected_length:
-            if time.time() - start_time > timeout:
-                raise TimeoutError(f"Operation timed out after {timeout} seconds.")
-            time.sleep(0.01)
-    """ test retrieve """
-    ret_mask = engine.retrieve(
-        torch.cat([tokens, new_tokens]),
-        kvcaches=retrieved_cache,
-        slot_mapping=torch.cat([slot_mapping, new_slot_mapping]),
-    )
 
-    length = torch.sum(ret_mask)
+        new_tokens = generate_tokens(new_num_tokens, device)
+        retrieved_cache = generate_kv_cache_paged_list_tensors(
+            num_blocks, device, block_size, dtype=dtype
+        )
 
-    assert length == expected_length
-    check_paged_kv_cache_equal(
-        retrieved_cache,
-        kv_cache,
-        torch.cat([slot_mapping, new_slot_mapping])[:expected_length],
-    )
+        slot_mapping = random.sample(
+            range(0, num_blocks * block_size), num_tokens + new_num_tokens
+        )
+        slot_mapping = torch.tensor(slot_mapping[:num_tokens], device=device)
 
-    """ Wait until disk save is finished before deleting the directory"""
-    if backend in ["local_cpu_disk"]:
-        engine.storage_manager.clear(locations=["LocalCPUBackend"])
-        timeout = 30
+        new_slot_mapping = torch.tensor(slot_mapping[-new_num_tokens:], device=device)
+
+        """ initialize the engine """
+        cfg = LMCacheEngineConfig.from_legacy(
+            chunk_size=chunk_size, backend=backend, remote_url=url
+        )
+
+        engine = autorelease_v1(
+            LMCacheEngineBuilder.get_or_create(
+                "test", cfg, dumb_metadata(fmt, kv_shape), connector
+            )
+        )
+        """ test store """
+        engine.store(tokens, kvcaches=kv_cache, slot_mapping=slot_mapping)
+        """ Compute expected length """
+        expected_chunk_cnt = num_tokens // chunk_size
+        expected_length = expected_chunk_cnt * chunk_size
+        """ Store is async. Need to wait for the store to finish """
+        timeout = 1
         start_time = time.time()
         while engine.lookup(tokens) < expected_length:
             if time.time() - start_time > timeout:
                 raise TimeoutError(f"Operation timed out after {timeout} seconds.")
             time.sleep(0.01)
+        """ Wait until disk save is finished """
+        if retrieve_from in ["local_disk", "remote"]:
+            engine.storage_manager.clear(locations=["LocalCPUBackend"])
+            timeout = 30
+            start_time = time.time()
+            while engine.lookup(tokens, ["LocalDiskBackend"]) < expected_length:
+                if time.time() - start_time > timeout:
+                    raise TimeoutError(f"Operation timed out after {timeout} seconds.")
+                time.sleep(0.01)
+        """ Wait until remote save is finished """
+        if retrieve_from == "remote":
+            engine.storage_manager.clear(locations=["LocalCPUBackend"])
+            # FIXME: change this `clear`
+            engine.storage_manager.storage_backends["LocalDiskBackend"].dict.clear()
+            timeout = 30
+            start_time = time.time()
+            while engine.lookup(tokens, ["RemoteBackend"]) < expected_length:
+                if time.time() - start_time > timeout:
+                    raise TimeoutError(f"Operation timed out after {timeout} seconds.")
+                time.sleep(0.01)
+        """ test retrieve """
+        ret_mask = engine.retrieve(
+            torch.cat([tokens, new_tokens]),
+            kvcaches=retrieved_cache,
+            slot_mapping=torch.cat([slot_mapping, new_slot_mapping]),
+        )
 
-    if backend in ["local_cpu_disk"]:
-        subprocess.run(shlex.split("rm -rf local/disk_test/local_disk/"))
+        length = torch.sum(ret_mask)
 
-    LMCacheEngineBuilder.destroy("test")
+        assert length == expected_length
+        check_paged_kv_cache_equal(
+            retrieved_cache,
+            kv_cache,
+            torch.cat([slot_mapping, new_slot_mapping])[:expected_length],
+        )
+
+        """ Wait until disk save is finished before deleting the directory"""
+        if backend in ["local_cpu_disk"]:
+            engine.storage_manager.clear(locations=["LocalCPUBackend"])
+            timeout = 30
+            start_time = time.time()
+            while engine.lookup(tokens) < expected_length:
+                if time.time() - start_time > timeout:
+                    raise TimeoutError(f"Operation timed out after {timeout} seconds.")
+                time.sleep(0.01)
+
+        if backend in ["local_cpu_disk"]:
+            subprocess.run(shlex.split("rm -rf local/disk_test/local_disk/"))
+
+        LMCacheEngineBuilder.destroy("test")
+    finally:
+        # Explicit cleanup of GPU tensors to prevent memory leaks
+        locals_to_clean = [
+            "connector",
+            "tokens",
+            "kv_cache",
+            "new_tokens",
+            "retrieved_cache",
+            "slot_mapping",
+            "new_slot_mapping",
+            "ret_mask",
+            "length",
+        ]
+        for var_name in locals_to_clean:
+            if var_name in locals():
+                del locals()[var_name]
+
+        # Force GPU memory cleanup
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
 
 
 @pytest.mark.parametrize(
@@ -797,61 +838,80 @@ def test_paged_mem_leak(fmt, chunk_size, backend, lmserver_v1_process, autorelea
     num_blocks = 1000
     block_size = 16
     dtype = torch.bfloat16
-    connector = create_gpu_connector(1024, 32)
 
-    tokens = generate_tokens(num_tokens, device)
-    kv_cache = generate_kv_cache_paged_list_tensors(
-        num_blocks, device, block_size, dtype
-    )
-    slot_mapping = random.sample(range(0, num_blocks * block_size), num_tokens)
-    slot_mapping = torch.tensor(slot_mapping, device=device)
-    """ initialize the engine """
-    cfg = LMCacheEngineConfig.from_legacy(
-        chunk_size=chunk_size, backend=backend, remote_url=url
-    )
+    try:
+        connector = create_gpu_connector(1024, 32)
 
-    engine = autorelease_v1(
-        LMCacheEngineBuilder.get_or_create(
-            "test", cfg, dumb_metadata(fmt, kv_shape), connector
+        tokens = generate_tokens(num_tokens, device)
+        kv_cache = generate_kv_cache_paged_list_tensors(
+            num_blocks, device, block_size, dtype
         )
-    )
+        slot_mapping = random.sample(range(0, num_blocks * block_size), num_tokens)
+        slot_mapping = torch.tensor(slot_mapping, device=device)
+        """ initialize the engine """
+        cfg = LMCacheEngineConfig.from_legacy(
+            chunk_size=chunk_size, backend=backend, remote_url=url
+        )
 
-    engine.store(tokens, kvcaches=kv_cache, slot_mapping=slot_mapping)
+        engine = autorelease_v1(
+            LMCacheEngineBuilder.get_or_create(
+                "test", cfg, dumb_metadata(fmt, kv_shape), connector
+            )
+        )
 
-    expected_length = 2000
-    timeout = 30
-    """Wait until cpu store finishes"""
-    if "cpu" in backend:
-        start_time = time.time()
-        while engine.lookup(tokens, ["LocalCPUBackend"]) < expected_length:
-            if time.time() - start_time > timeout:
-                raise TimeoutError(f"Operation timed out after {timeout} seconds.")
-            time.sleep(0.01)
-    """Wait until disk store finishes"""
-    if "disk" in backend:
-        start_time = time.time()
-        while engine.lookup(tokens, ["LocalDiskBackend"]) < expected_length:
-            if time.time() - start_time > timeout:
-                raise TimeoutError(f"Operation timed out after {timeout} seconds.")
-            time.sleep(0.01)
+        engine.store(tokens, kvcaches=kv_cache, slot_mapping=slot_mapping)
 
-    if "remote" in backend:
-        start_time = time.time()
-        while engine.lookup(tokens, ["RemoteBackend"]) < expected_length:
-            if time.time() - start_time > timeout:
-                raise TimeoutError(f"Operation timed out after {timeout} seconds.")
-            time.sleep(0.01)
-    tensor_memory_allocator = (
-        engine.storage_manager.allocator_backend.memory_allocator.pin_allocator
-    )
-    if "cpu" not in backend:
-        assert tensor_memory_allocator.total_allocated_size == 0
-    else:
-        assert tensor_memory_allocator.total_allocated_size > 0
+        expected_length = 2000
+        timeout = 30
+        """Wait until cpu store finishes"""
+        if "cpu" in backend:
+            start_time = time.time()
+            while engine.lookup(tokens, ["LocalCPUBackend"]) < expected_length:
+                if time.time() - start_time > timeout:
+                    raise TimeoutError(f"Operation timed out after {timeout} seconds.")
+                time.sleep(0.01)
+        """Wait until disk store finishes"""
+        if "disk" in backend:
+            start_time = time.time()
+            while engine.lookup(tokens, ["LocalDiskBackend"]) < expected_length:
+                if time.time() - start_time > timeout:
+                    raise TimeoutError(f"Operation timed out after {timeout} seconds.")
+                time.sleep(0.01)
 
-    if "disk" in backend:
-        subprocess.run(shlex.split("rm -rf local/disk_test/local_disk/"))
-    LMCacheEngineBuilder.destroy("test")
+        if "remote" in backend:
+            start_time = time.time()
+            while engine.lookup(tokens, ["RemoteBackend"]) < expected_length:
+                if time.time() - start_time > timeout:
+                    raise TimeoutError(f"Operation timed out after {timeout} seconds.")
+                time.sleep(0.01)
+        tensor_memory_allocator = (
+            engine.storage_manager.allocator_backend.memory_allocator.pin_allocator
+        )
+        if "cpu" not in backend:
+            assert tensor_memory_allocator.total_allocated_size == 0
+        else:
+            assert tensor_memory_allocator.total_allocated_size > 0
+
+        if "disk" in backend:
+            subprocess.run(shlex.split("rm -rf local/disk_test/local_disk/"))
+        LMCacheEngineBuilder.destroy("test")
+    finally:
+        # Explicit cleanup of GPU tensors to prevent memory leaks
+        locals_to_clean = [
+            "connector",
+            "tokens",
+            "kv_cache",
+            "slot_mapping",
+            "tensor_memory_allocator",
+        ]
+        for var_name in locals_to_clean:
+            if var_name in locals():
+                del locals()[var_name]
+
+        # Force GPU memory cleanup
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
 
 
 def test_builder(autorelease_v1):
