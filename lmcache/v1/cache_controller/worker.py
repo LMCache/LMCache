@@ -1,17 +1,4 @@
-# Copyright 2024-2025 LMCache Authors.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
+# SPDX-License-Identifier: Apache-2.0
 # Standard
 from typing import TYPE_CHECKING
 import asyncio
@@ -29,6 +16,8 @@ from lmcache.v1.cache_controller.message import (
     ClearWorkerRetMsg,
     DeRegisterMsg,
     ErrorMsg,
+    MoveWorkerMsg,
+    MoveWorkerRetMsg,
     Msg,
     RegisterMsg,
     WorkerMsg,
@@ -98,6 +87,8 @@ class LMCacheWorker:
             role=zmq.REP,  # type: ignore[attr-defined]
             bind_or_connect="bind",
         )
+
+        logger.info(f"Reply socket established at {self.lmcache_worker_internal_url}")
 
         self.loop = asyncio.new_event_loop()
         self.thread = threading.Thread(target=self.loop.run_forever, daemon=True)
@@ -193,6 +184,30 @@ class LMCacheWorker:
                     result = self.lmcache_engine.clear(tokens)
                     serialized_ret_msg = msgspec.msgpack.encode(
                         ClearWorkerRetMsg(success=result > 0)
+                    )
+                elif isinstance(request, MoveWorkerMsg):
+                    tokens = request.tokens
+                    old_position = request.old_position
+                    new_position = request.new_position
+
+                    # Old position should be the same as the worker's
+                    # instance id and worker id.
+                    assert old_position[0] == self.lmcache_instance_id
+
+                    # TODO(Jiayi): currently we only support moving from
+                    # local disk to local cpu.
+                    assert old_position[1] == "disk"
+                    assert new_position[0] == self.lmcache_instance_id
+                    assert new_position[1] == "cpu"
+
+                    logger.debug("Executing prefetch operation.")
+                    result = self.lmcache_engine.prefetch(tokens)
+
+                    # TODO(Jiayi): LMCache needs to have an event tracking
+                    # pool to enable more advanced control-plane optims.
+                    # For now, we use a dummy `event_id`.
+                    serialized_ret_msg = msgspec.msgpack.encode(
+                        MoveWorkerRetMsg(worker_event_id="move")
                     )
                 else:
                     logger.error(f"Unknown message: {request}")
