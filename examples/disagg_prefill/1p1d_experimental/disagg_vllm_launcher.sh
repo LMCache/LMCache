@@ -2,6 +2,9 @@
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# NOTE: For correct KV cache transfer, ensure all processes use the same PYTHONHASHSEED to keep the hash of the KV cache consistent across processes.
+export PYTHONHASHSEED=0
+
 if [[ $# -lt 1 ]]; then
     echo "Usage: $0 <prefiller | decoder> [model]"
     exit 1
