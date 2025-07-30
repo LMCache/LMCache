@@ -26,6 +26,8 @@ CID=
 HF_TOKEN=
 SERVER_WAIT_TIMEOUT=180
 
+export VLLM_USE_FLASHINFER_SAMPLER=0
+
 #############
 # UTILITIES #
 #############
