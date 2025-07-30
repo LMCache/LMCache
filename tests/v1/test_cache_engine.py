@@ -83,7 +83,8 @@ def test_paged_same_retrieve_store(autorelease_v1):
         assert length == num_tokens
         check_paged_kv_cache_equal(retrieved_cache, kv_cache, slot_mapping)
     finally:
-        # Explicit cleanup of GPU tensors to prevent memory leaks
+        # SUPER AGGRESSIVE cleanup for massive GPU tensor allocations
+        # Each generate_kv_cache_paged_list_tensors call creates ~2GB of GPU memory
         locals_to_clean = [
             "connector",
             "tokens",
@@ -94,14 +95,36 @@ def test_paged_same_retrieve_store(autorelease_v1):
             "ret_mask",
             "length",
         ]
+
+        # First: Explicitly clear tensor data to break references
+        for var_name in ["kv_cache", "retrieved_cache"]:
+            if var_name in locals():
+                tensor_list = locals()[var_name]
+                if isinstance(tensor_list, list):
+                    for i in range(len(tensor_list)):
+                        # Clear the list element directly
+                        tensor_list[i] = None
+                    # Clear the entire list
+                    tensor_list.clear()
+                    # Set the variable to None
+                    locals()[var_name] = None
+
+        # Second: Delete all local variables
         for var_name in locals_to_clean:
             if var_name in locals():
                 del locals()[var_name]
 
-        # Force GPU memory cleanup
+        # Third: Multiple aggressive CUDA cleanup cycles
         if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            torch.cuda.synchronize()
+            # Standard
+            import gc
+
+            for _ in range(10):  # More cycles for massive allocations
+                torch.cuda.synchronize()
+                torch.cuda.empty_cache()
+                gc.collect()
+                torch.cuda.synchronize()
+                time.sleep(0.1)  # Allow time for deregistration
 
 
 @pytest.mark.parametrize("fmt", ["vllm"])
@@ -129,76 +152,124 @@ def test_paged_retrieve_prefix(
     num_blocks = 1000
     block_size = 16
     dtype = torch.bfloat16
-    connector = create_gpu_connector(1024, 32)
 
-    tokens = generate_tokens(num_tokens, device)
-    kv_cache = generate_kv_cache_paged_list_tensors(
-        num_blocks, device, block_size, dtype
-    )
-    new_tokens = generate_tokens(new_num_tokens, device)
-    retrieved_cache = generate_kv_cache_paged_list_tensors(
-        num_blocks, device, block_size, dtype
-    )
-    slot_mapping_full = random.sample(
-        range(0, num_blocks * block_size), num_tokens + new_num_tokens
-    )
-    slot_mapping = torch.tensor(slot_mapping_full[:num_tokens], device=device)
+    try:
+        connector = create_gpu_connector(1024, 32)
 
-    new_slot_mapping = torch.tensor(slot_mapping_full[-new_num_tokens:], device=device)
-    """ initialize the engine """
-    cfg = LMCacheEngineConfig.from_legacy(
-        chunk_size=chunk_size,
-        backend=backend,
-        remote_url=url,
-        remote_serde=remote_serde,
-    )
-
-    engine = autorelease_v1(
-        LMCacheEngineBuilder.get_or_create(
-            "test", cfg, dumb_metadata(fmt, kv_shape), connector
+        tokens = generate_tokens(num_tokens, device)
+        kv_cache = generate_kv_cache_paged_list_tensors(
+            num_blocks, device, block_size, dtype
         )
-    )
-    """ test store """
-    engine.store(tokens, kvcaches=kv_cache, slot_mapping=slot_mapping)
-    """ Compute expected length """
-    expected_chunk_cnt = num_tokens // chunk_size
-    expected_length = expected_chunk_cnt * chunk_size
-    """ Store is async. Need to wait for the store to finish """
-    if backend == "cpu":
-        timeout = 1
-        search_range = "LocalCPUBackend"
-    elif backend == "local_disk":
-        timeout = 30
-        search_range = "LocalDiskBackend"
-    elif backend == "remote":
-        timeout = 30
-        search_range = "RemoteBackend"
-    start_time = time.time()
-    while engine.lookup(tokens, search_range) < expected_length:
-        if time.time() - start_time > timeout:
-            raise TimeoutError(f"Operation timed out after {timeout} seconds.")
-        time.sleep(0.01)
-    """ test retrieve """
-    ret_mask = engine.retrieve(
-        torch.cat([tokens, new_tokens]),
-        kvcaches=retrieved_cache,
-        slot_mapping=torch.cat([slot_mapping, new_slot_mapping]),
-    )
+        new_tokens = generate_tokens(new_num_tokens, device)
+        retrieved_cache = generate_kv_cache_paged_list_tensors(
+            num_blocks, device, block_size, dtype
+        )
+        slot_mapping_full = random.sample(
+            range(0, num_blocks * block_size), num_tokens + new_num_tokens
+        )
+        slot_mapping = torch.tensor(slot_mapping_full[:num_tokens], device=device)
 
-    length = torch.sum(ret_mask)
-
-    assert length == expected_length
-
-    if check_equality:
-        check_paged_kv_cache_equal(
-            kv_cache,
-            retrieved_cache,
-            torch.cat([slot_mapping, new_slot_mapping])[:expected_length],
+        new_slot_mapping = torch.tensor(
+            slot_mapping_full[-new_num_tokens:], device=device
+        )
+        """ initialize the engine """
+        cfg = LMCacheEngineConfig.from_legacy(
+            chunk_size=chunk_size,
+            backend=backend,
+            remote_url=url,
+            remote_serde=remote_serde,
         )
 
-    if backend in ["local_disk"]:
-        subprocess.run(shlex.split("rm -rf local/disk_test/local_disk/"))
-    LMCacheEngineBuilder.destroy("test")
+        engine = autorelease_v1(
+            LMCacheEngineBuilder.get_or_create(
+                "test", cfg, dumb_metadata(fmt, kv_shape), connector
+            )
+        )
+        """ test store """
+        engine.store(tokens, kvcaches=kv_cache, slot_mapping=slot_mapping)
+        """ Compute expected length """
+        expected_chunk_cnt = num_tokens // chunk_size
+        expected_length = expected_chunk_cnt * chunk_size
+        """ Store is async. Need to wait for the store to finish """
+        if backend == "cpu":
+            timeout = 1
+            search_range = "LocalCPUBackend"
+        elif backend == "local_disk":
+            timeout = 30
+            search_range = "LocalDiskBackend"
+        else:
+            timeout = 30
+            search_range = "RemoteBackend"
+        start_time = time.time()
+        while engine.lookup(tokens, [search_range]) < expected_length:
+            if time.time() - start_time > timeout:
+                raise TimeoutError(f"Operation timed out after {timeout} seconds.")
+            time.sleep(0.01)
+        """ test retrieve """
+        ret_mask = engine.retrieve(
+            torch.cat([tokens, new_tokens]),
+            kvcaches=retrieved_cache,
+            slot_mapping=torch.cat([slot_mapping, new_slot_mapping]),
+        )
+        length = torch.sum(ret_mask)
+
+        assert length == expected_length
+
+        if check_equality:
+            check_paged_kv_cache_equal(
+                kv_cache,
+                retrieved_cache,
+                torch.cat([slot_mapping, new_slot_mapping])[:expected_length],
+            )
+
+        if backend in ["local_disk"]:
+            subprocess.run(shlex.split("rm -rf local/disk_test/local_disk/"))
+        LMCacheEngineBuilder.destroy("test")
+    finally:
+        # SUPER AGGRESSIVE cleanup for massive GPU tensor allocations
+        # Each generate_kv_cache_paged_list_tensors call creates ~2GB of GPU memory
+        locals_to_clean = [
+            "connector",
+            "tokens",
+            "kv_cache",
+            "new_tokens",
+            "retrieved_cache",
+            "slot_mapping",
+            "new_slot_mapping",
+            "slot_mapping_full",
+            "ret_mask",
+            "length",
+        ]
+
+        # First: Explicitly clear tensor data to break references
+        for var_name in ["kv_cache", "retrieved_cache"]:
+            if var_name in locals():
+                tensor_list = locals()[var_name]
+                if isinstance(tensor_list, list):
+                    for i in range(len(tensor_list)):
+                        # Clear the list element directly
+                        tensor_list[i] = None
+                    # Clear the entire list
+                    tensor_list.clear()
+                    # Set the variable to None
+                    locals()[var_name] = None
+
+        # Second: Delete all local variables
+        for var_name in locals_to_clean:
+            if var_name in locals():
+                del locals()[var_name]
+
+        # Third: Multiple aggressive CUDA cleanup cycles
+        if torch.cuda.is_available():
+            # Standard
+            import gc
+
+            for _ in range(10):  # More cycles for massive allocations
+                torch.cuda.synchronize()
+                torch.cuda.empty_cache()
+                gc.collect()
+                torch.cuda.synchronize()
+                time.sleep(0.1)  # Allow time for deregistration
 
 
 @pytest.mark.parametrize("fmt", ["vllm"])
@@ -687,7 +758,8 @@ def test_paged_hierarchy_retrieve(
 
         LMCacheEngineBuilder.destroy("test")
     finally:
-        # Explicit cleanup of GPU tensors to prevent memory leaks
+        # SUPER AGGRESSIVE cleanup for massive GPU tensor allocations
+        # Each generate_kv_cache_paged_list_tensors call creates ~2GB of GPU memory
         locals_to_clean = [
             "connector",
             "tokens",
@@ -699,14 +771,36 @@ def test_paged_hierarchy_retrieve(
             "ret_mask",
             "length",
         ]
+
+        # First: Explicitly clear tensor data to break references
+        for var_name in ["kv_cache", "retrieved_cache"]:
+            if var_name in locals():
+                tensor_list = locals()[var_name]
+                if isinstance(tensor_list, list):
+                    for i in range(len(tensor_list)):
+                        # Clear the list element directly
+                        tensor_list[i] = None
+                    # Clear the entire list
+                    tensor_list.clear()
+                    # Set the variable to None
+                    locals()[var_name] = None
+
+        # Second: Delete all local variables
         for var_name in locals_to_clean:
             if var_name in locals():
                 del locals()[var_name]
 
-        # Force GPU memory cleanup
+        # Third: Multiple aggressive CUDA cleanup cycles
         if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            torch.cuda.synchronize()
+            # Standard
+            import gc
+
+            for _ in range(10):  # More cycles for massive allocations
+                torch.cuda.synchronize()
+                torch.cuda.empty_cache()
+                gc.collect()
+                torch.cuda.synchronize()
+                time.sleep(0.1)  # Allow time for deregistration
 
 
 @pytest.mark.parametrize(
@@ -896,7 +990,8 @@ def test_paged_mem_leak(fmt, chunk_size, backend, lmserver_v1_process, autorelea
             subprocess.run(shlex.split("rm -rf local/disk_test/local_disk/"))
         LMCacheEngineBuilder.destroy("test")
     finally:
-        # Explicit cleanup of GPU tensors to prevent memory leaks
+        # SUPER AGGRESSIVE cleanup for massive GPU tensor allocations
+        # Each generate_kv_cache_paged_list_tensors call creates ~2GB of GPU memory
         locals_to_clean = [
             "connector",
             "tokens",
@@ -904,14 +999,36 @@ def test_paged_mem_leak(fmt, chunk_size, backend, lmserver_v1_process, autorelea
             "slot_mapping",
             "tensor_memory_allocator",
         ]
+
+        # First: Explicitly clear tensor data to break references
+        for var_name in ["kv_cache"]:
+            if var_name in locals():
+                tensor_list = locals()[var_name]
+                if isinstance(tensor_list, list):
+                    for i in range(len(tensor_list)):
+                        # Clear the list element directly
+                        tensor_list[i] = None
+                    # Clear the entire list
+                    tensor_list.clear()
+                    # Set the variable to None
+                    locals()[var_name] = None
+
+        # Second: Delete all local variables
         for var_name in locals_to_clean:
             if var_name in locals():
                 del locals()[var_name]
 
-        # Force GPU memory cleanup
+        # Third: Multiple aggressive CUDA cleanup cycles
         if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            torch.cuda.synchronize()
+            # Standard
+            import gc
+
+            for _ in range(10):  # More cycles for massive allocations
+                torch.cuda.synchronize()
+                torch.cuda.empty_cache()
+                gc.collect()
+                torch.cuda.synchronize()
+                time.sleep(0.1)  # Allow time for deregistration
 
 
 def test_builder(autorelease_v1):

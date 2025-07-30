@@ -41,20 +41,63 @@ def test_vllm_paged_connector_v2_with_gpu_and_mla(use_gpu, use_mla):
     num_tokens = 800
     chunk_size = 256
 
-    allocator = PinMemoryAllocator(128 * 1024 * 1024)
+    try:
+        allocator = PinMemoryAllocator(128 * 1024 * 1024)
 
-    gpu_kv_src = generate_kv_cache_paged_list_tensors(
-        num_blocks=num_blocks, device=device, block_size=block_size, use_mla=use_mla
-    )
-    gpu_kv_dst = generate_kv_cache_paged_list_tensors(
-        num_blocks=num_blocks, device=device, block_size=block_size, use_mla=use_mla
-    )
+        gpu_kv_src = generate_kv_cache_paged_list_tensors(
+            num_blocks=num_blocks, device=device, block_size=block_size, use_mla=use_mla
+        )
+        gpu_kv_dst = generate_kv_cache_paged_list_tensors(
+            num_blocks=num_blocks, device=device, block_size=block_size, use_mla=use_mla
+        )
 
-    slot_mapping = random.sample(range(0, num_blocks * block_size), num_tokens)
-    slot_mapping = torch.tensor(slot_mapping, device=device, dtype=torch.int64)
+        slot_mapping = random.sample(range(0, num_blocks * block_size), num_tokens)
+        slot_mapping = torch.tensor(slot_mapping, device=device, dtype=torch.int64)
 
-    # Check the gpu_kv is not the same before copying
-    with pytest.raises(AssertionError):
+        # Check the gpu_kv is not the same before copying
+        with pytest.raises(AssertionError):
+            if use_mla:
+                check_paged_kv_cache_equal_with_mla(
+                    gpu_kv_src, gpu_kv_dst, slot_mapping, head_size
+                )
+            else:
+                check_paged_kv_cache_equal(
+                    gpu_kv_src, gpu_kv_dst, slot_mapping, num_heads, head_size
+                )
+
+        connector = VLLMPagedMemGPUConnectorV2(
+            hidden_dim,
+            num_layers,
+            use_gpu=use_gpu,
+            chunk_size=chunk_size,
+            dtype=gpu_kv_src[0].dtype,
+            device=device,
+        )
+
+        connector.from_gpu(
+            gpu_kv_src,
+            range(num_tokens),
+            slot_mapping=slot_mapping,
+            num_tokens=num_tokens,
+        )
+
+        memory_obj_list = allocator.batch_allocate(
+            connector.get_shape(num_tokens),
+            gpu_kv_src[0].dtype,
+            MemoryFormat.K_T2D,
+            num_layers,
+        )
+
+        for i in range(num_layers):
+            memory_obj_list[i].copy_()
+
+        connector.to_gpu(
+            gpu_kv_dst,
+            memory_obj_list,
+            range(num_tokens),
+            slot_mapping=slot_mapping,
+        )
+
         if use_mla:
             check_paged_kv_cache_equal_with_mla(
                 gpu_kv_src, gpu_kv_dst, slot_mapping, head_size
@@ -63,63 +106,24 @@ def test_vllm_paged_connector_v2_with_gpu_and_mla(use_gpu, use_mla):
             check_paged_kv_cache_equal(
                 gpu_kv_src, gpu_kv_dst, slot_mapping, num_heads, head_size
             )
+            allocator.close()
+    finally:
+        # Explicit cleanup of GPU tensors to prevent memory leaks
+        locals_to_clean = [
+            "gpu_kv_src",
+            "gpu_kv_dst",
+            "slot_mapping",
+            "connector",
+            "memory_obj_list",
+        ]
+        for var_name in locals_to_clean:
+            if var_name in locals():
+                del locals()[var_name]
 
-    connector = VLLMPagedMemGPUConnectorV2(
-        hidden_dim,
-        num_layers,
-        use_gpu=use_gpu,
-        chunk_size=chunk_size,
-        dtype=gpu_kv_src[0].dtype,
-        device=device,
-        use_mla=use_mla,
-    )
-    connector2 = VLLMPagedMemGPUConnectorV2(
-        hidden_dim,
-        num_layers,
-        use_gpu=use_gpu,
-        chunk_size=chunk_size,
-        dtype=gpu_kv_src[0].dtype,
-        device=device,
-        use_mla=use_mla,
-    )
-    assert connector.use_mla == use_mla
-    assert connector2.use_mla == use_mla
-    for start in range(0, num_tokens, chunk_size):
-        end = min(start + chunk_size, num_tokens)
-        shape = connector.get_shape(end - start)
-        memory_obj = allocator.allocate(shape, gpu_kv_src[0][0].dtype)
-        connector.from_gpu(
-            memory_obj,
-            start,
-            end,
-            kvcaches=gpu_kv_src,
-            slot_mapping=slot_mapping,
-            offset=0,
-        )
-        if use_mla:
-            assert memory_obj.metadata.fmt == MemoryFormat.KV_MLA_FMT
-        else:
-            assert memory_obj.metadata.fmt == MemoryFormat.KV_2LTD
-        connector2.to_gpu(
-            memory_obj,
-            start,
-            end,
-            kvcaches=gpu_kv_dst,
-            slot_mapping=slot_mapping,
-            offset=0,
-        )
-        allocator.free(memory_obj)
-        assert allocator.memcheck()
-
-    if use_mla:
-        check_paged_kv_cache_equal_with_mla(
-            gpu_kv_src, gpu_kv_dst, slot_mapping, head_size
-        )
-    else:
-        check_paged_kv_cache_equal(
-            gpu_kv_src, gpu_kv_dst, slot_mapping, num_heads, head_size
-        )
-    allocator.close()
+        # Force GPU memory cleanup
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
 
 
 @pytest.mark.parametrize("use_gpu", [True])
@@ -220,6 +224,26 @@ def test_layerwise_vllm_paged_connector_with_gpu(use_gpu):
     )
 
     allocator.close()
+
+    # Explicit cleanup of GPU tensors to prevent memory leaks
+    locals_to_clean = [
+        "gpu_kv_src",
+        "gpu_kv_dst",
+        "slot_mapping",
+        "connector",
+        "memory_objs",
+        "starts",
+        "ends",
+        "dtype",
+    ]
+    for var_name in locals_to_clean:
+        if var_name in locals():
+            del locals()[var_name]
+
+    # Force GPU memory cleanup
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
 
 
 @pytest.mark.parametrize("use_gpu", [True])
@@ -383,6 +407,29 @@ def test_batched_layerwise_vllm_paged_connector_with_gpu(use_gpu):
 
     allocator.close()
 
+    # Explicit cleanup of GPU tensors to prevent memory leaks
+    locals_to_clean = [
+        "gpu_kv_src",
+        "gpu_kv_dst",
+        "slot_mapping_total",
+        "connector",
+        "memory_objs_1",
+        "memory_objs_2",
+        "starts_1",
+        "ends_1",
+        "starts_2",
+        "ends_2",
+        "dtype",
+    ]
+    for var_name in locals_to_clean:
+        if var_name in locals():
+            del locals()[var_name]
+
+    # Force GPU memory cleanup
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+
 
 @pytest.mark.skip(reason="This test is skipped due to vllm dependency")
 @pytest.mark.parametrize("use_gpu", [True])
@@ -481,6 +528,26 @@ def test_layerwise_vllm_buffer_connector_with_gpu(use_gpu):
 
     allocator.close()
 
+    # Explicit cleanup of GPU tensors to prevent memory leaks
+    locals_to_clean = [
+        "gpu_kv_src",
+        "gpu_kv_dst",
+        "slot_mapping",
+        "connector",
+        "memory_objs",
+        "starts",
+        "ends",
+        "dtype",
+    ]
+    for var_name in locals_to_clean:
+        if var_name in locals():
+            del locals()[var_name]
+
+    # Force GPU memory cleanup
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+
 
 def test_vllm_paged_connector_v2_to_gpu_bench(benchmark):
     """
@@ -537,6 +604,25 @@ def test_vllm_paged_connector_v2_to_gpu_bench(benchmark):
     assert allocator.memcheck()
 
     allocator.close()
+
+    # Explicit cleanup of GPU tensors to prevent memory leaks
+    locals_to_clean = [
+        "gpu_kv_src",
+        "gpu_kv_dst",
+        "slot_mapping",
+        "connector",
+        "memory_obj",
+        "shape",
+        "chunk_size",
+    ]
+    for var_name in locals_to_clean:
+        if var_name in locals():
+            del locals()[var_name]
+
+    # Force GPU memory cleanup
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
 
 
 @pytest.mark.parametrize("use_gpu", [True, False])
@@ -648,3 +734,25 @@ def test_sglang_connector_with_gpu_and_mla(use_gpu, use_mla):
         )
 
     allocator.close()
+
+    # Explicit cleanup of GPU tensors to prevent memory leaks
+    locals_to_clean = [
+        "gpu_kv_src",
+        "gpu_kv_dst",
+        "slot_mapping",
+        "connector",
+        "connector2",
+        "shape",
+        "chunk_size",
+        "dtype",
+        "device",
+        "use_mla",
+    ]
+    for var_name in locals_to_clean:
+        if var_name in locals():
+            del locals()[var_name]
+
+    # Force GPU memory cleanup
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()

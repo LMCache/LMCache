@@ -153,6 +153,26 @@ def test_extract_and_load_back(num_tokens):
 
     mem_allocator.close()
 
+    # Explicit cleanup of GPU tensors and pinned memory to prevent memory leaks
+    locals_to_clean = [
+        "kv_cache",
+        "slot_mapping",
+        "kv_tuple_list",
+        "memory_obj_old_list",
+        "kv_blob",
+        "kv_chunked",
+        "start_event",
+        "end_event",
+    ]
+    for var_name in locals_to_clean:
+        if var_name in locals():
+            del locals()[var_name]
+
+    # Force GPU memory cleanup
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+
 
 @pytest.mark.parametrize("num_tokens", [256, 500, 1024, 8000])
 def test_multi_layer_kernel(num_tokens):
@@ -274,6 +294,31 @@ def test_multi_layer_kernel(num_tokens):
     )
 
     mem_allocator.close()
+
+    # Explicit cleanup of GPU tensors and pinned memory to prevent memory leaks
+    locals_to_clean = [
+        "kv_cache",
+        "kv_cache_new",
+        "slot_mapping",
+        "mem_objs_layerwise",
+        "mem_objs_batched",
+        "kv_cache_pointers",
+        "kv_cache_pointers_new",
+        "slot_mapping_chunked",
+        "chunk_id",
+        "memory_obj_new_list",
+        "start_event",
+        "end_event",
+        "page_buffer_size",
+    ]
+    for var_name in locals_to_clean:
+        if var_name in locals():
+            del locals()[var_name]
+
+    # Force GPU memory cleanup
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
 
 
 @pytest.mark.parametrize("num_tokens", [256, 500, 1024, 8000])
@@ -405,6 +450,47 @@ def test_multi_layer_kernel_use_mla(num_tokens):
         assert (left_reshaped[slot_mapping, :] == right_reshaped[slot_mapping, :]).all()
 
     mem_allocator.close()
+
+    # Explicit cleanup of GPU tensors and pinned memory to prevent memory leaks
+    locals_to_clean = [
+        "kv_cache",
+        "kv_cache_new",
+        "slot_mapping",
+        "mem_objs_layerwise",
+        "mem_objs_batched",
+        "kv_cache_pointers",
+        "kv_cache_pointers_new",
+        "slot_mapping_chunked",
+        "chunk_id",
+        "memory_obj_new_list",
+        "start_event",
+        "end_event",
+        "chunk_size",
+        "num_layers",
+        "head_size",
+        "mem_obj_shape",
+        "memory_obj_old_list",
+        "start_event",
+        "end_event",
+        "slot_mapping_temp",
+        "memory_obj_new",
+        "layer_id",
+        "token_idx",
+        "block_idx",
+        "block_offset",
+        "left_kv",
+        "right_kv",
+        "left_reshaped",
+        "right_reshaped",
+    ]
+    for var_name in locals_to_clean:
+        if var_name in locals():
+            del locals()[var_name]
+
+    # Force GPU memory cleanup
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
 
 
 @pytest.mark.parametrize("num_tokens", [256, 500, 1024, 8000])
