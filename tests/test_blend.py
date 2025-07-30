@@ -524,118 +524,146 @@ def test_cacheblend_executor_single_query():
     blender.set_positional_encoder(dumb_posional_encoding)
     blender.set_reverse_positional_encoder(dumb_posional_encoding)
 
-    fq_1 = torch.zeros(q_shape, dtype=dtype, device=device)
-    for i in range(query_len):
-        fq_1[i] = i
+    try:
+        fq_1 = torch.zeros(q_shape, dtype=dtype, device=device)
+        for i in range(query_len):
+            fq_1[i] = i
 
-    # Newly generated KV is 0 on the "changed_positions"
-    fk_1 = torch.full(kv_shape, 1, dtype=dtype, device=device)
-    fk_1[changed_positions, ...] = 0
-    fv_1 = torch.full(kv_shape, 1, dtype=dtype, device=device)
-    fv_1[changed_positions, ...] = 0
+        # Newly generated KV is 0 on the "changed_positions"
+        fk_1 = torch.full(kv_shape, 1, dtype=dtype, device=device)
+        fk_1[changed_positions, ...] = 0
+        fv_1 = torch.full(kv_shape, 1, dtype=dtype, device=device)
+        fv_1[changed_positions, ...] = 0
 
-    # Retrieved KV are all 1
-    rk_1 = torch.full(kv_shape, 1, dtype=dtype, device=device)
-    rv_1 = torch.full(kv_shape, 1, dtype=dtype, device=device)
-    valid = torch.full((query_len,), 1, dtype=torch.long, device="cpu")
-    positions = torch.arange(
-        prefix_len, prefix_len + query_len, dtype=torch.int32, device="cuda"
-    )
-    query_start_loc = torch.tensor([0, query_len], dtype=torch.int32, device="cuda")
-    original_positions = torch.arange(query_len)
+        # Retrieved KV are all 1
+        rk_1 = torch.full(kv_shape, 1, dtype=dtype, device=device)
+        rv_1 = torch.full(kv_shape, 1, dtype=dtype, device=device)
+        valid = torch.full((query_len,), 1, dtype=torch.long, device="cpu")
+        positions = torch.arange(
+            prefix_len, prefix_len + query_len, dtype=torch.int32, device="cuda"
+        )
+        query_start_loc = torch.tensor([0, query_len], dtype=torch.int32, device="cuda")
+        original_positions = torch.arange(query_len)
 
-    # First layer should do nothing!
-    ret = blender.blend(
-        0,
-        rk_1,
-        rv_1,
-        valid,
-        original_positions,
-        fq_1,
-        fk_1,
-        fv_1,
-        positions,
-        query_start_loc,
-        0,
-    )
-    assert torch.equal(ret.q, fq_1)
-    assert torch.equal(ret.k, fk_1)
-    assert torch.equal(ret.v, fv_1)
-    assert torch.equal(ret.positions, positions)
-    assert torch.equal(
-        ret.local_indices,
-        torch.arange(prefix_len, dtype=torch.int, device="cpu"),
-    )
-    assert ret.query_start_loc is None
+        # First layer should do nothing!
+        ret = blender.blend(
+            0,
+            rk_1,
+            rv_1,
+            valid,
+            original_positions,
+            fq_1,
+            fk_1,
+            fv_1,
+            positions,
+            query_start_loc,
+            0,
+        )
+        assert torch.equal(ret.q, fq_1)
+        assert torch.equal(ret.k, fk_1)
+        assert torch.equal(ret.v, fv_1)
+        assert torch.equal(ret.positions, positions)
+        assert torch.equal(
+            ret.local_indices,
+            torch.arange(prefix_len, dtype=torch.int, device="cpu"),
+        )
+        assert ret.query_start_loc is None
 
-    # Second layer should do token selection
-    ret = blender.blend(
-        1,
-        rk_1,
-        rv_1,
-        valid,
-        original_positions,
-        fq_1,
-        fk_1,
-        fv_1,
-        positions,
-        query_start_loc,
-        0,
-    )
-    assert len(ret.positions) == len(expected_positions)  # recompute 2 tokens
-    assert ret.k.shape[0] == query_len  # long K
-    assert ret.v.shape[0] == query_len  # long V
-    assert torch.equal(
-        ret.local_indices,
-        torch.tensor(changed_positions, dtype=torch.int, device="cpu"),
-    )
-    assert ret.query_start_loc[0].item() == 0
-    assert ret.query_start_loc[1].item() == 2
-    for i in range(len(expected_positions)):
-        assert ret.positions[i].item() == expected_positions[i]
-        assert ret.q[i][0].item() == changed_positions[i]
-        assert (ret.k[changed_positions[i]] == 0).all()
-        assert (ret.v[changed_positions[i]] == 0).all()
+        # Second layer should do token selection
+        ret = blender.blend(
+            1,
+            rk_1,
+            rv_1,
+            valid,
+            original_positions,
+            fq_1,
+            fk_1,
+            fv_1,
+            positions,
+            query_start_loc,
+            0,
+        )
+        assert len(ret.positions) == len(expected_positions)  # recompute 2 tokens
+        assert ret.k.shape[0] == query_len  # long K
+        assert ret.v.shape[0] == query_len  # long V
+        assert torch.equal(
+            ret.local_indices,
+            torch.tensor(changed_positions, dtype=torch.int, device="cpu"),
+        )
+        assert ret.query_start_loc[0].item() == 0
+        assert ret.query_start_loc[1].item() == 2
+        for i in range(len(expected_positions)):
+            assert ret.positions[i].item() == expected_positions[i]
+            assert ret.q[i][0].item() == changed_positions[i]
+            assert (ret.k[changed_positions[i]] == 0).all()
+            assert (ret.v[changed_positions[i]] == 0).all()
 
-    # Third layer should do kv update
-    fq_2 = ret.q
-    fk_2 = fk_1[changed_positions]
-    fv_2 = fv_1[changed_positions]
-    rk_2 = rk_1
-    rv_2 = rv_1
-    pos_2 = ret.positions
-    ret = blender.blend(
-        2,
-        rk_2,
-        rv_2,
-        valid,
-        original_positions,
-        ret.q,
-        fk_2,
-        fv_2,
-        pos_2,
-        query_start_loc,
-        0,
-    )
+        # Third layer should do kv update
+        fq_2 = ret.q
+        fk_2 = fk_1[changed_positions]
+        fv_2 = fv_1[changed_positions]
+        rk_2 = rk_1
+        rv_2 = rv_1
+        pos_2 = ret.positions
+        ret = blender.blend(
+            2,
+            rk_2,
+            rv_2,
+            valid,
+            original_positions,
+            ret.q,
+            fk_2,
+            fv_2,
+            pos_2,
+            query_start_loc,
+            0,
+        )
 
-    # Should update the KV without changing q or positions
-    assert torch.equal(ret.q, fq_2)
-    assert torch.equal(ret.positions, pos_2)
-    assert ret.k.shape[0] == prefix_len
-    assert ret.v.shape[0] == prefix_len
-    assert (ret.k[changed_positions] == 0).all()
-    assert (ret.v[changed_positions] == 0).all()
-    unchanged_positions = list(
-        filter(lambda x: x not in changed_positions, range(query_len))
-    )
-    assert (ret.k[unchanged_positions] == 1).all()
-    assert (ret.v[unchanged_positions] == 1).all()
-    assert torch.equal(
-        ret.local_indices,
-        torch.tensor(changed_positions, dtype=torch.int, device="cpu"),
-    )
-    assert ret.query_start_loc is None
+        # Should update the KV without changing q or positions
+        assert torch.equal(ret.q, fq_2)
+        assert torch.equal(ret.positions, pos_2)
+        assert ret.k.shape[0] == prefix_len
+        assert ret.v.shape[0] == prefix_len
+        assert (ret.k[changed_positions] == 0).all()
+        assert (ret.v[changed_positions] == 0).all()
+        unchanged_positions = list(
+            filter(lambda x: x not in changed_positions, range(query_len))
+        )
+        assert (ret.k[unchanged_positions] == 1).all()
+        assert (ret.v[unchanged_positions] == 1).all()
+        assert torch.equal(
+            ret.local_indices,
+            torch.tensor(changed_positions, dtype=torch.int, device="cpu"),
+        )
+        assert ret.query_start_loc is None
 
-    # TODO: un-tested cases:
-    # - some positions are invalid
-    # - multiple queries (batch size > 1)
+        # TODO: un-tested cases:
+        # - some positions are invalid
+        # - multiple queries (batch size > 1)
+
+    finally:
+        # Explicit cleanup of GPU tensors to prevent memory leaks
+        locals_to_clean = [
+            "fq_1",
+            "fk_1",
+            "fv_1",
+            "rk_1",
+            "rv_1",
+            "positions",
+            "query_start_loc",
+            "ret",
+            "fq_2",
+            "fk_2",
+            "fv_2",
+            "rk_2",
+            "rv_2",
+            "pos_2",
+        ]
+        for var_name in locals_to_clean:
+            if var_name in locals():
+                del locals()[var_name]
+
+        # Force GPU memory cleanup
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()

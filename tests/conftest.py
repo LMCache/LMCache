@@ -31,6 +31,23 @@ from lmcache.v1.cache_engine import LMCacheEngineBuilder
 _allocator_lock = threading.Lock()
 
 
+def _log_cuda_memory_status(context=""):
+    """Log CUDA memory status for debugging."""
+    # Third Party
+    import torch
+
+    if torch.cuda.is_available():
+        try:
+            allocated = torch.cuda.memory_allocated() / (1024**2)  # MB
+            reserved = torch.cuda.memory_reserved() / (1024**2)  # MB
+            print(
+                f"🔍 [CUDA-{context}] Allocated: {allocated:.1f}MB, \
+                    Reserved: {reserved:.1f}MB"
+            )
+        except Exception as e:
+            print(f"🔍 [CUDA-{context}] Error getting memory status: {e}")
+
+
 # Monkey patch from_legacy to respect LMCACHE_MAX_LOCAL_CPU_SIZE for tests
 def _patch_from_legacy():
     """Patch LMCacheEngineConfig.from_legacy to respect environment variables."""
@@ -63,6 +80,8 @@ def ensure_no_active_allocators():
     # Third Party
     import torch
 
+    _log_cuda_memory_status("PRE-CLEANUP")
+
     # Force CUDA cleanup BEFORE checking for allocators
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
@@ -94,6 +113,7 @@ def ensure_no_active_allocators():
         # (separate collection from closing to minimize lock time)
         allocators_to_close = []
         test_allocators_to_close = []
+        gpu_tensors_to_clear = []
 
         for obj in gc.get_objects():
             try:
@@ -107,6 +127,11 @@ def ensure_no_active_allocators():
                     obj._test_allocator, "close"
                 ):
                     test_allocators_to_close.append(obj._test_allocator)
+                # Clean up GPU tensors that might interfere with CUDA registration
+                elif hasattr(obj, "__class__") and obj.__class__.__name__ == "Tensor":
+                    if hasattr(obj, "device") and str(obj.device).startswith("cuda"):
+                        if hasattr(obj, "is_pinned") and obj.is_pinned():
+                            gpu_tensors_to_clear.append(obj)
             except Exception:
                 # Ignore objects that raise exceptions during attribute access
                 pass
@@ -129,14 +154,22 @@ def ensure_no_active_allocators():
         except Exception:
             pass
 
+    # Clear references to pinned GPU tensors
+    tensor_count = len(gpu_tensors_to_clear)
+    if tensor_count > 0:
+        print(f"🧹 [GPU] Found {tensor_count} pinned GPU tensors, clearing references")
+        del gpu_tensors_to_clear  # Clear the list holding references
+
     if cleanup_count > 0:
         print(
             f"🧹 [LOCK] Forcibly closed {cleanup_count} allocators for exclusive access"
         )
 
+    _log_cuda_memory_status("MID-CLEANUP")
+
     # Force multiple rounds of CUDA cleanup after closing allocators
     if torch.cuda.is_available():
-        for _ in range(3):  # Multiple cleanup cycles
+        for i in range(5):  # More cleanup cycles
             torch.cuda.empty_cache()
             torch.cuda.synchronize()
             time.sleep(0.05)  # Small delay between cycles
@@ -148,10 +181,12 @@ def ensure_no_active_allocators():
         except Exception as e:
             print(f"Failed to reset CUDA peak memory stats: {e}")
 
-    # Force garbage collection multiple times
-    for _ in range(3):
+    # Force garbage collection multiple times with delays
+    for i in range(5):  # More GC cycles
         gc.collect()
         time.sleep(0.02)
+
+    _log_cuda_memory_status("POST-CLEANUP")
 
 
 # Monkey patch RemoteBackend.close() to add timeout for tests only
