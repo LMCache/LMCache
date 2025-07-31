@@ -1,19 +1,6 @@
-# Copyright 2024-2025 LMCache Authors.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
+# SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Literal, Optional
 import socket
 
 # Third Party
@@ -28,6 +15,8 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
 logger = init_logger(__name__)
+
+ServiceKind = Literal["lookup", "offload"]
 
 
 def get_zmq_context():
@@ -87,19 +76,42 @@ def get_ip():
 
 def get_zmq_rpc_path_lmcache(
     vllm_config: Optional["VllmConfig"] = None,
+    service_name: ServiceKind = "lookup",
     rpc_port: int = 0,
     tp_rank: int = 0,
 ) -> str:
-    """Get the ZMQ RPC path for LMCache lookup communication."""
+    """Get the ZMQ RPC path for LMCache lookup and offload communication."""
     # Third Party
     import vllm.envs as envs
 
+    if vllm_config is None or vllm_config.kv_transfer_config is None:
+        raise ValueError("A valid kv_transfer_config with engine_id is required.")
+
+    if service_name not in {"lookup", "offload"}:
+        raise ValueError(
+            f"service_name must be 'lookup' or 'offload', got {service_name!r}"
+        )
+
     base_url = envs.VLLM_RPC_BASE_PATH
+
+    engine_id = vllm_config.kv_transfer_config.engine_id
 
     if isinstance(rpc_port, str):
         rpc_port = rpc_port + str(tp_rank)
     else:
         rpc_port += tp_rank
 
-    logger.debug("Base URL: %s, RPC Port: %s", base_url, rpc_port)
-    return f"ipc://{base_url}/lmcache_rpc_port_{rpc_port}"
+    logger.debug(
+        "Base URL: %s, Engine: %s, Service Name: %s, RPC Port: %s",
+        base_url,
+        engine_id,
+        service_name,
+        rpc_port,
+    )
+
+    socket_path = (
+        f"ipc://{base_url}/engine_{engine_id}_service_{service_name}_"
+        f"lmcache_rpc_port_{rpc_port}"
+    )
+
+    return socket_path

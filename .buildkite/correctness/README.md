@@ -1,45 +1,52 @@
-# LMCache MMLU Testing Suite
+# Correctness Test
 
-## Overview
-Tests LMCache KV transfer correctness vs vLLM baseline using MMLU benchmark.
-Compares dense (Llama 3.1 8B) and MLA (DeepSeek V2 Lite) architectures.
+This is a E2E testing suite for whether having a KV pass through LMCache from vllm (storing and loading) will degrade the accuracy of a transformer. 
 
-## Models Tested
-- **Llama 3.1 8B**: Dense attention architecture
-- **DeepSeek V2 Lite**: Multi-head Latent Attention (MLA)
+Unit tests do not suffice in going from request to response and passing through LMCache. We use offline serving
+for this testing suite because the API Server of vllm is assumed to be unproblematic. 
 
-## Quick Start
+## Setup 
+
+We use the [Measuring Massive Multitask Language Understanding](https://arxiv.org/abs/2009.03300) multiple choice dataset downloaded as a compressed tarball in `data.tar.xz`
+
+The following 3 options are viable:
+A. Disable prefix caching on vllm to only use lmcache
+B. Use lmcache centralized remote server
+C. Use lmcache p2p sharing
+
+We choose option A to keep the CI server lightweight (only 2x L4s needed). 
+
+We test one small model for each Attention Architecture. Currently dense/standard attention will use `meta-llama/Llama-3.1-8B-Instruct` and 
+MLA (multi-head latent attention) will use `deepseek-ai/DeepSeek-V2-Lite` with tensor parallel 2. We do not care about the objective accuracy on the MMLU benchmark but only on any differential that appears from using LMCache. 
+
+## CI Agent Pre Set-up
+
+To ensure the speed of the MMLU Correctness tests, please conduct the following set up on your runner beforehand (only need to do once and `setup.sh` will renew your environment afterwards). 
+
+1. Create a virtual environment at `~/correctness_venv`
+
 ```bash
-# Test single model
-./deploy-1-vllm.sh "meta-llama/Llama-3.1-8B"
-python3 1-mmlu.py --model "meta-llama/Llama-3.1-8B" --number-of-subjects 15
-
-./deploy-2-lmcache.sh "meta-llama/Llama-3.1-8B"  
-python3 2-mmlu.py --model "meta-llama/Llama-3.1-8B" --number-of-subjects 15
-
-# Summarize all results
-python3 summarize_scores.py
+pip install pandas
 ```
 
-## Buildkite Pipeline
+2. Please run the following commands (these will be run by `setup.sh` every time):
 ```bash
-buildkite-agent pipeline upload .buildkite/correctness/pipeline.mmlu.yml
+cd ~
+mkdir correctness_repositories
+cd correctness_repositories
+git clone https://github.com/LMCache/LMCache.git
+git clone https://github.com/vllm-project/vllm.git
+cd LMCache
+pip install -e .
+cd ../vllm
+pip install -e . 
 ```
 
-Pipeline tests both models with vLLM baseline and LMCache KV transfer (4 total tests).
+Explanation: "pull" upstream code in this CI suite by pulling the latest upstream default branch
+and let the editable virtual environment update the latest code. This allows a little bit of pre-setup to greatly optimize every run afterwards. 
 
-## Files
-- **`deploy-1-vllm.sh`**: Single vLLM engine (port 8000) - for baseline
-- **`deploy-2-lmcache.sh`**: Dual LMCache engines (ports 8000/8001) + Redis - for KV transfer
-- **`1-mmlu.py`**: MMLU test on single vLLM engine (baseline)
-- **`2-mmlu.py`**: MMLU test on dual LMCache engines (KV transfer)
-- **`summarize_scores.py`**: Results comparison and analysis
+## Directory Structure
+`single-mmlu-test.py`
 
-## Architecture
-- **Baseline**: Single vLLM → port 8000
-- **KV Transfer**: vLLM producer (port 8000) → Redis (port 6379) ← vLLM consumer (port 8001)
-
-## Requirements
-- Docker with nvidia runtime
-- Redis server  
-- HuggingFace token (set `HF_TOKEN` env var)
+The MMLU question dataset will be sent to this single endpoint and accuracy will be evaluated (correct answers are included
+in the dataset). When LMCache is used, queries are sent twice. 
