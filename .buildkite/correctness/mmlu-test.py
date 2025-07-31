@@ -1,49 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0
-# This is a special MMLU test script that will send each query twice
-# (first to 8000 and then to 8001) in order to test the correctness
-# of LMCache KV Transfer
-
-# ASSUMPTIONS:
-# 1. two lmcache serving engines are running on ports 8000 (as producer) and 8001
-#    (as consumer) and connected to the same lmcache server
-# 2. the mmlu dataset is in a "data" directory
-# 3. all invocations of this script should be run in the same directory
-#    (for later consolidation)
-
 # Standard
 import argparse
 import json
 import os
+import time
 
 # Third Party
 from tqdm import tqdm
 from transformers import AutoTokenizer, set_seed
+
+# vLLM
+from vllm import LLM, SamplingParams
+from vllm.config import KVTransferConfig
 import numpy as np
 import pandas as pd
-import requests
+
+# setting PYTHONHASHSEED derandomizes token chunking
+os.environ["PYTHONHASHSEED"] = "0"
 
 global tokenizer
 choices = ["A", "B", "C", "D"]
-
-
-# for complete determinism between runs of MMLU, we should:
-# 1. set the seed of LLM requests to a fixed number (42)
-# 2. set temperature to 0 on requests
-def get_llm_response(args, prompt):
-    data = {
-        "model": args.model,
-        "prompt": prompt,
-        "temperature": 0,
-        "max_tokens": 3,
-        "stop": None,
-        "n": 1,
-        "seed": 42,  # Add explicit seed for determinism
-    }
-    res = requests.post("http://localhost:8000/v1/completions", json=data, timeout=30)
-    if res.status_code != 200:
-        raise Exception(f"Error: {res.status_code} {res.text}")
-    response_json = res.json()
-    return response_json["choices"][0]["text"]
 
 
 # grab the idx'th row of the df and generate a prompt string
@@ -60,12 +36,15 @@ def prompt_string(df, idx, include_answer=True):
     return prompt
 
 
-def evaluate(args, subject, dev_df, test_df):
+def evaluate(args, llm, subject, dev_df, test_df):
     prompts, labels = [], []
 
     shared_multi_shot_prefix = [
-        f"The following are multiple choice questions (with answers) \
-                                about {subject}. \n\n"
+        f'The following are multiple choice questions (with answers) \
+                    about {subject}. \
+                    You must respond with a single letter only. \
+                    Either "A", "B", "C", or "D". \
+                    Do not include any other text in your response. \n\n'
     ]
     shared_multi_shot_prefix_length = 0
     for i in range(dev_df.shape[0]):
@@ -85,18 +64,40 @@ def evaluate(args, subject, dev_df, test_df):
     shared_multi_shot_prefix = "".join(shared_multi_shot_prefix)
 
     for i in range(test_df.shape[0]):
-        # do NOT include the answer for the actual question we want the LLM to answer
+        # do NOT include the answer for the actual question
+        # we want the LLM to answer
         query_prompt = prompt_string(test_df, i, include_answer=False)
         prompt = f"{shared_multi_shot_prefix}\n\n{query_prompt}"
         prompts.append(prompt)
         label = test_df.iloc[i, test_df.shape[1] - 1]
         labels.append(label)
 
+    # Create sampling params with deterministic settings
+    # (temperature=0, seed=42)
+    sampling_params = SamplingParams(
+        temperature=0,
+        max_tokens=2,
+        seed=42,
+        n=1,
+        stop=None,
+    )
+
+    # even though offline serving can batch all the prompts, we do them one at a time
+    # to keep the vllm scheduler deterministic
+    outputs = []
+    for prompt in prompts:
+        # if we use lmcache, we need to first populate the kv cache
+        if args.use_lmcache:
+            llm.generate(prompt, sampling_params)
+            time.sleep(0.5)
+        outputs.append(llm.generate(prompt, sampling_params))
+        time.sleep(0.5)
+
     predictions = []
-    for i, prompt in enumerate(prompts):
-        prediction = get_llm_response(args, prompt)
+    for output in outputs:
+        prediction = output.outputs[0].text
         prediction_stripped = prediction.strip()
-        if prediction_stripped and prediction_stripped[0] in ["A", "B", "C", "D"]:
+        if prediction_stripped and prediction_stripped[0] in choices:
             predictions.append(prediction_stripped[0])
         else:
             # Fallback: look for any A, B, C, D in the response
@@ -115,6 +116,23 @@ def main(args):
     global tokenizer
     tokenizer = AutoTokenizer.from_pretrained(args.model)
 
+    ktc = None
+    if args.use_lmcache:
+        ktc = KVTransferConfig(
+            kv_connector="LMCacheConnectorV1",
+            kv_role="kv_both",
+        )
+    llm = LLM(
+        model=args.model,
+        max_model_len=8000,
+        gpu_memory_utilization=0.9,
+        kv_transfer_config=ktc,
+        tensor_parallel_size=2,
+        enable_prefix_caching=False,
+        enforce_eager=True,
+        trust_remote_code=True,
+    )
+
     mmlu_files = os.listdir("data/test")
     test_files = [f for f in mmlu_files if f.endswith("_test.csv")]
     subjects = sorted([f.split("_test.csv")[0] for f in test_files])
@@ -124,19 +142,25 @@ def main(args):
     output_dict = {}
 
     for subject_raw in tqdm(
-        subjects[: args.number_of_subjects], desc="Processing subjects"
+        subjects[: args.number_of_subjects],
+        desc="Processing subjects",
     ):
-        subject = " ".join(subject_raw.split("_"))  # replace underscores with spaces
+        subject = " ".join(subject_raw.split("_"))
         dev_df = pd.read_csv(
-            os.path.join("data/dev", subject_raw + "_dev.csv"), header=None
+            os.path.join("data/dev", subject_raw + "_dev.csv"),
+            header=None,
         )
         test_df = pd.read_csv(
-            os.path.join("data/test", subject_raw + "_test.csv"), header=None
+            os.path.join("data/test", subject_raw + "_test.csv"),
+            header=None,
         )
-        accuracy = evaluate(args, subject, dev_df, test_df)
+        accuracy = evaluate(args, llm, subject, dev_df, test_df)
         accuracies.append(accuracy)
         num_questions.append(len(test_df))
-        output_dict[subject_raw] = {"accuracy": accuracy, "num_questions": len(test_df)}
+        output_dict[subject_raw] = {
+            "accuracy": accuracy,
+            "num_questions": len(test_df),
+        }
 
     total_accuracy = np.mean(accuracies)
     total_num_questions = sum(num_questions)
@@ -155,13 +179,11 @@ if __name__ == "__main__":
     set_seed(42)  # some tokenizers may have randomness
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", type=str, required=True)
-    parser.add_argument("--result-file", type=str, required=False)
-    parser.add_argument("--number-of-subjects", type=int, required=True)
-
+    parser.add_argument("--number-of-subjects", type=int, default=25)
+    parser.add_argument("--use-lmcache", action="store_true", default=False)
     args = parser.parse_args()
-    if args.result_file is None:
-        # Clean model name if it's a path or has slashes
-        model_name = args.model.split("/")[-1]
-        args.result_file = f"lmcache-{model_name}.jsonl"
-
+    if args.use_lmcache:
+        args.result_file = args.model.split("/")[-1] + "-lmcache.jsonl"
+    else:
+        args.result_file = args.model.split("/")[-1] + "-baseline.jsonl"
     main(args)

@@ -18,8 +18,10 @@
 #   https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html
 #
 # Note: The script should be run from the LMCache code base root.
+# Note: L4 CI runners cannot use Flash Infer
 
 set -ex
+trap 'cleanup $?' EXIT
 
 CID=
 HF_TOKEN=
@@ -28,6 +30,18 @@ SERVER_WAIT_TIMEOUT=180
 #############
 # UTILITIES #
 #############
+
+cleanup() {
+    local code="${1:-0}"
+
+    echo "→ Cleaning up Docker container and port..."
+    if [[ -n "${CID:-}" ]]; then
+        docker kill "$CID" &>/dev/null || true
+        docker rm "$CID" &>/dev/null || true
+    fi
+
+    fuser -k 8000/tcp &>/dev/null || true
+}
 
 build_lmcache_vllmopenai_image() {
     cp example_build.sh test-build.sh
@@ -44,8 +58,7 @@ wait_for_openai_api_server(){
     '; then
         echo "OpenAI API server did not start"
         docker logs $CID
-        cleanup 1
-        exit 1
+        return 1
     fi
 }
 
@@ -59,6 +72,7 @@ run_lmcache_vllmopenai_container() {
     
     if [ -z "$HF_TOKEN" ]; then
         CID=$(docker run -d --runtime nvidia --gpus "device=${best_gpu}" \
+            --env VLLM_USE_FLASHINFER_SAMPLER=0 \
             --env "LMCACHE_CHUNK_SIZE=256" \
             --env "LMCACHE_LOCAL_CPU=True" \
             --env "LMCACHE_MAX_LOCAL_CPU_SIZE=5" \
@@ -71,7 +85,8 @@ run_lmcache_vllmopenai_container() {
             --enforce-eager)
     else
         CID=$(docker run -d --runtime nvidia --gpus "device=${best_gpu}" \
-             --env HF_TOKEN=$HF_TOKEN \
+            --env VLLM_USE_FLASHINFER_SAMPLER=0 \
+            --env HF_TOKEN=$HF_TOKEN \
             --env "LMCACHE_CHUNK_SIZE=256" \
             --env "LMCACHE_LOCAL_CPU=True" \
             --env "LMCACHE_MAX_LOCAL_CPU_SIZE=5" \
@@ -107,8 +122,7 @@ run_lmcache_vllmopenai_container() {
         echo "Timeout waiting for startup marker, dumping full log:"
         cat "$LOGFILE"
         kill $LOG_PID
-        cleanup 1
-        exit 1
+        return 1
     fi
 
 }
@@ -127,7 +141,7 @@ usage() {
 #########
 
 test_vllmopenai_server_with_lmcache_integrated() {
-    http_status_code=$(curl http://localhost:8000/v1/completions \
+    http_status_code=$(curl --max-time 60 http://localhost:8000/v1/completions \
             -w "%{http_code}" -o response-file.txt \
             -H "Content-Type: application/json" \
             -d '{
@@ -142,8 +156,7 @@ test_vllmopenai_server_with_lmcache_integrated() {
         echo "Model prompt request from OpenAI API server failed, HTTP status code: ${http_status_code}."
         cat response-file.txt
         docker logs -n 20 $CID
-        cleanup 1
-        exit 1
+        return 1
     else
          echo "Model prompt request from OpenAI API server succeeded"
          cat response-file.txt
