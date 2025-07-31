@@ -143,8 +143,9 @@ class RequestTracker:
         tags = None
         if new_request.sampling_params.extra_args is not None:
             if kv_transfer_params := new_request.sampling_params.extra_args.get("kv_transfer_params"):
-                tags = OrderedDict()
-                tags["user"] = kv_transfer_params.get("user", "")
+                if user := kv_transfer_params.get("user"):
+                    tags = OrderedDict()
+                    tags["user"] = user
 
         return RequestTracker(
             req_id=new_request.req_id,
@@ -796,8 +797,9 @@ class LMCacheConnectorV1Impl:
         tags = None
         if request.sampling_params.extra_args is not None:
             if kv_transfer_params := request.sampling_params.extra_args.get("kv_transfer_params"):
-                tags = OrderedDict()
-                tags["user"] = kv_transfer_params.get("user", "")
+                if user := kv_transfer_params.get("user"):
+                    tags = OrderedDict()
+                    tags["user"] = user
 
         self._lookup_requests_in_step.append(request.request_id)
         if self.skip_last_n_tokens > 0:
