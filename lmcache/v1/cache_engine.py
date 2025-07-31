@@ -204,6 +204,7 @@ class LMCacheEngine:
         tot_kv_size = 0
         tot_token_num = 0
         t = time.perf_counter()
+
         tags = kwargs.get("tags")
         if tags is not None and len(tags) != 0:
             assert isinstance(tags, OrderedDict)
