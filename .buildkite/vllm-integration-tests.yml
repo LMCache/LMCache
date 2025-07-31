@@ -16,3 +16,12 @@ steps:
     commands:
       - chmod +x .buildkite/scripts/docker-cleanup.sh
       - .buildkite/scripts/docker-cleanup.sh
+
+  - label: "Clean up"
+    depends_on:
+        - "clean"
+    command: |
+      export TARGET="$PWD"
+      echo "Deleting current workspace $TARGET"
+      cd /
+      sudo rm -rf "$TARGET"

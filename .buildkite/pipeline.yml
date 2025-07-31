@@ -2,47 +2,48 @@ env:
   PATH: "$HOME/.local/bin:$PATH"
 
 steps:
-  - label: ":pip: Prepare venv"
-    key: "venv"
-    plugins:
-      - cache#v1.7.0:
-          key-extra: "venv-{{ BUILDKITE_BUILD_ID }}"
-          path: ".venv"
-          save: "pipeline"
-          force: "true"
-    command:
-      - bash .buildkite/scripts/install-env.sh
+  - label: "Unit Tests"
+    key: "unit_tests"
+    command: |
+      echo $PWD # for debugging
 
-  - label: ":pytest: Run pytest"
-    key: "pytest"
-    depends_on:
-      - "venv"
-    timeout_in_minutes: 25
-    plugins:
-      - cache#v1.7.0:
-          key-extra: "venv-{{ BUILDKITE_BUILD_ID }}"
-          path: ".venv"
-          restore: "pipeline"
-    command:
-      - source .venv/bin/activate
-      - bash .buildkite/scripts/install-lmcache.sh
-      - source .buildkite/scripts/pick-free-gpu.sh
-      - |
-        CUDA_LAUNCH_BLOCKING=1 \
-        LMCACHE_TRACK_USAGE="false" \
-        pytest --maxfail=1 --cov=lmcache \
-          --cov-report term --cov-report=html:coverage-test \
-          --cov-report=xml:coverage-test.xml --html=durations/test.html \
-          --ignore=tests/disagg --ignore=tests/v1/test_pos_kernels.py
+      uv venv --python 3.12 .venv-$BUILDKITE_BUILD_ID
+      source .venv-$BUILDKITE_BUILD_ID/bin/activate
+
+      uv pip install --upgrade pip setuptools wheel
+      uv pip install -r requirements/common.txt
+      uv pip install -r requirements/test.txt
+      uv pip install -e .
+      uv pip freeze
+
+      source .buildkite/scripts/pick-free-gpu.sh
+
+      CUDA_LAUNCH_BLOCKING=1 \
+      LMCACHE_TRACK_USAGE="false" \
+      pytest --maxfail=1 --cov=lmcache \
+        --cov-report term --cov-report=html:coverage-test \
+        --cov-report=xml:coverage-test.xml --html=durations/test.html \
+        --ignore=tests/disagg --ignore=tests/v1/test_pos_kernels.py
+
     artifact_paths:
       - "durations/test.html"
       - "coverage-test.xml"
       - "coverage-test/**/*"
 
   - label: "Upload Coverage Report"
+    key: "upload"
     depends_on:
-        - "pytest"
+        - "unit_tests"
     command: |
       cat << EOF | buildkite-agent annotate --style "info"
         Read the <a href="artifact://coverage-test/index.html">uploaded coverage report</a>
       EOF
+  
+  - label: "Clean up"
+    depends_on:
+        - "upload"
+    command: |
+      export TARGET="$PWD"
+      echo "Deleting current workspace $TARGET"
+      cd /
+      sudo rm -rf "$TARGET"

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # First Party
 from lmcache.protocol import ClientMetaMessage, Constants, ServerMetaMessage
 
