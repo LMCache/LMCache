@@ -83,7 +83,7 @@ class CacheEngineKey:
             f"{self.fmt}@{self.model_name}@{self.world_size}"
             f"@{self.worker_id}@{self.chunk_hash}"
         )
-        if self.tags is not None:
+        if self.tags is not None and len(self.tags) != 0:
             tags = [f"{k}%{v}" for k, v in self.tags.items()]
             s += "@"+ "@".join(tags)
         return s
@@ -145,7 +145,7 @@ class CacheEngineKey:
             "worker_id": self.worker_id,
             "chunk_hash": self.chunk_hash,
         }
-        if self.tags is not None:
+        if self.tags is not None and len(self.tags) != 0:
             msg["tags"] = [f"{k}%{v}" for k, v in self.tags.items()]
         return msg
 
@@ -192,7 +192,7 @@ class LayerCacheEngineKey(CacheEngineKey):
             f"{self.fmt}@{self.model_name}@{self.world_size}"
             f"@{self.worker_id}@{self.chunk_hash}@{self.layer_id}"
         )
-        if self.tags is not None:
+        if self.tags is not None and len(self.tags) != 0:
             tags = [f"{k}%{v}" for k, v in self.tags.items()]
             s += "@"+ "@".join(tags)
         return s

@@ -64,7 +64,7 @@ class LMCacheLookupClient(LookupClientInterface):
         token_bufs = self.encoder.encode(token_ids)
         request_id_buf = request_id.encode("utf-8")
         tags_str = ""
-        if tags is not None:
+        if tags is not None and len(tags) != 0:
             tags_str = "@".join([f"{k}%{v}" for k, v in tags.items()])
         tags_buf = tags_str.encode("utf-8")
         ranks = self.tensor_parallel_size

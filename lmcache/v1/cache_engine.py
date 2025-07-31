@@ -205,7 +205,7 @@ class LMCacheEngine:
         tot_token_num = 0
         t = time.perf_counter()
         tags = kwargs.get("tags")
-        if tags is not None:
+        if tags is not None and len(tags) != 0:
             assert isinstance(tags, OrderedDict)
 
         for start, end, key in self.token_database.process_tokens(
@@ -306,7 +306,7 @@ class LMCacheEngine:
         tot_token_num = 0
         kv_dtype = self.metadata.kv_dtype
         tags = kwargs.get("tags")
-        if tags is not None:
+        if tags is not None and len(tags) != 0:
             assert isinstance(tags, OrderedDict)
 
         for start, end, key in self.token_database.process_tokens(
@@ -424,7 +424,7 @@ class LMCacheEngine:
         reordered_starts = []
         reordered_ends = []
         tags = kwargs.get("tags")
-        if tags is not None:
+        if tags is not None and len(tags) != 0:
             assert isinstance(tags, OrderedDict)
         for start, end, key in self.token_database.process_tokens(
             tokens=tokens, mask=mask, tags=tags,
@@ -557,7 +557,7 @@ class LMCacheEngine:
         keys = []
 
         tags = kwargs.get("tags")
-        if tags is not None:
+        if tags is not None and len(tags) != 0:
             assert isinstance(tags, OrderedDict)
         for start, end, key in self.token_database.process_tokens(
             tokens=tokens, mask=mask, tags=tags,
