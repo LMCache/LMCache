@@ -3,7 +3,8 @@
 # Usage: source pick-free-gpu.sh <MIN_FREE_MEM_MB>
 MIN_FREE_MEM="${1:-10000}"    # in MiB (default: 10 GB)
 MAX_UTIL=20                   # hardcoded utilization threshold (%)
-TIMEOUT_SECONDS=180
+# 30 minutes
+TIMEOUT_SECONDS=1800
 INTERVAL=10
 
 echo "🔍 Waiting up to ${TIMEOUT_SECONDS}s for a GPU with >= ${MIN_FREE_MEM} MiB free and <= ${MAX_UTIL}% utilization..."
