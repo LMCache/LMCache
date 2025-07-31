@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Optional, Union
+from typing import TYPE_CHECKING, Any, Optional, Union, OrderedDict
 import os
 
 # Third Party
@@ -100,6 +100,8 @@ class RequestTracker:
     # Multimodal hashes and positions
     mm_hashes: Optional[list[str]] = None
     mm_positions: Optional[list["PlaceholderRange"]] = None
+    # The request tags
+    tags: OrderedDict = None
 
     @staticmethod
     def from_new_request(
@@ -138,6 +140,12 @@ class RequestTracker:
         # NOTE: Initialized in `update_state_after_alloc`
         disagg_spec = tmp_disagg_tracker.pop(new_request.req_id, None)
 
+        tags = None
+        if new_request.sampling_params.extra_args is not None:
+            if kv_transfer_params := new_request.sampling_params.extra_args.get("kv_transfer_params"):
+                tags = OrderedDict()
+                tags["user"] = kv_transfer_params.get("user", "")
+
         return RequestTracker(
             req_id=new_request.req_id,
             prompt_len=len(new_request.prompt_token_ids),
@@ -147,6 +155,7 @@ class RequestTracker:
             disagg_spec=disagg_spec,
             mm_hashes=new_request.mm_hashes.copy(),
             mm_positions=new_request.mm_positions.copy(),
+            tags=tags,
         )
 
     def update(
@@ -189,6 +198,8 @@ class ReqMeta:
     load_spec: Optional[LoadSpec] = None
     # disagg spec
     disagg_spec: Optional[DisaggSpec] = None
+    # tags
+    tags: OrderedDict = None
 
     @staticmethod
     def from_request_tracker(
@@ -302,6 +313,7 @@ class ReqMeta:
             save_spec=save_spec,
             load_spec=load_spec,
             disagg_spec=tracker.disagg_spec,
+            tags=tracker.tags,
         )
 
 
@@ -501,6 +513,7 @@ class LMCacheConnectorV1Impl:
                     token_mask[:lmcache_cached_tokens],
                     kvcaches=kvcaches,
                     slot_mapping=slot_mapping[:lmcache_cached_tokens],
+                    tags=request.tags,
                 )
 
                 # Check the result
@@ -734,6 +747,7 @@ class LMCacheConnectorV1Impl:
                 slot_mapping=slot_mapping,
                 offset=skip_leading_tokens,
                 transfer_spec=request.disagg_spec,
+                tags=request.tags,
             )
 
             # NOTE(Jiayi): We assume all tokens are saved
@@ -778,6 +792,12 @@ class LMCacheConnectorV1Impl:
             apply_mm_hashes_to_token_ids(
                 token_ids, request.mm_hashes, request.mm_positions
             )
+
+        tags = None
+        if request.sampling_params.extra_args is not None:
+            if kv_transfer_params := request.sampling_params.extra_args.get("kv_transfer_params"):
+                tags = OrderedDict()
+                tags["user"] = kv_transfer_params.get("user", "")
 
         self._lookup_requests_in_step.append(request.request_id)
         if self.skip_last_n_tokens > 0:
