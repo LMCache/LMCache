@@ -64,7 +64,7 @@ wait_for_openai_api_server(){
 
 run_lmcache_vllmopenai_container() {
     # Pick the GPU with the largest free memory
-    source "$ORIG_DIR/.buildkite/scripts/pick-free-gpu.sh" 12000
+    source "$ORIG_DIR/.buildkite/scripts/pick-free-gpu.sh" 8000
     best_gpu="${CUDA_VISIBLE_DEVICES}"
     
     if [ -z "$HF_TOKEN" ]; then
@@ -78,7 +78,8 @@ run_lmcache_vllmopenai_container() {
             'lmcache/vllm-openai:build-latest' \
             'meta-llama/Llama-3.2-1B-Instruct' --kv-transfer-config \
             '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}' \
-            --gpu-memory-utilization '0.5' \
+            --max-model-len 1024 \
+            --gpu-memory-utilization '0.3' \
             --enforce-eager)
     else
         CID=$(docker run -d --runtime nvidia --gpus "device=${best_gpu}" \
@@ -92,7 +93,8 @@ run_lmcache_vllmopenai_container() {
             'lmcache/vllm-openai:build-latest' \
             'meta-llama/Llama-3.2-1B-Instruct' --kv-transfer-config \
             '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}' \
-            --gpu-memory-utilization '0.5' \
+            --max-model-len 1024 \
+            --gpu-memory-utilization '0.3' \
             --enforce-eager)
     fi
     buildkite-agent meta-data set "docker-CID" "$CID"
