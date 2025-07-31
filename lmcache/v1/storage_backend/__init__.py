@@ -103,4 +103,20 @@ def CreateStorageBackends(
         backend_name = str(remote_backend)
         storage_backends[backend_name] = remote_backend
 
-    return storage_backends
+    # Only wrap if audit is enabled in config
+    if config.extra_config is not None and config.extra_config.get(
+        "audit_backend_enabled", False
+    ):
+        # First Party
+        from lmcache.v1.storage_backend.audit_backend import AuditBackend
+
+        # Conditionally wrap backends with audit logging if enabled in config
+        audited_backends = OrderedDict()
+        for name, backend in storage_backends.items():
+            # Wrap each backend with AuditBackend
+            audited_backend = AuditBackend(backend)
+            audited_backends[name] = audited_backend
+        return audited_backends
+    else:
+        # If audit is not enabled, use the original backends
+        return storage_backends
