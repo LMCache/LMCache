@@ -6,7 +6,11 @@ requires = [
     "packaging>=24.2",
     "setuptools>=77.0.3,<81.0.0",
     "setuptools_scm>=8",
+<<<<<<< HEAD
     "torch>=2.5.1",
+=======
+    "torch",
+>>>>>>> upstream/dev
     "wheel",
 ]
 build-backend = "setuptools.build_meta"

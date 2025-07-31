@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from contextlib import nullcontext
 from copy import deepcopy
+from unittest.mock import patch
 import random
 import shlex
 import subprocess
+import threading
 import time
 
 # Third Party
@@ -21,6 +24,123 @@ import torch
 from lmcache.v1.cache_engine import LMCacheEngineBuilder
 from lmcache.v1.config import LMCacheEngineConfig
 import lmcache.c_ops as lmc_ops
+from lmcache.v1.memory_management import (
+    BufferAllocator,
+    PagedTensorMemoryAllocator,
+    TensorMemoryAllocator,
+)
+
+
+# This is to mock the constructor and destructor of
+# MixedMemoryAllocator and PinMemoryAllocator to
+# use pin_memory=True for their constructors and
+# avoid calling cudaHostRegister and cudaHostUnregister
+# which may throw an error if torch.empty returns a buffer
+# that cannot be registered (which happens quicker on some machines,
+# especially when torch is doing many allocations and frees)
+@pytest.fixture(autouse=True, scope="module")
+def patch_mixed_allocator():
+    def fake_mixed_init(self, size: int, use_paging: bool = False, **kwargs):
+        """
+        :param int size: The size of the pinned memory in bytes.
+        """
+
+        # self.buffer = torch.empty(size, dtype=torch.uint8)
+        # ptr = self.buffer.data_ptr()
+        # err = torch.cuda.cudart().cudaHostRegister(ptr, size, 0)
+        # assert err == 0, (
+        #     f"cudaHostRegister failed: {torch.cuda.cudart().cudaGetErrorString(err)}"
+        # )
+        self._unregistered = False
+        self.buffer = torch.empty(size, dtype=torch.uint8, pin_memory=True)
+
+        if use_paging:
+            assert "shape" in kwargs, (
+                "shape must be specified for paged memory allocator"
+            )
+            assert "dtype" in kwargs, (
+                "dtype must be specified for paged memory allocator"
+            )
+            assert "fmt" in kwargs, "fmt must be specified for paged memory allocator"
+            self.pin_allocator = PagedTensorMemoryAllocator(
+                tensor=self.buffer,
+                shape=kwargs["shape"],
+                dtype=kwargs["dtype"],
+                fmt=kwargs["fmt"],
+            )
+        else:
+            self.pin_allocator = TensorMemoryAllocator(self.buffer)
+
+        self.host_mem_lock = threading.Lock() if not use_paging else nullcontext()
+
+        self.buffer_allocator = BufferAllocator("cpu")
+
+    def fake_mixed_close(self):
+        if not self._unregistered:
+            torch.cuda.synchronize()
+            # torch.cuda.cudart().cudaHostUnregister(self.buffer.data_ptr())
+            self._unregistered = True
+
+    with (
+        patch(
+            "lmcache.v1.memory_management.MixedMemoryAllocator.__init__",
+            fake_mixed_init,
+        ),
+        patch(
+            "lmcache.v1.memory_management.MixedMemoryAllocator.close", fake_mixed_close
+        ),
+    ):
+        yield
+
+
+@pytest.fixture(autouse=True, scope="module")
+def patch_pin_allocator():
+    def fake_pin_init(self, size: int, use_paging: bool = False, **kwargs):
+        """
+        :param int size: The size of the pinned memory in bytes.
+        """
+
+        # self.buffer = torch.empty(size, dtype=torch.uint8)
+        # ptr = self.buffer.data_ptr()
+        # err = torch.cuda.cudart().cudaHostRegister(ptr, size, 0)
+        # assert err == 0, (
+        #     f"cudaHostRegister failed: {torch.cuda.cudart().cudaGetErrorString(err)}"
+        # )
+        self._unregistered = False
+        self.buffer = torch.empty(size, dtype=torch.uint8, pin_memory=True)
+
+        if use_paging:
+            assert "shape" in kwargs, (
+                "shape must be specified for paged memory allocator"
+            )
+            assert "dtype" in kwargs, (
+                "dtype must be specified for paged memory allocator"
+            )
+            assert "fmt" in kwargs, "fmt must be specified for paged memory allocator"
+            self.allocator = PagedTensorMemoryAllocator(
+                tensor=self.buffer,
+                shape=kwargs["shape"],
+                dtype=kwargs["dtype"],
+                fmt=kwargs["fmt"],
+            )
+        else:
+            self.allocator = TensorMemoryAllocator(self.buffer)
+
+        self.host_mem_lock = threading.Lock() if not use_paging else nullcontext()
+
+    def fake_pin_close(self):
+        if not self._unregistered:
+            torch.cuda.synchronize()
+            torch.cuda.cudart().cudaHostUnregister(self.buffer.data_ptr())
+            self._unregistered = True
+
+    with (
+        patch(
+            "lmcache.v1.memory_management.PinMemoryAllocator.__init__", fake_pin_init
+        ),
+        patch("lmcache.v1.memory_management.PinMemoryAllocator.close", fake_pin_close),
+    ):
+        yield
 
 
 def test_paged_same_retrieve_store(autorelease_v1, has_npu):
@@ -59,7 +179,7 @@ def test_paged_same_retrieve_store(autorelease_v1, has_npu):
 
     engine = autorelease_v1(
         LMCacheEngineBuilder.get_or_create(
-            "test", cfg, dumb_metadata(fmt, kv_shape), connector, device=device 
+            "test", cfg, dumb_metadata(fmt, kv_shape), connector, device=device
         )
     )
 
@@ -87,8 +207,6 @@ def test_paged_same_retrieve_store(autorelease_v1, has_npu):
     length = torch.sum(ret_mask)
     assert length == num_tokens
     check_paged_kv_cache_equal(retrieved_cache, kv_cache, slot_mapping)
-
-    LMCacheEngineBuilder.destroy("test")
 
 
 @pytest.mark.parametrize("fmt", ["vllm"])
@@ -194,7 +312,6 @@ def test_paged_retrieve_prefix(
 
     if backend in ["local_disk"]:
         subprocess.run(shlex.split("rm -rf local/disk_test/local_disk/"))
-    LMCacheEngineBuilder.destroy("test")
 
 
 @pytest.mark.parametrize("fmt", ["vllm"])
@@ -290,7 +407,6 @@ def test_paged_store_offset(
 
     if backend in ["local_disk"]:
         subprocess.run(shlex.split("rm -rf local/disk_test/local_disk/"))
-    LMCacheEngineBuilder.destroy("test")
 
 
 @pytest.mark.parametrize("fmt", ["vllm"])
@@ -424,9 +540,6 @@ def test_paged_mixed_retrieve(fmt, chunk_size, backend, autorelease_v1, has_npu)
     if backend in ["local_disk"]:
         subprocess.run(shlex.split("rm -rf local/disk_test/local_disk/"))
 
-    # engine.close()
-    LMCacheEngineBuilder.destroy("test")
-
 
 @pytest.mark.parametrize("fmt", ["vllm"])
 def test_paged_store_kv_tensors_mask(fmt, autorelease_v1, has_npu):
@@ -557,8 +670,6 @@ def test_paged_store_kv_tensors_mask(fmt, autorelease_v1, has_npu):
             kvcaches=retrieved_cache,
             slot_mapping=torch.cat([slot_mapping, new_slot_mapping]),
         )
-
-    LMCacheEngineBuilder.destroy("test")
 
 
 @pytest.mark.parametrize("fmt", ["vllm"])
@@ -798,7 +909,6 @@ def test_paged_prefetch_retrieve(backend, prefetch_from, autorelease_v1, has_npu
 
     if backend in ["local_cpu_disk"]:
         subprocess.run(shlex.split("rm -rf local/disk_test/local_disk/"))
-    LMCacheEngineBuilder.destroy("test")
 
 
 @pytest.mark.parametrize("fmt", ["vllm"])
@@ -879,7 +989,6 @@ def test_paged_mem_leak(fmt, chunk_size, backend, lmserver_v1_process, autorelea
 
     if "disk" in backend:
         subprocess.run(shlex.split("rm -rf local/disk_test/local_disk/"))
-    LMCacheEngineBuilder.destroy("test")
 
 
 def test_builder(autorelease_v1, has_npu):
