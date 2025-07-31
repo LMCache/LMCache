@@ -216,7 +216,7 @@ class ServerMetaMessage:
 
     @staticmethod
     def deserialize(s: bytes) -> "ServerMetaMessage":
-        code, length, fmt, dtype, location, shape0, shape1, shape2, shape3 = (
+        code, length, fmt, dtype, shape0, shape1, shape2, shape3, location = (
             struct.unpack("iiiiiiiii", s)
         )
         return ServerMetaMessage(
@@ -224,6 +224,6 @@ class ServerMetaMessage:
             length,
             MemoryFormat(fmt),
             INT_TO_DTYPE[dtype],
-            INT_TO_LOCATION[location],
             torch.Size([shape0, shape1, shape2, shape3]),
+            INT_TO_LOCATION[location],
         )
