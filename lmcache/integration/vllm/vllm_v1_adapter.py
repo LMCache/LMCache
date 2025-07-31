@@ -14,8 +14,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
 )
-from vllm.utils import cdiv
 from vllm.sampling_params import SamplingParams
+from vllm.utils import cdiv
 from vllm.v1.core.sched.output import SchedulerOutput
 import torch
 
@@ -1037,4 +1037,3 @@ class LMCacheConnectorV1Impl:
             }
 
         return 0, return_params
-
