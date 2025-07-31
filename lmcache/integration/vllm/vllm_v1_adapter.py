@@ -42,6 +42,7 @@ if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheManager
     from vllm.v1.core.sched.output import NewRequestData
     from vllm.v1.request import Request
+    from vllm.sampling_params import SamplingParams
 
 logger = init_logger(__name__)
 
@@ -73,6 +74,14 @@ class DisaggSpec:
 
 tmp_disagg_tracker: dict[str, DisaggSpec] = {}
 
+def extract_tags(sampling_params: SamplingParams) -> OrderedDict:
+    tags = None
+    if sampling_params.extra_args is not None:
+        if kv_transfer_params := new_request.sampling_params.extra_args.get("kv_transfer_params"):
+            if user := kv_transfer_params.get("user"):
+                tags = OrderedDict()
+                tags["user"] = user
+    return tags
 
 @dataclass
 class RequestTracker:
@@ -140,12 +149,7 @@ class RequestTracker:
         # NOTE: Initialized in `update_state_after_alloc`
         disagg_spec = tmp_disagg_tracker.pop(new_request.req_id, None)
 
-        tags = None
-        if new_request.sampling_params.extra_args is not None:
-            if kv_transfer_params := new_request.sampling_params.extra_args.get("kv_transfer_params"):
-                if user := kv_transfer_params.get("user"):
-                    tags = OrderedDict()
-                    tags["user"] = user
+        tags = extract_tags(new_request.sampling_params)
 
         return RequestTracker(
             req_id=new_request.req_id,
@@ -794,12 +798,7 @@ class LMCacheConnectorV1Impl:
                 token_ids, request.mm_hashes, request.mm_positions
             )
 
-        tags = None
-        if request.sampling_params.extra_args is not None:
-            if kv_transfer_params := request.sampling_params.extra_args.get("kv_transfer_params"):
-                if user := kv_transfer_params.get("user"):
-                    tags = OrderedDict()
-                    tags["user"] = user
+        tags = extract_tags(request.sampling_params)
 
         self._lookup_requests_in_step.append(request.request_id)
         if self.skip_last_n_tokens > 0:
