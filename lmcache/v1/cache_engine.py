@@ -95,6 +95,8 @@ class LMCacheEngine:
 
         self.enable_p2p = config.enable_p2p
 
+        self.enable_controller = config.enable_controller
+
         # NOTE: Unix systems use fork by default
         multiprocessing.set_start_method("spawn", force=True)
 
@@ -107,7 +109,7 @@ class LMCacheEngine:
         from lmcache.v1.cache_controller import LMCacheWorker
 
         self.lmcache_worker: Optional[LMCacheWorker] = None
-        if self.config.enable_controller:
+        if self.enable_controller:
             self.lmcache_worker = LMCacheWorker(config, metadata, self)
 
         self.storage_manager = StorageManager(
@@ -125,17 +127,16 @@ class LMCacheEngine:
             config.enable_nixl and config.nixl_role == "receiver"
         )
 
-        if self.enable_p2p:
+        self.distributed_server: Optional[DistributedServerInterface] = None
+
+        if self.enable_p2p or self.enable_controller:
             self.distributed_loop = asyncio.get_event_loop()
-            assert self.lookup_server is not None
             assert isinstance(self.storage_manager, StorageManager)
-            self.distributed_server: DistributedServerInterface = (
-                NaiveDistributedServer(
-                    self.storage_manager,
-                    self.lookup_server,
-                    self.distributed_loop,
-                    config,
-                )
+            self.distributed_server = NaiveDistributedServer(
+                self.storage_manager,
+                self.lookup_server,
+                self.distributed_loop,
+                config,
             )
 
         self.use_layerwise = config.use_layerwise
@@ -486,7 +487,7 @@ class LMCacheEngine:
         for location, keys in key_mapping.items():
             memory_objs = self.storage_manager.batched_get(
                 keys=keys,
-                storage_backend_name=location,
+                location=location,
             )
             reordered_memory_objs.extend(memory_objs)
             reordered_keys.extend(keys)
@@ -682,8 +683,6 @@ class LMCacheEngine:
                 # TODO(Jiayi): Optimize by checking only the existence of the key
                 # of one layer
                 key_all_layers = key.split_layers(self.num_layers)
-                if pin:
-                    self.lookup_pins[request_id].extend(key_all_layers)
 
                 found = False
                 for key_single_layer in key_all_layers:
@@ -696,18 +695,21 @@ class LMCacheEngine:
                         if self.lookup_server.lookup(key_single_layer):
                             found = True
                 if found:
+                    if pin:
+                        self.lookup_pins[request_id].extend(key_all_layers)
                     prev_end = end
                     continue
                 return prev_end
             else:
-                if pin:
-                    self.lookup_pins[request_id].append(key)
                 if self.storage_manager.contains(key, search_range, pin):
+                    if pin:
+                        self.lookup_pins[request_id].append(key)
                     prev_end = end
                     continue
 
                 if search_p2p:
                     assert self.lookup_server is not None
+                    # TODO(Jiayi): We need to support pin for remote lookup
                     if self.lookup_server.lookup(key):
                         prev_end = end
                         continue
@@ -715,6 +717,68 @@ class LMCacheEngine:
 
         # all tokens where found, return the maximal end
         return end
+
+    @_lmcache_nvtx_annotate
+    def move(
+        self,
+        tokens: Union[torch.Tensor, List[int]],
+        old_position: str,
+        new_position: tuple[str, str],
+        event_id: str,
+        do_copy: bool = True,
+    ) -> int:
+        """
+        Perform cross-node move of the KV cache.
+        """
+
+        num_tokens = self.lookup(
+            tokens,
+            search_range=old_position,
+            request_id=event_id,
+            pin=True,
+        )
+
+        if not num_tokens:
+            logger.debug("Move is not performed as there are no tokens to move.")
+            return 0
+
+        keys = self.lookup_pins[event_id]
+
+        memory_objs = self.storage_manager.batched_get(
+            keys=keys,
+            location=old_position,
+        )
+        logger.debug(
+            f"Trying to send {len(memory_objs)} memory objects to {new_position}"
+        )
+
+        future = asyncio.run_coroutine_threadsafe(
+            self.distributed_server.batched_issue_put(
+                keys, memory_objs, new_position[0], new_position[1]
+            ),
+            self.distributed_loop,
+        )
+
+        future.add_done_callback(lambda f: [m.unpin() for m in memory_objs])
+
+        if not do_copy:
+            remove_callback = lambda f: self.storage_manager.batched_remove(
+                keys, locations=[old_position]
+            )
+            future.add_done_callback(remove_callback)
+
+        future.result()
+
+        logger.debug(f"Moving {num_tokens} token from {old_position} to {new_position}")
+        return num_tokens
+
+    @_lmcache_nvtx_annotate
+    def compress(self):
+        pass
+
+    @_lmcache_nvtx_annotate
+    def decompress(self):
+        pass
 
     @_lmcache_nvtx_annotate
     def lookup_unpin(self, request_ids: list[str]) -> None:

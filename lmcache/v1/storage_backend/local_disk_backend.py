@@ -251,10 +251,12 @@ class LocalDiskBackend(StorageBackendInterface):
     def remove(
         self,
         key: CacheEngineKey,
-    ) -> None:
-        path = self.dict[key].path
-        self.disk_lock.acquire()
-        self.dict.pop(key)
+        free_obj: bool = True,
+    ) -> bool:
+        with self.disk_lock:
+            if not (meta := self.dict.pop(key, None)):
+                return False
+        path = meta.path
         self.disk_lock.release()
         size = os.path.getsize(path)
         self.usage -= size
@@ -264,8 +266,10 @@ class LocalDiskBackend(StorageBackendInterface):
         # push kv evict msg
         if self.lmcache_worker is not None:
             self.lmcache_worker.put_msg(
-                KVEvictMsg(self.instance_id, key.worker_id, key.chunk_hash, "disk")
+                KVEvictMsg(self.instance_id, key.worker_id, key.chunk_hash, str(self))
             )
+
+        return True
 
     def insert_key(self, key: CacheEngineKey, memory_obj: MemoryObj) -> None:
         path = self._key_to_path(key)
@@ -286,7 +290,7 @@ class LocalDiskBackend(StorageBackendInterface):
         # push kv admit msg
         if self.lmcache_worker is not None and not has_stored:
             self.lmcache_worker.put_msg(
-                KVAdmitMsg(self.instance_id, key.worker_id, key.chunk_hash, "disk")
+                KVAdmitMsg(self.instance_id, key.worker_id, key.chunk_hash, str(self))
             )
 
     def submit_put_task(
