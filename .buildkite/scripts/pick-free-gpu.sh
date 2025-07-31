@@ -23,9 +23,12 @@ while true; do
     nvidia-smi --query-gpu=memory.free,utilization.gpu,index \
       --format=csv,noheader,nounits \
     | awk -F',' -v min_mem="$MIN_FREE_MEM" -v max_util="$MAX_UTIL" '{
-        gsub(/ /, "", $0);
-        if ($1 >= min_mem && $2 <= max_util) {
-          print $1 "," $2 "," $3;
+        mem = $1; util = $2; idx = $3;
+        gsub(/^[ \t]+|[ \t]+$/, "", mem);
+        gsub(/^[ \t]+|[ \t]+$/, "", util);
+        gsub(/^[ \t]+|[ \t]+$/, "", idx);
+        if (mem >= min_mem && util <= max_util) {
+          print mem "," util "," idx;
         }
       }'
   )
