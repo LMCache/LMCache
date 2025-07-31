@@ -15,6 +15,7 @@ from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
 )
 from vllm.utils import cdiv
+from vllm.sampling_params import SamplingParams
 from vllm.v1.core.sched.output import SchedulerOutput
 import torch
 
@@ -39,7 +40,6 @@ if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
     from vllm.forward_context import ForwardContext
     from vllm.multimodal.inputs import PlaceholderRange
-    from vllm.sampling_params import SamplingParams
     from vllm.v1.core.kv_cache_manager import KVCacheManager
     from vllm.v1.core.sched.output import NewRequestData
     from vllm.v1.request import Request
