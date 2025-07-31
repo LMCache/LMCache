@@ -64,7 +64,7 @@ wait_for_openai_api_server(){
 
 run_lmcache_vllmopenai_container() {
     # Pick the GPU with the largest free memory
-    source .buildkite/scripts/pick-free-gpu.sh 12000
+    source "$ORIG_DIR/.buildkite/scripts/pick-free-gpu.sh" 12000
     best_gpu="${CUDA_VISIBLE_DEVICES}"
     
     if [ -z "$HF_TOKEN" ]; then
@@ -192,6 +192,7 @@ while [ $# -gt 0 ]; do
   shift
 done
 
+ORIG_DIR="$PWD"
 # Need to run from docker directory
 cd docker/
 
