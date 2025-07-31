@@ -243,8 +243,8 @@ class LocalDiskBackend(StorageBackendInterface):
         with self.disk_lock:
             if not (meta := self.dict.pop(key, None)):
                 return False
+
         path = meta.path
-        self.disk_lock.release()
         size = os.path.getsize(path)
         self.usage -= size
         self.stats_monitor.update_local_storage_usage(self.usage)
