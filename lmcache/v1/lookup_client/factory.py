@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Optional
 from lmcache.integration.vllm.utils import lmcache_get_config
 from lmcache.logging import init_logger
 from lmcache.v1.cache_engine import LMCacheEngine
+from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.lookup_client.abstract_client import LookupClientInterface
 from lmcache.v1.lookup_client.mooncake_lookup_client import MooncakeLookupClient
 
@@ -25,17 +26,18 @@ class LookupClientFactory:
     @staticmethod
     def create_lookup_client(
         vllm_config: "VllmConfig",
+        config: LMCacheEngineConfig,
     ) -> LookupClientInterface:
         """
         Create a lookup client based on the configuration.
 
         Args:
             vllm_config: The vLLM configuration
+            config: The LMCache engine configuration
 
         Returns:
             A lookup client instance
         """
-        config = lmcache_get_config()
 
         # Check if external_lookup_client is configured
         if config.external_lookup_client is not None:
@@ -48,7 +50,7 @@ class LookupClientFactory:
                 LMCacheLookupClient,
             )
 
-            return LMCacheLookupClient(vllm_config)
+            return LMCacheLookupClient(vllm_config, config)
 
     @staticmethod
     def create_lookup_server(
@@ -69,7 +71,14 @@ class LookupClientFactory:
 
         # Only create the KV lookup API server on worker rank 0
         # when there are multiple workers and when not using external lookup client
-        if config.external_lookup_client is None:
+        create_lookup_server_only_on_worker_0 = (
+            config.extra_config
+            and config.extra_config.get("create_lookup_server_only_on_worker_0", True)
+        )
+        if config.external_lookup_client is None and (
+            not create_lookup_server_only_on_worker_0
+            or lmcache_engine.metadata.worker_id == 0
+        ):
             # First Party
             from lmcache.v1.lookup_client.lmcache_lookup_client import (
                 LMCacheLookupServer,
