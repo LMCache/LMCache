@@ -5,7 +5,7 @@ steps:
   - label: "Unit Tests"
     key: "unit_tests"
     command: |
-      pwd # for debugging
+      echo $PWD # for debugging
 
       uv venv --python 3.12 .venv-$BUILDKITE_BUILD_ID
       source .venv-$BUILDKITE_BUILD_ID/bin/activate
@@ -23,17 +23,27 @@ steps:
       pytest --maxfail=1 --cov=lmcache \
         --cov-report term --cov-report=html:coverage-test \
         --cov-report=xml:coverage-test.xml --html=durations/test.html \
-        tests/v1/test_cache_engine.py
-        # --ignore=tests/disagg --ignore=tests/v1/test_pos_kernels.py
+        --ignore=tests/disagg --ignore=tests/v1/test_pos_kernels.py
+
     artifact_paths:
       - "durations/test.html"
       - "coverage-test.xml"
       - "coverage-test/**/*"
 
   - label: "Upload Coverage Report"
+    key: "upload"
     depends_on:
         - "unit_tests"
     command: |
       cat << EOF | buildkite-agent annotate --style "info"
         Read the <a href="artifact://coverage-test/index.html">uploaded coverage report</a>
       EOF
+  
+  - label: "Clean up"
+    depends_on:
+        - "upload"
+    command: |
+      export TARGET="$PWD"
+      echo "Deleting current workspace $TARGET"
+      cd /
+      sudo rm -rf "$TARGET"
