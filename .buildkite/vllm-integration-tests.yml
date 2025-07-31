@@ -13,6 +13,15 @@ steps:
     key: "clean"
     depends_on: ["test"]
     allow_dependency_failure: true
-    commands:
-      - chmod +x .buildkite/scripts/docker-cleanup.sh
-      - .buildkite/scripts/docker-cleanup.sh
+    commands: |
+      chmod +x .buildkite/scripts/docker-cleanup.sh
+      .buildkite/scripts/docker-cleanup.sh
+
+  - label: "Clean up"
+    depends_on:
+        - "clean"
+    command: |
+      export TARGET="$PWD"
+      echo "Deleting current workspace $TARGET"
+      cd /
+      sudo rm -rf "$TARGET"
