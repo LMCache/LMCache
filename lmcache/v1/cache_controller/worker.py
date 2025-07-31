@@ -27,6 +27,8 @@ from lmcache.logging import init_logger
 from lmcache.v1.cache_controller.message import (
     ClearWorkerMsg,
     ClearWorkerRetMsg,
+    CompressWorkerMsg,
+    CompressWorkerRetMsg,
     DeRegisterMsg,
     ErrorMsg,
     MoveWorkerMsg,
@@ -236,7 +238,16 @@ class LMCacheWorker:
                     serialized_ret_msg = msgspec.msgpack.encode(
                         MoveWorkerRetMsg(num_tokens=num_tokens)
                     )
-
+                elif isinstance(request, CompressWorkerMsg):
+                    num_compressed_tokens = self.lmcache_engine.compress(
+                        tokens=request.tokens,
+                        method=request.method,
+                        location=request.location,
+                        event_id=request.worker_event_id,
+                    )
+                    serialized_ret_msg = msgspec.msgpack.encode(
+                        CompressWorkerRetMsg(num_tokens=num_compressed_tokens)
+                    )
                 else:
                     logger.error(f"Unknown message: {request}")
                     serialized_ret_msg = msgspec.msgpack.encode(

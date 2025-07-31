@@ -31,6 +31,7 @@ from lmcache.v1.cache_controller.message import (  # noqa: E501
     ClearWorkerMsg,
     CompressMsg,
     CompressRetMsg,
+    CompressWorkerMsg,
     ErrorMsg,
     HealthMsg,
     HealthRetMsg,
@@ -111,7 +112,67 @@ class LMCacheClusterExecutor:
         raise NotImplementedError
 
     async def compress(self, msg: CompressMsg) -> Union[CompressRetMsg, ErrorMsg]:
-        raise NotImplementedError
+        """
+        Execute a compress operation with error handling.
+        """
+        event_id = msg.event_id
+        instance_id = msg.instance_id
+        method = msg.method
+        location = msg.location
+        tokens = msg.tokens
+
+        worker_ids = self.reg_controller.get_workers(instance_id)
+        assert worker_ids is not None
+
+        # TODO(Jiayi): Currently, we do not support PP or heterogeneous TP.
+        # NOTE(Jiayi): The TP ranks are already sorted in registration_controller.
+
+        sockets = []
+        serialized_msgs = []
+        for worker_id in worker_ids:
+            socket = self.reg_controller.get_socket(instance_id, worker_id)
+
+            if socket is None:
+                return ErrorMsg(
+                    error=(
+                        f"Worker {worker_id} not registered for "
+                        f"instance {instance_id} or "
+                    )
+                )
+            sockets.append(socket)
+
+            worker_event_id = f"CompressWorker{worker_id}{str(uuid.uuid4())}"
+            serialized_msg = msgspec.msgpack.encode(
+                CompressWorkerMsg(
+                    worker_event_id=worker_event_id,
+                    method=method,
+                    location=location,
+                    tokens=tokens,
+                )
+            )
+            serialized_msgs.append(serialized_msg)
+            logger.debug(
+                f"Sending compress operation to worker ({instance_id}, {worker_id})"
+            )
+        serialized_results = await self.execute_workers(
+            sockets=sockets,
+            serialized_msgs=serialized_msgs,
+        )
+
+        num_tokens_list = []
+        for serialized_result in serialized_results:
+            result = msgspec.msgpack.decode(serialized_result, type=Msg)
+            num_tokens_list.append(result.num_tokens)
+
+        # TODO(Jiayi): Need to ensure cache consistency across workers.
+        assert len(set(num_tokens_list)) == 1, (
+            "The number of tokens moved should be the same across all workers."
+        )
+
+        return CompressRetMsg(
+            event_id=event_id,
+            num_tokens=num_tokens_list[0],
+        )
 
     async def move(self, msg: MoveMsg) -> Union[MoveRetMsg, ErrorMsg]:
         """

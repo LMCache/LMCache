@@ -772,13 +772,61 @@ class LMCacheEngine:
         logger.debug(f"Moving {num_tokens} token from {old_position} to {new_position}")
         return num_tokens
 
+    # TODO(Jiayi): Need to handle the case where `tokens=None`.
+    # In this case, we compress all tokens.
+    # TODO(Jiayi): support other compression methods.
+    # TODO(Jiayi): support decompression.
+    # TODO(Jiayi): support loading with automatic decompression with
+    # sth like `mem_obj.post_process()`
     @_lmcache_nvtx_annotate
-    def compress(self):
-        pass
+    def compress(
+        self,
+        tokens: Union[torch.Tensor, List[int]],
+        method: str,
+        location: str,
+        event_id: str,
+    ) -> int:
+        if method not in ["cachegen"]:
+            logger.warning(f"Unsupported compression method: {method}.")
+            return 0
 
-    @_lmcache_nvtx_annotate
-    def decompress(self):
-        pass
+        # First Party
+        from lmcache.v1.storage_backend.naive_serde import CreateSerde
+
+        serializer, _ = CreateSerde(method, self.metadata, self.config)
+
+        num_tokens = self.lookup(
+            tokens,
+            search_range=[location],
+            request_id=event_id,
+            pin=True,
+        )
+
+        if not num_tokens:
+            logger.debug("Move is not performed as there are no tokens to move.")
+            return 0
+
+        keys = self.lookup_pins[event_id]
+
+        memory_objs = self.storage_manager.batched_get(
+            keys=keys,
+            location=location,
+        )
+
+        compressed_memory_objs = []
+        for memory_obj in memory_objs:
+            compressed_memory_obj = serializer.serialize(memory_obj)
+            memory_obj.unpin()
+            compressed_memory_objs.append(compressed_memory_obj)
+        self.storage_manager.batched_put(
+            keys=keys,
+            memory_objs=compressed_memory_objs,
+            location=location,
+        )
+
+        self.storage_manager.batched_remove(memory_objs, locations=[location])
+
+        return num_tokens
 
     @_lmcache_nvtx_annotate
     def lookup_unpin(self, request_ids: list[str]) -> None:

@@ -173,12 +173,12 @@ def create_app(controller_url: str) -> FastAPI:
     class CompressRequest(BaseModel):
         instance_id: str
         method: str
-        locations: Optional[List[str]] = []
+        location: str
         tokens: Optional[List[int]] = []
 
     class CompressResponse(BaseModel):
         event_id: str
-        success: bool
+        num_tokens: int
 
     @app.post("/compress", response_model=CompressResponse)
     async def compress(req: CompressRequest):
@@ -188,12 +188,14 @@ def create_app(controller_url: str) -> FastAPI:
                 event_id=event_id,
                 instance_id=req.instance_id,
                 method=req.method,
-                locations=req.locations,
+                location=req.location,
                 tokens=req.tokens,
             )
             ret_msg = await lmcache_controller_manager.handle_orchestration_message(msg)
             assert isinstance(ret_msg, CompressRetMsg)
-            return CompressResponse(event_id=ret_msg.event_id, success=ret_msg.success)
+            return CompressResponse(
+                event_id=ret_msg.event_id, num_tokens=ret_msg.num_tokens
+            )
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e)) from e
 

@@ -136,7 +136,7 @@ class CompressWorkerMsg(ControlMsg):
 
     worker_event_id: str
     method: str
-    locations: Optional[list[str]] = None
+    location: str
     tokens: Optional[list[int]] = None
 
     def describe(self) -> str:
@@ -208,7 +208,7 @@ class PinWorkerRetMsg(ControlRetMsg):
 class CompressWorkerRetMsg(ControlRetMsg):
     """Compress return message for a single lmcache worker"""
 
-    success: bool
+    num_tokens: int
 
     def describe(self) -> str:
         return f"Compress success: {self.success}"
@@ -309,8 +309,8 @@ class CompressMsg(OrchMsg):
     event_id: str
     instance_id: str
     method: str
-    locations: Optional[list[str]] = None
-    tokens: Optional[list[int]] = None
+    location: str
+    tokens: Optional[list[int]] = None  # `None` means compress all tokens
 
     def describe(self) -> str:
         return (
@@ -405,10 +405,10 @@ class CompressRetMsg(OrchRetMsg):
     """Compress return message"""
 
     event_id: str
-    success: bool
+    num_tokens: int
 
     def describe(self) -> str:
-        return f"Compress success: {self.success}"
+        return f"Compressed {self.num_tokens} tokens"
 
 
 class MoveRetMsg(OrchRetMsg):
