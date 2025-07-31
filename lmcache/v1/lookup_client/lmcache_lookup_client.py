@@ -1,17 +1,4 @@
-# Copyright 2024-2025 LMCache Authors.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
+# SPDX-License-Identifier: Apache-2.0
 # Standard
 from typing import TYPE_CHECKING, Optional
 import threading
@@ -46,7 +33,9 @@ class LMCacheLookupClient(LookupClientInterface):
         )
         self.tensor_parallel_size = vllm_config.parallel_config.tensor_parallel_size
         for tp_rank in range(self.tensor_parallel_size):
-            socket_path = get_zmq_rpc_path_lmcache(vllm_config, rpc_port, tp_rank)
+            socket_path = get_zmq_rpc_path_lmcache(
+                vllm_config, "lookup", rpc_port, tp_rank
+            )
             if tp_rank == 0:
                 self.socket = make_zmq_socket(
                     self.ctx,
@@ -91,7 +80,7 @@ class LMCacheLookupServer:
             "lmcache_rpc_port", 0
         )
         socket_path = get_zmq_rpc_path_lmcache(
-            vllm_config, rpc_port, vllm_config.parallel_config.rank
+            vllm_config, "lookup", rpc_port, vllm_config.parallel_config.rank
         )
         self.socket = make_zmq_socket(
             self.ctx,

@@ -1,17 +1,4 @@
-# Copyright 2024-2025 LMCache Authors.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
+# SPDX-License-Identifier: Apache-2.0
 # Standard
 from collections import defaultdict
 from typing import Dict, Generator, List, Optional, Union
@@ -629,7 +616,7 @@ class LMCacheEngine:
     @_lmcache_nvtx_annotate
     def prefetch(
         self,
-        tokens: torch.Tensor,
+        tokens: Union[torch.Tensor, List[int]],
         mask: Optional[torch.Tensor] = None,
     ) -> None:
         """Launch the prefetching process in the storage manager to load the
@@ -753,6 +740,9 @@ class LMCacheEngine:
             self.lmcache_worker.close()
 
         self.storage_manager.close()
+
+        self.memory_allocator.close()
+
         logger.info("LMCacheEngine closed.")
 
 

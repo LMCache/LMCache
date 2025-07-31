@@ -1,17 +1,4 @@
-# Copyright 2024-2025 LMCache Authors.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
+# SPDX-License-Identifier: Apache-2.0
 # Standard
 from contextlib import asynccontextmanager
 from typing import Dict, List, Optional, Tuple
@@ -168,7 +155,7 @@ def create_app(controller_url: str) -> FastAPI:
             )
             ret_msg = await lmcache_controller_manager.handle_orchestration_message(msg)
             assert isinstance(ret_msg, CompressRetMsg)
-            return CompressResponse(success=ret_msg.event_id)
+            return CompressResponse(event_id=ret_msg.event_id)
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e)) from e
 
@@ -179,7 +166,7 @@ def create_app(controller_url: str) -> FastAPI:
         tokens: Optional[List[int]] = []
 
     class MoveResponse(BaseModel):
-        event_id: str
+        event_ids: List[str]
 
     @app.post("/move", response_model=MoveResponse)
     async def move(req: MoveRequest):
@@ -191,7 +178,7 @@ def create_app(controller_url: str) -> FastAPI:
             )
             ret_msg = await lmcache_controller_manager.handle_orchestration_message(msg)
             assert isinstance(ret_msg, MoveRetMsg)
-            return MoveResponse(success=ret_msg.event_id)
+            return MoveResponse(event_ids=ret_msg.event_ids)
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e)) from e
 

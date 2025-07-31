@@ -1,24 +1,23 @@
 steps:
-  - label: ":pip: Prepare venv"
-    key: "venv"
-    plugins:
-      - cache#v1.7.0:
-          key-extra: "venv-{{ BUILDKITE_BUILD_ID }}"
-          path: ".venv"
-          save: "pipeline"
-          force: "true"
-    command:
-      - bash .buildkite/scripts/install-env.sh
-
-  - label: ":checkered_flag: Run tests"
-    key: "test"
-    depends_on: ["venv"]
-    plugins:
-      - cache#v1.7.0:
-          key-extra: "venv-{{ BUILDKITE_BUILD_ID }}"
-          path: ".venv"
-          restore: "pipeline"
+  - label: ":pip: E2E Tests"
+    key: "e2e"
     command: |
+      echo $PWD # for debugging
+
+      uv venv --python 3.12 .venv-$BUILDKITE_BUILD_ID
+      source .venv-$BUILDKITE_BUILD_ID/bin/activate
+
+      uv pip install --upgrade pip setuptools wheel
+      uv pip install -r requirements/common.txt
+      uv pip install -r requirements/test.txt
+      uv pip install -e .
+      uv pip install matplotlib
+      uv pip install pandas
+      uv pip install -U vllm --pre --extra-index-url https://wheels.vllm.ai/nightly
+      uv pip freeze
+
+      source .buildkite/scripts/pick-free-gpu.sh
+
       bash .buildkite/scripts/end-to-end-test.sh
     artifact_paths:
       - "test_local_cpu_experimental.csv"
@@ -36,6 +35,15 @@ steps:
 
   - label: ":wastebasket: Kill all"
     key: "clean"
-    depends_on: ["test"]
+    depends_on: "e2e"
     allow_dependency_failure: true
     command: bash .buildkite/scripts/bare-machine-cleanup.sh
+
+  - label: "Clean up"
+    depends_on:
+        - "clean"
+    command: |
+      export TARGET="$PWD"
+      echo "Deleting current workspace $TARGET"
+      cd /
+      sudo rm -rf "$TARGET"
