@@ -811,7 +811,9 @@ class LMCacheConnectorV1Impl:
             )
         else:
             num_external_hit_tokens = self.lookup_client.lookup(
-                token_ids, request_id=request.request_id
+                token_ids,
+                request_id=request.request_id,
+                tags=tags,
             )
 
         # When prompt length is divisible by the block size and all
