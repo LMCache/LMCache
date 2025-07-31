@@ -361,7 +361,9 @@ class SegmentTokenDatabase(TokenDatabase):
                     yield (
                         start_idx,
                         end_idx,
-                        self._make_key_by_hash(self._hash_tokens(token_chunk), tags=tags),
+                        self._make_key_by_hash(
+                            self._hash_tokens(token_chunk), tags=tags
+                        ),
                     )
                 else:
                     yield start_idx, end_idx, self._hash_tokens(token_chunk)

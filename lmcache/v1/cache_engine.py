@@ -209,7 +209,11 @@ class LMCacheEngine:
             assert isinstance(tags, OrderedDict)
 
         for start, end, key in self.token_database.process_tokens(
-            tokens, hashes, offsets, mask, tags=tags,
+            tokens,
+            hashes,
+            offsets,
+            mask,
+            tags=tags,
         ):
             assert isinstance(key, CacheEngineKey)
             # Allocate the memory object
@@ -310,7 +314,9 @@ class LMCacheEngine:
             assert isinstance(tags, OrderedDict)
 
         for start, end, key in self.token_database.process_tokens(
-            tokens=tokens, mask=mask, tags=tags
+            tokens=tokens,
+            mask=mask,
+            tags=tags
         ):
             assert isinstance(key, CacheEngineKey)
 
@@ -427,7 +433,9 @@ class LMCacheEngine:
         if tags is not None and len(tags) != 0:
             assert isinstance(tags, OrderedDict)
         for start, end, key in self.token_database.process_tokens(
-            tokens=tokens, mask=mask, tags=tags,
+            tokens=tokens,
+            mask=mask,
+            tags=tags,
         ):
             assert isinstance(key, CacheEngineKey)
 
@@ -560,7 +568,9 @@ class LMCacheEngine:
         if tags is not None and len(tags) != 0:
             assert isinstance(tags, OrderedDict)
         for start, end, key in self.token_database.process_tokens(
-            tokens=tokens, mask=mask, tags=tags,
+            tokens=tokens,
+            mask=mask,
+            tags=tags,
         ):
             assert isinstance(key, CacheEngineKey)
 
@@ -638,7 +648,9 @@ class LMCacheEngine:
         KV to the local CPU memory
         """
         for start, end, key in self.token_database.process_tokens(
-            tokens=tokens, mask=mask
+            tokens=tokens,
+            mask=mask,
+            tags=tags
         ):
             assert isinstance(key, CacheEngineKey)
             self.storage_manager.prefetch(key)
@@ -678,7 +690,9 @@ class LMCacheEngine:
         # secondary lookup on p2p (via lookup_server) if enabled
         search_p2p = self.enable_p2p and (search_range is None or "p2p" in search_range)
 
-        for start, end, key in self.token_database.process_tokens(tokens=tokens, tags=tags):
+        for start, end, key in self.token_database.process_tokens(
+            tokens=tokens, tags=tags
+        ):
             assert isinstance(key, CacheEngineKey)
 
             if self.use_layerwise:
@@ -741,7 +755,9 @@ class LMCacheEngine:
 
         num_removed = 0
         # Only remove the caches for the given tokens
-        for start, end, key in self.token_database.process_tokens(tokens=tokens, tags=tags):
+        for start, end, key in self.token_database.process_tokens(
+            tokens=tokens, tags=tags
+        ):
             assert isinstance(key, CacheEngineKey)
             removed = self.storage_manager.remove(key, locations)
             num_removed += removed

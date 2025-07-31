@@ -77,7 +77,9 @@ tmp_disagg_tracker: dict[str, DisaggSpec] = {}
 def extract_tags(sampling_params: SamplingParams) -> OrderedDict:
     tags = None
     if sampling_params.extra_args is not None:
-        if kv_transfer_params := new_request.sampling_params.extra_args.get("kv_transfer_params"):
+        if kv_transfer_params := sampling_params.extra_args.get(
+            "kv_transfer_params"
+        ):
             if user := kv_transfer_params.get("user"):
                 tags = OrderedDict()
                 tags["user"] = user

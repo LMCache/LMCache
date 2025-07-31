@@ -72,7 +72,9 @@ class LMCacheLookupClient(LookupClientInterface):
             ranks = 1
         results = []
         for i in range(ranks):
-            self.socket.send_multipart(token_bufs + [request_id_buf, tags_buf], copy=False)
+            self.socket.send_multipart(
+                    token_bufs + [request_id_buf, tags_buf], copy=False
+            )
             resp = self.socket.recv()
             result = int.from_bytes(resp, "big")
             results.append(result)
@@ -133,7 +135,10 @@ class LMCacheLookupServer:
 
                 token_ids = self.decoder.decode(token_frames)
                 result = self.lmcache_engine.lookup(
-                    token_ids, request_id=request_id, pin=True, tags=tags,
+                    token_ids,
+                    request_id=request_id,
+                    pin=True,
+                    tags=tags,
                 )
                 response = result.to_bytes(4, "big")
                 self.socket.send(response)
