@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Optional, Union, OrderedDict
+from typing import TYPE_CHECKING, Any, Optional, OrderedDict, Union
 import os
 
 # Third Party
@@ -39,10 +39,10 @@ if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
     from vllm.forward_context import ForwardContext
     from vllm.multimodal.inputs import PlaceholderRange
+    from vllm.sampling_params import SamplingParams
     from vllm.v1.core.kv_cache_manager import KVCacheManager
     from vllm.v1.core.sched.output import NewRequestData
     from vllm.v1.request import Request
-    from vllm.sampling_params import SamplingParams
 
 logger = init_logger(__name__)
 
@@ -74,16 +74,16 @@ class DisaggSpec:
 
 tmp_disagg_tracker: dict[str, DisaggSpec] = {}
 
+
 def extract_tags(sampling_params: SamplingParams) -> OrderedDict:
     tags = None
     if sampling_params.extra_args is not None:
-        if kv_transfer_params := sampling_params.extra_args.get(
-            "kv_transfer_params"
-        ):
+        if kv_transfer_params := sampling_params.extra_args.get("kv_transfer_params"):
             if user := kv_transfer_params.get("user"):
                 tags = OrderedDict()
                 tags["user"] = user
     return tags
+
 
 @dataclass
 class RequestTracker:
@@ -805,7 +805,9 @@ class LMCacheConnectorV1Impl:
         self._lookup_requests_in_step.append(request.request_id)
         if self.skip_last_n_tokens > 0:
             num_external_hit_tokens = self.lookup_client.lookup(
-                token_ids[: -self.skip_last_n_tokens], request_id=request.request_id
+                token_ids[: -self.skip_last_n_tokens],
+                request_id=request.request_id,
+                tags=tags,
             )
         else:
             num_external_hit_tokens = self.lookup_client.lookup(

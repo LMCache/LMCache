@@ -60,7 +60,12 @@ class LMCacheLookupClient(LookupClientInterface):
             else:
                 self.socket.connect(socket_path)
 
-    def lookup(self, token_ids: torch.Tensor, request_id: Optional[str] = None, tags: OrderedDict = None) -> int:
+    def lookup(
+        self,
+        token_ids: torch.Tensor,
+        request_id: Optional[str] = None,
+        tags: OrderedDict = None,
+    ) -> int:
         token_bufs = self.encoder.encode(token_ids)
         request_id_buf = request_id.encode("utf-8")
         tags_str = ""
@@ -73,7 +78,7 @@ class LMCacheLookupClient(LookupClientInterface):
         results = []
         for i in range(ranks):
             self.socket.send_multipart(
-                    token_bufs + [request_id_buf, tags_buf], copy=False
+                token_bufs + [request_id_buf, tags_buf], copy=False
             )
             resp = self.socket.recv()
             result = int.from_bytes(resp, "big")

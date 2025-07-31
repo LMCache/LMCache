@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import Iterable, List, Optional, Tuple, Union, OrderedDict
+from typing import Iterable, List, Optional, OrderedDict, Tuple, Union
 import abc
 
 # Third Party

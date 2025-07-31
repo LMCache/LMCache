@@ -4,7 +4,7 @@ from __future__ import annotations
 
 # Standard
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, List, Optional, Tuple, OrderedDict
+from typing import TYPE_CHECKING, List, Optional, OrderedDict, Tuple
 import hashlib
 import threading
 
@@ -85,7 +85,7 @@ class CacheEngineKey:
         )
         if self.tags is not None and len(self.tags) != 0:
             tags = [f"{k}%{v}" for k, v in self.tags.items()]
-            s += "@"+ "@".join(tags)
+            s += "@" + "@".join(tags)
         return s
 
     def split_layers(self, num_layers: int) -> List["LayerCacheEngineKey"]:
@@ -194,7 +194,7 @@ class LayerCacheEngineKey(CacheEngineKey):
         )
         if self.tags is not None and len(self.tags) != 0:
             tags = [f"{k}%{v}" for k, v in self.tags.items()]
-            s += "@"+ "@".join(tags)
+            s += "@" + "@".join(tags)
         return s
 
     def split_layers(self, num_layers: int) -> List["LayerCacheEngineKey"]:

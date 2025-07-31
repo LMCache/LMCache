@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from collections import defaultdict
-from typing import Any, Callable, Dict, Generator, List, Optional, Union, OrderedDict
+from typing import Dict, Generator, List, Optional, OrderedDict, Union
 import asyncio
 import multiprocessing
 import time
@@ -314,9 +314,7 @@ class LMCacheEngine:
             assert isinstance(tags, OrderedDict)
 
         for start, end, key in self.token_database.process_tokens(
-            tokens=tokens,
-            mask=mask,
-            tags=tags
+            tokens=tokens, mask=mask, tags=tags
         ):
             assert isinstance(key, CacheEngineKey)
 
@@ -648,9 +646,7 @@ class LMCacheEngine:
         KV to the local CPU memory
         """
         for start, end, key in self.token_database.process_tokens(
-            tokens=tokens,
-            mask=mask,
-            tags=tags
+            tokens=tokens, mask=mask, tags=tags
         ):
             assert isinstance(key, CacheEngineKey)
             self.storage_manager.prefetch(key)
@@ -745,7 +741,7 @@ class LMCacheEngine:
         self,
         tokens: Optional[Union[torch.Tensor, List[int]]] = None,
         locations: Optional[List[str]] = None,
-        tags: OrderedDict = None, # TODO: need to clean by tags
+        tags: OrderedDict = None,  # TODO: need to clean by tags
     ) -> int:
         assert isinstance(self.storage_manager, StorageManager)
         # Clear all caches if tokens is None
