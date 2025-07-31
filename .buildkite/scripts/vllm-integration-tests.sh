@@ -64,11 +64,8 @@ wait_for_openai_api_server(){
 
 run_lmcache_vllmopenai_container() {
     # Pick the GPU with the largest free memory
-    best_gpu=$(nvidia-smi --query-gpu=memory.free,index \
-        --format=csv,noheader,nounits \
-      | sort -t',' -k1 -nr \
-      | head -n1 \
-      | cut -d',' -f2)
+    source "$ORIG_DIR/.buildkite/scripts/pick-free-gpu.sh" 12000
+    best_gpu="${CUDA_VISIBLE_DEVICES}"
     
     if [ -z "$HF_TOKEN" ]; then
         CID=$(docker run -d --runtime nvidia --gpus "device=${best_gpu}" \
@@ -195,6 +192,7 @@ while [ $# -gt 0 ]; do
   shift
 done
 
+ORIG_DIR="$PWD"
 # Need to run from docker directory
 cd docker/
 

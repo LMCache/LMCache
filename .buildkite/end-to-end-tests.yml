@@ -16,7 +16,7 @@ steps:
       uv pip install -U vllm --pre --extra-index-url https://wheels.vllm.ai/nightly
       uv pip freeze
 
-      source .buildkite/scripts/pick-free-gpu.sh
+      source .buildkite/scripts/pick-free-gpu.sh 12000
 
       bash .buildkite/scripts/end-to-end-test.sh
     artifact_paths:
