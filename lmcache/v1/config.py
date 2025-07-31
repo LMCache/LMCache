@@ -135,6 +135,10 @@ class LMCacheEngineConfig:
     # When set, uses external lookup client instead of regular lookup server
     external_lookup_client: Optional[str] = None
 
+    # Mooncake backend configuration
+    # When True, uses MooncakeBackend for storage
+    enable_mooncake: bool = False
+
     @staticmethod
     def from_defaults(
         chunk_size: int = 256,
@@ -180,6 +184,7 @@ class LMCacheEngineConfig:
         save_unfull_chunk: bool = True,
         blocking_timeout_secs: int = 10,
         external_lookup_client: Optional[str] = None,
+        enable_mooncake: bool = False,
     ) -> "LMCacheEngineConfig":
         # TODO (ApostaC): Add nixl config
         return LMCacheEngineConfig(
@@ -226,6 +231,7 @@ class LMCacheEngineConfig:
             save_unfull_chunk,
             blocking_timeout_secs,
             external_lookup_client,
+            enable_mooncake,
         ).validate()
 
     @staticmethod
@@ -402,6 +408,8 @@ class LMCacheEngineConfig:
 
         external_lookup_client = config.get("external_lookup_client", None)
 
+        enable_mooncake = config.get("enable_mooncake", False)
+
         local_disk_path = _parse_local_disk(local_disk)
 
         match remote_url:
@@ -457,6 +465,7 @@ class LMCacheEngineConfig:
                 save_unfull_chunk,
                 blocking_timeout_secs,
                 external_lookup_client,
+                enable_mooncake,
             )
             .validate()
             .log_config()
@@ -673,6 +682,9 @@ class LMCacheEngineConfig:
         )
         config.external_lookup_client = parse_env(
             get_env_name("external_lookup_client"), config.external_lookup_client
+        )
+        config.enable_mooncake = to_bool(
+            parse_env(get_env_name("enable_mooncake"), config.enable_mooncake)
         )
         return config.validate().log_config()
 

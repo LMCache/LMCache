@@ -17,6 +17,7 @@ from lmcache.v1.storage_backend.abstract_backend import StorageBackendInterface
 from lmcache.v1.storage_backend.gds_backend import GdsBackend
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.v1.storage_backend.local_disk_backend import LocalDiskBackend
+from lmcache.v1.storage_backend.mooncake_backend import MooncakeBackend
 from lmcache.v1.storage_backend.remote_backend import RemoteBackend
 from lmcache.v1.storage_backend.weka_gds_backend import WekaGdsBackend
 
@@ -102,5 +103,20 @@ def CreateStorageBackends(
         )
         backend_name = str(remote_backend)
         storage_backends[backend_name] = remote_backend
+
+    if config.enable_mooncake:
+        # Validate that Mooncake doesn't conflict with other backends
+        if config.remote_url is not None:
+            raise ValueError(
+                "Cannot enable both Mooncake backend (enable_mooncake=True) and "
+                "remote connector (remote_url) simultaneously. Please use either "
+                "enable_mooncake: True OR remote_url, but not both."
+            )
+
+        mooncake_backend = MooncakeBackend(
+            config, metadata, loop, local_cpu_backend, dst_device
+        )
+        backend_name = str(mooncake_backend)
+        storage_backends[backend_name] = mooncake_backend
 
     return storage_backends
