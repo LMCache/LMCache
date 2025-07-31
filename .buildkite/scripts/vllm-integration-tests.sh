@@ -78,6 +78,7 @@ run_lmcache_vllmopenai_container() {
             'lmcache/vllm-openai:build-latest' \
             'meta-llama/Llama-3.2-1B-Instruct' --kv-transfer-config \
             '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}' \
+            --max-model-len 1024 \
             --gpu-memory-utilization '0.3' \
             --enforce-eager)
     else
@@ -92,6 +93,7 @@ run_lmcache_vllmopenai_container() {
             'lmcache/vllm-openai:build-latest' \
             'meta-llama/Llama-3.2-1B-Instruct' --kv-transfer-config \
             '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}' \
+            --max-model-len 1024 \
             --gpu-memory-utilization '0.3' \
             --enforce-eager)
     fi
