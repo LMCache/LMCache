@@ -9,7 +9,7 @@
 # cat /var/log/gpu_zombie_killer.log
 
 # Kill it:
-# kill -9 $(cat /tmp/gpu_zombie_killer.pid)
+# sudo kill -9 $(cat /tmp/gpu_zombie_killer.pid)
 
 PIDFILE="/tmp/gpu_zombie_killer.pid"
 LOGFILE="/var/log/gpu_zombie_killer.log"
@@ -40,12 +40,12 @@ while true; do
   | awk '{print $1}' \
   | while read -r pid; do
       [ -d "/proc/$pid" ] || continue
-      stat=$(</proc/$pid/stat) || continue
-      start_ticks=$(awk '{print $22}' <<< "$stat")
+      start_ticks=$(awk '{print $22}' /proc/$pid/stat)
       hertz=$(getconf CLK_TCK)
-      uptime=$(cut -d. -f1 /proc/uptime)
-      start_time=$((uptime - start_ticks / hertz))
-      runtime=$((now - (now - uptime + start_time)))
+      boot_time=$(awk '/btime/ {print $2}' /proc/stat)
+      start_time=$((boot_time + start_ticks / hertz))
+      now=$(date +%s)
+      runtime=$((now - start_time))
 
       if (( runtime > MAX_SECONDS )); then
         echo "[GPU ZOMBIE KILLER] Killing PID $pid (runtime ${runtime}s) at $(date)" >> "$LOGFILE"
