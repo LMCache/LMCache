@@ -191,3 +191,27 @@ class AuditBackend(StorageBackendInterface):
                 "BATCHED_GET_BLOCKING", start_time, None, False, error=e
             )
             raise
+
+    def remove(self, key: CacheEngineKey, free_obj: bool = True) -> bool:
+        start_time = time.perf_counter()
+        try:
+            result = self.real_backend.remove(key, free_obj)
+            self._log_operation("REMOVE", start_time, key, True, result)
+            return result
+        except Exception as e:
+            self._log_operation("REMOVE", start_time, key, False, error=e)
+            raise
+
+    def batched_remove(
+        self,
+        keys: list[CacheEngineKey],
+        free_obj: bool = True,
+    ) -> int:
+        start_time = time.perf_counter()
+        try:
+            result = self.real_backend.batched_remove(keys, free_obj)
+            self._log_operation("BATCHED_REMOVE", start_time, None, True, result)
+            return result
+        except Exception as e:
+            self._log_operation("BATCHED_REMOVE", start_time, None, False, error=e)
+            raise
