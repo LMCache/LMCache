@@ -59,26 +59,26 @@ def create_app(controller_url: str) -> FastAPI:
     app = FastAPI(lifespan=lifespan)
 
     class QueryInstRequest(BaseModel):
-        event_id: str
+        eventId: str
         ip: str
 
     class QueryInstResponse(BaseModel):
-        event_id: str
+        eventId: str
         res: str  # the instance id
 
     @app.post("/query_instance")
     async def query_instance(req: QueryInstRequest):
         try:
-            event_id = ("QueryInst" + str(uuid.uuid4()),)
+            eventId = ("QueryInst" + str(uuid.uuid4()),)
             msg = QueryInstMsg(
-                event_id=event_id,
+                eventId=eventId,
                 ip=req.ip,
             )
             ret_msg = await lmcache_controller_manager.handle_orchestration_message(msg)
             assert isinstance(ret_msg, QueryInstRetMsg)
             return QueryInstResponse(
-                event_id=ret_msg.event_id,
-                res=ret_msg.instance_id,
+                eventId=ret_msg.eventId,
+                res=ret_msg.instanceId,
             )
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e)) from e
@@ -87,22 +87,22 @@ def create_app(controller_url: str) -> FastAPI:
         tokens: List[int]
 
     class LookupResponse(BaseModel):
-        event_id: str
+        eventId: str
         # a list of (instance_id, location, token_count)
         layout_info: Dict[str, Tuple[str, int]]
 
     @app.post("/lookup", response_model=LookupResponse)
     async def lookup(req: LookupRequest):
         try:
-            event_id = "Lookup" + str(uuid.uuid4())
+            eventId = "Lookup" + str(uuid.uuid4())
             msg = LookupMsg(
-                event_id=event_id,
+                eventId=eventId,
                 tokens=req.tokens,
             )
             ret_msg = await lmcache_controller_manager.handle_orchestration_message(msg)
             assert isinstance(ret_msg, LookupRetMsg)
             return LookupResponse(
-                event_id=ret_msg.event_id, layout_info=ret_msg.layout_info
+                eventId=ret_msg.eventId, layout_info=ret_msg.layout_info
             )
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e)) from e
@@ -113,22 +113,22 @@ def create_app(controller_url: str) -> FastAPI:
         tokens: Optional[List[int]] = []
 
     class ClearResponse(BaseModel):
-        event_id: str
+        eventId: str
         success: bool
 
     @app.post("/clear", response_model=ClearResponse)
     async def clear(req: ClearRequest):
         try:
-            event_id = "Clear" + str(uuid.uuid4())
+            eventId = "Clear" + str(uuid.uuid4())
             msg = ClearMsg(
-                event_id=event_id,
+                eventId=eventId,
                 instance_id=req.instance_id,
                 tokens=req.tokens,
                 locations=req.locations,
             )
             ret_msg = await lmcache_controller_manager.handle_orchestration_message(msg)
             assert isinstance(ret_msg, ClearRetMsg)
-            return ClearResponse(event_id=ret_msg.event_id, success=ret_msg.success)
+            return ClearResponse(eventId=ret_msg.eventId, success=ret_msg.success)
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e)) from e
 
@@ -138,22 +138,22 @@ def create_app(controller_url: str) -> FastAPI:
         tokens: Optional[List[int]] = []
 
     class PinResponse(BaseModel):
-        event_id: str
+        eventId: str
         success: bool
 
     @app.post("/pin", response_model=PinResponse)
     async def pin(req: PinRequest):
         try:
-            event_id = "Pin" + str(uuid.uuid4())
+            eventId = "Pin" + str(uuid.uuid4())
             msg = PinMsg(
-                event_id=event_id,
+                eventId=eventId,
                 instance_id=req.instance_id,
                 locations=req.locations,
                 tokens=req.tokens,
             )
             ret_msg = await lmcache_controller_manager.handle_orchestration_message(msg)
             assert isinstance(ret_msg, PinRetMsg)
-            return PinResponse(event_id=ret_msg.event_id, success=ret_msg.success)
+            return PinResponse(eventId=ret_msg.eventId, success=ret_msg.success)
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e)) from e
 
@@ -164,15 +164,15 @@ def create_app(controller_url: str) -> FastAPI:
         tokens: Optional[List[int]] = []
 
     class CompressResponse(BaseModel):
-        event_id: str
+        eventId: str
         num_tokens: int
 
     @app.post("/compress", response_model=CompressResponse)
     async def compress(req: CompressRequest):
         try:
-            event_id = "Compress" + str(uuid.uuid4())
+            eventId = "Compress" + str(uuid.uuid4())
             msg = CompressMsg(
-                event_id=event_id,
+                eventId=eventId,
                 instance_id=req.instance_id,
                 method=req.method,
                 location=req.location,
@@ -181,7 +181,7 @@ def create_app(controller_url: str) -> FastAPI:
             ret_msg = await lmcache_controller_manager.handle_orchestration_message(msg)
             assert isinstance(ret_msg, CompressRetMsg)
             return CompressResponse(
-                event_id=ret_msg.event_id, num_tokens=ret_msg.num_tokens
+                eventId=ret_msg.eventId, num_tokens=ret_msg.num_tokens
             )
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e)) from e
@@ -194,15 +194,15 @@ def create_app(controller_url: str) -> FastAPI:
         copy: Optional[bool] = False
 
     class MoveResponse(BaseModel):
-        event_id: str
+        eventId: str
         num_tokens: int
 
     @app.post("/move", response_model=MoveResponse)
     async def move(req: MoveRequest):
         try:
-            event_id = "Move" + str(uuid.uuid4())
+            eventId = "Move" + str(uuid.uuid4())
             msg = MoveMsg(
-                event_id=event_id,
+                eventId=eventId,
                 old_position=req.old_position,
                 new_position=req.new_position,
                 tokens=req.tokens,
@@ -211,7 +211,7 @@ def create_app(controller_url: str) -> FastAPI:
             ret_msg = await lmcache_controller_manager.handle_orchestration_message(msg)
             assert isinstance(ret_msg, MoveRetMsg)
             return MoveResponse(
-                event_id=ret_msg.event_id,
+                eventId=ret_msg.eventId,
                 num_tokens=ret_msg.num_tokens,
             )
         except Exception as e:
@@ -221,25 +221,25 @@ def create_app(controller_url: str) -> FastAPI:
         instance_id: str
 
     class HealthResponse(BaseModel):
-        event_id: str
+        eventId: str
         alive: bool
 
     @app.post("/health", response_model=HealthResponse)
     async def health(req: HealthRequest):
         try:
-            event_id = "Health" + str(uuid.uuid4())
+            eventId = "Health" + str(uuid.uuid4())
             msg = HealthMsg(
-                event_id=event_id,
+                eventId=eventId,
                 instance_id=req.instance_id,
             )
             ret_msg = await lmcache_controller_manager.handle_orchestration_message(msg)
             assert isinstance(ret_msg, HealthRetMsg)
-            return HealthResponse(event_id=ret_msg.event_id, alive=ret_msg.alive)
+            return HealthResponse(eventId=ret_msg.eventId, alive=ret_msg.alive)
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e)) from e
 
     class CheckFinishRequest(BaseModel):
-        event_id: str
+        eventId: str
 
     class CheckFinishResponse(BaseModel):
         status: str
@@ -248,7 +248,7 @@ def create_app(controller_url: str) -> FastAPI:
     async def check_finish(req: CheckFinishRequest):
         try:
             msg = CheckFinishMsg(
-                event_id=req.event_id,
+                eventId=req.eventId,
             )
             ret_msg = await lmcache_controller_manager.handle_orchestration_message(msg)
             assert isinstance(ret_msg, CheckFinishRetMsg)
