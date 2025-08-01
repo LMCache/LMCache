@@ -708,7 +708,7 @@ class LMCacheEngine:
         finally:
             # vllm lookup sets pin to True
             if pin:
-                self.storage_manager.post_lookup()
+                self.storage_manager.touch_cache()
 
     @_lmcache_nvtx_annotate
     def lookup_unpin(self, request_ids: list[str]) -> None:

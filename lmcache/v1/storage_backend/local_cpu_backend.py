@@ -82,7 +82,7 @@ class LocalCPUBackend(StorageBackendInterface):
                 self.keys_in_request.append(key)
             return True
 
-    def post_lookup(self):
+    def touch_cache(self):
         # flip the order of the keys in the request
         with self.cpu_lock:
             for key in reversed(self.keys_in_request):

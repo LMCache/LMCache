@@ -322,10 +322,10 @@ class StorageManager:
 
         return None
 
-    def post_lookup(self):
+    def touch_cache(self):
         for backend_name, backend in self.storage_backends.items():
             if backend_name == "LocalCPUBackend" or backend_name == "LocalDiskBackend":
-                backend.post_lookup()
+                backend.touch_cache()
 
     def remove(
         self,
