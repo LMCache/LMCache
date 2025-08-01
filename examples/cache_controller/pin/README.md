@@ -55,7 +55,7 @@ curl -X POST http://localhost:9000/pin \
     "location": "LocalCPUBackend"
   }'
 ```
-You should be able to see a return message indicating the KV cache has been successfully pinned in the system:
+You should be able to see a return message indicating the number of tokens' KV cache that has been successfully pinned in the system:
 
 ```plaintext
 {"event_id": "xxx", "num_tokens": 12}

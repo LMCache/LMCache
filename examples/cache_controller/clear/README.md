@@ -39,7 +39,7 @@ curl -X POST http://localhost:9000/clear \
     "location": "LocalCPUBackend"
   }'
 ```
-You should be able to see a return message indicating the KV cache has been successfully cleared in the system:
+You should be able to see a return message indicating the number of tokens' KV cache that has been successfully cleared in the system:
 
 ```plaintext
 {"event_id": "xxx", "num_tokens": 12}
