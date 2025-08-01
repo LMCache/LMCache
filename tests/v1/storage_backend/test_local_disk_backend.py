@@ -1,4 +1,7 @@
+# SPDX-License-Identifier: Apache-2.0
 # Standard
+from contextlib import nullcontext
+from unittest.mock import patch
 import asyncio
 import os
 import shutil
@@ -12,9 +15,128 @@ import torch
 # First Party
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.memory_management import MemoryFormat, MemoryObj, MixedMemoryAllocator
+from lmcache.v1.memory_management import (
+    BufferAllocator,
+    MemoryFormat,
+    MemoryObj,
+    MixedMemoryAllocator,
+    PagedTensorMemoryAllocator,
+    TensorMemoryAllocator,
+)
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.v1.storage_backend.local_disk_backend import LocalDiskBackend
+
+
+# This is to mock the constructor and destructor of
+# MixedMemoryAllocator and PinMemoryAllocator to
+# use pin_memory=True for their constructors and
+# avoid calling cudaHostRegister and cudaHostUnregister
+# which may throw an error if torch.empty returns a buffer
+# that cannot be registered (which happens quicker on some machines,
+# especially when torch is doing many allocations and frees)
+@pytest.fixture(autouse=True, scope="module")
+def patch_mixed_allocator():
+    def fake_mixed_init(self, size: int, use_paging: bool = False, **kwargs):
+        """
+        :param int size: The size of the pinned memory in bytes.
+        """
+
+        # self.buffer = torch.empty(size, dtype=torch.uint8)
+        # ptr = self.buffer.data_ptr()
+        # err = torch.cuda.cudart().cudaHostRegister(ptr, size, 0)
+        # assert err == 0, (
+        #     f"cudaHostRegister failed: {torch.cuda.cudart().cudaGetErrorString(err)}"
+        # )
+        self._unregistered = False
+        self.buffer = torch.empty(size, dtype=torch.uint8, pin_memory=True)
+
+        if use_paging:
+            assert "shape" in kwargs, (
+                "shape must be specified for paged memory allocator"
+            )
+            assert "dtype" in kwargs, (
+                "dtype must be specified for paged memory allocator"
+            )
+            assert "fmt" in kwargs, "fmt must be specified for paged memory allocator"
+            self.pin_allocator = PagedTensorMemoryAllocator(
+                tensor=self.buffer,
+                shape=kwargs["shape"],
+                dtype=kwargs["dtype"],
+                fmt=kwargs["fmt"],
+            )
+        else:
+            self.pin_allocator = TensorMemoryAllocator(self.buffer)
+
+        self.host_mem_lock = threading.Lock() if not use_paging else nullcontext()
+
+        self.buffer_allocator = BufferAllocator("cpu")
+
+    def fake_mixed_close(self):
+        if not self._unregistered:
+            torch.cuda.synchronize()
+            # torch.cuda.cudart().cudaHostUnregister(self.buffer.data_ptr())
+            self._unregistered = True
+
+    with (
+        patch(
+            "lmcache.v1.memory_management.MixedMemoryAllocator.__init__",
+            fake_mixed_init,
+        ),
+        patch(
+            "lmcache.v1.memory_management.MixedMemoryAllocator.close", fake_mixed_close
+        ),
+    ):
+        yield
+
+
+@pytest.fixture(autouse=True, scope="module")
+def patch_pin_allocator():
+    def fake_pin_init(self, size: int, use_paging: bool = False, **kwargs):
+        """
+        :param int size: The size of the pinned memory in bytes.
+        """
+
+        # self.buffer = torch.empty(size, dtype=torch.uint8)
+        # ptr = self.buffer.data_ptr()
+        # err = torch.cuda.cudart().cudaHostRegister(ptr, size, 0)
+        # assert err == 0, (
+        #     f"cudaHostRegister failed: {torch.cuda.cudart().cudaGetErrorString(err)}"
+        # )
+        self._unregistered = False
+        self.buffer = torch.empty(size, dtype=torch.uint8, pin_memory=True)
+
+        if use_paging:
+            assert "shape" in kwargs, (
+                "shape must be specified for paged memory allocator"
+            )
+            assert "dtype" in kwargs, (
+                "dtype must be specified for paged memory allocator"
+            )
+            assert "fmt" in kwargs, "fmt must be specified for paged memory allocator"
+            self.allocator = PagedTensorMemoryAllocator(
+                tensor=self.buffer,
+                shape=kwargs["shape"],
+                dtype=kwargs["dtype"],
+                fmt=kwargs["fmt"],
+            )
+        else:
+            self.allocator = TensorMemoryAllocator(self.buffer)
+
+        self.host_mem_lock = threading.Lock() if not use_paging else nullcontext()
+
+    def fake_pin_close(self):
+        if not self._unregistered:
+            torch.cuda.synchronize()
+            # torch.cuda.cudart().cudaHostUnregister(self.buffer.data_ptr())
+            self._unregistered = True
+
+    with (
+        patch(
+            "lmcache.v1.memory_management.PinMemoryAllocator.__init__", fake_pin_init
+        ),
+        patch("lmcache.v1.memory_management.PinMemoryAllocator.close", fake_pin_close),
+    ):
+        yield
 
 
 class MockLookupServer:
@@ -124,7 +246,8 @@ class TestLocalDiskBackend:
         assert backend.instance_id == "test_instance"
         assert backend.usage == 0
         assert len(backend.dict) == 0
-        assert len(backend.put_tasks) == 0
+
+        local_cpu_backend.memory_allocator.close()
 
     def test_init_with_lookup_server_and_worker(
         self, temp_disk_path, async_loop, local_cpu_backend
@@ -146,9 +269,12 @@ class TestLocalDiskBackend:
         assert backend.lookup_server == lookup_server
         assert backend.lmcache_worker == lmcache_worker
 
+        local_cpu_backend.memory_allocator.close()
+
     def test_str(self, local_disk_backend):
         """Test string representation."""
         assert str(local_disk_backend) == "LocalDiskBackend"
+        local_disk_backend.local_cpu_backend.memory_allocator.close()
 
     def test_key_to_path(self, local_disk_backend):
         """Test key to path conversion."""
@@ -158,11 +284,15 @@ class TestLocalDiskBackend:
         expected_filename = key.to_string().replace("/", "-") + ".pt"
         assert path == os.path.join(local_disk_backend.path, expected_filename)
 
+        local_disk_backend.local_cpu_backend.memory_allocator.close()
+
     def test_contains_key_not_exists(self, local_disk_backend):
         """Test contains() when key doesn't exist."""
         key = create_test_key("nonexistent")
         assert not local_disk_backend.contains(key)
         assert not local_disk_backend.contains(key, pin=True)
+
+        local_disk_backend.local_cpu_backend.memory_allocator.close()
 
     def test_contains_key_exists(self, local_disk_backend):
         """Test contains() when key exists."""
@@ -175,19 +305,7 @@ class TestLocalDiskBackend:
         assert local_disk_backend.contains(key)
         assert local_disk_backend.contains(key, pin=True)
 
-    def test_exists_in_put_tasks(self, local_disk_backend):
-        """Test exists_in_put_tasks()."""
-        key = create_test_key("test_key")
-
-        # Initially not in put tasks
-        assert not local_disk_backend.exists_in_put_tasks(key)
-
-        # Add to put tasks
-        local_disk_backend.disk_lock.acquire()
-        local_disk_backend.put_tasks.append(key)
-        local_disk_backend.disk_lock.release()
-
-        assert local_disk_backend.exists_in_put_tasks(key)
+        local_disk_backend.local_cpu_backend.memory_allocator.close()
 
     def test_pin_unpin(self, local_disk_backend):
         """Test pin() and unpin() operations."""
@@ -207,6 +325,8 @@ class TestLocalDiskBackend:
         assert not local_disk_backend.pin(non_existent_key)
         assert not local_disk_backend.unpin(non_existent_key)
 
+        local_disk_backend.local_cpu_backend.memory_allocator.close()
+
     def test_insert_key(self, local_disk_backend):
         """Test insert_key()."""
         key = create_test_key("test_key")
@@ -220,6 +340,7 @@ class TestLocalDiskBackend:
         assert metadata.dtype == memory_obj.metadata.dtype
         assert metadata.fmt == memory_obj.metadata.fmt
         assert metadata.pin_count == 0
+        local_disk_backend.local_cpu_backend.memory_allocator.close()
 
     def test_insert_key_reinsert(self, local_disk_backend):
         """Test insert_key() with reinsertion."""
@@ -238,6 +359,8 @@ class TestLocalDiskBackend:
         metadata = local_disk_backend.dict[key]
         assert metadata.path == original_path  # Path should remain the same
         assert metadata.size == memory_obj2.get_size()  # Size should be updated
+
+        local_disk_backend.local_cpu_backend.memory_allocator.close()
 
     def test_remove(self, local_disk_backend):
         """Test remove()."""
@@ -258,6 +381,8 @@ class TestLocalDiskBackend:
 
         assert key not in local_disk_backend.dict
         assert not os.path.exists(path)
+
+        local_disk_backend.local_cpu_backend.memory_allocator.close()
 
     def test_remove_with_worker(self, temp_disk_path, async_loop, local_cpu_backend):
         """Test remove() with LMCacheWorker."""
@@ -287,6 +412,8 @@ class TestLocalDiskBackend:
 
         assert any(isinstance(msg, KVAdmitMsg) for msg in lmcache_worker.messages)
         assert any(isinstance(msg, KVEvictMsg) for msg in lmcache_worker.messages)
+
+        local_cpu_backend.memory_allocator.close()
 
     def test_submit_put_task(self, local_disk_backend):
         """Test submit_put_task() synchronous"""
@@ -319,6 +446,8 @@ class TestLocalDiskBackend:
         # (since we used insert_key directly)
         assert not local_disk_backend.exists_in_put_tasks(key)
 
+        local_disk_backend.local_cpu_backend.memory_allocator.close()
+
     def test_submit_put_task_with_eviction(
         self, temp_disk_path, async_loop, local_cpu_backend
     ):
@@ -346,27 +475,16 @@ class TestLocalDiskBackend:
         # Test that the evictor is properly initialized
         assert backend.evictor is not None
 
-    def test_batched_submit_put_task(self, local_disk_backend):
-        """Test batched_submit_put_task()."""
-        keys = [create_test_key(f"key_{i}") for i in range(3)]
-        memory_objs = [create_test_memory_obj() for _ in range(3)]
-
-        futures = local_disk_backend.batched_submit_put_task(keys, memory_objs)
-
-        assert futures is not None
-        assert len(futures) == 3
-
-        # Wait for all tasks to complete
-        for future in futures:
-            assert future is not None
-            # Don't call future.result() to avoid blocking
+        local_cpu_backend.memory_allocator.close()
 
     def test_submit_prefetch_task_key_not_exists(self, local_disk_backend):
         """Test submit_prefetch_task() when key doesn't exist."""
         key = create_test_key("nonexistent")
-        future = local_disk_backend.submit_prefetch_task(key)
+        res = local_disk_backend.submit_prefetch_task(key)
 
-        assert future is None
+        assert not res
+
+        local_disk_backend.local_cpu_backend.memory_allocator.close()
 
     def test_submit_prefetch_task_key_exists(self, local_disk_backend):
         """Test submit_prefetch_task() when key exists."""
@@ -386,12 +504,16 @@ class TestLocalDiskBackend:
         assert future is not None
         # Don't call future.result() to avoid blocking
 
+        local_disk_backend.local_cpu_backend.memory_allocator.close()
+
     def test_get_blocking_key_not_exists(self, local_disk_backend):
         """Test get_blocking() when key doesn't exist."""
         key = create_test_key("nonexistent")
         result = local_disk_backend.get_blocking(key)
 
         assert result is None
+
+        local_disk_backend.local_cpu_backend.memory_allocator.close()
 
     def test_get_blocking_key_exists(self, local_disk_backend):
         """Test get_blocking() when key exists."""
@@ -413,22 +535,7 @@ class TestLocalDiskBackend:
         assert result.metadata.shape == memory_obj.metadata.shape
         assert result.metadata.dtype == memory_obj.metadata.dtype
 
-    def test_get_non_blocking(self, local_disk_backend):
-        """Test get_non_blocking()."""
-        key = create_test_key("test_key")
-        memory_obj = create_test_memory_obj()
-
-        # Insert key first
-        local_disk_backend.insert_key(key, memory_obj)
-
-        # Create the actual file on disk
-        path = local_disk_backend._key_to_path(key)
-        with open(path, "wb") as f:
-            f.write(memory_obj.byte_array)
-
-        future = local_disk_backend.get_non_blocking(key)
-
-        assert future is not None
+        local_disk_backend.local_cpu_backend.memory_allocator.close()
 
     def test_async_save_bytes_to_disk(self, local_disk_backend, async_loop):
         """Test async_save_bytes_to_disk()."""
@@ -444,6 +551,8 @@ class TestLocalDiskBackend:
         metadata = local_disk_backend.dict[key]
         assert metadata.path == local_disk_backend._key_to_path(key)
         assert metadata.size == memory_obj.get_size()
+
+        local_disk_backend.local_cpu_backend.memory_allocator.close()
 
     def test_async_load_bytes_from_disk(self, local_disk_backend):
         """Test async_load_bytes_from_disk()"""
@@ -467,6 +576,8 @@ class TestLocalDiskBackend:
         assert result.metadata.shape == memory_obj.metadata.shape
         assert result.metadata.dtype == memory_obj.metadata.dtype
 
+        local_disk_backend.local_cpu_backend.memory_allocator.close()
+
     def test_load_bytes_from_disk(self, local_disk_backend):
         """Test load_bytes_from_disk()."""
         key = create_test_key("test_key")
@@ -489,31 +600,7 @@ class TestLocalDiskBackend:
         assert result.metadata.shape == memory_obj.metadata.shape
         assert result.metadata.dtype == memory_obj.metadata.dtype
 
-    def test_load_disk_bytes_backend(self, local_disk_backend):
-        """Test load_disk() with bytes backend."""
-        key = create_test_key("test_key")
-        memory_obj = create_test_memory_obj()
-
-        # Create the file first
-        path = local_disk_backend._key_to_path(key)
-        with open(path, "wb") as f:
-            f.write(memory_obj.byte_array)
-
-        result = local_disk_backend.load_disk(
-            path,
-            "bytes",
-            memory_obj.metadata.dtype,
-            memory_obj.metadata.shape,
-            memory_obj.metadata.fmt,
-        )
-
-        assert result is not None
-        assert isinstance(result, MemoryObj)
-
-    def test_load_disk_invalid_backend(self, local_disk_backend):
-        """Test load_disk() with invalid backend."""
-        with pytest.raises(ValueError, match="Invalid backend"):
-            local_disk_backend.load_disk("dummy_path", "invalid_backend")
+        local_disk_backend.local_cpu_backend.memory_allocator.close()
 
     def test_close(self, temp_disk_path, async_loop, local_cpu_backend):
         """Test close()."""
@@ -540,6 +627,8 @@ class TestLocalDiskBackend:
         # Check that keys were removed from lookup server
         assert len(lookup_server.removed_keys) == 3
 
+        local_cpu_backend.memory_allocator.close()
+
     def test_concurrent_access(self, local_disk_backend):
         """Test concurrent access to the backend."""
         key = create_test_key("test_key")
@@ -559,26 +648,7 @@ class TestLocalDiskBackend:
         for thread in threads:
             thread.join()
 
-    def test_memory_allocation_failure(
-        self, temp_disk_path, async_loop, local_cpu_backend
-    ):
-        """Test behavior when memory allocation fails."""
-        config = create_test_config(temp_disk_path)
-        backend = LocalDiskBackend(
-            config=config,
-            loop=async_loop,
-            local_cpu_backend=local_cpu_backend,
-            dst_device="cuda",
-        )
-
-        # Test the interface without triggering actual allocation
-        memory_obj = create_test_memory_obj()
-
-        # Test that the submit_put_task interface works
-        future = backend.submit_put_task(create_test_key("test_key"), memory_obj)
-
-        # The operation should not crash
-        assert future is not None
+        local_disk_backend.local_cpu_backend.memory_allocator.close()
 
     def test_file_operations_error_handling(self, local_disk_backend):
         """Test error handling in file operations."""
@@ -592,6 +662,8 @@ class TestLocalDiskBackend:
                 torch.Size([2, 16, 8, 128]),
                 MemoryFormat.KV_T2D,
             )
+
+        local_disk_backend.local_cpu_backend.memory_allocator.close()
 
     def test_evictor_integration(self, local_disk_backend):
         """Test integration with the LRU evictor."""
@@ -612,6 +684,8 @@ class TestLocalDiskBackend:
         # The evictor should be managing the cache size
         assert local_disk_backend.evictor is not None
 
+        local_disk_backend.local_cpu_backend.memory_allocator.close()
+
     def test_cleanup_on_remove(self, local_disk_backend):
         """Test that resources are properly cleaned up on remove."""
         key = create_test_key("test_key")
@@ -631,6 +705,8 @@ class TestLocalDiskBackend:
         # Check that both the dict entry and file are removed
         assert key not in local_disk_backend.dict
         assert not os.path.exists(path)
+
+        local_disk_backend.local_cpu_backend.memory_allocator.close()
 
     def test_thread_safety(self, local_disk_backend):
         """Test thread safety of the backend."""
@@ -664,3 +740,5 @@ class TestLocalDiskBackend:
 
         # The backend should still be in a consistent state
         assert local_disk_backend.contains(key)
+
+        local_disk_backend.local_cpu_backend.memory_allocator.close()

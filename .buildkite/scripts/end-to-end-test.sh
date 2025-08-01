@@ -1,25 +1,5 @@
 #!/bin/bash
 
-VENV_DIR=".venv"
-PYTHON_BIN="/usr/bin/python3.10"
-if [[ -d "$VENV_DIR" ]]; then
-  echo "⟳ Using existing venv: $(pwd)/$VENV_DIR"
-else
-  echo "⚙️  Creating venv with Python 3.10 at: $(pwd)/$VENV_DIR"
-  # use uv for fast venv creation
-  uv venv --python "$PYTHON_BIN" "$VENV_DIR"
-fi
-
-source .venv/bin/activate
-uv pip install -e .
-uv pip install matplotlib
-uv pip install pandas
-uv pip install -U vllm --pre --extra-index-url https://wheels.vllm.ai/nightly
-
-# List installed packages for debugging
-echo "📦 Installed packages in venv:"
-uv pip freeze
-
 orig_dir="$(pwd)"
 cd "$LM_CACHE_TEST_DIR"
 

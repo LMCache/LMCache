@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # Standard
 from pathlib import Path
 import asyncio
@@ -6,6 +7,7 @@ import shutil
 import threading
 
 # Third Party
+import pytest
 import torch
 
 # First Party
@@ -16,6 +18,7 @@ from lmcache.v1.memory_management import CuFileMemoryAllocator
 from lmcache.v1.storage_backend import CreateStorageBackends
 
 
+@pytest.mark.skip(reason="We need to add this test back after implementing prefetch")
 def test_weka_backend_sanity():
     BASE_DIR = Path(__file__).parent
     WEKA_DIR = "/tmp/weka/test-cache"

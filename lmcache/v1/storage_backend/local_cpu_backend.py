@@ -1,17 +1,4 @@
-# Copyright 2024-2025 LMCache Authors.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
+# SPDX-License-Identifier: Apache-2.0
 # Standard
 from collections import OrderedDict
 from concurrent.futures import Future
@@ -77,6 +64,11 @@ class LocalCPUBackend(StorageBackendInterface):
         self.layerwise = config.use_layerwise
         self.enable_blending = config.enable_blending
 
+        # to help maintain suffix -> prefix order in the dict
+        # assumption: only one request is looked up at a time
+        # (only one worker per cache engine)
+        self.keys_in_request: List[CacheEngineKey] = []
+
     def __str__(self):
         return self.__class__.__name__
 
@@ -86,7 +78,16 @@ class LocalCPUBackend(StorageBackendInterface):
                 return False
             if pin:
                 self.hot_cache[key].pin()
+                # vllm lookup sets pin to True
+                self.keys_in_request.append(key)
             return True
+
+    def touch_cache(self):
+        # flip the order of the keys in the request
+        with self.cpu_lock:
+            for key in reversed(self.keys_in_request):
+                self.hot_cache.move_to_end(key)
+            self.keys_in_request = []
 
     def exists_in_put_tasks(self, key: CacheEngineKey) -> bool:
         """
@@ -114,7 +115,9 @@ class LocalCPUBackend(StorageBackendInterface):
             # push kv admit msg
             if self.lmcache_worker is not None:
                 self.lmcache_worker.put_msg(
-                    KVAdmitMsg(self.instance_id, key.worker_id, key.chunk_hash, "cpu")
+                    KVAdmitMsg(
+                        self.instance_id, key.worker_id, key.chunk_hash, str(self)
+                    )
                 )
         return None
 
@@ -141,8 +144,8 @@ class LocalCPUBackend(StorageBackendInterface):
     def submit_prefetch_task(
         self,
         key: CacheEngineKey,
-    ) -> Optional[Future]:
-        return None
+    ) -> bool:
+        return False
 
     def get_blocking(
         self,
@@ -156,7 +159,6 @@ class LocalCPUBackend(StorageBackendInterface):
             # is evicted from the local cpu backend before the caller calls
             # ref count up themselves
             memory_obj.ref_count_up()
-            self.hot_cache.move_to_end(key)
             return memory_obj
 
     def get_non_blocking(
@@ -171,7 +173,6 @@ class LocalCPUBackend(StorageBackendInterface):
                 return None
             memory_obj = self.hot_cache[key]
             memory_obj.ref_count_up()
-            self.hot_cache.move_to_end(key)
             f: Future = Future()
             f.set_result(memory_obj)
             return f
@@ -205,7 +206,9 @@ class LocalCPUBackend(StorageBackendInterface):
 
             if self.lmcache_worker is not None:
                 self.lmcache_worker.put_msg(
-                    KVEvictMsg(self.instance_id, key.worker_id, key.chunk_hash, "cpu")
+                    KVEvictMsg(
+                        self.instance_id, key.worker_id, key.chunk_hash, str(self)
+                    )
                 )
             # NOTE (Jiayi): This `return True` might not accurately reflect
             # whether the key is removed from the actual memory because
@@ -348,68 +351,6 @@ class LocalCPUBackend(StorageBackendInterface):
         if self.lookup_server is not None:
             self.lookup_server.batched_remove(evict_keys)
         return memory_objs
-
-    def write_back(self, key: CacheEngineKey, memory_obj: MemoryObj):
-        if memory_obj is None or not self.use_hot:
-            return
-
-        if memory_obj.tensor is not None and memory_obj.tensor.is_cuda:
-            self.cpu_lock.acquire()
-            if key in self.hot_cache:
-                self.cpu_lock.release()
-                return
-            self.cpu_lock.release()
-
-            # Allocate a cpu memory object
-            cpu_memory_obj = self.memory_allocator.allocate(
-                memory_obj.get_shape(),
-                memory_obj.get_dtype(),
-                fmt=memory_obj.get_memory_format(),
-            )
-
-            if cpu_memory_obj is None:
-                logger.warning("Memory allocation failed in cachegen deserializer")
-                return None
-
-            # Copy the tensor to the cpu memory object
-            assert cpu_memory_obj.tensor is not None
-            self.stream.wait_stream(torch.cuda.default_stream())
-            with torch.cuda.stream(self.stream):
-                cpu_memory_obj.tensor.copy_(memory_obj.tensor, non_blocking=True)
-            memory_obj.tensor.record_stream(self.stream)
-
-            # Update the hot cache
-            self.cpu_lock.acquire()
-            self.hot_cache[key] = cpu_memory_obj
-            cpu_memory_obj.ref_count_up()
-            self.cpu_lock.release()
-
-            # Push kv msg
-            if self.lmcache_worker is not None:
-                self.lmcache_worker.put_msg(
-                    KVAdmitMsg(self.instance_id, key.worker_id, key.chunk_hash, "cpu")
-                )
-
-            logger.debug("Updated hot cache!")
-        else:
-            self.cpu_lock.acquire()
-            if self.use_hot and key not in self.hot_cache:
-                self.hot_cache[key] = memory_obj
-                memory_obj.ref_count_up()
-                self.cpu_lock.release()
-
-                # Push kv msg
-                if self.lmcache_worker is not None:
-                    self.lmcache_worker.put_msg(
-                        KVAdmitMsg(
-                            self.instance_id,
-                            key.worker_id,
-                            key.chunk_hash,
-                            "cpu",
-                        )
-                    )
-            else:
-                self.cpu_lock.release()
 
     def get_keys(self) -> List[CacheEngineKey]:
         """

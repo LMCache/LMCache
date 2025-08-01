@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # Standard
 from pathlib import Path
 import asyncio
@@ -66,6 +67,8 @@ def test_lm_connector(url, autorelease_v1, lmserver_v1_process):
 
     close_asyncio_loop(async_loop, async_thread)
 
+    memory_allocator.close()
+
 
 @pytest.mark.parametrize("lmserver_v1_process", ["cpu"], indirect=True)
 def test_fs_connector(lmserver_v1_process, autorelease_v1):
@@ -122,6 +125,8 @@ def test_fs_connector(lmserver_v1_process, autorelease_v1):
         assert files[0].name == f"{random_key.to_string()}.data"
 
         close_asyncio_loop(async_loop, async_thread)
+
+        memory_allocator.close()
 
 
 @pytest.mark.parametrize(
@@ -184,6 +189,8 @@ def test_redis_connector(url, autorelease_v1):
 
     close_asyncio_loop(async_loop, async_thread)
 
+    memory_allocator.close()
+
 
 @pytest.mark.parametrize(
     "url",
@@ -243,3 +250,5 @@ def test_redis_sentinel_connector(url, autorelease_v1):
     future.result()
 
     close_asyncio_loop(async_loop, async_thread)
+
+    memory_allocator.close()

@@ -1,7 +1,7 @@
 buildkite-test-collector
-pytest>=7.0
+pytest>=7.0,<8.2  # avoid some plugins breaking in 8.x
 pytest-benchmark
 pytest-benchmark[histogram]
 pytest-cov
-pytest-html
-
+pytest-html>=3.2,<4.0  # 4.x requires external assets; 3.2 is stable
+jinja2<3.1     
