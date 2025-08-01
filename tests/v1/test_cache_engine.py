@@ -39,7 +39,7 @@ from lmcache.v1.memory_management import (
 # that cannot be registered (which happens quicker on some machines,
 # especially when torch is doing many allocations and frees)
 @pytest.fixture(autouse=True, scope="module")
-def patch_mixed_allocator():
+def patch_mixed_allocator(has_npu):
     def fake_mixed_init(self, size: int, use_paging: bool = False, **kwargs):
         """
         :param int size: The size of the pinned memory in bytes.
@@ -81,6 +81,11 @@ def patch_mixed_allocator():
             # torch.cuda.cudart().cudaHostUnregister(self.buffer.data_ptr())
             self._unregistered = True
 
+    if has_npu:
+        # Ascend NPU requires Host Registered Buffer
+        yield
+        return
+
     with (
         patch(
             "lmcache.v1.memory_management.MixedMemoryAllocator.__init__",
@@ -94,7 +99,7 @@ def patch_mixed_allocator():
 
 
 @pytest.fixture(autouse=True, scope="module")
-def patch_pin_allocator():
+def patch_pin_allocator(has_npu):
     def fake_pin_init(self, size: int, use_paging: bool = False, **kwargs):
         """
         :param int size: The size of the pinned memory in bytes.
@@ -133,6 +138,11 @@ def patch_pin_allocator():
             torch.cuda.synchronize()
             torch.cuda.cudart().cudaHostUnregister(self.buffer.data_ptr())
             self._unregistered = True
+
+    if has_npu:
+        # Ascend NPU requires Host Registered Buffer
+        yield
+        return
 
     with (
         patch(
