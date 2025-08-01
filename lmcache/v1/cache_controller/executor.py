@@ -2,6 +2,7 @@
 # Standard
 from typing import Union
 import asyncio
+import uuid
 
 # Third Party
 import msgspec
@@ -17,6 +18,7 @@ from lmcache.v1.cache_controller.message import (  # noqa: E501
     ClearWorkerMsg,
     CompressMsg,
     CompressRetMsg,
+    CompressWorkerMsg,
     ErrorMsg,
     HealthMsg,
     HealthRetMsg,
@@ -70,8 +72,13 @@ class LMCacheClusterExecutor:
                     )
                 )
             sockets.append(socket)
+
+            # TODO(Jiayi): Need a way to trak event_id -> worker_event_id mapping
+            # Also, we need to track worker_event_id status
+            worker_event_id = f"Worker{worker_id}{msg.event_id}"
             serialized_msg = msgspec.msgpack.encode(
                 ClearWorkerMsg(
+                    worker_event_id=worker_event_id,
                     tokens=tokens,
                 )
             )
@@ -86,58 +93,144 @@ class LMCacheClusterExecutor:
             result = msgspec.msgpack.decode(serialized_result, type=Msg)
             if success:
                 success = result.success
-        return ClearRetMsg(success=success)
+        return ClearRetMsg(event_id=msg.event_id, success=success)
 
     async def pin(self, msg: PinMsg) -> Union[PinRetMsg, ErrorMsg]:
         raise NotImplementedError
 
     async def compress(self, msg: CompressMsg) -> Union[CompressRetMsg, ErrorMsg]:
-        raise NotImplementedError
-
-    async def move(self, msg: MoveMsg) -> Union[MoveRetMsg, ErrorMsg]:
         """
-        Execute a move cache operation with error handling.
+        Execute a compress operation with error handling.
         """
+        event_id = msg.event_id
+        instance_id = msg.instance_id
+        method = msg.method
+        location = msg.location
+        tokens = msg.tokens
 
-        # NOTE(Jiayi): Currently we assume the transfer is push-based.
-        src_instance_id = msg.old_position[0]
-
-        worker_ids = self.reg_controller.get_workers(src_instance_id)
+        worker_ids = self.reg_controller.get_workers(instance_id)
         assert worker_ids is not None
+
+        # TODO(Jiayi): Currently, we do not support PP or heterogeneous TP.
+        # NOTE(Jiayi): The TP ranks are already sorted in registration_controller.
+
         sockets = []
         serialized_msgs = []
         for worker_id in worker_ids:
-            socket = self.reg_controller.get_socket(src_instance_id, worker_id)
+            socket = self.reg_controller.get_socket(instance_id, worker_id)
+
             if socket is None:
                 return ErrorMsg(
                     error=(
                         f"Worker {worker_id} not registered for "
-                        "instance {src_instance_id}"
+                        f"instance {instance_id} or "
                     )
                 )
             sockets.append(socket)
+
+            worker_event_id = f"CompressWorker{worker_id}{str(uuid.uuid4())}"
             serialized_msg = msgspec.msgpack.encode(
-                MoveWorkerMsg(
-                    old_position=msg.old_position,
-                    new_position=msg.new_position,
-                    tokens=msg.tokens,
+                CompressWorkerMsg(
+                    worker_event_id=worker_event_id,
+                    method=method,
+                    location=location,
+                    tokens=tokens,
                 )
             )
             serialized_msgs.append(serialized_msg)
             logger.debug(
-                f"Sending move operation to worker ({src_instance_id}, {worker_id})"
+                f"Sending compress operation to worker ({instance_id}, {worker_id})"
             )
         serialized_results = await self.execute_workers(
             sockets=sockets,
             serialized_msgs=serialized_msgs,
         )
 
-        event_ids = []
-        for i, serialized_result in enumerate(serialized_results):
+        num_tokens_list = []
+        for serialized_result in serialized_results:
             result = msgspec.msgpack.decode(serialized_result, type=Msg)
-            event_ids.append(result.worker_event_id)
+            num_tokens_list.append(result.num_tokens)
 
-        return MoveRetMsg(event_ids=event_ids)
+        # TODO(Jiayi): Need to ensure cache consistency across workers.
+        assert len(set(num_tokens_list)) == 1, (
+            "The number of tokens moved should be the same across all workers."
+        )
+
+        return CompressRetMsg(
+            event_id=event_id,
+            num_tokens=num_tokens_list[0],
+        )
+
+    async def move(self, msg: MoveMsg) -> Union[MoveRetMsg, ErrorMsg]:
+        """
+        Execute a move cache operation with error handling.
+        """
+        # NOTE(Jiayi): Currently we assume the transfer is push-based.
+        src_instance_id = msg.old_position[0]
+        dst_instance_id = msg.new_position[0]
+
+        src_worker_ids = self.reg_controller.get_workers(src_instance_id)
+        assert src_worker_ids is not None
+        dst_worker_ids = self.reg_controller.get_workers(dst_instance_id)
+        assert dst_worker_ids is not None
+
+        # TODO(Jiayi): Currently, we do not support PP or heterogeneous TP.
+        # NOTE(Jiayi): The TP ranks are already sorted in registration_controller.
+
+        sockets = []
+        serialized_msgs = []
+        for src_worker_id, dst_worker_id in zip(
+            src_worker_ids, dst_worker_ids, strict=False
+        ):
+            socket = self.reg_controller.get_socket(src_instance_id, src_worker_id)
+            dst_url = self.reg_controller.get_distributed_url(
+                dst_instance_id, dst_worker_id
+            )
+
+            if socket is None or dst_url is None:
+                return ErrorMsg(
+                    error=(
+                        f"Src worker {src_worker_id} not registered for "
+                        f"instance {src_instance_id} or "
+                        f"dst worker {dst_worker_id} not registered for "
+                        f"instance {dst_instance_id}"
+                    )
+                )
+            sockets.append(socket)
+
+            worker_event_id = f"MoveWorker{src_worker_id}{str(uuid.uuid4())}"
+            serialized_msg = msgspec.msgpack.encode(
+                MoveWorkerMsg(
+                    worker_event_id=worker_event_id,
+                    old_position=msg.old_position[1],
+                    new_position=(dst_url, msg.new_position[1]),
+                    tokens=msg.tokens,
+                    copy=msg.copy,
+                )
+            )
+            serialized_msgs.append(serialized_msg)
+            logger.debug(
+                f"Sending move operation to worker ({src_instance_id}, {src_worker_id})"
+            )
+        serialized_results = await self.execute_workers(
+            sockets=sockets,
+            serialized_msgs=serialized_msgs,
+        )
+
+        num_tokens_list = []
+        for serialized_result in serialized_results:
+            result = msgspec.msgpack.decode(serialized_result, type=Msg)
+            num_tokens_list.append(result.num_tokens)
+
+        # TODO(Jiayi): Need to ensure cache consistency across workers.
+        assert len(set(num_tokens_list)) == 1, (
+            "The number of tokens moved should be the same across all workers."
+        )
+
+        return MoveRetMsg(
+            event_id=msg.event_id,
+            num_tokens=num_tokens_list[0],
+        )
 
     async def health(self, msg: HealthMsg) -> Union[HealthRetMsg, ErrorMsg]:
         raise NotImplementedError

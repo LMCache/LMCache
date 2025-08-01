@@ -101,7 +101,9 @@ class LocalCPUBackend(StorageBackendInterface):
             # push kv admit msg
             if self.lmcache_worker is not None:
                 self.lmcache_worker.put_msg(
-                    KVAdmitMsg(self.instance_id, key.worker_id, key.chunk_hash, "cpu")
+                    KVAdmitMsg(
+                        self.instance_id, key.worker_id, key.chunk_hash, str(self)
+                    )
                 )
         return None
 
@@ -192,7 +194,9 @@ class LocalCPUBackend(StorageBackendInterface):
 
             if self.lmcache_worker is not None:
                 self.lmcache_worker.put_msg(
-                    KVEvictMsg(self.instance_id, key.worker_id, key.chunk_hash, "cpu")
+                    KVEvictMsg(
+                        self.instance_id, key.worker_id, key.chunk_hash, str(self)
+                    )
                 )
             # NOTE (Jiayi): This `return True` might not accurately reflect
             # whether the key is removed from the actual memory because
