@@ -21,6 +21,8 @@ from lmcache.v1.cache_controller.message import (
     MoveWorkerMsg,
     MoveWorkerRetMsg,
     Msg,
+    PinWorkerMsg,
+    PinWorkerRetMsg,
     RegisterMsg,
     WorkerMsg,
 )
@@ -184,13 +186,7 @@ class LMCacheWorker:
                 serialized_request = await self.reply_socket.recv()
                 request = msgspec.msgpack.decode(serialized_request, type=Msg)
                 logger.debug(f"Received message: {request}")
-                if isinstance(request, ClearWorkerMsg):
-                    tokens = request.tokens
-                    result = self.lmcache_engine.clear(tokens)
-                    serialized_ret_msg = msgspec.msgpack.encode(
-                        ClearWorkerRetMsg(success=result > 0)
-                    )
-                elif isinstance(request, MoveWorkerMsg):
+                if isinstance(request, MoveWorkerMsg):
                     tokens = request.tokens
                     old_position = request.old_position
                     new_position = request.new_position
@@ -207,7 +203,8 @@ class LMCacheWorker:
 
                         # TODO(Jiayi): We need to align prefetch and move.
                         logger.debug("Executing prefetch operation.")
-                        result = self.lmcache_engine.prefetch(tokens)
+                        self.lmcache_engine.prefetch(tokens)
+                        num_tokens = 0
                     else:
                         assert self.lmcache_engine.distributed_server is not None
                         logger.debug("Executing cross-node move operation.")
@@ -234,6 +231,23 @@ class LMCacheWorker:
                     )
                     serialized_ret_msg = msgspec.msgpack.encode(
                         CompressWorkerRetMsg(num_tokens=num_compressed_tokens)
+                    )
+                elif isinstance(request, PinWorkerMsg):
+                    num_pinned_tokens = self.lmcache_engine.lookup(
+                        tokens=request.tokens,
+                        search_range=[request.location],
+                        request_id=request.worker_event_id,
+                        pin=True,
+                    )
+                    serialized_ret_msg = msgspec.msgpack.encode(
+                        PinWorkerRetMsg(num_tokens=num_pinned_tokens)
+                    )
+                elif isinstance(request, ClearWorkerMsg):
+                    num_cleared_tokens = self.lmcache_engine.clear(
+                        locations=[request.location],
+                    )
+                    serialized_ret_msg = msgspec.msgpack.encode(
+                        ClearWorkerRetMsg(num_tokens=num_cleared_tokens)
                     )
                 else:
                     logger.error(f"Unknown message: {request}")

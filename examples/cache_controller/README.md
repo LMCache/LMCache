@@ -4,6 +4,7 @@ LMCache offers various ochestration APIs which can be used for routing (e.g., KV
 
 Here are a few examples:
 
+- [KV cache clear](clear/)
 - [KV cache compress](compress/)
 - [KV cache lookup](lookup/)
 - [KV cache move](move/)

@@ -366,20 +366,23 @@ class LocalCPUBackend(StorageBackendInterface):
         if not self.use_hot:
             return 0
         clear_keys = []
+        num_cleared_tokens = 0
         with self.cpu_lock:
             for key in self.hot_cache:
                 memory_obj = self.hot_cache[key]
                 if memory_obj.get_ref_count() > 1:
                     continue
                 clear_keys.append(key)
+                num_cleared_tokens += memory_obj.get_num_tokens()
 
-        for key in clear_keys:
-            self.remove(key)
+        # TODO(Jiayi): might not be accurate if we don't calculate
+        # `num_cleared_token` and remove the keys in an atomic way.
+        self.batched_remove(clear_keys)
 
         if self.lookup_server is not None:
             self.lookup_server.batched_remove(clear_keys)
 
-        return len(clear_keys)
+        return num_cleared_tokens
 
     def close(self) -> None:
         self.clear()

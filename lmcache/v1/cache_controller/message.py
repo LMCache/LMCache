@@ -100,22 +100,21 @@ class ClearWorkerMsg(ControlMsg):
     """Clear message for a single lmcache worker"""
 
     worker_event_id: str
-    locations: Optional[list[str]] = None
-    tokens: Optional[list[int]] = None
+    location: str
 
     def describe(self) -> str:
-        return f"Clear tokens {self.tokens} in locations {self.locations}"
+        return f"Clear tokens {self.tokens} in location {self.location}"
 
 
 class PinWorkerMsg(ControlMsg):
     """Pin message for a single lmcache worker"""
 
     worker_event_id: str
-    locations: Optional[list[str]] = None
-    tokens: Optional[list[int]] = None
+    location: str
+    tokens: list[int]
 
     def describe(self) -> str:
-        return f"Pin tokens {self.tokens} in locations {self.locations}"
+        return f"Pin tokens {self.tokens} in location {self.location}"
 
 
 class CompressWorkerMsg(ControlMsg):
@@ -177,19 +176,19 @@ class ControlRetMsg(MsgBase):
 class ClearWorkerRetMsg(ControlRetMsg):
     """Return message for a ClearWorkerMsg"""
 
-    success: bool
+    num_tokens: int
 
     def describe(self) -> str:
-        return f"Clear success: {self.success}"
+        return f"Number of cleared tokens: {self.num_tokens}"
 
 
 class PinWorkerRetMsg(ControlRetMsg):
     """Pin return message for a single lmcache worker"""
 
-    success: bool
+    num_tokens: int
 
     def describe(self) -> str:
-        return f"Pin success: {self.success}"
+        return f"Number of pinned tokens: {self.num_tokens}"
 
 
 class CompressWorkerRetMsg(ControlRetMsg):
@@ -263,14 +262,11 @@ class ClearMsg(OrchMsg):
 
     event_id: str
     instance_id: str
-    locations: Optional[list[str]] = None
-    tokens: Optional[list[int]] = None
+    location: str
 
     def describe(self) -> str:
         return (
-            f"Clear tokens {self.tokens} in instance "
-            f"{self.instance_id} and "
-            f"locations {self.locations}"
+            f"Clear tokens in instance {self.instance_id} and locations {self.location}"
         )
 
 
@@ -279,14 +275,14 @@ class PinMsg(OrchMsg):
 
     event_id: str
     instance_id: str
-    locations: Optional[list[str]] = None
-    tokens: Optional[list[int]] = None
+    location: str
+    tokens: list[int]
 
     def describe(self) -> str:
         return (
             f"Pin tokens {self.tokens} in instance "
             f"{self.instance_id} and "
-            f"locations {self.locations}"
+            f"location {self.location}"
         )
 
 
@@ -372,20 +368,20 @@ class ClearRetMsg(OrchRetMsg):
     """Clear return message"""
 
     event_id: str
-    success: bool
+    num_tokens: int
 
     def describe(self) -> str:
-        return f"Clear success: {self.success}"
+        return f"Number of cleared tokens: {self.num_tokens}"
 
 
 class PinRetMsg(OrchRetMsg):
     """Pin return message"""
 
     event_id: str
-    success: bool
+    num_tokens: int
 
     def describe(self) -> str:
-        return f"Pin success: {self.success}"
+        return f"Number of pinned tokens: {self.num_tokens}"
 
 
 class CompressRetMsg(OrchRetMsg):
