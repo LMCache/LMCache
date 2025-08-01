@@ -160,6 +160,7 @@ run_proxy = True  # Shutdown flag
 
 
 async def zmq_pull_server():
+    global counter
     socket = zmq_ctx.socket(zmq.PULL)
     proxy_url = f"{global_args.proxy_host}:{global_args.proxy_port}"
     socket.bind(f"tcp://{proxy_url}")
@@ -171,7 +172,7 @@ async def zmq_pull_server():
             msg = msgspec.msgpack.decode(msg_bytes, type=NixlMsg)
             req_id = msg.req_id
             app.state.finished_reqs.add(req_id)
-            logger.debug(f"Prefill of req {req_id} done.")
+            logger.info(f"Prefill of req {req_id} done. Global counter is {counter}")
         except zmq.Again:
             await asyncio.sleep(0.01)  # Avoid busy loop
         except Exception as e:
@@ -221,9 +222,14 @@ async def wait_decode_kv_ready(req_id: str):
     app.state.finished_reqs.remove(req_id)
 
 
+num_requests = 0
+
+
 @app.post("/v1/completions")
 async def handle_completions(request: Request):
-    global counter, stats_calculator
+    global counter, stats_calculator, num_requests
+    num_requests += 1
+    logger.info(f"DEBUG: the {num_requests}'th request is received")
     counter += 1
     req_id = str(counter)  # we use counter as req_id
 
@@ -264,6 +270,9 @@ async def handle_completions(request: Request):
         prefill_client = round_robin_pick_client(app.state.prefill_clients, counter)
         prefill_output = await send_request_to_service(
             prefill_client.client, "/v1/completions", req_data
+        )
+        logger.info(
+            f"DEBUG: the {num_requests}'th request is sent to the prefill service and the response is received"
         )
 
         prefill_output = prefill_output.json()

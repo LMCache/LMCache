@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from queue import Queue
 from typing import TYPE_CHECKING, Any, Optional, Union
 import copy
+import math
 import threading
 import time
 import uuid
@@ -28,6 +29,7 @@ from lmcache.v1.memory_management import (
 )
 from lmcache.v1.storage_backend.abstract_backend import StorageBackendInterface
 from lmcache.v1.storage_backend.connector.nixl_utils import NixlConfigXpYd, NixlRole
+from lmcache.v1.storage_backend.storage_manager import StorageManager
 
 if TYPE_CHECKING:
     # Third Party
@@ -50,6 +52,7 @@ class NixlAllocRequest(NixlMsgBase):
     shape: list[int]  # The shape of the memory objects
     dtype: str
     last_chunk_toks: int
+    is_last_prefill: bool
 
 
 class NixlAllocResponse(NixlMsgBase):
@@ -105,6 +108,7 @@ class NixlReceiverInfo:
 class NixlSenderTask:
     req_id: str
     receiver_info: NixlReceiverInfo
+    is_last_prefill: bool
     keys: list[CacheEngineKey]  # The keys to send
     mem_objs: list[MemoryObj]  # The memory objects to send
 
@@ -135,6 +139,7 @@ class NixlSenderTask:
             shape=list(shape),
             dtype=dtype,
             last_chunk_toks=last_chunk_toks,
+            is_last_prefill=self.is_last_prefill,
         )
 
     # TODO (Jiayi): reduce for loop
@@ -230,8 +235,11 @@ class NixlSender:
             receiver_info.receiver_init_port
         )
 
+        is_last_prefill = transfer_spec.is_last_prefill
+
         sender_task = NixlSenderTask(
             req_id=transfer_spec.req_id,
+            is_last_prefill=is_last_prefill,
             receiver_info=receiver_info,
             keys=keys,
             mem_objs=mem_objs,
@@ -475,10 +483,12 @@ class NixlReceiver:
         config: LMCacheEngineConfig,
         backend: StorageBackendInterface,
         tp_rank: int,
+        storage_manager: Optional["StorageManager"] = None,
     ):
         assert nixl_config.role == NixlRole.RECEIVER, (
             "NixlReceiver should only be initialized with NixlRole.RECEIVER"
         )
+        self.i = 1
 
         self._backend = backend
         self.memory_allocator = backend.memory_allocator
@@ -537,17 +547,71 @@ class NixlReceiver:
         self._init_thread.start()
         self._running_threads.append(self._init_thread)
 
+        # The decoder should continuously offload chunked prefill memory objects to cpu
+        # from the nixl buffer
+        self.storage_manager = storage_manager
+
+        # A list of (cek, mem_obj) tuples that are in the nixl buffer from the previous step
+        # This allows us to continuously offload from the nixl buffer to cpu during chunked prefill
+        self.prev_step_chunks: list[tuple[CacheEngineKey, MemoryObj]] = []
+        self.offload_stream = torch.cuda.Stream()
+
     def _allocate_and_put(self, alloc_request: NixlAllocRequest) -> NixlAllocResponse:
         total_allocs = len(alloc_request.keys)
         fmt = MemoryFormat(alloc_request.fmt)
         dtype = STR_DTYPE_TO_TORCH_DTYPE[alloc_request.dtype]
         shape = alloc_request.shape
+        is_last_prefill = alloc_request.is_last_prefill
 
+        total_size_in_bytes = (
+            total_allocs
+            * math.prod(shape)
+            * torch.empty((), dtype=dtype).element_size()
+        )
+        logger.info(
+            f"DEBUG: _allocate_and_put() called for the {self.i}'th time on len(alloc_request.keys) = {total_allocs} with total_size_in_bytes = {total_size_in_bytes}"
+        )
+        self.memory_allocator.nixl_allocator.memcheck()
+        self.i += 1
+        if total_size_in_bytes > self.memory_allocator.nixl_allocator.buffer_size:
+            raise RuntimeError(
+                f"Not enough memory in Nixl Buffer to allocate {total_size_in_bytes} bytes in a single step for the decoder"
+            )
+
+        # offload all the nixl buffer memory objects to cpu from the previous step
+        if hasattr(self.memory_allocator, "cpu_allocator"):
+            cpu_keys = []
+            cpu_memory_objs = []
+            # TODO(apostaB): Optimize this with batched_allocate
+            for cek, mem_obj in self.prev_step_chunks:
+                cpu_memory_object = self.memory_allocator.allocate(
+                    mem_obj.meta.shape,
+                    mem_obj.meta.dtype,
+                    mem_obj.meta.fmt,
+                    allocator_type="cpu",
+                )
+                with torch.cuda.stream(self.offload_stream):
+                    cpu_memory_object.tensor.copy_(mem_obj.tensor, non_blocking=True)
+                    cpu_keys.append(cek)
+                    cpu_memory_objs.append(cpu_memory_object)
+                    # TODO(apostaB): need to pin the cpu memory object and unpin it when the prefill is done
+                    mem_obj.ref_count_down()
+                    if self._backend.contains(cek):
+                        mem_obj.unpin()
+
+            self.offload_stream.synchronize()
+
+            for backend_name, backend in self.storage_manager.storage_backends.items():
+                if backend_name == "NixlBackend":
+                    continue
+                backend.batched_submit_put_task(cpu_keys, cpu_memory_objs)
+
+        self.prev_step_chunks = []
         alloc_indexes = []
         already_send_indexes = []
-
         for idx, key in enumerate(alloc_request.keys):
-            if self._backend.contains(key, pin=True):
+            if self._backend.contains(key, pin=True, i=self.i - 1):
+                self.prev_step_chunks.append((key, self._backend.get(key)))
                 already_send_indexes.append(idx)
                 continue
 
@@ -565,16 +629,27 @@ class NixlReceiver:
             decay = 1.1
             while mem_obj is None:
                 logger.warning(
-                    "Failed to allocate memory object, retrying...",
+                    f"Failed to allocate memory object of size {math.prod(shape) * torch.empty((), dtype=dtype).element_size()} bytes, retrying...",
                 )
                 time.sleep(wait_time)
                 wait_time /= decay
                 mem_obj = self._backend.allocate(torch.Size(shape), dtype, fmt)
+                self.memory_allocator.nixl_allocator.memcheck()
+                time.sleep(1)
 
             alloc_indexes.append(mem_obj.meta.address)
+            cek = CacheEngineKey.from_string(key)
+            self.prev_step_chunks.append((cek, mem_obj))
 
-            self._backend.put(CacheEngineKey.from_string(key), mem_obj)
+            self._backend.put(cek, mem_obj)
 
+        if is_last_prefill:
+            # the chunks in the nixl buffer will be cleared after prefill is done and decode begins
+            self.prev_step_chunks = []
+
+        logger.info(
+            f"DEBUG: the {self.i}'th time of _allocate_and_put() is done and returning the NixlAllocResponse"
+        )
         return NixlAllocResponse(
             already_sent_indexes=already_send_indexes, remote_indexes=alloc_indexes
         )
@@ -696,6 +771,7 @@ class NixlChannel:
         nixl_config: NixlConfigXpYd,
         config: LMCacheEngineConfig,
         backend: StorageBackendInterface,
+        storage_manager: Optional["StorageManager"] = None,
     ):
         self.nixl_config = nixl_config
         self.role = nixl_config.role
@@ -716,7 +792,9 @@ class NixlChannel:
         if nixl_config.role == NixlRole.SENDER:
             self._sender = NixlSender(nixl_config, config, backend, tp_rank)
         else:
-            self._receiver = NixlReceiver(nixl_config, config, backend, tp_rank)
+            self._receiver = NixlReceiver(
+                nixl_config, config, backend, tp_rank, storage_manager
+            )
 
     def _check_sender(self):
         """Check if this channel is configured as a sender."""

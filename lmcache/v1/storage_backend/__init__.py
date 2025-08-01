@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from collections import OrderedDict
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional
 import asyncio
 
 # Third Party
@@ -35,6 +35,7 @@ def CreateStorageBackends(
     dst_device: str = "cuda",
     lmcache_worker: Optional["LMCacheWorker"] = None,
     lookup_server: Optional[LookupServerInterface] = None,
+    storage_manager: Any = None,  # noqa: E501
 ) -> OrderedDict[str, StorageBackendInterface]:
     # Replace 'cuda' with 'cuda:<device id>'
     if dst_device == "cuda":
@@ -48,7 +49,7 @@ def CreateStorageBackends(
             from lmcache.v1.storage_backend.nixl_backend_v3 import NixlBackend
 
             storage_backends["NixlBackend"] = NixlBackend.CreateNixlBackend(
-                config, metadata, memory_allocator
+                config, metadata, memory_allocator, storage_manager=storage_manager
             )
         else:
             # First Party

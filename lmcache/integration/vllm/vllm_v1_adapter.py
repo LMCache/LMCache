@@ -338,7 +338,6 @@ class LMCacheConnectorV1Impl:
                 vllm_config, config
             )
             self._unfinished_requests: dict[str, Request] = {}
-            self._lookup_requests_in_step: list[str] = []
         else:
             self.lmcache_engine = init_lmcache_engine(
                 vllm_config.model_config,
@@ -368,6 +367,9 @@ class LMCacheConnectorV1Impl:
                 vllm_config,
                 get_tensor_model_parallel_rank(),
             )
+
+        # used by both scheduler and worker
+        self._lookup_requests_in_step: list[str] = []
 
         self.kv_caches: dict[str, torch.Tensor] = {}
 
@@ -519,8 +521,7 @@ class LMCacheConnectorV1Impl:
                         num_retrieved_tokens,
                         num_expected_tokens,
                     )
-
-        self.lmcache_engine.lookup_unpin(metadata.lookup_requests_in_step)
+        self._lookup_requests_in_step = metadata.lookup_requests_in_step
 
     @_lmcache_nvtx_annotate
     def wait_for_layer_load(self, layer_name: str) -> None:
@@ -650,6 +651,14 @@ class LMCacheConnectorV1Impl:
     @_lmcache_nvtx_annotate
     def wait_for_save(self):
         """Blocking until the KV cache is saved to the connector buffer."""
+
+        # `vllm/v1/worker/gpu_model_runner.py`
+        # `def execute_model()` always invokes wait_for_save()
+        # so we avoid mem leaks and calling `lookup_unpin()`
+        # here guarantees layerwise retrieval finishes first
+        logger.info("\n\n\nDEBUG: wait_for_save() calling lookup_unpin()")
+        self.lmcache_engine.lookup_unpin(self._lookup_requests_in_step)
+
         if self.kv_role == "kv_consumer":
             # Don't do save if the role is kv_consumer
             return

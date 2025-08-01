@@ -3,6 +3,7 @@
 from concurrent.futures import Future
 from typing import List, Optional
 import threading
+import time
 
 # Third Party
 import torch
@@ -22,6 +23,7 @@ from lmcache.v1.storage_backend.connector.nixl_connector_v3 import (
     NixlChannel,
 )
 from lmcache.v1.storage_backend.connector.nixl_utils import NixlConfigXpYd, NixlRole
+from lmcache.v1.storage_backend.storage_manager import StorageManager
 
 logger = init_logger(__name__)
 
@@ -42,6 +44,7 @@ class NixlBackend(StorageBackendInterface):
         nixl_config: NixlConfigXpYd,
         config: LMCacheEngineConfig,
         memory_allocator: MemoryAllocatorInterface,
+        storage_manager: Optional["StorageManager"] = None,
     ):
         """
         Initialize the Nixl storage backend.
@@ -62,12 +65,18 @@ class NixlBackend(StorageBackendInterface):
             NixlRole.RECEIVER,
         ], "Nixl role must be either SENDER or RECEIVER."
 
+        self.storage_manager = storage_manager
         self.memory_allocator = memory_allocator
 
-        self._nixl_channel = NixlChannel(nixl_config, config, self)
+        # since contains and put is not called from the cache engine,
+        # we need to separately handle pin and unpin logic
+        self.lookup_pins: list[CacheEngineKey] = []
 
-    # TODO(Jiayi): handle `pin` smantics
-    def contains(self, key: CacheEngineKey, pin: bool = False) -> bool:
+        self._nixl_channel = NixlChannel(nixl_config, config, self, storage_manager)
+
+    def contains(
+        self, key: CacheEngineKey, pin: bool = False, i: Optional[int] = None
+    ) -> bool:
         """
         Check whether key is in the storage backend.
 
@@ -76,10 +85,19 @@ class NixlBackend(StorageBackendInterface):
 
         :return: True if the key exists, False otherwise
         """
+        logger.info(
+            f"DEBUG: nixl_backend.contains() called during the {i}'th time of _allocate_and_put()"
+        )
         with self._data_lock:
             if mem_obj := self._data.get(key, None):
                 if pin:
-                    mem_obj.ref_count_up()
+                    logger.info("DEBUG: nixl_backend.contains() calling mem_obj.pin()")
+                    if i:
+                        logger.info(
+                            f"this call belongs to the {i}'th time of _allocate_and_put()"
+                        )
+                    mem_obj.pin()
+                    self.lookup_pins.append(key)
                 return True
             return False
 
@@ -192,8 +210,10 @@ class NixlBackend(StorageBackendInterface):
         """
         with self._data_lock:
             if mem_obj := self._data.get(key, None):
-                if mem_obj.get_ref_count() == 1:
-                    del self._data[key]
+                del self._data[key]
+                while mem_obj.get_ref_count() > 0:
+                    mem_obj.ref_count_down()
+                    time.sleep(0.1)
                 return True
             return False
 
@@ -209,12 +229,30 @@ class NixlBackend(StorageBackendInterface):
     def unpin(self, key: CacheEngineKey) -> bool:
         return True
 
+    def lookup_unpin(self) -> None:
+        """
+        Control Flow:
+        1. vllm gpu model runner finishes forward execution,
+            including potential retrieval from lmcache so we
+            can safely unpin
+        2. calls `vllm_v1_adapter.py` `wait_for_save()`
+        3. calls `lmcache_engine.lookup_unpin()`
+        4. calls `storage_manager.batched_unpin()`
+        5. calls `nixl_backend.lookup_unpin()`
+        """
+        logger.info("DEBUG: nixl_backend.lookup_unpin() calling unpin()")
+        for key in self.lookup_pins:
+            if key in self._data:
+                self._data[key].unpin()
+        self.lookup_pins = []
+
     # TODO (Jiayi): put this in _init__.py later
     @staticmethod
     def CreateNixlBackend(
         config: LMCacheEngineConfig,
         metadata: LMCacheEngineMetadata,
         memory_allocator: MemoryAllocatorInterface,
+        storage_manager: Optional["StorageManager"] = None,
     ) -> "NixlBackend":
         """
         Create a Nixl backend with the given configuration.
@@ -227,5 +265,5 @@ class NixlBackend(StorageBackendInterface):
         # Create the Nixl config
         nixl_config = NixlConfigXpYd.from_cache_engine_config(config, metadata)
         # Create the Nixl backend
-        backend = NixlBackend(nixl_config, config, memory_allocator)
+        backend = NixlBackend(nixl_config, config, memory_allocator, storage_manager)
         return backend

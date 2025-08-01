@@ -65,6 +65,7 @@ class StorageManager:
                 dst_device,
                 lmcache_worker,
                 lookup_server,
+                storage_manager=self,
             )
         )
 
@@ -411,6 +412,10 @@ class StorageManager:
         """
         for backend_name, backend in self.storage_backends.items():
             if locations is None or backend_name in locations:
+                if backend_name == "NixlBackend":
+                    # Nixl backend internally remembers keys per vllm step
+                    # we only call batched_unpin() on nixl in this context
+                    backend.lookup_unpin()
                 for key in keys:
                     backend.unpin(key)
 
