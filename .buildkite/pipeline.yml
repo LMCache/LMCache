@@ -16,7 +16,7 @@ steps:
       uv pip install -e .
       uv pip freeze
 
-      source .buildkite/scripts/pick-free-gpu.sh 12000
+      source .buildkite/scripts/pick-free-gpu.sh 18000
 
       CUDA_LAUNCH_BLOCKING=1 \
       LMCACHE_TRACK_USAGE="false" \
