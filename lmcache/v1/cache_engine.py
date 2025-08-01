@@ -703,13 +703,7 @@ class LMCacheEngine:
                         if self.lookup_server.lookup(key):
                             prev_end = end
                             continue
-
-                        if search_p2p:
-                            assert self.lookup_server is not None
-                            if self.lookup_server.lookup(key):
-                                prev_end = end
-                                continue
-                        return prev_end
+                    return prev_end
 
             # all tokens where found, return the maximal end
             return end
