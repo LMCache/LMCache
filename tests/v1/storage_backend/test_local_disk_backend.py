@@ -84,10 +84,11 @@ def async_loop():
 
 
 @pytest.fixture
-def local_cpu_backend():
+def local_cpu_backend(has_npu):
     """Create a LocalCPUBackend for testing."""
+    device = "npu" if has_npu else "cuda"
     config = LMCacheEngineConfig.from_legacy(chunk_size=256)
-    memory_allocator = MixedMemoryAllocator(1024 * 1024 * 1024)  # 1GB
+    memory_allocator = MixedMemoryAllocator(1024 * 1024 * 1024, device=device)  # 1GB
     return LocalCPUBackend(config, memory_allocator)
 
 
