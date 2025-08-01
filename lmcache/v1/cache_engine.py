@@ -711,8 +711,8 @@ class LMCacheEngine:
                                 continue
                         return prev_end
 
-                # all tokens where found, return the maximal end
-                return end
+            # all tokens where found, return the maximal end
+            return end
         finally:
             # vllm lookup sets pin to True
             if pin:
