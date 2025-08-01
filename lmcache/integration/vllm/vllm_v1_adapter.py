@@ -333,7 +333,9 @@ class LMCacheConnectorV1Impl:
         self.layerwise_retrievers = []
         if role == KVConnectorRole.SCHEDULER:
             # Create lookup client using factory
-            self.lookup_client = LookupClientFactory.create_lookup_client(vllm_config)
+            self.lookup_client = LookupClientFactory.create_lookup_client(
+                vllm_config, config
+            )
             self._unfinished_requests: dict[str, Request] = {}
             self._lookup_requests_in_step: list[str] = []
         else:

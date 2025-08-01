@@ -14,6 +14,8 @@ from lmcache.logging import init_logger
 from lmcache.v1.cache_controller.message import (
     ClearWorkerMsg,
     ClearWorkerRetMsg,
+    CompressWorkerMsg,
+    CompressWorkerRetMsg,
     DeRegisterMsg,
     ErrorMsg,
     MoveWorkerMsg,
@@ -80,6 +82,8 @@ class LMCacheWorker:
         self.lmcache_worker_ip = get_ip()
         self.lmcache_worker_port = lmcache_worker_port
 
+        self.distributed_url = config.distributed_url
+
         self.reply_socket = get_zmq_socket(
             self.context,
             self.lmcache_worker_internal_url,
@@ -114,6 +118,7 @@ class LMCacheWorker:
                 worker_id=self.worker_id,
                 ip=self.lmcache_worker_ip,
                 port=self.lmcache_worker_port,
+                distributed_url=self.distributed_url,
             )
         )
 
@@ -189,25 +194,46 @@ class LMCacheWorker:
                     tokens = request.tokens
                     old_position = request.old_position
                     new_position = request.new_position
+                    do_copy = request.copy
+                    worker_event_id = request.worker_event_id
 
-                    # Old position should be the same as the worker's
-                    # instance id and worker id.
-                    assert old_position[0] == self.lmcache_instance_id
+                    # Intra node move
+                    if new_position[0] == self.lmcache_worker_internal_url:
+                        # TODO(Jiayi): currently we only support moving from
+                        # local disk to local cpu.
+                        assert old_position[1] == "disk"
+                        assert new_position[1] == "cpu"
+                        assert do_copy
 
-                    # TODO(Jiayi): currently we only support moving from
-                    # local disk to local cpu.
-                    assert old_position[1] == "disk"
-                    assert new_position[0] == self.lmcache_instance_id
-                    assert new_position[1] == "cpu"
-
-                    logger.debug("Executing prefetch operation.")
-                    result = self.lmcache_engine.prefetch(tokens)
+                        # TODO(Jiayi): We need to align prefetch and move.
+                        logger.debug("Executing prefetch operation.")
+                        result = self.lmcache_engine.prefetch(tokens)
+                    else:
+                        assert self.lmcache_engine.distributed_server is not None
+                        logger.debug("Executing cross-node move operation.")
+                        num_tokens = self.lmcache_engine.move(
+                            tokens=tokens,
+                            old_position=old_position,
+                            new_position=new_position,
+                            event_id=worker_event_id,
+                            do_copy=do_copy,
+                        )
 
                     # TODO(Jiayi): LMCache needs to have an event tracking
                     # pool to enable more advanced control-plane optims.
                     # For now, we use a dummy `event_id`.
                     serialized_ret_msg = msgspec.msgpack.encode(
-                        MoveWorkerRetMsg(worker_event_id="move")
+                        MoveWorkerRetMsg(num_tokens=num_tokens)
+                    )
+                elif isinstance(request, CompressWorkerMsg):
+                    num_compressed_tokens = self.lmcache_engine.compress(
+                        tokens=request.tokens,
+                        method=request.method,
+                        location=request.location,
+                        event_id=request.worker_event_id,
+                    )
+                    serialized_ret_msg = msgspec.msgpack.encode(
+                        CompressWorkerRetMsg(num_tokens=num_compressed_tokens)
                     )
                 else:
                     logger.error(f"Unknown message: {request}")

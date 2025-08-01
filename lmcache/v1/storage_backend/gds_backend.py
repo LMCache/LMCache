@@ -673,5 +673,8 @@ class GdsBackend(StorageBackendInterface):
         # to implement pin and unpin
         return
 
+    def remove(self, key, free_obj=True):
+        raise NotImplementedError("Remote backend does not support remove now.")
+
     def close(self) -> None:
         logger.info("GDS backend closed.")

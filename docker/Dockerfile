@@ -120,7 +120,7 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
 
 # Install LMCache latest build and vLLM nightly build
 RUN . /opt/venv/bin/activate && \
-uv pip install vllm[runai,tensorizer] --extra-index-url https://wheels.vllm.ai/nightly && \
+    uv pip install --prerelease=allow vllm[runai,tensorizer] --extra-index-url https://wheels.vllm.ai/nightly && \
     uv pip install /workspace/LMCache/dist_lmcache/*.whl --verbose
 
 WORKDIR /workspace
@@ -134,7 +134,7 @@ FROM base AS image-release
 
 # Install LMCache and vLLM stable releases
 RUN . /opt/venv/bin/activate && \
-uv pip install vllm[runai,tensorizer] && \
+    uv pip install --prerelease=allow vllm[runai,tensorizer] && \
     uv pip install lmcache --verbose
 
 WORKDIR /workspace
