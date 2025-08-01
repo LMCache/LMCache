@@ -183,7 +183,7 @@ class AuditBackend(StorageBackendInterface):
                 start_time,
                 None,
                 True,
-                result=result is not None,
+                result=len(result) if result is not None else 0,
             )
             return result
         except Exception as e:

@@ -397,3 +397,6 @@ class LocalCPUBackend(StorageBackendInterface):
 
     def close(self) -> None:
         self.clear()
+
+    def is_normal_backend(self):
+        return False

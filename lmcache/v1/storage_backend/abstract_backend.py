@@ -200,3 +200,9 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
         Close the storage backend.
         """
         raise NotImplementedError
+
+    def is_normal_backend(self):
+        """
+        Whether the storage backend is a normal backend.
+        """
+        return True
