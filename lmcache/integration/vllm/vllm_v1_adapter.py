@@ -199,6 +199,7 @@ class ReqMeta:
         load_spec: Optional[LoadSpec] = None,
         skip_save: bool = False,
         discard_partial_chunks: bool = True,
+        is_first_prefill: bool = False,
     ) -> Optional["ReqMeta"]:
         """Create the request metadata from a request tracker.
 
@@ -303,6 +304,7 @@ class ReqMeta:
             save_spec=save_spec,
             load_spec=load_spec,
             disagg_spec=tracker.disagg_spec,
+            is_first_prefill=is_first_prefill,
         )
 
 
@@ -685,22 +687,25 @@ class LMCacheConnectorV1Impl:
             # TODO: have a pre-allocated buffer to hold the slot_mappings
             slot_mapping = slot_mapping.cuda()
 
-            skip_leading_tokens = max(
-                self.lmcache_engine.lookup(token_ids),
-                save_spec.skip_leading_tokens,
-            )
-            skip_leading_tokens = save_spec.skip_leading_tokens
+            if self.kv_role == "kv_producer" and request.is_first_prefill:
+                skip_leading_tokens = 0
+            else:
+                skip_leading_tokens = max(
+                    self.lmcache_engine.lookup(token_ids),
+                    save_spec.skip_leading_tokens,
+                )
+                skip_leading_tokens = save_spec.skip_leading_tokens
 
-            if skip_leading_tokens == len(token_ids) and not (
-                self.kv_role == "kv_producer" and request.is_first_prefill
-            ):
-                continue  # skip this request
-            # Align to lmcache chunk size
-            skip_leading_tokens = (
-                skip_leading_tokens
-                // self._lmcache_chunk_size
-                * self._lmcache_chunk_size
-            )
+                if skip_leading_tokens == len(token_ids) and not (
+                    self.kv_role == "kv_producer" and request.is_first_prefill
+                ):
+                    continue  # skip this request
+                # Align to lmcache chunk size
+                skip_leading_tokens = (
+                    skip_leading_tokens
+                    // self._lmcache_chunk_size
+                    * self._lmcache_chunk_size
+                )
 
             store_mask = torch.ones_like(token_ids, dtype=torch.bool)
             store_mask[:skip_leading_tokens] = False
@@ -726,10 +731,6 @@ class LMCacheConnectorV1Impl:
                 token_ids = token_ids[:aligned_token_len]
                 store_mask = store_mask[:aligned_token_len]
                 slot_mapping = slot_mapping[:aligned_token_len]
-
-            if self.kv_role == "kv_producer" and request.is_first_prefill:
-                skip_leading_tokens = 0
-                request.is_first_prefill = False
 
             self.lmcache_engine.store(
                 token_ids,
@@ -936,6 +937,7 @@ class LMCacheConnectorV1Impl:
                 load_spec=load_spec,
                 skip_save=force_skip_save,
                 discard_partial_chunks=self._discard_partial_chunks,
+                is_first_prefill=True,
             )
             if req_meta is not None:
                 meta.add_request(req_meta)
@@ -986,6 +988,7 @@ class LMCacheConnectorV1Impl:
                 load_spec=None,
                 skip_save=force_skip_save,
                 discard_partial_chunks=self._discard_partial_chunks,
+                is_first_prefill=False,
             )
             if req_meta is not None:
                 meta.add_request(req_meta)
