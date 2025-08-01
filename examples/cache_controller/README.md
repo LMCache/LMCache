@@ -9,3 +9,7 @@ Here are a few examples:
 - [KV cache lookup](lookup/)
 - [KV cache move](move/)
 - [KV cache pin](pin/)
+
+Unsupported APIs (WIP):
+- [KV cache decompress](decompress/)
+- [KV cache unpin](unpin/)
