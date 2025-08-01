@@ -181,6 +181,7 @@ class ReqMeta:
     slot_mapping: torch.Tensor
 
     # Whether is last prefill or not
+    is_first_prefill: bool = True
     is_last_prefill: bool = False
 
     # Skip save or not
@@ -684,23 +685,22 @@ class LMCacheConnectorV1Impl:
             # TODO: have a pre-allocated buffer to hold the slot_mappings
             slot_mapping = slot_mapping.cuda()
 
-            if self.kv_role == "kv_producer":
-                skip_leading_tokens = 0
-            else:
-                skip_leading_tokens = max(
-                    self.lmcache_engine.lookup(token_ids),
-                    save_spec.skip_leading_tokens,
-                )
-                skip_leading_tokens = save_spec.skip_leading_tokens
+            skip_leading_tokens = max(
+                self.lmcache_engine.lookup(token_ids),
+                save_spec.skip_leading_tokens,
+            )
+            skip_leading_tokens = save_spec.skip_leading_tokens
 
-                if skip_leading_tokens == len(token_ids):
-                    continue  # skip this request
-                # Align to lmcache chunk size
-                skip_leading_tokens = (
-                    skip_leading_tokens
-                    // self._lmcache_chunk_size
-                    * self._lmcache_chunk_size
-                )
+            if skip_leading_tokens == len(token_ids) and not (
+                self.kv_role == "kv_producer" and request.is_first_prefill
+            ):
+                continue  # skip this request
+            # Align to lmcache chunk size
+            skip_leading_tokens = (
+                skip_leading_tokens
+                // self._lmcache_chunk_size
+                * self._lmcache_chunk_size
+            )
 
             store_mask = torch.ones_like(token_ids, dtype=torch.bool)
             store_mask[:skip_leading_tokens] = False
@@ -726,6 +726,10 @@ class LMCacheConnectorV1Impl:
                 token_ids = token_ids[:aligned_token_len]
                 store_mask = store_mask[:aligned_token_len]
                 slot_mapping = slot_mapping[:aligned_token_len]
+
+            if self.kv_role == "kv_producer" and request.is_first_prefill:
+                skip_leading_tokens = 0
+                request.is_first_prefill = False
 
             self.lmcache_engine.store(
                 token_ids,
