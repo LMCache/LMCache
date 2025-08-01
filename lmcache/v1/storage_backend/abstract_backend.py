@@ -162,6 +162,37 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
         raise NotImplementedError
 
     @abc.abstractmethod
+    def remove(self, key: CacheEngineKey, free_obj: bool = True) -> bool:
+        """
+        remove a memory object.
+
+        :param CacheEngineKey key: The key of the MemoryObj.
+        :param bool free_obj: Whether to free the MemoryObj after removing it.
+
+        :return: a bool indicates whether remove is successful.
+        """
+        raise NotImplementedError
+
+    # TODO(Jiayi): Optimize batched remove
+    def batched_remove(
+        self,
+        keys: list[CacheEngineKey],
+        free_obj: bool = True,
+    ) -> int:
+        """
+        Remove a list of memory objects.
+
+        :param list[CacheEngineKey] keys: The keys of the MemoryObjs.
+        :param bool free_obj: Whether to free the MemoryObjs after removing them.
+
+        :return: a int indicates the number of removed memory objects.
+        """
+        num_removed = 0
+        for key in keys:
+            num_removed += self.remove(key, free_obj=free_obj)
+        return num_removed
+
+    @abc.abstractmethod
     def close(
         self,
     ) -> None:
