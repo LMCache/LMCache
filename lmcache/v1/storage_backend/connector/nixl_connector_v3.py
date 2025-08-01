@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from collections import defaultdict
 from dataclasses import dataclass
 from queue import Queue
 from typing import TYPE_CHECKING, Any, Optional, Union
@@ -53,6 +54,7 @@ class NixlAllocRequest(NixlMsgBase):
     dtype: str
     last_chunk_toks: int
     is_last_prefill: bool
+    req_id: str
 
 
 class NixlAllocResponse(NixlMsgBase):
@@ -140,6 +142,7 @@ class NixlSenderTask:
             dtype=dtype,
             last_chunk_toks=last_chunk_toks,
             is_last_prefill=self.is_last_prefill,
+            req_id=self.req_id,
         )
 
     # TODO (Jiayi): reduce for loop
@@ -551,21 +554,21 @@ class NixlReceiver:
         # from the nixl buffer
         self.storage_manager = storage_manager
 
-        # A list of (cek, mem_obj) tuples that are in the nixl buffer from the previous step
+        # req_id -> (cek, mem_obj) tuples that are in the nixl buffer from the previous step
         # This allows us to continuously offload from the nixl buffer to cpu during chunked prefill
-        self.prev_step_chunks: list[tuple[CacheEngineKey, MemoryObj]] = []
+        self.prev_step_chunks: dict[str, list[tuple[CacheEngineKey, MemoryObj]]] = defaultdict(list)
         self.offload_stream = torch.cuda.Stream()
 
     def _allocate_and_put(self, alloc_request: NixlAllocRequest) -> NixlAllocResponse:
         total_allocs = len(alloc_request.keys)
         fmt = MemoryFormat(alloc_request.fmt)
         dtype = STR_DTYPE_TO_TORCH_DTYPE[alloc_request.dtype]
-        shape = alloc_request.shape
+        original_shape = alloc_request.shape
         is_last_prefill = alloc_request.is_last_prefill
 
         total_size_in_bytes = (
             total_allocs
-            * math.prod(shape)
+            * math.prod(original_shape)
             * torch.empty((), dtype=dtype).element_size()
         )
         logger.info(
@@ -583,7 +586,7 @@ class NixlReceiver:
             cpu_keys = []
             cpu_memory_objs = []
             # TODO(apostaB): Optimize this with batched_allocate
-            for cek, mem_obj in self.prev_step_chunks:
+            for cek, mem_obj in self.prev_step_chunks[alloc_request.req_id]:
                 cpu_memory_object = self.memory_allocator.allocate(
                     mem_obj.meta.shape,
                     mem_obj.meta.dtype,
@@ -606,15 +609,16 @@ class NixlReceiver:
                     continue
                 backend.batched_submit_put_task(cpu_keys, cpu_memory_objs)
 
-        self.prev_step_chunks = []
+        self.prev_step_chunks[alloc_request.req_id] = []
         alloc_indexes = []
         already_send_indexes = []
         for idx, key in enumerate(alloc_request.keys):
             if self._backend.contains(key, pin=True, i=self.i - 1):
-                self.prev_step_chunks.append((key, self._backend.get(key)))
+                self.prev_step_chunks[alloc_request.req_id].append((key, self._backend.get(key)))
                 already_send_indexes.append(idx)
                 continue
-
+            
+            shape = list(original_shape)
             if idx == total_allocs - 1:
                 num_alloc_tokens = alloc_request.last_chunk_toks
                 token_dim = fmt.token_dim()
@@ -639,13 +643,13 @@ class NixlReceiver:
 
             alloc_indexes.append(mem_obj.meta.address)
             cek = CacheEngineKey.from_string(key)
-            self.prev_step_chunks.append((cek, mem_obj))
+            self.prev_step_chunks[alloc_request.req_id].append((cek, mem_obj))
 
             self._backend.put(cek, mem_obj)
 
         if is_last_prefill:
             # the chunks in the nixl buffer will be cleared after prefill is done and decode begins
-            self.prev_step_chunks = []
+            self.prev_step_chunks[alloc_request.req_id] = []
 
         logger.info(
             f"DEBUG: the {self.i}'th time of _allocate_and_put() is done and returning the NixlAllocResponse"

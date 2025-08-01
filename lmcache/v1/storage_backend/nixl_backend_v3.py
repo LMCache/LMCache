@@ -3,7 +3,6 @@
 from concurrent.futures import Future
 from typing import List, Optional
 import threading
-import time
 
 # Third Party
 import torch
@@ -211,9 +210,7 @@ class NixlBackend(StorageBackendInterface):
         with self._data_lock:
             if mem_obj := self._data.get(key, None):
                 del self._data[key]
-                while mem_obj.get_ref_count() > 0:
-                    mem_obj.ref_count_down()
-                    time.sleep(0.1)
+                mem_obj.ref_count_down()
                 return True
             return False
 
