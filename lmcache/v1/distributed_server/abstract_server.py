@@ -6,6 +6,7 @@ import abc
 # First Party
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.memory_management import MemoryObj
+from lmcache.v1.protocol import ServerMetaMessage
 
 
 class DistributedServerInterface(metaclass=abc.ABCMeta):
@@ -23,6 +24,31 @@ class DistributedServerInterface(metaclass=abc.ABCMeta):
     async def issue_get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         """
         Perform get from the peer.
+        """
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    async def handle_put(
+        self,
+        meta: ServerMetaMessage,
+        reader,
+        writer,
+    ) -> bool:
+        """
+        Handle put from the peer.
+        """
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    async def batched_issue_put(
+        self,
+        keys: CacheEngineKey,
+        memory_objs: list[MemoryObj],
+        dst_url: str,
+        dst_location: Optional[str] = None,
+    ) -> bool:
+        """
+        Perform batched put to the peer.
         """
         raise NotImplementedError
 
