@@ -180,7 +180,7 @@ class ReqMeta:
     # Slot mapping
     slot_mapping: torch.Tensor
 
-    # Whether is last prefill or not
+    # Whether is first or last prefill
     is_first_prefill: bool = True
     is_last_prefill: bool = False
 
