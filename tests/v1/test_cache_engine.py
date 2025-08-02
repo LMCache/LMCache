@@ -130,7 +130,7 @@ def patch_pin_allocator():
     def fake_pin_close(self):
         if not self._unregistered:
             torch.cuda.synchronize()
-            torch.cuda.cudart().cudaHostUnregister(self.buffer.data_ptr())
+            # torch.cuda.cudart().cudaHostUnregister(self.buffer.data_ptr())
             self._unregistered = True
 
     with (

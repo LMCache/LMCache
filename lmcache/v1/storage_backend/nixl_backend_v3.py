@@ -185,7 +185,11 @@ class NixlBackend(StorageBackendInterface):
     ) -> Optional[Future]:
         raise NotImplementedError
 
-    def remove(self, key: CacheEngineKey) -> bool:
+    def remove(
+        self,
+        key: CacheEngineKey,
+        free_obj: bool = True,
+    ) -> bool:
         """
         Remove the key from the storage backend.
 
