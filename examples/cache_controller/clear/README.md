@@ -1,5 +1,5 @@
-# LMCache Pin/Persistence
-This is an example to demonstrate how to pin/persist a request's KV cache in an LMCacheEngine externally.
+# LMCache Clear
+This is an example to demonstrate how to clear KV cache in an LMCacheEngine externally.
 
 ## Prerequisites
 Your server should have at least 1 GPU.  
@@ -30,32 +30,16 @@ curl -X POST http://localhost:8000/v1/completions \
   }'
 ```
 
-4. Tokenize the prompt:  
+4. Clear the KV cache in the system:
 ```bash
-curl -X POST http://localhost:8000/tokenize \
+curl -X POST http://localhost:9000/clear \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "meta-llama/Llama-3.1-8B-Instruct",
-    "prompt": "Explain the significance of KV cache in language models."
-  }'
-```
-
-You should be able to see the returned token ids as:
-```plaintext
-{"count":12,"max_model_len":4096,"tokens":[128000,849,21435,279,26431,315,85748,6636,304,4221,4211,13],"token_strs":null}
-```
-
-5. Pin a request's KV cache in the system:
-```bash
-curl -X POST http://localhost:9000/pin \
-  -H "Content-Type: application/json" \
-  -d '{
-    "tokens": [128000, 849, 21435, 279, 26431, 315, 85748, 6636, 304, 4221, 4211, 13],
     "instance_id": "lmcache_default_instance",
     "location": "LocalCPUBackend"
   }'
 ```
-You should be able to see a return message indicating the number of tokens' KV cache that has been successfully pinned in the system:
+You should be able to see a return message indicating the number of tokens' KV cache that has been successfully cleared in the system:
 
 ```plaintext
 {"event_id": "xxx", "num_tokens": 12}
