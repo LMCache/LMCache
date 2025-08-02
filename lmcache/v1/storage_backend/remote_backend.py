@@ -263,6 +263,9 @@ class RemoteBackend(StorageBackendInterface):
         )
         return True
 
+    def remove(self, key, free_obj=True):
+        raise NotImplementedError("Remote backend does not support remove now.")
+
     def close(self):
         try:
             assert self.connection is not None
