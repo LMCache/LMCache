@@ -1,18 +1,4 @@
-# Copyright 2024-2025 LMCache Authors.
-# Copyright 2025 Ilya Yanok, Serapheim Dimitropoulos.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
+# SPDX-License-Identifier: Apache-2.0
 # Standard
 from collections import deque
 from contextlib import nullcontext
@@ -245,6 +231,13 @@ class MemoryObj(metaclass=abc.ABCMeta):
         """
         raise NotImplementedError
 
+    @abc.abstractmethod
+    def get_num_tokens(self) -> int:
+        """
+        Get token number for the given MemoryObj.
+        """
+        raise NotImplementedError
+
     @property
     @abc.abstractmethod
     def metadata(self) -> MemoryObjMetadata:
@@ -346,21 +339,32 @@ class TensorMemoryObj(MemoryObj):
         with self.lock:
             return self.meta.ref_count
 
+    def get_num_tokens(self) -> int:
+        with self.lock:
+            token_dim = self.meta.fmt.token_dim()
+            return self.meta.shape[token_dim]
+
     def pin(self) -> bool:
-        self.metadata.pin_count += 1
-        return True
+        with self.lock:
+            self.meta.pin_count += 1
+            return True
 
     def unpin(self) -> bool:
-        self.metadata.pin_count -= 1
-        if self.metadata.pin_count < 0:
-            logger.warning(
-                f"Pin count of MemoryObj {self.meta.address}"
-                f"is negative: {self.meta.pin_count}."
-                "Double unpin occurred somewhere."
-                "Setting pin count back to 0 as a hack but please find the bug."
-            )
-            self.metadata.pin_count = 0
-        return True
+        with self.lock:
+            self.meta.pin_count -= 1
+
+            if self.meta.pin_count <= 0 and self.meta.ref_count <= 0:
+                self.parent_allocator.free(self)
+
+            if self.meta.pin_count < 0:
+                logger.warning(
+                    f"Pin count of MemoryObj {self.meta.address}"
+                    f"is negative: {self.meta.pin_count}."
+                    "Double unpin occurred somewhere."
+                    "Setting pin count back to 0 as a hack but please find the bug."
+                )
+                self.meta.pin_count = 0
+            return True
 
     @property
     def metadata(self) -> MemoryObjMetadata:
@@ -458,6 +462,10 @@ class BytesBufferMemoryObj(MemoryObj):
         pass
 
     def get_ref_count(self) -> int:
+        return 1
+
+    def get_num_tokens(self) -> int:
+        # TODO(Jiayi): record the number of tokens somehow
         return 1
 
     @property
@@ -1277,7 +1285,10 @@ class PinMemoryAllocator(MemoryAllocatorInterface):
 
         self.buffer = torch.empty(size, dtype=torch.uint8)
         ptr = self.buffer.data_ptr()
-        torch.cuda.cudart().cudaHostRegister(ptr, size, 0)
+        err = torch.cuda.cudart().cudaHostRegister(ptr, size, 0)
+        assert err == 0, (
+            f"cudaHostRegister failed: {torch.cuda.cudart().cudaGetErrorString(err)}"
+        )
         self._unregistered = False
 
         if use_paging:
@@ -1361,7 +1372,10 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
 
         self.buffer = torch.empty(size, dtype=torch.uint8)
         ptr = self.buffer.data_ptr()
-        torch.cuda.cudart().cudaHostRegister(ptr, size, 0)
+        err = torch.cuda.cudart().cudaHostRegister(ptr, size, 0)
+        assert err == 0, (
+            f"cudaHostRegister failed: {torch.cuda.cudart().cudaGetErrorString(err)}"
+        )
         self._unregistered = False
 
         if use_paging:

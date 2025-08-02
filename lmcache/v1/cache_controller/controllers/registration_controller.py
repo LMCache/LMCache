@@ -1,17 +1,4 @@
-# Copyright 2024-2025 LMCache Authors.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
+# SPDX-License-Identifier: Apache-2.0
 # Standard
 from typing import Optional
 
@@ -43,7 +30,12 @@ class RegistrationController:
         # Mapping from `instance_id` -> `worker_ids`
         self.worker_mapping: dict[str, list[int]] = {}
 
-        # Mapping from `(instance_id, worker_id)` -> `url`
+        # Mapping from `(instance_id, worker_id)` -> `distributed_url`
+        # NOTE(Jiayi): `distributed_url` is used for actual KV cache transfer.
+        # It's not the lmcache_worker_url
+        self.distributed_url_mapping: dict[tuple[str, int], str] = {}
+
+        # Mapping from `(instance_id, worker_id)` -> `socket`
         self.socket_mapping: dict[tuple[str, int], zmq.asyncio.Socket] = {}
 
         # Mapping from `ip` -> `instance_id`
@@ -66,6 +58,15 @@ class RegistrationController:
         if socket is None:
             logger.warning(f"Instance-worker {(instance_id, worker_id)} not registered")
         return socket
+
+    def get_distributed_url(self, instance_id: str, worker_id: int) -> Optional[str]:
+        """
+        Get the URL for a given instance and worker ID.
+        """
+        url = self.distributed_url_mapping.get((instance_id, worker_id))
+        if url is None:
+            logger.warning(f"Instance-worker {(instance_id, worker_id)} not registered")
+        return url
 
     def get_workers(self, instance_id: str) -> list[int]:
         """
@@ -93,6 +94,8 @@ class RegistrationController:
         ip = msg.ip
         port = msg.port
         url = f"{ip}:{port}"
+        distributed_url = msg.distributed_url
+        self.distributed_url_mapping[(instance_id, worker_id)] = distributed_url
 
         self.instance_mapping[ip] = instance_id
 
@@ -108,7 +111,11 @@ class RegistrationController:
         self.socket_mapping[(instance_id, worker_id)] = socket
         if instance_id not in self.worker_mapping:
             self.worker_mapping[instance_id] = []
+
+        # TODO(Jiayi): Use more efficient data structures
         self.worker_mapping[instance_id].append(worker_id)
+        self.worker_mapping[instance_id].sort()
+
         logger.info(
             f"Registered instance-worker {(instance_id, worker_id)} with URL {url}"
         )
@@ -129,6 +136,8 @@ class RegistrationController:
                 del self.worker_mapping[instance_id]
         else:
             logger.warning(f"Instance {instance_id} not registered")
+
+        self.distributed_url_mapping.pop((instance_id, worker_id), None)
 
         if (instance_id, worker_id) in self.socket_mapping:
             socket = self.socket_mapping.pop((instance_id, worker_id))

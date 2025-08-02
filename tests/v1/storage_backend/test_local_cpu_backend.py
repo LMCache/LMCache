@@ -1,4 +1,7 @@
+# SPDX-License-Identifier: Apache-2.0
 # Standard
+from contextlib import nullcontext
+from unittest.mock import patch
 import threading
 
 # Third Party
@@ -10,11 +13,126 @@ from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import (
     AdHocMemoryAllocator,
+    BufferAllocator,
     MemoryFormat,
     MemoryObj,
     MixedMemoryAllocator,
+    PagedTensorMemoryAllocator,
+    TensorMemoryAllocator,
 )
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
+
+
+# This is to mock the constructor and destructor of
+# MixedMemoryAllocator and PinMemoryAllocator to
+# use pin_memory=True for their constructors and
+# avoid calling cudaHostRegister and cudaHostUnregister
+# which may throw an error if torch.empty returns a buffer
+# that cannot be registered (which happens quicker on some machines,
+# especially when torch is doing many allocations and frees)
+@pytest.fixture(autouse=True, scope="module")
+def patch_mixed_allocator():
+    def fake_mixed_init(self, size: int, use_paging: bool = False, **kwargs):
+        """
+        :param int size: The size of the pinned memory in bytes.
+        """
+
+        # self.buffer = torch.empty(size, dtype=torch.uint8)
+        # ptr = self.buffer.data_ptr()
+        # err = torch.cuda.cudart().cudaHostRegister(ptr, size, 0)
+        # assert err == 0, (
+        #     f"cudaHostRegister failed: {torch.cuda.cudart().cudaGetErrorString(err)}"
+        # )
+        self._unregistered = False
+        self.buffer = torch.empty(size, dtype=torch.uint8, pin_memory=True)
+
+        if use_paging:
+            assert "shape" in kwargs, (
+                "shape must be specified for paged memory allocator"
+            )
+            assert "dtype" in kwargs, (
+                "dtype must be specified for paged memory allocator"
+            )
+            assert "fmt" in kwargs, "fmt must be specified for paged memory allocator"
+            self.pin_allocator = PagedTensorMemoryAllocator(
+                tensor=self.buffer,
+                shape=kwargs["shape"],
+                dtype=kwargs["dtype"],
+                fmt=kwargs["fmt"],
+            )
+        else:
+            self.pin_allocator = TensorMemoryAllocator(self.buffer)
+
+        self.host_mem_lock = threading.Lock() if not use_paging else nullcontext()
+
+        self.buffer_allocator = BufferAllocator("cpu")
+
+    def fake_mixed_close(self):
+        if not self._unregistered:
+            torch.cuda.synchronize()
+            # torch.cuda.cudart().cudaHostUnregister(self.buffer.data_ptr())
+            self._unregistered = True
+
+    with (
+        patch(
+            "lmcache.v1.memory_management.MixedMemoryAllocator.__init__",
+            fake_mixed_init,
+        ),
+        patch(
+            "lmcache.v1.memory_management.MixedMemoryAllocator.close", fake_mixed_close
+        ),
+    ):
+        yield
+
+
+@pytest.fixture(autouse=True, scope="module")
+def patch_pin_allocator():
+    def fake_pin_init(self, size: int, use_paging: bool = False, **kwargs):
+        """
+        :param int size: The size of the pinned memory in bytes.
+        """
+
+        # self.buffer = torch.empty(size, dtype=torch.uint8)
+        # ptr = self.buffer.data_ptr()
+        # err = torch.cuda.cudart().cudaHostRegister(ptr, size, 0)
+        # assert err == 0, (
+        #     f"cudaHostRegister failed: {torch.cuda.cudart().cudaGetErrorString(err)}"
+        # )
+        self._unregistered = False
+        self.buffer = torch.empty(size, dtype=torch.uint8, pin_memory=True)
+
+        if use_paging:
+            assert "shape" in kwargs, (
+                "shape must be specified for paged memory allocator"
+            )
+            assert "dtype" in kwargs, (
+                "dtype must be specified for paged memory allocator"
+            )
+            assert "fmt" in kwargs, "fmt must be specified for paged memory allocator"
+            self.allocator = PagedTensorMemoryAllocator(
+                tensor=self.buffer,
+                shape=kwargs["shape"],
+                dtype=kwargs["dtype"],
+                fmt=kwargs["fmt"],
+            )
+        else:
+            self.allocator = TensorMemoryAllocator(self.buffer)
+
+        self.host_mem_lock = threading.Lock() if not use_paging else nullcontext()
+
+    def fake_pin_close(self):
+        if not self._unregistered:
+            torch.cuda.synchronize()
+            # torch.cuda.cudart().cudaHostUnregister(self.buffer.data_ptr())
+            self._unregistered = True
+
+    with (
+        patch(
+            "lmcache.v1.memory_management.PinMemoryAllocator.__init__", fake_pin_init
+        ),
+        patch("lmcache.v1.memory_management.PinMemoryAllocator.close", fake_pin_close),
+    ):
+        yield
 
 
 class MockLookupServer:
@@ -231,10 +349,10 @@ class TestLocalCPUBackend:
     def test_submit_prefetch_task(self, local_cpu_backend):
         """Test submit_prefetch_task()."""
         key = create_test_key("test_key")
-        future = local_cpu_backend.submit_prefetch_task(key)
+        ret = local_cpu_backend.submit_prefetch_task(key)
 
         # LocalCPUBackend always returns None for submit_prefetch_task
-        assert future is None
+        assert ret is False
 
         local_cpu_backend.memory_allocator.close()
 
@@ -452,64 +570,6 @@ class TestLocalCPUBackend:
 
         local_cpu_backend.memory_allocator.close()
 
-    def test_write_back_cpu_tensor(self, local_cpu_backend):
-        """Test write_back() with CPU tensor."""
-        key = create_test_key("test_key")
-        memory_obj = create_test_memory_obj()  # CPU tensor
-
-        # Write back should work with CPU tensor
-        local_cpu_backend.write_back(key, memory_obj)
-
-        # Should be added to hot cache
-        assert key in local_cpu_backend.hot_cache
-        assert local_cpu_backend.hot_cache[key] == memory_obj
-
-        local_cpu_backend.memory_allocator.close()
-
-    def test_write_back_cuda_tensor(self, local_cpu_backend):
-        """Test write_back() with CUDA tensor."""
-        if not torch.cuda.is_available():
-            pytest.skip("CUDA not available")
-
-        key = create_test_key("test_key")
-        # Create a CUDA tensor
-        allocator = AdHocMemoryAllocator(device="cuda")
-        cuda_memory_obj = allocator.allocate(
-            (2, 16, 8, 128), torch.bfloat16, fmt=MemoryFormat.KV_T2D
-        )
-
-        # Write back should copy CUDA tensor to CPU
-        local_cpu_backend.write_back(key, cuda_memory_obj)
-
-        # Should be added to hot cache
-        assert key in local_cpu_backend.hot_cache
-        cpu_memory_obj = local_cpu_backend.hot_cache[key]
-        assert cpu_memory_obj.tensor is not None
-        assert cpu_memory_obj.tensor.device.type == "cpu"
-
-        local_cpu_backend.memory_allocator.close()
-
-    def test_write_back_none(self, local_cpu_backend):
-        """Test write_back() with None."""
-        key = create_test_key("test_key")
-
-        # Write back with None should not crash
-        local_cpu_backend.write_back(key, None)
-
-        local_cpu_backend.memory_allocator.close()
-
-    def test_write_back_disabled(self, local_cpu_backend_disabled):
-        """Test write_back() when local_cpu is disabled."""
-        key = create_test_key("test_key")
-        memory_obj = create_test_memory_obj()
-
-        # Write back should not add to hot cache when disabled
-        local_cpu_backend_disabled.write_back(key, memory_obj)
-
-        assert key not in local_cpu_backend_disabled.hot_cache
-
-        local_cpu_backend_disabled.memory_allocator.close()
-
     def test_get_keys(self, local_cpu_backend):
         """Test get_keys()."""
         keys = [create_test_key(f"key_{i}") for i in range(3)]
@@ -626,25 +686,4 @@ class TestLocalCPUBackend:
         # Remove key
         local_cpu_backend.remove(key)
         assert memory_obj.get_ref_count() == initial_ref_count + 1
-
-        local_cpu_backend.memory_allocator.close()
-
-    def test_lru_ordering(self, local_cpu_backend):
-        """Test LRU ordering of the hot cache."""
-        keys = [create_test_key(f"key_{i}") for i in range(3)]
-        memory_objs = [create_test_memory_obj() for _ in range(3)]
-
-        # Insert keys
-        for key, memory_obj in zip(keys, memory_objs, strict=False):
-            local_cpu_backend.submit_put_task(key, memory_obj)
-
-        # Access the first key to move it to the end
-        local_cpu_backend.get_blocking(keys[0])
-
-        # Get keys (should be in LRU order)
-        retrieved_keys = local_cpu_backend.get_keys()
-
-        # The accessed key should be at the end (MRU)
-        assert retrieved_keys[-1] == keys[0]
-
         local_cpu_backend.memory_allocator.close()

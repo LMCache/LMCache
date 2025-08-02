@@ -84,6 +84,12 @@ Press ``Ctrl+C`` to stop all servers.
 Configuration
 ~~~~~~~~~~~~~
 
+**Important**: For correct KV cache transfer, ensure all processes use the same ``PYTHONHASHSEED`` to keep the hash of the KV cache consistent across processes:
+
+   .. code-block:: bash
+
+      export PYTHONHASHSEED=0
+
 Prefiller Configuration
 ^^^^^^^^^^^^^^^^^^^^^^^
 

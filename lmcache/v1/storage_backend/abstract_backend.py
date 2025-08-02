@@ -1,17 +1,4 @@
-# Copyright 2024-2025 LMCache Authors.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
+# SPDX-License-Identifier: Apache-2.0
 # Standard
 from concurrent.futures import Future
 from typing import List, Optional
@@ -90,7 +77,7 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
     def submit_prefetch_task(
         self,
         key: CacheEngineKey,
-    ) -> Optional[Future]:
+    ) -> bool:
         """
         An async function to get the MemoryObj from the storage backend.
 
@@ -173,6 +160,37 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
         :return: a bool indicates whether unpin is successful.
         """
         raise NotImplementedError
+
+    @abc.abstractmethod
+    def remove(self, key: CacheEngineKey, free_obj: bool = True) -> bool:
+        """
+        remove a memory object.
+
+        :param CacheEngineKey key: The key of the MemoryObj.
+        :param bool free_obj: Whether to free the MemoryObj after removing it.
+
+        :return: a bool indicates whether remove is successful.
+        """
+        raise NotImplementedError
+
+    # TODO(Jiayi): Optimize batched remove
+    def batched_remove(
+        self,
+        keys: list[CacheEngineKey],
+        free_obj: bool = True,
+    ) -> int:
+        """
+        Remove a list of memory objects.
+
+        :param list[CacheEngineKey] keys: The keys of the MemoryObjs.
+        :param bool free_obj: Whether to free the MemoryObjs after removing them.
+
+        :return: a int indicates the number of removed memory objects.
+        """
+        num_removed = 0
+        for key in keys:
+            num_removed += self.remove(key, free_obj=free_obj)
+        return num_removed
 
     @abc.abstractmethod
     def close(
