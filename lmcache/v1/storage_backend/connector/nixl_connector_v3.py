@@ -276,7 +276,7 @@ class NixlSender:
 
         # NOTE (vladnosiv): len(local_indexes) may be zero
         # if the requests in the batch have a large common prefix
-        if len(local_indexes) == 0:
+        if not local_indexes:
             logger.debug(
                 "Sending objs with request ID: %s is not required: "
                 "all indexes already sent",
