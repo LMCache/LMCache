@@ -22,6 +22,7 @@ from lmcache.v1.cache_controller.message import (  # noqa: E501
     ErrorMsg,
     HealthMsg,
     HealthRetMsg,
+    HealthWorkerMsg,
     MoveMsg,
     MoveRetMsg,
     MoveWorkerMsg,
@@ -286,7 +287,50 @@ class LMCacheClusterExecutor:
         )
 
     async def health(self, msg: HealthMsg) -> Union[HealthRetMsg, ErrorMsg]:
-        raise NotImplementedError
+        """
+        Execute a compress operation with error handling.
+        """
+        instance_id = msg.instance_id
+
+        worker_ids = self.reg_controller.get_workers(instance_id)
+        assert worker_ids is not None
+
+        # TODO(Jiayi): Currently, we do not support PP or heterogeneous TP.
+        # NOTE(Jiayi): The TP ranks are already sorted in registration_controller.
+
+        sockets = []
+        serialized_msgs = []
+        for worker_id in worker_ids:
+            socket = self.reg_controller.get_socket(instance_id, worker_id)
+
+            if socket is None:
+                return ErrorMsg(
+                    error=(
+                        f"Worker {worker_id} not registered for "
+                        f"instance {instance_id} or "
+                    )
+                )
+            sockets.append(socket)
+
+            worker_event_id = f"HealthWorker{worker_id}{str(uuid.uuid4())}"
+            serialized_msg = msgspec.msgpack.encode(
+                HealthWorkerMsg(
+                    worker_event_id=worker_event_id,
+                )
+            )
+            serialized_msgs.append(serialized_msg)
+            logger.debug(
+                f"Sending health check operation to worker ({instance_id}, {worker_id})"
+            )
+        # TODO(baoloongmao): Handle the results of the health check operation.
+        await self.execute_workers(
+            sockets=sockets,
+            serialized_msgs=serialized_msgs,
+        )
+        return HealthRetMsg(
+            event_id="event_id",
+            error_code=0,
+        )
 
     async def check_finish(
         self, msg: CheckFinishMsg

@@ -573,6 +573,12 @@ class MemoryAllocatorInterface(metaclass=abc.ABCMeta):
         """
         return
 
+    def memcheck(self):
+        """
+        Checks the memory allocator for consistency.
+        """
+        return
+
 
 class TensorMemoryAllocator(MemoryAllocatorInterface):
     """
