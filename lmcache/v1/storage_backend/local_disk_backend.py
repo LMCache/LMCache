@@ -188,6 +188,11 @@ class LocalDiskBackend(StorageBackendInterface):
 
         self.disk_worker = LocalDiskWorker()
 
+        # to help maintain suffix -> prefix order in the dict
+        # assumption: only one request is looked up at a time
+        # (only one worker per cache engine)
+        self.keys_in_request: List[CacheEngineKey] = []
+
         self.lmcache_worker = lmcache_worker
         self.instance_id = config.lmcache_instance_id
         self.stats_monitor = LMCStatsMonitor.GetOrCreate()
@@ -208,7 +213,16 @@ class LocalDiskBackend(StorageBackendInterface):
                 return False
             if pin:
                 self.dict[key].pin()
+                # vllm lookup sets pin to True
+                self.keys_in_request.append(key)
             return True
+
+    def touch_cache(self):
+        # flip the order of the keys in the request
+        with self.disk_lock:
+            for key in reversed(self.keys_in_request):
+                self.evictor.update_on_hit(key, self.dict)
+            self.keys_in_request = []
 
     def exists_in_put_tasks(self, key: CacheEngineKey) -> bool:
         return self.disk_worker.exists_in_put_tasks(key)
@@ -238,11 +252,13 @@ class LocalDiskBackend(StorageBackendInterface):
     def remove(
         self,
         key: CacheEngineKey,
-    ) -> None:
-        path = self.dict[key].path
-        self.disk_lock.acquire()
-        self.dict.pop(key)
-        self.disk_lock.release()
+        free_obj: bool = True,
+    ) -> bool:
+        with self.disk_lock:
+            if not (meta := self.dict.pop(key, None)):
+                return False
+
+        path = meta.path
         size = os.path.getsize(path)
         self.usage -= size
         self.stats_monitor.update_local_storage_usage(self.usage)
@@ -251,8 +267,10 @@ class LocalDiskBackend(StorageBackendInterface):
         # push kv evict msg
         if self.lmcache_worker is not None:
             self.lmcache_worker.put_msg(
-                KVEvictMsg(self.instance_id, key.worker_id, key.chunk_hash, "disk")
+                KVEvictMsg(self.instance_id, key.worker_id, key.chunk_hash, str(self))
             )
+
+        return True
 
     def insert_key(self, key: CacheEngineKey, memory_obj: MemoryObj) -> None:
         path = self._key_to_path(key)
@@ -273,7 +291,7 @@ class LocalDiskBackend(StorageBackendInterface):
         # push kv admit msg
         if self.lmcache_worker is not None and not has_stored:
             self.lmcache_worker.put_msg(
-                KVAdmitMsg(self.instance_id, key.worker_id, key.chunk_hash, "disk")
+                KVAdmitMsg(self.instance_id, key.worker_id, key.chunk_hash, str(self))
             )
 
     def submit_put_task(
