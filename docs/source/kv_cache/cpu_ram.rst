@@ -54,12 +54,12 @@ with the GPU. This means it is possible to set ``LMCACHE_LOCAL_CPU=False`` even
 though ``LMCACHE_MAX_LOCAL_CPU_SIZE`` is set to a non-zero number.
 
 
-However, it is recommended to *always* set ``LMCACHE_USE_LOCAL_CPU=True`` (the default is ``True`` so if you
+However, it is recommended to *always* set ``LMCACHE_LOCAL_CPU=True`` (the default is ``True`` so if you
 don't specify, CPU offloading will automatically be enabled) since this allows all currently unused pinned CPU RAM that
 LMCache has reserved to hold KV caches. When the pinned CPU RAM is required for any disk or remote transfers, the CPU KV caches will be LRU evicted to make
 space so there is no danger of running out of pinned CPU RAM.
 
-When ``LMCACHE_USE_LOCAL_CPU=True`` is used in conjunction with the disk backend or
+When ``LMCACHE_LOCAL_CPU=True`` is used in conjunction with the disk backend or
 a remote backend (:doc:`Redis <./redis>`, :doc:`Mooncake <./mooncake>`, :doc:`Valkey <./valkey>`,
 or :doc:`Infinistore <./infinistore>`), we can think of the CPU RAM as a "hot cache" that
 will contain the "hottest" (most recently accessed)subset of KV caches from Disk and Remote storage.

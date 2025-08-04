@@ -64,6 +64,11 @@ class LocalCPUBackend(StorageBackendInterface):
         self.layerwise = config.use_layerwise
         self.enable_blending = config.enable_blending
 
+        # to help maintain suffix -> prefix order in the dict
+        # assumption: only one request is looked up at a time
+        # (only one worker per cache engine)
+        self.keys_in_request: List[CacheEngineKey] = []
+
     def __str__(self):
         return self.__class__.__name__
 
@@ -73,7 +78,16 @@ class LocalCPUBackend(StorageBackendInterface):
                 return False
             if pin:
                 self.hot_cache[key].pin()
+                # vllm lookup sets pin to True
+                self.keys_in_request.append(key)
             return True
+
+    def touch_cache(self):
+        # flip the order of the keys in the request
+        with self.cpu_lock:
+            for key in reversed(self.keys_in_request):
+                self.hot_cache.move_to_end(key)
+            self.keys_in_request = []
 
     def exists_in_put_tasks(self, key: CacheEngineKey) -> bool:
         """
@@ -145,7 +159,6 @@ class LocalCPUBackend(StorageBackendInterface):
             # is evicted from the local cpu backend before the caller calls
             # ref count up themselves
             memory_obj.ref_count_up()
-            self.hot_cache.move_to_end(key)
             return memory_obj
 
     def get_non_blocking(
@@ -160,7 +173,6 @@ class LocalCPUBackend(StorageBackendInterface):
                 return None
             memory_obj = self.hot_cache[key]
             memory_obj.ref_count_up()
-            self.hot_cache.move_to_end(key)
             f: Future = Future()
             f.set_result(memory_obj)
             return f
@@ -354,20 +366,23 @@ class LocalCPUBackend(StorageBackendInterface):
         if not self.use_hot:
             return 0
         clear_keys = []
+        num_cleared_tokens = 0
         with self.cpu_lock:
             for key in self.hot_cache:
                 memory_obj = self.hot_cache[key]
                 if memory_obj.get_ref_count() > 1:
                     continue
                 clear_keys.append(key)
+                num_cleared_tokens += memory_obj.get_num_tokens()
 
-        for key in clear_keys:
-            self.remove(key)
+        # TODO(Jiayi): might not be accurate if we don't calculate
+        # `num_cleared_token` and remove the keys in an atomic way.
+        self.batched_remove(clear_keys)
 
         if self.lookup_server is not None:
             self.lookup_server.batched_remove(clear_keys)
 
-        return len(clear_keys)
+        return num_cleared_tokens
 
     def close(self) -> None:
         self.clear()

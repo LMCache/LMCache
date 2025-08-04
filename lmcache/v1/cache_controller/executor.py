@@ -29,6 +29,7 @@ from lmcache.v1.cache_controller.message import (  # noqa: E501
     MsgBase,
     PinMsg,
     PinRetMsg,
+    PinWorkerMsg,
 )
 
 logger = init_logger(__name__)
@@ -57,7 +58,7 @@ class LMCacheClusterExecutor:
         Execute a clear cache operation with error handling.
         """
         instance_id = msg.instance_id
-        tokens = msg.tokens
+        location = msg.location
 
         worker_ids = self.reg_controller.get_workers(instance_id)
         assert worker_ids is not None
@@ -68,7 +69,7 @@ class LMCacheClusterExecutor:
             if socket is None:
                 return ErrorMsg(
                     error=(
-                        f"Worker {worker_id} not registeredfor instance {instance_id}"
+                        f"Worker {worker_id} not registered for instance {instance_id}"
                     )
                 )
             sockets.append(socket)
@@ -79,7 +80,7 @@ class LMCacheClusterExecutor:
             serialized_msg = msgspec.msgpack.encode(
                 ClearWorkerMsg(
                     worker_event_id=worker_event_id,
-                    tokens=tokens,
+                    location=location,
                 )
             )
             serialized_msgs.append(serialized_msg)
@@ -88,15 +89,67 @@ class LMCacheClusterExecutor:
             serialized_msgs=serialized_msgs,
         )
 
-        success = True
+        num_tokens_list = []
         for i, serialized_result in enumerate(serialized_results):
             result = msgspec.msgpack.decode(serialized_result, type=Msg)
-            if success:
-                success = result.success
-        return ClearRetMsg(event_id=msg.event_id, success=success)
+            num_tokens_list.append(result.num_tokens)
+
+        # TODO(Jiayi): Need to ensure cache consistency across workers.
+        assert len(set(num_tokens_list)) == 1, (
+            "The number of tokens cleared should be the same across all workers."
+        )
+
+        return ClearRetMsg(event_id=msg.event_id, num_tokens=num_tokens_list[0])
 
     async def pin(self, msg: PinMsg) -> Union[PinRetMsg, ErrorMsg]:
-        raise NotImplementedError
+        """
+        Execute a pin cache operation with error handling.
+        """
+        instance_id = msg.instance_id
+        tokens = msg.tokens
+        location = msg.location
+
+        worker_ids = self.reg_controller.get_workers(instance_id)
+        assert worker_ids is not None
+        sockets = []
+        serialized_msgs = []
+        for worker_id in worker_ids:
+            socket = self.reg_controller.get_socket(instance_id, worker_id)
+            if socket is None:
+                return ErrorMsg(
+                    error=(
+                        f"Worker {worker_id} not registered for instance {instance_id}"
+                    )
+                )
+            sockets.append(socket)
+
+            # TODO(Jiayi): Need a way to trak event_id -> worker_event_id mapping
+            # Also, we need to track worker_event_id status
+            worker_event_id = f"Worker{worker_id}{msg.event_id}"
+            serialized_msg = msgspec.msgpack.encode(
+                PinWorkerMsg(
+                    worker_event_id=worker_event_id,
+                    tokens=tokens,
+                    location=location,
+                )
+            )
+            serialized_msgs.append(serialized_msg)
+        serialized_results = await self.execute_workers(
+            sockets=sockets,
+            serialized_msgs=serialized_msgs,
+        )
+
+        num_tokens_list = []
+        for i, serialized_result in enumerate(serialized_results):
+            result = msgspec.msgpack.decode(serialized_result, type=Msg)
+            num_tokens_list.append(result.num_tokens)
+
+        # TODO(Jiayi): Need to ensure cache consistency across workers.
+        assert len(set(num_tokens_list)) == 1, (
+            "The number of tokens pinned should be the same across all workers."
+        )
+
+        return PinRetMsg(event_id=msg.event_id, num_tokens=num_tokens_list[0])
 
     async def compress(self, msg: CompressMsg) -> Union[CompressRetMsg, ErrorMsg]:
         """
@@ -153,7 +206,7 @@ class LMCacheClusterExecutor:
 
         # TODO(Jiayi): Need to ensure cache consistency across workers.
         assert len(set(num_tokens_list)) == 1, (
-            "The number of tokens moved should be the same across all workers."
+            "The number of tokens compressed should be the same across all workers."
         )
 
         return CompressRetMsg(
