@@ -692,7 +692,7 @@ class LMCacheEngine:
             )
 
             for start, end, key in self.token_database.process_tokens(
-              tokens=tokens, tags=tags
+                tokens=tokens, tags=tags
             ):
                 assert isinstance(key, CacheEngineKey)
 
