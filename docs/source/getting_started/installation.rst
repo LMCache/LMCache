@@ -94,8 +94,8 @@ LMCache with vLLM v0
 ~~~~~~~~~~~~~~~~~~~~
 
 .. note::
-    LMCache is also integrated with vLLM v0. Refer to `the example in vLLM <https://github.com/vllm-project/vllm/blob/main/examples/lmcache/cpu_offload_lmcache.py>`__.
-    See the `examples README <https://github.com/vllm-project/vllm/tree/main/examples/lmcache#2-cpu-offload-examples>`_ to understand how to run the script for vLLM v0.
+    LMCache is also integrated with vLLM v0. Refer to `the example in vLLM <https://github.com/vllm-project/vllm/blob/main/examples/others/lmcache/cpu_offload_lmcache.py>`__.
+    See the `examples README <https://github.com/vllm-project/vllm/tree/main/examples/others/lmcache#2-cpu-offload-examples>`_ to understand how to run the script for vLLM v0.
 
 Setup using Docker
 ------------------

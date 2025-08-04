@@ -76,6 +76,7 @@ class NixlBackend(StorageBackendInterface):
 
         :return: True if the key exists, False otherwise
         """
+        assert isinstance(key, CacheEngineKey)
         with self._data_lock:
             if mem_obj := self._data.get(key, None):
                 if pin:
@@ -97,6 +98,7 @@ class NixlBackend(StorageBackendInterface):
         key: CacheEngineKey,
         mem_obj: MemoryObj,
     ):
+        assert isinstance(key, CacheEngineKey)
         with self._data_lock:
             self._data[key] = mem_obj
 
@@ -128,6 +130,8 @@ class NixlBackend(StorageBackendInterface):
     ) -> Optional[List[Future]]:
         for mem_obj in memory_objs:
             mem_obj.ref_count_up()
+        for key in keys:
+            assert isinstance(key, CacheEngineKey)
 
         self._nixl_channel.prepare_send(
             keys=keys,
@@ -155,10 +159,11 @@ class NixlBackend(StorageBackendInterface):
         :return: MemoryObj. None if the key does not exist.
         """
 
+        assert isinstance(key, CacheEngineKey)
         with self._data_lock:
             # NOTE(Jiayi): we assume that the key must be in local data
             # because we are using a push-based transfer
-            mem_obj = self._data.pop(key, None)
+            mem_obj = self._data.get(key, None)
             assert mem_obj is not None, f"Key {key} not found in local data."
 
             # NOTE(Jiayi): Currently, we remove the cache from local storage

@@ -69,6 +69,7 @@ class DisaggSpec:
     req_id: str
     receiver_info: NixlReceiverInfo
     is_last_prefill: bool = False
+    num_transferred_tokens: int = 0
 
 
 tmp_disagg_tracker: dict[str, DisaggSpec] = {}
@@ -227,8 +228,10 @@ class ReqMeta:
         chunk_boundary = (
             cdiv(tracker.num_saved_tokens + 1, lmcache_chunk_size) * lmcache_chunk_size
         )
-        skip_save = skip_save or (
-            tracker.num_saved_tokens > 0 and input_token_len < chunk_boundary
+        # NOTE(vladnosiv): for disagg, you cannot skip saving, as saving is a transfer
+        skip_save = tracker.disagg_spec is None and (
+            skip_save
+            or (tracker.num_saved_tokens > 0 and input_token_len < chunk_boundary)
         )
 
         if skip_save and load_spec is None:
@@ -236,9 +239,13 @@ class ReqMeta:
 
         # Calculate number of tokens to save based on discard_partial_chunks
         # setting
+
+        # NOTE(vladnosiv): for the input_token_len chunk prefill,
+        # we are required to discard partial chunks,
+        # as new tokens will be added in the next iteration.
         num_tokens_to_save = (
             (input_token_len // lmcache_chunk_size * lmcache_chunk_size)
-            if discard_partial_chunks
+            if not is_last_prefill or discard_partial_chunks
             else input_token_len
         )
 
@@ -685,23 +692,20 @@ class LMCacheConnectorV1Impl:
             # TODO: have a pre-allocated buffer to hold the slot_mappings
             slot_mapping = slot_mapping.cuda()
 
+            skip_leading_tokens = save_spec.skip_leading_tokens
             if self.kv_role == "kv_producer":
-                skip_leading_tokens = 0
-            else:
-                skip_leading_tokens = max(
-                    self.lmcache_engine.lookup(token_ids),
-                    save_spec.skip_leading_tokens,
+                skip_leading_tokens = min(
+                    skip_leading_tokens, request.disagg_spec.num_transferred_tokens
                 )
-                skip_leading_tokens = save_spec.skip_leading_tokens
 
-                if skip_leading_tokens == len(token_ids):
-                    continue  # skip this request
-                # Align to lmcache chunk size
-                skip_leading_tokens = (
-                    skip_leading_tokens
-                    // self._lmcache_chunk_size
-                    * self._lmcache_chunk_size
-                )
+            if skip_leading_tokens == len(token_ids):
+                continue  # skip this request
+            # Align to lmcache chunk size
+            skip_leading_tokens = (
+                skip_leading_tokens
+                // self._lmcache_chunk_size
+                * self._lmcache_chunk_size
+            )
 
             store_mask = torch.ones_like(token_ids, dtype=torch.bool)
             store_mask[:skip_leading_tokens] = False
@@ -739,6 +743,8 @@ class LMCacheConnectorV1Impl:
 
             # NOTE(Jiayi): We assume all tokens are saved
             save_spec.skip_leading_tokens = len(token_ids)
+            if request.disagg_spec:
+                request.disagg_spec.num_transferred_tokens = len(token_ids)
 
     def get_finished(
         self, finished_req_ids: set[str]
