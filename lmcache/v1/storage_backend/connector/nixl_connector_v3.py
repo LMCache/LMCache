@@ -547,8 +547,8 @@ class NixlReceiver:
         already_send_indexes = []
 
         for idx, key in enumerate(alloc_request.keys):
-            temp_fix_key = CacheEngineKey.from_string(key)
-            if self._backend.contains(temp_fix_key, pin=True):
+            key_from_string = CacheEngineKey.from_string(key)
+            if self._backend.contains(key_from_string, pin=True):
                 already_send_indexes.append(idx)
                 continue
 
