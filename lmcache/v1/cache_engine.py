@@ -654,56 +654,63 @@ class LMCacheEngine:
 
         :return: An int indicating how many prefix tokens are cached.
         """
-        end = 0
-        prev_end = 0
+        try:
+            end = 0
+            prev_end = 0
 
-        if pin:
-            assert request_id is not None, "request_id is required when pin is True"
+            if pin:
+                assert request_id is not None, "request_id is required when pin is True"
 
-        # secondary lookup on p2p (via lookup_server) if enabled
-        search_p2p = self.enable_p2p and (search_range is None or "p2p" in search_range)
+            # secondary lookup on p2p (via lookup_server) if enabled
+            search_p2p = self.enable_p2p and (
+                search_range is None or "p2p" in search_range
+            )
 
-        for start, end, key in self.token_database.process_tokens(tokens=tokens):
-            assert isinstance(key, CacheEngineKey)
+            for start, end, key in self.token_database.process_tokens(tokens=tokens):
+                assert isinstance(key, CacheEngineKey)
 
-            if self.use_layerwise:
-                # TODO(Jiayi): Optimize by checking only the existence of the key
-                # of one layer
-                key_all_layers = key.split_layers(self.num_layers)
+                if self.use_layerwise:
+                    # TODO(Jiayi): Optimize by checking only the existence of the key
+                    # of one layer
+                    key_all_layers = key.split_layers(self.num_layers)
 
-                found = False
-                for key_single_layer in key_all_layers:
-                    if self.storage_manager.contains(
-                        key_single_layer, search_range, pin
-                    ):
-                        found = True
-                    if search_p2p:
-                        assert self.lookup_server is not None
-                        if self.lookup_server.lookup(key_single_layer):
+                    found = False
+                    for key_single_layer in key_all_layers:
+                        if self.storage_manager.contains(
+                            key_single_layer, search_range, pin
+                        ):
                             found = True
-                if found:
-                    if pin:
-                        self.lookup_pins[request_id].extend(key_all_layers)
-                    prev_end = end
-                    continue
-                return prev_end
-            else:
-                if self.storage_manager.contains(key, search_range, pin):
-                    if pin:
-                        self.lookup_pins[request_id].append(key)
-                    prev_end = end
-                    continue
-
-                if search_p2p:
-                    assert self.lookup_server is not None
-                    # TODO(Jiayi): We need to support pin for remote lookup
-                    if self.lookup_server.lookup(key):
+                        if search_p2p:
+                            assert self.lookup_server is not None
+                            if self.lookup_server.lookup(key_single_layer):
+                                found = True
+                    if found:
+                        if pin:
+                            self.lookup_pins[request_id].extend(key_all_layers)
                         prev_end = end
                         continue
-                return prev_end
+                    return prev_end
+                else:
+                    if self.storage_manager.contains(key, search_range, pin):
+                        if pin:
+                            self.lookup_pins[request_id].append(key)
+                        prev_end = end
+                        continue
 
-        # all tokens where found, return the maximal end
-        return end
+                    if search_p2p:
+                        assert self.lookup_server is not None
+                        # TODO(Jiayi): We need to support pin for remote lookup
+                        if self.lookup_server.lookup(key):
+                            prev_end = end
+                            continue
+                    return prev_end
+
+            # all tokens where found, return the maximal end
+            return end
+        finally:
+            # vllm lookup sets pin to True
+            if pin:
+                self.storage_manager.touch_cache()
 
     @_lmcache_nvtx_annotate
     def move(

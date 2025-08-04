@@ -26,6 +26,7 @@ trap 'cleanup $?' EXIT
 CID=
 HF_TOKEN=
 SERVER_WAIT_TIMEOUT=180
+PORT=
 
 #############
 # UTILITIES #
@@ -40,7 +41,34 @@ cleanup() {
         docker rm "$CID" &>/dev/null || true
     fi
 
-    fuser -k 8000/tcp &>/dev/null || true
+    if [[ -n "${PORT:-}" ]]; then
+        fuser -k "${PORT}/tcp" &>/dev/null || true
+    fi
+}
+
+find_available_port() {
+    local start_port=${1:-8000}
+    local port=$start_port
+    
+    while [ $port -lt 65536 ]; do
+        # Check if port is available using netstat
+        if ! netstat -tuln 2>/dev/null | grep -q ":${port} "; then
+            # Double-check by trying to bind to the port with nc
+            if timeout 1 bash -c "</dev/tcp/127.0.0.1/${port}" 2>/dev/null; then
+                # Port is in use, try next one
+                ((port++))
+                continue
+            else
+                # Port is available
+                echo $port
+                return 0
+            fi
+        fi
+        ((port++))
+    done
+    
+    echo "ERROR: No available ports found starting from $start_port" >&2
+    return 1
 }
 
 build_lmcache_vllmopenai_image() {
@@ -50,12 +78,12 @@ build_lmcache_vllmopenai_image() {
 }
 
 wait_for_openai_api_server(){
-    if ! timeout $SERVER_WAIT_TIMEOUT bash -c '
-        until curl 127.0.0.1:8000/v1/models |grep "\"id\":\"meta-llama/Llama-3.2-1B-Instruct\""; do
-            echo "waiting for OpenAI API server to start"
+    if ! timeout $SERVER_WAIT_TIMEOUT bash -c "
+        until curl 127.0.0.1:${PORT}/v1/models |grep '\"id\":\"meta-llama/Llama-3.2-1B-Instruct\"'; do
+            echo 'waiting for OpenAI API server to start'
             sleep 30
         done
-    '; then
+    "; then
         echo "OpenAI API server did not start"
         docker logs $CID
         return 1
@@ -64,7 +92,7 @@ wait_for_openai_api_server(){
 
 run_lmcache_vllmopenai_container() {
     # Pick the GPU with the largest free memory
-    source "$ORIG_DIR/.buildkite/scripts/pick-free-gpu.sh" 8000
+    source "$ORIG_DIR/.buildkite/scripts/pick-free-gpu.sh" $PORT
     best_gpu="${CUDA_VISIBLE_DEVICES}"
     
     if [ -z "$HF_TOKEN" ]; then
@@ -80,7 +108,8 @@ run_lmcache_vllmopenai_container() {
             '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}' \
             --max-model-len 1024 \
             --gpu-memory-utilization '0.3' \
-            --enforce-eager)
+            --enforce-eager \
+            --port $PORT)
     else
         CID=$(docker run -d --runtime nvidia --gpus "device=${best_gpu}" \
             --env VLLM_USE_FLASHINFER_SAMPLER=0 \
@@ -95,7 +124,8 @@ run_lmcache_vllmopenai_container() {
             '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}' \
             --max-model-len 1024 \
             --gpu-memory-utilization '0.3' \
-            --enforce-eager)
+            --enforce-eager \
+            --port $PORT)
     fi
     buildkite-agent meta-data set "docker-CID" "$CID"
 
@@ -140,7 +170,7 @@ usage() {
 #########
 
 test_vllmopenai_server_with_lmcache_integrated() {
-    http_status_code=$(curl --max-time 60 http://localhost:8000/v1/completions \
+    http_status_code=$(curl --max-time 60 http://localhost:${PORT}/v1/completions \
             -w "%{http_code}" -o response-file.txt \
             -H "Content-Type: application/json" \
             -d '{
@@ -195,6 +225,15 @@ while [ $# -gt 0 ]; do
 done
 
 ORIG_DIR="$PWD"
+
+# Find an available port starting from 8000
+PORT=$(find_available_port 8000)
+if [ $? -ne 0 ]; then
+    echo "Failed to find an available port"
+    exit 1
+fi
+echo "Using port: $PORT"
+
 # Need to run from docker directory
 cd docker/
 

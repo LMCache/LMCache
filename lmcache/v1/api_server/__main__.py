@@ -109,12 +109,11 @@ def create_app(controller_url: str) -> FastAPI:
 
     class ClearRequest(BaseModel):
         instance_id: str
-        locations: Optional[List[str]] = []
-        tokens: Optional[List[int]] = []
+        location: str
 
     class ClearResponse(BaseModel):
         event_id: str
-        success: bool
+        num_tokens: int
 
     @app.post("/clear", response_model=ClearResponse)
     async def clear(req: ClearRequest):
@@ -123,23 +122,24 @@ def create_app(controller_url: str) -> FastAPI:
             msg = ClearMsg(
                 event_id=event_id,
                 instance_id=req.instance_id,
-                tokens=req.tokens,
-                locations=req.locations,
+                location=req.location,
             )
             ret_msg = await lmcache_controller_manager.handle_orchestration_message(msg)
             assert isinstance(ret_msg, ClearRetMsg)
-            return ClearResponse(event_id=ret_msg.event_id, success=ret_msg.success)
+            return ClearResponse(
+                event_id=ret_msg.event_id, num_tokens=ret_msg.num_tokens
+            )
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e)) from e
 
     class PinRequest(BaseModel):
         instance_id: str
-        locations: Optional[List[str]] = []
-        tokens: Optional[List[int]] = []
+        location: str
+        tokens: list[int]
 
     class PinResponse(BaseModel):
         event_id: str
-        success: bool
+        num_tokens: int
 
     @app.post("/pin", response_model=PinResponse)
     async def pin(req: PinRequest):
@@ -148,12 +148,12 @@ def create_app(controller_url: str) -> FastAPI:
             msg = PinMsg(
                 event_id=event_id,
                 instance_id=req.instance_id,
-                locations=req.locations,
+                location=req.location,
                 tokens=req.tokens,
             )
             ret_msg = await lmcache_controller_manager.handle_orchestration_message(msg)
             assert isinstance(ret_msg, PinRetMsg)
-            return PinResponse(event_id=ret_msg.event_id, success=ret_msg.success)
+            return PinResponse(event_id=ret_msg.event_id, num_tokens=ret_msg.num_tokens)
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e)) from e
 
