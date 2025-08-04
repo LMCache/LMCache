@@ -431,23 +431,23 @@ class StorageManager:
         Should be a subset of ["LocalCPUBackend", "LocalDiskBackend"] for now.
         If None, perform `clear` in all backends.
 
-        return: Total number of cleared caches in the specified
+        return: Total number of cleared tokens in the specified
         storage backends.
         """
 
-        num_cleared = 0
+        num_cleared_tokens = 0
         for backend_name, backend in self.storage_backends.items():
             # TODO(Jiayi): need to handle remove in non-cpu backends
             if locations is None or backend_name in locations:
                 if hasattr(backend, "clear"):
-                    num_cleared += backend.clear()
+                    num_cleared_tokens += backend.clear()
                 else:
                     logger.warning(
                         f"Storage backend {backend_name} does not support "
                         "clear operation. Skipping."
                     )
 
-        return num_cleared
+        return num_cleared_tokens
 
     def close(self):
         for backend in self.storage_backends.values():
