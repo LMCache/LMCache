@@ -231,6 +231,13 @@ class MemoryObj(metaclass=abc.ABCMeta):
         """
         raise NotImplementedError
 
+    @abc.abstractmethod
+    def get_num_tokens(self) -> int:
+        """
+        Get token number for the given MemoryObj.
+        """
+        raise NotImplementedError
+
     @property
     @abc.abstractmethod
     def metadata(self) -> MemoryObjMetadata:
@@ -331,6 +338,11 @@ class TensorMemoryObj(MemoryObj):
     def get_ref_count(self) -> int:
         with self.lock:
             return self.meta.ref_count
+
+    def get_num_tokens(self) -> int:
+        with self.lock:
+            token_dim = self.meta.fmt.token_dim()
+            return self.meta.shape[token_dim]
 
     def pin(self) -> bool:
         with self.lock:
@@ -450,6 +462,10 @@ class BytesBufferMemoryObj(MemoryObj):
         pass
 
     def get_ref_count(self) -> int:
+        return 1
+
+    def get_num_tokens(self) -> int:
+        # TODO(Jiayi): record the number of tokens somehow
         return 1
 
     @property
