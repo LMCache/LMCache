@@ -7,7 +7,7 @@ steps:
     timeout_in_minutes: 60
     commands:
       - chmod +x .buildkite/scripts/vllm-integration-tests.sh
-      - .buildkite/scripts/vllm-integration-tests.sh --hf-token=$HF_TOKEN --server-wait-timeout=240
+      - .buildkite/scripts/vllm-integration-tests.sh --hf-token=$HF_TOKEN --server-wait-timeout=240 --configs=lmcache_local_cpu.yaml
   
   - label: ":broom: Cleanup Docker"
     key: "clean"

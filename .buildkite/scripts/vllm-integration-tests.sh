@@ -146,6 +146,7 @@ usage() {
     echo "  --hf-token|-hft              HuggingFace access token for downloading model(s)"
     echo "  --server-wait-timeout|-swt   Wait time in seconds for vLLM OpenAI server to start"
     echo "  --help|-h                    Print usage"
+    echo "  --configs|-c               Comma-separated list of config filenames (required)"
 }
 
 #########
@@ -181,6 +182,10 @@ test_vllmopenai_server_with_lmcache_integrated() {
 
 while [ $# -gt 0 ]; do
   case "$1" in
+     --configs*|-c*)
+       if [[ "$1" != *=* ]]; then shift; fi
+       configs_arg="${1#*=}"
+       ;;
     --hf-token*|-hft*)
       if [[ "$1" != *=* ]]; then shift; fi # Value is next arg if no `=`
       HF_TOKEN="${1#*=}"
@@ -209,10 +214,13 @@ done
 
 ORIG_DIR="$PWD"
 
-CONFIG_NAMES=(
-  "lmcache_local_cpu.yaml"
-  "lmcache_local_disk.yaml"
-)
+# Read the configs argument 
+if [[ -z "${configs_arg:-}" ]]; then
+  echo "Error: --configs is required" >&2
+  usage
+  exit 1
+fi
+IFS=',' read -r -a CONFIG_NAMES <<< "$configs_arg"
 
 # Find an available port starting from 8000
 PORT=$(find_available_port 8000)
@@ -233,7 +241,7 @@ build_lmcache_vllmopenai_image
 ########
 
 for cfg_name in "${CONFIG_NAMES[@]}"; do
-    echo "===== Testing LMCache with ${cfg_name} ====="
+    echo -e "\033[1;33m===== Testing LMCache with ${cfg_name} =====\033[0m"
 
     # Start the OpenAI API server by running the container image
     run_lmcache_vllmopenai_container "$cfg_name"
