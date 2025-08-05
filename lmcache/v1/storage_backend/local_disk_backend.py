@@ -467,13 +467,12 @@ class LocalDiskBackend(StorageBackendInterface):
         else:
             fd = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_DIRECT, 0o644)
             os.write(fd, byte_array)
-        
+
         disk_write_time = time.time() - start_time
         logger.debug(
             f"Disk write size: {size} bytes, "
             f"Bandwidth: {size / disk_write_time / 1e6:.2f} MB/s"
         )
-
 
         self.insert_key(key, memory_obj)
 
