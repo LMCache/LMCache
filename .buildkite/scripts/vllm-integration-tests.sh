@@ -21,7 +21,6 @@
 # Note: L4 CI runners cannot use Flash Infer
 
 set -ex
-trap 'cleanup $?' EXIT
 
 CID=
 HF_TOKEN=
@@ -91,42 +90,25 @@ wait_for_openai_api_server(){
 }
 
 run_lmcache_vllmopenai_container() {
+    local cfg_file="$1"
     # Pick the GPU with the largest free memory
     source "$ORIG_DIR/.buildkite/scripts/pick-free-gpu.sh" $PORT
     best_gpu="${CUDA_VISIBLE_DEVICES}"
     
-    if [ -z "$HF_TOKEN" ]; then
-        CID=$(docker run -d --runtime nvidia --gpus "device=${best_gpu}" \
-            --env VLLM_USE_FLASHINFER_SAMPLER=0 \
-            --env "LMCACHE_CHUNK_SIZE=256" \
-            --env "LMCACHE_LOCAL_CPU=True" \
-            --env "LMCACHE_MAX_LOCAL_CPU_SIZE=5" \
-            --volume ~/.cache/huggingface:/root/.cache/huggingface \
-            --network host \
-            'lmcache/vllm-openai:build-latest' \
-            'meta-llama/Llama-3.2-1B-Instruct' --kv-transfer-config \
-            '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}' \
-            --max-model-len 1024 \
-            --gpu-memory-utilization '0.3' \
-            --enforce-eager \
-            --port $PORT)
-    else
-        CID=$(docker run -d --runtime nvidia --gpus "device=${best_gpu}" \
-            --env VLLM_USE_FLASHINFER_SAMPLER=0 \
-            --env HF_TOKEN=$HF_TOKEN \
-            --env "LMCACHE_CHUNK_SIZE=256" \
-            --env "LMCACHE_LOCAL_CPU=True" \
-            --env "LMCACHE_MAX_LOCAL_CPU_SIZE=5" \
-            --volume ~/.cache/huggingface:/root/.cache/huggingface \
-            --network host \
-            'lmcache/vllm-openai:build-latest' \
-            'meta-llama/Llama-3.2-1B-Instruct' --kv-transfer-config \
-            '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}' \
-            --max-model-len 1024 \
-            --gpu-memory-utilization '0.3' \
-            --enforce-eager \
-            --port $PORT)
-    fi
+    CID=$(docker run -d --runtime nvidia --gpus "device=${best_gpu}" \
+        --env VLLM_USE_FLASHINFER_SAMPLER=0 \
+        --env HF_TOKEN=$HF_TOKEN \
+        --env "LMCACHE_CONFIG_FILE=${cfg_file}" \
+        --volume ~/.cache/huggingface:/root/.cache/huggingface \
+        --network host \
+        'lmcache/vllm-openai:build-latest' \
+        'meta-llama/Llama-3.2-1B-Instruct' --kv-transfer-config \
+        '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}' \
+        --max-model-len 1024 \
+        --gpu-memory-utilization '0.3' \
+        --enforce-eager \
+        --port $PORT)
+
     buildkite-agent meta-data set "docker-CID" "$CID"
 
     wait_for_openai_api_server
@@ -187,8 +169,8 @@ test_vllmopenai_server_with_lmcache_integrated() {
         docker logs -n 20 $CID
         return 1
     else
-         echo "Model prompt request from OpenAI API server succeeded"
-         cat response-file.txt
+        echo "Model prompt request from OpenAI API server succeeded"
+        cat response-file.txt
     fi
 }
 
@@ -226,6 +208,11 @@ done
 
 ORIG_DIR="$PWD"
 
+CONFIG_FILES=(
+  "$PWD/.buildkite/configs/lmcache_local_cpu.yaml"
+  "$PWD/.buildkite/configs/lmcache_local_disk.yaml"
+)
+
 # Find an available port starting from 8000
 PORT=$(find_available_port 8000)
 if [ $? -ne 0 ]; then
@@ -240,14 +227,20 @@ cd docker/
 # Create the container image
 build_lmcache_vllmopenai_image
 
-# Start the OpenAI API server by running the container image
-run_lmcache_vllmopenai_container
-
 ########
 # MAIN #
 ########
 
-# test that can inference model using vLLM OpenAI API (lmcache integrated)
-test_vllmopenai_server_with_lmcache_integrated
+for cfg in "${CONFIG_FILES[@]}"; do
+    echo "===== Testing LMCache with ${cfg} ====="
+
+    # Start the OpenAI API server by running the container image
+    run_lmcache_vllmopenai_container "$cfg"
+
+    # test that can inference model using vLLM OpenAI API (lmcache integrated)
+    test_vllmopenai_server_with_lmcache_integrated
+
+    cleanup 0
+done
 
 exit 0
