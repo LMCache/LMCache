@@ -109,6 +109,7 @@ class RemoteBackend(StorageBackendInterface):
                 self.loop,
                 self.local_cpu_backend,
                 self.config,
+                self.metadata,
             )
             logger.info(
                 f"Connection initialized/re-established at {self.config.remote_url}"
