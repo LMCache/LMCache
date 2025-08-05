@@ -12,6 +12,7 @@ import zmq
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.cache_engine import LMCacheEngine
+from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.lookup_client.abstract_client import LookupClientInterface
 from lmcache.v1.rpc_utils import get_zmq_rpc_path_lmcache
 
@@ -23,16 +24,29 @@ logger = init_logger(__name__)
 
 
 class LMCacheLookupClient(LookupClientInterface):
-    """ZMQ-based lookup client that communicates with a lookup server."""
+    """
+    ZMQ-based lookup client that communicates with a lookup server.
 
-    def __init__(self, vllm_config: "VllmConfig"):
+    Related extra_config:
+    - create_lookup_server_only_on_worker_0:
+        is a flag to control whether to create lookup server only on worker 0.
+    """
+
+    def __init__(self, vllm_config: "VllmConfig", config: LMCacheEngineConfig):
         self.encoder = MsgpackEncoder()
         self.ctx = zmq.Context()  # type: ignore[attr-defined]
         rpc_port = vllm_config.kv_transfer_config.get_from_extra_config(
             "lmcache_rpc_port", 0
         )
         self.tensor_parallel_size = vllm_config.parallel_config.tensor_parallel_size
-        for tp_rank in range(self.tensor_parallel_size):
+        self.create_lookup_server_only_on_worker_0 = (
+            config.extra_config
+            and config.extra_config.get("create_lookup_server_only_on_worker_0", True)
+        )
+        ranks = self.tensor_parallel_size
+        if self.create_lookup_server_only_on_worker_0:
+            ranks = 1
+        for tp_rank in range(ranks):
             socket_path = get_zmq_rpc_path_lmcache(
                 vllm_config, "lookup", rpc_port, tp_rank
             )
@@ -49,8 +63,11 @@ class LMCacheLookupClient(LookupClientInterface):
     def lookup(self, token_ids: torch.Tensor, request_id: Optional[str] = None) -> int:
         token_bufs = self.encoder.encode(token_ids)
         request_id_buf = request_id.encode("utf-8")
+        ranks = self.tensor_parallel_size
+        if self.create_lookup_server_only_on_worker_0:
+            ranks = 1
         results = []
-        for i in range(self.tensor_parallel_size):
+        for i in range(ranks):
             self.socket.send_multipart(token_bufs + [request_id_buf], copy=False)
             resp = self.socket.recv()
             result = int.from_bytes(resp, "big")

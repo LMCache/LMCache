@@ -18,16 +18,58 @@
 #   https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html
 #
 # Note: The script should be run from the LMCache code base root.
+# Note: L4 CI runners cannot use Flash Infer
 
 set -ex
+trap 'cleanup $?' EXIT
 
 CID=
 HF_TOKEN=
 SERVER_WAIT_TIMEOUT=180
+PORT=
 
 #############
 # UTILITIES #
 #############
+
+cleanup() {
+    local code="${1:-0}"
+
+    echo "→ Cleaning up Docker container and port..."
+    if [[ -n "${CID:-}" ]]; then
+        docker kill "$CID" &>/dev/null || true
+        docker rm "$CID" &>/dev/null || true
+    fi
+
+    if [[ -n "${PORT:-}" ]]; then
+        fuser -k "${PORT}/tcp" &>/dev/null || true
+    fi
+}
+
+find_available_port() {
+    local start_port=${1:-8000}
+    local port=$start_port
+    
+    while [ $port -lt 65536 ]; do
+        # Check if port is available using netstat
+        if ! netstat -tuln 2>/dev/null | grep -q ":${port} "; then
+            # Double-check by trying to bind to the port with nc
+            if timeout 1 bash -c "</dev/tcp/127.0.0.1/${port}" 2>/dev/null; then
+                # Port is in use, try next one
+                ((port++))
+                continue
+            else
+                # Port is available
+                echo $port
+                return 0
+            fi
+        fi
+        ((port++))
+    done
+    
+    echo "ERROR: No available ports found starting from $start_port" >&2
+    return 1
+}
 
 build_lmcache_vllmopenai_image() {
     cp example_build.sh test-build.sh
@@ -36,29 +78,26 @@ build_lmcache_vllmopenai_image() {
 }
 
 wait_for_openai_api_server(){
-    if ! timeout $SERVER_WAIT_TIMEOUT bash -c '
-        until curl 127.0.0.1:8000/v1/models |grep "\"id\":\"meta-llama/Llama-3.2-1B-Instruct\""; do
-            echo "waiting for OpenAI API server to start"
+    if ! timeout $SERVER_WAIT_TIMEOUT bash -c "
+        until curl 127.0.0.1:${PORT}/v1/models |grep '\"id\":\"meta-llama/Llama-3.2-1B-Instruct\"'; do
+            echo 'waiting for OpenAI API server to start'
             sleep 30
         done
-    '; then
+    "; then
         echo "OpenAI API server did not start"
         docker logs $CID
-        cleanup 1
-        exit 1
+        return 1
     fi
 }
 
 run_lmcache_vllmopenai_container() {
     # Pick the GPU with the largest free memory
-    best_gpu=$(nvidia-smi --query-gpu=memory.free,index \
-        --format=csv,noheader,nounits \
-      | sort -t',' -k1 -nr \
-      | head -n1 \
-      | cut -d',' -f2)
+    source "$ORIG_DIR/.buildkite/scripts/pick-free-gpu.sh" $PORT
+    best_gpu="${CUDA_VISIBLE_DEVICES}"
     
     if [ -z "$HF_TOKEN" ]; then
         CID=$(docker run -d --runtime nvidia --gpus "device=${best_gpu}" \
+            --env VLLM_USE_FLASHINFER_SAMPLER=0 \
             --env "LMCACHE_CHUNK_SIZE=256" \
             --env "LMCACHE_LOCAL_CPU=True" \
             --env "LMCACHE_MAX_LOCAL_CPU_SIZE=5" \
@@ -67,11 +106,14 @@ run_lmcache_vllmopenai_container() {
             'lmcache/vllm-openai:build-latest' \
             'meta-llama/Llama-3.2-1B-Instruct' --kv-transfer-config \
             '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}' \
-            --gpu-memory-utilization '0.5' \
-            --enforce-eager)
+            --max-model-len 1024 \
+            --gpu-memory-utilization '0.3' \
+            --enforce-eager \
+            --port $PORT)
     else
         CID=$(docker run -d --runtime nvidia --gpus "device=${best_gpu}" \
-             --env HF_TOKEN=$HF_TOKEN \
+            --env VLLM_USE_FLASHINFER_SAMPLER=0 \
+            --env HF_TOKEN=$HF_TOKEN \
             --env "LMCACHE_CHUNK_SIZE=256" \
             --env "LMCACHE_LOCAL_CPU=True" \
             --env "LMCACHE_MAX_LOCAL_CPU_SIZE=5" \
@@ -80,8 +122,10 @@ run_lmcache_vllmopenai_container() {
             'lmcache/vllm-openai:build-latest' \
             'meta-llama/Llama-3.2-1B-Instruct' --kv-transfer-config \
             '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}' \
-            --gpu-memory-utilization '0.5' \
-            --enforce-eager)
+            --max-model-len 1024 \
+            --gpu-memory-utilization '0.3' \
+            --enforce-eager \
+            --port $PORT)
     fi
     buildkite-agent meta-data set "docker-CID" "$CID"
 
@@ -107,8 +151,7 @@ run_lmcache_vllmopenai_container() {
         echo "Timeout waiting for startup marker, dumping full log:"
         cat "$LOGFILE"
         kill $LOG_PID
-        cleanup 1
-        exit 1
+        return 1
     fi
 
 }
@@ -127,7 +170,7 @@ usage() {
 #########
 
 test_vllmopenai_server_with_lmcache_integrated() {
-    http_status_code=$(curl http://localhost:8000/v1/completions \
+    http_status_code=$(curl --max-time 60 http://localhost:${PORT}/v1/completions \
             -w "%{http_code}" -o response-file.txt \
             -H "Content-Type: application/json" \
             -d '{
@@ -142,8 +185,7 @@ test_vllmopenai_server_with_lmcache_integrated() {
         echo "Model prompt request from OpenAI API server failed, HTTP status code: ${http_status_code}."
         cat response-file.txt
         docker logs -n 20 $CID
-        cleanup 1
-        exit 1
+        return 1
     else
          echo "Model prompt request from OpenAI API server succeeded"
          cat response-file.txt
@@ -181,6 +223,16 @@ while [ $# -gt 0 ]; do
   esac
   shift
 done
+
+ORIG_DIR="$PWD"
+
+# Find an available port starting from 8000
+PORT=$(find_available_port 8000)
+if [ $? -ne 0 ]; then
+    echo "Failed to find an available port"
+    exit 1
+fi
+echo "Using port: $PORT"
 
 # Need to run from docker directory
 cd docker/

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from collections import defaultdict
-from typing import Dict, Generator, List, Optional, Union
+from typing import Dict, Generator, List, Optional, Tuple, Union
 import asyncio
 import multiprocessing
 import time
@@ -26,11 +26,12 @@ from lmcache.v1.gpu_connector import (
     VLLMPagedMemLayerwiseGPUConnector,
 )
 from lmcache.v1.lookup_server import LookupServerInterface, RedisLookupServer
-from lmcache.v1.memory_management import AdHocMemoryAllocator  # noqa: E501
 from lmcache.v1.memory_management import CuFileMemoryAllocator  # noqa: E501
-from lmcache.v1.memory_management import (
+from lmcache.v1.memory_management import (  # noqa: E501
+    AdHocMemoryAllocator,
     MemoryAllocatorInterface,
     MemoryFormat,
+    MemoryObj,
     MixedMemoryAllocator,
     NixlCPUMemoryAllocator,
 )
@@ -82,6 +83,8 @@ class LMCacheEngine:
 
         self.enable_p2p = config.enable_p2p
 
+        self.enable_controller = config.enable_controller
+
         # NOTE: Unix systems use fork by default
         multiprocessing.set_start_method("spawn", force=True)
 
@@ -94,7 +97,7 @@ class LMCacheEngine:
         from lmcache.v1.cache_controller import LMCacheWorker
 
         self.lmcache_worker: Optional[LMCacheWorker] = None
-        if self.config.enable_controller:
+        if self.enable_controller:
             self.lmcache_worker = LMCacheWorker(config, metadata, self)
 
         self.storage_manager = StorageManager(
@@ -112,17 +115,16 @@ class LMCacheEngine:
             config.enable_nixl and config.nixl_role == "receiver"
         )
 
-        if self.enable_p2p:
+        self.distributed_server: Optional[DistributedServerInterface] = None
+
+        if self.enable_p2p or self.enable_controller:
             self.distributed_loop = asyncio.get_event_loop()
-            assert self.lookup_server is not None
             assert isinstance(self.storage_manager, StorageManager)
-            self.distributed_server: DistributedServerInterface = (
-                NaiveDistributedServer(
-                    self.storage_manager,
-                    self.lookup_server,
-                    self.distributed_loop,
-                    config,
-                )
+            self.distributed_server = NaiveDistributedServer(
+                self.storage_manager,
+                self.lookup_server,
+                self.distributed_loop,
+                config,
             )
 
         self.use_layerwise = config.use_layerwise
@@ -408,14 +410,13 @@ class LMCacheEngine:
 
         ret_mask = torch.zeros_like(tokens, dtype=torch.bool, device="cpu")
 
-        key_mapping: Dict[str, List[CacheEngineKey]] = {}
-        start_mapping: Dict[str, List[int]] = {}
-        end_mapping: Dict[str, List[int]] = {}
+        # location -> [(CacheEngineKey, start, end)]
+        block_mapping: Dict[str, List[Tuple[CacheEngineKey, int, int]]] = defaultdict(
+            list
+        )
+        # [(CacheEngineKey, MemoryObj, start, end)]
+        reordered_chunks: List[Tuple[CacheEngineKey, MemoryObj, int, int]] = []
 
-        reordered_keys = []
-        reordered_memory_objs = []
-        reordered_starts = []
-        reordered_ends = []
         for start, end, key in self.token_database.process_tokens(
             tokens=tokens, mask=mask
         ):
@@ -439,10 +440,7 @@ class LMCacheEngine:
                         )
                         memory_obj = future_memory_obj.result()
                         if memory_obj:
-                            reordered_keys.append(key)
-                            reordered_memory_objs.append(memory_obj)
-                            reordered_starts.append(start)
-                            reordered_ends.append(end)
+                            reordered_chunks.append((key, memory_obj, start, end))
                             ret_mask[start:end] = True
                         else:
                             # NOTE: break for P2P retrieve KV because of no required
@@ -456,40 +454,53 @@ class LMCacheEngine:
                 # object is already pinned in the storage backend.
                 ret_mask[start:end] = True
 
-                if location not in key_mapping:
-                    key_mapping[location] = [key]
-                    start_mapping[location] = [start]
-                    end_mapping[location] = [end]
-                    continue
-
             assert location is not None
 
-            key_mapping[location].append(key)
-            start_mapping[location].append(start)
-            end_mapping[location].append(end)
+            block_mapping[location].append((key, start, end))
 
         # TODO(Jiayi): We can parallelize the retrieval from
         # different storage backends.
-        for location, keys in key_mapping.items():
+        last_failed_block_start = None
+        for location, blocks in block_mapping.items():
+            keys = [key for key, _, _ in blocks]
             memory_objs = self.storage_manager.batched_get(
                 keys=keys,
-                storage_backend_name=location,
+                location=location,
             )
-            reordered_memory_objs.extend(memory_objs)
-            reordered_keys.extend(keys)
-            reordered_starts.extend(start_mapping[location])
-            reordered_ends.extend(end_mapping[location])
+            for (key, start, end), memory_obj in zip(blocks, memory_objs, strict=False):
+                if memory_obj is None:
+                    logger.warn(
+                        "The cache block is in the storage, but it can't be retrieved"
+                    )
+                    if (
+                        last_failed_block_start is None
+                        or last_failed_block_start < start
+                    ):
+                        last_failed_block_start = start
+                    break
+                reordered_chunks.append((key, memory_obj, start, end))
+
+        if last_failed_block_start is not None:
+            ret_mask[last_failed_block_start:] = False
+
+            reordered_chunks = [
+                (key, memory_obj, start, end)
+                for key, memory_obj, start, end in reordered_chunks
+                if end < last_failed_block_start
+            ]
 
         # NOTE(Jiayi): memory_obj doesn't have to be a pinned
         # cpu tensor for the sake of performance.
         # For example, disk->gpu is faster than disk->cpu->gpu.
         # RDMA is another example.
-        self.gpu_connector.batched_to_gpu(
-            reordered_memory_objs, reordered_starts, reordered_ends, **kwargs
-        )
+        if len(reordered_chunks) > 0:
+            _, memory_objs, starts, ends = zip(*reordered_chunks, strict=False)
+            self.gpu_connector.batched_to_gpu(
+                list(memory_objs), list(starts), list(ends), **kwargs
+            )
 
         # TODO(Jiayi): Remove the following for loop with batched operations
-        for key, memory_obj in zip(reordered_keys, reordered_memory_objs, strict=False):
+        for key, memory_obj, _, _ in reordered_chunks:
             if self.remove_after_retrieve:
                 self.storage_manager.remove(key)
             memory_obj.ref_count_down()
@@ -653,55 +664,173 @@ class LMCacheEngine:
 
         :return: An int indicating how many prefix tokens are cached.
         """
-        end = 0
-        prev_end = 0
+        try:
+            end = 0
+            prev_end = 0
 
-        if pin:
-            assert request_id is not None, "request_id is required when pin is True"
+            if pin:
+                assert request_id is not None, "request_id is required when pin is True"
 
-        # secondary lookup on p2p (via lookup_server) if enabled
-        search_p2p = self.enable_p2p and (search_range is None or "p2p" in search_range)
+            # secondary lookup on p2p (via lookup_server) if enabled
+            search_p2p = self.enable_p2p and (
+                search_range is None or "p2p" in search_range
+            )
 
-        for start, end, key in self.token_database.process_tokens(tokens=tokens):
-            assert isinstance(key, CacheEngineKey)
+            for start, end, key in self.token_database.process_tokens(tokens=tokens):
+                assert isinstance(key, CacheEngineKey)
 
-            if self.use_layerwise:
-                # TODO(Jiayi): Optimize by checking only the existence of the key
-                # of one layer
-                key_all_layers = key.split_layers(self.num_layers)
-                if pin:
-                    self.lookup_pins[request_id].extend(key_all_layers)
+                if self.use_layerwise:
+                    # TODO(Jiayi): Optimize by checking only the existence of the key
+                    # of one layer
+                    key_all_layers = key.split_layers(self.num_layers)
 
-                found = False
-                for key_single_layer in key_all_layers:
-                    if self.storage_manager.contains(
-                        key_single_layer, search_range, pin
-                    ):
-                        found = True
-                    if search_p2p:
-                        assert self.lookup_server is not None
-                        if self.lookup_server.lookup(key_single_layer):
+                    found = False
+                    for key_single_layer in key_all_layers:
+                        if self.storage_manager.contains(
+                            key_single_layer, search_range, pin
+                        ):
                             found = True
-                if found:
-                    prev_end = end
-                    continue
-                return prev_end
-            else:
-                if pin:
-                    self.lookup_pins[request_id].append(key)
-                if self.storage_manager.contains(key, search_range, pin):
-                    prev_end = end
-                    continue
-
-                if search_p2p:
-                    assert self.lookup_server is not None
-                    if self.lookup_server.lookup(key):
+                        if search_p2p:
+                            assert self.lookup_server is not None
+                            if self.lookup_server.lookup(key_single_layer):
+                                found = True
+                    if found:
+                        if pin:
+                            self.lookup_pins[request_id].extend(key_all_layers)
                         prev_end = end
                         continue
-                return prev_end
+                    return prev_end
+                else:
+                    if self.storage_manager.contains(key, search_range, pin):
+                        if pin:
+                            self.lookup_pins[request_id].append(key)
+                        prev_end = end
+                        continue
 
-        # all tokens where found, return the maximal end
-        return end
+                    if search_p2p:
+                        assert self.lookup_server is not None
+                        # TODO(Jiayi): We need to support pin for remote lookup
+                        if self.lookup_server.lookup(key):
+                            prev_end = end
+                            continue
+                    return prev_end
+
+            # all tokens where found, return the maximal end
+            return end
+        finally:
+            # vllm lookup sets pin to True
+            if pin:
+                self.storage_manager.touch_cache()
+
+    @_lmcache_nvtx_annotate
+    def move(
+        self,
+        tokens: Union[torch.Tensor, List[int]],
+        old_position: str,
+        new_position: tuple[str, str],
+        event_id: str,
+        do_copy: bool = True,
+    ) -> int:
+        """
+        Perform cross-node move of the KV cache.
+        """
+
+        num_tokens = self.lookup(
+            tokens,
+            search_range=old_position,
+            request_id=event_id,
+            pin=True,
+        )
+
+        if not num_tokens:
+            logger.debug("Move is not performed as there are no tokens to move.")
+            return 0
+
+        keys = self.lookup_pins[event_id]
+
+        memory_objs = self.storage_manager.batched_get(
+            keys=keys,
+            location=old_position,
+        )
+        logger.debug(
+            f"Trying to send {len(memory_objs)} memory objects to {new_position}"
+        )
+
+        future = asyncio.run_coroutine_threadsafe(
+            self.distributed_server.batched_issue_put(
+                keys, memory_objs, new_position[0], new_position[1]
+            ),
+            self.distributed_loop,
+        )
+
+        future.add_done_callback(lambda f: [m.unpin() for m in memory_objs])
+
+        if not do_copy:
+            remove_callback = lambda f: self.storage_manager.batched_remove(
+                keys, locations=[old_position]
+            )
+            future.add_done_callback(remove_callback)
+
+        future.result()
+
+        logger.debug(f"Moving {num_tokens} token from {old_position} to {new_position}")
+        return num_tokens
+
+    # TODO(Jiayi): Need to handle the case where `tokens=None`.
+    # In this case, we compress all tokens.
+    # TODO(Jiayi): support other compression methods.
+    # TODO(Jiayi): support decompression.
+    # TODO(Jiayi): support loading with automatic decompression with
+    # sth like `mem_obj.post_process()`
+    @_lmcache_nvtx_annotate
+    def compress(
+        self,
+        tokens: Union[torch.Tensor, List[int]],
+        method: str,
+        location: str,
+        event_id: str,
+    ) -> int:
+        if method not in ["cachegen"]:
+            logger.warning(f"Unsupported compression method: {method}.")
+            return 0
+
+        # First Party
+        from lmcache.v1.storage_backend.naive_serde import CreateSerde
+
+        serializer, _ = CreateSerde(method, self.metadata, self.config)
+
+        num_tokens = self.lookup(
+            tokens,
+            search_range=[location],
+            request_id=event_id,
+            pin=True,
+        )
+
+        if not num_tokens:
+            logger.debug("Move is not performed as there are no tokens to move.")
+            return 0
+
+        keys = self.lookup_pins[event_id]
+
+        memory_objs = self.storage_manager.batched_get(
+            keys=keys,
+            location=location,
+        )
+
+        compressed_memory_objs = []
+        for memory_obj in memory_objs:
+            compressed_memory_obj = serializer.serialize(memory_obj)
+            memory_obj.unpin()
+            compressed_memory_objs.append(compressed_memory_obj)
+        self.storage_manager.batched_put(
+            keys=keys,
+            memory_objs=compressed_memory_objs,
+            location=location,
+        )
+
+        self.storage_manager.batched_remove(memory_objs, locations=[location])
+
+        return num_tokens
 
     @_lmcache_nvtx_annotate
     def lookup_unpin(self, request_ids: list[str]) -> None:

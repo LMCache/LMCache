@@ -151,9 +151,10 @@ class KVController:
         for start, end, key in self.token_database.process_tokens(
             tokens, make_key=False
         ):
+            key = str(key)
             if key not in self.kv_pool:
                 break
-            matched_instance = self.kv_pool[str(key)][0].instance_id
-            matched_location = self.kv_pool[str(key)][0].location
+            matched_instance = self.kv_pool[key][0].instance_id
+            matched_location = self.kv_pool[key][0].location
             layout_info[matched_instance] = (matched_location, end)
-        return LookupRetMsg(layout_info=layout_info)
+        return LookupRetMsg(layout_info=layout_info, event_id=msg.event_id)

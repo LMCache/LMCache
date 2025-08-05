@@ -37,7 +37,7 @@ class LocalDiskWorker:
         self.pq = queue.PriorityQueue()
 
         # TODO(Jiayi): remove this hard code.
-        num_workers = 4
+        num_workers = 1
         self.executor = ThreadPoolExecutor(max_workers=num_workers)
 
         self.put_lock = threading.Lock()
@@ -188,6 +188,11 @@ class LocalDiskBackend(StorageBackendInterface):
 
         self.disk_worker = LocalDiskWorker()
 
+        # to help maintain suffix -> prefix order in the dict
+        # assumption: only one request is looked up at a time
+        # (only one worker per cache engine)
+        self.keys_in_request: List[CacheEngineKey] = []
+
         self.lmcache_worker = lmcache_worker
         self.instance_id = config.lmcache_instance_id
         self.stats_monitor = LMCStatsMonitor.GetOrCreate()
@@ -208,7 +213,16 @@ class LocalDiskBackend(StorageBackendInterface):
                 return False
             if pin:
                 self.dict[key].pin()
+                # vllm lookup sets pin to True
+                self.keys_in_request.append(key)
             return True
+
+    def touch_cache(self):
+        # flip the order of the keys in the request
+        with self.disk_lock:
+            for key in reversed(self.keys_in_request):
+                self.evictor.update_on_hit(key, self.dict)
+            self.keys_in_request = []
 
     def exists_in_put_tasks(self, key: CacheEngineKey) -> bool:
         return self.disk_worker.exists_in_put_tasks(key)
@@ -238,12 +252,14 @@ class LocalDiskBackend(StorageBackendInterface):
     def remove(
         self,
         key: CacheEngineKey,
-    ) -> None:
-        path = self.dict[key].path
-        size = self.dict[key].size
-        self.disk_lock.acquire()
-        self.dict.pop(key)
-        self.disk_lock.release()
+        free_obj: bool = True,
+    ) -> bool:
+        with self.disk_lock:
+            if not (meta := self.dict.pop(key, None)):
+                return False
+
+        path = meta.path
+        size = meta.size
         self.usage -= size
         self.stats_monitor.update_local_storage_usage(self.usage)
         os.remove(path)
@@ -251,8 +267,10 @@ class LocalDiskBackend(StorageBackendInterface):
         # push kv evict msg
         if self.lmcache_worker is not None:
             self.lmcache_worker.put_msg(
-                KVEvictMsg(self.instance_id, key.worker_id, key.chunk_hash, "disk")
+                KVEvictMsg(self.instance_id, key.worker_id, key.chunk_hash, str(self))
             )
+
+        return True
 
     def insert_key(self, key: CacheEngineKey, memory_obj: MemoryObj) -> None:
         path = self._key_to_path(key)
@@ -273,7 +291,7 @@ class LocalDiskBackend(StorageBackendInterface):
         # push kv admit msg
         if self.lmcache_worker is not None and not has_stored:
             self.lmcache_worker.put_msg(
-                KVAdmitMsg(self.instance_id, key.worker_id, key.chunk_hash, "disk")
+                KVAdmitMsg(self.instance_id, key.worker_id, key.chunk_hash, str(self))
             )
 
     def submit_put_task(
@@ -441,13 +459,20 @@ class LocalDiskBackend(StorageBackendInterface):
         self.usage += size
         self.stats_monitor.update_local_storage_usage(self.usage)
 
+        start_time = time.time()
         # FIXME(Jiayi): need to add ref count in disk memory object
         if size % self.os_disk_bs != 0 or not self.use_odirect:
             with open(path, "wb") as f:
                 f.write(byte_array)
         else:
-            fd = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_DIRECT)
+            fd = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_DIRECT, 0o644)
             os.write(fd, byte_array)
+
+        disk_write_time = time.time() - start_time
+        logger.debug(
+            f"Disk write size: {size} bytes, "
+            f"Bandwidth: {size / disk_write_time / 1e6:.2f} MB/s"
+        )
 
         self.insert_key(key, memory_obj)
 
@@ -473,17 +498,27 @@ class LocalDiskBackend(StorageBackendInterface):
         # FIXME (Jiayi): handle the case where loading fails.
         buffer = memory_obj.byte_array
         size = len(buffer)
-        if size % self.os_disk_bs != 0 or not self.use_odirect:
+
+        fblock_aligned = size % self.os_disk_bs == 0
+        if not fblock_aligned and self.use_odirect:
             logger.warning(
                 "Cannot use O_DIRECT for this file, "
                 "size is not aligned to disk block size."
             )
+
+        start_time = time.time()
+        if not fblock_aligned or not self.use_odirect:
             with open(path, "rb") as f:
                 f.readinto(buffer)
         else:
             fd = os.open(path, os.O_RDONLY | os.O_DIRECT)
             fdo = os.fdopen(fd, "rb", buffering=0)
             fdo.readinto(buffer)
+        disk_read_time = time.time() - start_time
+        logger.debug(
+            f"Disk read size: {size} bytes, "
+            f"Bandwidth: {size / disk_read_time / 1e6:.2f} MB/s"
+        )
 
         self.disk_lock.acquire()
         self.dict[key].unpin()
@@ -512,17 +547,27 @@ class LocalDiskBackend(StorageBackendInterface):
 
         buffer = memory_obj.byte_array
         size = len(buffer)
-        if size % self.os_disk_bs != 0 or not self.use_odirect:
+
+        fblock_aligned = size % self.os_disk_bs == 0
+        if not fblock_aligned and self.use_odirect:
             logger.warning(
                 "Cannot use O_DIRECT for this file, "
                 "size is not aligned to disk block size."
             )
+
+        start_time = time.time()
+        if not fblock_aligned or not self.use_odirect:
             with open(path, "rb") as f:
                 f.readinto(buffer)
         else:
             fd = os.open(path, os.O_RDONLY | os.O_DIRECT)
             fdo = os.fdopen(fd, "rb", buffering=0)
             fdo.readinto(buffer)
+        disk_read_time = time.time() - start_time
+        logger.debug(
+            f"Disk read size: {size} bytes, "
+            f"Bandwidth: {size / disk_read_time / 1e6:.2f} MB/s"
+        )
         return memory_obj
 
     def close(self) -> None:

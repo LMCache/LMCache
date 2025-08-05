@@ -18,4 +18,3 @@ sortedcontainers
 # don't pin torch version to avoid breaking vllm dockerfile (contains lmcache wheels)
 torch
 transformers >= 4.51.1
-xxhash==3.5.0

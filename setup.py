@@ -71,6 +71,7 @@ def cuda_extension() -> tuple[list, dict]:
         "csrc/ac_enc.cu",
         "csrc/ac_dec.cu",
         "csrc/pos_kernels.cu",
+        "csrc/mem_alloc.cpp",
     ]
     ext_modules = [
         cpp_extension.CUDAExtension(
