@@ -2,7 +2,7 @@ env:
   DOCKER_BUILDKIT: 1
 
 steps:
-  - label: ":rocket: vLLM Integration Tests"
+  - label: ":compression: Comprehensive Tests"
     key: "test"
     timeout_in_minutes: 60
     commands:
