@@ -4,9 +4,11 @@ KV Caching for Multimodal Models with vLLM
 Overview: 
 ~~~~~~~~~~
 
-vllm passes ``mm_hashes`` and ``mm_positions`` to requests to LMCache for placeholder tokens for multi-media content. After substituting in the content-based hash values for the placeholder tokens (in ``apply_mm_hashes_to_token_ids`` in ``lmcache/integration/vllm/utils.py``), the token embeddings of multimodal content is indistinguishable from tokenized text and can be saved and retrieved the same way, speeding up inference time for multimodal models like audio, image, and video models. LMCache is always integrated with all modalities that vllm supports. 
+vllm passes ``mm_hashes`` and ``mm_positions`` to requests to LMCache for placeholder tokens for multi-media content. After substituting in the content-based hash values for the placeholder tokens (in ``apply_mm_hashes_to_token_ids`` in ``lmcache/integration/vllm/utils.py``), the token embeddings of multimodal content is indistinguishable from tokenized text and can be saved and retrieved the same way, speeding up inference time for multimodal models like audio, image, and video models. 
 
-TTFT speed up for each models of each modality: 
+LMCache can thus be used to speed up inference time for all multimodal models supported by vllm.
+
+TTFT speed up for models of each modality: 
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 **Sources:**
@@ -68,9 +70,7 @@ TTFT speed up for each models of each modality:
    # run twice to see TTFT speedup
    python openai_chat_completion_client_for_multimodal.py --chat-type video
 
-Save as ``openai_chat_completion_client_for_multimodal.py``
-
-**Run with:**
+**Save as ``openai_chat_completion_client_for_multimodal.py``**
 
 .. code-block:: python
 
@@ -389,7 +389,7 @@ Save as ``openai_chat_completion_client_for_multimodal.py``
        end_time = time.time()
        print(f"Time taken: {end_time - start_time} seconds")
 
-**Retrieval and speed up in logs:**
+**Example Retrieval and speed up in logs:**
 
 .. code-block:: text
 
