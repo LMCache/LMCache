@@ -65,6 +65,8 @@ class LocalDiskWorker:
         elif task_type == "put":
             priority = 1
             self.insert_put_task(kwargs["key"])
+        elif task_type == "delete":
+            priority = 0
         else:
             raise ValueError(f"Unknown task type: {task_type}")
 
@@ -262,7 +264,7 @@ class LocalDiskBackend(StorageBackendInterface):
         size = os.path.getsize(path)
         self.usage -= size
         self.stats_monitor.update_local_storage_usage(self.usage)
-        os.remove(path)
+        self.disk_worker.submit_task("delete", os.remove, path=path)
 
         # push kv evict msg
         if self.lmcache_worker is not None:
