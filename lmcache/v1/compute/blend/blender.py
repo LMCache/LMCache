@@ -36,7 +36,7 @@ class LMCBlender:
         # TODO (Jiayi): make this less hard-coded
         self.common_metadata = LMCBlendCommonMetadata(
             check_layers=[1],
-            recomp_ratios=[0.15],
+            recomp_ratios=[self.cache_engine.config.blend_recompute_ratio],
             thresholds=None,
         )
 

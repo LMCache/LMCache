@@ -29,6 +29,7 @@ def setup_environment_variables(
     os.environ["LMCACHE_ENABLE_BLENDING"] = "True"
     os.environ["LMCACHE_BLEND_SPECIAL_STR"] = blend_special_str
     os.environ["LMCACHE_USE_LAYERWISE"] = "True"
+    os.environ["LMCACHE_BLEND_RECOMPUTE_RATIO"] = "0.15"
 
     if use_disk:
         # Disable local CPU backend in LMCache
