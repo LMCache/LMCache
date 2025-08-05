@@ -55,6 +55,51 @@ class InstrumentedRemoteConnector(RemoteConnector):
             )
         return memory_obj
 
+    @property
+    def has_batched_get(self) -> bool:
+        return hasattr(self._connector, "batched_get")
+
+    @property
+    def has_batched_put(self) -> bool:
+        return hasattr(self._connector, "batched_put")
+
+    async def batched_get(
+        self, keys: List[CacheEngineKey]
+    ) -> List[Optional[MemoryObj]]:
+        begin = time.perf_counter()
+        memory_objs = await self._connector.batched_get(keys)
+        end = time.perf_counter()
+        self._stats_monitor.update_interval_remote_time_to_get((end - begin) * 1000)
+        total_obj_size = 0
+        for memory_obj in memory_objs:
+            if memory_obj is not None:
+                total_obj_size += memory_obj.get_size()
+        self._stats_monitor.update_interval_remote_read_metrics(total_obj_size)
+        logger.debug(
+            f"[{self.name}]Bytes loaded: {total_obj_size / 1e6:.3f} MBytes "
+            f"in {(end - begin) * 1000:.3f}ms"
+        )
+        return memory_objs
+
+    async def batched_put(
+        self, keys: List[CacheEngineKey], memory_objs: List[MemoryObj]
+    ):
+        begin = time.perf_counter()
+        total_obj_size = 0
+        try:
+            await self._connector.batched_put(keys, memory_objs)
+        finally:
+            for memory_obj in memory_objs:
+                total_obj_size += memory_obj.get_size()
+                memory_obj.ref_count_down()
+        end = time.perf_counter()
+        self._stats_monitor.update_interval_remote_time_to_put((end - begin) * 1000)
+        self._stats_monitor.update_interval_remote_write_metrics(total_obj_size)
+        logger.debug(
+            f"[{self.name}]Bytes offloaded: {total_obj_size / 1e6:.3f} MBytes "
+            f"in {(end - begin) * 1000:.3f}ms"
+        )
+
     # Delegate all other methods to the underlying connector
     async def exists(self, key: CacheEngineKey) -> bool:
         return await self._connector.exists(key)

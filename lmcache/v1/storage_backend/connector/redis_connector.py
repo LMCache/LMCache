@@ -36,6 +36,7 @@ class RedisConnector(RemoteConnector):
         local_cpu_backend: LocalCPUBackend,
     ):
         self.connection = redis.from_url(url=url, decode_responses=False)
+        self.pipeline = self.connection.pipeline(transaction=False)
         self.loop = loop
         self.local_cpu_backend = local_cpu_backend
 
@@ -96,6 +97,74 @@ class RedisConnector(RemoteConnector):
 
         return memory_obj
 
+    async def batched_get(self, keys: List[CacheEngineKey]) -> List[MemoryObj]:
+        # list comprehensions are more optimized than append
+        key_strs = [key.to_string() for key in keys]
+        for key_str in key_strs:
+            self.pipeline.get(key_str + "metadata")
+            self.pipeline.get(key_str + "kv_bytes")
+
+        metadata_kv_bytes_list = self.pipeline.execute()
+
+        final_memory_objs = []
+
+        for i in range(len(keys)):
+            metadata_bytes = metadata_kv_bytes_list[i * 2]
+            kv_bytes = metadata_kv_bytes_list[i * 2 + 1]
+
+            if metadata_bytes is None:
+                final_memory_objs.append(None)
+                continue
+
+            if kv_bytes is None:
+                # TODO (Jiayi): We might need a way to better handle
+                # consistency issues.
+                # TODO (Jiayi): A background sweeper might be better
+                # for the sake of performance.
+                logger.warning(
+                    "Key exists but KV cache does not exist."
+                    "Might happen when the cache is evicted by redis."
+                )
+                self.connection.delete(key_strs[i] + "metadata")
+                final_memory_objs.append(None)
+                continue
+
+            assert not inspect.isawaitable(metadata_bytes)
+            assert not inspect.isawaitable(kv_bytes)
+
+            metadata = RemoteMetadata.deserialize(memoryview(metadata_bytes))
+
+            memory_obj = self.local_cpu_backend.allocate(
+                metadata.shape,
+                metadata.dtype,
+                metadata.fmt,
+            )
+
+            if memory_obj is None:
+                logger.warning("Failed to allocate memory during remote receive")
+                final_memory_objs.append(None)
+                continue
+
+            if isinstance(memory_obj.byte_array, memoryview):
+                view = memory_obj.byte_array
+                if view.format == "<B":
+                    view = view.cast("B")
+            else:
+                view = memoryview(memory_obj.byte_array)
+
+            if isinstance(kv_bytes, (bytes, bytearray)):
+                view[: metadata.length] = kv_bytes
+            elif isinstance(kv_bytes, str):
+                converted = kv_bytes.encode("utf-8")
+                view[: metadata.length] = converted
+            else:
+                converted = bytes(kv_bytes)
+                view[: metadata.length] = converted
+
+            final_memory_objs.append(memory_obj)
+
+        return final_memory_objs
+
     async def put(self, key: CacheEngineKey, memory_obj: MemoryObj):
         # TODO(Jiayi): The following code is ugly.
         # Please use a function like `memory_obj.to_meta()`.
@@ -111,6 +180,24 @@ class RedisConnector(RemoteConnector):
         key_str = key.to_string()
         self.connection.set(key_str + "metadata", metadata_bytes)
         self.connection.set(key_str + "kv_bytes", kv_bytes)
+
+    async def batched_put(
+        self, keys: List[CacheEngineKey], memory_objs: List[MemoryObj]
+    ):
+        for key, memory_obj in zip(keys, memory_objs, strict=False):
+            key_str = key.to_string()
+            kv_bytes = memory_obj.byte_array
+            self.pipeline.set(
+                key_str + "metadata",
+                RemoteMetadata(
+                    len(kv_bytes),
+                    memory_obj.get_shape(),
+                    memory_obj.get_dtype(),
+                    memory_obj.get_memory_format(),
+                ).serialize(),
+            )
+            self.pipeline.set(key_str + "kv_bytes", kv_bytes)
+        self.pipeline.execute()
 
     # TODO
     @no_type_check
