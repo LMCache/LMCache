@@ -4,6 +4,7 @@
 #include "mem_kernels.cuh"
 #include "cachegen_kernels.cuh"
 #include "pos_kernels.cuh"
+#include "mem_alloc.h"
 #include <torch/torch.h>
 #include <iostream>
 
@@ -21,4 +22,6 @@ PYBIND11_MODULE(c_ops, m) {
   m.def("decode_fast_prefsum", &decode_cuda_prefsum);
   m.def("calculate_cdf", &calculate_cdf);
   m.def("rotary_embedding_k_fused", &rotary_embedding_k_fused);
+  m.def("alloc_pinned_ptr", &alloc_pinned_ptr);
+  m.def("free_pinned_ptr", &free_pinned_ptr);
 }
