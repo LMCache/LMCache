@@ -4,4 +4,4 @@ pytest-benchmark
 pytest-benchmark[histogram]
 pytest-cov
 pytest-html>=3.2,<4.0  # 4.x requires external assets; 3.2 is stable
-jinja2<3.1     
+jinja2<3.2     
