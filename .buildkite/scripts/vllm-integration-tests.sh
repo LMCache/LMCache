@@ -208,6 +208,9 @@ run_long_doc_qa() {
     echo "   repeat=${repeat_mode}×${repeat_count}, seed=${shuffle_seed}"
     echo "   inflight=${max_inflight}, sleep_after=${sleep_after}s"
 
+    UV_PYTHON=python3 uv venv
+    source .venv/bin/activate
+    uv pip install openai
     python3 "$ORIG_DIR/benchmarks/long-doc-qa/long-doc-qa.py" \
         --num-documents="$num_docs" \
         --document-length="$doc_len" \
