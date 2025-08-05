@@ -19,7 +19,6 @@ from lmcache.observability import LMCStatsMonitor
 from lmcache.utils import _lmcache_nvtx_annotate
 import lmcache.c_ops as lmc_ops
 
-
 logger = init_logger(__name__)
 
 
@@ -1375,7 +1374,6 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
         array_type = ctypes.c_uint8 * size
         buf = array_type.from_address(ptr)
         self.buffer = torch.frombuffer(buf, dtype=torch.uint8)
-
         self._unregistered = False
 
         if use_paging:
