@@ -339,15 +339,15 @@ class LMCacheClusterExecutor:
                 if isinstance(result, HealthWorkerRetMsg):
                     error_codes[worker_ids[i]] = result.error_code
                 elif isinstance(result, ErrorMsg):
-                    error_codes[worker_ids[i]] = -1  # Worker returned error
+                    error_codes[worker_ids[i]] = -1001  # Worker returned error
                 else:
-                    error_codes[worker_ids[i]] = -2  # Unexpected response
+                    error_codes[worker_ids[i]] = -1002  # Unexpected response
             except Exception as e:
                 logger.error(
                     f"Failed to parse health response from worker "
                     f"{worker_ids[i]}: {str(e)}"
                 )
-                error_codes[worker_ids[i]] = -3  # Failed to parse response
+                error_codes[worker_ids[i]] = -1003  # Failed to parse response
 
         return HealthRetMsg(
             event_id=msg.event_id,

@@ -871,7 +871,7 @@ class LMCacheEngine:
         Check the health of the cache engine.
         return: 0 if healthy, otherwise the error code
         """
-        return self.memory_allocator.memcheck()
+        return 0 if self.memory_allocator.memcheck() else -1
 
     def close(self) -> None:
         """Close the cache engine and free all the resources"""
