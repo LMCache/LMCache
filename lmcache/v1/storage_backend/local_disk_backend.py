@@ -335,7 +335,7 @@ class LocalDiskBackend(StorageBackendInterface):
 
                 self.batched_remove(evict_keys, force=False)
 
-                if self.lookup_server is not None:
+                if self.lookup_server is not None and evict_keys:
                     self.lookup_server.batched_remove(evict_keys)
             self.current_cache_size += required_size
 
