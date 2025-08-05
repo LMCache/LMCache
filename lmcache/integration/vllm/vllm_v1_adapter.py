@@ -3,6 +3,8 @@
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Optional, Union
 import os
+import random
+import string
 
 # Third Party
 from vllm.config import VllmConfig
@@ -780,14 +782,18 @@ class LMCacheConnectorV1Impl:
                 token_ids, request.mm_hashes, request.mm_positions
             )
 
-        self._lookup_requests_in_step.append(request.request_id)
+        # since the vllm scheduler may look up the same request
+        # multiple times before the worker runs even a single forward pass,
+        # we need to use a unique lookup id for each lookup request
+        lookup_id = "".join(random.choices(string.ascii_letters + string.digits, k=10))
+        self._lookup_requests_in_step.append(lookup_id)
         if self.skip_last_n_tokens > 0:
             num_external_hit_tokens = self.lookup_client.lookup(
-                token_ids[: -self.skip_last_n_tokens], request_id=request.request_id
+                token_ids[: -self.skip_last_n_tokens], lookup_id=lookup_id
             )
         else:
             num_external_hit_tokens = self.lookup_client.lookup(
-                token_ids, request_id=request.request_id
+                token_ids, lookup_id=lookup_id
             )
 
         # When prompt length is divisible by the block size and all

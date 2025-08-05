@@ -15,7 +15,7 @@ class LookupClientInterface(metaclass=abc.ABCMeta):
     """Abstract interface for lookup clients."""
 
     @abc.abstractmethod
-    def lookup(self, token_ids: torch.Tensor, request_id: Optional[str] = None) -> int:
+    def lookup(self, token_ids: torch.Tensor, lookup_id: Optional[str] = None) -> int:
         """
         Perform lookup for the given token IDs.
 
