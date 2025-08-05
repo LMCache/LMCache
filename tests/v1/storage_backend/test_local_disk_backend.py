@@ -460,6 +460,45 @@ class TestLocalDiskBackend:
 
         local_disk_backend.local_cpu_backend.memory_allocator.close()
 
+    def test_save_and_load_metadata(
+        self, temp_disk_path, async_loop, local_cpu_backend
+    ):
+        """Test saving and loading of metadata."""
+        config = create_test_config(temp_disk_path)
+        backend1 = LocalDiskBackend(
+            config=config,
+            loop=async_loop,
+            local_cpu_backend=local_cpu_backend,
+        )
+
+        # Add some data
+        key1 = create_test_key("key1")
+        mem_obj1 = create_test_memory_obj()
+        backend1.insert_key(key1, mem_obj1)
+
+        # Save metadata
+        backend1._save_metadata()
+
+        # Check if metadata file exists
+        metadata_path = os.path.join(temp_disk_path, "metadata.pkl")
+        assert os.path.exists(metadata_path)
+
+        # Create a new backend, which should load the metadata
+        backend2 = LocalDiskBackend(
+            config=config,
+            loop=async_loop,
+            local_cpu_backend=local_cpu_backend,
+        )
+
+        # Check if data is loaded correctly
+        assert key1 in backend2.dict
+        assert backend2.dict[key1].size == mem_obj1.get_size()
+        assert backend2.usage > 0
+
+        backend1.close()
+        backend2.close()
+        local_cpu_backend.memory_allocator.close()
+
     def test_close(self, temp_disk_path, async_loop, local_cpu_backend):
         """Test close()."""
         config = create_test_config(temp_disk_path)
@@ -474,8 +513,10 @@ class TestLocalDiskBackend:
         )
 
         # Add some keys
+        keys = []
         for i in range(3):
             key = create_test_key(f"key_{i}")
+            keys.append(key)
             memory_obj = create_test_memory_obj()
             backend.insert_key(key, memory_obj)
 
@@ -484,6 +525,21 @@ class TestLocalDiskBackend:
 
         # Check that keys were removed from lookup server
         assert len(lookup_server.removed_keys) == 3
+
+        # Check that metadata was saved
+        metadata_path = os.path.join(temp_disk_path, "metadata.pkl")
+        assert os.path.exists(metadata_path)
+
+        # Create a new backend to verify metadata loading
+        new_backend = LocalDiskBackend(
+            config=config,
+            loop=async_loop,
+            local_cpu_backend=local_cpu_backend,
+        )
+        assert len(new_backend.dict) == 3
+        for key in keys:
+            assert key in new_backend.dict
+        new_backend.close()
 
         local_cpu_backend.memory_allocator.close()
 

@@ -5,7 +5,9 @@ from typing import TYPE_CHECKING, Callable, List, Optional
 import asyncio
 import itertools
 import os
+import pickle
 import queue
+import signal
 import threading
 import time
 
@@ -205,8 +207,44 @@ class LocalDiskBackend(StorageBackendInterface):
         self.stats_monitor = LMCStatsMonitor.GetOrCreate()
         self.usage = 0
 
+        self._load_metadata()
+        self.loop.add_signal_handler(signal.SIGINT, self._shutdown)
+
+    def _shutdown(self):
+        """
+        Gracefully shutdown the backend, saving metadata and closing workers.
+        """
+        logger.info("Shutting down LocalDiskBackend...")
+        self._save_metadata()
+        logger.info("LocalDiskBackend shutdown complete.")
+
     def __str__(self):
         return "LocalDiskBackend"
+
+    def _save_metadata(self):
+        """
+        Save the metadata to a file.
+        """
+        with self.disk_lock:
+            metadata_path = os.path.join(self.path, "metadata.pkl")
+            if os.path.exists(self.path):
+                with open(metadata_path, "wb") as f:
+                    pickle.dump(self.dict, f)
+                logger.info(f"Metadata saved to {metadata_path}")
+
+    def _load_metadata(self):
+        """
+        Load the metadata from a file.
+        """
+        metadata_path = os.path.join(self.path, "metadata.pkl")
+        if os.path.exists(metadata_path):
+            with self.disk_lock:
+                with open(metadata_path, "rb") as f:
+                    self.dict = pickle.load(f)
+                logger.info(f"Metadata loaded from {metadata_path}")
+                # Recalculate usage
+                self.usage = sum(meta.size for meta in self.dict.values())
+                self.stats_monitor.update_local_storage_usage(self.usage)
 
     def _key_to_path(
         self,
@@ -588,6 +626,7 @@ class LocalDiskBackend(StorageBackendInterface):
         )
 
     def close(self) -> None:
+        self._shutdown()
         if self.lookup_server is not None:
             self.disk_lock.acquire()
             self.lookup_server.batched_remove(list(self.dict.keys()))
