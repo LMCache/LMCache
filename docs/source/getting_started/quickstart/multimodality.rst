@@ -4,11 +4,11 @@ Example: Multimodal KV Cache Support
 Quick Start Example (Audio Model): 
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-**Installation:** 
+We  going to be running audio inference with ``ultravox-v0_5-llama-3_2-1b`` and using LMCache to speed up the TTFT after the first request.
+
+**Install and Serve:** 
 
 ``pip install lmcache vllm[audio] openai``
-
-**Serve:** 
 
 .. code-block:: bash
 
@@ -166,7 +166,7 @@ Save as ``audio_query.py``
    print(f"Time taken: {end_time - start_time} seconds")   
 
 
-**Run:** 
+**Run and see TTFT speedup:** 
 
 .. code-block:: bash
 
@@ -177,7 +177,7 @@ Save as ``audio_query.py``
    python audio_query.py
 
 
-**Logs:**
+**Retrieval and speed up in logs:**
 
 1. After First Request:
 

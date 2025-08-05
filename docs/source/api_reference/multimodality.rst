@@ -1,22 +1,17 @@
-vLLM Multimodality Support
-==========================
+KV Caching for Multimodal Models with vLLM
+==========================================
 
-Explanation: 
-~~~~~~~~~~~~
+Overview: 
+~~~~~~~~~~
 
-vllm attaches ``mm_hashes`` and ``mm_positions`` to requests for placeholder tokens for multi-media content. 
-After substituting in the content-based hash values for the placeholder tokens (in ``apply_mm_hashes_to_token_ids`` in ``lmcache/integration/vllm/utils.py``),
-the token embeddings of multimodal content is indistinguishable from text and can be saved and retrieved the same way. Thus, LMCache is always integrated 
-with all modalities that vllm supports. 
+vllm passes ``mm_hashes`` and ``mm_positions`` to requests to LMCache for placeholder tokens for multi-media content. After substituting in the content-based hash values for the placeholder tokens (in ``apply_mm_hashes_to_token_ids`` in ``lmcache/integration/vllm/utils.py``), the token embeddings of multimodal content is indistinguishable from tokenized text and can be saved and retrieved the same way, speeding up inference time for multimodal models like audio, image, and video models. LMCache is always integrated with all modalities that vllm supports. 
 
-Basic Examples for each modality: 
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+TTFT speed up for each models of each modality: 
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 **Sources:**
 
 - `vllm/blob/examples/online_serving/openai_chat_completion_client_for_multimodal.py <https://github.com/vllm-project/vllm/blob/main/examples/online_serving/openai_chat_completion_client_for_multimodal.py>`_
-
-- `vllm/pull/8486 <https://github.com/vllm-project/vllm/pull/8486>`_
 
 **Installation:** 
 
@@ -30,12 +25,23 @@ Basic Examples for each modality:
        --max-model-len 4096 --trust-remote-code \
        --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}'
 
+.. code-block:: bash
+
+   # run twice to see TTFT speedup
+   python openai_chat_completion_client_for_multimodal.py --chat-type audio
+
+
 **Single Image Inference with Llava:** 
 
 .. code-block:: bash
 
    vllm serve llava-hf/llava-1.5-7b-hf \
        --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}'
+
+.. code-block:: bash
+
+   # run twice to see TTFT speedup
+   python openai_chat_completion_client_for_multimodal.py --chat-type single-image
 
 **Multi-image Inference with Phi-3.5-vision-instruct:** 
 
@@ -45,6 +51,11 @@ Basic Examples for each modality:
        --trust-remote-code --max-model-len 4096 --limit-mm-per-prompt '{"image":2}' \
        --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}'
 
+.. code-block:: bash
+
+   # run twice to see TTFT speedup
+   python openai_chat_completion_client_for_multimodal.py --chat-type multi-image
+
 **Video Inference with Llava-OneVision:**
 
 .. code-block:: bash
@@ -52,16 +63,14 @@ Basic Examples for each modality:
    vllm serve llava-hf/llava-onevision-qwen2-7b-ov-hf \
        --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}'
 
+.. code-block:: bash
+
+   # run twice to see TTFT speedup
+   python openai_chat_completion_client_for_multimodal.py --chat-type video
+
 Save as ``openai_chat_completion_client_for_multimodal.py``
 
 **Run with:**
-
-.. code-block:: bash
-
-   python openai_chat_completion_client_for_multimodal.py --chat-type audio
-   python openai_chat_completion_client_for_multimodal.py --chat-type single-image
-   python openai_chat_completion_client_for_multimodal.py --chat-type multi-image
-   python openai_chat_completion_client_for_multimodal.py --chat-type video
 
 .. code-block:: python
 
@@ -380,11 +389,11 @@ Save as ``openai_chat_completion_client_for_multimodal.py``
        end_time = time.time()
        print(f"Time taken: {end_time - start_time} seconds")
 
-**Logs:**
+**Retrieval and speed up in logs:**
 
 .. code-block:: text
 
-   [2025-08-04 22:43:35,484] LMCache INFO: Reqid: chatcmpl-05e2d296601046b29210f53a1fa30b13, Total tokens 1536, LMCache hit tokens: 1536, need to load: 15 (vllm_v1_adapter.py:803:lmcache.integration.vllm.vllm_v1_adapter)
+   [2025-08-04 22:43:35,484] LMCache INFO: Reqid: chatcmpl-05e2d296601046b29210f53a1fa30b13, Total tokens 1536, LMCache hit tokens: 1536, need to load: 1535 (vllm_v1_adapter.py:803:lmcache.integration.vllm.vllm_v1_adapter)
 
 1. First request: 
 
