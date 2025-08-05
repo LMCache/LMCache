@@ -491,11 +491,15 @@ class LocalDiskBackend(StorageBackendInterface):
         # FIXME (Jiayi): handle the case where loading fails.
         buffer = memory_obj.byte_array
         size = len(buffer)
-        if size % self.os_disk_bs != 0 or not self.use_odirect:
+
+        fblock_aligned = size % self.os_disk_bs == 0
+        if not fblock_aligned and self.use_odirect:
             logger.warning(
                 "Cannot use O_DIRECT for this file, "
                 "size is not aligned to disk block size."
             )
+
+        if not fblock_aligned or not self.use_odirect:
             with open(path, "rb") as f:
                 f.readinto(buffer)
         else:
@@ -530,11 +534,15 @@ class LocalDiskBackend(StorageBackendInterface):
 
         buffer = memory_obj.byte_array
         size = len(buffer)
-        if size % self.os_disk_bs != 0 or not self.use_odirect:
+
+        fblock_aligned = size % self.os_disk_bs == 0
+        if not fblock_aligned and self.use_odirect:
             logger.warning(
                 "Cannot use O_DIRECT for this file, "
                 "size is not aligned to disk block size."
             )
+
+        if not fblock_aligned or not self.use_odirect:
             with open(path, "rb") as f:
                 f.readinto(buffer)
         else:
