@@ -4,13 +4,15 @@ name: Build and Deploy Online Documentation
 on:
   # Trigger the workflow on push request,
   # for the dev branch
+  pull_request: # TODO: Remove pull req before merging
   push:
     branches:
       - 'dev'
-    paths:
-      - 'docs/**'
-      - 'lmcache/**'
-      - 'examples/**'
+    # TODO: Disabled during testing of workflow, change before merging
+    #paths:
+    #  - 'docs/**'
+    #  - 'lmcache/**'
+    #  - 'examples/**'
 jobs:
   build-docs:
     name: Build docs
@@ -84,9 +86,12 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions@github.com"
           git add .
-          if ! git diff --cached --quiet; then
-            git commit -m "Deploy updated online docs"
-            git push https://x-access-token:${{ secrets.LMCACHE_DOC }}@github.com/LM-Cache-Website/lm-cache-website.github.io.git main --force
-          else
-            echo "No changes to commit."
-          fi
+          # TODO: Disabled during testing of workflow, change before merging
+          # if ! git diff --cached --quiet; then
+          #   git commit -m "Deploy updated online docs"
+          #   git push https://x-access-token:${{ secrets.LMCACHE_DOC }}@github.com/LM-Cache-Website/lm-cache-website.github.io.git main --force
+          # else
+          #   echo "No changes to commit."
+          # fi
+          git commit -m "Deploy updated online docs"
+          git push https://x-access-token:${{ secrets.LMCACHE_DOC }}@github.com/LM-Cache-Website/lm-cache-website.github.io.git main --force
