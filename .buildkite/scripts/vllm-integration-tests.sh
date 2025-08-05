@@ -1,7 +1,7 @@
 #!/usr/bin/bash
 #
 # This test script runs integration tests for the LMCache integration with vLLM.
-# A lmcache/vllm-openai container image is built by this script from the LMCache code base 
+# A lmcache/vllm-openai container image is built by this script from the LMCache code base
 # the script is running from and the latest nightly build of vLLM. It is therefore using the
 # latest of both code bases to build the image which it then performs tests on.
 #
@@ -48,7 +48,7 @@ cleanup() {
 find_available_port() {
     local start_port=${1:-8000}
     local port=$start_port
-    
+
     while [ $port -lt 65536 ]; do
         # Check if port is available using netstat
         if ! netstat -tuln 2>/dev/null | grep -q ":${port} "; then
@@ -65,18 +65,18 @@ find_available_port() {
         fi
         ((port++))
     done
-    
+
     echo "ERROR: No available ports found starting from $start_port" >&2
     return 1
 }
 
 build_lmcache_vllmopenai_image() {
     cp example_build.sh test-build.sh
-    chmod 755 test-build.sh 
+    chmod 755 test-build.sh
     ./test-build.sh
 }
 
-wait_for_openai_api_server(){
+wait_for_openai_api_server() {
     if ! timeout $SERVER_WAIT_TIMEOUT bash -c "
         until curl 127.0.0.1:${PORT}/v1/models |grep '\"id\":\"meta-llama/Llama-3.2-1B-Instruct\"'; do
             echo 'waiting for OpenAI API server to start'
@@ -115,26 +115,22 @@ run_lmcache_vllmopenai_container() {
         --enforce-eager
         --port "$PORT"
     )
-
-    # add the dummy‐only flags
     if [ "$test_mode" = "dummy" ]; then
-        cmd_args=( --max-model-len 1024 --gpu-memory-utilization '0.3' "${cmd_args[@]}" )
+        cmd_args=("${cmd_args[@]}" --max-model-len 1024 --gpu-memory-utilization '0.3')
     fi
 
-    # finally run it once
     CID=$(
         docker run -d \
             "${docker_args[@]}" \
             "${cmd_args[@]}"
     )
 
-
     buildkite-agent meta-data set "docker-CID" "$CID"
 
     wait_for_openai_api_server
 
     LOGFILE="/tmp/vllm_${CID}.log"
-    docker logs -f "$CID" &> "$LOGFILE" &
+    docker logs -f "$CID" &>"$LOGFILE" &
     LOG_PID=$!
 
     set +x
@@ -165,8 +161,8 @@ usage() {
     echo "  --hf-token|-hft              HuggingFace access token for downloading model(s)"
     echo "  --server-wait-timeout|-swt   Wait time in seconds for vLLM OpenAI server to start"
     echo "  --help|-h                    Print usage"
-    echo "  --configs|-c               Comma-separated list of config filenames (required)"
-    echo "  --tests|-t               Test mode"
+    echo "  --configs|-c                 Comma-separated list of config filenames (required)"
+    echo "  --tests|-t                   Test mode"
 }
 
 #########
@@ -174,7 +170,8 @@ usage() {
 #########
 
 test_vllmopenai_server_with_lmcache_integrated() {
-    http_status_code=$(curl --max-time 60 http://localhost:${PORT}/v1/completions \
+    http_status_code=$(
+        curl --max-time 60 http://localhost:${PORT}/v1/completions \
             -w "%{http_code}" -o response-file.txt \
             -H "Content-Type: application/json" \
             -d '{
@@ -211,17 +208,17 @@ run_long_doc_qa() {
     echo "   repeat=${repeat_mode}×${repeat_count}, seed=${shuffle_seed}"
     echo "   inflight=${max_inflight}, sleep_after=${sleep_after}s"
 
-    python3 long-doc-qa.py \
-      --num-documents="$num_docs" \
-      --document-length="$doc_len" \
-      --output-len="$out_len" \
-      --repeat-count="$repeat_count" \
-      --repeat-mode="$repeat_mode" \
-      --shuffle-seed="$shuffle_seed" \
-      --max-inflight-requests="$max_inflight" \
-      --sleep-time-after-warmup="$sleep_after" \
-      --port="$PORT" \
-      --model="meta-llama/Llama-3.2-1B-Instruct"
+    python3 "$ORIG_DIR/benchmarks/long-doc-qa/long-doc-qa.py" \
+        --num-documents="$num_docs" \
+        --document-length="$doc_len" \
+        --output-len="$out_len" \
+        --repeat-count="$repeat_count" \
+        --repeat-mode="$repeat_mode" \
+        --shuffle-seed="$shuffle_seed" \
+        --max-inflight-requests="$max_inflight" \
+        --sleep-time-after-warmup="$sleep_after" \
+        --port="$PORT" \
+        --model="meta-llama/Llama-3.2-1B-Instruct"
 }
 
 #########
@@ -229,50 +226,50 @@ run_long_doc_qa() {
 #########
 
 while [ $# -gt 0 ]; do
-  case "$1" in
-    --configs*|-c*)
-      if [[ "$1" != *=* ]]; then shift; fi
-      configs_arg="${1#*=}"
-      ;;
-    --tests*|-t*)
-      if [[ "$1" != *=* ]]; then shift; fi
-      test_mode="${1#*=}"
-      ;;
-    --hf-token*|-hft*)
-      if [[ "$1" != *=* ]]; then shift; fi # Value is next arg if no `=`
-      HF_TOKEN="${1#*=}"
-      ;;
-    --server-wait-timeout*|-swt*)
-      if [[ "$1" != *=* ]]; then shift; fi
-      SERVER_WAIT_TIMEOUT="${1#*=}"
-      if ! [[ "$SERVER_WAIT_TIMEOUT" =~ ^[0-9]+$ ]]; then
-            echo "server-wait-timeout is wait time in seconds - integer only"
-            exit 1
-      fi
+    case "$1" in
+        --configs* | -c*)
+            if [[ "$1" != *=* ]]; then shift; fi
+            configs_arg="${1#*=}"
+            ;;
+        --tests* | -t*)
+            if [[ "$1" != *=* ]]; then shift; fi
+            test_mode="${1#*=}"
+            ;;
+        --hf-token* | -hft*)
+            if [[ "$1" != *=* ]]; then shift; fi # Value is next arg if no `=`
+            HF_TOKEN="${1#*=}"
+            ;;
+        --server-wait-timeout* | -swt*)
+            if [[ "$1" != *=* ]]; then shift; fi
+            SERVER_WAIT_TIMEOUT="${1#*=}"
+            if ! [[ "$SERVER_WAIT_TIMEOUT" =~ ^[0-9]+$ ]]; then
+                echo "server-wait-timeout is wait time in seconds - integer only"
+                exit 1
+            fi
 
-      ;;
-    --help|-h)
-      usage
-      exit 0
-      ;;
-    *)
-      >&2 printf "Error: Invalid argument\n"
-      usage
-      exit 1
-      ;;
-  esac
-  shift
+            ;;
+        --help | -h)
+            usage
+            exit 0
+            ;;
+        *)
+            printf >&2 "Error: Invalid argument\n"
+            usage
+            exit 1
+            ;;
+    esac
+    shift
 done
 
 ORIG_DIR="$PWD"
 
-# Read the configs argument 
+# Read the configs argument
 if [[ -z "${configs_arg:-}" ]]; then
-  echo "Error: --configs is required" >&2
-  usage
-  exit 1
+    echo "Error: --configs is required" >&2
+    usage
+    exit 1
 fi
-IFS=',' read -r -a CONFIG_NAMES <<< "$configs_arg"
+IFS=',' read -r -a CONFIG_NAMES <<<"$configs_arg"
 
 # Find an available port starting from 8000
 PORT=$(find_available_port 8000)
