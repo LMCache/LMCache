@@ -12,19 +12,17 @@ with all modalities that vllm supports.
 Basic Examples for each modality: 
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Sources:
+**Sources:**
 
-`vllm/blob/examples/online_serving/openai_chat_completion_client_for_multimodal.py <https://github.com/vllm-project/vllm/blob/main/examples/online_serving/openai_chat_completion_client_for_multimodal.py>`_
+- `vllm/blob/examples/online_serving/openai_chat_completion_client_for_multimodal.py <https://github.com/vllm-project/vllm/blob/main/examples/online_serving/openai_chat_completion_client_for_multimodal.py>`_
 
-`vllm/pull/8486 <https://github.com/vllm-project/vllm/pull/8486>`_
+- `vllm/pull/8486 <https://github.com/vllm-project/vllm/pull/8486>`_
 
-Installation: 
+**Installation:** 
 
-``pip install vllm[audio] openai``
+``pip install lmcache vllm[audio] openai``
 
-Serve a multimodal model: 
-
-Audio Inference with Ultravox:
+**Audio Inference with Ultravox:**
 
 .. code-block:: bash
 
@@ -32,14 +30,14 @@ Audio Inference with Ultravox:
        --max-model-len 4096 --trust-remote-code \
        --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}'
 
-Single Image Inference with Llava: 
+**Single Image Inference with Llava:** 
 
 .. code-block:: bash
 
    vllm serve llava-hf/llava-1.5-7b-hf \
        --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}'
 
-Multi-image Inference with Phi-3.5-vision-instruct: 
+**Multi-image Inference with Phi-3.5-vision-instruct:** 
 
 .. code-block:: bash
 
@@ -47,16 +45,16 @@ Multi-image Inference with Phi-3.5-vision-instruct:
        --trust-remote-code --max-model-len 4096 --limit-mm-per-prompt '{"image":2}' \
        --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}'
 
-Video Inference with Llava-OneVision:
+**Video Inference with Llava-OneVision:**
 
 .. code-block:: bash
 
    vllm serve llava-hf/llava-onevision-qwen2-7b-ov-hf \
        --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}'
 
-Save as  ``openai_chat_completion_client_for_multimodal.py``
+Save as ``openai_chat_completion_client_for_multimodal.py``
 
-Run with:
+**Run with:**
 
 .. code-block:: bash
 
@@ -382,13 +380,13 @@ Run with:
        end_time = time.time()
        print(f"Time taken: {end_time - start_time} seconds")
 
-You should see logs like: 
+**Logs:**
 
 .. code-block:: text
 
    [2025-08-04 22:43:35,484] LMCache INFO: Reqid: chatcmpl-05e2d296601046b29210f53a1fa30b13, Total tokens 1536, LMCache hit tokens: 1536, need to load: 15 (vllm_v1_adapter.py:803:lmcache.integration.vllm.vllm_v1_adapter)
 
-First request: 
+1. First request: 
 
 .. code-block:: text
 
@@ -399,7 +397,7 @@ First request:
    However, the mention of "
    Time taken: 50.828808307647705 seconds
 
-Second request: 
+2. Second request: 
 
 .. code-block:: text
 
