@@ -473,10 +473,6 @@ class LMCacheConnectorV1Impl:
 
         self.lmcache_engine.post_init(kvcaches=kvcaches)
 
-        for idx, request in enumerate(metadata.requests):
-            if request.load_spec is None:
-                continue
-
         self.layerwise_retrievers = []
         for idx, request in enumerate(metadata.requests):
             if request.load_spec is None:
