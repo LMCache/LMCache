@@ -1,10 +1,8 @@
-
 name: Build and Deploy Online Documentation
 
 on:
   # Trigger the workflow on push request,
   # for the dev branch
-  pull_request: # TODO: Remove pull req before merging
   push:
     branches:
       - 'dev'
