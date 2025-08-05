@@ -322,6 +322,7 @@ class MoveMsg(OrchMsg):
 class HealthMsg(OrchMsg):
     """Health message"""
 
+    event_id: str
     instance_id: str
 
     def describe(self) -> str:
@@ -408,10 +409,10 @@ class HealthRetMsg(OrchRetMsg):
     """Health return message"""
 
     event_id: str
-    error_code: int
+    error_codes: Dict[int, int]
 
     def describe(self) -> str:
-        return f"Alive: {self.error_code}"
+        return f"error_codes: {self.error_codes}"
 
 
 class CheckFinishRetMsg(OrchRetMsg):

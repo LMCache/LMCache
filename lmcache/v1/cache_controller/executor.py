@@ -23,6 +23,7 @@ from lmcache.v1.cache_controller.message import (  # noqa: E501
     HealthMsg,
     HealthRetMsg,
     HealthWorkerMsg,
+    HealthWorkerRetMsg,
     MoveMsg,
     MoveRetMsg,
     MoveWorkerMsg,
@@ -293,7 +294,8 @@ class LMCacheClusterExecutor:
         instance_id = msg.instance_id
 
         worker_ids = self.reg_controller.get_workers(instance_id)
-        assert worker_ids is not None
+        if worker_ids is None:
+            return ErrorMsg(error=f"No workers found for instance {instance_id}")
 
         # TODO(Jiayi): Currently, we do not support PP or heterogeneous TP.
         # NOTE(Jiayi): The TP ranks are already sorted in registration_controller.
@@ -307,7 +309,7 @@ class LMCacheClusterExecutor:
                 return ErrorMsg(
                     error=(
                         f"Worker {worker_id} not registered for "
-                        f"instance {instance_id} or "
+                        f"instance {instance_id} or socket not found"
                     )
                 )
             sockets.append(socket)
@@ -322,14 +324,34 @@ class LMCacheClusterExecutor:
             logger.debug(
                 f"Sending health check operation to worker ({instance_id}, {worker_id})"
             )
-        # TODO(baoloongmao): Handle the results of the health check operation.
-        await self.execute_workers(
+
+        # Collect results from all workers
+        serialized_results = await self.execute_workers(
             sockets=sockets,
             serialized_msgs=serialized_msgs,
         )
+
+        # Process results
+        error_codes = {}
+        for i, serialized_result in enumerate(serialized_results):
+            try:
+                result = msgspec.msgpack.decode(serialized_result, type=Msg)
+                if isinstance(result, HealthWorkerRetMsg):
+                    error_codes[worker_ids[i]] = result.error_code
+                elif isinstance(result, ErrorMsg):
+                    error_codes[worker_ids[i]] = -1  # Worker returned error
+                else:
+                    error_codes[worker_ids[i]] = -2  # Unexpected response
+            except Exception as e:
+                logger.error(
+                    f"Failed to parse health response from worker "
+                    f"{worker_ids[i]}: {str(e)}"
+                )
+                error_codes[worker_ids[i]] = -3  # Failed to parse response
+
         return HealthRetMsg(
-            event_id="event_id",
-            error_code=0,
+            event_id=msg.event_id,
+            error_codes=error_codes,
         )
 
     async def check_finish(
