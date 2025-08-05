@@ -90,7 +90,7 @@ wait_for_openai_api_server(){
 }
 
 run_lmcache_vllmopenai_container() {
-    local cfg_file="$1"
+    local cfg_name
     # Pick the GPU with the largest free memory
     source "$ORIG_DIR/.buildkite/scripts/pick-free-gpu.sh" $PORT
     best_gpu="${CUDA_VISIBLE_DEVICES}"
@@ -98,7 +98,8 @@ run_lmcache_vllmopenai_container() {
     CID=$(docker run -d --runtime nvidia --gpus "device=${best_gpu}" \
         --env VLLM_USE_FLASHINFER_SAMPLER=0 \
         --env HF_TOKEN=$HF_TOKEN \
-        --env "LMCACHE_CONFIG_FILE=${cfg_file}" \
+        --volume "${ORIG_DIR}/.buildkite/configs:/configs:ro" \
+        --env "LMCACHE_CONFIG_FILE=/configs/${cfg_name}" \
         --volume ~/.cache/huggingface:/root/.cache/huggingface \
         --network host \
         'lmcache/vllm-openai:build-latest' \
@@ -208,9 +209,9 @@ done
 
 ORIG_DIR="$PWD"
 
-CONFIG_FILES=(
-  "$PWD/.buildkite/configs/lmcache_local_cpu.yaml"
-  "$PWD/.buildkite/configs/lmcache_local_disk.yaml"
+CONFIG_NAMES=(
+  "lmcache_local_cpu.yaml"
+  "lmcache_local_disk.yaml"
 )
 
 # Find an available port starting from 8000
@@ -231,11 +232,11 @@ build_lmcache_vllmopenai_image
 # MAIN #
 ########
 
-for cfg in "${CONFIG_FILES[@]}"; do
-    echo "===== Testing LMCache with ${cfg} ====="
+for cfg_name in "${CONFIG_NAMES[@]}"; do
+    echo "===== Testing LMCache with ${cfg_name} ====="
 
     # Start the OpenAI API server by running the container image
-    run_lmcache_vllmopenai_container "$cfg"
+    run_lmcache_vllmopenai_container "$cfg_name"
 
     # test that can inference model using vLLM OpenAI API (lmcache integrated)
     test_vllmopenai_server_with_lmcache_integrated
