@@ -704,8 +704,6 @@ class LMCacheEngineConfig:
             assert self.nixl_buffer_size is not None
             assert self.nixl_buffer_device is not None
 
-            assert self.local_disk is None, "Nixl only supports local_disk=None"
-
             assert self.remote_url is None, "Nixl only supports remote_url=None"
 
             assert self.save_decode_cache is False, (
