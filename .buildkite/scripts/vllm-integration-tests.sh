@@ -94,21 +94,40 @@ run_lmcache_vllmopenai_container() {
     # Pick the GPU with the largest free memory
     source "$ORIG_DIR/.buildkite/scripts/pick-free-gpu.sh" $PORT
     best_gpu="${CUDA_VISIBLE_DEVICES}"
-    
-    CID=$(docker run -d --runtime nvidia --gpus "device=${best_gpu}" \
-        --env VLLM_USE_FLASHINFER_SAMPLER=0 \
-        --env HF_TOKEN=$HF_TOKEN \
-        --volume "${ORIG_DIR}/.buildkite/configs:/configs:ro" \
-        --env "LMCACHE_CONFIG_FILE=/configs/${cfg_name}" \
-        --volume ~/.cache/huggingface:/root/.cache/huggingface \
-        --network host \
-        'lmcache/vllm-openai:build-latest' \
-        'meta-llama/Llama-3.2-1B-Instruct' --kv-transfer-config \
-        '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}' \
-        --max-model-len 1024 \
-        --gpu-memory-utilization '0.3' \
-        --enforce-eager \
-        --port $PORT)
+
+    # common docker args
+    docker_args=(
+        --runtime nvidia
+        --gpus "device=${best_gpu}"
+        --env VLLM_USE_FLASHINFER_SAMPLER=0
+        --env HF_TOKEN="$HF_TOKEN"
+        --volume "${ORIG_DIR}/.buildkite/configs:/configs:ro"
+        --env "LMCACHE_CONFIG_FILE=/configs/${cfg_name}"
+        --volume ~/.cache/huggingface:/root/.cache/huggingface
+        --network host
+    )
+
+    # common command args after the image
+    cmd_args=(
+        lmcache/vllm-openai:build-latest
+        meta-llama/Llama-3.2-1B-Instruct
+        --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}'
+        --enforce-eager
+        --port "$PORT"
+    )
+
+    # add the dummy‐only flags
+    if [ "$test_mode" = "dummy" ]; then
+        cmd_args=( --max-model-len 1024 --gpu-memory-utilization '0.3' "${cmd_args[@]}" )
+    fi
+
+    # finally run it once
+    CID=$(
+        docker run -d \
+            "${docker_args[@]}" \
+            "${cmd_args[@]}"
+    )
+
 
     buildkite-agent meta-data set "docker-CID" "$CID"
 
@@ -147,6 +166,7 @@ usage() {
     echo "  --server-wait-timeout|-swt   Wait time in seconds for vLLM OpenAI server to start"
     echo "  --help|-h                    Print usage"
     echo "  --configs|-c               Comma-separated list of config filenames (required)"
+    echo "  --tests|-t               Test mode"
 }
 
 #########
@@ -176,16 +196,48 @@ test_vllmopenai_server_with_lmcache_integrated() {
     fi
 }
 
+run_long_doc_qa() {
+    local num_docs="${NUM_DOCUMENTS:-8}"
+    local doc_len="${DOCUMENT_LENGTH:-20000}"
+    local out_len="${OUTPUT_LEN:-100}"
+    local repeat_count="${REPEAT_COUNT:-2}"
+    local repeat_mode="${REPEAT_MODE:-random}"
+    local shuffle_seed="${SHUFFLE_SEED:-0}"
+    local max_inflight="${MAX_INFLIGHT_REQUESTS:-20}"
+    local sleep_after="${SLEEP_TIME_AFTER_WARMUP:-0.0}"
+
+    echo "→ Running long-doc-qa:"
+    echo "   num_docs=${num_docs}, doc_len=${doc_len}, out_len=${out_len}"
+    echo "   repeat=${repeat_mode}×${repeat_count}, seed=${shuffle_seed}"
+    echo "   inflight=${max_inflight}, sleep_after=${sleep_after}s"
+
+    python3 long-doc-qa.py \
+      --num-documents="$num_docs" \
+      --document-length="$doc_len" \
+      --output-len="$out_len" \
+      --repeat-count="$repeat_count" \
+      --repeat-mode="$repeat_mode" \
+      --shuffle-seed="$shuffle_seed" \
+      --max-inflight-requests="$max_inflight" \
+      --sleep-time-after-warmup="$sleep_after" \
+      --port="$PORT" \
+      --model="meta-llama/Llama-3.2-1B-Instruct"
+}
+
 #########
 # SETUP #
 #########
 
 while [ $# -gt 0 ]; do
   case "$1" in
-     --configs*|-c*)
-       if [[ "$1" != *=* ]]; then shift; fi
-       configs_arg="${1#*=}"
-       ;;
+    --configs*|-c*)
+      if [[ "$1" != *=* ]]; then shift; fi
+      configs_arg="${1#*=}"
+      ;;
+    --tests*|-t*)
+      if [[ "$1" != *=* ]]; then shift; fi
+      test_mode="${1#*=}"
+      ;;
     --hf-token*|-hft*)
       if [[ "$1" != *=* ]]; then shift; fi # Value is next arg if no `=`
       HF_TOKEN="${1#*=}"
@@ -243,11 +295,13 @@ build_lmcache_vllmopenai_image
 for cfg_name in "${CONFIG_NAMES[@]}"; do
     echo -e "\033[1;33m===== Testing LMCache with ${cfg_name} =====\033[0m"
 
-    # Start the OpenAI API server by running the container image
-    run_lmcache_vllmopenai_container "$cfg_name"
-
-    # test that can inference model using vLLM OpenAI API (lmcache integrated)
-    test_vllmopenai_server_with_lmcache_integrated
+    if [ "$test_mode" = "dummy" ]; then
+        run_lmcache_vllmopenai_container "$cfg_name" "$test_mode"
+        test_vllmopenai_server_with_lmcache_integrated
+    elif [ "$test_mode" = "long-doc-qa" ]; then
+        run_lmcache_vllmopenai_container "$cfg_name" "$test_mode"
+        run_long_doc_qa
+    fi
 
     cleanup 0
 done
