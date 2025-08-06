@@ -20,7 +20,7 @@
 # Note: The script should be run from the LMCache code base root.
 # Note: L4 CI runners cannot use Flash Infer
 
-set -ex
+set -e
 trap 'cleanup $?' EXIT
 
 CID=
@@ -96,28 +96,27 @@ run_lmcache_vllmopenai_container() {
     source "$ORIG_DIR/.buildkite/scripts/pick-free-gpu.sh" $PORT
     best_gpu="${CUDA_VISIBLE_DEVICES}"
 
-    # common docker args
+    # docker args
     docker_args=(
         --runtime nvidia
+        --network host
         --gpus "device=${best_gpu}"
+        --volume "${ORIG_DIR}/.buildkite/lmcache_configs:/configs:ro"
+        --volume ~/.cache/huggingface:/root/.cache/huggingface
         --env VLLM_USE_FLASHINFER_SAMPLER=0
         --env HF_TOKEN="$HF_TOKEN"
-        --volume "${ORIG_DIR}/.buildkite/lmcache_configs:/configs:ro"
-        --env "LMCACHE_CONFIG_FILE=/configs/${cfg_name}"
-        --volume ~/.cache/huggingface:/root/.cache/huggingface
-        --network host
+        --env LMCACHE_CONFIG_FILE="/configs/${cfg_name}"
     )
 
-    # common command args after the image
+    # vllm args
     cmd_args=(
         lmcache/vllm-openai:build-latest
         meta-llama/Llama-3.2-1B-Instruct
         --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}'
-        --enforce-eager
         --port "$PORT"
     )
     if [ "$test_mode" = "dummy" ]; then
-        cmd_args=("${cmd_args[@]}" --max-model-len 1024 --gpu-memory-utilization '0.35')
+        cmd_args=("${cmd_args[@]}" --max-model-len 1024 --gpu-memory-utilization '0.35' --enforce-eager)
     fi
 
     CID=$(
@@ -208,7 +207,9 @@ run_long_doc_qa() {
     echo "   repeat=${repeat_mode}×${repeat_count}, seed=${shuffle_seed}"
     echo "   inflight=${max_inflight}, sleep_after=${sleep_after}s"
 
-    UV_PYTHON=python3 uv venv
+    if [ ! -d ".venv" ]; then
+        UV_PYTHON=python3 uv venv
+    fi
     source .venv/bin/activate
     uv pip install openai
     python3 "$ORIG_DIR/benchmarks/long-doc-qa/long-doc-qa.py" \

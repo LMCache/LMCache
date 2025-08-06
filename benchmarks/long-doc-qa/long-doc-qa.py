@@ -241,13 +241,20 @@ async def main(args):
     # Print results
     warmup_mean_ttft = sum(warmup_ttfts) / len(warmup_ttfts)
     query_mean_ttft = sum(benchmark_ttfts) / len(benchmark_ttfts)
-    print("\n=== BENCHMARK RESULTS ===")
-    print(f"Warmup round mean TTFT: {warmup_mean_ttft:.3f}s")
-    print(f"Warmup round time: {warmup_end_time - warmup_start_time:.3f}s")
-    print(f"Warmup round prompt count: {len(warmup_ttfts)}")
-    print(f"Query round mean TTFT: {query_mean_ttft:.3f}s")
-    print(f"Query round time: {benchmark_end_time - benchmark_start_time:.3f}s")
-    print(f"Query round prompt count: {len(benchmark_ttfts)}")
+    CSI = "\x1b["
+    RESET = CSI + "0m"
+    print(f"{CSI}36;1m\n=== BENCHMARK RESULTS ==={RESET}")
+    print(f"{CSI}32mWarmup round mean TTFT: {warmup_mean_ttft:.3f}s{RESET}")
+    print(
+        f"{CSI}33mWarmup round time: {warmup_end_time - warmup_start_time:.3f}s{RESET}"
+    )
+    print(f"{CSI}35mWarmup round prompt count: {len(warmup_ttfts)}{RESET}")
+    print(f"{CSI}32mQuery round mean TTFT: {query_mean_ttft:.3f}s{RESET}")
+    print(
+        f"{CSI}33mQuery round time: "
+        f"{benchmark_end_time - benchmark_start_time:.3f}s{RESET}"
+    )
+    print(f"{CSI}35mQuery round prompt count: {len(benchmark_ttfts)}{RESET}")
 
 
 def create_argument_parser():
