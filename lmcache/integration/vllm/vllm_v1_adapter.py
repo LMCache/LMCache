@@ -20,6 +20,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 )
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
+    get_tp_group,
 )
 from vllm.sampling_params import SamplingParams
 from vllm.utils import cdiv, get_kv_cache_torch_dtype
@@ -500,8 +501,14 @@ def init_lmcache_engine(
             device=device,
             use_mla=use_mla,
         )
+    tpg = get_tp_group()
     engine = LMCacheEngineBuilder.get_or_create(
-        ENGINE_NAME, config, metadata, vllm_gpu_connector
+        ENGINE_NAME,
+        config,
+        metadata,
+        vllm_gpu_connector,
+        tpg.broadcast,
+        tpg.broadcast_object,
     )
 
     return engine
