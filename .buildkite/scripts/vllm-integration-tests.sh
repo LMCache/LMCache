@@ -277,7 +277,9 @@ if [[ ! -f "$configs_arg" ]]; then
     echo "Error: --configs file not found: $configs_arg" >&2
     exit 1
 fi
-mapfile -t CONFIG_NAMES < <(sed 's/\r$//' "$configs_arg")
+mapfile -t CONFIG_NAMES < <(
+  sed 's/[[:space:]]\+$//' "$configs_arg"
+)
 
 # Find an available port starting from 8000
 PORT=$(find_available_port 8000)
