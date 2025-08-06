@@ -465,6 +465,10 @@ class TestLocalDiskBackend:
     ):
         """Test saving and loading of metadata."""
         config = create_test_config(temp_disk_path)
+        config.extra_config = config.extra_config or {}
+        config.extra_config.setdefault(
+            "disk_metadata_path", os.path.join(temp_disk_path, "metadata.pkl")
+        )
         backend1 = LocalDiskBackend(
             config=config,
             loop=async_loop,
@@ -480,7 +484,7 @@ class TestLocalDiskBackend:
         backend1._save_metadata()
 
         # Check if metadata file exists
-        metadata_path = os.path.join(temp_disk_path, "metadata.pkl")
+        metadata_path = config.extra_config["disk_metadata_path"]
         assert os.path.exists(metadata_path)
 
         # Create a new backend, which should load the metadata
@@ -502,6 +506,10 @@ class TestLocalDiskBackend:
     def test_close(self, temp_disk_path, async_loop, local_cpu_backend):
         """Test close()."""
         config = create_test_config(temp_disk_path)
+        config.extra_config = config.extra_config or {}
+        config.extra_config.setdefault(
+            "disk_metadata_path", os.path.join(temp_disk_path, "metadata.pkl")
+        )
         lookup_server = MockLookupServer()
 
         backend = LocalDiskBackend(
@@ -527,7 +535,7 @@ class TestLocalDiskBackend:
         assert len(lookup_server.removed_keys) == 3
 
         # Check that metadata was saved
-        metadata_path = os.path.join(temp_disk_path, "metadata.pkl")
+        metadata_path = config.extra_config["disk_metadata_path"]
         assert os.path.exists(metadata_path)
 
         # Create a new backend to verify metadata loading

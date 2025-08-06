@@ -185,10 +185,16 @@ class LocalDiskBackend(StorageBackendInterface):
         stat = os.statvfs(self.path)
         self.os_disk_bs = stat.f_bsize
         self.use_odirect = False
+        self.disk_metadata_path = None
 
         if config.extra_config is not None:
             self.use_odirect = config.extra_config.get("use_odirect", False)
+            self.disk_metadata_path = config.extra_config.get(
+                "disk_metadata_path", self.disk_metadata_path
+            )
         logger.info("Using O_DIRECT for disk I/O: %s", self.use_odirect)
+        if self._has_valid_metadata_path():
+            os.makedirs(os.path.dirname(self.disk_metadata_path), exist_ok=True)
 
         self.disk_worker = LocalDiskWorker()
 
@@ -221,27 +227,30 @@ class LocalDiskBackend(StorageBackendInterface):
     def __str__(self):
         return "LocalDiskBackend"
 
+    def _has_valid_metadata_path(self) -> bool:
+        return self.disk_metadata_path is not None and os.path.exists(
+            os.path.dirname(self.disk_metadata_path)
+        )
+
     def _save_metadata(self):
         """
         Save the metadata to a file.
         """
-        with self.disk_lock:
-            metadata_path = os.path.join(self.path, "metadata.pkl")
-            if os.path.exists(self.path):
-                with open(metadata_path, "wb") as f:
+        if self._has_valid_metadata_path():
+            with self.disk_lock:
+                with open(self.disk_metadata_path, "wb") as f:
                     pickle.dump(self.dict, f)
-                logger.info(f"Metadata saved to {metadata_path}")
+                logger.info(f"Metadata saved to {self.disk_metadata_path}")
 
     def _load_metadata(self):
         """
         Load the metadata from a file.
         """
-        metadata_path = os.path.join(self.path, "metadata.pkl")
-        if os.path.exists(metadata_path):
+        if self._has_valid_metadata_path() and os.path.exists(self.disk_metadata_path):
             with self.disk_lock:
-                with open(metadata_path, "rb") as f:
+                with open(self.disk_metadata_path, "rb") as f:
                     self.dict = pickle.load(f)
-                logger.info(f"Metadata loaded from {metadata_path}")
+                logger.info(f"Metadata loaded from {self.disk_metadata_path}")
                 # Recalculate usage
                 self.usage = sum(meta.size for meta in self.dict.values())
                 self.stats_monitor.update_local_storage_usage(self.usage)
