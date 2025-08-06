@@ -36,6 +36,14 @@ Commandline arguments:
                               (Optional, default: 0.0 seconds)
 
     --output: Filename to write all responses to. If omitted, writes to stdout.
+
+    --expected-ttft-gain: Expected minimum speed-up in time-to-first-token
+                         (warmup/query) as a factor, e.g. 4.3 for 4.3×. If
+                         actual gain is below this, exits.
+
+    --expected-latency-gain: Expected minimum speed-up in total round time
+                            (warmup/query) as a factor, e.g. 4.5 for 4.5×.
+                            If actual gain is below this, exits.
 """
 
 # Standard
@@ -273,6 +281,29 @@ async def main(args):
     )
     print(f"{CSI}35mQuery round prompt count: {len(benchmark_ttfts)}{RESET}")
 
+    # Validate expected gains as multiplicative speed-ups
+    if args.expected_ttft_gain is not None:
+        actual_ttft_gain = (
+            warmup_mean_ttft / query_mean_ttft if query_mean_ttft > 0 else float("inf")
+        )
+        if actual_ttft_gain < args.expected_ttft_gain:
+            sys.exit(
+                f"ERROR: TTFT gain {actual_ttft_gain:.2f}× < expected "
+                f"{args.expected_ttft_gain:.2f}×"
+            )
+
+    if args.expected_latency_gain is not None:
+        warmup_duration = warmup_end_time - warmup_start_time
+        query_duration = benchmark_end_time - benchmark_start_time
+        actual_latency_gain = (
+            warmup_duration / query_duration if query_duration > 0 else float("inf")
+        )
+        if actual_latency_gain < args.expected_latency_gain:
+            sys.exit(
+                f"ERROR: latency gain {actual_latency_gain:.2f}× < expected "
+                f"{args.expected_latency_gain:.2f}×"
+            )
+
 
 def create_argument_parser():
     parser = argparse.ArgumentParser(
@@ -359,6 +390,24 @@ def create_argument_parser():
         type=str,
         default=None,
         help="Filename to write all responses to; if omitted, writes to stdout.",
+    )
+    parser.add_argument(
+        "--expected-ttft-gain",
+        type=float,
+        default=None,
+        help=(
+            "Expected minimum speed-up in time-to-first-token (warmup/query) "
+            "as a factor, e.g. 4.3 for 4.3×. If actual gain is below this, exits."
+        ),
+    )
+    parser.add_argument(
+        "--expected-latency-gain",
+        type=float,
+        default=None,
+        help=(
+            "Expected minimum speed-up in total round time (warmup/query) "
+            "as a factor, e.g. 4.5 for 4.5×. If actual gain is below this, exits."
+        ),
     )
 
     return parser
