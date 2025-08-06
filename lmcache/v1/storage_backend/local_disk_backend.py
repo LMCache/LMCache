@@ -259,7 +259,7 @@ class LocalDiskBackend(StorageBackendInterface):
                 return False
 
         path = meta.path
-        size = os.path.getsize(path)
+        size = meta.size
         self.usage -= size
         self.stats_monitor.update_local_storage_usage(self.usage)
         os.remove(path)
