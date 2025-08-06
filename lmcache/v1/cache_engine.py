@@ -429,10 +429,6 @@ class LMCacheEngine:
         # [(CacheEngineKey, MemoryObj, start, end)]
         reordered_chunks: List[Tuple[CacheEngineKey, MemoryObj, int, int]] = []
 
-        reordered_keys = []
-        reordered_memory_objs = []
-        reordered_starts = []
-        reordered_ends = []
         tags = kwargs.get("tags")
         if tags is not None and len(tags) != 0:
             assert isinstance(tags, OrderedDict)
