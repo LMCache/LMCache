@@ -649,14 +649,14 @@ class LMCacheConnectorV1Impl:
     def wait_for_save(self):
         """Blocking until the KV cache is saved to the connector buffer."""
 
-        if self.kv_role == "kv_consumer":
-            # Don't do save if the role is kv_consumer
-            return
-
         connector_metadata = self._parent._get_connector_metadata()
         assert isinstance(connector_metadata, LMCacheConnectorMetadata)
 
         self.lmcache_engine.lookup_unpin(connector_metadata.lookup_requests_in_step)
+
+        if self.kv_role == "kv_consumer":
+            # Don't do save if the role is kv_consumer
+            return
 
         if self.use_layerwise:
             for layerwise_storer in self.layerwise_storers:
