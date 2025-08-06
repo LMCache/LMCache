@@ -82,7 +82,6 @@ async def process_single_prompt(
         float: Time-to-first-token measurement
     """
     async with semaphore:  # Acquire semaphore to limit concurrent requests
-        # Log sending prompt to response file
         write_resp(f"\n--- Sending prompt {prompt_index + 1}/{total_prompts} ---\n")
         start_time = time.time()
         first_token_time = None
@@ -112,7 +111,6 @@ async def process_single_prompt(
                 words += content
 
         final_response = "".join(responses)
-        # Log response to response file
         write_resp(f"\nResponse of request {prompt_index}: {final_response}\n")
 
         if first_token_time is not None:
@@ -244,7 +242,7 @@ async def main(args):
 
     sleep_time_after_warmup = args.sleep_time_after_warmup
     if sleep_time_after_warmup > 0:
-        write_resp(f"Sleeping for {sleep_time_after_warmup} seconds after warmup...")
+        write_resp(f"Sleeping for {sleep_time_after_warmup} seconds after warmup...\n")
         time.sleep(sleep_time_after_warmup)
 
     benchmark_start_time = time.time()
