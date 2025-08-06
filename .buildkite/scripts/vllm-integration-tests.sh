@@ -200,11 +200,14 @@ run_long_doc_qa() {
     local shuffle_seed="${SHUFFLE_SEED:-0}"
     local max_inflight="${MAX_INFLIGHT_REQUESTS:-20}"
     local sleep_after="${SLEEP_TIME_AFTER_WARMUP:-0.0}"
+    local expected_ttft_gain="${EXPECTED_TTFT_GAIN:-2.3}"
+    local expected_latency_gain="${EXPECTED_LATENCY_GAIN:-3.5}"
 
     echo "→ Running long-doc-qa:"
     echo "   num_docs=${num_docs}, doc_len=${doc_len}, out_len=${out_len}"
     echo "   repeat=${repeat_mode}×${repeat_count}, seed=${shuffle_seed}"
     echo "   inflight=${max_inflight}, sleep_after=${sleep_after}s"
+    echo "   expected_ttft_gain=${expected_ttft_gain}, expected_latency_gain=${expected_latency_gain}"
 
     if [ ! -d ".venv" ]; then
         UV_PYTHON=python3 uv -q venv
@@ -222,7 +225,9 @@ run_long_doc_qa() {
         --sleep-time-after-warmup="$sleep_after" \
         --port="$PORT" \
         --model="meta-llama/Llama-3.2-1B-Instruct" \
-        --output="response.txt"
+        --output="response.txt" \
+        --expected-ttft-gain="$expected_ttft_gain" \
+        --expected-latency-gain="$expected_latency_gain" \
 }
 
 #########
@@ -311,6 +316,8 @@ for cfg_name in "${CONFIG_NAMES[@]}"; do
             SHUFFLE_SEED="$(yq e '.shuffle_seed' "$workload_file")"
             MAX_INFLIGHT_REQUESTS="$(yq e '.max_inflight' "$workload_file")"
             SLEEP_TIME_AFTER_WARMUP="$(yq e '.sleep_after'  "$workload_file")"
+            EXPECTED_TTFT_GAIN="$(yq e '.EXPECTED_TTFT_GAIN'   "$workload_file")"
+            EXPECTED_LATENCY_GAIN="$(yq e '.EXPECTED_LATENCY_GAIN' "$workload_file")"
         else
             echo "❌ Error: workload YAML for ${cfg_name} not found at ${workload_file}" >&2
             exit 1
