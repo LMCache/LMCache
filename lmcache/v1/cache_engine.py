@@ -695,14 +695,14 @@ class LMCacheEngine:
                             if self.lookup_server.lookup(key_single_layer):
                                 found = True
                     if found:
-                        if pin:
+                        if pin and request_id not in self.lookup_pins:
                             self.lookup_pins[request_id].extend(key_all_layers)
                         prev_end = end
                         continue
                     return prev_end
                 else:
                     if self.storage_manager.contains(key, search_range, pin):
-                        if pin:
+                        if pin and request_id not in self.lookup_pins:
                             self.lookup_pins[request_id].append(key)
                         prev_end = end
                         continue
