@@ -65,7 +65,6 @@ async def process_single_prompt(
         float: Time-to-first-token measurement
     """
     async with semaphore:  # Acquire semaphore to limit concurrent requests
-        print(f"\n--- Sending prompt {prompt_index + 1}/{total_prompts} ---")
         start_time = time.time()
         first_token_time = None
         words = ""

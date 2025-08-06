@@ -79,6 +79,7 @@ build_lmcache_vllmopenai_image() {
 
 wait_for_openai_api_server() {
     if ! timeout $SERVER_WAIT_TIMEOUT bash -c "
+        echo "Curl /v1/models endpoint"
         until curl -s 127.0.0.1:${PORT}/v1/models | grep '\"id\":\"meta-llama/Llama-3.2-1B-Instruct\"'; do
             sleep 30
         done
@@ -205,10 +206,10 @@ run_long_doc_qa() {
     echo "   inflight=${max_inflight}, sleep_after=${sleep_after}s"
 
     if [ ! -d ".venv" ]; then
-        UV_PYTHON=python3 uv venv
+        UV_PYTHON=python3 uv -q venv
     fi
     source .venv/bin/activate
-    uv pip install openai
+    uv -q pip install openai
     python3 "$ORIG_DIR/benchmarks/long-doc-qa/long-doc-qa.py" \
         --num-documents="$num_docs" \
         --document-length="$doc_len" \
@@ -294,26 +295,26 @@ build_lmcache_vllmopenai_image
 for cfg_name in "${CONFIG_NAMES[@]}"; do
     echo -e "\033[1;33m===== Testing LMCache with ${cfg_name} =====\033[0m"
 
-    # load workload override from YAML if present
-    workload_file="${WORKLOAD_DIR}/${cfg_name}"
-    if [[ -f "$workload_file" ]]; then
-        echo "→ Loading workload parameters from ${workload_file}"
-        NUM_DOCUMENTS="$(yq e '.num_docs'    "$workload_file")"
-        DOCUMENT_LENGTH="$(yq e '.doc_len'    "$workload_file")"
-        OUTPUT_LEN="$(yq e '.out_len'        "$workload_file")"
-        REPEAT_COUNT="$(yq e '.repeat_count' "$workload_file")"
-        REPEAT_MODE="$(yq e '.repeat_mode'   "$workload_file")"
-        SHUFFLE_SEED="$(yq e '.shuffle_seed' "$workload_file")"
-        MAX_INFLIGHT_REQUESTS="$(yq e '.max_inflight' "$workload_file")"
-        SLEEP_TIME_AFTER_WARMUP="$(yq e '.sleep_after'  "$workload_file")"
-    else
-        echo "→ No workload YAML for ${cfg_name}; using defaults"
-    fi
-
     if [ "$test_mode" = "dummy" ]; then
         run_lmcache_vllmopenai_container "$cfg_name" "$test_mode"
         test_vllmopenai_server_with_lmcache_integrated
     elif [ "$test_mode" = "long-doc-qa" ]; then
+        # load workload override from YAML if present
+        workload_file="${WORKLOAD_DIR}/${cfg_name}"
+        if [[ -f "$workload_file" ]]; then
+            echo "→ Loading workload parameters from ${workload_file}"
+            NUM_DOCUMENTS="$(yq e '.num_docs'    "$workload_file")"
+            DOCUMENT_LENGTH="$(yq e '.doc_len'    "$workload_file")"
+            OUTPUT_LEN="$(yq e '.out_len'        "$workload_file")"
+            REPEAT_COUNT="$(yq e '.repeat_count' "$workload_file")"
+            REPEAT_MODE="$(yq e '.repeat_mode'   "$workload_file")"
+            SHUFFLE_SEED="$(yq e '.shuffle_seed' "$workload_file")"
+            MAX_INFLIGHT_REQUESTS="$(yq e '.max_inflight' "$workload_file")"
+            SLEEP_TIME_AFTER_WARMUP="$(yq e '.sleep_after'  "$workload_file")"
+        else
+            echo "→ No workload YAML for ${cfg_name}; using defaults"
+        fi
+
         run_lmcache_vllmopenai_container "$cfg_name" "$test_mode"
         run_long_doc_qa
     fi
