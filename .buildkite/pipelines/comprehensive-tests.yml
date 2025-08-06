@@ -6,8 +6,11 @@ steps:
     key: "test"
     timeout_in_minutes: 60
     commands:
+      - rm -rf /tmp/lmcache_vllm_*.log
       - chmod +x .buildkite/scripts/vllm-integration-tests.sh
       - .buildkite/scripts/vllm-integration-tests.sh --hf-token=$HF_TOKEN --server-wait-timeout=240 --tests=long-doc-qa --configs=.buildkite/cases/comprehensive-cases.txt
+    artifact_paths:
+      - "/tmp/lmcache_vllm_*.log"
 
   - label: ":broom: Clean up"
     depends_on: ["test"]
