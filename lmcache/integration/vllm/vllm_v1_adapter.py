@@ -102,6 +102,9 @@ class RequestTracker:
     mm_hashes: Optional[list[str]] = None
     mm_positions: Optional[list["PlaceholderRange"]] = None
 
+    # Whether the request is in decode phase
+    is_decode_phase = False
+
     @staticmethod
     def from_new_request(
         new_request: "NewRequestData",
@@ -171,6 +174,12 @@ class RequestTracker:
             raise ValueError(f"Unsupported new_block_ids type {type(new_block_ids)}")
         self.allocated_block_ids.extend(new_block_ids)
 
+        # When a request is scheduled again, and the number of new tokens
+        # is 1 (excluding chunked prefill), the request is in decode phase.
+        # TODO: Need to further exclude the case of chunked prefill with 1 token.
+        if len(new_token_ids) == 1:
+            self.is_decode_phase = True
+
 
 @dataclass
 class ReqMeta:
@@ -199,6 +208,7 @@ class ReqMeta:
         load_spec: Optional[LoadSpec] = None,
         skip_save: bool = False,
         discard_partial_chunks: bool = True,
+        save_decode_cache: bool = False,
     ) -> Optional["ReqMeta"]:
         """Create the request metadata from a request tracker.
 
@@ -209,6 +219,7 @@ class ReqMeta:
             load_spec (Optional[LoadSpec]): the load spec for KV cache loading.
             skip_save (bool): whether to skip the save operation.
             discard_partial_chunks (bool): whether to discard partial chunks.
+            save_decode_cache (bool): whether to save the cache in decode phase.
 
         Returns:
             the request metadata if we need to perform load/save
@@ -224,14 +235,18 @@ class ReqMeta:
         # For save operation: do not save if the following condition is met
         # 1. has already been saved before (num_saved_tokens > 0)
         # 2. number of unsaved tokens is not reached the chunk boundary
+        # 3. if save_decode_cache is False and it is in decode phase
+
         skip_leading_tokens = tracker.num_saved_tokens
         chunk_boundary = (
             cdiv(tracker.num_saved_tokens + 1, lmcache_chunk_size) * lmcache_chunk_size
         )
+
         # NOTE(vladnosiv): for disagg, you cannot skip saving, as saving is a transfer
         skip_save = tracker.disagg_spec is None and (
             skip_save
             or (tracker.num_saved_tokens > 0 and input_token_len < chunk_boundary)
+            or (tracker.is_decode_phase and not save_decode_cache)
         )
 
         if skip_save and load_spec is None:
@@ -396,6 +411,7 @@ class LMCacheConnectorV1Impl:
         )
 
         self._lmcache_chunk_size = config.chunk_size
+        self._save_decode_cache = config.save_decode_cache
 
         self.skip_last_n_tokens = vllm_config.kv_transfer_config.get_from_extra_config(
             "skip_last_n_tokens", 0
@@ -456,10 +472,6 @@ class LMCacheConnectorV1Impl:
         assert self.lmcache_engine is not None
 
         self.lmcache_engine.post_init(kvcaches=kvcaches)
-
-        for idx, request in enumerate(metadata.requests):
-            if request.load_spec is None:
-                continue
 
         self.layerwise_retrievers = []
         for idx, request in enumerate(metadata.requests):
@@ -526,8 +538,6 @@ class LMCacheConnectorV1Impl:
                         num_retrieved_tokens,
                         num_expected_tokens,
                     )
-
-        self.lmcache_engine.lookup_unpin(metadata.lookup_requests_in_step)
 
     @_lmcache_nvtx_annotate
     def wait_for_layer_load(self, layer_name: str) -> None:
@@ -657,6 +667,12 @@ class LMCacheConnectorV1Impl:
     @_lmcache_nvtx_annotate
     def wait_for_save(self):
         """Blocking until the KV cache is saved to the connector buffer."""
+
+        connector_metadata = self._parent._get_connector_metadata()
+        assert isinstance(connector_metadata, LMCacheConnectorMetadata)
+
+        self.lmcache_engine.lookup_unpin(connector_metadata.lookup_requests_in_step)
+
         if self.kv_role == "kv_consumer":
             # Don't do save if the role is kv_consumer
             return
@@ -665,9 +681,6 @@ class LMCacheConnectorV1Impl:
             for layerwise_storer in self.layerwise_storers:
                 next(layerwise_storer)
             return
-
-        connector_metadata = self._parent._get_connector_metadata()
-        assert isinstance(connector_metadata, LMCacheConnectorMetadata)
 
         assert len(self.kv_caches) > 0
         kvcaches = list(self.kv_caches.values())
@@ -939,6 +952,7 @@ class LMCacheConnectorV1Impl:
                 load_spec=load_spec,
                 skip_save=force_skip_save,
                 discard_partial_chunks=self._discard_partial_chunks,
+                save_decode_cache=self._save_decode_cache,
             )
             if req_meta is not None:
                 meta.add_request(req_meta)
@@ -989,6 +1003,7 @@ class LMCacheConnectorV1Impl:
                 load_spec=None,
                 skip_save=force_skip_save,
                 discard_partial_chunks=self._discard_partial_chunks,
+                save_decode_cache=self._save_decode_cache,
             )
             if req_meta is not None:
                 meta.add_request(req_meta)

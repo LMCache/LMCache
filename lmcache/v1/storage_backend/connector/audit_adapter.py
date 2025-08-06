@@ -52,6 +52,10 @@ class AuditConnectorAdapter(ConnectorAdapter):
         verify_checksum = verify_param.lower() in ("true", "1", "yes")
         real_url = context.config.audit_actual_remote_url
         connector = CreateConnector(
-            real_url, context.loop, context.local_cpu_backend, context.config
+            real_url,
+            context.loop,
+            context.local_cpu_backend,
+            context.config,
+            context.metadata,
         )
         return AuditConnector(connector, verify_checksum)
