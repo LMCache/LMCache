@@ -103,7 +103,7 @@ run_lmcache_vllmopenai_container() {
         --env VLLM_USE_FLASHINFER_SAMPLER=0
         --env HF_TOKEN="$HF_TOKEN"
         --volume "${ORIG_DIR}/.buildkite/lmcache_configs:/configs:ro"
-        --env "LMCACHE_CONFIG_FILE=/lmcache_configs/${cfg_name}"
+        --env "LMCACHE_CONFIG_FILE=/configs/${cfg_name}"
         --volume ~/.cache/huggingface:/root/.cache/huggingface
         --network host
     )
