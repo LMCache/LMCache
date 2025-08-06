@@ -42,4 +42,3 @@ but if you change the `user` field, the first time will not hit the cache.
 ```plaintext
 LMCache INFO: Retrieved 512 out of 512 out of total 512 tokens
 ```
-
