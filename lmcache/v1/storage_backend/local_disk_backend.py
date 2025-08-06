@@ -81,6 +81,8 @@ class LocalDiskWorker:
                 # Remove the prefetch task from the queue
                 self.insert_prefetch_task(kwargs["key"], future)
 
+            self.pq.task_done()
+
     def remove_put_task(self, key: CacheEngineKey):
         with self.put_lock:
             if key in self.put_tasks:

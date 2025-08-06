@@ -379,6 +379,10 @@ class TestLocalDiskBackend:
         # Remove the key
         local_disk_backend.remove(key)
 
+        # Wait for worker tasks
+        local_disk_backend.disk_worker.pq.join()
+        local_disk_backend.disk_worker.executor.shutdown()
+
         assert key not in local_disk_backend.dict
         assert not os.path.exists(path)
 
@@ -701,6 +705,10 @@ class TestLocalDiskBackend:
 
         # Remove key
         local_disk_backend.remove(key)
+
+        # Wait for worker tasks
+        local_disk_backend.disk_worker.pq.join()
+        local_disk_backend.disk_worker.executor.shutdown()
 
         # Check that both the dict entry and file are removed
         assert key not in local_disk_backend.dict
