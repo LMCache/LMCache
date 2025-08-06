@@ -492,10 +492,6 @@ class LMCacheConnectorV1Impl:
 
         self.lmcache_engine.post_init(kvcaches=kvcaches)
 
-        for idx, request in enumerate(metadata.requests):
-            if request.load_spec is None:
-                continue
-
         self.layerwise_retrievers = []
         for idx, request in enumerate(metadata.requests):
             if request.load_spec is None:
@@ -562,8 +558,6 @@ class LMCacheConnectorV1Impl:
                         num_retrieved_tokens,
                         num_expected_tokens,
                     )
-
-        self.lmcache_engine.lookup_unpin(metadata.lookup_requests_in_step)
 
     @_lmcache_nvtx_annotate
     def wait_for_layer_load(self, layer_name: str) -> None:
@@ -693,6 +687,12 @@ class LMCacheConnectorV1Impl:
     @_lmcache_nvtx_annotate
     def wait_for_save(self):
         """Blocking until the KV cache is saved to the connector buffer."""
+
+        connector_metadata = self._parent._get_connector_metadata()
+        assert isinstance(connector_metadata, LMCacheConnectorMetadata)
+
+        self.lmcache_engine.lookup_unpin(connector_metadata.lookup_requests_in_step)
+
         if self.kv_role == "kv_consumer":
             # Don't do save if the role is kv_consumer
             return
@@ -701,9 +701,6 @@ class LMCacheConnectorV1Impl:
             for layerwise_storer in self.layerwise_storers:
                 next(layerwise_storer)
             return
-
-        connector_metadata = self._parent._get_connector_metadata()
-        assert isinstance(connector_metadata, LMCacheConnectorMetadata)
 
         assert len(self.kv_caches) > 0
         kvcaches = list(self.kv_caches.values())
