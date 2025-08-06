@@ -8,8 +8,6 @@ GPU_LIMIT=4                   # reserves GPU 0-3 for CI/Build
 TIMEOUT_SECONDS=1800
 INTERVAL=10
 
-echo "🔍 Waiting up to ${TIMEOUT_SECONDS}s for a GPU with >= ${MIN_FREE_MEM} MiB free and <= ${MAX_UTIL}% utilization..."
-
 start_time=$(date +%s)
 
 while true; do
@@ -42,6 +40,5 @@ while true; do
     break
   fi
 
-  echo "⏳ Still waiting... ${elapsed}s elapsed"
   sleep $INTERVAL
 done

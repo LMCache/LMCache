@@ -79,8 +79,7 @@ build_lmcache_vllmopenai_image() {
 
 wait_for_openai_api_server() {
     if ! timeout $SERVER_WAIT_TIMEOUT bash -c "
-        until curl 127.0.0.1:${PORT}/v1/models | grep '\"id\":\"meta-llama/Llama-3.2-1B-Instruct\"'; do
-            echo 'waiting for OpenAI API server to start'
+        until curl -s 127.0.0.1:${PORT}/v1/models | grep '\"id\":\"meta-llama/Llama-3.2-1B-Instruct\"'; do
             sleep 30
         done
     "; then
@@ -133,7 +132,6 @@ run_lmcache_vllmopenai_container() {
     docker logs -f "$CID" &>"$LOGFILE" &
     LOG_PID=$!
 
-    set +x
     end=$((SECONDS + 120))
     while [ $SECONDS -lt $end ]; do
         if grep -qi 'Starting vLLM API server' "$LOGFILE"; then
@@ -143,7 +141,6 @@ run_lmcache_vllmopenai_container() {
         fi
         sleep 1
     done
-    set -x
 
     if [ $SECONDS -ge $end ]; then
         echo "Timeout waiting for startup marker, dumping full log:"
@@ -266,7 +263,7 @@ done
 
 ORIG_DIR="$PWD"
 
-WORKLOAD_DIR="${ORIG_DIR}/workload_configs"
+WORKLOAD_DIR="${ORIG_DIR}/.buildkite/workload_configs"
 
 # Read the configs argument
 if [[ -z "${configs_arg:-}" ]]; then
