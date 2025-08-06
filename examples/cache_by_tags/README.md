@@ -9,7 +9,7 @@ This will use the port 8000 for 1 vllm.
 1. Start the vllm engine at port 8000:
 
 ```bash
-VLLM_USE_V1=0 \
+VLLM_USE_V1=1 \
 LMCACHE_USE_EXPERIMENTAL=True \
 LMCACHE_TRACK_USAGE=false \
 LMCACHE_CONFIG_FILE=example.yaml \
