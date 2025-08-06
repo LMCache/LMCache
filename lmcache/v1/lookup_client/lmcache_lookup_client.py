@@ -40,8 +40,8 @@ class LMCacheLookupClient(LookupClientInterface):
         )
         self.tensor_parallel_size = vllm_config.parallel_config.tensor_parallel_size
         self.create_lookup_server_only_on_worker_0 = (
-            config.extra_config
-            and config.extra_config.get("create_lookup_server_only_on_worker_0", True)
+            not config.extra_config
+            or config.extra_config.get("create_lookup_server_only_on_worker_0", True)
         )
         ranks = self.tensor_parallel_size
         if self.create_lookup_server_only_on_worker_0:

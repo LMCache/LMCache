@@ -72,8 +72,8 @@ class LookupClientFactory:
         # Only create the KV lookup API server on worker rank 0
         # when there are multiple workers and when not using external lookup client
         create_lookup_server_only_on_worker_0 = (
-            config.extra_config
-            and config.extra_config.get("create_lookup_server_only_on_worker_0", True)
+            not config.extra_config
+            or config.extra_config.get("create_lookup_server_only_on_worker_0", True)
         )
         if config.external_lookup_client is None and (
             not create_lookup_server_only_on_worker_0
