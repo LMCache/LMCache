@@ -34,16 +34,33 @@ Commandline arguments:
 
     --sleep-time-after-warmup: Sleep time after warm up iteration.
                               (Optional, default: 0.0 seconds)
+
+    --output: Filename to write all responses to. If omitted, writes to stdout.
 """
 
 # Standard
 import argparse
 import asyncio
 import random
+import sys
 import time
 
 # Third Party
 from openai import AsyncOpenAI
+
+# Global output filename (set in __main__)
+OUTPUT_FILE = None
+
+
+def write_resp(text: str):
+    """
+    Write text to the specified output file (if any), otherwise to stdout.
+    """
+    if OUTPUT_FILE:
+        with open(OUTPUT_FILE, "a") as resp_file:
+            resp_file.write(text)
+    else:
+        sys.stdout.write(text)
 
 
 async def process_single_prompt(
@@ -66,10 +83,7 @@ async def process_single_prompt(
     """
     async with semaphore:  # Acquire semaphore to limit concurrent requests
         # Log sending prompt to response file
-        with open("responses.txt", "a") as resp_file:
-            resp_file.write(
-                f"\n--- Sending prompt {prompt_index + 1}/{total_prompts} ---\n"
-            )
+        write_resp(f"\n--- Sending prompt {prompt_index + 1}/{total_prompts} ---\n")
         start_time = time.time()
         first_token_time = None
         words = ""
@@ -99,8 +113,7 @@ async def process_single_prompt(
 
         final_response = "".join(responses)
         # Log response to response file
-        with open("responses.txt", "a") as resp_file:
-            resp_file.write(f"\nResponse of request {prompt_index}: {final_response}\n")
+        write_resp(f"\nResponse of request {prompt_index}: {final_response}\n")
 
         if first_token_time is not None:
             return first_token_time - start_time
@@ -170,8 +183,7 @@ def repeat_prompts(prompts, repeat_count, mode: str):
     Raises:
         ValueError: If an invalid mode is provided.
     """
-    with open("responses.txt", "a") as resp_file:
-        resp_file.write(f"Repeat mode:  {mode}\n")
+    write_resp(f"Repeat mode:  {mode}\n")
     if mode == "random":
         repeated_prompts = prompts * repeat_count
         random.shuffle(repeated_prompts)
@@ -218,8 +230,7 @@ async def main(args):
 
     prompts = repeat_prompts(warmup_prompts, args.repeat_count, mode=args.repeat_mode)
 
-    with open("responses.txt", "a") as resp_file:
-        resp_file.write("------warm up round------\n")
+    write_resp("------warm up round------\n")
     warmup_start_time = time.time()
     warmup_ttfts = await test_long_document_qa(
         client=client,
@@ -229,12 +240,11 @@ async def main(args):
         max_inflight_requests=args.max_inflight_requests,
     )
     warmup_end_time = time.time()
-    with open("responses.txt", "a") as resp_file:
-        resp_file.write("------query round------\n")
+    write_resp("------query round------\n")
 
     sleep_time_after_warmup = args.sleep_time_after_warmup
     if sleep_time_after_warmup > 0:
-        print(f"Sleeping for {sleep_time_after_warmup} seconds after warmup...")
+        write_resp(f"Sleeping for {sleep_time_after_warmup} seconds after warmup...")
         time.sleep(sleep_time_after_warmup)
 
     benchmark_start_time = time.time()
@@ -346,10 +356,18 @@ def create_argument_parser():
         help="Sleep time after warm up iteration",
     )
 
+    parser.add_argument(
+        "--output",
+        type=str,
+        default=None,
+        help="Filename to write all responses to; if omitted, writes to stdout.",
+    )
+
     return parser
 
 
 if __name__ == "__main__":
     parser = create_argument_parser()
     args = parser.parse_args()
+    OUTPUT_FILE = args.output
     asyncio.run(main(args))
