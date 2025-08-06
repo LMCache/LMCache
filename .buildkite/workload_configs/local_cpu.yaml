@@ -6,5 +6,5 @@ repeat_mode:          random
 shuffle_seed:         0
 max_inflight:         20
 sleep_after:          0
-expected_ttft_gain:   3.9
+expected_ttft_gain:   2.3
 expected_latency_gain: 4.0
