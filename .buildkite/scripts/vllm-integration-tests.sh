@@ -21,6 +21,7 @@
 # Note: L4 CI runners cannot use Flash Infer
 
 set -ex
+trap 'cleanup $?' EXIT
 
 CID=
 HF_TOKEN=
