@@ -138,7 +138,7 @@ skip = "pp*"
 # 8.6: A40, A10, A16, A2
 # 8.9: L4, L40, L40S
 # 9.0: H100
-environment = {TORCH_CUDA_ARCH_LIST = "7.0;7.5;8.0;8.6;8.9;9.0"}
+environment = {TORCH_CUDA_ARCH_LIST = "7.0;7.5;8.0;8.6;8.9;9.0", ENABLE_CXX11_ABI = "1"}
 
 # Use the PyTorch manylinux image version '2_28' that contains CUDA 12.8
 # and torch 2.7 supports (https://pypi.org/project/torch/2.7.0/#files)

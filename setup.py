@@ -18,6 +18,8 @@ BUILDING_SDIST = "sdist" in sys.argv or os.environ.get("NO_CUDA_EXT", "0") == "1
 # New environment variable to choose between CUDA and HIP
 BUILD_WITH_HIP = os.environ.get("BUILD_WITH_HIP", "0") == "1"
 
+ENABLE_CXX11_ABI = os.environ.get("ENABLE_CXX11_ABI", "0") == "1"
+
 
 def hipify_wrapper() -> None:
     # Third Party
@@ -63,6 +65,11 @@ def cuda_extension() -> tuple[list, dict]:
     from torch.utils import cpp_extension  # Import here
 
     print("Building CUDA extensions")
+    global ENABLE_CXX11_ABI
+    if ENABLE_CXX11_ABI:
+        flag_cxx_abi = "-D_GLIBCXX_USE_CXX11_ABI=1"
+    else:
+        flag_cxx_abi = "-D_GLIBCXX_USE_CXX11_ABI=0"
 
     cuda_sources = [
         "csrc/pybind.cpp",
@@ -78,8 +85,8 @@ def cuda_extension() -> tuple[list, dict]:
             "lmcache.c_ops",
             sources=cuda_sources,
             extra_compile_args={
-                "cxx": ["-D_GLIBCXX_USE_CXX11_ABI=0"],
-                "nvcc": ["-D_GLIBCXX_USE_CXX11_ABI=0"],
+                "cxx": [flag_cxx_abi],
+                "nvcc": [flag_cxx_abi],
             },
         ),
     ]
