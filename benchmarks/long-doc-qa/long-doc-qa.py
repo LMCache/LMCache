@@ -286,6 +286,7 @@ async def main(args):
         actual_ttft_gain = (
             warmup_mean_ttft / query_mean_ttft if query_mean_ttft > 0 else float("inf")
         )
+        print(f"{CSI}34mActual TTFT gain: {actual_ttft_gain:.2f}×{RESET}")
         if actual_ttft_gain < args.expected_ttft_gain:
             sys.exit(
                 f"ERROR: TTFT gain {actual_ttft_gain:.2f}× < expected "
@@ -304,6 +305,7 @@ async def main(args):
             if query_per_prompt > 0
             else float("inf")
         )
+        print(f"{CSI}34mActual latency gain: {actual_latency_gain:.2f}×{RESET}")
         if actual_latency_gain < args.expected_latency_gain:
             sys.exit(
                 f"ERROR: latency gain {actual_latency_gain:.2f}× < expected "
