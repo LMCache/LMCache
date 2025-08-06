@@ -78,9 +78,10 @@ build_lmcache_vllmopenai_image() {
 }
 
 wait_for_openai_api_server() {
-    if ! timeout $SERVER_WAIT_TIMEOUT bash -c "
-        echo "Curl /v1/models endpoint"
-        until curl -s 127.0.0.1:${PORT}/v1/models | grep '\"id\":\"meta-llama/Llama-3.2-1B-Instruct\"'; do
+    if ! timeout "$SERVER_WAIT_TIMEOUT" bash -c "
+        echo \"Curl /v1/models endpoint\"
+        until curl -s 127.0.0.1:${PORT}/v1/models \
+                | grep '\"id\":\"meta-llama/Llama-3.2-1B-Instruct\"'; do
             sleep 30
         done
     "; then

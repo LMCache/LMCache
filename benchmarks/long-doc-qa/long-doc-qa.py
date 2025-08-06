@@ -65,6 +65,11 @@ async def process_single_prompt(
         float: Time-to-first-token measurement
     """
     async with semaphore:  # Acquire semaphore to limit concurrent requests
+        # Log sending prompt to response file
+        with open("responses.txt", "a") as resp_file:
+            resp_file.write(
+                f"\n--- Sending prompt {prompt_index + 1}/{total_prompts} ---\n"
+            )
         start_time = time.time()
         first_token_time = None
         words = ""
@@ -93,7 +98,9 @@ async def process_single_prompt(
                 words += content
 
         final_response = "".join(responses)
-        print(f"\nResponse of request {prompt_index}: {final_response}")
+        # Log response to response file
+        with open("responses.txt", "a") as resp_file:
+            resp_file.write(f"\nResponse of request {prompt_index}: {final_response}\n")
 
         if first_token_time is not None:
             return first_token_time - start_time
