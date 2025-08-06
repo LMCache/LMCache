@@ -9,7 +9,17 @@ This will use the port 8000 for 1 vllm.
 1. Start the vllm engine at port 8000:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 LMCACHE_USE_EXPERIMENTAL=True LMCACHE_CONFIG_FILE=example.yaml vllm serve meta-llama/Meta-Llama-3.1-8B-Instruct --max-model-len 4096  --gpu-memory-utilization 0.8 --port 8000 --kv-transfer-config '{"kv_connector":"LMCacheConnector", "kv_role":"kv_both"}'
+VLLM_USE_V1=0 \
+LMCACHE_USE_EXPERIMENTAL=True \
+LMCACHE_TRACK_USAGE=false \
+LMCACHE_CONFIG_FILE=example.yaml \
+vllm serve /disc/f/models/opt-125m/ \
+           --served-model-name "facebook/opt-125m" \
+           --enforce-eager  \
+           --port 8000 \
+           --gpu-memory-utilization 0.8 \
+           --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}' \
+           --trust-remote-code
 ```
 
 3. Send a request to vllm engine with `kv_transfer_params: {user: example_user_1}`:
@@ -17,7 +27,7 @@ CUDA_VISIBLE_DEVICES=0 LMCACHE_USE_EXPERIMENTAL=True LMCACHE_CONFIG_FILE=example
 curl -X POST http://localhost:8000/v1/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
+    "model": "facebook/opt-125m",
     "prompt": "Explain the significance of KV cache in language models." * 100,
     "max_tokens": 10,
 	"kv_transfer_params": {
