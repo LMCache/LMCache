@@ -7,7 +7,7 @@ steps:
     timeout_in_minutes: 60
     commands:
       - chmod +x .buildkite/scripts/vllm-integration-tests.sh
-      - .buildkite/scripts/vllm-integration-tests.sh --hf-token=$HF_TOKEN --server-wait-timeout=240 --tests=dummy --configs=local_cpu.yaml 
+      - .buildkite/scripts/vllm-integration-tests.sh --hf-token=$HF_TOKEN --server-wait-timeout=240 --tests=dummy --configs=integration-case.txt
 
   - label: ":broom: Clean up"
     depends_on: ["test"]
