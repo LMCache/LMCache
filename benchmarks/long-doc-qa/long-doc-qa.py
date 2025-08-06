@@ -295,8 +295,14 @@ async def main(args):
     if args.expected_latency_gain is not None:
         warmup_duration = warmup_end_time - warmup_start_time
         query_duration = benchmark_end_time - benchmark_start_time
+
+        # compute per-prompt latency before comparing
+        warmup_per_prompt = warmup_duration / len(warmup_ttfts)
+        query_per_prompt = query_duration / len(benchmark_ttfts)
         actual_latency_gain = (
-            warmup_duration / query_duration if query_duration > 0 else float("inf")
+            warmup_per_prompt / query_per_prompt
+            if query_per_prompt > 0
+            else float("inf")
         )
         if actual_latency_gain < args.expected_latency_gain:
             sys.exit(
