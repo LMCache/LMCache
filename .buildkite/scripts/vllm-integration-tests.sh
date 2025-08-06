@@ -5,7 +5,7 @@
 # the script is running from and the latest nightly build of vLLM. It is therefore using the
 # latest of both code bases to build the image which it then performs tests on.
 #
-# It is laid out as follows:
+# It’s laid out as follows:
 # - UTILITIES:  utility functions
 # - TESTS:      test functions
 # - SETUP:      environment setup steps
@@ -78,7 +78,7 @@ build_lmcache_vllmopenai_image() {
 
 wait_for_openai_api_server() {
     if ! timeout $SERVER_WAIT_TIMEOUT bash -c "
-        until curl 127.0.0.1:${PORT}/v1/models |grep '\"id\":\"meta-llama/Llama-3.2-1B-Instruct\"'; do
+        until curl 127.0.0.1:${PORT}/v1/models | grep '\"id\":\"meta-llama/Llama-3.2-1B-Instruct\"'; do
             echo 'waiting for OpenAI API server to start'
             sleep 30
         done
@@ -101,8 +101,8 @@ run_lmcache_vllmopenai_container() {
         --gpus "device=${best_gpu}"
         --env VLLM_USE_FLASHINFER_SAMPLER=0
         --env HF_TOKEN="$HF_TOKEN"
-        --volume "${ORIG_DIR}/.buildkite/configs:/configs:ro"
-        --env "LMCACHE_CONFIG_FILE=/configs/${cfg_name}"
+        --volume "${ORIG_DIR}/.buildkite/lmcache_configs:/configs:ro"
+        --env "LMCACHE_CONFIG_FILE=/lmcache_configs/${cfg_name}"
         --volume ~/.cache/huggingface:/root/.cache/huggingface
         --network host
     )
@@ -116,7 +116,7 @@ run_lmcache_vllmopenai_container() {
         --port "$PORT"
     )
     if [ "$test_mode" = "dummy" ]; then
-        cmd_args=("${cmd_args[@]}" --max-model-len 1024 --gpu-memory-utilization '0.3')
+        cmd_args=("${cmd_args[@]}" --max-model-len 1024 --gpu-memory-utilization '0.35')
     fi
 
     CID=$(
@@ -151,7 +151,6 @@ run_lmcache_vllmopenai_container() {
         kill $LOG_PID
         return 1
     fi
-
 }
 
 usage() {
@@ -239,7 +238,7 @@ while [ $# -gt 0 ]; do
             test_mode="${1#*=}"
             ;;
         --hf-token* | -hft*)
-            if [[ "$1" != *=* ]]; then shift; fi # Value is next arg if no `=`
+            if [[ "$1" != *=* ]]; then shift; fi
             HF_TOKEN="${1#*=}"
             ;;
         --server-wait-timeout* | -swt*)
@@ -249,7 +248,6 @@ while [ $# -gt 0 ]; do
                 echo "server-wait-timeout is wait time in seconds - integer only"
                 exit 1
             fi
-
             ;;
         --help | -h)
             usage
@@ -265,6 +263,14 @@ while [ $# -gt 0 ]; do
 done
 
 ORIG_DIR="$PWD"
+
+# ——— workload_configs directory & yq check ———
+WORKLOAD_DIR="${ORIG_DIR}/workload_configs"
+if ! command -v yq &>/dev/null; then
+    echo "ERROR: 'yq' is required for workload YAML parsing. Please install it."
+    exit 1
+fi
+# —————————————————————————————————————————————
 
 # Read the configs argument
 if [[ -z "${configs_arg:-}" ]]; then
@@ -294,6 +300,22 @@ build_lmcache_vllmopenai_image
 
 for cfg_name in "${CONFIG_NAMES[@]}"; do
     echo -e "\033[1;33m===== Testing LMCache with ${cfg_name} =====\033[0m"
+
+    # load workload override from YAML if present
+    workload_file="${WORKLOAD_DIR}/${cfg_name}"
+    if [[ -f "$workload_file" ]]; then
+        echo "→ Loading workload parameters from ${workload_file}"
+        NUM_DOCUMENTS="$(yq e '.num_docs'    "$workload_file")"
+        DOCUMENT_LENGTH="$(yq e '.doc_len'    "$workload_file")"
+        OUTPUT_LEN="$(yq e '.out_len'        "$workload_file")"
+        REPEAT_COUNT="$(yq e '.repeat_count' "$workload_file")"
+        REPEAT_MODE="$(yq e '.repeat_mode'   "$workload_file")"
+        SHUFFLE_SEED="$(yq e '.shuffle_seed' "$workload_file")"
+        MAX_INFLIGHT_REQUESTS="$(yq e '.max_inflight' "$workload_file")"
+        SLEEP_TIME_AFTER_WARMUP="$(yq e '.sleep_after'  "$workload_file")"
+    else
+        echo "→ No workload YAML for ${cfg_name}; using defaults"
+    fi
 
     if [ "$test_mode" = "dummy" ]; then
         run_lmcache_vllmopenai_container "$cfg_name" "$test_mode"
