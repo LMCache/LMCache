@@ -57,9 +57,13 @@ class NixlStorageConfig:
     backends: list[str]
 
     @staticmethod
-    def validate_nixl_backend(backend: str):
-        supported_backends = ["GDS", "GDS_MT"]
-        return backend in supported_backends
+    def validate_nixl_backend(backend: str, device: str):
+        if backend in ("GDS", "GDS_MT"):
+            return device == "cpu" or device == "cuda"
+        elif backend in ("POSIX", "HF3FS"):
+            return device == "cpu"
+        else:
+            return False
 
     @staticmethod
     def from_cache_engine_config(
@@ -76,7 +80,7 @@ class NixlStorageConfig:
         assert extra_config.get("nixl_file_pool_size") is not None
 
         assert NixlStorageConfig.validate_nixl_backend(
-            extra_config.get("nixl_backend")
+            extra_config.get("nixl_backend"), config.nixl_buffer_device
         ), "Invalid NIXL backend & device combination"
 
         corrected_device = get_correct_nixl_device(
@@ -101,7 +105,7 @@ class NixlFilePool:
 
         for i in reversed(range(size)):
             tmp_path = path + f"obj_{i}_{uuid.uuid4().hex[0:4]}.bin"
-            fd = os.open(tmp_path, os.O_CREAT | os.O_RDWR | os.O_DIRECT)
+            fd = os.open(tmp_path, os.O_CREAT | os.O_RDWR)
             self.fds.append(fd)
             self.indices.append(i)
 
@@ -138,37 +142,43 @@ class NixlStorageAgent:
         self,
         allocator: MemoryAllocatorInterface,
         file_pool: NixlFilePool,
+        device: str,
         backends: list[str],
     ):
-        vram_buffer_ptr = allocator.buffer_ptr
-        vram_buffer_size = allocator.buffer_size
-        vram_page_size = allocator.align_bytes
+        buffer_ptr = allocator.buffer_ptr
+        buffer_size = allocator.buffer_size
+        page_size = allocator.align_bytes
 
         self.agent_name = "NixlAgent_" + str(uuid.uuid4())
         nixl_conf = NixlAgentConfig(backends=backends)
         self.nixl_agent = NixlAgent(self.agent_name, nixl_conf)
 
         device_id = torch.cuda.current_device()
-        self.init_vram_handlers(
-            vram_buffer_ptr, vram_buffer_size, vram_page_size, device_id
-        )
+        self.init_handlers(device, buffer_ptr, buffer_size, page_size, device_id)
 
-        self.init_file_handlers(vram_page_size, file_pool.fds)
+        self.init_file_handlers(page_size, file_pool.fds)
 
-    def init_vram_handlers(self, buffer_ptr, buffer_size, page_size, device_id):
+    def init_handlers(self, device, buffer_ptr, buffer_size, page_size, device_id):
         reg_list = [(buffer_ptr, buffer_size, device_id, "")]
         xfer_desc = [
             (base_addr, page_size, device_id)
             for base_addr in range(buffer_ptr, buffer_ptr + buffer_size, page_size)
         ]
 
-        reg_descs = self.nixl_agent.register_memory(reg_list, mem_type="VRAM")
-        xfer_descs = self.nixl_agent.get_xfer_descs(xfer_desc, mem_type="VRAM")
-        xfer_handler = self.nixl_agent.prep_xfer_dlist("", xfer_descs, mem_type="VRAM")
+        if device == "cpu":
+            mem_type = "DRAM"
+        else:
+            mem_type = "VRAM"
 
-        self.vram_reg_descs = reg_descs
-        self.vram_xfer_descs = xfer_descs
-        self.vram_xfer_handler = xfer_handler
+        reg_descs = self.nixl_agent.register_memory(reg_list, mem_type=mem_type)
+        xfer_descs = self.nixl_agent.get_xfer_descs(xfer_desc, mem_type=mem_type)
+        xfer_handler = self.nixl_agent.prep_xfer_dlist(
+            "", xfer_descs, mem_type=mem_type
+        )
+
+        self.reg_descs = reg_descs
+        self.xfer_descs = xfer_descs
+        self.xfer_handler = xfer_handler
 
     def init_file_handlers(self, page_size, fds):
         reg_list = [(0, page_size, fd, "") for fd in fds]
@@ -186,7 +196,7 @@ class NixlStorageAgent:
     def get_gpu_to_file_handle(self, mem_indices, file_indices) -> NixlXferHandle:
         return self.nixl_agent.make_prepped_xfer(
             "WRITE",
-            self.vram_xfer_handler,
+            self.xfer_handler,
             mem_indices,
             self.file_xfer_handler,
             file_indices,
@@ -194,11 +204,7 @@ class NixlStorageAgent:
 
     def get_file_to_gpu_handle(self, mem_indices, file_indices) -> NixlXferHandle:
         return self.nixl_agent.make_prepped_xfer(
-            "READ",
-            self.vram_xfer_handler,
-            mem_indices,
-            self.file_xfer_handler,
-            file_indices,
+            "READ", self.xfer_handler, mem_indices, self.file_xfer_handler, file_indices
         )
 
     def post_blocking(self, handle: NixlXferHandle):
@@ -214,9 +220,9 @@ class NixlStorageAgent:
 
     def close(self):
         self.nixl_agent.release_dlist_handle(self.file_xfer_handler)
-        self.nixl_agent.release_dlist_handle(self.vram_xfer_handler)
+        self.nixl_agent.release_dlist_handle(self.xfer_handler)
         self.nixl_agent.deregister_memory(self.file_reg_descs)
-        self.nixl_agent.deregister_memory(self.vram_reg_descs)
+        self.nixl_agent.deregister_memory(self.reg_descs)
 
 
 class NixlStorageBackend(StorageBackendInterface):
@@ -254,6 +260,7 @@ class NixlStorageBackend(StorageBackendInterface):
         self.agent = NixlStorageAgent(
             memory_allocator,
             self.file_pool,
+            nixl_config.buffer_device,
             nixl_config.backends,
         )
 
