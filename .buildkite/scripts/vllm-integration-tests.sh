@@ -103,7 +103,7 @@ run_lmcache_vllmopenai_container() {
         --network host
         --gpus "device=${best_gpu}"
         --volume "${ORIG_DIR}/.buildkite/lmcache_configs:/configs:ro"
-        --volume ~/.cache/huggingface:/root/.cache/huggingface
+        --volume ~/.cache/huggingface:/root/.cache/hugglingface
         --env VLLM_USE_FLASHINFER_SAMPLER=0
         --env HF_TOKEN="$HF_TOKEN"
         --env LMCACHE_CONFIG_FILE="/configs/${cfg_name}"
@@ -159,7 +159,7 @@ usage() {
     echo "  --hf-token|-hft              HuggingFace access token for downloading model(s)"
     echo "  --server-wait-timeout|-swt   Wait time in seconds for vLLM OpenAI server to start"
     echo "  --help|-h                    Print usage"
-    echo "  --configs|-c                 Comma-separated list of config filenames (required)"
+    echo "  --configs|-c                 Path to a file containing one config filename per line (required)"
     echo "  --tests|-t                   Test mode"
 }
 
@@ -265,16 +265,14 @@ while [ $# -gt 0 ]; do
 done
 
 ORIG_DIR="$PWD"
-
 WORKLOAD_DIR="${ORIG_DIR}/.buildkite/workload_configs"
 
-# Read the configs argument
-if [[ -z "${configs_arg:-}" ]]; then
-    echo "Error: --configs is required" >&2
-    usage
+# Read the configs argument (always a file with one config per line)
+if [[ ! -f "$configs_arg" ]]; then
+    echo "Error: --configs file not found: $configs_arg" >&2
     exit 1
 fi
-IFS=',' read -r -a CONFIG_NAMES <<<"$configs_arg"
+mapfile -t CONFIG_NAMES < "$configs_arg"
 
 # Find an available port starting from 8000
 PORT=$(find_available_port 8000)

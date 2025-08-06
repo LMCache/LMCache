@@ -34,7 +34,12 @@ while true; do
   )
 
   if [ "${#candidates[@]}" -gt 0 ]; then
-    IFS=',' read -r _ _ chosen_gpu <<< "$(printf "%s\n" "${candidates[@]}" | sort -t',' -k1 -nr | head -n1)"
+    # select the GPU with the maximum free memory
+    IFS=',' read -r _ _ chosen_gpu <<< "$(
+      printf "%s\n" "${candidates[@]}" \
+        | sort -t',' -k1,1 -nr \
+        | head -n1
+    )"
     export CUDA_VISIBLE_DEVICES="${chosen_gpu}"
     echo "✅ Selected GPU #${chosen_gpu} (CUDA_VISIBLE_DEVICES=${chosen_gpu})"
     break
