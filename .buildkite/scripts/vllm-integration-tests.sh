@@ -227,7 +227,7 @@ run_long_doc_qa() {
         --model="meta-llama/Llama-3.2-1B-Instruct" \
         --output="response.txt" \
         --expected-ttft-gain="$expected_ttft_gain" \
-        --expected-latency-gain="$expected_latency_gain" \
+        --expected-latency-gain="$expected_latency_gain"
 }
 
 #########
