@@ -236,35 +236,35 @@ run_long_doc_qa() {
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        --configs* | -c*)
-            if [[ "$1" != *=* ]]; then shift; fi
-            configs_arg="${1#*=}"
-            ;;
-        --tests* | -t*)
-            if [[ "$1" != *=* ]]; then shift; fi
-            test_mode="${1#*=}"
-            ;;
-        --hf-token* | -hft*)
-            if [[ "$1" != *=* ]]; then shift; fi
-            HF_TOKEN="${1#*=}"
-            ;;
-        --server-wait-timeout* | -swt*)
-            if [[ "$1" != *=* ]]; then shift; fi
-            SERVER_WAIT_TIMEOUT="${1#*=}"
-            if ! [[ "$SERVER_WAIT_TIMEOUT" =~ ^[0-9]+$ ]]; then
-                echo "server-wait-timeout is wait time in seconds - integer only"
-                exit 1
-            fi
-            ;;
-        --help | -h)
-            usage
-            exit 0
-            ;;
-        *)
-            printf >&2 "Error: Invalid argument\n"
-            usage
+    --configs* | -c*)
+        if [[ "$1" != *=* ]]; then shift; fi
+        configs_arg="${1#*=}"
+        ;;
+    --tests* | -t*)
+        if [[ "$1" != *=* ]]; then shift; fi
+        test_mode="${1#*=}"
+        ;;
+    --hf-token* | -hft*)
+        if [[ "$1" != *=* ]]; then shift; fi
+        HF_TOKEN="${1#*=}"
+        ;;
+    --server-wait-timeout* | -swt*)
+        if [[ "$1" != *=* ]]; then shift; fi
+        SERVER_WAIT_TIMEOUT="${1#*=}"
+        if ! [[ "$SERVER_WAIT_TIMEOUT" =~ ^[0-9]+$ ]]; then
+            echo "server-wait-timeout is wait time in seconds - integer only"
             exit 1
-            ;;
+        fi
+        ;;
+    --help | -h)
+        usage
+        exit 0
+        ;;
+    *)
+        printf >&2 "Error: Invalid argument\n"
+        usage
+        exit 1
+        ;;
     esac
     shift
 done
@@ -308,16 +308,16 @@ for cfg_name in "${CONFIG_NAMES[@]}"; do
         workload_file="${WORKLOAD_DIR}/${cfg_name}"
         if [[ -f "$workload_file" ]]; then
             echo "→ Loading workload parameters from ${workload_file}"
-            NUM_DOCUMENTS="$(yq e '.num_docs'    "$workload_file")"
-            DOCUMENT_LENGTH="$(yq e '.doc_len'    "$workload_file")"
-            OUTPUT_LEN="$(yq e '.out_len'        "$workload_file")"
+            NUM_DOCUMENTS="$(yq e '.num_docs' "$workload_file")"
+            DOCUMENT_LENGTH="$(yq e '.doc_len' "$workload_file")"
+            OUTPUT_LEN="$(yq e '.out_len' "$workload_file")"
             REPEAT_COUNT="$(yq e '.repeat_count' "$workload_file")"
-            REPEAT_MODE="$(yq e '.repeat_mode'   "$workload_file")"
+            REPEAT_MODE="$(yq e '.repeat_mode' "$workload_file")"
             SHUFFLE_SEED="$(yq e '.shuffle_seed' "$workload_file")"
             MAX_INFLIGHT_REQUESTS="$(yq e '.max_inflight' "$workload_file")"
-            SLEEP_TIME_AFTER_WARMUP="$(yq e '.sleep_after'  "$workload_file")"
-            EXPECTED_TTFT_GAIN="$(yq e '.EXPECTED_TTFT_GAIN'   "$workload_file")"
-            EXPECTED_LATENCY_GAIN="$(yq e '.EXPECTED_LATENCY_GAIN' "$workload_file")"
+            SLEEP_TIME_AFTER_WARMUP="$(yq e '.sleep_after' "$workload_file")"
+            EXPECTED_TTFT_GAIN="$(yq e '.expected_ttft_gain' "$workload_file")"
+            EXPECTED_LATENCY_GAIN="$(yq e '.expected_latency_gain' "$workload_file")"
         else
             echo "❌ Error: workload YAML for ${cfg_name} not found at ${workload_file}" >&2
             exit 1
