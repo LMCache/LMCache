@@ -312,7 +312,8 @@ for cfg_name in "${CONFIG_NAMES[@]}"; do
             MAX_INFLIGHT_REQUESTS="$(yq e '.max_inflight' "$workload_file")"
             SLEEP_TIME_AFTER_WARMUP="$(yq e '.sleep_after'  "$workload_file")"
         else
-            echo "→ No workload YAML for ${cfg_name}; using defaults"
+            echo "❌ Error: workload YAML for ${cfg_name} not found at ${workload_file}" >&2
+            exit 1
         fi
 
         run_lmcache_vllmopenai_container "$cfg_name" "$test_mode"
