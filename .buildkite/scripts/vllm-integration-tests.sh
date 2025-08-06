@@ -264,13 +264,7 @@ done
 
 ORIG_DIR="$PWD"
 
-# ——— workload_configs directory & yq check ———
 WORKLOAD_DIR="${ORIG_DIR}/workload_configs"
-if ! command -v yq &>/dev/null; then
-    echo "ERROR: 'yq' is required for workload YAML parsing. Please install it."
-    exit 1
-fi
-# —————————————————————————————————————————————
 
 # Read the configs argument
 if [[ -z "${configs_arg:-}" ]]; then
