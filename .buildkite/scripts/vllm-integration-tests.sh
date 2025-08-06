@@ -221,7 +221,8 @@ run_long_doc_qa() {
         --max-inflight-requests="$max_inflight" \
         --sleep-time-after-warmup="$sleep_after" \
         --port="$PORT" \
-        --model="meta-llama/Llama-3.2-1B-Instruct"
+        --model="meta-llama/Llama-3.2-1B-Instruct" \
+        --output="response.txt"
 }
 
 #########
