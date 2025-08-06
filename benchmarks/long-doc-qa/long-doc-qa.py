@@ -170,7 +170,8 @@ def repeat_prompts(prompts, repeat_count, mode: str):
     Raises:
         ValueError: If an invalid mode is provided.
     """
-    print("Repeat mode: ", mode)
+    with open("responses.txt", "a") as resp_file:
+        resp_file.write(f"Repeat mode:  {mode}\n")
     if mode == "random":
         repeated_prompts = prompts * repeat_count
         random.shuffle(repeated_prompts)
@@ -217,7 +218,8 @@ async def main(args):
 
     prompts = repeat_prompts(warmup_prompts, args.repeat_count, mode=args.repeat_mode)
 
-    print("------warm up round------")
+    with open("responses.txt", "a") as resp_file:
+        resp_file.write("------warm up round------\n")
     warmup_start_time = time.time()
     warmup_ttfts = await test_long_document_qa(
         client=client,
@@ -227,7 +229,8 @@ async def main(args):
         max_inflight_requests=args.max_inflight_requests,
     )
     warmup_end_time = time.time()
-    print("------query round------")
+    with open("responses.txt", "a") as resp_file:
+        resp_file.write("------query round------\n")
 
     sleep_time_after_warmup = args.sleep_time_after_warmup
     if sleep_time_after_warmup > 0:
