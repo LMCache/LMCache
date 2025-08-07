@@ -47,7 +47,7 @@ def parse_args():
     parser.add_argument(
         "-b",
         "--blend-special-str",
-        default=" # # ",
+        default="# #",
         help="Specify the special separators to separate chunks (default: ' # # ')",
     )
 
@@ -77,11 +77,11 @@ def main():
     chunk2_prompt = "Hello, what's up?" * 250
     chunk3_prompt = "Hey, how can i do" * 250
     blend_special_str = args.blend_special_str  # FIXME: should change
-
+    blend_special_str = f" {blend_special_str}"
     precompute_prompts = [
         (sys_prompt + blend_special_str + chunk1_prompt),
-        (chunk2_prompt),
-        (chunk3_prompt),
+        (sys_prompt + blend_special_str + chunk2_prompt), # FIXME: must add sys_prompt
+        (sys_prompt + blend_special_str + chunk3_prompt),
     ]
     test_prompt = (
         sys_prompt

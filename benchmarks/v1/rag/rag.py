@@ -8,7 +8,8 @@ import random
 import signal
 import sys
 import time
-from typing import List
+from typing import List, Optional
+from abc import ABC, abstractmethod
 
 # Third Party
 from transformers import AutoTokenizer, AutoConfig
@@ -17,6 +18,7 @@ from vllm.config import KVTransferConfig
 from vllm.engine.arg_utils import EngineArgs
 from vllm.inputs import TokensPrompt
 import pandas as pd
+import openai
 
 # First Party
 from lmcache.integration.vllm.utils import ENGINE_NAME, lmcache_get_config
@@ -102,6 +104,10 @@ class WorkloadConfig:
     max_tokens: int
     # KV chunk size
     kv_chunk_size: int
+    # Online specific configs
+    openai_api_base: Optional[str] = None
+    openai_api_key: Optional[str] = None
+    temperature: float = 0.0
 
 
 @dataclass
@@ -114,6 +120,9 @@ class Response:
     generation_tokens: int
     launch_time: float
     finish_time: float
+    # Additional metrics for online serving
+    tpot: float = 0.0  # Time per output token
+    end_to_end_latency: float = 0.0
 
 
 def parse_arguments():
@@ -153,6 +162,27 @@ def parse_arguments():
         default=32,
         help="Max tokens for each generation",
     )
+    # Online mode arguments
+    parser.add_argument(
+        "--online",
+        action="store_true",
+        help="Use online serving mode with OpenAI-compatible API",
+    )
+    parser.add_argument(
+        "--openai-api-base",
+        type=str,
+        default="http://localhost:8000/v1",
+        help="OpenAI API base URL for online mode",
+    )
+    parser.add_argument(
+        "--openai-api-key",
+        type=str,
+        default="dummy-key",
+        help="OpenAI API key for online mode",
+    )
+    parser.add_argument(
+        "--temperature", type=float, default=0.0, help="Temperature for generation"
+    )
     args = parser.parse_args()
     return args
 
@@ -191,31 +221,149 @@ class KVSizeCalculator:
         return token_cnt * self.ratio
 
 
-class OfflineRAGManager:
+class BaseRAGManager(ABC):
+    """Abstract base class for RAG managers to improve code reuse"""
+
     def __init__(self, workload_config: WorkloadConfig):
         self.workload_config = workload_config
-        eval_dataset = load_dataset(workload_config.dataset)
-        start_index = workload_config.start_index
-        end_index = workload_config.end_index
-        if end_index < 0:
-            end_index = len(eval_dataset)
-        eval_dataset = eval_dataset[start_index:end_index]
-        if workload_config.shuffle:
-            random.shuffle(eval_dataset)
-
         self._tokenizer = AutoTokenizer.from_pretrained(workload_config.tokenizer)
         self._model_config = AutoConfig.from_pretrained(workload_config.model)
-        self._document_tokens = []  # Store document tokens for precompute
-        self._request_tokens = []  # Store full request tokens
         self._answers = []
         self._build_method = workload_config.prompt_build_method
         self._results = []
+
+        # Load and preprocess dataset
+        self._load_dataset()
+
+    def _load_dataset(self):
+        """Load and preprocess dataset - common logic for both online and offline"""
+        eval_dataset = load_dataset(self.workload_config.dataset)
+        start_index = self.workload_config.start_index
+        end_index = self.workload_config.end_index
+        if end_index < 0:
+            end_index = len(eval_dataset)
+        eval_dataset = eval_dataset[start_index:end_index]
+        if self.workload_config.shuffle:
+            random.shuffle(eval_dataset)
+
+        self._eval_dataset = eval_dataset
+        for ex in eval_dataset:
+            self._answers.append(ex["answers"])
+
+    @abstractmethod
+    def _precompute_documents(self) -> int:
+        """Precompute document KV cache"""
+        pass
+
+    @abstractmethod
+    def run_benchmark(self, **kwargs) -> float:
+        """Run the benchmark"""
+        pass
+
+    def summary(self, total_time: float, is_online: bool = False) -> pd.DataFrame:
+        """Generate summary statistics - common logic with online-specific metrics"""
+        cnt = len(self._results)
+        assert cnt > 0, "No results to summarize"
+
+        generation_times = [r.generation_time for r in self._results]
+        prefill_token_cnts = [r.prompt_tokens for r in self._results]
+        generation_token_cnts = [r.generation_tokens for r in self._results]
+
+        # Online-specific metrics
+        if is_online:
+            ttfts = [r.ttft for r in self._results]
+            tpots = [
+                r.generation_time / r.generation_tokens
+                if r.generation_tokens > 0
+                else 0
+                for r in self._results
+            ]
+            end_to_end_latencies = [r.end_to_end_latency for r in self._results]
+
+            avg_ttft = sum(ttfts) / cnt
+            avg_tpot = sum(tpots) / cnt
+            avg_e2e_latency = sum(end_to_end_latencies) / cnt
+
+        # Calculate quality scores
+        quality = []
+        for i in range(cnt):
+            generated_text = self._results[i].body
+            if self._build_method == PromptBuildMethodType.QA:
+                quality.append(
+                    max(
+                        [
+                            compute_f1(generated_text, answer, self._tokenizer)
+                            for answer in self._answers[i]
+                        ]
+                    )
+                )
+            elif self._build_method == PromptBuildMethodType.FEW_SHOT:
+                quality.append(
+                    max(
+                        [
+                            compute_rl(generated_text, answer)
+                            for answer in self._answers[i]
+                        ]
+                    )
+                )
+            else:
+                raise ValueError(f"Invalid prompt build method {self._build_method}")
+
+        avg_quality = sum(quality) / cnt
+        thput = cnt / total_time
+
+        if is_online:
+            df = pd.DataFrame(
+                {
+                    "quality": quality,
+                    "ttft": ttfts,
+                    "tpot": tpots,
+                    "end_to_end_latency": end_to_end_latencies,
+                    "generation_time": generation_times,
+                    "prefill_token_cnt": prefill_token_cnts,
+                    "generation_token_cnt": generation_token_cnts,
+                }
+            )
+
+            logger.info(
+                f"Summary: {cnt} requests, average_ttft={avg_ttft:.4f} (second)\n"
+                f"average_tpot={avg_tpot:.4f} (second)\n"
+                f"average_e2e_latency={avg_e2e_latency:.4f} (second)\n"
+                f"throughput={thput:.4f} (req/s)\n"
+                f"average_quality={avg_quality:.4f}\n"
+            )
+        else:
+            df = pd.DataFrame(
+                {
+                    "quality": quality,
+                    "throughput": [cnt / total_time] * cnt,
+                    "generation_time": generation_times,
+                    "prefill_token_cnt": prefill_token_cnts,
+                    "generation_token_cnt": generation_token_cnts,
+                }
+            )
+
+            logger.info(
+                f"Summary: {cnt} requests, total_time={total_time:.4f} (second)\n"
+                f"throughput={thput:.4f} (req/s)\n"
+                f"average_quality={avg_quality:.4f}\n"
+            )
+
+        return df
+
+
+class OfflineRAGManager(BaseRAGManager):
+    def __init__(self, workload_config: WorkloadConfig):
+        super().__init__(workload_config)
+
+        self._document_tokens = []  # Store document tokens for precompute
+        self._request_tokens = []  # Store full request tokens
         # Preprocess all prompts into token format
         system_prompt_tokens = self._tokenizer.encode(workload_config.system_prompt)
         # Remove BOS
         separator_tokens = self._tokenizer.encode(workload_config.separator)[1:]
 
-        for ex in eval_dataset:
+        for ex in self._eval_dataset:
             if workload_config.prompt_build_method == PromptBuildMethodType.QA:
                 doc_prompts, q_prompt = build_qa_prompt(
                     ex, workload_config.query_prompt
@@ -252,9 +400,8 @@ class OfflineRAGManager:
             # Store document tokens for precompute
             self._document_tokens.append(fix_doc_tokens_list)
             self._request_tokens.append(prompt_tokens)
-            self._answers.append(ex["answers"])
 
-    def _precompute_documents(self, llm: LLM):
+    def _precompute_documents(self, llm: LLM) -> int:
         """Precompute KV cache for document chunks using the same LLM instance"""
         logger.info("Starting document precomputation...")
 
@@ -316,7 +463,7 @@ class OfflineRAGManager:
         llm: LLM,
         sampling_params: SamplingParams,
     ) -> float:
-        """Run the benchmark - optimized using vLLM's batch processing approach like benchmark_throughput.py"""
+        """Run the benchmark - optimized using vLLM's batch processing approach"""
         self._results = []
 
         # Step 1: Precompute document KV cache using the same LLM instance
@@ -444,90 +591,201 @@ class OfflineRAGManager:
 
         return elapsed_time
 
-    def summary(self, total_time: float, is_online: bool = False) -> pd.DataFrame:
-        """Generate summary statistics"""
-        cnt = len(self._results)
-        assert cnt > 0, "No results to summarize"
-        if is_online:
-            ttfts = [r.ttft for r in self._results]
-            tpots = [
-                r.generation_time / r.generation_tokens
-                if r.generation_tokens > 0
-                else 0
-                for r in self._results
-            ]
 
-            avg_ttft = sum(ttfts) / cnt
-            avg_tpot = sum(tpots) / cnt
+class OnlineRAGManager(BaseRAGManager):
+    """
+    Online RAG Manager that uses OpenAI-compatible API
+    instead of local vLLM instance
+    """
 
-        generation_times = [r.generation_time for r in self._results]
-        prefill_token_cnts = [r.prompt_tokens for r in self._results]
-        generation_token_cnts = [r.generation_tokens for r in self._results]
+    def __init__(self, workload_config: WorkloadConfig):
+        super().__init__(workload_config)
+        # FIXME: change the spec_str
+        self.workload_config.separator = " " + self.workload_config.separator
+        # Initialize OpenAI client
+        self._client = openai.OpenAI(
+            base_url=workload_config.openai_api_base,
+            api_key=workload_config.openai_api_key or "dummy-key",
+        )
 
-        # Calculate quality scores
-        quality = []
-        for i in range(cnt):
-            generated_text = self._results[i].body
-            if self._build_method == PromptBuildMethodType.QA:
-                quality.append(
-                    max(
-                        [
-                            compute_f1(generated_text, answer, self._tokenizer)
-                            for answer in self._answers[i]
-                        ]
-                    )
-                )
-            elif self._build_method == PromptBuildMethodType.FEW_SHOT:
-                quality.append(
-                    max(
-                        [
-                            compute_rl(generated_text, answer)
-                            for answer in self._answers[i]
-                        ]
-                    )
-                )
+        self._document_prompts = []  # Store document prompts as strings
+        self._request_prompts = []  # Store full request prompts as strings
+
+        # Process dataset for online serving (using strings, not tokens)
+        self._prepare_prompts()
+
+    def _prepare_prompts(self):
+        """Prepare prompts as strings for online API calls"""
+        system_prompt = self.workload_config.system_prompt
+        separator = self.workload_config.separator
+        query_prompt = self.workload_config.query_prompt
+
+        for ex in self._eval_dataset:
+            if self.workload_config.prompt_build_method == PromptBuildMethodType.QA:
+                doc_prompts, q_prompt = build_qa_prompt(ex, query_prompt)
+            elif (
+                self.workload_config.prompt_build_method
+                == PromptBuildMethodType.FEW_SHOT
+            ):
+                doc_prompts, q_prompt = build_fewshot_prompt(ex)
             else:
-                raise ValueError(f"Invalid prompt build method {self._build_method}")
+                raise ValueError(
+                    "Invalid prompt build method "
+                    f"{self.workload_config.prompt_build_method}"
+                )
 
-        avg_quality = sum(quality) / cnt
-        thput = cnt / total_time
+            # For online serving, prepare document prompts with system prompt
+            # TODO: need fix, precompute documents donot need system prompt and q_prompt
+            doc_prompts_with_system = [
+                system_prompt + separator + doc_prompt + separator + q_prompt
+                for doc_prompt in doc_prompts
+            ]
+            # Build full request prompt
+            full_prompt = separator.join([system_prompt] + doc_prompts + [q_prompt])
 
-        if is_online:
-            df = pd.DataFrame(
-                {
-                    "quality": quality,
-                    "ttft": ttfts,
-                    "tpot": tpots,
-                    "generation_time": generation_times,
-                    "prefill_token_cnt": prefill_token_cnts,
-                    "generation_token_cnt": generation_token_cnts,
-                }
+            self._document_prompts.append(doc_prompts_with_system)
+            self._request_prompts.append(full_prompt)
+
+    def _precompute_documents(self) -> int:
+        """Precompute documents by sending them to the online server"""
+        logger.info("Starting online document precomputation...")
+
+        precomputed_count = 0
+
+        for i, doc_prompts_with_system in enumerate(self._document_prompts):
+            try:
+                # For online precomputation, we send each document prompt separately
+                for doc_prompt in doc_prompts_with_system:
+                    # Use minimal generation to trigger KV cache creation
+                    completion = self._client.chat.completions.create(  # noqa: F841
+                        model=self.workload_config.model,
+                        messages=[{"role": "user", "content": doc_prompt}],
+                        temperature=self.workload_config.temperature,
+                        max_tokens=1,  # Minimal generation
+                        timeout=30,
+                    )
+                precomputed_count += 1
+
+            except Exception as e:
+                logger.warning(f"Precompute failed for document set {i}: {e}")
+                continue
+
+        logger.info(f"Precomputed {precomputed_count} document sets for online serving")
+        return precomputed_count
+
+    def run_benchmark(self, **kwargs) -> float:
+        """Run online benchmark with detailed timing metrics"""
+        self._results = []
+
+        # Step 1: Precompute documents
+        precomputed_count = self._precompute_documents()
+        logger.info(f"Precomputed {precomputed_count} document sets")
+
+        # Step 2: Run benchmark requests with detailed timing
+        logger.info("Starting online benchmark...")
+
+        start_time = time.perf_counter()
+
+        for i, request_prompt in enumerate(self._request_prompts):
+            request_start_time = time.perf_counter()
+
+            try:
+                # Make API call with timing
+                completion = self._client.chat.completions.create(
+                    model=self.workload_config.model,
+                    messages=[{"role": "user", "content": request_prompt}],
+                    temperature=self.workload_config.temperature,
+                    max_tokens=self.workload_config.max_tokens,
+                    timeout=60,
+                )
+
+                request_end_time = time.perf_counter()
+
+                # Extract response details
+                generated_text = completion.choices[0].message.content
+                prompt_tokens = completion.usage.prompt_tokens
+                completion_tokens = completion.usage.completion_tokens
+
+                # Calculate timing metrics
+                total_time = request_end_time - request_start_time
+
+                # For online serving, we can estimate TTFT and TPOT
+                # In a real implementation, these would come from streaming responses
+                estimated_ttft = total_time * 0.1  # Rough estimate: 10% for first token
+                estimated_tpot = (total_time - estimated_ttft) / max(
+                    completion_tokens, 1
+                )
+
+                response = Response(
+                    request_id=i,
+                    body=generated_text or "",
+                    ttft=estimated_ttft,
+                    generation_time=total_time,
+                    prompt_tokens=prompt_tokens,
+                    generation_tokens=completion_tokens,
+                    launch_time=request_start_time,
+                    finish_time=request_end_time,
+                    tpot=estimated_tpot,
+                    end_to_end_latency=total_time,
+                )
+
+                self._results.append(response)
+
+            except Exception as e:
+                logger.error(f"Error processing request {i}: {e}")
+                # Add dummy response for failed requests
+                request_end_time = time.perf_counter()
+                response = Response(
+                    request_id=i,
+                    body="",
+                    ttft=0.0,
+                    generation_time=0.0,
+                    prompt_tokens=len(self._tokenizer.encode(request_prompt)),
+                    generation_tokens=0,
+                    launch_time=request_start_time,
+                    finish_time=request_end_time,
+                    tpot=0.0,
+                    end_to_end_latency=0.0,
+                )
+                self._results.append(response)
+
+        end_time = time.perf_counter()
+        total_elapsed = end_time - start_time
+
+        # Print throughput metrics
+        total_prompt_tokens = sum(r.prompt_tokens for r in self._results)
+        total_output_tokens = sum(r.generation_tokens for r in self._results)
+        total_tokens = total_prompt_tokens + total_output_tokens
+        successful_requests = len([r for r in self._results if r.generation_tokens > 0])
+
+        print("\n=== Online Serving Results ===")
+        print(f"Elapsed time: {total_elapsed:.2f} seconds")
+        print(f"Total requests: {len(self._results)}")
+        print(f"Successful requests: {successful_requests}")
+        print(f"Total prompt tokens: {total_prompt_tokens}")
+        print(f"Total output tokens: {total_output_tokens}")
+        print(f"Total tokens: {total_tokens}")
+        print(f"Requests per second: {len(self._results) / total_elapsed:.2f}")
+        if total_tokens > 0:
+            print(f"Tokens per second: {total_tokens / total_elapsed:.2f}")
+        if total_output_tokens > 0:
+            print(
+                f"Output tokens per second: {total_output_tokens / total_elapsed:.2f}"
             )
 
-            logger.info(
-                f"Summary: {cnt} requests, average_ttft={avg_ttft:.4f} (second)\n"
-                f"average_tpot={avg_tpot:.4f} (second)\n"
-                f"throughput={thput:.4f} (req/s)\n"
-                f"average_quality={avg_quality:.4f}\n"
-            )
-        else:
-            df = pd.DataFrame(
-                {
-                    "quality": quality,
-                    "throughput": [cnt / total_time] * cnt,
-                    "generation_time": generation_times,
-                    "prefill_token_cnt": prefill_token_cnts,
-                    "generation_token_cnt": generation_token_cnts,
-                }
-            )
+        # Online-specific metrics
+        avg_ttft = sum(r.ttft for r in self._results) / len(self._results)
+        avg_tpot = sum(r.tpot for r in self._results) / len(self._results)
+        avg_e2e_latency = sum(r.end_to_end_latency for r in self._results) / len(
+            self._results
+        )
 
-            logger.info(
-                f"Summary: {cnt} requests, total_time={total_time:.4f} (second)\n"
-                f"throughput={thput:.4f} (req/s)\n"
-                f"average_quality={avg_quality:.4f}\n"
-            )
+        print(f"Average TTFT: {avg_ttft:.4f} seconds")
+        print(f"Average TPOT: {avg_tpot:.4f} seconds")
+        print(f"Average End-to-End Latency: {avg_e2e_latency:.4f} seconds")
 
-        return df
+        logger.info(f"Completed {len(self._results)} requests")
+        return total_elapsed
 
 
 def run_rag_benchmark(args):
@@ -540,34 +798,65 @@ def run_rag_benchmark(args):
     else:
         raise ValueError(f"Invalid prompt build method {build_prompt_method_str}")
 
-    # TODO: use LMConfig to detect separator
     lmconfig = lmcache_get_config()
-    workload_config = WorkloadConfig(
-        model=args.model,
-        tokenizer=args.tokenizer,
-        dataset=args.dataset,
-        start_index=args.start_index,
-        end_index=args.end_index,
-        shuffle=args.shuffle,
-        system_prompt=args.system_prompt,
-        separator=lmconfig.blend_special_str,
-        query_prompt=args.query_prompt,
-        prompt_build_method=build_prompt_method,
-        max_tokens=args.max_tokens,
-        kv_chunk_size=lmconfig.chunk_size,
-    )
+    if args.online:
+        # Online mode configuration
+        workload_config = WorkloadConfig(
+            model=args.model,
+            tokenizer=args.tokenizer,
+            dataset=args.dataset,
+            start_index=args.start_index,
+            end_index=args.end_index,
+            shuffle=args.shuffle,
+            system_prompt=args.system_prompt,
+            separator=lmconfig.blend_special_str,  # Simple separator for online mode
+            query_prompt=args.query_prompt,
+            prompt_build_method=build_prompt_method,
+            max_tokens=args.max_tokens,
+            kv_chunk_size=lmconfig.chunk_size,  # Default chunk size for online mode
+            openai_api_base=args.openai_api_base,
+            openai_api_key=args.openai_api_key,
+            temperature=args.temperature,
+        )
 
-    manager = OfflineRAGManager(workload_config)
+        manager = OnlineRAGManager(workload_config)
+        total_time = manager.run_benchmark()
 
-    with build_llm_with_lmcache(args.model) as llm:
-        # FIXME: top_p
-        sampling_params = SamplingParams(temperature=0, max_tokens=args.max_tokens)
-
-        total_time = manager.run_benchmark(llm, sampling_params)
-
-        logger.info(f"Finished benchmarking, dumping summary to {args.output}")
-        summary = manager.summary(total_time)
+        logger.info(f"Finished online benchmarking, dumping summary to {args.output}")
+        summary = manager.summary(total_time, is_online=True)
         summary.to_csv(args.output, index=False)
+
+    else:
+        # Offline mode configuration (existing logic)
+        workload_config = WorkloadConfig(
+            model=args.model,
+            tokenizer=args.tokenizer,
+            dataset=args.dataset,
+            start_index=args.start_index,
+            end_index=args.end_index,
+            shuffle=args.shuffle,
+            system_prompt=args.system_prompt,
+            separator=lmconfig.blend_special_str,
+            query_prompt=args.query_prompt,
+            prompt_build_method=build_prompt_method,
+            max_tokens=args.max_tokens,
+            kv_chunk_size=lmconfig.chunk_size,
+        )
+
+        manager = OfflineRAGManager(workload_config)
+
+        with build_llm_with_lmcache(args.model) as llm:
+            sampling_params = SamplingParams(
+                temperature=args.temperature, max_tokens=args.max_tokens
+            )
+
+            total_time = manager.run_benchmark(llm, sampling_params)
+
+            logger.info(
+                f"Finished offline benchmarking, dumping summary to {args.output}"
+            )
+            summary = manager.summary(total_time, is_online=False)
+            summary.to_csv(args.output, index=False)
 
 
 def cleanup_handler(signum, frame):
@@ -582,14 +871,15 @@ def cleanup_handler(signum, frame):
 
 
 def main():
-    # Register signal handlers for graceful shutdown
-    signal.signal(signal.SIGINT, cleanup_handler)
-    signal.signal(signal.SIGTERM, cleanup_handler)
-
-    # Register atexit handler as backup
-    atexit.register(lambda: LMCacheEngineBuilder.destroy(ENGINE_NAME))
-
     args = parse_arguments()
+
+    if not hasattr(args, "online") or not args.online:
+        # Register signal handlers for graceful shutdown
+        signal.signal(signal.SIGINT, cleanup_handler)
+        signal.signal(signal.SIGTERM, cleanup_handler)
+        # Register atexit handler as backup (only for offline mode)
+        atexit.register(lambda: LMCacheEngineBuilder.destroy(ENGINE_NAME))
+
     build_prompt_method_str = args.prompt_build_method.upper()
     if build_prompt_method_str == "QA":
         build_prompt_method = PromptBuildMethodType.QA

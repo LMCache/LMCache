@@ -12,7 +12,6 @@
 # full re-compute
 LMCACHE_CONFIG_FILE=blending.yaml vllm serve mistralai/Mistral-7B-Instruct-v0.2 --disable-log-requests \
     --port 8200 --host localhost \
-    --tokenizer-mode "mistral" \
     --kv-transfer-config '{"kv_connector": "LMCacheConnectorV1", "kv_role": "kv_both"}' \
     --max-model-len 8000 --gpu-memory-utilization 0.8 \
     --no-enable-prefix-caching \

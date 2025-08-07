@@ -3,4 +3,4 @@ enable_blending: true
 use_layerwise: true
 local_cpu: true
 max_local_cpu_size: 5
-blend_special_str: " # # "
+blend_special_str: "# #" # FIXME: diff from client

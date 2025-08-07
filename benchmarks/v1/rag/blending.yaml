@@ -1,8 +1,9 @@
 # LMCache is set to use 256 tokens per chunk
 chunk_size: 256
 # Blending related config
-enable_blending: true
-blend_special_str: " # # "
+enable_blending: false
+blend_special_str: "# #" # FIXME: diff from client(" # #") for online
+
 use_layerwise: true
 
 # Enable local CPU backend in LMCache
