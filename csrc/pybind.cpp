@@ -1,23 +1,10 @@
-/*
- * Copyright 2024-2025 LMCache Authors.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// SPDX-License-Identifier: Apache-2.0
 
 #include <pybind11/pybind11.h>
 #include "mem_kernels.cuh"
 #include "cachegen_kernels.cuh"
 #include "pos_kernels.cuh"
+#include "mem_alloc.h"
 #include <torch/torch.h>
 #include <iostream>
 
@@ -35,4 +22,6 @@ PYBIND11_MODULE(c_ops, m) {
   m.def("decode_fast_prefsum", &decode_cuda_prefsum);
   m.def("calculate_cdf", &calculate_cdf);
   m.def("rotary_embedding_k_fused", &rotary_embedding_k_fused);
+  m.def("alloc_pinned_ptr", &alloc_pinned_ptr);
+  m.def("free_pinned_ptr", &free_pinned_ptr);
 }
