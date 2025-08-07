@@ -135,6 +135,9 @@ class LMCacheEngineConfig:
     # When set, uses external lookup client instead of regular lookup server
     external_lookup_client: Optional[str] = None
 
+    # Whether to enable Python's garbage collection
+    py_enable_gc: bool = True
+
     @staticmethod
     def from_defaults(
         chunk_size: int = 256,
@@ -180,6 +183,7 @@ class LMCacheEngineConfig:
         save_unfull_chunk: bool = True,
         blocking_timeout_secs: int = 10,
         external_lookup_client: Optional[str] = None,
+        py_enable_gc: bool = True,
     ) -> "LMCacheEngineConfig":
         # TODO (ApostaC): Add nixl config
         return LMCacheEngineConfig(
@@ -226,6 +230,7 @@ class LMCacheEngineConfig:
             save_unfull_chunk,
             blocking_timeout_secs,
             external_lookup_client,
+            py_enable_gc,
         ).validate()
 
     @staticmethod
