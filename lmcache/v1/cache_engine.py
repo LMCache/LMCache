@@ -3,6 +3,7 @@
 from collections import defaultdict
 from typing import Dict, Generator, List, Optional, Tuple, Union
 import asyncio
+import gc
 import multiprocessing
 import time
 
@@ -143,6 +144,10 @@ class LMCacheEngine:
         self.stats_monitor = LMCStatsMonitor.GetOrCreate()
 
         self.post_inited = False
+
+        gc.collect()
+        if not config.py_enable_gc:
+            gc.disable()
 
     def post_init(self, **kwargs) -> None:
         if not self.post_inited:
