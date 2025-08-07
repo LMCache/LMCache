@@ -132,9 +132,8 @@ class RemoteBackend(StorageBackendInterface):
             )
 
         try:
-            if (
-                self.config.extra_config is not None
-                and self.config.extra_config.get("use_exists_sync", False)
+            if self.config.extra_config is not None and self.config.extra_config.get(
+                "use_exists_sync", False
             ):
                 return self.connection.exists_sync(key)
             else:
