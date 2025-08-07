@@ -639,7 +639,6 @@ class LMCacheEngine:
             assert isinstance(key, CacheEngineKey)
             self.storage_manager.prefetch(key)
 
-    # TODO(Jiayi): Currently, search_range is only used for testing.
     @_lmcache_nvtx_annotate
     def lookup(
         self,
