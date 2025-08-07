@@ -1,17 +1,4 @@
-# Copyright 2024-2025 LMCache Authors.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
+# SPDX-License-Identifier: Apache-2.0
 # Standard
 from dataclasses import dataclass
 from queue import Queue
@@ -286,7 +273,17 @@ class NixlSender:
             alloc_response.already_sent_indexes
         )
         remote_indexes = alloc_response.remote_indexes
-        self._blocking_send(req_id, receiver_id, local_indexes, remote_indexes)
+
+        # NOTE (vladnosiv): len(local_indexes) may be zero
+        # if the requests in the batch have a large common prefix
+        if not local_indexes:
+            logger.debug(
+                "Sending objs with request ID: %s is not required: "
+                "all indexes already sent",
+                sender_task.req_id,
+            )
+        else:
+            self._blocking_send(req_id, receiver_id, local_indexes, remote_indexes)
 
         logger.debug(f"transfer spec: {transfer_spec}")
         if transfer_spec.is_last_prefill:
@@ -559,7 +556,8 @@ class NixlReceiver:
         alloc_indexes = []
         already_send_indexes = []
 
-        for idx, key in enumerate(alloc_request.keys):
+        for idx, key_str in enumerate(alloc_request.keys):
+            key = CacheEngineKey.from_string(key_str)
             if self._backend.contains(key, pin=True):
                 already_send_indexes.append(idx)
                 continue
@@ -586,7 +584,7 @@ class NixlReceiver:
 
             alloc_indexes.append(mem_obj.meta.address)
 
-            self._backend.put(CacheEngineKey.from_string(key), mem_obj)
+            self._backend.put(key, mem_obj)
 
         return NixlAllocResponse(
             already_sent_indexes=already_send_indexes, remote_indexes=alloc_indexes

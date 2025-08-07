@@ -1,17 +1,4 @@
-# Copyright 2024-2025 LMCache Authors.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
+# SPDX-License-Identifier: Apache-2.0
 # Standard
 from concurrent.futures import Future
 from typing import List, Optional
@@ -89,6 +76,7 @@ class NixlBackend(StorageBackendInterface):
 
         :return: True if the key exists, False otherwise
         """
+        assert isinstance(key, CacheEngineKey)
         with self._data_lock:
             if mem_obj := self._data.get(key, None):
                 if pin:
@@ -110,6 +98,7 @@ class NixlBackend(StorageBackendInterface):
         key: CacheEngineKey,
         mem_obj: MemoryObj,
     ):
+        assert isinstance(key, CacheEngineKey)
         with self._data_lock:
             self._data[key] = mem_obj
 
@@ -141,6 +130,8 @@ class NixlBackend(StorageBackendInterface):
     ) -> Optional[List[Future]]:
         for mem_obj in memory_objs:
             mem_obj.ref_count_up()
+        for key in keys:
+            assert isinstance(key, CacheEngineKey)
 
         self._nixl_channel.prepare_send(
             keys=keys,
@@ -149,7 +140,7 @@ class NixlBackend(StorageBackendInterface):
         )
         return None
 
-    def submit_prefetch_task(self, key: CacheEngineKey) -> Optional[Future]:
+    def submit_prefetch_task(self, key: CacheEngineKey) -> bool:
         """
         An async function to get the MemoryObj from the storage backend.
 
@@ -168,10 +159,11 @@ class NixlBackend(StorageBackendInterface):
         :return: MemoryObj. None if the key does not exist.
         """
 
+        assert isinstance(key, CacheEngineKey)
         with self._data_lock:
             # NOTE(Jiayi): we assume that the key must be in local data
             # because we are using a push-based transfer
-            mem_obj = self._data.pop(key, None)
+            mem_obj = self._data.get(key, None)
             assert mem_obj is not None, f"Key {key} not found in local data."
 
             # NOTE(Jiayi): Currently, we remove the cache from local storage
@@ -193,7 +185,11 @@ class NixlBackend(StorageBackendInterface):
     ) -> Optional[Future]:
         raise NotImplementedError
 
-    def remove(self, key: CacheEngineKey) -> bool:
+    def remove(
+        self,
+        key: CacheEngineKey,
+        free_obj: bool = True,
+    ) -> bool:
         """
         Remove the key from the storage backend.
 
