@@ -3,6 +3,7 @@
 from collections import defaultdict
 from typing import Dict, Generator, List, Optional, Tuple, Union
 import asyncio
+import gc
 import multiprocessing
 import time
 
@@ -143,6 +144,10 @@ class LMCacheEngine:
         self.stats_monitor = LMCStatsMonitor.GetOrCreate()
 
         self.post_inited = False
+
+        gc.collect()
+        if not config.py_enable_gc:
+            gc.disable()
 
     def post_init(self, **kwargs) -> None:
         if not self.post_inited:
@@ -639,7 +644,6 @@ class LMCacheEngine:
             assert isinstance(key, CacheEngineKey)
             self.storage_manager.prefetch(key)
 
-    # TODO(Jiayi): Currently, search_range is only used for testing.
     @_lmcache_nvtx_annotate
     def lookup(
         self,
@@ -695,14 +699,14 @@ class LMCacheEngine:
                             if self.lookup_server.lookup(key_single_layer):
                                 found = True
                     if found:
-                        if pin:
+                        if pin and request_id not in self.lookup_pins:
                             self.lookup_pins[request_id].extend(key_all_layers)
                         prev_end = end
                         continue
                     return prev_end
                 else:
                     if self.storage_manager.contains(key, search_range, pin):
-                        if pin:
+                        if pin and request_id not in self.lookup_pins:
                             self.lookup_pins[request_id].append(key)
                         prev_end = end
                         continue
