@@ -118,6 +118,7 @@ class RequestTracker:
     # Whether the request is in decode phase
     is_decode_phase = False
 
+    @_lmcache_nvtx_annotate
     @staticmethod
     def from_new_request(
         new_request: "NewRequestData",
@@ -351,6 +352,7 @@ class LMCacheConnectorMetadata(KVConnectorMetadata):
     requests: list[ReqMeta] = field(default_factory=list)
     lookup_requests_in_step: list[str] = field(default_factory=list)
 
+    @_lmcache_nvtx_annotate
     def add_request(self, req_meta: ReqMeta) -> None:
         """Add a request to the metadata.
 
@@ -443,6 +445,7 @@ class LMCacheConnectorV1Impl:
 
         self.force_skip_save = bool(os.environ.get("LMCACHE_FORCE_SKIP_SAVE", False))
 
+    @_lmcache_nvtx_annotate
     def _init_kv_caches_from_forward_context(self, forward_context: "ForwardContext"):
         for layer_name in forward_context.no_compile_layers:
             attn_layer = forward_context.no_compile_layers[layer_name]
@@ -493,6 +496,12 @@ class LMCacheConnectorV1Impl:
         self.lmcache_engine.post_init(kvcaches=kvcaches)
 
         self.layerwise_retrievers = []
+
+        for idx, request in enumerate(metadata.requests):
+            if request.load_spec is None:
+                continue
+            last_idx = idx
+
         for idx, request in enumerate(metadata.requests):
             if request.load_spec is None:
                 continue
@@ -512,7 +521,10 @@ class LMCacheConnectorV1Impl:
 
             lmcache_cached_tokens = request.load_spec.lmcache_cached_tokens
             if self.use_layerwise:
-                sync = True
+                if idx == last_idx:
+                    sync = True
+                else:
+                    sync = False
                 # NOTE(Jiayi): Perform blending before layerwise prefix caching
                 if self.enable_blending:
                     # TODO(Jiayi): Need to make prefix caching and blending compatible
@@ -618,7 +630,7 @@ class LMCacheConnectorV1Impl:
         if self.current_layer == 0:
             self.layerwise_storers = []
 
-            is_first = False
+            is_first = True
 
             for idx, request in enumerate(connector_metadata.requests):
                 save_spec = request.save_spec
@@ -661,11 +673,6 @@ class LMCacheConnectorV1Impl:
                     skip_leading_tokens,
                     request.req_id,
                 )
-                if not is_first:
-                    sync = True
-                    is_first = True
-                else:
-                    sync = False
 
                 # TODO (Jiayi): need to make layerwise storing
                 # compatible with disagg spec
@@ -675,9 +682,11 @@ class LMCacheConnectorV1Impl:
                     kvcaches=kvcaches,
                     slot_mapping=slot_mapping,
                     offset=skip_leading_tokens,
-                    sync=sync,
+                    sync=is_first,
                 )
                 self.layerwise_storers.append(layerwise_storer)
+                if is_first:
+                    is_first = False
 
         for layerwise_storer in self.layerwise_storers:
             next(layerwise_storer)
@@ -780,6 +789,7 @@ class LMCacheConnectorV1Impl:
             if request.disagg_spec:
                 request.disagg_spec.num_transferred_tokens = len(token_ids)
 
+    @_lmcache_nvtx_annotate
     def get_finished(
         self, finished_req_ids: set[str]
     ) -> tuple[Optional[set[str]], Optional[set[str]]]:
@@ -1039,6 +1049,7 @@ class LMCacheConnectorV1Impl:
         self._lookup_requests_in_step = []
         return meta
 
+    @_lmcache_nvtx_annotate
     def request_finished(
         self,
         request: "Request",
