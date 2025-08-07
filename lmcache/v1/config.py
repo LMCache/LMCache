@@ -135,6 +135,9 @@ class LMCacheEngineConfig:
     # When set, uses external lookup client instead of regular lookup server
     external_lookup_client: Optional[str] = None
 
+    # Whether to enable Python's garbage collection
+    py_enable_gc: bool = True
+
     @staticmethod
     def from_defaults(
         chunk_size: int = 256,
@@ -180,6 +183,7 @@ class LMCacheEngineConfig:
         save_unfull_chunk: bool = True,
         blocking_timeout_secs: int = 10,
         external_lookup_client: Optional[str] = None,
+        py_enable_gc: bool = True,
     ) -> "LMCacheEngineConfig":
         # TODO (ApostaC): Add nixl config
         return LMCacheEngineConfig(
@@ -226,6 +230,7 @@ class LMCacheEngineConfig:
             save_unfull_chunk,
             blocking_timeout_secs,
             external_lookup_client,
+            py_enable_gc,
         ).validate()
 
     @staticmethod
@@ -369,6 +374,8 @@ class LMCacheEngineConfig:
         nixl_proxy_host = config.get("nixl_proxy_host", None)
         nixl_proxy_port = config.get("nixl_proxy_port", None)
 
+        py_enable_gc = config.get("py_enable_gc", True)
+
         extra_config = config.get("extra_config", None)
         if extra_config is not None:
             assert isinstance(extra_config, dict), "extra_config must be a dict"
@@ -457,6 +464,7 @@ class LMCacheEngineConfig:
                 save_unfull_chunk,
                 blocking_timeout_secs,
                 external_lookup_client,
+                py_enable_gc,
             )
             .validate()
             .log_config()
@@ -674,6 +682,8 @@ class LMCacheEngineConfig:
         config.external_lookup_client = parse_env(
             get_env_name("external_lookup_client"), config.external_lookup_client
         )
+
+        config.py_enable_gc = to_bool(parse_env(get_env_name("py_enable_gc"), True))
         return config.validate().log_config()
 
     def to_original_config(self) -> orig_config.LMCacheEngineConfig:
@@ -755,6 +765,7 @@ class LMCacheEngineConfig:
             "save_unfull_chunk": self.save_unfull_chunk,
             "blocking_timeout_secs": self.blocking_timeout_secs,
             "external_lookup_client": self.external_lookup_client,
+            "py_enable_gc": self.py_enable_gc,
         }
         logger.info(f"LMCache Configuration: {config_dict}")
 
