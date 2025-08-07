@@ -207,6 +207,11 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "default": None,
         "env_converter": str,
     },
+    "py_enable_gc": {
+        "type": bool,
+        "default": True,
+        "env_converter": lambda x: x.lower() in ["true", "1"],
+    },
 }
 
 
