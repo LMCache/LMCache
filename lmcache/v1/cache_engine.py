@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from collections import defaultdict
-from typing import Dict, Generator, List, Optional, Union
+from typing import Dict, Generator, List, Optional, Tuple, Union
 import asyncio
 import multiprocessing
 import time
@@ -26,11 +26,12 @@ from lmcache.v1.gpu_connector import (
     VLLMPagedMemLayerwiseGPUConnector,
 )
 from lmcache.v1.lookup_server import LookupServerInterface, RedisLookupServer
-from lmcache.v1.memory_management import AdHocMemoryAllocator  # noqa: E501
 from lmcache.v1.memory_management import CuFileMemoryAllocator  # noqa: E501
-from lmcache.v1.memory_management import (
+from lmcache.v1.memory_management import (  # noqa: E501
+    AdHocMemoryAllocator,
     MemoryAllocatorInterface,
     MemoryFormat,
+    MemoryObj,
     MixedMemoryAllocator,
     NixlCPUMemoryAllocator,
 )
@@ -409,14 +410,13 @@ class LMCacheEngine:
 
         ret_mask = torch.zeros_like(tokens, dtype=torch.bool, device="cpu")
 
-        key_mapping: Dict[str, List[CacheEngineKey]] = {}
-        start_mapping: Dict[str, List[int]] = {}
-        end_mapping: Dict[str, List[int]] = {}
+        # location -> [(CacheEngineKey, start, end)]
+        block_mapping: Dict[str, List[Tuple[CacheEngineKey, int, int]]] = defaultdict(
+            list
+        )
+        # [(CacheEngineKey, MemoryObj, start, end)]
+        reordered_chunks: List[Tuple[CacheEngineKey, MemoryObj, int, int]] = []
 
-        reordered_keys = []
-        reordered_memory_objs = []
-        reordered_starts = []
-        reordered_ends = []
         for start, end, key in self.token_database.process_tokens(
             tokens=tokens, mask=mask
         ):
@@ -440,10 +440,7 @@ class LMCacheEngine:
                         )
                         memory_obj = future_memory_obj.result()
                         if memory_obj:
-                            reordered_keys.append(key)
-                            reordered_memory_objs.append(memory_obj)
-                            reordered_starts.append(start)
-                            reordered_ends.append(end)
+                            reordered_chunks.append((key, memory_obj, start, end))
                             ret_mask[start:end] = True
                         else:
                             # NOTE: break for P2P retrieve KV because of no required
@@ -457,40 +454,53 @@ class LMCacheEngine:
                 # object is already pinned in the storage backend.
                 ret_mask[start:end] = True
 
-                if location not in key_mapping:
-                    key_mapping[location] = [key]
-                    start_mapping[location] = [start]
-                    end_mapping[location] = [end]
-                    continue
-
             assert location is not None
 
-            key_mapping[location].append(key)
-            start_mapping[location].append(start)
-            end_mapping[location].append(end)
+            block_mapping[location].append((key, start, end))
 
         # TODO(Jiayi): We can parallelize the retrieval from
         # different storage backends.
-        for location, keys in key_mapping.items():
+        last_failed_block_start = None
+        for location, blocks in block_mapping.items():
+            keys = [key for key, _, _ in blocks]
             memory_objs = self.storage_manager.batched_get(
                 keys=keys,
                 location=location,
             )
-            reordered_memory_objs.extend(memory_objs)
-            reordered_keys.extend(keys)
-            reordered_starts.extend(start_mapping[location])
-            reordered_ends.extend(end_mapping[location])
+            for (key, start, end), memory_obj in zip(blocks, memory_objs, strict=False):
+                if memory_obj is None:
+                    logger.warn(
+                        "The cache block is in the storage, but it can't be retrieved"
+                    )
+                    if (
+                        last_failed_block_start is None
+                        or last_failed_block_start < start
+                    ):
+                        last_failed_block_start = start
+                    break
+                reordered_chunks.append((key, memory_obj, start, end))
+
+        if last_failed_block_start is not None:
+            ret_mask[last_failed_block_start:] = False
+
+            reordered_chunks = [
+                (key, memory_obj, start, end)
+                for key, memory_obj, start, end in reordered_chunks
+                if end < last_failed_block_start
+            ]
 
         # NOTE(Jiayi): memory_obj doesn't have to be a pinned
         # cpu tensor for the sake of performance.
         # For example, disk->gpu is faster than disk->cpu->gpu.
         # RDMA is another example.
-        self.gpu_connector.batched_to_gpu(
-            reordered_memory_objs, reordered_starts, reordered_ends, **kwargs
-        )
+        if len(reordered_chunks) > 0:
+            _, memory_objs, starts, ends = zip(*reordered_chunks, strict=False)
+            self.gpu_connector.batched_to_gpu(
+                list(memory_objs), list(starts), list(ends), **kwargs
+            )
 
         # TODO(Jiayi): Remove the following for loop with batched operations
-        for key, memory_obj in zip(reordered_keys, reordered_memory_objs, strict=False):
+        for key, memory_obj, _, _ in reordered_chunks:
             if self.remove_after_retrieve:
                 self.storage_manager.remove(key)
             memory_obj.ref_count_down()
