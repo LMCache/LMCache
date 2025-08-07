@@ -93,7 +93,7 @@ wait_for_openai_api_server() {
 
 run_lmcache_vllmopenai_container() {
     local cfg_name="$1"
-    LOGFILE="/tmp/lmcache_vllm_${cfg_name}.log"
+    LOGFILE="/tmp/build_${BUILD_ID}_${cfg_name}.log"
     # Pick the GPU with the largest free memory
     source "$ORIG_DIR/.buildkite/scripts/pick-free-gpu.sh" $PORT
     best_gpu="${CUDA_VISIBLE_DEVICES}"
