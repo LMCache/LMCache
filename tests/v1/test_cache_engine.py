@@ -44,14 +44,14 @@ def patch_mixed_allocator():
         :param int size: The size of the pinned memory in bytes.
         """
 
-        # self.buffer = torch.empty(size, dtype=torch.uint8)
-        # ptr = self.buffer.data_ptr()
-        # err = torch.cuda.cudart().cudaHostRegister(ptr, size, 0)
-        # assert err == 0, (
-        #     f"cudaHostRegister failed: {torch.cuda.cudart().cudaGetErrorString(err)}"
-        # )
+        self.buffer = torch.empty(size, dtype=torch.uint8)
+        ptr = self.buffer.data_ptr()
+        err = torch.cuda.cudart().cudaHostRegister(ptr, size, 0)
+        assert err == 0, (
+            f"cudaHostRegister failed: {torch.cuda.cudart().cudaGetErrorString(err)}"
+        )
         self._unregistered = False
-        self.buffer = torch.empty(size, dtype=torch.uint8, pin_memory=True)
+        # self.buffer = torch.empty(size, dtype=torch.uint8, pin_memory=True)
 
         if use_paging:
             assert "shape" in kwargs, (
