@@ -15,7 +15,7 @@ The XpYd setup consists of multiple components that can be scaled independently:
 2. **Multiple Decoder Servers** - Handle the decode phase of inference (token generation) 
 3. **Proxy Server** - Coordinates requests between prefillers and decoders using round-robin load balancing
 
-Example 2p1d Architecture:
+Example 2p2d Architecture:
 
 .. code-block::
 
@@ -23,25 +23,31 @@ Example 2p1d Architecture:
                 │   Client    │
                 └─────┬───────┘
                       │
-              ┌───────▼───────┐
-              │ Proxy Server  │
-              │   Port 9000   │--------------|
-              │ (Round-Robin) │              |
-              └───┬───────┬───┘              |
-                  │       │                  |
-         ┌────────▼──┐  ┌─▼────────┐         |
-         │Prefiller1 │  │Prefiller2│         |
-         │Port 8100  │  │Port 8101 │         |
-         │  GPU 0    │  │  GPU 1   │         |
-         └─────┬─────┘  └─────┬────┘         |
-               │              │              |
-               └──────┬───────┘              |
-                      │ NIXL Transfer        |
-                ┌─────▼─────┐                |
-                │  Decoder  │                |
-                │Port 8200  │<---------------|
-                │  GPU 2    │                  
-                └───────────┘
+              ┌───────▼────────┐
+              │  Proxy Server  │
+              │    Port 9100   │----------------------|
+              │  (Round-Robin) │                      |
+              └───┬────────┬───┘                      |
+                  │        │                          |
+         ┌────────▼───┐  ┌─▼──────────┐               |
+         │ Prefiller1 │  │ Prefiller2 │                 |
+         │ Port 7100  │  │ Port 7101  │                 |
+         │   GPU 0    │  │   GPU 1    │                 |
+         └─────┬──────┘  └─────┬──────┘                 |
+               │              │                      |
+         ┌─────┴──────────────┴──────┐               |
+         │       NIXL Transfer       │               |
+         └────────┬─────────┬────────┘               |
+                  │         │                        |
+          ┌───────▼───┐ ┌──▼────────┐                |
+          │ Decoder 1 │ │ Decoder 2 │                |
+          │Port 8200  │ │Port 8201  │                |
+          │ GPU 2     │ │ GPU 3     │                | 
+          └───────▲───┘ └───▲───────┘                |
+                  |         |                        |
+                  │         │                        |
+                  └─────────┘────────────────────────|
+                   NIXL Transfer
 
 Prerequisites
 ~~~~~~~~~~~~~
