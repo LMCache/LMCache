@@ -801,7 +801,7 @@ class LMCacheConnectorV1Impl:
                 token_ids, request.mm_hashes, request.mm_positions
             )
 
-        lookup_hash = "".join(random.choices(string.ascii_letters + string.digits, k=4))
+        lookup_hash = "".join(random.choices(string.ascii_letters + string.digits, k=8))
         lookup_id = request.request_id + "###" + lookup_hash
         self._lookup_requests_in_step.append(lookup_id)
         if self.skip_last_n_tokens > 0:
