@@ -18,7 +18,7 @@ BUILDING_SDIST = "sdist" in sys.argv or os.environ.get("NO_CUDA_EXT", "0") == "1
 # New environment variable to choose between CUDA and HIP
 BUILD_WITH_HIP = os.environ.get("BUILD_WITH_HIP", "0") == "1"
 
-ENABLE_CXX11_ABI = os.environ.get("ENABLE_CXX11_ABI", "0") == "1"
+ENABLE_CXX11_ABI = os.environ.get("ENABLE_CXX11_ABI", "1") == "1"
 
 
 def hipify_wrapper() -> None:

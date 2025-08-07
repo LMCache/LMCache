@@ -45,7 +45,6 @@ Example 2p2d Architecture:
                │               │                      |
                └───────────────┴──────────────────────|
 
-
 Prerequisites
 ~~~~~~~~~~~~~
 
