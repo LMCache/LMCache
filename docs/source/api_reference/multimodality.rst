@@ -1,25 +1,39 @@
 KV Caching for Multimodal Models with vLLM
-==========================================
+##########################################
 
-Overview: 
-~~~~~~~~~~
+Overview
+********
 
-vllm passes ``mm_hashes`` and ``mm_positions`` to requests to LMCache for placeholder tokens for multi-media content. After substituting in the content-based hash values for the placeholder tokens (in ``apply_mm_hashes_to_token_ids`` in ``lmcache/integration/vllm/utils.py``), the token embeddings of multimodal content is indistinguishable from tokenized text and can be saved and retrieved the same way, speeding up inference time for multimodal models like audio, image, and video models. 
+vLLM is building on its multimodal capability and currently supports the following `List of Multimodal Language Models <https://docs.vllm.ai/en/latest/models/supported_models.html#list-of-multimodal-language-models>`_. 
 
-LMCache can thus be used to speed up inference time for all multimodal models supported by vllm.
+LMCache can therefore be used to speed up inference time for all multimodal models supported by vLLM. This document shows the speedup improvements using LMCache for KV caching in vLLM for multimodal models.
 
-TTFT speed up for models of each modality: 
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Examples of TTFT speed up for different multimodal types 
+========================================================
 
-**Sources:**
+Prerequisites
+-------------
 
-- `vllm/blob/examples/online_serving/openai_chat_completion_client_for_multimodal.py <https://github.com/vllm-project/vllm/blob/main/examples/online_serving/openai_chat_completion_client_for_multimodal.py>`_
+- A Machine with at least one GPU. You can adjust the max model length of your vLLM instance depending on your GPU memory
+- vLLM and LMCache installed (:doc:`Installation Guide <../getting_started/installation>`)
+- vLLM audio dependencies installed: ``pip install vllm[audio]``
 
-**Installation:** 
+Examples
+--------
 
-``pip install lmcache vllm[audio] openai``
+.. note::
 
-**Audio Inference with Ultravox:**
+    The examples below use a python script for inferencing multimodal models hosted by vLLM.
+    The script is the `openai_chat_completion_client_for_multimodal python script in vLLM <https://github.com/vllm-project/vllm/blob/main/examples/online_serving/openai_chat_completion_client_for_multimodal.py>`_.
+    You will need to download it locally for running the examples below.
+    The script is printed in the `reference section <#reference-inferencing-multimodal-models-in-vllm-example-python-script>`_ that follows for you perusal.
+    Go to the `Example output <#example-output>`_ section to see the output in the vLLM logs that demonstrate the speedup improvements.
+
+
+Audio Inference with Ultravox
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Start vLLM server with ``fixie-ai/ultravox-v0_5-llama-3_2-1b`` model and LMCache KV caching:
 
 .. code-block:: bash
 
@@ -27,25 +41,34 @@ TTFT speed up for models of each modality:
        --max-model-len 4096 --trust-remote-code \
        --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}'
 
+Run the python script twice to demonstrate TTFT speedup on the second turn because of the caching:
+
 .. code-block:: bash
 
    # run twice to see TTFT speedup
    python openai_chat_completion_client_for_multimodal.py --chat-type audio
 
+Single Image Inference with Llava
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-**Single Image Inference with Llava:** 
+Start vLLM server with ``llava-hf/llava-1.5-7b-hf`` model and LMCache KV caching:
 
 .. code-block:: bash
 
    vllm serve llava-hf/llava-1.5-7b-hf \
        --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}'
 
+Run the python script twice to demonstrate TTFT speedup on the second turn because of the caching:
+
 .. code-block:: bash
 
    # run twice to see TTFT speedup
    python openai_chat_completion_client_for_multimodal.py --chat-type single-image
 
-**Multi-image Inference with Phi-3.5-vision-instruct:** 
+Multi-image Inference with Phi-3.5-vision-instruct
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Start vLLM server with ``microsoft/Phi-3.5-vision-instruct`` model and LMCache KV caching:
 
 .. code-block:: bash
 
@@ -53,24 +76,69 @@ TTFT speed up for models of each modality:
        --trust-remote-code --max-model-len 4096 --limit-mm-per-prompt '{"image":2}' \
        --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}'
 
+Run the python script twice to demonstrate TTFT speedup on the second turn because of the caching:
+
 .. code-block:: bash
 
    # run twice to see TTFT speedup
    python openai_chat_completion_client_for_multimodal.py --chat-type multi-image
 
-**Video Inference with Llava-OneVision:**
+Video Inference with Llava-OneVision
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Start vLLM server with ``llava-hf/llava-onevision-qwen2-7b-ov-hf`` model and LMCache KV caching:
 
 .. code-block:: bash
 
    vllm serve llava-hf/llava-onevision-qwen2-7b-ov-hf \
        --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}'
 
+Run the python script twice to demonstrate TTFT speedup on the second turn because of the caching:
+
 .. code-block:: bash
 
    # run twice to see TTFT speedup
    python openai_chat_completion_client_for_multimodal.py --chat-type video
 
-**Save as ``openai_chat_completion_client_for_multimodal.py``**
+
+Example output
+--------------
+
+When running the examples above you will notice output in the vLLM logs similar to below. 
+
+This first output demonstrates the tokens being cached and loaded.
+
+.. code-block:: text
+
+   [2025-08-04 22:43:35,484] LMCache INFO: Reqid: chatcmpl-05e2d296601046b29210f53a1fa30b13, Total tokens 1536, LMCache hit tokens: 1536, need to load: 1535 (vllm_v1_adapter.py:803:lmcache.integration.vllm.vllm_v1_adapter)
+
+This then shows the speedup between the first and second runs.
+
+1. First request: 
+
+.. code-block:: text
+
+   Chat completion output from input audio: It seems like you're excitedly sharing your thoughts and predictions about a game you're about to watch. The audio appears to be a stream of comments or a social media post. The words "one pitch on the way to Edgar Martinez" suggest that someone is saying something in a baseball chat or social media post about the
+   Chat completion output from audio url: It appears to be a enthusiastic and excited baseball comment from an individual. The content seems to be a play-by-play description of a specific baseball game, with the narrator belonging to a team that is competing in the American League Championship Series. The reference to the player Edgar Martinez is a nod to a well-known baseball player,
+   Chat completion output from base64 encoded audio: It seems like you're excited about a baseball game, possibly the Los Angeles Dodgers or the Boston Red Sox, but it's unclear which one. The text mentions a "pitcher" and "swung on the line," but it's not entirely obvious which team it's referring to.
+   
+   However, the mention of "
+   Time taken: 50.828808307647705 seconds
+
+2. Second request: 
+
+.. code-block:: text
+
+   Chat completion output from input audio: It seems like you're extremely excited about the possibility of the San Francisco Giants winning the American League championship and playing in the World Series. The audio is filled with emotions and a sense of optimism, with you enthusiastically expressing your thoughts and feelings. It's clear that this is a significant moment for you, particularly given the fact
+   Chat completion output from audio url: I can tell you're excited about a baseball game. It seems like you're reliving a moment during the middle of a game, especially the highlight of a six runs game for the Golden Giants. The audio appears to include a local sports radio talk show style broadcast, with a ringer ("the guy" in the
+   Chat completion output from base64 encoded audio: It seems like you're having a lively discussion about a Major League Baseball game, specifically about the shortstop playing for the Mariners and,Mario Upton swinging at a pitch and eventually being thrown out on a play at the plate. The atmosphere is excited, with all the cheering and commentary you've written. It appears to
+   Time taken: 3.3407371044158936 seconds
+
+
+Reference: Inferencing multimodal models in vLLM example Python script 
+======================================================================
+
+Source: https://github.com/vllm-project/vllm/blob/main/examples/online_serving/openai_chat_completion_client_for_multimodal.py
 
 .. code-block:: python
 
@@ -389,28 +457,3 @@ TTFT speed up for models of each modality:
        end_time = time.time()
        print(f"Time taken: {end_time - start_time} seconds")
 
-**Example Retrieval and speed up in logs:**
-
-.. code-block:: text
-
-   [2025-08-04 22:43:35,484] LMCache INFO: Reqid: chatcmpl-05e2d296601046b29210f53a1fa30b13, Total tokens 1536, LMCache hit tokens: 1536, need to load: 1535 (vllm_v1_adapter.py:803:lmcache.integration.vllm.vllm_v1_adapter)
-
-1. First request: 
-
-.. code-block:: text
-
-   Chat completion output from input audio: It seems like you're excitedly sharing your thoughts and predictions about a game you're about to watch. The audio appears to be a stream of comments or a social media post. The words "one pitch on the way to Edgar Martinez" suggest that someone is saying something in a baseball chat or social media post about the
-   Chat completion output from audio url: It appears to be a enthusiastic and excited baseball comment from an individual. The content seems to be a play-by-play description of a specific baseball game, with the narrator belonging to a team that is competing in the American League Championship Series. The reference to the player Edgar Martinez is a nod to a well-known baseball player,
-   Chat completion output from base64 encoded audio: It seems like you're excited about a baseball game, possibly the Los Angeles Dodgers or the Boston Red Sox, but it's unclear which one. The text mentions a "pitcher" and "swung on the line," but it's not entirely obvious which team it's referring to.
-   
-   However, the mention of "
-   Time taken: 50.828808307647705 seconds
-
-2. Second request: 
-
-.. code-block:: text
-
-   Chat completion output from input audio: It seems like you're extremely excited about the possibility of the San Francisco Giants winning the American League championship and playing in the World Series. The audio is filled with emotions and a sense of optimism, with you enthusiastically expressing your thoughts and feelings. It's clear that this is a significant moment for you, particularly given the fact
-   Chat completion output from audio url: I can tell you're excited about a baseball game. It seems like you're reliving a moment during the middle of a game, especially the highlight of a six runs game for the Golden Giants. The audio appears to include a local sports radio talk show style broadcast, with a ringer ("the guy" in the
-   Chat completion output from base64 encoded audio: It seems like you're having a lively discussion about a Major League Baseball game, specifically about the shortstop playing for the Mariners and,Mario Upton swinging at a pitch and eventually being thrown out on a play at the plate. The atmosphere is excited, with all the cheering and commentary you've written. It appears to
-   Time taken: 3.3407371044158936 seconds
