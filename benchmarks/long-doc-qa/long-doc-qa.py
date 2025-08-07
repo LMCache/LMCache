@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Adapted from
 # https://github.com/vllm-project/vllm/blob/main/benchmarks/benchmark_long_document_qa_throughput.py
-
 """
 Commandline arguments:
     --num-documents: The number of documents to sample prompts from.
@@ -28,12 +27,12 @@ Commandline arguments:
 
     --port: Port to query the vLLM server
 
-    --model: Model name
-
-    --max-inflight-requests: Maximum number of in-flight requests. Default is 20
+    --max-inflight-requests: Maximum number of in-flight requests. Default is 2
 
     --sleep-time-after-warmup: Sleep time after warm up iteration.
                               (Optional, default: 0.0 seconds)
+
+    --model: Model name
 """
 
 # Standard
@@ -44,6 +43,44 @@ import time
 
 # Third Party
 from openai import AsyncOpenAI
+
+
+def has_content(chunk):
+    """
+    Check if the chunk has content in the choices.
+
+    Args:
+        chunk: The response chunk from OpenAI API.
+
+    Returns:
+        bool: True if content exists, False otherwise.
+    """
+    return (
+        chunk.choices
+        and chunk.choices[0].delta
+        and (
+            chunk.choices[0].delta.content is not None
+            or chunk.choices[0].delta.reasoning_content is not None
+        )
+    )
+
+
+def extract_content(chunk):
+    """
+    Extract content from the response chunk.
+
+    Args:
+        chunk: The response chunk from OpenAI API.
+
+    Returns:
+        str: The content extracted from the chunk.
+    """
+    if chunk.choices[0].delta.content is not None:
+        return chunk.choices[0].delta.content
+    elif chunk.choices[0].delta.reasoning_content is not None:
+        return chunk.choices[0].delta.reasoning_content
+    else:
+        return ""
 
 
 async def process_single_prompt(
@@ -86,8 +123,8 @@ async def process_single_prompt(
                 continue
 
             # Handle content for chat completions
-            if chunk.choices[0].delta and chunk.choices[0].delta.content is not None:
-                content = chunk.choices[0].delta.content
+            if has_content(chunk):
+                content = extract_content(chunk)
                 if first_token_time is None and content != "":
                     first_token_time = time.time()
                 responses.append(content)
@@ -191,7 +228,7 @@ async def main(args):
     )
     model = args.model
 
-    pre_warmup_prompts = [str(i) + " " + " ".join(["hi"] * 1000) for i in range(5)]
+    pre_warmup_prompts = [str(i) + "xx" + " ".join(["hi"] * 1000) for i in range(5)]
 
     await test_long_document_qa(
         client=client,
@@ -212,22 +249,20 @@ async def main(args):
     prompts = repeat_prompts(warmup_prompts, args.repeat_count, mode=args.repeat_mode)
 
     print("------warm up round------")
-    warmup_start_time = time.time()
-    warmup_ttfts = await test_long_document_qa(
+    _ = await test_long_document_qa(
         client=client,
         model=model,
         prompts=warmup_prompts,
         output_len=args.output_len,
         max_inflight_requests=args.max_inflight_requests,
     )
-    warmup_end_time = time.time()
-    print("------query round------")
 
     sleep_time_after_warmup = args.sleep_time_after_warmup
     if sleep_time_after_warmup > 0:
         print(f"Sleeping for {sleep_time_after_warmup} seconds after warmup...")
         time.sleep(sleep_time_after_warmup)
 
+    print("------query round------")
     benchmark_start_time = time.time()
     benchmark_ttfts = await test_long_document_qa(
         client=client,
@@ -239,12 +274,8 @@ async def main(args):
     benchmark_end_time = time.time()
 
     # Print results
-    warmup_mean_ttft = sum(warmup_ttfts) / len(warmup_ttfts)
     query_mean_ttft = sum(benchmark_ttfts) / len(benchmark_ttfts)
     print("\n=== BENCHMARK RESULTS ===")
-    print(f"Warmup round mean TTFT: {warmup_mean_ttft:.3f}s")
-    print(f"Warmup round time: {warmup_end_time - warmup_start_time:.3f}s")
-    print(f"Warmup round prompt count: {len(warmup_ttfts)}")
     print(f"Query round mean TTFT: {query_mean_ttft:.3f}s")
     print(f"Query round time: {benchmark_end_time - benchmark_start_time:.3f}s")
     print(f"Query round prompt count: {len(benchmark_ttfts)}")
@@ -254,6 +285,13 @@ def create_argument_parser():
     parser = argparse.ArgumentParser(
         description="Benchmark the performance with or "
         "without automatic prefix caching."
+    )
+
+    parser.add_argument(
+        "--model",
+        type=str,
+        default="openai/gpt-oss-120b",
+        help="Model to use for testing.",
     )
 
     parser.add_argument(
@@ -310,16 +348,9 @@ def create_argument_parser():
     )
 
     parser.add_argument(
-        "--model",
-        type=str,
-        default="meta-llama/Llama-3.1-8B-Instruct",
-        help="Model name",
-    )
-
-    parser.add_argument(
         "--max-inflight-requests",
         type=int,
-        default=20,
+        default=2,
         help="Maximum number of concurrent inflight requests",
     )
 
