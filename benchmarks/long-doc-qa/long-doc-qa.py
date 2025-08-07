@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Adapted from
 # https://github.com/vllm-project/vllm/blob/main/benchmarks/benchmark_long_document_qa_throughput.py
+
 """
 Commandline arguments:
     --num-documents: The number of documents to sample prompts from.
@@ -27,28 +28,41 @@ Commandline arguments:
 
     --port: Port to query the vLLM server
 
+    --model: Model name
+
     --max-inflight-requests: Maximum number of in-flight requests. Default is 2
 
     --sleep-time-after-warmup: Sleep time after warm up iteration.
                               (Optional, default: 0.0 seconds)
 
-    --model: Model name
+    --output: Filename to write all responses to. If omitted, writes to stdout.
+
+    --expected-ttft-gain: Expected minimum speed-up in time-to-first-token
+                         (warmup/query) as a factor, e.g. 4.3 for 4.3×. If
+                         actual gain is below this, exits.
+
+    --expected-latency-gain: Expected minimum speed-up in total round time
+                            (warmup/query) as a factor, e.g. 4.5 for 4.5×.
+                            If actual gain is below this, exits.
 """
 
 # Standard
 import argparse
 import asyncio
 import random
+import sys
 import time
 
 # Third Party
 from openai import AsyncOpenAI
 
+# Global output filename (set in __main__)
+OUTPUT_FILE = None
+
 
 def has_content(chunk):
     """
     Check if the chunk has content in the choices.
-
     Args:
         chunk: The response chunk from OpenAI API.
 
@@ -68,10 +82,8 @@ def has_content(chunk):
 def extract_content(chunk):
     """
     Extract content from the response chunk.
-
     Args:
         chunk: The response chunk from OpenAI API.
-
     Returns:
         str: The content extracted from the chunk.
     """
@@ -81,6 +93,17 @@ def extract_content(chunk):
         return chunk.choices[0].delta.reasoning_content
     else:
         return ""
+
+
+def write_resp(text: str):
+    """
+    Write text to the specified output file (if any), otherwise to stdout.
+    """
+    if OUTPUT_FILE:
+        with open(OUTPUT_FILE, "a") as resp_file:
+            resp_file.write(text)
+    else:
+        sys.stdout.write(text)
 
 
 async def process_single_prompt(
@@ -102,7 +125,7 @@ async def process_single_prompt(
         float: Time-to-first-token measurement
     """
     async with semaphore:  # Acquire semaphore to limit concurrent requests
-        print(f"\n--- Sending prompt {prompt_index + 1}/{total_prompts} ---")
+        write_resp(f"\n--- Sending prompt {prompt_index + 1}/{total_prompts} ---\n")
         start_time = time.time()
         first_token_time = None
         words = ""
@@ -131,7 +154,7 @@ async def process_single_prompt(
                 words += content
 
         final_response = "".join(responses)
-        print(f"\nResponse of request {prompt_index}: {final_response}")
+        write_resp(f"\nResponse of request {prompt_index}: {final_response}\n")
 
         if first_token_time is not None:
             return first_token_time - start_time
@@ -201,7 +224,7 @@ def repeat_prompts(prompts, repeat_count, mode: str):
     Raises:
         ValueError: If an invalid mode is provided.
     """
-    print("Repeat mode: ", mode)
+    write_resp(f"Repeat mode:  {mode}\n")
     if mode == "random":
         repeated_prompts = prompts * repeat_count
         random.shuffle(repeated_prompts)
@@ -248,21 +271,23 @@ async def main(args):
 
     prompts = repeat_prompts(warmup_prompts, args.repeat_count, mode=args.repeat_mode)
 
-    print("------warm up round------")
-    _ = await test_long_document_qa(
+    write_resp("------warm up round------\n")
+    warmup_start_time = time.time()
+    warmup_ttfts = await test_long_document_qa(
         client=client,
         model=model,
         prompts=warmup_prompts,
         output_len=args.output_len,
         max_inflight_requests=args.max_inflight_requests,
     )
+    warmup_end_time = time.time()
+    write_resp("------query round------\n")
 
     sleep_time_after_warmup = args.sleep_time_after_warmup
     if sleep_time_after_warmup > 0:
-        print(f"Sleeping for {sleep_time_after_warmup} seconds after warmup...")
+        write_resp(f"Sleeping for {sleep_time_after_warmup} seconds after warmup...\n")
         time.sleep(sleep_time_after_warmup)
 
-    print("------query round------")
     benchmark_start_time = time.time()
     benchmark_ttfts = await test_long_document_qa(
         client=client,
@@ -274,24 +299,59 @@ async def main(args):
     benchmark_end_time = time.time()
 
     # Print results
+    warmup_mean_ttft = sum(warmup_ttfts) / len(warmup_ttfts)
     query_mean_ttft = sum(benchmark_ttfts) / len(benchmark_ttfts)
-    print("\n=== BENCHMARK RESULTS ===")
-    print(f"Query round mean TTFT: {query_mean_ttft:.3f}s")
-    print(f"Query round time: {benchmark_end_time - benchmark_start_time:.3f}s")
-    print(f"Query round prompt count: {len(benchmark_ttfts)}")
+    CSI = "\x1b["
+    RESET = CSI + "0m"
+    print(f"{CSI}36;1m\n=== BENCHMARK RESULTS ==={RESET}")
+    print(f"{CSI}32mWarmup round mean TTFT: {warmup_mean_ttft:.3f}s{RESET}")
+    print(
+        f"{CSI}33mWarmup round time: {warmup_end_time - warmup_start_time:.3f}s{RESET}"
+    )
+    print(f"{CSI}35mWarmup round prompt count: {len(warmup_ttfts)}{RESET}")
+    print(f"{CSI}32mQuery round mean TTFT: {query_mean_ttft:.3f}s{RESET}")
+    print(
+        f"{CSI}33mQuery round time: "
+        f"{benchmark_end_time - benchmark_start_time:.3f}s{RESET}"
+    )
+    print(f"{CSI}35mQuery round prompt count: {len(benchmark_ttfts)}{RESET}")
+
+    # Validate expected gains as multiplicative speed-ups
+    if args.expected_ttft_gain is not None:
+        actual_ttft_gain = (
+            warmup_mean_ttft / query_mean_ttft if query_mean_ttft > 0 else float("inf")
+        )
+        print(f"{CSI}34mActual TTFT gain: {actual_ttft_gain:.2f}×{RESET}")
+        if actual_ttft_gain < args.expected_ttft_gain:
+            sys.exit(
+                f"ERROR: TTFT gain {actual_ttft_gain:.2f}× < expected "
+                f"{args.expected_ttft_gain:.2f}×"
+            )
+
+    if args.expected_latency_gain is not None:
+        warmup_duration = warmup_end_time - warmup_start_time
+        query_duration = benchmark_end_time - benchmark_start_time
+
+        # compute per-prompt latency before comparing
+        warmup_per_prompt = warmup_duration / len(warmup_ttfts)
+        query_per_prompt = query_duration / len(benchmark_ttfts)
+        actual_latency_gain = (
+            warmup_per_prompt / query_per_prompt
+            if query_per_prompt > 0
+            else float("inf")
+        )
+        print(f"{CSI}34mActual latency gain: {actual_latency_gain:.2f}×{RESET}")
+        if actual_latency_gain < args.expected_latency_gain:
+            sys.exit(
+                f"ERROR: latency gain {actual_latency_gain:.2f}× < expected "
+                f"{args.expected_latency_gain:.2f}×"
+            )
 
 
 def create_argument_parser():
     parser = argparse.ArgumentParser(
         description="Benchmark the performance with or "
         "without automatic prefix caching."
-    )
-
-    parser.add_argument(
-        "--model",
-        type=str,
-        default="openai/gpt-oss-120b",
-        help="Model to use for testing.",
     )
 
     parser.add_argument(
@@ -348,9 +408,16 @@ def create_argument_parser():
     )
 
     parser.add_argument(
+        "--model",
+        type=str,
+        default="meta-llama/Llama-3.1-8B-Instruct",
+        help="Model name",
+    )
+
+    parser.add_argument(
         "--max-inflight-requests",
         type=int,
-        default=2,
+        default=20,
         help="Maximum number of concurrent inflight requests",
     )
 
@@ -361,10 +428,36 @@ def create_argument_parser():
         help="Sleep time after warm up iteration",
     )
 
+    parser.add_argument(
+        "--output",
+        type=str,
+        default=None,
+        help="Filename to write all responses to; if omitted, writes to stdout.",
+    )
+    parser.add_argument(
+        "--expected-ttft-gain",
+        type=float,
+        default=None,
+        help=(
+            "Expected minimum speed-up in time-to-first-token (warmup/query) "
+            "as a factor, e.g. 4.3 for 4.3×. If actual gain is below this, exits."
+        ),
+    )
+    parser.add_argument(
+        "--expected-latency-gain",
+        type=float,
+        default=None,
+        help=(
+            "Expected minimum speed-up in total round time (warmup/query) "
+            "as a factor, e.g. 4.5 for 4.5×. If actual gain is below this, exits."
+        ),
+    )
+
     return parser
 
 
 if __name__ == "__main__":
     parser = create_argument_parser()
     args = parser.parse_args()
+    OUTPUT_FILE = args.output
     asyncio.run(main(args))
