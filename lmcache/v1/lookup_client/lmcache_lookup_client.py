@@ -2,6 +2,7 @@
 # Standard
 from typing import TYPE_CHECKING, Optional
 import threading
+import uuid
 
 # Third Party
 from vllm.utils import make_zmq_socket
@@ -60,9 +61,11 @@ class LMCacheLookupClient(LookupClientInterface):
             else:
                 self.socket.connect(socket_path)
 
-    def lookup(self, token_ids: torch.Tensor, lookup_id: Optional[str] = None) -> int:
+    def lookup(
+        self, token_ids: torch.Tensor, lookup_id: Optional[uuid.UUID] = None
+    ) -> int:
         token_bufs = self.encoder.encode(token_ids)
-        lookup_id_buf = lookup_id.encode("utf-8")
+        lookup_id_buf = lookup_id.bytes
         ranks = self.tensor_parallel_size
         if self.create_lookup_server_only_on_worker_0:
             ranks = 1
@@ -115,7 +118,7 @@ class LMCacheLookupServer:
                 # request = self.socket.recv()
                 frames = self.socket.recv_multipart(copy=False)
                 token_frames = frames[:-1]
-                lookup_id = frames[-1].bytes.decode("utf-8")
+                lookup_id = uuid.UUID(bytes=frames[-1].bytes)
                 token_ids = self.decoder.decode(token_frames)
                 result = self.lmcache_engine.lookup(
                     token_ids, lookup_id=lookup_id, pin=True

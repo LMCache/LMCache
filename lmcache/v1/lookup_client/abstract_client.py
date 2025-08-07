@@ -2,6 +2,7 @@
 # Standard
 from typing import TYPE_CHECKING, Optional
 import abc
+import uuid
 
 # Third Party
 import torch
@@ -15,7 +16,9 @@ class LookupClientInterface(metaclass=abc.ABCMeta):
     """Abstract interface for lookup clients."""
 
     @abc.abstractmethod
-    def lookup(self, token_ids: torch.Tensor, lookup_id: Optional[str] = None) -> int:
+    def lookup(
+        self, token_ids: torch.Tensor, lookup_id: Optional[uuid.UUID] = None
+    ) -> int:
         """
         Perform lookup for the given token IDs.
 

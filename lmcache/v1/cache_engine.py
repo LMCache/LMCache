@@ -5,6 +5,7 @@ from typing import Dict, Generator, List, Optional, Tuple, Union
 import asyncio
 import multiprocessing
 import time
+import uuid
 
 # Third Party
 import torch
@@ -645,7 +646,7 @@ class LMCacheEngine:
         self,
         tokens: Union[torch.Tensor, List[int]],
         search_range: Optional[List[str]] = None,
-        lookup_id: Optional[str] = None,
+        lookup_id: Optional[Union[str, uuid.UUID]] = None,
         pin: bool = False,
     ) -> int:
         """
@@ -658,7 +659,8 @@ class LMCacheEngine:
         ["LocalCPUBackend", "LocalDiskBackend"] for now.
         If None, search in all backends.
 
-        :param str lookup_id: The lookup ID to associate with the lookup
+        :param Union[str, uuid.UUID] lookup_id: The lookup ID to
+        associate with the lookup
 
         :param bool pin: If True, pin the KV cache in the storage.
 
@@ -833,7 +835,7 @@ class LMCacheEngine:
         return num_tokens
 
     @_lmcache_nvtx_annotate
-    def lookup_unpin(self, lookup_ids: list[str]) -> None:
+    def lookup_unpin(self, lookup_ids: list[Union[str, uuid.UUID]]) -> None:
         for lookup_id in lookup_ids:
             if lookup_id in self.lookup_pins:
                 self.storage_manager.batched_unpin(self.lookup_pins[lookup_id])
