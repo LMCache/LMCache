@@ -132,7 +132,17 @@ class RemoteBackend(StorageBackendInterface):
             )
 
         try:
-            return self.connection.exists_sync(key)
+            if (
+                self.config.extra_config is not None
+                and self.config.extra_config.get("use_exists_sync", False)
+            ):
+                return self.connection.exists_sync(key)
+            else:
+                future = asyncio.run_coroutine_threadsafe(
+                    self.connection.exists(key), self.loop
+                )
+                res = future.result()
+                return res
         except Exception as e:
             logger.warning(f"Remote connection failed in contains: {e}")
             logger.warning("Returning False")
