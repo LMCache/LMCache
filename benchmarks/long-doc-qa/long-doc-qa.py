@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 # Adapted from
 # https://github.com/vllm-project/vllm/blob/main/benchmarks/benchmark_long_document_qa_throughput.py
+
 """
 Commandline arguments:
     --num-documents: The number of documents to sample prompts from.
@@ -27,7 +28,9 @@ Commandline arguments:
 
     --port: Port to query the vLLM server
 
-    --max-inflight-requests: Maximum number of in-flight requests. Default is 2
+    --model: Model name
+
+    --max-inflight-requests: Maximum number of in-flight requests. Default is 20
 
     --sleep-time-after-warmup: Sleep time after warm up iteration.
                               (Optional, default: 0.0 seconds)
@@ -41,8 +44,6 @@ Commandline arguments:
     --expected-latency-gain: Expected minimum speed-up in total round time
                             (warmup/query) as a factor, e.g. 4.5 for 4.5×.
                             If actual gain is below this, exits.
-
-    --model: Model name
 """
 
 # Standard
@@ -68,44 +69,6 @@ def write_resp(text: str):
             resp_file.write(text)
     else:
         sys.stdout.write(text)
-
-
-def has_content(chunk):
-    """
-    Check if the chunk has content in the choices.
-
-    Args:
-        chunk: The response chunk from OpenAI API.
-
-    Returns:
-        bool: True if content exists, False otherwise.
-    """
-    return (
-        chunk.choices
-        and chunk.choices[0].delta
-        and (
-            chunk.choices[0].delta.content is not None
-            or chunk.choices[0].delta.reasoning_content is not None
-        )
-    )
-
-
-def extract_content(chunk):
-    """
-    Extract content from the response chunk.
-
-    Args:
-        chunk: The response chunk from OpenAI API.
-
-    Returns:
-        str: The content extracted from the chunk.
-    """
-    if chunk.choices[0].delta.content is not None:
-        return chunk.choices[0].delta.content
-    elif chunk.choices[0].delta.reasoning_content is not None:
-        return chunk.choices[0].delta.reasoning_content
-    else:
-        return ""
 
 
 async def process_single_prompt(
@@ -148,8 +111,8 @@ async def process_single_prompt(
                 continue
 
             # Handle content for chat completions
-            if has_content(chunk):
-                content = extract_content(chunk)
+            if chunk.choices[0].delta and chunk.choices[0].delta.content is not None:
+                content = chunk.choices[0].delta.content
                 if first_token_time is None and content != "":
                     first_token_time = time.time()
                 responses.append(content)
@@ -253,7 +216,7 @@ async def main(args):
     )
     model = args.model
 
-    pre_warmup_prompts = [str(i) + "xx" + " ".join(["hi"] * 1000) for i in range(5)]
+    pre_warmup_prompts = [str(i) + " " + " ".join(["hi"] * 1000) for i in range(5)]
 
     await test_long_document_qa(
         client=client,
@@ -290,7 +253,6 @@ async def main(args):
         write_resp(f"Sleeping for {sleep_time_after_warmup} seconds after warmup...\n")
         time.sleep(sleep_time_after_warmup)
 
-    print("------query round------")
     benchmark_start_time = time.time()
     benchmark_ttfts = await test_long_document_qa(
         client=client,
@@ -302,6 +264,7 @@ async def main(args):
     benchmark_end_time = time.time()
 
     # Print results
+    warmup_mean_ttft = sum(warmup_ttfts) / len(warmup_ttfts)
     query_mean_ttft = sum(benchmark_ttfts) / len(benchmark_ttfts)
     CSI = "\x1b["
     RESET = CSI + "0m"
@@ -354,13 +317,6 @@ def create_argument_parser():
     parser = argparse.ArgumentParser(
         description="Benchmark the performance with or "
         "without automatic prefix caching."
-    )
-
-    parser.add_argument(
-        "--model",
-        type=str,
-        default="openai/gpt-oss-120b",
-        help="Model to use for testing.",
     )
 
     parser.add_argument(
@@ -417,9 +373,16 @@ def create_argument_parser():
     )
 
     parser.add_argument(
+        "--model",
+        type=str,
+        default="meta-llama/Llama-3.1-8B-Instruct",
+        help="Model name",
+    )
+
+    parser.add_argument(
         "--max-inflight-requests",
         type=int,
-        default=2,
+        default=20,
         help="Maximum number of concurrent inflight requests",
     )
 
