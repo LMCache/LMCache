@@ -109,6 +109,7 @@ class RemoteBackend(StorageBackendInterface):
                 self.loop,
                 self.local_cpu_backend,
                 self.config,
+                self.metadata,
             )
             logger.info(
                 f"Connection initialized/re-established at {self.config.remote_url}"
@@ -262,6 +263,9 @@ class RemoteBackend(StorageBackendInterface):
             "This method is a no-op and will return True."
         )
         return True
+
+    def remove(self, key, free_obj=True):
+        raise NotImplementedError("Remote backend does not support remove now.")
 
     def close(self):
         try:

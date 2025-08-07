@@ -69,6 +69,7 @@ class DisaggSpec:
     req_id: str
     receiver_info: NixlReceiverInfo
     is_last_prefill: bool = False
+    num_transferred_tokens: int = 0
 
 
 tmp_disagg_tracker: dict[str, DisaggSpec] = {}
@@ -101,6 +102,10 @@ class RequestTracker:
     mm_hashes: Optional[list[str]] = None
     mm_positions: Optional[list["PlaceholderRange"]] = None
 
+    # Whether the request is in decode phase
+    is_decode_phase = False
+
+    @_lmcache_nvtx_annotate
     @staticmethod
     def from_new_request(
         new_request: "NewRequestData",
@@ -170,6 +175,12 @@ class RequestTracker:
             raise ValueError(f"Unsupported new_block_ids type {type(new_block_ids)}")
         self.allocated_block_ids.extend(new_block_ids)
 
+        # When a request is scheduled again, and the number of new tokens
+        # is 1 (excluding chunked prefill), the request is in decode phase.
+        # TODO: Need to further exclude the case of chunked prefill with 1 token.
+        if len(new_token_ids) == 1:
+            self.is_decode_phase = True
+
 
 @dataclass
 class ReqMeta:
@@ -198,6 +209,7 @@ class ReqMeta:
         load_spec: Optional[LoadSpec] = None,
         skip_save: bool = False,
         discard_partial_chunks: bool = True,
+        save_decode_cache: bool = False,
     ) -> Optional["ReqMeta"]:
         """Create the request metadata from a request tracker.
 
@@ -208,6 +220,7 @@ class ReqMeta:
             load_spec (Optional[LoadSpec]): the load spec for KV cache loading.
             skip_save (bool): whether to skip the save operation.
             discard_partial_chunks (bool): whether to discard partial chunks.
+            save_decode_cache (bool): whether to save the cache in decode phase.
 
         Returns:
             the request metadata if we need to perform load/save
@@ -223,12 +236,18 @@ class ReqMeta:
         # For save operation: do not save if the following condition is met
         # 1. has already been saved before (num_saved_tokens > 0)
         # 2. number of unsaved tokens is not reached the chunk boundary
+        # 3. if save_decode_cache is False and it is in decode phase
+
         skip_leading_tokens = tracker.num_saved_tokens
         chunk_boundary = (
             cdiv(tracker.num_saved_tokens + 1, lmcache_chunk_size) * lmcache_chunk_size
         )
-        skip_save = skip_save or (
-            tracker.num_saved_tokens > 0 and input_token_len < chunk_boundary
+
+        # NOTE(vladnosiv): for disagg, you cannot skip saving, as saving is a transfer
+        skip_save = tracker.disagg_spec is None and (
+            skip_save
+            or (tracker.num_saved_tokens > 0 and input_token_len < chunk_boundary)
+            or (tracker.is_decode_phase and not save_decode_cache)
         )
 
         if skip_save and load_spec is None:
@@ -236,9 +255,13 @@ class ReqMeta:
 
         # Calculate number of tokens to save based on discard_partial_chunks
         # setting
+
+        # NOTE(vladnosiv): for the input_token_len chunk prefill,
+        # we are required to discard partial chunks,
+        # as new tokens will be added in the next iteration.
         num_tokens_to_save = (
             (input_token_len // lmcache_chunk_size * lmcache_chunk_size)
-            if discard_partial_chunks
+            if not is_last_prefill or discard_partial_chunks
             else input_token_len
         )
 
@@ -310,6 +333,7 @@ class LMCacheConnectorMetadata(KVConnectorMetadata):
     requests: list[ReqMeta] = field(default_factory=list)
     lookup_requests_in_step: list[str] = field(default_factory=list)
 
+    @_lmcache_nvtx_annotate
     def add_request(self, req_meta: ReqMeta) -> None:
         """Add a request to the metadata.
 
@@ -333,7 +357,9 @@ class LMCacheConnectorV1Impl:
         self.layerwise_retrievers = []
         if role == KVConnectorRole.SCHEDULER:
             # Create lookup client using factory
-            self.lookup_client = LookupClientFactory.create_lookup_client(vllm_config)
+            self.lookup_client = LookupClientFactory.create_lookup_client(
+                vllm_config, config
+            )
             self._unfinished_requests: dict[str, Request] = {}
             self._lookup_requests_in_step: list[str] = []
         else:
@@ -383,9 +409,11 @@ class LMCacheConnectorV1Impl:
             vllm_config.kv_transfer_config.get_from_extra_config(
                 "discard_partial_chunks", False
             )
+            or not config.save_unfull_chunk
         )
 
         self._lmcache_chunk_size = config.chunk_size
+        self._save_decode_cache = config.save_decode_cache
 
         self.skip_last_n_tokens = vllm_config.kv_transfer_config.get_from_extra_config(
             "skip_last_n_tokens", 0
@@ -398,6 +426,7 @@ class LMCacheConnectorV1Impl:
 
         self.force_skip_save = bool(os.environ.get("LMCACHE_FORCE_SKIP_SAVE", False))
 
+    @_lmcache_nvtx_annotate
     def _init_kv_caches_from_forward_context(self, forward_context: "ForwardContext"):
         for layer_name in forward_context.no_compile_layers:
             attn_layer = forward_context.no_compile_layers[layer_name]
@@ -447,11 +476,13 @@ class LMCacheConnectorV1Impl:
 
         self.lmcache_engine.post_init(kvcaches=kvcaches)
 
+        self.layerwise_retrievers = []
+
         for idx, request in enumerate(metadata.requests):
             if request.load_spec is None:
                 continue
+            last_idx = idx
 
-        self.layerwise_retrievers = []
         for idx, request in enumerate(metadata.requests):
             if request.load_spec is None:
                 continue
@@ -471,7 +502,10 @@ class LMCacheConnectorV1Impl:
 
             lmcache_cached_tokens = request.load_spec.lmcache_cached_tokens
             if self.use_layerwise:
-                sync = True
+                if idx == last_idx:
+                    sync = True
+                else:
+                    sync = False
                 # NOTE(Jiayi): Perform blending before layerwise prefix caching
                 if self.enable_blending:
                     # TODO(Jiayi): Need to make prefix caching and blending compatible
@@ -516,8 +550,6 @@ class LMCacheConnectorV1Impl:
                         num_retrieved_tokens,
                         num_expected_tokens,
                     )
-
-        self.lmcache_engine.lookup_unpin(metadata.lookup_requests_in_step)
 
     @_lmcache_nvtx_annotate
     def wait_for_layer_load(self, layer_name: str) -> None:
@@ -578,7 +610,7 @@ class LMCacheConnectorV1Impl:
         if self.current_layer == 0:
             self.layerwise_storers = []
 
-            is_first = False
+            is_first = True
 
             for idx, request in enumerate(connector_metadata.requests):
                 save_spec = request.save_spec
@@ -621,11 +653,6 @@ class LMCacheConnectorV1Impl:
                     skip_leading_tokens,
                     request.req_id,
                 )
-                if not is_first:
-                    sync = True
-                    is_first = True
-                else:
-                    sync = False
 
                 # TODO (Jiayi): need to make layerwise storing
                 # compatible with disagg spec
@@ -635,9 +662,11 @@ class LMCacheConnectorV1Impl:
                     kvcaches=kvcaches,
                     slot_mapping=slot_mapping,
                     offset=skip_leading_tokens,
-                    sync=sync,
+                    sync=is_first,
                 )
                 self.layerwise_storers.append(layerwise_storer)
+                if is_first:
+                    is_first = False
 
         for layerwise_storer in self.layerwise_storers:
             next(layerwise_storer)
@@ -647,6 +676,12 @@ class LMCacheConnectorV1Impl:
     @_lmcache_nvtx_annotate
     def wait_for_save(self):
         """Blocking until the KV cache is saved to the connector buffer."""
+
+        connector_metadata = self._parent._get_connector_metadata()
+        assert isinstance(connector_metadata, LMCacheConnectorMetadata)
+
+        self.lmcache_engine.lookup_unpin(connector_metadata.lookup_requests_in_step)
+
         if self.kv_role == "kv_consumer":
             # Don't do save if the role is kv_consumer
             return
@@ -655,9 +690,6 @@ class LMCacheConnectorV1Impl:
             for layerwise_storer in self.layerwise_storers:
                 next(layerwise_storer)
             return
-
-        connector_metadata = self._parent._get_connector_metadata()
-        assert isinstance(connector_metadata, LMCacheConnectorMetadata)
 
         assert len(self.kv_caches) > 0
         kvcaches = list(self.kv_caches.values())
@@ -682,23 +714,20 @@ class LMCacheConnectorV1Impl:
             # TODO: have a pre-allocated buffer to hold the slot_mappings
             slot_mapping = slot_mapping.cuda()
 
+            skip_leading_tokens = save_spec.skip_leading_tokens
             if self.kv_role == "kv_producer":
-                skip_leading_tokens = 0
-            else:
-                skip_leading_tokens = max(
-                    self.lmcache_engine.lookup(token_ids),
-                    save_spec.skip_leading_tokens,
+                skip_leading_tokens = min(
+                    skip_leading_tokens, request.disagg_spec.num_transferred_tokens
                 )
-                skip_leading_tokens = save_spec.skip_leading_tokens
 
-                if skip_leading_tokens == len(token_ids):
-                    continue  # skip this request
-                # Align to lmcache chunk size
-                skip_leading_tokens = (
-                    skip_leading_tokens
-                    // self._lmcache_chunk_size
-                    * self._lmcache_chunk_size
-                )
+            if skip_leading_tokens == len(token_ids):
+                continue  # skip this request
+            # Align to lmcache chunk size
+            skip_leading_tokens = (
+                skip_leading_tokens
+                // self._lmcache_chunk_size
+                * self._lmcache_chunk_size
+            )
 
             store_mask = torch.ones_like(token_ids, dtype=torch.bool)
             store_mask[:skip_leading_tokens] = False
@@ -736,7 +765,10 @@ class LMCacheConnectorV1Impl:
 
             # NOTE(Jiayi): We assume all tokens are saved
             save_spec.skip_leading_tokens = len(token_ids)
+            if request.disagg_spec:
+                request.disagg_spec.num_transferred_tokens = len(token_ids)
 
+    @_lmcache_nvtx_annotate
     def get_finished(
         self, finished_req_ids: set[str]
     ) -> tuple[Optional[set[str]], Optional[set[str]]]:
@@ -930,6 +962,7 @@ class LMCacheConnectorV1Impl:
                 load_spec=load_spec,
                 skip_save=force_skip_save,
                 discard_partial_chunks=self._discard_partial_chunks,
+                save_decode_cache=self._save_decode_cache,
             )
             if req_meta is not None:
                 meta.add_request(req_meta)
@@ -980,6 +1013,7 @@ class LMCacheConnectorV1Impl:
                 load_spec=None,
                 skip_save=force_skip_save,
                 discard_partial_chunks=self._discard_partial_chunks,
+                save_decode_cache=self._save_decode_cache,
             )
             if req_meta is not None:
                 meta.add_request(req_meta)
@@ -988,6 +1022,7 @@ class LMCacheConnectorV1Impl:
         self._lookup_requests_in_step = []
         return meta
 
+    @_lmcache_nvtx_annotate
     def request_finished(
         self,
         request: "Request",

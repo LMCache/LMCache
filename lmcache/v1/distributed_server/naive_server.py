@@ -2,6 +2,7 @@
 # Standard
 from typing import Optional
 import asyncio
+import ctypes
 import socket
 import threading
 import time
@@ -23,22 +24,26 @@ from lmcache.v1.storage_backend.storage_manager import StorageManager
 
 logger = init_logger(__name__)
 
-# TODO(Jiayi): Logic related to "put" and "exists" is not implemented yet.
-# Need to think when it's needed.
 
 # TODO(Jiayi): Need to make `handle_get` async as blocking get from disk
 # will affect the performance. Another simpler and cleaner option is to make
 # `handle_get` always blocking but make disk loading always async.
 
 # TODO(Jiayi): Need to find a way to make the code more concise.
-# For example, consider reusing code from remote cache server?
+# We need to unify all transfer-related code (e.g., a Transfer Manager).
+
+# TODO(Jiayi): Hetero-TP support is also not implemented yet.
+# Perhaps we can do this after we split lmcache to a separate process.
+
+# TODO(Jiayi): Replace reader/writer to raw sockets such that copies can be
+# avoided.
 
 
 class NaiveDistributedServer(DistributedServerInterface):
     def __init__(
         self,
         storage_manager: StorageManager,
-        lookup_server: LookupServerInterface,
+        lookup_server: Optional[LookupServerInterface],
         loop: asyncio.AbstractEventLoop,
         config: LMCacheEngineConfig,
     ):
@@ -69,41 +74,145 @@ class NaiveDistributedServer(DistributedServerInterface):
         memory_obj = self.storage_manager.get(key)
         return memory_obj
 
-    def receive_all_client(
+    async def receive_mem_obj(
         self,
         meta: ServerMetaMessage,
-        client_socket: socket.socket,
+        sock: socket.socket,
     ) -> Optional[MemoryObj]:
         received = 0
         n = meta.length
 
         # TODO(Jiayi): Format will be used once we support
         # compressed memory format
-        memory_obj = self.storage_manager.allocate(
+        mem_obj = self.storage_manager.allocate(
             meta.shape,
             meta.dtype,
             meta.fmt,
         )
-        if memory_obj is None:
+        if mem_obj is None:
+            server_msg = ServerMetaMessage(
+                Constants.SERVER_FAIL,
+                0,
+                MemoryFormat(1),
+                torch.float16,
+                torch.Size([0, 0, 0, 0]),
+            ).serialize()
+            await self.loop.sock_sendall(sock, server_msg)
             logger.warning("Failed to allocate memory during remote receive")
             return None
 
-        buffer = memory_obj.byte_array
+        server_msg = ServerMetaMessage(
+            Constants.SERVER_SUCCESS,
+            0,
+            MemoryFormat(1),
+            torch.float16,
+            torch.Size([0, 0, 0, 0]),
+        ).serialize()
+        await self.loop.sock_sendall(sock, server_msg)
+
+        buffer = mem_obj.byte_array
         view = memoryview(buffer)
 
+        logger.debug(f"Receivng {n} bytes")
+
         while received < n:
-            num_bytes = client_socket.recv_into(view[received:], n - received)
+            num_bytes = await self.loop.sock_recv_into(sock, view[received:])
             if num_bytes == 0:
-                return None
+                raise ConnectionError(
+                    "Connection closed by the peer while receiving data."
+                )
             received += num_bytes
 
-        return memory_obj
+            logger.debug(f"Received {num_bytes} bytes")
 
-    async def issue_get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
+        return mem_obj
+
+    async def handle_put(
+        self,
+        meta: ServerMetaMessage,
+        reader,
+        writer,
+    ) -> bool:
+        t0 = time.perf_counter()
+        mem_obj = await self.receive_mem_obj_stream(meta, reader, writer)
+        t1 = time.perf_counter()
+
+        if mem_obj is None:
+            return False
+
+        self.storage_manager.put(meta.key, mem_obj, meta.location)
+
+        t2 = time.perf_counter()
+
+        logger.debug(f"Time to receive data: {t1 - t0}, time to store data: {t2 - t1}")
+        return True
+
+    async def receive_mem_obj_stream(
+        self,
+        meta: ServerMetaMessage,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+    ) -> Optional[MemoryObj]:
+        received = 0
+        n = meta.length
+
+        mem_obj = self.storage_manager.allocate(
+            meta.shape,
+            meta.dtype,
+            meta.fmt,
+        )
+        if mem_obj is None:
+            fail_msg = ServerMetaMessage(
+                Constants.SERVER_FAIL,
+                0,
+                MemoryFormat(1),
+                torch.float16,
+                torch.Size([0, 0, 0, 0]),
+            ).serialize()
+            writer.write(fail_msg)
+            await writer.drain()
+            logger.warning("Failed to allocate memory during remote receive (stream)")
+            return None
+
+        success_msg = ServerMetaMessage(
+            Constants.SERVER_SUCCESS,
+            0,
+            MemoryFormat(1),
+            torch.float16,
+            torch.Size([0, 0, 0, 0]),
+        ).serialize()
+        writer.write(success_msg)
+        await writer.drain()
+
+        logger.debug(f"Receiving {n} bytes (stream)")
+
+        tensor_ptr = mem_obj.tensor.data_ptr()
+        while received < n:
+            chunk = await reader.read(n - received)
+            if not chunk:
+                raise ConnectionError(
+                    "Connection closed by the peer while receiving data."
+                )
+            ctypes.memmove(tensor_ptr + received, chunk, len(chunk))
+            received += len(chunk)
+            logger.debug(f"Received {len(chunk)} bytes (stream)")
+
+        return mem_obj
+
+    async def issue_get(
+        self,
+        key: CacheEngineKey,
+        location: Optional[str] = None,
+    ) -> Optional[MemoryObj]:
         """
         Perform get from the peer.
         This function can be blocking for now.
         """
+
+        assert self.lookup_server is not None, (
+            "Lookup server is not set in `issue_get`."
+        )
+
         # `url` has the format host:port
         host_and_port = self.lookup_server.lookup(key)
         if host_and_port is None:
@@ -119,28 +228,82 @@ class NaiveDistributedServer(DistributedServerInterface):
         client_socket.connect((host, port))
         logger.debug(f"Peer connection created at {host}:{port}")
 
-        async with self.async_socket_lock:
-            client_socket.sendall(
-                ClientMetaMessage(
-                    Constants.CLIENT_GET,
-                    key,
-                    0,
-                    MemoryFormat(1),
-                    torch.float16,
-                    torch.Size([0, 0, 0, 0]),
-                ).serialize()
-            )
+        await self.loop.sock_sendall(
+            client_socket,
+            ClientMetaMessage(
+                Constants.CLIENT_GET,
+                key,
+                0,
+                MemoryFormat(1),
+                torch.float16,
+                torch.Size([0, 0, 0, 0]),
+                location,
+            ).serialize(),
+        )
 
-            data = client_socket.recv(ServerMetaMessage.packlength())
+        data = await self.loop.sock_recv(client_socket, ServerMetaMessage.packlength())
 
         meta = ServerMetaMessage.deserialize(data)
         if meta.code != Constants.SERVER_SUCCESS:
             return None
 
-        async with self.async_socket_lock:
-            memory_obj = self.receive_all_client(meta, client_socket)
+        memory_obj = await self.receive_mem_obj(meta, client_socket)
 
         return memory_obj
+
+    async def batched_issue_put(
+        self,
+        keys: CacheEngineKey,
+        memory_objs: list[MemoryObj],
+        dst_url: str,
+        dst_location: Optional[str] = None,
+    ) -> bool:
+        """
+        Perform put to the peer.
+        This function can be blocking for now.
+        """
+        # `dst_url` has the format host:port
+        host, port = dst_url.split(":")
+        port = int(port)
+
+        logger.debug(f"Trying to connect to peer {host}:{port}")
+
+        # TODO(Jiayi): Cache the hot client sockets if possible.
+        # For example, retrieving 100 chunks could create 100 the same
+        # connection for 100 times.
+        # However, too many live sockets could cause file descriptor exhaustion
+        # (i.e., Too many open files).
+        client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        client_socket.setblocking(False)
+
+        await self.loop.sock_connect(client_socket, (host, port))
+        logger.debug(f"Peer connection created at {host}:{port}")
+
+        for key, memory_obj in zip(keys, memory_objs, strict=False):
+            await self.loop.sock_sendall(
+                client_socket,
+                ClientMetaMessage(
+                    Constants.CLIENT_PUT,
+                    key,
+                    memory_obj.get_physical_size(),
+                    memory_obj.get_memory_format(),
+                    memory_obj.get_dtype(),
+                    memory_obj.get_shape(),
+                    dst_location,
+                ).serialize(),
+            )
+
+            data = await self.loop.sock_recv(
+                client_socket, ServerMetaMessage.packlength()
+            )
+
+            meta = ServerMetaMessage.deserialize(data)
+            if meta.code != Constants.SERVER_SUCCESS:
+                return False
+
+            await self.loop.sock_sendall(client_socket, memory_obj.byte_array)
+
+        return True
 
     async def receive_all_server(self, reader, n):
         data = bytearray()
@@ -156,7 +319,10 @@ class NaiveDistributedServer(DistributedServerInterface):
         Handle the client.
         """
         addr = writer.get_extra_info("peername")
+        server_socket = writer.get_extra_info("socket")
+        server_socket.setblocking(False)  # ensure non-blocking
         logger.info(f"Connected by {addr}")
+
         try:
             while True:
                 header = await self.receive_all_server(
@@ -172,6 +338,7 @@ class NaiveDistributedServer(DistributedServerInterface):
 
                         memory_obj = await self.handle_get(meta.key)
 
+                        # TODO(Jiayi): Refactor the following code to `handle_get`
                         t1 = time.perf_counter()
 
                         if memory_obj is not None:
@@ -193,7 +360,7 @@ class NaiveDistributedServer(DistributedServerInterface):
                             memory_obj.ref_count_down()
 
                             t3 = time.perf_counter()
-                            logger.info(
+                            logger.debug(
                                 f"Time to get data: {t1 - t0}, "
                                 f"time to send meta: {t2 - t1}, "
                                 f"time to send data: {t3 - t2}"
@@ -209,6 +376,10 @@ class NaiveDistributedServer(DistributedServerInterface):
                                 ).serialize()
                             )
                             await writer.drain()
+
+                    case Constants.CLIENT_PUT:
+                        await self.handle_put(meta, reader, writer)
+
         finally:
             writer.close()
             await writer.wait_closed()
