@@ -188,8 +188,9 @@ class RemoteConnector(metaclass=abc.ABCMeta):
         """
         return False
 
-    @abc.abstractmethod
-    async def batched_get(self, keys: List[CacheEngineKey]) -> List[Optional[MemoryObj]]:
+    async def batched_get(
+        self, keys: List[CacheEngineKey]
+    ) -> List[Optional[MemoryObj]]:
         """
         Batched get the memory_objs of the corresponding keys
 

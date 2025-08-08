@@ -77,7 +77,9 @@ class InstrumentedRemoteConnector(RemoteConnector):
     def support_batched_get(self) -> bool:
         return self._connector.support_batched_get()
 
-    async def batched_get(self, keys: List[CacheEngineKey]) -> List[Optional[MemoryObj]]:
+    async def batched_get(
+        self, keys: List[CacheEngineKey]
+    ) -> List[Optional[MemoryObj]]:
         return await self._connector.batched_get(keys)
 
     def __repr__(self) -> str:
