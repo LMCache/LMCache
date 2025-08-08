@@ -20,7 +20,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
 )
-from vllm.utils import cdiv
+from vllm.utils import cdiv, get_kv_cache_torch_dtype
 from vllm.v1.core.sched.output import SchedulerOutput
 import torch
 
@@ -29,7 +29,6 @@ from lmcache.config import LMCacheEngineConfig, LMCacheEngineMetadata
 from lmcache.integration.vllm.utils import (
     ENGINE_NAME,
     apply_mm_hashes_to_token_ids,
-    get_kv_cache_torch_dtype,
     lmcache_get_config,
 )
 from lmcache.logging import init_logger
