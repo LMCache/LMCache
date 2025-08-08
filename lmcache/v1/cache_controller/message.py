@@ -409,6 +409,7 @@ class HealthRetMsg(OrchRetMsg):
     """Health return message"""
 
     event_id: str
+    # worker_id -> error_code
     error_codes: Dict[int, int]
 
     def describe(self) -> str:

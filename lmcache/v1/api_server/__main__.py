@@ -222,6 +222,7 @@ def create_app(controller_url: str) -> FastAPI:
 
     class HealthResponse(BaseModel):
         event_id: str
+        # worker_id -> error_code
         error_codes: dict[int, int]
 
     @app.post("/health", response_model=HealthResponse)
