@@ -60,15 +60,15 @@ class LMCacheLookupClient(LookupClientInterface):
             else:
                 self.socket.connect(socket_path)
 
-    def lookup(self, token_ids: torch.Tensor, request_id: Optional[str] = None) -> int:
+    def lookup(self, token_ids: torch.Tensor, lookup_id: Optional[str] = None) -> int:
         token_bufs = self.encoder.encode(token_ids)
-        request_id_buf = request_id.encode("utf-8")
+        lookup_id_buf = lookup_id.encode("utf-8")
         ranks = self.tensor_parallel_size
         if self.create_lookup_server_only_on_worker_0:
             ranks = 1
         results = []
         for i in range(ranks):
-            self.socket.send_multipart(token_bufs + [request_id_buf], copy=False)
+            self.socket.send_multipart(token_bufs + [lookup_id_buf], copy=False)
             resp = self.socket.recv()
             result = int.from_bytes(resp, "big")
             results.append(result)
@@ -115,10 +115,10 @@ class LMCacheLookupServer:
                 # request = self.socket.recv()
                 frames = self.socket.recv_multipart(copy=False)
                 token_frames = frames[:-1]
-                request_id = frames[-1].bytes.decode("utf-8")
+                lookup_id = frames[-1].bytes.decode("utf-8")
                 token_ids = self.decoder.decode(token_frames)
                 result = self.lmcache_engine.lookup(
-                    token_ids, request_id=request_id, pin=True
+                    token_ids, lookup_id=lookup_id, pin=True
                 )
                 response = result.to_bytes(4, "big")
                 self.socket.send(response)
