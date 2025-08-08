@@ -32,7 +32,7 @@ Example 2p2d Architecture:
          ┌────────▼───┐  ┌─▼──────────┐               |
          │ Prefiller1 │  │ Prefiller2 │               |
          │ Port 7100  │  │ Port 7101  │               |
-         │   GPU 4    │  │   GPU 5    │               |
+         │   GPU 0    │  │   GPU 1    │               |
          └─────▲──────┘  └─────▲──────┘               |
                │               │                      |
                │ NIXL transfer |                      |
@@ -40,7 +40,7 @@ Example 2p2d Architecture:
           ┌────▼───────┐  ┌────▼──────┐               |
           │ Decoder 1  │  │ Decoder 2 │               |
           │ Port 7200  │  │ Port 7201 │               |
-          │  GPU 6     │  │  GPU 7    │               |
+          │  GPU 2     │  │  GPU 3    │               |
           └────▲───────┘  └────▲──────┘               |
                │               │                      |
                └───────────────┴──────────────────────|
@@ -76,8 +76,8 @@ Quick Start (2p2d Example)
 
 The script will automatically:
 
-- Launch two decoder instances on port 8200 and 8201 (GPU 6 and GPU 7)
-- Launch two prefiller instances on ports 7100 and 7101 (GPU 4 and GPU 5)
+- Launch two decoder instances on port 8200 and 8201 (GPU 2 and GPU 3)
+- Launch two prefiller instances on ports 7100 and 7101 (GPU 0 and GPU 1)
 - Launch a proxy server on port 9100 with round-robin load balancing
 - Wait for all servers to be ready
 
@@ -179,7 +179,7 @@ This script launches individual vLLM servers with appropriate configurations:
       LMCACHE_CONFIG_FILE=$prefill_config_file \
       VLLM_ENABLE_V1_MULTIPROCESSING=1 \
       VLLM_WORKER_MULTIPROC_METHOD=spawn \
-      CUDA_VISIBLE_DEVICES=4 \
+      CUDA_VISIBLE_DEVICES=0 \
       vllm serve $MODEL \
       --port 7100 \
       --disable-log-requests \
@@ -196,7 +196,7 @@ This script launches individual vLLM servers with appropriate configurations:
       LMCACHE_CONFIG_FILE=$prefill_config_file \
       VLLM_ENABLE_V1_MULTIPROCESSING=1 \
       VLLM_WORKER_MULTIPROC_METHOD=spawn \
-      CUDA_VISIBLE_DEVICES=5 \
+      CUDA_VISIBLE_DEVICES=1 \
       vllm serve $MODEL \
       --port 7101 \
       --disable-log-requests \
@@ -213,7 +213,7 @@ This script launches individual vLLM servers with appropriate configurations:
       LMCACHE_CONFIG_FILE=$decode_config_file \
       VLLM_ENABLE_V1_MULTIPROCESSING=1 \
       VLLM_WORKER_MULTIPROC_METHOD=spawn \
-      CUDA_VISIBLE_DEVICES=6 \
+      CUDA_VISIBLE_DEVICES=2 \
       vllm serve $MODEL \
       --port 7200 \
       --disable-log-requests \
@@ -230,7 +230,7 @@ This script launches individual vLLM servers with appropriate configurations:
       LMCACHE_CONFIG_FILE=$decode_config_file \
       VLLM_ENABLE_V1_MULTIPROCESSING=1 \
       VLLM_WORKER_MULTIPROC_METHOD=spawn \
-      CUDA_VISIBLE_DEVICES=7 \
+      CUDA_VISIBLE_DEVICES=3 \
       vllm serve $MODEL \
       --port 7201 \
       --disable-log-requests \
