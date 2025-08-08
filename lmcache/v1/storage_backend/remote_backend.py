@@ -271,7 +271,7 @@ class RemoteBackend(StorageBackendInterface):
 
         t1 = time.perf_counter()
         # batched get
-        if hasattr(self.connection, "batched_get"):
+        if self.connection.support_batched_get():
             future = asyncio.run_coroutine_threadsafe(
                 self.connection.batched_get(new_keys), self.loop
             )
