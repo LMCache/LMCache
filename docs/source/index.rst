@@ -143,7 +143,8 @@ Documentation
    api_reference/configurations
    api_reference/storage_backends
    api_reference/dynamic_connector
-
+   api_reference/multimodality
+   
 :raw-html:`<br />`
 
 .. toctree::
