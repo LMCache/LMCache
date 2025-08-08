@@ -62,7 +62,7 @@ class LMCacheLookupClient(LookupClientInterface):
 
     def lookup(self, token_ids: torch.Tensor, lookup_id: Optional[str] = None) -> int:
         token_bufs = self.encoder.encode(token_ids)
-        lookup_id_buf = lookup_id.bytes
+        lookup_id_buf = lookup_id.encode("utf-8")
         ranks = self.tensor_parallel_size
         if self.create_lookup_server_only_on_worker_0:
             ranks = 1
