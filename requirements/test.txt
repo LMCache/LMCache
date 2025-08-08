@@ -1,5 +1,5 @@
 buildkite-test-collector
-pytest>=7.0,<8.2  # avoid some plugins breaking in 8.x
+pytest>=7.0,<8.5  # avoid some plugins breaking in 8.x
 pytest-benchmark
 pytest-benchmark[histogram]
 pytest-cov
