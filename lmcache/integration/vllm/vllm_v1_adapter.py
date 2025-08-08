@@ -358,6 +358,7 @@ def init_lmcache_engine(
     parallel_config: ParallelConfig,
     cache_config: CacheConfig,
     scheduler_config: SchedulerConfig,
+    config: LMCacheEngineConfig,
 ) -> Optional[LMCacheEngine]:
     """Initialize the LMCache engine by the given model config and parallel
     config. This function will check the environment variable
@@ -389,7 +390,6 @@ def init_lmcache_engine(
     VLLM_MODEL_CONFIG = model_config
     VLLM_SCHEDULER_CONFIG = scheduler_config
 
-    config = lmcache_get_config()
     assert isinstance(config, LMCacheEngineConfig), (
         "LMCache v1 configuration is should be passed."
     )
@@ -517,6 +517,7 @@ class LMCacheConnectorV1Impl:
                 vllm_config.parallel_config,
                 vllm_config.cache_config,
                 vllm_config.scheduler_config,
+                config,
             )
 
             self.use_layerwise = config.use_layerwise
