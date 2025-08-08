@@ -62,11 +62,11 @@ class LocalDiskWorker:
         if task_type == "prefetch":
             priority = 0
             self.insert_prefetch_task(kwargs["key"], None)
-        elif task_type == "put":
-            priority = 1
-            self.insert_put_task(kwargs["key"])
         elif task_type == "delete":
-            priority = 0
+            priority = 1
+        elif task_type == "put":
+            priority = 2
+            self.insert_put_task(kwargs["key"])
         else:
             raise ValueError(f"Unknown task type: {task_type}")
 
