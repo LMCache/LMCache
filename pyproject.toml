@@ -1,12 +1,13 @@
 [build-system]
 # Requirements for package build
 # Should be mirrored in requirements/build.txt (for builds external to setuptools)
+# the torch version in requirements/common.txt MUST match
 requires = [
     "ninja",
     "packaging>=24.2",
     "setuptools>=77.0.3,<81.0.0",
     "setuptools_scm>=8",
-    "torch",
+    "torch==2.7.1",
     "wheel",
 ]
 build-backend = "setuptools.build_meta"
