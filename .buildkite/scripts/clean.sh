@@ -25,4 +25,6 @@ for pid in "${pids[@]}"; do
   fi
 done
 
+docker system prune -af
+
 echo "Done."
