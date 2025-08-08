@@ -179,5 +179,29 @@ class RemoteConnector(metaclass=abc.ABCMeta):
         """
         raise NotImplementedError
 
+    def support_batched_get(self) -> bool:
+        """
+        Check if the connector supports batched get
+
+        Returns:
+            True if batched get is supported, False otherwise
+        """
+        return False
+
+    async def batched_get(
+        self, keys: List[CacheEngineKey]
+    ) -> List[Optional[MemoryObj]]:
+        """
+        Batched get the memory_objs of the corresponding keys
+
+        Input:
+            keys: the keys of the corresponding objects
+
+        Returns:
+            The memory_objs of the corresponding keys
+            Return None if the key does not exist
+        """
+        raise NotImplementedError
+
     def __repr__(self) -> str:
         return f"<{self.__class__.__name__}>"

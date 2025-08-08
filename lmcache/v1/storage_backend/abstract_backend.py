@@ -120,9 +120,9 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
     def batched_get_blocking(
         self,
         keys: List[CacheEngineKey],
-    ) -> List[MemoryObj]:
+    ) -> List[Optional[MemoryObj]]:
         """
-        A blcocking function to get the kv cache from the storage backend.
+        A blocking function to get the kv cache from the storage backend.
 
         :param List[CacheEngineKey] keys: The keys of the MemoryObjs.
 
