@@ -332,7 +332,7 @@ class ReqMeta:
 @dataclass
 class LMCacheConnectorMetadata(KVConnectorMetadata):
     requests: list[ReqMeta] = field(default_factory=list)
-    lookup_requests_in_step: list[uuid.UUID] = field(default_factory=list)
+    lookup_requests_in_step: list[str] = field(default_factory=list)
 
     @_lmcache_nvtx_annotate
     def add_request(self, req_meta: ReqMeta) -> None:
@@ -362,7 +362,7 @@ class LMCacheConnectorV1Impl:
                 vllm_config, config
             )
             self._unfinished_requests: dict[str, Request] = {}
-            self._lookup_requests_in_step: list[uuid.UUID] = []
+            self._lookup_requests_in_step: list[str] = []
         else:
             self.lmcache_engine = init_lmcache_engine(
                 vllm_config.model_config,
@@ -810,7 +810,7 @@ class LMCacheConnectorV1Impl:
                 token_ids, request.mm_hashes, request.mm_positions
             )
 
-        lookup_id = uuid.uuid4()
+        lookup_id = str(uuid.uuid4())
         self._lookup_requests_in_step.append(lookup_id)
         if self.skip_last_n_tokens > 0:
             num_external_hit_tokens = self.lookup_client.lookup(
