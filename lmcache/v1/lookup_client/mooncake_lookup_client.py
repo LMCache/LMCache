@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from typing import TYPE_CHECKING, Optional
-import uuid
 
 # Third Party
 import torch
@@ -57,9 +56,7 @@ class MooncakeLookupClient(LookupClientInterface):
         else:
             self.token_database = ChunkedTokenDatabase(config, metadata)
 
-    def lookup(
-        self, token_ids: torch.Tensor, lookup_id: Optional[uuid.UUID] = None
-    ) -> int:
+    def lookup(self, token_ids: torch.Tensor, lookup_id: Optional[str] = None) -> int:
         # process token_ids to cacheengine keys
         keys = []
         ends = []
