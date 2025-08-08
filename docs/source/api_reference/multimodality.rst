@@ -30,8 +30,8 @@ Examples
     Go to the `Example output <#example-output>`_ section to see the output in the vLLM logs that demonstrate the speedup improvements.
 
 
-Audio Inference with Ultravox
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+Audio Inference with Ultravox:
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 Start vLLM server with ``fixie-ai/ultravox-v0_5-llama-3_2-1b`` model and LMCache KV caching:
 
@@ -48,8 +48,8 @@ Run the python script twice to demonstrate TTFT speedup on the second turn becau
    # run twice to see TTFT speedup
    python openai_chat_completion_client_for_multimodal.py --chat-type audio
 
-Single Image Inference with Llava
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+Single Image Inference with Llava:
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 Start vLLM server with ``llava-hf/llava-1.5-7b-hf`` model and LMCache KV caching:
 
@@ -65,8 +65,8 @@ Run the python script twice to demonstrate TTFT speedup on the second turn becau
    # run twice to see TTFT speedup
    python openai_chat_completion_client_for_multimodal.py --chat-type single-image
 
-Multi-image Inference with Phi-3.5-vision-instruct
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+Multi-image Inference with Phi-3.5-vision-instruct:
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 Start vLLM server with ``microsoft/Phi-3.5-vision-instruct`` model and LMCache KV caching:
 
@@ -83,8 +83,8 @@ Run the python script twice to demonstrate TTFT speedup on the second turn becau
    # run twice to see TTFT speedup
    python openai_chat_completion_client_for_multimodal.py --chat-type multi-image
 
-Video Inference with Llava-OneVision
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+Video Inference with Llava-OneVision:
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 Start vLLM server with ``llava-hf/llava-onevision-qwen2-7b-ov-hf`` model and LMCache KV caching:
 
