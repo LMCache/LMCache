@@ -15,6 +15,7 @@ safetensors
 setuptools>=77.0.3,<81.0.0
 setuptools_scm>=8
 sortedcontainers
-# don't pin torch version to avoid breaking vllm dockerfile (contains lmcache wheels)
-torch
+# please update ASAP when vllm torch updates
+# MUST match the [build-system].requires in pyproject.toml
+torch==2.7.1
 transformers >= 4.51.1

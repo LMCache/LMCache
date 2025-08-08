@@ -471,6 +471,7 @@ class LocalDiskBackend(StorageBackendInterface):
         else:
             fd = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_DIRECT, 0o644)
             os.write(fd, byte_array)
+            os.close(fd)
 
         disk_write_time = time.time() - start_time
         logger.debug(
@@ -516,8 +517,8 @@ class LocalDiskBackend(StorageBackendInterface):
                 f.readinto(buffer)
         else:
             fd = os.open(path, os.O_RDONLY | os.O_DIRECT)
-            fdo = os.fdopen(fd, "rb", buffering=0)
-            fdo.readinto(buffer)
+            with os.fdopen(fd, "rb", buffering=0) as fdo:
+                fdo.readinto(buffer)
         disk_read_time = time.time() - start_time
         logger.debug(
             f"Disk read size: {size} bytes, "
@@ -565,8 +566,8 @@ class LocalDiskBackend(StorageBackendInterface):
                 f.readinto(buffer)
         else:
             fd = os.open(path, os.O_RDONLY | os.O_DIRECT)
-            fdo = os.fdopen(fd, "rb", buffering=0)
-            fdo.readinto(buffer)
+            with os.fdopen(fd, "rb", buffering=0) as fdo:
+                fdo.readinto(buffer)
         disk_read_time = time.time() - start_time
         logger.debug(
             f"Disk read size: {size} bytes, "
