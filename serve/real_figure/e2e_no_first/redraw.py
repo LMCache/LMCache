@@ -128,7 +128,7 @@ methods = [
     ('KIVI LRU', 'kivi', 'tab:blue', 'o'),
     ('StreamingLLM LRU', 'streaming', 'tab:pink', 's'),
     ('Prefill', 'prefill', 'tab:green', 'D'),
-    ('Offload', 'offload', 'tab:red', 'X')
+    ('Without compression', 'offload', 'tab:red', 'X')
 ]
 
 fig, axs = plt.subplots(1, 3, figsize=(24, 6), sharex=False, sharey=False)
@@ -136,25 +136,37 @@ for i, ax in enumerate(axs):
     filepaths = subplot_filepaths[i]
     for label, key, color, marker in methods:
         ttft, f1 = load_metrics(filepaths[key], filter_first=True)
-        if ttft and f1:
-            ax.plot(
-                ttft, f1,
-                color=color,
-                marker=marker,
-                markersize=10,
-                linewidth=5,
-                label=label
-            )
-    ax.set_xlabel("Average Delay (s)", fontsize=22)
-    ax.set_ylabel(y_labels[i], fontsize=22)
-    ax.set_title(subplot_titles[i], fontsize=22)
-    ax.tick_params(axis='both', labelsize=20)
+        if i == 2 and key == 'offload':
+            print("Skipping offload for subplot 3")
+            if ttft and f1:
+                ax.plot(
+                    ttft, 1,
+                    color=color,
+                    marker=marker,
+                    markersize=20,
+                    linewidth=7,
+                    label=label
+                )
+        else:
+            if ttft and f1:
+                ax.plot(
+                    ttft, f1,
+                    color=color,
+                    marker=marker,
+                    markersize=20,
+                    linewidth=7,
+                    label=label
+                )
+    ax.set_xlabel("Average TTFT (s)", fontsize=25)
+    ax.set_ylabel(y_labels[i], fontsize=25)
+    ax.set_title(subplot_titles[i], fontsize=25)
+    ax.tick_params(axis='both', labelsize=25)
     ax.grid(True)
     ax.set_xlim(left=0)
 
 # Shared legend
 handles, labels = axs[0].get_legend_handles_labels()
-fig.legend(handles, labels, loc='upper center', ncol=len(labels), fontsize=20, frameon=False, bbox_to_anchor=(0.5, 1.07))
+fig.legend(handles, labels, loc='upper center', ncol=len(labels), fontsize=25, frameon=False, bbox_to_anchor=(0.5, 1.07))
 plt.tight_layout(rect=[0, 0, 1, 0.97])
 plt.savefig("all_metrics.pdf", dpi=300, bbox_inches="tight")
 print("Plot saved as all_metrics.pdf")
