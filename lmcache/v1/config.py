@@ -138,6 +138,8 @@ class LMCacheEngineConfig:
     # Whether to enable Python's garbage collection
     py_enable_gc: bool = True
 
+    cache_policy: str = "LRU"  # Cache policy to use
+
     @staticmethod
     def from_defaults(
         chunk_size: int = 256,
@@ -184,6 +186,7 @@ class LMCacheEngineConfig:
         blocking_timeout_secs: int = 10,
         external_lookup_client: Optional[str] = None,
         py_enable_gc: bool = True,
+        cache_policy: str = "LRU",
     ) -> "LMCacheEngineConfig":
         # TODO (ApostaC): Add nixl config
         return LMCacheEngineConfig(
@@ -231,6 +234,7 @@ class LMCacheEngineConfig:
             blocking_timeout_secs,
             external_lookup_client,
             py_enable_gc,
+            cache_policy,
         ).validate()
 
     @staticmethod
@@ -376,6 +380,8 @@ class LMCacheEngineConfig:
 
         py_enable_gc = config.get("py_enable_gc", True)
 
+        cache_policy = config.get("cache_policy", "LRU")
+
         extra_config = config.get("extra_config", None)
         if extra_config is not None:
             assert isinstance(extra_config, dict), "extra_config must be a dict"
@@ -465,6 +471,7 @@ class LMCacheEngineConfig:
                 blocking_timeout_secs,
                 external_lookup_client,
                 py_enable_gc,
+                cache_policy,
             )
             .validate()
             .log_config()
@@ -684,6 +691,9 @@ class LMCacheEngineConfig:
         )
 
         config.py_enable_gc = to_bool(parse_env(get_env_name("py_enable_gc"), True))
+
+        config.cache_policy = parse_env(get_env_name("cache_policy"), "LRU")
+
         return config.validate().log_config()
 
     def to_original_config(self) -> orig_config.LMCacheEngineConfig:
@@ -766,6 +776,7 @@ class LMCacheEngineConfig:
             "blocking_timeout_secs": self.blocking_timeout_secs,
             "external_lookup_client": self.external_lookup_client,
             "py_enable_gc": self.py_enable_gc,
+            "cache_policy": self.cache_policy,
         }
         logger.info(f"LMCache Configuration: {config_dict}")
 
