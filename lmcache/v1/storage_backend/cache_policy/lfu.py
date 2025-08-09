@@ -14,7 +14,7 @@ from lmcache.v1.storage_backend.cache_policy.base_policy import BaseCachePolicy
 logger = init_logger(__name__)
 
 
-class LFUCachePolicy(BaseCachePolicy(dict[CacheEngineKey, Any])):
+class LFUCachePolicy(BaseCachePolicy[dict[CacheEngineKey, Any]]):
     """
     LFU cache policy.
     """
