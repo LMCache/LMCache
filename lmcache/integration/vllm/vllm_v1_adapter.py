@@ -3,6 +3,7 @@
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Optional, Union
 import os
+import uuid
 
 # Third Party
 from vllm.config import VllmConfig
@@ -396,7 +397,7 @@ class LMCacheConnectorV1Impl:
 
         self._block_size = vllm_config.cache_config.block_size
 
-        # request_id -> (vllm cached tokes, lmcache cached tokens)
+        # request_id -> (vllm cached tokens, lmcache cached tokens)
         self.load_specs: dict[str, LoadSpec] = {}
 
         self.kv_cache_manager: Optional[KVCacheManager] = None
@@ -469,7 +470,7 @@ class LMCacheConnectorV1Impl:
 
         attn_metadata = forward_context.attn_metadata
         if attn_metadata is None:
-            logger.warning("In connector.start_load_kv, but the attn_metadata is None")
+            logger.debug("In connector.start_load_kv, but the attn_metadata is None")
             return
 
         assert self.lmcache_engine is not None
@@ -809,14 +810,15 @@ class LMCacheConnectorV1Impl:
                 token_ids, request.mm_hashes, request.mm_positions
             )
 
-        self._lookup_requests_in_step.append(request.request_id)
+        lookup_id = str(uuid.uuid4())
+        self._lookup_requests_in_step.append(lookup_id)
         if self.skip_last_n_tokens > 0:
             num_external_hit_tokens = self.lookup_client.lookup(
-                token_ids[: -self.skip_last_n_tokens], request_id=request.request_id
+                token_ids[: -self.skip_last_n_tokens], lookup_id=lookup_id
             )
         else:
             num_external_hit_tokens = self.lookup_client.lookup(
-                token_ids, request_id=request.request_id
+                token_ids, lookup_id=lookup_id
             )
 
         # When prompt length is divisible by the block size and all
