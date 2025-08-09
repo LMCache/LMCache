@@ -43,6 +43,8 @@ class LFUCachePolicy(BaseCachePolicy[dict[CacheEngineKey, Any]]):
     ) -> None:
         curr_freq = self.key_to_freq[key]
         self.freq_to_keys[curr_freq].pop(key)
+        if not self.freq_to_keys[curr_freq]:
+            self.freq_to_keys.pop(curr_freq)
 
         curr_freq += 1
         self.key_to_freq[key] = curr_freq
@@ -87,6 +89,8 @@ class LFUCachePolicy(BaseCachePolicy[dict[CacheEngineKey, Any]]):
             for key in fifo_keys:
                 if not cache_dict[key].can_evict:
                     continue
+                evict_keys.append(key)
+                evict_freqs.append(curr_min_freq)
                 self.key_to_freq.pop(key)
                 if len(evict_keys) == num_candidates:
                     break
