@@ -224,7 +224,7 @@ class LocalDiskBackend(StorageBackendInterface):
         # flip the order of the keys in the request
         with self.disk_lock:
             for key in reversed(self.keys_in_request):
-                self.evictor.update_on_hit(key, self.dict)
+                self.cache_policy.update_on_hit(key, self.dict)
             self.keys_in_request = []
 
     def exists_in_put_tasks(self, key: CacheEngineKey) -> bool:
@@ -321,7 +321,7 @@ class LocalDiskBackend(StorageBackendInterface):
         required_size = memory_obj.get_physical_size()
         with self.disk_lock:
             while self.current_cache_size + required_size > self.max_cache_size:
-                evict_keys = self.evictor.get_evict_candidates(
+                evict_keys = self.cache_policy.get_evict_candidates(
                     self.dict, num_candidates=1
                 )
                 if not evict_keys:
@@ -398,7 +398,7 @@ class LocalDiskBackend(StorageBackendInterface):
         self.dict[key].pin()
 
         # Update cache recency
-        self.evictor.update_on_hit(key, self.dict)
+        self.cache_policy.update_on_hit(key, self.dict)
 
         self.disk_lock.release()
         logger.debug(f"Prefetching {key} from disk.")
@@ -440,7 +440,7 @@ class LocalDiskBackend(StorageBackendInterface):
 
         self.disk_lock.acquire()
         # Update cache recency
-        self.evictor.update_on_hit(key, self.dict)
+        self.cache_policy.update_on_hit(key, self.dict)
 
         disk_meta = self.dict[key]
         path = disk_meta.path
