@@ -24,8 +24,8 @@ def dumb_metadata_with_model_name(
     return LMCacheEngineMetadata(model_name, 3, 123, fmt, torch.bfloat16, kv_shape)
 
 
-def dumb_cache_engine_key():
-    return CacheEngineKey("vllm", "test_model", 3, 123, 1234)
+def dumb_cache_engine_key(id: int = 0) -> CacheEngineKey:
+    return CacheEngineKey("vllm", "test_model", 3, 123, id)
 
 
 def random_string(N):
