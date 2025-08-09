@@ -27,7 +27,7 @@ if [[ $1 == "prefiller1" ]]; then
         LMCACHE_CONFIG_FILE=$prefill_config_file \
         VLLM_ENABLE_V1_MULTIPROCESSING=1 \
         VLLM_WORKER_MULTIPROC_METHOD=spawn \
-        CUDA_VISIBLE_DEVICES=4 \
+        CUDA_VISIBLE_DEVICES=0 \
         vllm serve $MODEL \
         --port 7100 \
         --disable-log-requests \
@@ -44,7 +44,7 @@ elif [[ $1 == "prefiller2" ]]; then
         LMCACHE_CONFIG_FILE=$prefill_config_file \
         VLLM_ENABLE_V1_MULTIPROCESSING=1 \
         VLLM_WORKER_MULTIPROC_METHOD=spawn \
-        CUDA_VISIBLE_DEVICES=5 \
+        CUDA_VISIBLE_DEVICES=1 \
         vllm serve $MODEL \
         --port 7101 \
         --disable-log-requests \
@@ -63,7 +63,7 @@ elif [[ $1 == "decoder1" ]]; then
         LMCACHE_CONFIG_FILE=$decode_config_file \
         VLLM_ENABLE_V1_MULTIPROCESSING=1 \
         VLLM_WORKER_MULTIPROC_METHOD=spawn \
-        CUDA_VISIBLE_DEVICES=6 \
+        CUDA_VISIBLE_DEVICES=2 \
         vllm serve $MODEL \
         --port 7200 \
         --disable-log-requests \
@@ -80,7 +80,7 @@ elif [[ $1 == "decoder2" ]]; then
         LMCACHE_CONFIG_FILE=$decode_config_file \
         VLLM_ENABLE_V1_MULTIPROCESSING=1 \
         VLLM_WORKER_MULTIPROC_METHOD=spawn \
-        CUDA_VISIBLE_DEVICES=7 \
+        CUDA_VISIBLE_DEVICES=3 \
         vllm serve $MODEL \
         --port 7201 \
         --disable-log-requests \
