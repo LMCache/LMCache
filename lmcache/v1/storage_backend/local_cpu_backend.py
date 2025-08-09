@@ -204,10 +204,10 @@ class LocalCPUBackend(StorageBackendInterface):
             return False
 
         memory_obj = self.hot_cache.pop(key)
+        memory_obj.ref_count_down()
 
         if force:
             self.cache_policy.update_on_force_evict(key)
-            memory_obj.ref_count_down()
             self.cpu_lock.release()
 
         self.usage -= memory_obj.get_size()
