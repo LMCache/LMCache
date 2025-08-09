@@ -137,7 +137,7 @@ class LMCacheEngine:
                 self.fmt = MemoryFormat.KV_T2D
 
         self.lookup_cache = {}
-        # request_id -> [pinned keys]
+        # lookup_id -> [pinned keys]
         self.lookup_pins = defaultdict(list)
 
         InitializeUsageContext(config.to_original_config(), metadata)
@@ -649,7 +649,7 @@ class LMCacheEngine:
         self,
         tokens: Union[torch.Tensor, List[int]],
         search_range: Optional[List[str]] = None,
-        request_id: Optional[str] = None,
+        lookup_id: Optional[str] = None,
         pin: bool = False,
     ) -> int:
         """
@@ -662,7 +662,8 @@ class LMCacheEngine:
         ["LocalCPUBackend", "LocalDiskBackend"] for now.
         If None, search in all backends.
 
-        :param str request_id: The request ID to associate with the lookup
+        :param str lookup_id: The lookup ID to
+        associate with the lookup
 
         :param bool pin: If True, pin the KV cache in the storage.
 
@@ -673,7 +674,7 @@ class LMCacheEngine:
             prev_end = 0
 
             if pin:
-                assert request_id is not None, "request_id is required when pin is True"
+                assert lookup_id is not None, "lookup_id is required when pin is True"
 
             # secondary lookup on p2p (via lookup_server) if enabled
             search_p2p = self.enable_p2p and (
@@ -699,15 +700,15 @@ class LMCacheEngine:
                             if self.lookup_server.lookup(key_single_layer):
                                 found = True
                     if found:
-                        if pin and request_id not in self.lookup_pins:
-                            self.lookup_pins[request_id].extend(key_all_layers)
+                        if pin:
+                            self.lookup_pins[lookup_id].extend(key_all_layers)
                         prev_end = end
                         continue
                     return prev_end
                 else:
                     if self.storage_manager.contains(key, search_range, pin):
-                        if pin and request_id not in self.lookup_pins:
-                            self.lookup_pins[request_id].append(key)
+                        if pin:
+                            self.lookup_pins[lookup_id].append(key)
                         prev_end = end
                         continue
 
@@ -742,7 +743,7 @@ class LMCacheEngine:
         num_tokens = self.lookup(
             tokens,
             search_range=old_position,
-            request_id=event_id,
+            lookup_id=event_id,
             pin=True,
         )
 
@@ -806,7 +807,7 @@ class LMCacheEngine:
         num_tokens = self.lookup(
             tokens,
             search_range=[location],
-            request_id=event_id,
+            lookup_id=event_id,
             pin=True,
         )
 
@@ -837,11 +838,11 @@ class LMCacheEngine:
         return num_tokens
 
     @_lmcache_nvtx_annotate
-    def lookup_unpin(self, request_ids: list[str]) -> None:
-        for request_id in request_ids:
-            if request_id in self.lookup_pins:
-                self.storage_manager.batched_unpin(self.lookup_pins[request_id])
-                del self.lookup_pins[request_id]
+    def lookup_unpin(self, lookup_ids: list[str]) -> None:
+        for lookup_id in lookup_ids:
+            if lookup_id in self.lookup_pins:
+                self.storage_manager.batched_unpin(self.lookup_pins[lookup_id])
+                del self.lookup_pins[lookup_id]
 
     @_lmcache_nvtx_annotate
     def clear(
