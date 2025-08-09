@@ -70,7 +70,7 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
     "max_local_disk_size": {"type": float, "default": 0.0, "env_converter": float},
     "remote_url": {
         "type": Optional[str],
-        "default": "lm://localhost:65432",
+        "default": None,
         "env_converter": str,
     },
     "remote_serde": {"type": Optional[str], "default": "naive", "env_converter": str},
