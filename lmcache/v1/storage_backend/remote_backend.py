@@ -131,12 +131,17 @@ class RemoteBackend(StorageBackendInterface):
                 key.fmt, key.model_name, key.world_size, 0, key.chunk_hash
             )
 
-        future = asyncio.run_coroutine_threadsafe(
-            self.connection.exists(key), self.loop
-        )
         try:
-            res = future.result()
-            return res
+            if self.config.extra_config is not None and self.config.extra_config.get(
+                "use_exists_sync", False
+            ):
+                return self.connection.exists_sync(key)
+            else:
+                future = asyncio.run_coroutine_threadsafe(
+                    self.connection.exists(key), self.loop
+                )
+                res = future.result()
+                return res
         except Exception as e:
             logger.warning(f"Remote connection failed in contains: {e}")
             logger.warning("Returning False")

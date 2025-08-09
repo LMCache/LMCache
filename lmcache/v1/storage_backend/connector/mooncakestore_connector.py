@@ -143,6 +143,9 @@ class MooncakestoreConnector(RemoteConnector):
     async def exists(self, key: CacheEngineKey) -> bool:
         return self.store.is_exist(key.to_string())
 
+    def exists_sync(self, key: CacheEngineKey) -> bool:
+        return self.store.is_exist(key.to_string())
+
     async def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         key_str = key.to_string()
 
