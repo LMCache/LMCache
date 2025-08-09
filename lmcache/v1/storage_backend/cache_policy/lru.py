@@ -29,6 +29,13 @@ class LRUCachePolicy(BaseCachePolicy[OrderedDict[CacheEngineKey, Any]]):
     ) -> None:
         cache_dict.move_to_end(key)
 
+    def update_on_put(
+        self,
+        key: CacheEngineKey,
+    ) -> None:
+        # No action needed for LRU on put, as the key is already at the end.
+        pass
+
     def update_on_force_evict(
         self,
         key: CacheEngineKey,

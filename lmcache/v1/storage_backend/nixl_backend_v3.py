@@ -188,7 +188,7 @@ class NixlBackend(StorageBackendInterface):
     def remove(
         self,
         key: CacheEngineKey,
-        free_obj: bool = True,
+        force: bool = True,
     ) -> bool:
         """
         Remove the key from the storage backend.

@@ -43,6 +43,20 @@ class BaseCachePolicy(Generic[TCache], metaclass=abc.ABCMeta):
 
     # TODO(Jiayi): we need to unify the `Any` type in the `MutableMapping`
     @abc.abstractmethod
+    def update_on_put(
+        self,
+        key: CacheEngineKey,
+    ) -> None:
+        """
+        Update cache_dict and internal states when a cache is stored
+
+        Input:
+            key: a CacheEngineKey
+        """
+        raise NotImplementedError
+
+    # TODO(Jiayi): we need to unify the `Any` type in the `MutableMapping`
+    @abc.abstractmethod
     def update_on_force_evict(
         self,
         key: CacheEngineKey,

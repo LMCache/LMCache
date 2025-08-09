@@ -29,6 +29,12 @@ class FIFOCachePolicy(BaseCachePolicy[dict[CacheEngineKey, Any]]):
     ) -> None:
         pass
 
+    def update_on_put(
+        self,
+        key: CacheEngineKey,
+    ) -> None:
+        pass
+
     def update_on_force_evict(
         self,
         key: CacheEngineKey,

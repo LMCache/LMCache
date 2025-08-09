@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from collections import OrderedDict
 from concurrent.futures import Future
 from typing import TYPE_CHECKING, List, Optional
 import threading
@@ -47,9 +46,7 @@ class LocalCPUBackend(StorageBackendInterface):
         lmcache_worker: Optional["LMCacheWorker"] = None,
     ):
         self.cache_policy = get_cache_policy(config.cache_policy)
-        self.hot_cache: OrderedDict[CacheEngineKey, MemoryObj] = (
-            self.cache_policy.init_mutable_mapping()
-        )
+        self.hot_cache = self.cache_policy.init_mutable_mapping()
 
         self.use_hot = config.local_cpu
         self.lookup_server = lookup_server
@@ -107,8 +104,11 @@ class LocalCPUBackend(StorageBackendInterface):
         with self.cpu_lock:
             if key in self.hot_cache:
                 return None
-            self.hot_cache[key] = memory_obj
+
             memory_obj.ref_count_up()
+            self.hot_cache[key] = memory_obj
+
+            self.cache_policy.update_on_put(key)
 
             self.usage += memory_obj.get_size()
             self.stats_monitor.update_local_cache_usage(self.usage)
@@ -195,27 +195,32 @@ class LocalCPUBackend(StorageBackendInterface):
             memory_obj.unpin()
             return True
 
-    def remove(self, key: CacheEngineKey, free_obj=True) -> bool:
-        with self.cpu_lock:
-            if key not in self.hot_cache:
-                return False
-            memory_obj = self.hot_cache.pop(key)
-            if free_obj:
-                memory_obj.ref_count_down()
+    def remove(self, key: CacheEngineKey, force: bool = True) -> bool:
+        if force:
+            self.cpu_lock.acquire()
+        if key not in self.hot_cache:
+            if force:
+                self.cpu_lock.release()
+            return False
 
-            self.usage -= memory_obj.get_size()
-            self.stats_monitor.update_local_cache_usage(self.usage)
+        memory_obj = self.hot_cache.pop(key)
 
-            if self.lmcache_worker is not None:
-                self.lmcache_worker.put_msg(
-                    KVEvictMsg(
-                        self.instance_id, key.worker_id, key.chunk_hash, str(self)
-                    )
-                )
-            # NOTE (Jiayi): This `return True` might not accurately reflect
-            # whether the key is removed from the actual memory because
-            # other backends might still (temporarily) hold the memory object.
-            return True
+        if force:
+            self.cache_policy.update_on_force_evict(key)
+            memory_obj.ref_count_down()
+            self.cpu_lock.release()
+
+        self.usage -= memory_obj.get_size()
+        self.stats_monitor.update_local_cache_usage(self.usage)
+
+        if self.lmcache_worker is not None:
+            self.lmcache_worker.put_msg(
+                KVEvictMsg(self.instance_id, key.worker_id, key.chunk_hash, str(self))
+            )
+        # NOTE (Jiayi): This `return True` might not accurately reflect
+        # whether the key is removed from the actual memory because
+        # other backends might still (temporarily) hold the memory object.
+        return True
 
     @_lmcache_nvtx_annotate
     def allocate(
@@ -263,10 +268,9 @@ class LocalCPUBackend(StorageBackendInterface):
                     )
                     break
 
-                for evict_key in evict_keys:
-                    old_mem_obj = self.hot_cache.pop(evict_key)
-                    old_mem_obj.ref_count_down()
+                self.batched_remove(evict_keys, force=False)
 
+                # TODO(Jiayi): Move this inside `batched_remove`
                 if self.lookup_server is not None:
                     self.lookup_server.batched_remove(evict_keys)
 
@@ -333,6 +337,9 @@ class LocalCPUBackend(StorageBackendInterface):
                 for evict_key in evict_keys:
                     evict_key_all_layer = evict_key.split_layers(batch_size)
 
+                    # TODO(Jiayi): batched allocate is not supported through
+                    # `batched_remove`. Therefore, features like usage tracking
+                    # is not supported.
                     old_mem_objs = []
                     for key in evict_key_all_layer:
                         old_mem_objs.append(self.hot_cache[key])

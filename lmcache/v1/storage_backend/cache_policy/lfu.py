@@ -52,11 +52,24 @@ class LFUCachePolicy(BaseCachePolicy[dict[CacheEngineKey, Any]]):
         else:
             self.freq_to_keys[curr_freq][key] = None
 
+    def update_on_put(
+        self,
+        key: CacheEngineKey,
+    ) -> None:
+        # Initialize the frequency for the new key.
+        self.key_to_freq[key] = 1
+        if 1 not in self.freq_to_keys:
+            self.freq_to_keys[1] = {key: None}
+        else:
+            self.freq_to_keys[1][key] = None
+
     def update_on_force_evict(
         self,
         key: CacheEngineKey,
     ) -> None:
-        freq = self.key_to_freq.pop(key)
+        freq = self.key_to_freq.pop(key, None)
+        if not freq:
+            return
         self.freq_to_keys[freq].pop(key)
         if not self.freq_to_keys[freq]:
             self.freq_to_keys.pop(freq)
