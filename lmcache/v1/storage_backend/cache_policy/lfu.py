@@ -1,118 +1,89 @@
 # SPDX-License-Identifier: Apache-2.0
+
 # Standard
-from collections import deque
+from typing import Any
+
+# Third Party
+from sortedcontainers import SortedDict
 
 # First Party
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
-
 from lmcache.v1.storage_backend.cache_policy.base_policy import BaseCachePolicy
 
 logger = init_logger(__name__)
 
 
-class LFUCachePolicy(BaseCachePolicy):
+class LFUCachePolicy(BaseCachePolicy(dict[CacheEngineKey, Any])):
     """
     LFU cache policy.
     """
-    
-    # NOTE(Jiayi): We use `ordered dict` + `bucket` to implement LFU.
+
+    # NOTE(Jiayi): We use `sorted dict` + `bucket` to implement LFU.
     # NOTE(Jiayi): We use FIFO for entries with the same frequency.
     def __init__(self):
-        self.freq_to_keys = {}
+        # TODO(Jiayi): `SortedDict` is log(N).
+        # A way to make it O(1) is to use a dict and keep track min freuency.
+        # However, this requires us keep another data structures to keep track
+        # of the pinned keys.
+        self.freq_to_keys = SortedDict()
 
         # TODO(Jiayi): We can optimize this a bit by using `key_to_val_freq`
         self.key_to_freq = {}
 
-        self.min_freq = 0
-        self.max_freq = 0
-
         logger.info("Initializing LFUCachePolicy")
-    
+
     def init_mutable_mapping(self) -> dict[CacheEngineKey, Any]:
         return {}
 
     def update_on_hit(
-        self, 
-        key: CacheEngineKey, 
+        self,
+        key: CacheEngineKey,
         cache_dict: dict[CacheEngineKey, Any],
     ) -> None:
         curr_freq = self.key_to_freq[key]
         self.freq_to_keys[curr_freq].pop(key)
 
-        if curr_freq == self.min_freq:
-            self.min_freq += 1
-        
-        if curr_freq == self.max_freq:
-            self.max_freq += 1
-
         curr_freq += 1
         self.key_to_freq[key] = curr_freq
 
         if curr_freq not in self.freq_to_keys:
-            self.freq_to_keys[curr_freq] = OrderedDict(key=None)
+            self.freq_to_keys[curr_freq] = {key: None}
         else:
             self.freq_to_keys[curr_freq][key] = None
-        
+
+    def update_on_force_evict(
+        self,
+        key: CacheEngineKey,
+    ) -> None:
+        freq = self.key_to_freq.pop(key)
+        self.freq_to_keys[freq].pop(key)
+        if not self.freq_to_keys[freq]:
+            self.freq_to_keys.pop(freq)
 
     # NOTE(Jiayi): We do best effort to get eviction candidates so the number
     # of returned keys mignt be smaller than num_candidates.
     def get_evict_candidates(
-        self, 
-        cache_dict: dict[CacheEngineKey, Any], 
+        self,
+        cache_dict: dict[CacheEngineKey, Any],
         num_candidates: int = 1,
     ) -> list[CacheEngineKey]:
-        
         evict_keys = []
-        curr_min_freq = self.min_freq
-
-        # Previous `min_freq` whose bucket still has keys.
-        prev_min_freq = 0
-
-
-        # Whether an unfull bucket has been evicted.
-        # In this case we don't have to skip pinned keys.
-        evict_unfull = False
-
-        while True:
-            if curr_min_freq not in self.freq_to_keys:
-                curr_min_freq += 1
-                continue
-            
-            if not evict_unfull:
-                self.min_freq = curr_min_freq
-
-            fifo_keys = self.freq_to_keys[curr_min_freq]
-            
-            evict_keys_in_bucket = []
-            evict_unfull_this_bucket = False
+        evict_freqs = []
+        for curr_min_freq, fifo_keys in self.freq_to_keys.items():
             for key in fifo_keys:
-                if cache_dict[key].is_pinned:
+                if not cache_dict[key].can_evict:
                     continue
-                evict_keys_in_bucket.append(key)
                 self.key_to_freq.pop(key)
-                if len(evict_keys) + len(evict_keys_in_bucket) == num_candidates:
+                if len(evict_keys) == num_candidates:
                     break
-            
-            if len(evict_keys_in_bucket) < len(fifo_keys):
-                evict_unfull = True
-                evict_unfull_this_bucket = True
-            
-            for key in evict_keys_in_bucket:
-                fifo_keys.pop(key)
-                evict_keys.append(key)
 
-            if not fifo_keys:
-                self.freq_to_keys.pop(curr_min_freq)
-            
-            if curr_min_freq == self.max_freq:
-                if not evict_unfull_this_bucket:
-                    self.max_freq = prev_min_freq
+            if len(evict_keys) == num_candidates:
                 break
-            
-            if evict_unfull_this_bucket:
-                prev_min_freq = curr_min_freq
 
-            curr_min_freq += 1
+        for freq, key in zip(evict_freqs, evict_keys, strict=False):
+            self.freq_to_keys[freq].pop(key)
+            if not self.freq_to_keys[freq]:
+                self.freq_to_keys.pop(freq)
 
         return evict_keys
