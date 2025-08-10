@@ -74,14 +74,8 @@ Documentation
    :maxdepth: 2
    :caption: KV Cache offloading and sharing
 
-   kv_cache/cpu_ram
-   kv_cache/local_storage
-   kv_cache/gds
-   kv_cache/redis
-   kv_cache/infinistore
-   kv_cache/mooncake
-   kv_cache/valkey
-   kv_cache/weka
+   kv_cache/storage_backends/index
+   kv_cache/caching_policies
 
 :raw-html:`<br />`
 

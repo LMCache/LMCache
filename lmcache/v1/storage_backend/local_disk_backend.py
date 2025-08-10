@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from collections import OrderedDict
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import TYPE_CHECKING, Callable, List, Optional
 import asyncio
@@ -22,7 +21,7 @@ from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.lookup_server import LookupServerInterface
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
 from lmcache.v1.storage_backend.abstract_backend import StorageBackendInterface
-from lmcache.v1.storage_backend.evictor import LRUEvictor, PutStatus
+from lmcache.v1.storage_backend.cache_policy import get_cache_policy
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 
 if TYPE_CHECKING:
@@ -155,7 +154,9 @@ class LocalDiskBackend(StorageBackendInterface):
         lmcache_worker: Optional["LMCacheWorker"] = None,
         lookup_server: Optional[LookupServerInterface] = None,
     ):
-        self.dict: OrderedDict[CacheEngineKey, DiskCacheMetadata] = OrderedDict()
+        self.cache_policy = get_cache_policy(config.cache_policy)
+        self.dict = self.cache_policy.init_mutable_mapping()
+
         self.dst_device = dst_device
 
         self.local_cpu_backend = local_cpu_backend
@@ -169,9 +170,6 @@ class LocalDiskBackend(StorageBackendInterface):
             logger.info(f"Created local disk cache directory: {self.path}")
 
         self.lookup_server = lookup_server
-
-        # Initialize the evictor
-        self.evictor = LRUEvictor(max_cache_size=config.max_local_disk_size)
 
         self.loop = loop
 
@@ -187,6 +185,11 @@ class LocalDiskBackend(StorageBackendInterface):
         logger.info("Using O_DIRECT for disk I/O: %s", self.use_odirect)
 
         self.disk_worker = LocalDiskWorker()
+
+        # TODO(Jiayi): We need a disk space allocator to avoid fragmentation
+        # and hide the following details away from the backend.
+        self.max_cache_size = int(config.max_local_disk_size * 1024**3)
+        self.current_cache_size = 0.0
 
         # to help maintain suffix -> prefix order in the dict
         # assumption: only one request is looked up at a time
@@ -221,7 +224,7 @@ class LocalDiskBackend(StorageBackendInterface):
         # flip the order of the keys in the request
         with self.disk_lock:
             for key in reversed(self.keys_in_request):
-                self.evictor.update_on_hit(key, self.dict)
+                self.cache_policy.update_on_hit(key, self.dict)
             self.keys_in_request = []
 
     def exists_in_put_tasks(self, key: CacheEngineKey) -> bool:
@@ -252,17 +255,25 @@ class LocalDiskBackend(StorageBackendInterface):
     def remove(
         self,
         key: CacheEngineKey,
-        free_obj: bool = True,
+        force: bool = True,
     ) -> bool:
-        with self.disk_lock:
-            if not (meta := self.dict.pop(key, None)):
-                return False
+        if force:
+            self.disk_lock.acquire()
+
+        if not (meta := self.dict.pop(key, None)):
+            if force:
+                self.disk_lock.release()
+            return False
 
         path = meta.path
         size = meta.size
         self.usage -= size
         self.stats_monitor.update_local_storage_usage(self.usage)
         os.remove(path)
+
+        if force:
+            self.cache_policy.update_on_force_evict(key)
+            self.disk_lock.release()
 
         # push kv evict msg
         if self.lmcache_worker is not None:
@@ -306,18 +317,29 @@ class LocalDiskBackend(StorageBackendInterface):
             logger.debug(f"Put task for {key} is already in progress.")
             return None
 
-        # Update cache recency
-        evict_keys, put_status = self.evictor.update_on_put(
-            self.dict, memory_obj.get_physical_size()
-        )
-        if put_status == PutStatus.ILLEGAL:
-            return None
-        # evict caches
-        for evict_key in evict_keys:
-            self.remove(evict_key)
-        if self.lookup_server is not None:
-            self.lookup_server.batched_remove(evict_keys)
+        # TODO(Jiayi): Fragmentation is not considered here.
+        required_size = memory_obj.get_physical_size()
+        with self.disk_lock:
+            while self.current_cache_size + required_size > self.max_cache_size:
+                evict_keys = self.cache_policy.get_evict_candidates(
+                    self.dict, num_candidates=1
+                )
+                if not evict_keys:
+                    logger.warning(
+                        "No eviction candidates found.", "Disk space under pressure."
+                    )
+                    return None
 
+                for evict_key in evict_keys:
+                    self.current_cache_size -= self.dict[evict_key].size
+
+                self.batched_remove(evict_keys, force=False)
+
+                if self.lookup_server is not None:
+                    self.lookup_server.batched_remove(evict_keys)
+            self.current_cache_size += required_size
+
+        self.cache_policy.update_on_put(key)
         memory_obj.ref_count_up()
 
         self.disk_worker.submit_task(
@@ -351,6 +373,9 @@ class LocalDiskBackend(StorageBackendInterface):
             self.disk_lock.release()
             return False
 
+        # NOTE(Jiayi): Currently, we consider prefetch as cache hit.
+        self.cache_policy.update_on_hit(key, self.dict)
+
         if self.disk_worker.exists_in_prefetch_tasks(key):
             logger.debug(f"Prefetch task for {key} is already in progress.")
             self.disk_lock.release()
@@ -373,7 +398,7 @@ class LocalDiskBackend(StorageBackendInterface):
         self.dict[key].pin()
 
         # Update cache recency
-        self.evictor.update_on_hit(key, self.dict)
+        self.cache_policy.update_on_hit(key, self.dict)
 
         self.disk_lock.release()
         logger.debug(f"Prefetching {key} from disk.")
@@ -400,6 +425,8 @@ class LocalDiskBackend(StorageBackendInterface):
             self.disk_lock.release()
             return None
 
+        self.cache_policy.update_on_hit(key, self.dict)
+
         self.disk_lock.release()
 
         if memory_obj := self.disk_worker.wait_prefetch_task(key):
@@ -413,12 +440,13 @@ class LocalDiskBackend(StorageBackendInterface):
 
         self.disk_lock.acquire()
         # Update cache recency
-        self.evictor.update_on_hit(key, self.dict)
+        self.cache_policy.update_on_hit(key, self.dict)
 
-        path = self.dict[key].path
-        dtype = self.dict[key].dtype
-        shape = self.dict[key].shape
-        fmt = self.dict[key].fmt
+        disk_meta = self.dict[key]
+        path = disk_meta.path
+        dtype = disk_meta.dtype
+        shape = disk_meta.shape
+        fmt = disk_meta.fmt
         assert dtype is not None
         assert shape is not None
 

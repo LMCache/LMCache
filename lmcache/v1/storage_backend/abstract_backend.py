@@ -162,12 +162,12 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
         raise NotImplementedError
 
     @abc.abstractmethod
-    def remove(self, key: CacheEngineKey, free_obj: bool = True) -> bool:
+    def remove(self, key: CacheEngineKey, force: bool = True) -> bool:
         """
         remove a memory object.
 
         :param CacheEngineKey key: The key of the MemoryObj.
-        :param bool free_obj: Whether to free the MemoryObj after removing it.
+        :param bool force: Whether to it is a forced remove from the external.
 
         :return: a bool indicates whether remove is successful.
         """
@@ -177,19 +177,19 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
     def batched_remove(
         self,
         keys: list[CacheEngineKey],
-        free_obj: bool = True,
+        force: bool = True,
     ) -> int:
         """
         Remove a list of memory objects.
 
         :param list[CacheEngineKey] keys: The keys of the MemoryObjs.
-        :param bool free_obj: Whether to free the MemoryObjs after removing them.
+        :param bool force: Whether to force remove the memory objects.
 
         :return: a int indicates the number of removed memory objects.
         """
         num_removed = 0
         for key in keys:
-            num_removed += self.remove(key, free_obj=free_obj)
+            num_removed += self.remove(key, force=force)
         return num_removed
 
     @abc.abstractmethod

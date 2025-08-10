@@ -120,6 +120,13 @@ class AuditConnector(RemoteConnector):
         self.logger.info(f"[REMOTE_AUDIT]EXISTS|{result}|Key: {key}")
         return result
 
+    def exists_sync(self, key: CacheEngineKey) -> bool:
+        """Check key existence with audit log synchronized"""
+        self.logger.debug(f"[REMOTE_AUDIT]EXISTS_SYNC|START|Key:{key}")
+        result = self.real_connector.exists_sync(key)
+        self.logger.info(f"[REMOTE_AUDIT]EXISTS_SYNC|{result}|Key: {key}")
+        return result
+
     async def list(self) -> List[str]:
         """List keys with audit log"""
         self.logger.debug("[REMOTE_AUDIT]LIST|START")
