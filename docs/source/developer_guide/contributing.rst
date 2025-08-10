@@ -23,7 +23,7 @@ Code of Conduct
 This project adheres to the `Code of Conduct <https://github.com/LMCache/LMCache/blob/dev/CODE_OF_CONDUCT.md>`_. By participating, you are expected to uphold this code.
 
 Contribution Guidelines
-----------------------------------------
+-----------------------
 
 Help on open source projects is always welcome and there is always something that can be improved. For example, documentation (like the text you are reading now) can always use improvement, code can always be clarified, variables or functions can always be renamed or commented on, and there is always a need for more test coverage. If you see something that you think should be fixed, take ownership! Here is how you get started.
 

@@ -11,7 +11,7 @@ The system creates a distributed memory pool by aggregating memory space contrib
 
 By pooling underutilized DRAM and SSD resources from multiple nodes, the system forms a unified distributed storage service that maximizes resource efficiency.
 
-.. image:: ../assets/mooncake-store-preview.png
+.. image:: ../../assets/mooncake-store-preview.png
     :alt: Mooncake Architecture Diagram
 
 Key Features
