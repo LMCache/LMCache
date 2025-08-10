@@ -72,7 +72,7 @@ Setup Example
 
 - Weka already installed and mounted.
 
-- vllm and lmcache installed (:doc:`Installation Guide <../getting_started/installation>`)
+- vllm and lmcache installed (:doc:`Installation Guide <../../getting_started/installation>`)
 
 - Hugging Face access to ``meta-llama/Llama-3.1-70B-Instruct``
 
