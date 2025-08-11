@@ -64,8 +64,8 @@ class RedisConnector(RemoteConnector):
         """Unpack metadata and KV bytes from combined format."""
         if len(combined_bytes) < METADATA_HEADER_SIZE:
             raise ValueError(
-                "Combined bytes too small:"
-                "{len(combined_bytes)} < {METADATA_HEADER_SIZE}"
+                f"Combined bytes too small: "
+                f"{len(combined_bytes)} < {METADATA_HEADER_SIZE}"
             )
 
         metadata_bytes = combined_bytes[:METADATA_HEADER_SIZE]
@@ -78,9 +78,7 @@ class RedisConnector(RemoteConnector):
         return await self.connection.exists(key.to_string())
 
     def exists_sync(self, key: CacheEngineKey) -> bool:
-        raise NotImplementedError(
-            "exists_sync is not supported", " for RedisConnector yet"
-        )
+        raise NotImplementedError("exists_sync is not supported for RedisConnector yet")
 
     async def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         key_str = key.to_string()
@@ -297,8 +295,8 @@ class RedisSentinelConnector(RemoteConnector):
         """Unpack metadata and KV bytes from combined format."""
         if len(combined_bytes) < METADATA_HEADER_SIZE:
             raise ValueError(
-                "Combined bytes too small: "
-                "{len(combined_bytes)} < {METADATA_HEADER_SIZE}"
+                f"Combined bytes too small: "
+                f"{len(combined_bytes)} < {METADATA_HEADER_SIZE}"
             )
 
         metadata_bytes = combined_bytes[:METADATA_HEADER_SIZE]
