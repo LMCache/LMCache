@@ -29,6 +29,8 @@ from lmcache.v1.cache_controller.message import (  # noqa: E501
     MoveRetMsg,
     PinMsg,
     PinRetMsg,
+    UnpinMsg,
+    UnpinRetMsg,
     QueryInstMsg,
     QueryInstRetMsg,
 )
@@ -141,6 +143,15 @@ def create_app(controller_url: str) -> FastAPI:
         event_id: str
         num_tokens: int
 
+    class UnpinRequest(BaseModel):
+        instance_id: str
+        location: str
+        event_id: str
+
+    class UnpinResponse(BaseModel):
+        event_id: str
+        msg: str
+
     @app.post("/pin", response_model=PinResponse)
     async def pin(req: PinRequest):
         try:
@@ -154,6 +165,20 @@ def create_app(controller_url: str) -> FastAPI:
             ret_msg = await lmcache_controller_manager.handle_orchestration_message(msg)
             assert isinstance(ret_msg, PinRetMsg)
             return PinResponse(event_id=ret_msg.event_id, num_tokens=ret_msg.num_tokens)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e)) from e
+
+    @app.post("/unpin", response_model=UnpinResponse)
+    async def unpin(req: UnpinRequest):
+        try:
+            msg = UnpinMsg(
+                event_id=req.event_id,
+                instance_id=req.instance_id,
+                location=req.location,
+            )
+            ret_msg = await lmcache_controller_manager.handle_orchestration_message(msg)
+            assert isinstance(ret_msg, UnpinRetMsg)
+            return UnpinResponse(event_id=ret_msg.event_id, msg=ret_msg.msg)
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e)) from e
 

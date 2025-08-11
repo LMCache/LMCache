@@ -23,6 +23,8 @@ from lmcache.v1.cache_controller.message import (
     Msg,
     PinWorkerMsg,
     PinWorkerRetMsg,
+    UnpinWorkerMsg,
+    UnpinWorkerRetMsg,
     RegisterMsg,
     WorkerMsg,
 )
@@ -241,6 +243,13 @@ class LMCacheWorker:
                     )
                     serialized_ret_msg = msgspec.msgpack.encode(
                         PinWorkerRetMsg(num_tokens=num_pinned_tokens)
+                    )
+                elif isinstance(request, UnpinWorkerMsg):
+                    self.lmcache_engine.lookup_unpin(
+                        request_id=request.worker_event_id,
+                    )
+                    serialized_ret_msg = msgspec.msgpack.encode(
+                        UnpinWorkerRetMsg()
                     )
                 elif isinstance(request, ClearWorkerMsg):
                     num_cleared_tokens = self.lmcache_engine.clear(
