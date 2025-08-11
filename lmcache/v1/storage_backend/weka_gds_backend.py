@@ -509,7 +509,7 @@ class WekaGdsBackend(StorageBackendInterface):
         # TODO(Serapheim): Implement this
         return False
 
-    def remove(self, key, free_obj=True):
+    def remove(self, key, force=True):
         raise NotImplementedError("Remote backend does not support remove now.")
 
     def close(self) -> None:

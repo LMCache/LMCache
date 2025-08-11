@@ -56,7 +56,7 @@ class MooncakeLookupClient(LookupClientInterface):
         else:
             self.token_database = ChunkedTokenDatabase(config, metadata)
 
-    def lookup(self, token_ids: torch.Tensor, request_id: Optional[str] = None) -> int:
+    def lookup(self, token_ids: torch.Tensor, lookup_id: Optional[str] = None) -> int:
         # process token_ids to cacheengine keys
         keys = []
         ends = []

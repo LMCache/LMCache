@@ -81,6 +81,9 @@ class InfinistoreConnector(RemoteConnector):
 
         return await self.loop.run_in_executor(None, blocking_io)
 
+    def exists_sync(self, key: CacheEngineKey) -> bool:
+        return self.rdma_conn.check_exist(key.to_string())
+
     async def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         key_str = key.to_string()
 
