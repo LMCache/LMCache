@@ -238,6 +238,8 @@ def mock_redis():
         patch("redis.Redis", MockRedis) as mock_redis_class,
         patch("redis.from_url", MockRedis.from_url),
         patch("redis.asyncio.from_url", MockRedis.from_url),
+        patch("redis.asyncio.Redis", MockRedis),
+        patch("redis.asyncio.client.Redis", MockRedis),
     ):
         yield mock_redis_class
 
@@ -247,6 +249,7 @@ def mock_redis_sentinel():
     with (
         patch("redis.Sentinel", MockRedisSentinel) as mock,
         patch("redis.asyncio.sentinel.Sentinel", MockRedisSentinel),
+        patch("redis.asyncio.Sentinel", MockRedisSentinel),
     ):
         yield mock
 
