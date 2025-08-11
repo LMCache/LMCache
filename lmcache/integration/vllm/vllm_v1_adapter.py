@@ -983,10 +983,9 @@ class LMCacheConnectorV1Impl:
             )
 
         lookup_id = str(uuid.uuid4())
+        self._lookup_requests_in_step.append(lookup_id)
 
         tags = extract_tags(request.sampling_params)
-
-        self._lookup_requests_in_step.append(request.request_id)
         if self.skip_last_n_tokens > 0:
             num_external_hit_tokens = self.lookup_client.lookup(
                 token_ids[: -self.skip_last_n_tokens],

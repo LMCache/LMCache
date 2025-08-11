@@ -141,7 +141,7 @@ class LMCacheLookupServer:
                 token_ids = self.decoder.decode(token_frames)
                 result = self.lmcache_engine.lookup(
                     token_ids,
-                    request_id=lookup_id,
+                    lookup_id=lookup_id,
                     pin=True,
                     tags=tags,
                 )
