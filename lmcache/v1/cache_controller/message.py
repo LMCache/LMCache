@@ -116,6 +116,14 @@ class PinWorkerMsg(ControlMsg):
     def describe(self) -> str:
         return f"Pin tokens {self.tokens} in location {self.location}"
 
+class UnpinWorkerMsg(ControlMsg):
+    """Unpin message for a single lmcache worker"""
+
+    worker_event_id: str
+    location: str
+
+    def describe(self) -> str:
+        return f"Unpin tokens in location {self.location}"
 
 class CompressWorkerMsg(ControlMsg):
     """Compress message for a single lmcache worker"""
@@ -190,6 +198,13 @@ class PinWorkerRetMsg(ControlRetMsg):
     def describe(self) -> str:
         return f"Number of pinned tokens: {self.num_tokens}"
 
+class UnpinWorkerRetMsg(ControlRetMsg):
+    """Unpin return message for a single lmcache worker"""
+
+    msg: str
+
+    def describe(self) -> str:
+        return f"Unpin success"
 
 class CompressWorkerRetMsg(ControlRetMsg):
     """Compress return message for a single lmcache worker"""
@@ -284,6 +299,29 @@ class PinMsg(OrchMsg):
             f"{self.instance_id} and "
             f"location {self.location}"
         )
+
+class UnpinMsg(OrchMsg):
+    """Unpin message"""
+
+    event_id: str
+    instance_id: str
+    location: str
+
+    def describe(self) -> str:
+        return (
+            f"Unpin tokens in instance "
+            f"{self.instance_id} and "
+            f"location {self.location}"
+        )
+
+class PinRetMsg(OrchMsg):
+    """Pin return message"""
+
+    event_id: str
+    num_tokens: int
+
+    def describe(self) -> str:
+        return f"Number of pinned tokens: {self.num_tokens}"
 
 
 class CompressMsg(OrchMsg):
@@ -383,6 +421,14 @@ class PinRetMsg(OrchRetMsg):
     def describe(self) -> str:
         return f"Number of pinned tokens: {self.num_tokens}"
 
+class UnpinRetMsg(OrchRetMsg):
+    """Unpin return message"""
+
+    event_id: str
+    msg: str
+
+    def describe(self) -> str:
+        return f"Unpin Event {self.event_id} success"
 
 class CompressRetMsg(OrchRetMsg):
     """Compress return message"""
@@ -441,6 +487,8 @@ Msg = Union[
     ClearWorkerRetMsg,
     PinWorkerMsg,
     PinWorkerRetMsg,
+    UnpinWorkerMsg,
+    UnpinWorkerRetMsg,
     CompressWorkerMsg,
     CompressWorkerRetMsg,
     MoveWorkerMsg,
@@ -455,6 +503,8 @@ Msg = Union[
     ClearRetMsg,
     PinMsg,
     PinRetMsg,
+    UnpinMsg,
+    UnpinRetMsg,
     CompressMsg,
     CompressRetMsg,
     MoveMsg,

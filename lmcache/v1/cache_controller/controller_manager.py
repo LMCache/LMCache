@@ -32,6 +32,7 @@ from lmcache.v1.cache_controller.message import (  # isort: skip
     OrchMsg,
     OrchRetMsg,
     PinMsg,
+    UnpinMsg,
     QueryInstMsg,
     RegisterMsg,
     WorkerMsg,
@@ -112,6 +113,8 @@ class LMCacheControllerManager:
             return await self.kv_controller.clear(msg)
         elif isinstance(msg, PinMsg):
             return await self.kv_controller.pin(msg)
+        elif isinstance(msg, UnpinMsg):
+            return await self.kv_controller.unpin(msg)
         elif isinstance(msg, CompressMsg):
             return await self.kv_controller.compress(msg)
         elif isinstance(msg, MoveMsg):
