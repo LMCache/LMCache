@@ -18,7 +18,7 @@ class LookupClientInterface(metaclass=abc.ABCMeta):
     def lookup(
         self,
         token_ids: torch.Tensor,
-        request_id: Optional[str] = None,
+        lookup_id: Optional[str] = None,
         tags: OrderedDict = None,
     ) -> int:
         """
@@ -27,7 +27,7 @@ class LookupClientInterface(metaclass=abc.ABCMeta):
         Args:
             token_ids: The token IDs to lookup
 
-            request_id: The request ID to associate with the lookup
+            lookup_id: The lookup ID to associate with the lookup
 
         Returns:
             The number of tokens that can be loaded from cache

@@ -1,0 +1,10 @@
+num_docs:             8
+doc_len:              20000
+out_len:              100
+repeat_count:         2
+repeat_mode:          random
+shuffle_seed:         0
+max_inflight:         20
+sleep_after:          0
+expected_ttft_gain:   1.5
+expected_latency_gain: 1.5

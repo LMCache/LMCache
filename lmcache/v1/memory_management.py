@@ -271,6 +271,14 @@ class MemoryObj(metaclass=abc.ABCMeta):
         """
         raise NotImplementedError
 
+    @property
+    @abc.abstractmethod
+    def can_evict(self) -> bool:
+        """
+        Check whether the memory obj can be evicted.
+        """
+        raise NotImplementedError
+
 
 class TensorMemoryObj(MemoryObj):
     """
@@ -396,6 +404,14 @@ class TensorMemoryObj(MemoryObj):
     def is_pinned(self) -> bool:
         return self.metadata.pin_count > 0
 
+    @property
+    def can_evict(self) -> bool:
+        """
+        Check whether the memory obj can be evicted.
+        A memory obj can be evicted if it is not pinned and ref_count=1.
+        """
+        return not self.is_pinned and self.get_ref_count() == 1
+
 
 class BytesBufferMemoryObj(MemoryObj):
     """
@@ -487,6 +503,14 @@ class BytesBufferMemoryObj(MemoryObj):
     @property
     def is_pinned(self) -> bool:
         return self.metadata.pin_count > 0
+
+    @property
+    def can_evict(self) -> bool:
+        """
+        Check whether the memory obj can be evicted.
+        A buffer memory obj can be evicted if it is not pinned.
+        """
+        return not self.is_pinned
 
 
 class MemoryAllocatorInterface(metaclass=abc.ABCMeta):

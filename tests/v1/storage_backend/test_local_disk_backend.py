@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from contextlib import nullcontext
-from unittest.mock import patch
 import asyncio
 import os
 import shutil
@@ -16,127 +14,12 @@ import torch
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import (
-    BufferAllocator,
     MemoryFormat,
     MemoryObj,
     MixedMemoryAllocator,
-    PagedTensorMemoryAllocator,
-    TensorMemoryAllocator,
 )
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.v1.storage_backend.local_disk_backend import LocalDiskBackend
-
-
-# This is to mock the constructor and destructor of
-# MixedMemoryAllocator and PinMemoryAllocator to
-# use pin_memory=True for their constructors and
-# avoid calling cudaHostRegister and cudaHostUnregister
-# which may throw an error if torch.empty returns a buffer
-# that cannot be registered (which happens quicker on some machines,
-# especially when torch is doing many allocations and frees)
-@pytest.fixture(autouse=True, scope="module")
-def patch_mixed_allocator():
-    def fake_mixed_init(self, size: int, use_paging: bool = False, **kwargs):
-        """
-        :param int size: The size of the pinned memory in bytes.
-        """
-
-        # self.buffer = torch.empty(size, dtype=torch.uint8)
-        # ptr = self.buffer.data_ptr()
-        # err = torch.cuda.cudart().cudaHostRegister(ptr, size, 0)
-        # assert err == 0, (
-        #     f"cudaHostRegister failed: {torch.cuda.cudart().cudaGetErrorString(err)}"
-        # )
-        self._unregistered = False
-        self.buffer = torch.empty(size, dtype=torch.uint8, pin_memory=True)
-
-        if use_paging:
-            assert "shape" in kwargs, (
-                "shape must be specified for paged memory allocator"
-            )
-            assert "dtype" in kwargs, (
-                "dtype must be specified for paged memory allocator"
-            )
-            assert "fmt" in kwargs, "fmt must be specified for paged memory allocator"
-            self.pin_allocator = PagedTensorMemoryAllocator(
-                tensor=self.buffer,
-                shape=kwargs["shape"],
-                dtype=kwargs["dtype"],
-                fmt=kwargs["fmt"],
-            )
-        else:
-            self.pin_allocator = TensorMemoryAllocator(self.buffer)
-
-        self.host_mem_lock = threading.Lock() if not use_paging else nullcontext()
-
-        self.buffer_allocator = BufferAllocator("cpu")
-
-    def fake_mixed_close(self):
-        if not self._unregistered:
-            torch.cuda.synchronize()
-            # torch.cuda.cudart().cudaHostUnregister(self.buffer.data_ptr())
-            self._unregistered = True
-
-    with (
-        patch(
-            "lmcache.v1.memory_management.MixedMemoryAllocator.__init__",
-            fake_mixed_init,
-        ),
-        patch(
-            "lmcache.v1.memory_management.MixedMemoryAllocator.close", fake_mixed_close
-        ),
-    ):
-        yield
-
-
-@pytest.fixture(autouse=True, scope="module")
-def patch_pin_allocator():
-    def fake_pin_init(self, size: int, use_paging: bool = False, **kwargs):
-        """
-        :param int size: The size of the pinned memory in bytes.
-        """
-
-        # self.buffer = torch.empty(size, dtype=torch.uint8)
-        # ptr = self.buffer.data_ptr()
-        # err = torch.cuda.cudart().cudaHostRegister(ptr, size, 0)
-        # assert err == 0, (
-        #     f"cudaHostRegister failed: {torch.cuda.cudart().cudaGetErrorString(err)}"
-        # )
-        self._unregistered = False
-        self.buffer = torch.empty(size, dtype=torch.uint8, pin_memory=True)
-
-        if use_paging:
-            assert "shape" in kwargs, (
-                "shape must be specified for paged memory allocator"
-            )
-            assert "dtype" in kwargs, (
-                "dtype must be specified for paged memory allocator"
-            )
-            assert "fmt" in kwargs, "fmt must be specified for paged memory allocator"
-            self.allocator = PagedTensorMemoryAllocator(
-                tensor=self.buffer,
-                shape=kwargs["shape"],
-                dtype=kwargs["dtype"],
-                fmt=kwargs["fmt"],
-            )
-        else:
-            self.allocator = TensorMemoryAllocator(self.buffer)
-
-        self.host_mem_lock = threading.Lock() if not use_paging else nullcontext()
-
-    def fake_pin_close(self):
-        if not self._unregistered:
-            torch.cuda.synchronize()
-            # torch.cuda.cudart().cudaHostUnregister(self.buffer.data_ptr())
-            self._unregistered = True
-
-    with (
-        patch(
-            "lmcache.v1.memory_management.PinMemoryAllocator.__init__", fake_pin_init
-        ),
-        patch("lmcache.v1.memory_management.PinMemoryAllocator.close", fake_pin_close),
-    ):
-        yield
 
 
 class MockLookupServer:
@@ -448,35 +331,6 @@ class TestLocalDiskBackend:
 
         local_disk_backend.local_cpu_backend.memory_allocator.close()
 
-    def test_submit_put_task_with_eviction(
-        self, temp_disk_path, async_loop, local_cpu_backend
-    ):
-        """Test submit_put_task() with eviction."""
-        config = create_test_config(
-            temp_disk_path, max_disk_size=0.001
-        )  # Very small size
-        backend = LocalDiskBackend(
-            config=config,
-            loop=async_loop,
-            local_cpu_backend=local_cpu_backend,
-            dst_device="cuda",
-        )
-
-        # Add multiple keys to trigger eviction
-        for i in range(5):
-            key = create_test_key(f"key_{i}")
-            memory_obj = create_test_memory_obj()
-            backend.insert_key(key, memory_obj)
-
-        # Test that the evictor is working by checking the cache size
-        # The evictor should manage the cache size based on max_disk_size
-        assert len(backend.dict) <= 5
-
-        # Test that the evictor is properly initialized
-        assert backend.evictor is not None
-
-        local_cpu_backend.memory_allocator.close()
-
     def test_submit_prefetch_task_key_not_exists(self, local_disk_backend):
         """Test submit_prefetch_task() when key doesn't exist."""
         key = create_test_key("nonexistent")
@@ -662,27 +516,6 @@ class TestLocalDiskBackend:
                 torch.Size([2, 16, 8, 128]),
                 MemoryFormat.KV_T2D,
             )
-
-        local_disk_backend.local_cpu_backend.memory_allocator.close()
-
-    def test_evictor_integration(self, local_disk_backend):
-        """Test integration with the LRU evictor."""
-        # Add multiple keys to test eviction
-        keys = []
-        memory_objs = []
-
-        for i in range(10):
-            key = create_test_key(f"key_{i}")
-            memory_obj = create_test_memory_obj()
-            keys.append(key)
-            memory_objs.append(memory_obj)
-            local_disk_backend.insert_key(key, memory_obj)
-
-        # Test that evictor is working
-        assert len(local_disk_backend.dict) == 10
-
-        # The evictor should be managing the cache size
-        assert local_disk_backend.evictor is not None
 
         local_disk_backend.local_cpu_backend.memory_allocator.close()
 

@@ -117,6 +117,19 @@ class RemoteConnector(metaclass=abc.ABCMeta):
         raise NotImplementedError
 
     @abc.abstractmethod
+    def exists_sync(self, key: CacheEngineKey) -> bool:
+        """
+        Check if the remote server contains the key synchronized
+
+        Input:
+            key: a string
+
+        Returns:
+            True if the cache engine contains the key, False otherwise
+        """
+        raise NotImplementedError
+
+    @abc.abstractmethod
     async def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         """
         Get the memory_obj of the corresponding key
@@ -176,6 +189,30 @@ class RemoteConnector(metaclass=abc.ABCMeta):
 
         Returns:
             The error code, 0 means success
+        """
+        raise NotImplementedError
+
+    def support_batched_get(self) -> bool:
+        """
+        Check if the connector supports batched get
+
+        Returns:
+            True if batched get is supported, False otherwise
+        """
+        return False
+
+    async def batched_get(
+        self, keys: List[CacheEngineKey]
+    ) -> List[Optional[MemoryObj]]:
+        """
+        Batched get the memory_objs of the corresponding keys
+
+        Input:
+            keys: the keys of the corresponding objects
+
+        Returns:
+            The memory_objs of the corresponding keys
+            Return None if the key does not exist
         """
         raise NotImplementedError
 

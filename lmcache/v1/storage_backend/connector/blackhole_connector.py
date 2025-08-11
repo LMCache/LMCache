@@ -20,6 +20,9 @@ class BlackholeConnector(RemoteConnector):
     async def exists(self, key: CacheEngineKey) -> bool:
         return False
 
+    def exists_sync(self, key: CacheEngineKey) -> bool:
+        return False
+
     async def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         return None
 

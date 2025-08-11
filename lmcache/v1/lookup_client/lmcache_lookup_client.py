@@ -63,11 +63,11 @@ class LMCacheLookupClient(LookupClientInterface):
     def lookup(
         self,
         token_ids: torch.Tensor,
-        request_id: Optional[str] = None,
+        lookup_id: Optional[str] = None,
         tags: OrderedDict = None,
     ) -> int:
         token_bufs = self.encoder.encode(token_ids)
-        request_id_buf = request_id.encode("utf-8")
+        lookup_id_buf = lookup_id.encode("utf-8")
         tags_str = ""
         if tags is not None and len(tags) != 0:
             tags_str = "@".join([f"{k}%{v}" for k, v in tags.items()])
@@ -78,7 +78,7 @@ class LMCacheLookupClient(LookupClientInterface):
         results = []
         for i in range(ranks):
             self.socket.send_multipart(
-                token_bufs + [request_id_buf, tags_buf], copy=False
+                token_bufs + [lookup_id_buf, tags_buf], copy=False
             )
             resp = self.socket.recv()
             result = int.from_bytes(resp, "big")
@@ -126,7 +126,7 @@ class LMCacheLookupServer:
                 # request = self.socket.recv()
                 frames = self.socket.recv_multipart(copy=False)
                 token_frames = frames[:-2]
-                request_id = frames[-2].bytes.decode("utf-8")
+                lookup_id = frames[-2].bytes.decode("utf-8")
                 tags_str = frames[-1].bytes.decode("utf-8")
                 tags = None
                 if tags_str != "":
@@ -141,7 +141,7 @@ class LMCacheLookupServer:
                 token_ids = self.decoder.decode(token_frames)
                 result = self.lmcache_engine.lookup(
                     token_ids,
-                    request_id=request_id,
+                    request_id=lookup_id,
                     pin=True,
                     tags=tags,
                 )

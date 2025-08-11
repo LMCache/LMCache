@@ -41,6 +41,13 @@ class DiskCacheMetadata:
     def is_pinned(self) -> bool:
         return self.pin_count > 0
 
+    @property
+    def can_evict(self) -> bool:
+        """
+        Check if the disk cache can be evicted.
+        """
+        return not self.is_pinned
+
 
 TORCH_DTYPE_TO_STR_DTYPE = {
     torch.half: "half",
