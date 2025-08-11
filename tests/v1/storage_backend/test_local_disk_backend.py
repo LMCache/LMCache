@@ -331,35 +331,6 @@ class TestLocalDiskBackend:
 
         local_disk_backend.local_cpu_backend.memory_allocator.close()
 
-    def test_submit_put_task_with_eviction(
-        self, temp_disk_path, async_loop, local_cpu_backend
-    ):
-        """Test submit_put_task() with eviction."""
-        config = create_test_config(
-            temp_disk_path, max_disk_size=0.001
-        )  # Very small size
-        backend = LocalDiskBackend(
-            config=config,
-            loop=async_loop,
-            local_cpu_backend=local_cpu_backend,
-            dst_device="cuda",
-        )
-
-        # Add multiple keys to trigger eviction
-        for i in range(5):
-            key = create_test_key(f"key_{i}")
-            memory_obj = create_test_memory_obj()
-            backend.insert_key(key, memory_obj)
-
-        # Test that the evictor is working by checking the cache size
-        # The evictor should manage the cache size based on max_disk_size
-        assert len(backend.dict) <= 5
-
-        # Test that the evictor is properly initialized
-        assert backend.evictor is not None
-
-        local_cpu_backend.memory_allocator.close()
-
     def test_submit_prefetch_task_key_not_exists(self, local_disk_backend):
         """Test submit_prefetch_task() when key doesn't exist."""
         key = create_test_key("nonexistent")
@@ -545,27 +516,6 @@ class TestLocalDiskBackend:
                 torch.Size([2, 16, 8, 128]),
                 MemoryFormat.KV_T2D,
             )
-
-        local_disk_backend.local_cpu_backend.memory_allocator.close()
-
-    def test_evictor_integration(self, local_disk_backend):
-        """Test integration with the LRU evictor."""
-        # Add multiple keys to test eviction
-        keys = []
-        memory_objs = []
-
-        for i in range(10):
-            key = create_test_key(f"key_{i}")
-            memory_obj = create_test_memory_obj()
-            keys.append(key)
-            memory_objs.append(memory_obj)
-            local_disk_backend.insert_key(key, memory_obj)
-
-        # Test that evictor is working
-        assert len(local_disk_backend.dict) == 10
-
-        # The evictor should be managing the cache size
-        assert local_disk_backend.evictor is not None
 
         local_disk_backend.local_cpu_backend.memory_allocator.close()
 

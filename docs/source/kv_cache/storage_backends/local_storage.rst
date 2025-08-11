@@ -20,8 +20,6 @@ Two ways to configure LMCache Disk Offloading:
 
 .. code-block:: bash
 
-    # Specify LMCache V1
-    export LMCACHE_USE_EXPERIMENTAL=True
     # 256 Tokens per KV Chunk
     export LMCACHE_CHUNK_SIZE=256
     # None if disabled
@@ -31,6 +29,10 @@ Two ways to configure LMCache Disk Offloading:
     export LMCACHE_LOCAL_DISK="file://local/disk_test/local_disk/"
     # 5GB of Disk
     export LMCACHE_MAX_LOCAL_DISK_SIZE=5.0
+
+    # Disable page cache
+    # This should be turned on for better performance if most local CPU memory is used
+    export LMCACHE_EXTRA_CONFIG='{'use_odirect': True}'
 
 **2. Configuration File**:
 
@@ -46,6 +48,10 @@ Passed in through ``LMCACHE_CONFIG_FILE=your-lmcache-config.yaml``
     local_disk: "file://local/disk_test/local_disk/"
     # 5GB of Disk memory
     max_local_disk_size: 5.0
+
+    # Disable page cache
+    # This should be turned on for better performance if most local CPU memory is used
+    extra_config: {'use_odirect': True}
 
 Local Storage Explanation:
 --------------------------
@@ -77,7 +83,7 @@ Let's feel the TTFT (time to first token) differential!
 
 - A Machine with at least one GPU. Adjust the max model length of your vllm instance depending on your GPU memory and the long context you want to use.
 
-- vllm and lmcache installed (:doc:`Installation Guide <../getting_started/installation>`)
+- vllm and lmcache installed (:doc:`Installation Guide <../../getting_started/installation>`)
 
 - Hugging Face access to ``meta-llama/Meta-Llama-3.1-8B-Instruct``
 

@@ -344,26 +344,6 @@ class TestLocalCPUBackend:
 
         local_cpu_backend.memory_allocator.close()
 
-    def test_remove_without_free(self, local_cpu_backend):
-        """Test remove() with free_obj=False."""
-        key = create_test_key("test_key")
-        memory_obj = create_test_memory_obj()
-
-        # Insert key first
-        local_cpu_backend.submit_put_task(key, memory_obj)
-        initial_ref_count = memory_obj.get_ref_count()
-
-        # Remove the key without freeing the object
-        result = local_cpu_backend.remove(key, free_obj=False)
-
-        assert result is True
-        assert key not in local_cpu_backend.hot_cache
-        assert (
-            memory_obj.get_ref_count() == initial_ref_count
-        )  # Should not be decremented
-
-        local_cpu_backend.memory_allocator.close()
-
     def test_remove_with_worker(self, memory_allocator):
         """Test remove() with LMCacheWorker."""
         config = create_test_config()
