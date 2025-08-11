@@ -208,7 +208,7 @@ class WekaGdsBackend(StorageBackendInterface):
                         if not fentry.name.endswith(target_suffix):
                             continue
                         filename = os.path.basename(fentry.name)
-                        key_str = filename[:-14].replace("_", "/")
+                        key_str = filename[: -len(target_suffix)].replace("_", "/")
                         try:
                             key = CacheEngineKey.from_string(key_str)
                         except ValueError as e:
