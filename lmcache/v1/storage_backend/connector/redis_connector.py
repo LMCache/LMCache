@@ -20,10 +20,6 @@ from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 
 logger = init_logger(__name__)
 
-# NOTE(Jiayi): `redis-py` supports async operations, but data copy
-# cannot be avoided. `hiredis` is more lower-level but asyncio is
-# not supported.
-
 # Constants for the combined format
 METADATA_HEADER_SIZE = 28  # 7 integers * 4 bytes each from RemoteMetadata.serialize()
 
@@ -42,6 +38,7 @@ class RedisConnector(RemoteConnector):
         self.connection = redis_from_url(url=url, decode_responses=False)
         self.loop = loop
         self.local_cpu_backend = local_cpu_backend
+        # pip install hiredis automatically enables hiredis (asyncio compatible)
         logger.info(
             f"HIREDIS_AVAILABLE: {getattr(redis.connection, 'HIREDIS_AVAILABLE', None)}"
         )
@@ -143,7 +140,6 @@ class RedisConnector(RemoteConnector):
         # degrades async performance
 
         # temporary pipeline
-        logger.info(f"Batched get {len(keys)} keys")
         async with self.connection.pipeline(transaction=False) as pipeline:
             key_strings = [key.to_string() for key in keys]
 

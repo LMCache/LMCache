@@ -298,7 +298,7 @@ class LocalCPUBackend(StorageBackendInterface):
                     "Local cpu memory is under pressure. "
                     f"Waiting for {time_to_wait} second before retrying."
                 )
-                self.memory_allocator.memcheck()
+                # self.memory_allocator.memcheck()
                 # do not hold the lock during sleep
                 time.sleep(time_to_wait)
 
@@ -397,7 +397,7 @@ class LocalCPUBackend(StorageBackendInterface):
                     "Local cpu memory is under pressure. "
                     f"Waiting for {time_to_wait} second before retrying."
                 )
-                self.memory_allocator.memcheck()
+                # self.memory_allocator.memcheck()
                 # do not hold the lock during sleep
                 time.sleep(time_to_wait)
 
