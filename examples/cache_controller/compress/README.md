@@ -7,7 +7,7 @@ Your server should have at least 1 GPU.
 This will use port 8000 for vllm and port 8001 for the LMCache worker. The controller itself occupies port 9000 and 9001.
 
 ## Steps
-1. Start two vllm engines at port 8000 and port 8001:
+1. Start vllm engine at port 8000
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 LMCACHE_CONFIG_FILE=example.yaml vllm serve meta-llama/Llama-3.1-8B-Instruct --max-model-len 4096  --gpu-memory-utilization 0.8 --port 8000 --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1", "kv_role":"kv_both"}'

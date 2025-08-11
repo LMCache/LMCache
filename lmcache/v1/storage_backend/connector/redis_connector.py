@@ -42,6 +42,9 @@ class RedisConnector(RemoteConnector):
     async def exists(self, key: CacheEngineKey) -> bool:
         return bool(self.connection.exists(key.to_string() + "metadata"))
 
+    def exists_sync(self, key: CacheEngineKey) -> bool:
+        return bool(self.connection.exists(key.to_string() + "metadata"))
+
     async def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         key_str = key.to_string()
         metadata_bytes = self.connection.get(key_str + "metadata")
@@ -179,6 +182,9 @@ class RedisSentinelConnector(RemoteConnector):
         self.local_cpu_backend = local_cpu_backend
 
     async def exists(self, key: CacheEngineKey) -> bool:
+        return bool(self.slave.exists(key.to_string() + "metadata"))
+
+    def exists_sync(self, key: CacheEngineKey) -> bool:
         return bool(self.slave.exists(key.to_string() + "metadata"))
 
     async def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:

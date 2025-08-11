@@ -82,7 +82,7 @@ Let's feel the TTFT (time to first token) differential!
 
 - A Machine with at least one GPU. Adjust the max model length of your vllm instance depending on your GPU memory and the long context you want to use.
 
-- vllm and lmcache installed (:doc:`Installation Guide <../getting_started/installation>`)
+- vllm and lmcache installed (:doc:`Installation Guide <../../getting_started/installation>`)
 
 - Hugging Face access to ``meta-llama/Meta-Llama-3.1-8B-Instruct``
 

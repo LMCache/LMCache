@@ -21,7 +21,7 @@ There are two major scenarios how InfiniStore supports:
 Prefill-Decoding disaggregation clusters: in such mode inference workloads are separated into two node pools: prefill nodes and decoding nodes. InfiniStore enables KV cache transfer among these two types of nodes, and also KV cache reuse.
 Non-disaggregated clusters: in such mode prefill and decoding workloads are mixed on every node. Infinistore serves as an extra large KV cache pool in addition to GPU cache and local CPU cache, and also enables cross-node KV cache reuse.
 
-.. image:: ../assets/InfiniStore-usage.png
+.. image:: ../../assets/InfiniStore-usage.png
     :alt: InfiniStore Usage Diagram
 
 
