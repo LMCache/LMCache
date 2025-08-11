@@ -30,6 +30,9 @@ from lmcache.v1.cache_controller.message import (  # noqa: E501
     PinMsg,
     PinRetMsg,
     PinWorkerMsg,
+    UnpinMsg,
+    UnpinRetMsg,
+    UnpinWorkerMsg,
 )
 
 logger = init_logger(__name__)
@@ -150,6 +153,50 @@ class LMCacheClusterExecutor:
         )
 
         return PinRetMsg(event_id=msg.event_id, num_tokens=num_tokens_list[0])
+
+    async def unpin(self, msg: UnpinMsg) -> Union[PinRetMsg, ErrorMsg]:
+        """
+        Execute a unpin cache operation with error handling.
+        """
+        instance_id = msg.instance_id
+        event_id = msg.event_id
+        location = msg.location
+        worker_ids = self.reg_controller.get_workers(instance_id)
+        assert worker_ids is not None
+        sockets = []
+        serialized_msgs = []
+        for worker_id in worker_ids:
+            socket = self.reg_controller.get_socket(instance_id, worker_id)
+            if socket is None:
+                return ErrorMsg(
+                    error=(
+                        f"Worker {worker_id} not registered for instance {instance_id}"
+                    )
+                )
+            sockets.append(socket)
+            worker_event_id = f"Worker{worker_id}{event_id}"
+            serialized_msg = msgspec.msgpack.encode(
+                UnpinWorkerMsg(
+                    worker_event_id = worker_event_id,
+                    location = location,
+                )
+            )
+            serialized_msgs.append(serialized_msg)
+        serialized_results = await self.execute_workers(
+            sockets=sockets,
+            serialized_msgs=serialized_msgs,
+        )
+
+        msg_list = []
+        for i, serialized_result in enumerate(serialized_results):
+            result = msgspec.msgpack.decode(serialized_result, type=Msg)
+            msg_list.append(result.msg)
+
+        assert len(set(msg_list)) == 1, (
+            "The unpin message should be the same across all workers."
+        )
+
+        return UnpinRetMsg(event_id=msg.event_id, msg=msg_list[0])
 
     async def compress(self, msg: CompressMsg) -> Union[CompressRetMsg, ErrorMsg]:
         """
