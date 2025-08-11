@@ -75,6 +75,16 @@ class CacheEngineKey:
     tags: Optional[OrderedDict] = None
 
     def __hash__(self):
+        if self.tags is None:
+            return hash(
+                (
+                    self.fmt,
+                    self.model_name,
+                    self.world_size,
+                    self.worker_id,
+                    self.chunk_hash,
+                )
+            )
         return hash(
             (
                 self.fmt,
@@ -82,6 +92,7 @@ class CacheEngineKey:
                 self.world_size,
                 self.worker_id,
                 self.chunk_hash,
+                "%".join([f"{k}={v}" for k, v in self.tags.items()]),
             )
         )
 
@@ -183,6 +194,17 @@ class LayerCacheEngineKey(CacheEngineKey):
     layer_id: int = 0
 
     def __hash__(self):
+        if self.tags is None:
+            return hash(
+                (
+                    self.fmt,
+                    self.model_name,
+                    self.world_size,
+                    self.worker_id,
+                    self.chunk_hash,
+                    self.layer_id,
+                )
+            )
         return hash(
             (
                 self.fmt,
@@ -190,6 +212,7 @@ class LayerCacheEngineKey(CacheEngineKey):
                 self.world_size,
                 self.worker_id,
                 self.chunk_hash,
+                "%".join([f"{k}={v}" for k, v in self.tags.items()]),
                 self.layer_id,
             )
         )
