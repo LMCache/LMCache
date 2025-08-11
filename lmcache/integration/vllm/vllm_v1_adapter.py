@@ -92,11 +92,17 @@ tmp_disagg_tracker: dict[str, DisaggSpec] = {}
 
 def extract_tags(sampling_params: SamplingParams) -> OrderedDict:
     tags = None
-    if sampling_params.extra_args is not None:
+    tag_keys = None
+    config = lmcache_get_config()
+    if config.extra_config is not None and isinstance(config.extra_config, dict):
+        tag_keys = config.extra_config.get("tag_keys")
+    if sampling_params.extra_args is not None and tag_keys is not None:
         if kv_transfer_params := sampling_params.extra_args.get("kv_transfer_params"):
-            if user := kv_transfer_params.get("user"):
-                tags = OrderedDict()
-                tags["user"] = user
+            for k in tag_keys:
+                if v := kv_transfer_params.get(k):
+                    if tags is None:
+                        tags = OrderedDict()
+                    tags[k] = v
     return tags
 
 
@@ -127,7 +133,7 @@ class RequestTracker:
     mm_hashes: Optional[list[str]] = None
     mm_positions: Optional[list["PlaceholderRange"]] = None
     # The request tags
-    tags: OrderedDict = None
+    tags: Optional[OrderedDict] = None
 
     # Whether the request is in decode phase
     is_decode_phase = False
@@ -231,7 +237,7 @@ class ReqMeta:
     # disagg spec
     disagg_spec: Optional[DisaggSpec] = None
     # tags
-    tags: OrderedDict = None
+    tags: Optional[OrderedDict] = None
 
     @staticmethod
     def from_request_tracker(

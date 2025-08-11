@@ -72,7 +72,7 @@ class CacheEngineKey:
     world_size: int
     worker_id: int
     chunk_hash: int
-    tags: OrderedDict = None
+    tags: Optional[OrderedDict] = None
 
     def __hash__(self):
         return hash(
