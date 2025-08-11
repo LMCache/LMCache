@@ -25,6 +25,9 @@ class LMCacheStats:
     interval_store_requests: int
     interval_requested_tokens: int
     interval_hit_tokens: int
+    interval_lookup_requested_tokens: int
+    interval_lookup_hits: int
+    interval_lookup_requests: int
 
     interval_remote_read_requests: int
     interval_remote_read_bytes: int
@@ -76,6 +79,12 @@ class RetrieveRequestStats:
 
 
 @dataclass
+class LookupRequestStats:
+    num_tokens: int
+    hits: int
+
+
+@dataclass
 class StoreRequestStats:
     num_tokens: int
     start_time: float
@@ -100,6 +109,9 @@ class LMCStatsMonitor:
         self.interval_store_requests = 0
         self.interval_requested_tokens = 0
         self.interval_hit_tokens = 0
+        self.interval_lookup_requests = 0
+        self.interval_lookup_requested_tokens = 0
+        self.interval_lookup_hits = 0
 
         # remote backends read/write metrics
         self.interval_remote_read_requests = 0
@@ -125,9 +137,11 @@ class LMCStatsMonitor:
 
         self.retrieve_requests: Dict[int, RetrieveRequestStats] = {}
         self.store_requests: Dict[int, StoreRequestStats] = {}
+        self.lookup_requests: Dict[int, LookupRequestStats] = {}
 
         self.retrieve_request_id = 0
         self.store_request_id = 0
+        self.lookup_request_id = 0
 
     @thread_safe
     def on_retrieve_request(self, num_tokens: int) -> int:
@@ -157,6 +171,29 @@ class LMCStatsMonitor:
         retrieve_stats.local_hit_tokens = retrieved_tokens
         retrieve_stats.end_time = curr_time
         self.interval_hit_tokens += retrieved_tokens
+
+    @thread_safe
+    def on_lookup_request(self, num_tokens: int) -> int:
+        """
+        Returns the internal "request id" that will be used in
+        on_lookup_finished
+        """
+        lookup_stats = LookupRequestStats(
+            num_tokens=num_tokens,
+            hits=0,
+        )
+        self.interval_lookup_requests += 1
+        self.interval_lookup_requested_tokens += num_tokens
+        self.lookup_requests[self.lookup_request_id] = lookup_stats
+        self.lookup_request_id += 1
+        return self.lookup_request_id - 1
+
+    @thread_safe
+    def on_lookup_finished(self, request_id: int, hits: int):
+        assert request_id in self.lookup_requests
+        lookup_stats = self.lookup_requests[request_id]
+        lookup_stats.hits = hits
+        self.interval_lookup_hits += hits
 
     @thread_safe
     def on_store_request(self, num_tokens: int) -> int:
@@ -237,6 +274,9 @@ class LMCStatsMonitor:
 
         self.interval_requested_tokens = 0
         self.interval_hit_tokens = 0
+        self.interval_lookup_requests = 0
+        self.interval_lookup_requested_tokens = 0
+        self.interval_lookup_hits = 0
 
         self.interval_remote_read_requests = 0
         self.interval_remote_read_bytes = 0
@@ -302,6 +342,9 @@ class LMCStatsMonitor:
             interval_store_requests=self.interval_store_requests,
             interval_requested_tokens=self.interval_requested_tokens,
             interval_hit_tokens=self.interval_hit_tokens,
+            interval_lookup_requests=self.interval_lookup_requests,
+            interval_lookup_requested_tokens=self.interval_lookup_requested_tokens,
+            interval_lookup_hits=self.interval_lookup_hits,
             interval_remote_read_requests=self.interval_remote_read_requests,
             interval_remote_read_bytes=self.interval_remote_read_bytes,
             interval_remote_write_requests=self.interval_remote_write_requests,
@@ -377,6 +420,24 @@ class PrometheusLogger:
         self.counter_num_hit_tokens = self._counter_cls(
             name="lmcache:num_hit_tokens",
             documentation="Total number of tokens hit in lmcache",
+            labelnames=labelnames,
+        )
+
+        self.counter_num_lookup_requests = self._counter_cls(
+            name="lmcache:num_lookup_requests",
+            documentation="Total number of lookup requests sent to lmcache",
+            labelnames=labelnames,
+        )
+
+        self.counter_num_lookup_requested_tokens = self._counter_cls(
+            name="lmcache:num_lookup_requested_tokens",
+            documentation="Total number of tokens requested during lookup from lmcache",
+            labelnames=labelnames,
+        )
+
+        self.counter_num_lookup_hits = self._counter_cls(
+            name="lmcache:num_lookup_hits",
+            documentation="Total number of tokens hit during lookup from lmcache",
             labelnames=labelnames,
         )
 
@@ -659,6 +720,14 @@ class PrometheusLogger:
             self.counter_num_requested_tokens, stats.interval_requested_tokens
         )
         self._log_counter(self.counter_num_hit_tokens, stats.interval_hit_tokens)
+        self._log_counter(
+            self.counter_num_lookup_requests, stats.interval_lookup_requests
+        )
+        self._log_counter(
+            self.counter_num_lookup_requested_tokens,
+            stats.interval_lookup_requested_tokens,
+        )
+        self._log_counter(self.counter_num_lookup_hits, stats.interval_lookup_hits)
 
         self._log_counter(
             self.counter_num_remote_read_requests,
