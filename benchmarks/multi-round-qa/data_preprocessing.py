@@ -80,11 +80,17 @@ parser.add_argument(
     default="mistralai/Mistral-7B-Instruct-v0.2",
     help="Model for tokenizer. Default is mistralai/Mistral-7B-Instruct-v0.2.",
 )
+parser.add_argument(
+    "--trace",
+    type=str,
+    default="ShareGPT_V3_unfiltered_cleaned_split.json",
+    help="Trace file. Default is ShareGPT_V3_unfiltered_cleaned_split.json",
+)
 
 args = parser.parse_args()
 
 print("Loading trace file..")
-with open("ShareGPT_V3_unfiltered_cleaned_split.json", "r", encoding="utf-8") as file:
+with open(args.trace, "r", encoding="utf-8") as file:
     data = json.load(file)
 
 num_of_ids = len(data)
