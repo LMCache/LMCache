@@ -654,7 +654,7 @@ def main():
     args = parse_arguments()
     if args.verbose:
         global logger
-        logger = init_logger(__name__, level=logging.DEBUG)
+        logger = init_logger(__name__, logging.DEBUG)
 
     step_interval = 0.1
 
