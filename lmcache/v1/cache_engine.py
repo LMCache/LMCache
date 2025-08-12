@@ -669,6 +669,7 @@ class LMCacheEngine:
 
         :return: An int indicating how many prefix tokens are cached.
         """
+        self.stats_monitor.on_lookup_request(len(tokens))
         try:
             end = 0
             prev_end = 0
@@ -704,6 +705,7 @@ class LMCacheEngine:
                             self.lookup_pins[lookup_id].extend(key_all_layers)
                         prev_end = end
                         continue
+                    end = prev_end
                     return prev_end
                 else:
                     if self.storage_manager.contains(key, search_range, pin):
@@ -718,11 +720,13 @@ class LMCacheEngine:
                         if self.lookup_server.lookup(key):
                             prev_end = end
                             continue
+                    end = prev_end
                     return prev_end
 
             # all tokens where found, return the maximal end
             return end
         finally:
+            self.stats_monitor.on_lookup_finished(end)
             # vllm lookup sets pin to True
             if pin:
                 self.storage_manager.touch_cache()

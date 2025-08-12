@@ -84,7 +84,7 @@ demonstrating how to address different use cases with LMCache.
 
 ## Interested in Connecting?
 
-Fill out the [interest form](https://forms.gle/mQfQDUXbKfp2St1z7), [sign up for our newsletter](https://mailchi.mp/tensormesh/lmcache-sign-up-newsletter), [join LMCache slack](https://join.slack.com/t/lmcacheworkspace/shared_invite/zt-2viziwhue-5Amprc9k5hcIdXT7XevTaQ), [check out LMCache website](https://lmcache.ai/), or [drop an email](contact@lmcache.ai), and our team will reach out to you!
+Fill out the [interest form](https://forms.gle/mQfQDUXbKfp2St1z7), [sign up for our newsletter](https://mailchi.mp/tensormesh/lmcache-sign-up-newsletter), [join LMCache slack](https://join.slack.com/t/lmcacheworkspace/shared_invite/zt-2viziwhue-5Amprc9k5hcIdXT7XevTaQ), [check out LMCache website](https://lmcache.ai/), or [drop an email](mailto:contact@lmcache.ai), and our team will reach out to you!
 
 ## Community meeting
 
