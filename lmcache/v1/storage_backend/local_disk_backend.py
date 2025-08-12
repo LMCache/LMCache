@@ -61,8 +61,10 @@ class LocalDiskWorker:
         if task_type == "prefetch":
             priority = 0
             self.insert_prefetch_task(kwargs["key"], None)
-        elif task_type == "put":
+        elif task_type == "delete":
             priority = 1
+        elif task_type == "put":
+            priority = 2
             self.insert_put_task(kwargs["key"])
         else:
             raise ValueError(f"Unknown task type: {task_type}")
@@ -77,6 +79,8 @@ class LocalDiskWorker:
             if task_type == "prefetch":
                 # Remove the prefetch task from the queue
                 self.insert_prefetch_task(kwargs["key"], future)
+
+            self.pq.task_done()
 
     def remove_put_task(self, key: CacheEngineKey):
         with self.put_lock:
@@ -269,7 +273,7 @@ class LocalDiskBackend(StorageBackendInterface):
         size = meta.size
         self.usage -= size
         self.stats_monitor.update_local_storage_usage(self.usage)
-        os.remove(path)
+        self.disk_worker.submit_task("delete", os.remove, path=path)
 
         if force:
             self.cache_policy.update_on_force_evict(key)
