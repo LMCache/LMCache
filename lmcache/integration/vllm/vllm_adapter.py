@@ -185,12 +185,19 @@ def init_lmcache_engine(
     )
 
     use_gpu = need_gpu_interm_buffer(config)
-    vllm_gpu_connector: Union[
+    BaseVLLMGPUConnector = Union[
         VLLMBufferLayerwiseGPUConnector,
         VLLMPagedMemGPUConnectorV2,
         VLLMPagedMemLayerwiseGPUConnector,
-        VLLMPagedMemHPUConnectorV2
     ]
+
+    if hasattr(torch, "hpu") and torch.hpu.is_available():
+        vllm_gpu_connector = Union[
+		BaseVLLMGPUConnector,
+		VLLMPagedMemHPUConnectorV2,
+	]
+    else:
+        vllm_gpu_connector = BaseVLLMGPUConnector
 
     if use_mla and config.use_layerwise:
         raise ValueError("layerwise MLA connector is not supported yet")
