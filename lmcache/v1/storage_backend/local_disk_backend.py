@@ -480,23 +480,16 @@ class LocalDiskBackend(StorageBackendInterface):
         """
         kv_chunk = memory_obj.tensor
         assert kv_chunk is not None
-        byte_array = memory_obj.byte_array
+        buffer = memory_obj.byte_array
         path = self._key_to_path(key)
 
-        size = len(byte_array)
+        size = len(buffer)
         self.usage += size
         self.stats_monitor.update_local_storage_usage(self.usage)
 
         start_time = time.time()
         # FIXME(Jiayi): need to add ref count in disk memory object
-        if size % self.os_disk_bs != 0 or not self.use_odirect:
-            with open(path, "wb") as f:
-                f.write(byte_array)
-        else:
-            fd = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_DIRECT, 0o644)
-            os.write(fd, byte_array)
-            os.close(fd)
-
+        self.write_file(buffer, path)
         disk_write_time = time.time() - start_time
         logger.debug(
             f"Disk write size: {size} bytes, "
@@ -528,21 +521,8 @@ class LocalDiskBackend(StorageBackendInterface):
         buffer = memory_obj.byte_array
         size = len(buffer)
 
-        fblock_aligned = size % self.os_disk_bs == 0
-        if not fblock_aligned and self.use_odirect:
-            logger.warning(
-                "Cannot use O_DIRECT for this file, "
-                "size is not aligned to disk block size."
-            )
-
         start_time = time.time()
-        if not fblock_aligned or not self.use_odirect:
-            with open(path, "rb") as f:
-                f.readinto(buffer)
-        else:
-            fd = os.open(path, os.O_RDONLY | os.O_DIRECT)
-            with os.fdopen(fd, "rb", buffering=0) as fdo:
-                fdo.readinto(buffer)
+        self.read_file(buffer, path)
         disk_read_time = time.time() - start_time
         logger.debug(
             f"Disk read size: {size} bytes, "
@@ -577,6 +557,27 @@ class LocalDiskBackend(StorageBackendInterface):
         buffer = memory_obj.byte_array
         size = len(buffer)
 
+        start_time = time.time()
+        self.read_file(buffer, path)
+        disk_read_time = time.time() - start_time
+        logger.debug(
+            f"Disk read size: {size} bytes, "
+            f"Bandwidth: {size / disk_read_time / 1e6:.2f} MB/s"
+        )
+        return memory_obj
+
+    def write_file(self, buffer, path):
+        size = len(buffer)
+        if size % self.os_disk_bs != 0 or not self.use_odirect:
+            with open(path, "wb") as f:
+                f.write(buffer)
+        else:
+            fd = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_DIRECT, 0o644)
+            os.write(fd, buffer)
+            os.close(fd)
+
+    def read_file(self, buffer, path):
+        size = len(buffer)
         fblock_aligned = size % self.os_disk_bs == 0
         if not fblock_aligned and self.use_odirect:
             logger.warning(
@@ -584,7 +585,6 @@ class LocalDiskBackend(StorageBackendInterface):
                 "size is not aligned to disk block size."
             )
 
-        start_time = time.time()
         if not fblock_aligned or not self.use_odirect:
             with open(path, "rb") as f:
                 f.readinto(buffer)
@@ -592,12 +592,7 @@ class LocalDiskBackend(StorageBackendInterface):
             fd = os.open(path, os.O_RDONLY | os.O_DIRECT)
             with os.fdopen(fd, "rb", buffering=0) as fdo:
                 fdo.readinto(buffer)
-        disk_read_time = time.time() - start_time
-        logger.debug(
-            f"Disk read size: {size} bytes, "
-            f"Bandwidth: {size / disk_read_time / 1e6:.2f} MB/s"
-        )
-        return memory_obj
+
 
     def close(self) -> None:
         if self.lookup_server is not None:
