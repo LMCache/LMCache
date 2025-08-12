@@ -594,7 +594,8 @@ class LocalDiskBackend(StorageBackendInterface):
                 with open(path, "rb") as f:
                     f.readinto(buffer)
             except FileNotFoundError:
-                self.dict.pop(key)
+                if self.dict.get(key, None):
+                    self.dict.pop(key)
                 return memory_obj
         else:
             fd = os.open(path, os.O_RDONLY | os.O_DIRECT)
