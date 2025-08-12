@@ -40,10 +40,10 @@ class CacheEngineInternalAPIServer:
         await self.server.serve()
 
     def start(self):
-        logger.info(f"Starting API server on port {self.port}")
+        logger.info(f"Starting lmcache internal API server on port {self.port}")
         threading.Thread(target=asyncio.run, args=(self.run(),), daemon=True).start()
 
     def stop(self):
-        logger.info("Stopping LMCache API server")
+        logger.info("Stopping LMCache internal API server")
         if self.server:
             self.server.should_exit = True

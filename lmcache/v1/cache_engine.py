@@ -887,7 +887,6 @@ class LMCacheEngine:
         # Stop the API server
         if self.api_server is not None:
             self.api_server.stop()
-            logger.info("LMCache API server stopped")
 
         logger.info("LMCacheEngine closed.")
 
