@@ -380,6 +380,9 @@ class UserSessionManager:
             if d["num_round"] > 2 * self.workload_config.num_rounds
         ]
         logger.info(f"There are {len(self.sharegpt_data)} users satisfying ")
+        assert len(self.sharegpt_data) >= self.workload_config.num_users, (
+            "Not enough data! Reduce --num-users or --num-rounds"
+        )
 
     def _ramp_up(self, timestamp: float, ramp_up_time: float):
         for i in range(self.workload_config.num_users):
