@@ -23,7 +23,10 @@ try:
 except (ModuleNotFoundError, ImportError):
     if hasattr(torch, "hpu") and torch.hpu.is_available():
         # Third Party
-        from vllm.attention.backends.hpu_attn import HPUAttentionMetadata
+        try:
+            from vllm_gaudi.attention.backends.hpu_attn import HPUAttentionMetadata
+        except (ModuleNotFoundError, ImportError):
+            from vllm.attention.backends.hpu_attn import HPUAttentionMetadata
     else:
         # vllm_flash_attn is not installed, try the ROCm FA metadata
         # Third Party
