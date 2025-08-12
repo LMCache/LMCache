@@ -8,11 +8,62 @@ import os
 from transformers import AutoTokenizer
 import numpy as np
 
+
 def estimate_num_tokens(text: str) -> int:
     if not hasattr(estimate_num_tokens, "tokenizer"):
         os.environ["TOKENIZERS_PARALLELISM"] = "false"
         estimate_num_tokens.tokenizer = AutoTokenizer.from_pretrained(args.model)
     return len(estimate_num_tokens.tokenizer.tokenize(text))
+
+
+def is_human(human):
+    return human in ["human", "user"]
+
+
+def is_gpt(gpt):
+    return gpt in ["gpt", "chatgpt", "bing", "bard"]
+
+
+def is_system(system):
+    return system in ["system"]
+
+
+def invalid_conversations(conversations):
+    # pair does not match
+    if len(conversations) < 2:
+        return True
+
+    # starting from gpt or systems
+    entry = conversations[0]
+    if is_gpt(entry["from"]) or is_system(entry["from"]):
+        return True
+
+    # ending with human
+    entry = conversations[-1]
+    if is_human(entry["from"]):
+        return True
+
+    prev_from = None
+    total_tokens = 0
+    for conv in conversations:
+        _from = conv["from"]
+        total_tokens += estimate_num_tokens(conv["value"])
+
+        # consecutive rounds (gpt followed by gpt, human followed by human, ..)
+        if prev_from == _from:
+            return True
+
+        # too long conversations
+        if total_tokens > (128 * 1024):
+            return True
+
+        # unknown from
+        if not is_human(_from) and not is_gpt(_from) and not is_system(_from):
+            return True
+
+        prev_from = _from
+
+    return False
 
 
 parser = argparse.ArgumentParser(description="Process data percentage.")
@@ -36,21 +87,34 @@ with open("ShareGPT_V3_unfiltered_cleaned_split.json", "r", encoding="utf-8") as
 
 num_of_ids = len(data)
 print(f"Number of IDs: {num_of_ids}")
-data = data[: int(num_of_ids * args.parse)]
+
+# exclude invalid data
+data = [d for d in data if not invalid_conversations(d["conversations"])]
+excluded_ids = len(data)
+num_of_ids -= excluded_ids
+print(f"Excluded number of IDs: {excluded_ids}")
+
+data_to_process = int(num_of_ids * args.parse)
+data = data[:data_to_process]
+print(f"Data to process: {data_to_process}")
 
 count = 0
-
 for d in data:
-    d["num_round"] = len(d["conversations"])  # human is one round, gpt is another round
+    conversations = d["conversations"]
+    d["num_round"] = len(conversations)  # human is one round, gpt is another round
     human_tokens = []
     gpt_tokens = []
-    for conv in d["conversations"]:
-        if conv["from"] == "human":
-            human_tokens.append(estimate_num_tokens(conv["value"]))
-        if conv["from"] == "gpt":
-            token_number = estimate_num_tokens(conv["value"])
-            conv["num_tokens"] = token_number
-            gpt_tokens.append(token_number)
+    for conv in conversations:
+        num_tokens = estimate_num_tokens(conv["value"])
+
+        if is_human(conv["from"]):
+            human_tokens.append(num_tokens)
+        elif is_gpt(conv["from"]):
+            conv["num_tokens"] = num_tokens
+            gpt_tokens.append(num_tokens)
+        else:
+            print("Invalid _from_")
+
     if len(human_tokens) == 0:
         d["average_human_token"] = 0
         d["max_human_token"] = 0
@@ -66,9 +130,6 @@ for d in data:
 
     count += 1
     print(f"Finished {count}")
-
-# Remove the data that has two consecutive human rounds
-del data[260]
 
 with open("ShareGPT.json", "w", encoding="utf-8") as file:
     json.dump(data, file, ensure_ascii=False, indent=2)
