@@ -262,13 +262,17 @@ class UserSession:
             max_tokens = min(max_tokens, self.user_config.answer_len)
         else:
             max_tokens = self.user_config.answer_len
-        request_executor.launch_request(
-            self.chat_history,
-            max_tokens,
-            self._on_request_finished,
-            extra_headers={"x-user-id": str(self.user_config.user_id)},
-        )
-        self.has_unfinished_request = True
+        if request_executor is not None:
+            request_executor.launch_request(
+                self.chat_history,
+                max_tokens,
+                self._on_request_finished,
+                extra_headers={"x-user-id": str(self.user_config.user_id)},
+            )
+            self.has_unfinished_request = True
+        else:  # dry-run
+            self.chat_history.on_system_response("")
+            self.has_unfinished_request = False
         self.last_request_time = timestamp
 
     def _on_request_finished(self, response: Response):
@@ -625,6 +629,11 @@ def parse_arguments() -> WorkloadConfig:
         action="store_true",
         help="Whether to use ShareGPT dataset",
     )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Does not send requests to the endpoint (server)",
+    )
     args = parser.parse_args()
     return args
 
@@ -661,11 +670,14 @@ def main():
 
     step_interval = 0.1
 
-    executor = RequestExecutor(
-        base_url=args.base_url, api_key="EMPTY", model=args.model
-    )
+    executor = None
+    if not args.dry_run:
+        executor = RequestExecutor(
+            base_url=args.base_url, api_key="EMPTY", model=args.model
+        )
 
-    warmup_engine(executor)
+        warmup_engine(executor)
+
     workload_config = WorkloadConfig(
         num_users=args.num_users,
         system_prompt_len=args.shared_system_prompt,
