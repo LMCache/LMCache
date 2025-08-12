@@ -8,6 +8,13 @@ import os
 from transformers import AutoTokenizer
 import numpy as np
 
+def estimate_num_tokens(text: str) -> int:
+    if not hasattr(estimate_num_tokens, "tokenizer"):
+        os.environ["TOKENIZERS_PARALLELISM"] = "false"
+        estimate_num_tokens.tokenizer = AutoTokenizer.from_pretrained(args.model)
+    return len(estimate_num_tokens.tokenizer.tokenize(text))
+
+
 parser = argparse.ArgumentParser(description="Process data percentage.")
 parser.add_argument(
     "--parse",
@@ -26,16 +33,6 @@ args = parser.parse_args()
 
 with open("ShareGPT_V3_unfiltered_cleaned_split.json", "r", encoding="utf-8") as file:
     data = json.load(file)
-
-
-def estimate_num_tokens(text: str) -> int:
-    if not hasattr(estimate_num_tokens, "tokenizer"):
-        os.environ["TOKENIZERS_PARALLELISM"] = "false"
-        estimate_num_tokens.tokenizer = AutoTokenizer.from_pretrained(
-            args.model
-        )
-    return len(estimate_num_tokens.tokenizer.tokenize(text))
-
 
 num_of_ids = len(data)
 print(f"Number of IDs: {num_of_ids}")
