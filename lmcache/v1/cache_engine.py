@@ -151,13 +151,10 @@ class LMCacheEngine:
             gc.disable()
 
         # Start api server
-        if config.cache_engine_internal_api_server_enabled:
+        if config.cache_engine_internal_api_server_enabled and metadata.worker_id == 0:
             # TODO(baoloongmao): support create api servers for each worker.
-            api_port = config.cache_engine_internal_api_server_port_start
-            logger.info(f"Starting cache engine internal API server on port {api_port}")
-            self.api_server = CacheEngineInternalAPIServer(api_port)
+            self.api_server = CacheEngineInternalAPIServer(config)
             self.api_server.start()
-            logger.info(f"Started cache engine internal API server on port {api_port}")
 
     def post_init(self, **kwargs) -> None:
         if not self.post_inited:

@@ -227,6 +227,11 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "default": 7000,
         "env_converter": int,
     },
+    "cache_engine_internal_api_server_metrics_ttl": {
+        "type": int,
+        "default": 30,
+        "env_converter": int,
+    },
 }
 
 
