@@ -172,6 +172,9 @@ class RemoteBackend(StorageBackendInterface):
         if self._mla_worker_id_as0_mode:
             return None
 
+        if self.exists_in_put_tasks(key):
+            return None
+
         memory_obj.ref_count_up()
 
         self.lock.acquire()
