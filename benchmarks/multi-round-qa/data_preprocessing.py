@@ -15,6 +15,12 @@ parser.add_argument(
     default=1,
     help="The percentage of data to process (0 to 1). Default is 1 (100%).",
 )
+parser.add_argument(
+    "--model",
+    type=str,
+    default="mistralai/Mistral-7B-Instruct-v0.2",
+    help="Model for tokenizer. Default is mistralai/Mistral-7B-Instruct-v0.2.",
+)
 
 args = parser.parse_args()
 
@@ -26,7 +32,7 @@ def estimate_num_tokens(text: str) -> int:
     if not hasattr(estimate_num_tokens, "tokenizer"):
         os.environ["TOKENIZERS_PARALLELISM"] = "false"
         estimate_num_tokens.tokenizer = AutoTokenizer.from_pretrained(
-            "mistralai/Mistral-7B-Instruct-v0.2"
+            args.model
         )
     return len(estimate_num_tokens.tokenizer.tokenize(text))
 
