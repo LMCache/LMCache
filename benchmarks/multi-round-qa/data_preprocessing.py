@@ -5,6 +5,7 @@ import json
 import os
 
 # Third Party
+from tqdm import tqdm
 from transformers import AutoTokenizer
 import numpy as np
 
@@ -82,6 +83,7 @@ parser.add_argument(
 
 args = parser.parse_args()
 
+print("Loading trace file..")
 with open("ShareGPT_V3_unfiltered_cleaned_split.json", "r", encoding="utf-8") as file:
     data = json.load(file)
 
@@ -89,7 +91,8 @@ num_of_ids = len(data)
 print(f"Number of IDs: {num_of_ids}")
 
 # exclude invalid data
-data = [d for d in data if not invalid_conversations(d["conversations"])]
+print("Veryfing trace..")
+data = [d for d in tqdm(data) if not invalid_conversations(d["conversations"])]
 excluded_ids = len(data)
 num_of_ids -= excluded_ids
 print(f"Excluded number of IDs: {excluded_ids}")
@@ -98,8 +101,7 @@ data_to_process = int(num_of_ids * args.parse)
 data = data[:data_to_process]
 print(f"Data to process: {data_to_process}")
 
-count = 0
-for d in data:
+for d in tqdm(data):
     conversations = d["conversations"]
     d["num_round"] = len(conversations)  # human is one round, gpt is another round
     human_tokens = []
@@ -127,9 +129,6 @@ for d in data:
     else:
         d["average_gpt_token"] = float(np.mean(gpt_tokens))
         d["max_gpt_token"] = float(np.max(gpt_tokens))
-
-    count += 1
-    print(f"Finished {count}")
 
 with open("ShareGPT.json", "w", encoding="utf-8") as file:
     json.dump(data, file, ensure_ascii=False, indent=2)
