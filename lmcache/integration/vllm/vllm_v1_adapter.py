@@ -378,6 +378,18 @@ def need_gpu_interm_buffer(lmcache_config: LMCacheEngineConfig):
         return True
 
 
+def _calculate_mtp_layers(vllm_config, model_config):
+    num_mtp_layers = 0
+    if vllm_config is not None and vllm_config.speculative_config is not None:
+        logger.info(f"vllm_config.speculative_config: {vllm_config.speculative_config}")
+        # TODO(baoloongmao): Support other MTP methods
+        if vllm_config.speculative_config.method == "deepseek_mtp":
+            num_mtp_layers = getattr(
+                model_config.hf_config, "num_nextn_predict_layers", 0
+            )
+    return num_mtp_layers
+
+
 VLLM_CACHE_CONFIG: Optional[CacheConfig] = None
 VLLM_MODEL_CONFIG: Optional[ModelConfig] = None
 VLLM_PARALLEL_CONFIG: Optional[ParallelConfig] = None
@@ -390,6 +402,7 @@ def init_lmcache_engine(
     cache_config: CacheConfig,
     scheduler_config: SchedulerConfig,
     config: LMCacheEngineConfig,
+    vllm_config: Optional["VllmConfig"] = None,
 ) -> Optional[LMCacheEngine]:
     """Initialize the LMCache engine by the given model config and parallel
     config. This function will check the environment variable
@@ -440,11 +453,15 @@ def init_lmcache_engine(
 
     # construct kv shape (for mem pool)
     num_layer = model_config.get_num_layers(parallel_config)
+    num_mtp_layers = _calculate_mtp_layers(vllm_config, model_config)
+    num_layer += num_mtp_layers
     chunk_size = config.chunk_size
     num_kv_head = model_config.get_num_kv_heads(parallel_config)
     head_size = model_config.get_head_size()
     kv_shape = (num_layer, 1 if use_mla else 2, chunk_size, num_kv_head, head_size)
-    logger.info(f"use mla: {use_mla}, kv shape: {kv_shape}")
+    logger.info(
+        f"use mla: {use_mla}, kv shape: {kv_shape}, num_mtp_layers:{num_mtp_layers}"
+    )
 
     # Change current device.
     torch.cuda.device(parallel_config.rank)
@@ -556,6 +573,7 @@ class LMCacheConnectorV1Impl:
                 vllm_config.cache_config,
                 vllm_config.scheduler_config,
                 config,
+                vllm_config,
             )
 
             self.use_layerwise = config.use_layerwise
