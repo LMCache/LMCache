@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from collections import defaultdict
+from itertools import chain
 from typing import Dict, Generator, List, Optional, Tuple, Union
 import asyncio
 import gc
@@ -367,7 +368,17 @@ class LMCacheEngine:
             for layer_id in range(self.num_layers):
                 yield
                 next(mem_obj_generator)
-                self.storage_manager.batched_put(keys[layer_id], memory_objs[layer_id])
+                if not self.config.enable_nixl:
+                    self.storage_manager.batched_put(
+                        keys[layer_id], memory_objs[layer_id]
+                    )
+
+            # Note: batched put once for NixlBackend to avoid the duplicate flush.
+            if self.config.enable_nixl:
+                self.storage_manager.batched_put(
+                    list(chain.from_iterable(keys)),
+                    list(chain.from_iterable(memory_objs)),
+                )
         else:
             # If no cache are found, we still need to yield to avoid
             # `StopIteration`
@@ -578,6 +589,7 @@ class LMCacheEngine:
 
             ret_mask[start:end] = True
 
+        mem_obj_consumer = None
         if keys:
             # Transpose the keys into layer major format
             keys_layer_major = [list(row) for row in zip(*keys, strict=False)]
@@ -617,7 +629,8 @@ class LMCacheEngine:
         yield None
 
         # synchronize the last layer
-        next(mem_obj_consumer)
+        if mem_obj_consumer is not None:
+            next(mem_obj_consumer)
 
         retrieved_tokens = torch.sum(ret_mask)
         self.stats_monitor.on_retrieve_finished(monitor_req_id, retrieved_tokens)

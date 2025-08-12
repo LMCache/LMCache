@@ -173,6 +173,29 @@ class LayerCacheEngineKey(CacheEngineKey):
             f"@{self.worker_id}@{self.chunk_hash}@{self.layer_id}"
         )
 
+    def to_dict(self):
+        # Override parent's to_dict to include layer_id
+        return {
+            "__type__": "LayerCacheEngineKey",
+            "fmt": self.fmt,
+            "model_name": self.model_name,
+            "world_size": self.world_size,
+            "worker_id": self.worker_id,
+            "chunk_hash": self.chunk_hash,
+            "layer_id": self.layer_id,
+        }
+
+    @staticmethod
+    def from_dict(d):
+        return LayerCacheEngineKey(
+            fmt=d["fmt"],
+            model_name=d["model_name"],
+            world_size=d["world_size"],
+            worker_id=d["worker_id"],
+            chunk_hash=d["chunk_hash"],
+            layer_id=d["layer_id"],
+        )
+
     def split_layers(self, num_layers: int) -> List["LayerCacheEngineKey"]:
         """Split the key into multiple keys for each layer"""
         keys = []

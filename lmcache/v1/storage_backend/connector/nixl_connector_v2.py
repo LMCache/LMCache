@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from dataclasses import dataclass
-from typing import Callable, Optional, Union
+from typing import Callable, List, Optional, Union
 import abc
 import threading
 import time
@@ -15,7 +15,7 @@ import zmq
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.utils import CacheEngineKey, _lmcache_nvtx_annotate
+from lmcache.utils import CacheEngineKey, LayerCacheEngineKey, _lmcache_nvtx_annotate
 from lmcache.v1.memory_management import (
     MemoryAllocatorInterface,
     MemoryFormat,
@@ -103,10 +103,67 @@ class NixlBufferAllocator(MemoryAllocatorInterface):
         batch_size: int,
         fmt=MemoryFormat.KV_2LTD,
         allocator_type: Optional[str] = "nixl",
-    ):
-        raise NotImplementedError(
-            "Batched allocation is not supported in NIXL buffer allocator"
+    ) -> Optional[List[MemoryObj]]:
+        """
+        Batch allocate memory objects for multiple tensors with the same shape
+        and dtype. Raises an error if the batch size is larger than the NIXL
+        buffer capacity.
+
+        :param torch.Size shape: The shape of each tensor to allocate
+        :param torch.dtype dtype: The dtype of each tensor to allocate
+        :param int batch_size: Number of MemoryObj to allocate
+        :param MemoryFormat fmt: The format of the memory to allocate
+        :param str allocator_type: Type of allocator (unused, kept for
+        interface compatibility)
+
+        :return: List of MemoryObj wrapping the allocated memory
+        :rtype: Optional[List[MemoryObj]]
+        """
+        # Pre-calculate the size once
+        metadata = MemoryObjMetadata(
+            shape=shape,
+            dtype=dtype,
+            address=self.allocated_size,  # Will be updated for each object
+            phy_size=0,
+            ref_count=1,
+            fmt=fmt,
         )
+        required_size = metadata.get_size()
+        batched_required_size = required_size * batch_size
+
+        batch_start_idx = self.allocated_size
+        batch_end_idx = batch_start_idx + batched_required_size
+
+        # Check capacity once for the entire batch
+        assert batch_end_idx <= self.capacity, (
+            "The batch size is larger than the NIXL buffer capacity. "
+            "Consider decreasing `max_batched_tokens` in vllm config "
+            "or increasing `nixl_buffer_size` in lmcache config."
+        )
+
+        batch_buffer = self.buffer[batch_start_idx:batch_end_idx]
+        raw_datas = torch.chunk(batch_buffer, batch_size)
+
+        rets = [
+            TensorMemoryObj(
+                raw_data=raw_data,
+                metadata=MemoryObjMetadata(
+                    shape=shape,
+                    dtype=dtype,
+                    address=batch_start_idx + i * required_size,
+                    phy_size=0,
+                    ref_count=1,
+                    fmt=fmt,
+                ),
+                parent_allocator=self,
+            )
+            for i, raw_data in enumerate(raw_datas)
+        ]
+
+        # Update allocated size once for the entire batch
+        self.allocated_size += batched_required_size
+
+        return rets
 
     def free(self, obj: MemoryObj, allocator_type: Optional[str] = "nixl"):
         """Free the memory object."""
@@ -158,6 +215,8 @@ class NixlRequest:
         t = d["__type__"]
         if t == "CacheEngineKey":
             return CacheEngineKey.from_dict(d)
+        elif t == "LayerCacheEngineKey":
+            return LayerCacheEngineKey.from_dict(d)
         elif t == "MemoryObjMetadata":
             return MemoryObjMetadata.from_dict(d)
         elif t == "NixlRequest":
@@ -390,6 +449,27 @@ class NixlPipe:
         # and may be confusing
         return self._allocator.allocate(shape, dtype, fmt)
 
+    def batched_allocate_for_write(
+        self,
+        shape: torch.Size,
+        dtype: Optional[torch.dtype],
+        batch_size: int,
+        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
+    ) -> Optional[List[MemoryObj]]:
+        """
+        Batch allocate the memory for write.
+
+        :param torch.Size shape: The shape of each tensor to allocate
+        :param torch.dtype dtype: The dtype of each tensor to allocate
+        :param int batch_size: Number of MemoryObj to allocate
+        :param MemoryFormat fmt: The format of the memory to allocate
+        :param str allocator_type: Type of allocator (unused, kept
+        for interface compatibility)
+
+        :return: A list of MemoryObj if allocation is successful
+        """
+        return self._allocator.batched_allocate(shape, dtype, batch_size, fmt)
+
     @_lmcache_nvtx_annotate
     def flush(self):
         """Flush the buffer to the receiver side.
@@ -561,6 +641,19 @@ class NixlSender:
 
         self._added_payload_count += 1
         return self._pipe.allocate_for_write(shape, dtype, fmt)
+
+    def batched_allocate_for_send(
+        self,
+        shape: torch.Size,
+        dtype: Optional[torch.dtype],
+        batch_size: int,
+        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
+    ) -> Optional[List[MemoryObj]]:
+        """
+        Batch allocate the memory for send.
+        """
+        self._added_payload_count += batch_size
+        return self._pipe.batched_allocate_for_write(shape, dtype, batch_size, fmt)
 
     def _flush_send(self):
         """Flush the underlying pipe"""
@@ -884,6 +977,19 @@ class NixlChannel:
         """Allocate the memory for send."""
         sender = self._check_sender()
         return sender.allocate_for_send(shape, dtype, fmt)
+
+    def batched_allocate_for_send(
+        self,
+        shape: torch.Size,
+        dtype: Optional[torch.dtype],
+        batch_size: int,
+        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
+    ) -> Optional[List[MemoryObj]]:
+        """
+        Batch allocate the memory for send.
+        """
+        sender = self._check_sender()
+        return sender.batched_allocate_for_send(shape, dtype, batch_size, fmt)
 
     def finish_send(self):
         """Finish the send transaction by flushing the buffer."""

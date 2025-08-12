@@ -171,10 +171,10 @@ class RecvObjPool:
             return ret
 
     def pin(self, key: CacheEngineKey) -> bool:
-        raise NotImplementedError
+        return True
 
     def unpin(self, key: CacheEngineKey) -> bool:
-        raise NotImplementedError
+        return True
 
 
 class BasicNixlObserver(NixlObserverInterface):
@@ -316,6 +316,25 @@ class NixlBackend(StorageBackendInterface):
         assert ret is not None, "Failed to allocate zero-copy buffer from nixl_channel"
         return ret
 
+    def batched_allocate(
+        self,
+        shape: torch.Size,
+        dtype: torch.dtype,
+        batch_size: int,
+        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
+        eviction: bool = False,
+    ) -> Optional[List[MemoryObj]]:
+        """
+        Batched allocate a zero-copy write object for the given shape and dtype.
+        """
+        self._num_payload_added += batch_size
+
+        rets = self._nixl_channel.batched_allocate_for_send(
+            shape=shape, dtype=dtype, batch_size=batch_size, fmt=fmt
+        )
+        assert rets is not None, "Failed to allocate zero-copy buffer from nixl_channel"
+        return rets
+
     def flush_put_tasks(self) -> None:
         """
         Flush the registered tasks
@@ -367,7 +386,19 @@ class NixlBackend(StorageBackendInterface):
         self,
         key: CacheEngineKey,
     ) -> Optional[Future]:
-        raise NotImplementedError
+        """
+        Non-blocking get function. Return the dummy future object.
+
+        :param key: The key of the MemoryObj.
+
+        :return: MemoryObj. None if the key does not exist.
+        """
+        memory_obj = self._obj_pool.get(key)
+        if memory_obj is None:
+            return None
+        f: Future = Future()
+        f.set_result(memory_obj)
+        return f
 
     def remove(self, key: CacheEngineKey, force=True) -> bool:
         """
@@ -390,10 +421,22 @@ class NixlBackend(StorageBackendInterface):
         return self._nixl_channel.get_allocator()
 
     def pin(self, key: CacheEngineKey) -> bool:
-        raise NotImplementedError
+        """Pin the key in the storage backend.
+
+        :param key: The key to pin.
+
+        :return: True if the key is pinned, False otherwise.
+        """
+        return self._obj_pool.pin(key)
 
     def unpin(self, key: CacheEngineKey) -> bool:
-        raise NotImplementedError
+        """Unpin the key in the storage backend.
+
+        :param key: The key to unpin.
+
+        :return: True if the key is unpinned, False otherwise.
+        """
+        return self._obj_pool.unpin(key)
 
     @staticmethod
     def CreateNixlBackend(
