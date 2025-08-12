@@ -189,6 +189,97 @@ class MockRedisSentinel:
         return self.redis
 
 
+class MockCouchbaseCollection:
+    """Mock Couchbase collection for testing."""
+
+    def __init__(self):
+        self.data = {}
+
+    def exists(self, key):
+        """Mock exists operation."""
+
+        class ExistsResult:
+            def __init__(self, exists):
+                self.exists = exists
+
+        return ExistsResult(key in self.data)
+
+    def get(self, key):
+        """Mock get operation."""
+        if key not in self.data:
+            # Import here to avoid circular imports
+            try:
+                # First Party
+                from lmcache.v1.storage_backend.connector.couchbase_connector import (
+                    DocumentNotFoundException,
+                )
+
+                if DocumentNotFoundException:
+                    raise DocumentNotFoundException()
+            except Exception:
+                pass
+            raise Exception("Document not found")
+
+        class GetResult:
+            def __init__(self, data):
+                self.content_as = {bytes: data, dict: data}
+
+        return GetResult(self.data[key])
+
+    def upsert(self, key, value):
+        """Mock upsert operation."""
+        self.data[key] = value
+
+    def remove(self, key):
+        """Mock remove operation."""
+        if key in self.data:
+            del self.data[key]
+
+
+class MockCouchbaseScope:
+    """Mock Couchbase scope for testing."""
+
+    def __init__(self):
+        self._collection = MockCouchbaseCollection()
+
+    def collection(self, name):
+        return self._collection
+
+
+class MockCouchbaseBucket:
+    """Mock Couchbase bucket for testing."""
+
+    def __init__(self):
+        self._scope = MockCouchbaseScope()
+
+    def scope(self, name):
+        return self._scope
+
+    def ping(self):
+        """Mock ping operation."""
+        return True
+
+
+class MockCouchbaseCluster:
+    """Mock Couchbase cluster for testing."""
+
+    def __init__(self, connection_string, options=None):
+        self.connection_string = connection_string
+        self.options = options
+        self._bucket = MockCouchbaseBucket()
+
+    def bucket(self, name):
+        return self._bucket
+
+    def query(self, query_str):
+        """Mock N1QL query for list operations."""
+        return []
+
+    def close(self):
+        """Mock close operation."""
+        pass
+
+
 @dataclass
 class LMCacheServerProcess:
     server_url: str
@@ -208,6 +299,36 @@ def mock_redis():
 def mock_redis_sentinel():
     with patch("redis.Sentinel", MockRedisSentinel) as mock:
         yield mock
+
+
+@pytest.fixture(scope="function", autouse=True)
+def mock_couchbase():
+    """Mock the Couchbase SDK components."""
+    with (
+        patch(
+            "lmcache.v1.storage_backend.connector.couchbase_connector.Cluster",
+            MockCouchbaseCluster,
+        ),
+        patch(
+            (
+                "lmcache.v1.storage_backend.connector"
+                ".couchbase_connector.PasswordAuthenticator"
+            ),
+            lambda x, y: None,
+        ),
+        patch(
+            ("lmcache.v1.storage_backend.connector.couchbase_connector.ClusterOptions"),
+            lambda x: None,
+        ),
+        patch(
+            (
+                "lmcache.v1.storage_backend.connector"
+                ".couchbase_connector.DocumentNotFoundException"
+            ),
+            Exception,
+        ),
+    ):
+        yield
 
 
 @pytest.fixture(scope="module")

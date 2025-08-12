@@ -211,6 +211,7 @@ def CreateConnector(
     - lm://host:port
     - infinistore://host:port[?device=device_name]
     - mooncakestore://host:port[?device=device_name]
+    - couchbase://[[username]:[password]@]host[:port][?bucket=bucket_name&scope=scope_name&collection=collection_name]
     - blackhole://[any_text]
     - audit://host:port[?verify=true|false]
     - fs://[host:port]/path
@@ -222,6 +223,7 @@ def CreateConnector(
     - lm://localhost:65432
     - infinistore://127.0.0.1:12345?device=mlx5_0
     - mooncakestore://127.0.0.1:50051
+    - couchbase://username:password@localhost:8091?bucket=lmcache&scope=cache&collection=kv
     - blackhole://
     - audit://localhost:8080?verify=true
     - fs:///tmp/lmcache

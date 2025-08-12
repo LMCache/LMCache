@@ -72,6 +72,68 @@ def test_lm_connector(url, autorelease_v1, lmserver_v1_process):
     memory_allocator.close()
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        "couchbase://localhost:8091",
+        "couchbase://user:password@localhost:8091?bucket=testbucket",
+        "couchbase://localhost:8091?bucket=lmcache&scope=cache&collection=kv",
+        "couchbases://user:password@secure.example.com:18091?bucket=secure",
+    ],
+)
+def test_couchbase_connector_basic(url, autorelease_v1):
+    """Test Couchbase connector: exists, put, get operations.
+
+    This test uses the MockCouchbaseCluster from conftest.py to simulate
+    Couchbase behavior without requiring an actual Couchbase server.
+    """
+
+    async_loop, async_thread = init_asyncio_loop()
+    memory_allocator = PinMemoryAllocator(1024 * 1024 * 1024)
+    connector = autorelease_v1(CreateConnector(url, async_loop, memory_allocator))
+
+    random_key = dumb_cache_engine_key()
+
+    # Test 1: Verify key doesn't exist initially
+    future = asyncio.run_coroutine_threadsafe(connector.exists(random_key), async_loop)
+    assert not future.result()
+
+    # Test 2: Create and store test data
+    num_tokens = 1000
+    mem_obj_shape = [2, 32, num_tokens, 1024]
+    dtype = torch.bfloat16
+    memory_obj = memory_allocator.allocate(mem_obj_shape, dtype)
+    memory_obj.ref_count_up()
+
+    torch.manual_seed(42)
+    test_tensor = torch.randint(0, 100, memory_obj.raw_data.shape, dtype=torch.int64)
+    memory_obj.raw_data.copy_(test_tensor.to(torch.float32).to(dtype))
+
+    # Test 3: Put data
+    future = asyncio.run_coroutine_threadsafe(
+        connector.put(random_key, memory_obj), async_loop
+    )
+    future.result()
+
+    # Test 4: Verify key exists after putting data
+    future = asyncio.run_coroutine_threadsafe(connector.exists(random_key), async_loop)
+    assert future.result()
+    assert memory_obj.get_ref_count() == 1
+
+    # Test 5: Retrieve and verify data
+    future = asyncio.run_coroutine_threadsafe(connector.get(random_key), async_loop)
+    retrieved_memory_obj = future.result()
+
+    check_mem_obj_equal(
+        [retrieved_memory_obj],
+        [memory_obj],
+    )
+
+    close_asyncio_loop(async_loop, async_thread)
+
+    memory_allocator.close()
+
+
 @pytest.mark.parametrize("full_chunk", [True, False])
 @pytest.mark.parametrize("save_chunk_meta", [True, False])
 @pytest.mark.parametrize("use_mla", [True, False])
@@ -238,6 +300,68 @@ def test_redis_connector(url, autorelease_v1):
 @pytest.mark.parametrize(
     "url",
     [
+        "couchbase://localhost:8091",
+        "couchbase://user:password@localhost:8091?bucket=testbucket",
+        "couchbase://localhost:8091?bucket=lmcache&scope=cache&collection=kv",
+        "couchbases://user:password@secure.example.com:18091?bucket=secure",
+    ],
+)
+def test_couchbase_connector_operations(url, autorelease_v1):
+    """Test Couchbase connector: exists, put, get operations.
+
+    This test uses the MockCouchbaseCluster from conftest.py to simulate
+    Couchbase behavior without requiring an actual Couchbase server.
+    """
+
+    async_loop, async_thread = init_asyncio_loop()
+    memory_allocator = PinMemoryAllocator(1024 * 1024 * 1024)
+    connector = autorelease_v1(CreateConnector(url, async_loop, memory_allocator))
+
+    random_key = dumb_cache_engine_key()
+
+    # Test 1: Verify key doesn't exist initially
+    future = asyncio.run_coroutine_threadsafe(connector.exists(random_key), async_loop)
+    assert not future.result()
+
+    # Test 2: Create and store test data
+    num_tokens = 1000
+    mem_obj_shape = [2, 32, num_tokens, 1024]
+    dtype = torch.bfloat16
+    memory_obj = memory_allocator.allocate(mem_obj_shape, dtype)
+    memory_obj.ref_count_up()
+
+    torch.manual_seed(42)
+    test_tensor = torch.randint(0, 100, memory_obj.raw_data.shape, dtype=torch.int64)
+    memory_obj.raw_data.copy_(test_tensor.to(torch.float32).to(dtype))
+
+    # Test 3: Put data
+    future = asyncio.run_coroutine_threadsafe(
+        connector.put(random_key, memory_obj), async_loop
+    )
+    future.result()
+
+    # Test 4: Verify key exists after putting data
+    future = asyncio.run_coroutine_threadsafe(connector.exists(random_key), async_loop)
+    assert future.result()
+    assert memory_obj.get_ref_count() == 1
+
+    # Test 5: Retrieve and verify data
+    future = asyncio.run_coroutine_threadsafe(connector.get(random_key), async_loop)
+    retrieved_memory_obj = future.result()
+
+    check_mem_obj_equal(
+        [retrieved_memory_obj],
+        [memory_obj],
+    )
+
+    close_asyncio_loop(async_loop, async_thread)
+
+    memory_allocator.close()
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
         "redis-sentinel://localhost:26379,localhost:26380,localhost:26381",
         "redis-sentinel://user:password@localhost:26379,localhost:26380",
         "redis-sentinel://localhost:26379",
@@ -291,6 +415,68 @@ def test_redis_sentinel_connector(url, autorelease_v1):
     # Test 5: Retrieve and verify data
     future = asyncio.run_coroutine_threadsafe(connector.get(random_key), async_loop)
     future.result()
+
+    close_asyncio_loop(async_loop, async_thread)
+
+    memory_allocator.close()
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "couchbase://localhost:8091",
+        "couchbase://user:password@localhost:8091?bucket=testbucket",
+        "couchbase://localhost:8091?bucket=lmcache&scope=cache&collection=kv",
+        "couchbases://user:password@secure.example.com:18091?bucket=secure",
+    ],
+)
+def test_couchbase_connector_advanced(url, autorelease_v1):
+    """Test Couchbase connector: exists, put, get operations.
+
+    This test uses the MockCouchbaseCluster from conftest.py to simulate
+    Couchbase behavior without requiring an actual Couchbase server.
+    """
+
+    async_loop, async_thread = init_asyncio_loop()
+    memory_allocator = PinMemoryAllocator(1024 * 1024 * 1024)
+    connector = autorelease_v1(CreateConnector(url, async_loop, memory_allocator))
+
+    random_key = dumb_cache_engine_key()
+
+    # Test 1: Verify key doesn't exist initially
+    future = asyncio.run_coroutine_threadsafe(connector.exists(random_key), async_loop)
+    assert not future.result()
+
+    # Test 2: Create and store test data
+    num_tokens = 1000
+    mem_obj_shape = [2, 32, num_tokens, 1024]
+    dtype = torch.bfloat16
+    memory_obj = memory_allocator.allocate(mem_obj_shape, dtype)
+    memory_obj.ref_count_up()
+
+    torch.manual_seed(42)
+    test_tensor = torch.randint(0, 100, memory_obj.raw_data.shape, dtype=torch.int64)
+    memory_obj.raw_data.copy_(test_tensor.to(torch.float32).to(dtype))
+
+    # Test 3: Put data
+    future = asyncio.run_coroutine_threadsafe(
+        connector.put(random_key, memory_obj), async_loop
+    )
+    future.result()
+
+    # Test 4: Verify key exists after putting data
+    future = asyncio.run_coroutine_threadsafe(connector.exists(random_key), async_loop)
+    assert future.result()
+    assert memory_obj.get_ref_count() == 1
+
+    # Test 5: Retrieve and verify data
+    future = asyncio.run_coroutine_threadsafe(connector.get(random_key), async_loop)
+    retrieved_memory_obj = future.result()
+
+    check_mem_obj_equal(
+        [retrieved_memory_obj],
+        [memory_obj],
+    )
 
     close_asyncio_loop(async_loop, async_thread)
 
