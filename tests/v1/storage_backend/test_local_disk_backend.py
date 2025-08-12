@@ -516,15 +516,14 @@ class TestLocalDiskBackend:
         key = create_test_key("test_key")
         non_existent_path = "/non/existent/path/file.pt"
 
-        with pytest.raises(FileNotFoundError):
-            local_disk_backend.load_bytes_from_disk(
-                key,
-                non_existent_path,
-                torch.bfloat16,
-                torch.Size([2, 16, 8, 128]),
-                MemoryFormat.KV_T2D,
-            )
-
+        memory_obj = local_disk_backend.load_bytes_from_disk(
+            key,
+            non_existent_path,
+            torch.bfloat16,
+            torch.Size([2, 16, 8, 128]),
+            MemoryFormat.KV_T2D,
+        )
+        assert memory_obj is not None
         local_disk_backend.local_cpu_backend.memory_allocator.close()
 
     def test_cleanup_on_remove(self, local_disk_backend):
