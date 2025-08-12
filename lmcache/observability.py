@@ -43,6 +43,9 @@ class LMCacheStats:
     interval_remote_ping_success: int  # Number of ping successes
     interval_remote_ping_error_code: int  # Latest ping error code
 
+    interval_local_cpu_evict_count: int  # evict count
+    interval_local_cpu_evict_keys_count: int  # evict keys count
+
     # Real time value measurements (will be reset after each log)
     retrieve_hit_rate: float
     lookup_hit_rate: float
@@ -131,6 +134,9 @@ class LMCStatsMonitor:
         self.interval_remote_ping_errors = 0
         self.interval_remote_ping_success = 0
         self.interval_remote_ping_error_code = 0  # 0 means success
+
+        self.interval_local_cpu_evict_count = 0
+        self.interval_local_cpu_evict_keys_count = 0
 
         self.local_cache_usage_bytes = 0
         self.remote_cache_usage_bytes = 0
@@ -258,6 +264,11 @@ class LMCStatsMonitor:
         else:
             self.interval_remote_ping_success += 1
 
+    @thread_safe
+    def update_local_cpu_evict_metrics(self, evict_keys_count: int):
+        self.interval_local_cpu_evict_count += 1
+        self.interval_local_cpu_evict_keys_count += evict_keys_count
+
     def _clear(self):
         """
         Clear all the distribution stats
@@ -284,6 +295,9 @@ class LMCStatsMonitor:
         self.interval_remote_ping_errors = 0
         self.interval_remote_ping_success = 0
         self.interval_remote_ping_error_code = 0
+
+        self.interval_local_cpu_evict_count = 0
+        self.interval_local_cpu_evict_keys_count = 0
 
         new_retrieve_requests = {}
         for request_id, retrieve_stats in self.retrieve_requests.items():
@@ -357,6 +371,8 @@ class LMCStatsMonitor:
             interval_remote_ping_error_code=self.interval_remote_ping_error_code,
             retrieve_hit_rate=retrieve_hit_rate,
             lookup_hit_rate=lookup_hit_rate,
+            interval_local_cpu_evict_count=self.interval_local_cpu_evict_count,
+            interval_local_cpu_evict_keys_count=self.interval_local_cpu_evict_keys_count,
             local_cache_usage_bytes=self.local_cache_usage_bytes,
             remote_cache_usage_bytes=self.remote_cache_usage_bytes,
             local_storage_usage_bytes=self.local_storage_usage_bytes,
@@ -464,6 +480,18 @@ class PrometheusLogger:
         self.counter_num_remote_write_bytes = self._counter_cls(
             name="lmcache:num_remote_write_bytes",
             documentation="Total number of bytes write to remote backends in lmcache",
+            labelnames=labelnames,
+        )
+
+        self.counter_local_cpu_evict_count = self._counter_cls(
+            name="lmcache:local_cpu_evict_count",
+            documentation="Total number of evict in local cpu backend",
+            labelnames=labelnames,
+        )
+
+        self.counter_local_cpu_evict_keys_count = self._counter_cls(
+            name="lmcache:local_cpu_evict_keys_count",
+            documentation="Total number of evict keys in local cpu backend",
             labelnames=labelnames,
         )
 
@@ -747,6 +775,14 @@ class PrometheusLogger:
         self._log_counter(
             self.counter_num_remote_write_bytes,
             stats.interval_remote_write_bytes,
+        )
+        self._log_counter(
+            self.counter_local_cpu_evict_count,
+            stats.interval_local_cpu_evict_count,
+        )
+        self._log_counter(
+            self.counter_local_cpu_evict_keys_count,
+            stats.interval_local_cpu_evict_keys_count,
         )
 
         self._log_gauge(self.gauge_retrieve_hit_rate, stats.retrieve_hit_rate)
