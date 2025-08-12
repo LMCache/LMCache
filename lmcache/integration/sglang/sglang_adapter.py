@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import List, Optional
+from typing import List, Optional, TYPE_CHECKING
+from dataclasses import dataclass
 
 # Third Party
-from sglang.srt.configs.model_config import ModelConfig
 import torch
 
 # First Party
@@ -16,6 +16,12 @@ from lmcache.v1.gpu_connector import (
     SGLangGPUConnector,
 )
 
+if TYPE_CHECKING:
+    from sglang.srt.managers.schedule_batch import ForwardBatch
+    from sglang.srt.configs.model_config import ModelConfig
+    from sglang.srt.mem_cache.lmc_radix_cache import StoreMetadata
+
+
 logger = init_logger(__name__)
 
 
@@ -24,13 +30,12 @@ def need_gpu_interm_buffer(lmcache_config: LMCacheEngineConfig):
         return False
     else:
         return True
-
+    
 
 def init_lmcache_engine(
     model_config: ModelConfig,
     tp_size: int,
     rank: int,
-    world_size: int,
     kv_dtype: torch.dtype,
 ) -> Optional[LMCacheEngine]:
     """
@@ -57,7 +62,7 @@ def init_lmcache_engine(
     device = torch.device(f"cuda:{rank}")
     metadata = LMCacheEngineMetadata(
         model_config.model_path,
-        world_size,
+        tp_size,
         rank,
         "sgl",
         kv_dtype,
@@ -92,7 +97,6 @@ class LMCacheConnector:
         sgl_config: ModelConfig,
         tp_size: int,
         rank: int,
-        world_size: int,
         k_pool: List[torch.Tensor],
         v_pool: List[torch.Tensor],
     ):
@@ -101,13 +105,11 @@ class LMCacheConnector:
             sgl_config,
             tp_size,
             rank,
-            world_size,
             kv_dtype,
         )
         self.sgl_config = sgl_config
         self.tp_size = tp_size
         self.rank = rank
-        self.world_size = world_size
         self.kvcaches = k_pool + v_pool
 
     ####################
@@ -170,3 +172,79 @@ class LMCacheConnector:
 
     def close(self):
         self.lmcache_engine.close()
+
+class LMCacheLayerwiseConnector(LMCacheConnector):
+    def __init__(
+        self,
+        sgl_config: ModelConfig,
+        tp_size: int,
+        rank: int,
+        k_pool: List[torch.Tensor],
+        v_pool: List[torch.Tensor],
+    ):
+        super().__init__(sgl_config, tp_size, rank, k_pool, v_pool)
+        self.current_layer = 0
+        self._lmcache_chunk_size = self.lmcache_engine.config.chunk_size
+        self.layerwise_retrievers = []
+
+    def load_kv_layerwise(self, forward_batch: ForwardBatch) -> None:
+        self.current_layer = 0
+
+        self.lmcache_engine.post_init(kvcaches=self.kvcaches)
+
+        self.layerwise_retrievers = []
+
+        for idx, request in enumerate(forward_batch.requests):
+            if request.load_spec is None:
+                continue
+            last_idx = idx
+
+        for idx, request in enumerate(forward_batch.requests):
+            tokens = request.input_ids
+            slot_mapping = request.token_pool_mapping
+
+            token_mask = torch.ones_like(tokens, dtype=torch.bool)
+            masked_token_count = (
+                request.load_spec.vllm_cached_tokens
+                // self._lmcache_chunk_size
+                * self._lmcache_chunk_size
+            )
+            token_mask[:masked_token_count] = False
+
+            if idx == last_idx:
+                sync = True
+            else:
+                sync = False
+
+            layerwise_retriever = self.lmcache_engine.retrieve_layer(
+                tokens[:masked_token_count],
+                token_mask[:masked_token_count],
+                kvcaches=self.kvcaches,
+                slot_mapping=slot_mapping[:masked_token_count],
+                sync=sync,
+            )
+            next(layerwise_retriever)
+            self.layerwise_retrievers.append(layerwise_retriever)
+
+    def wait_for_layer_load(self, layer_name: str) -> None:
+        for layerwise_retriever in self.layerwise_retrievers:
+            ret_token_mask = next(layerwise_retriever)
+            if self.current_layer == self.num_layers - 1:
+                assert ret_token_mask is not None
+                num_retrieved_tokens = ret_token_mask.sum().item()
+                logger.info(f"Retrieved {num_retrieved_tokens} tokens")
+        return
+
+    def store_kv(self, store_metadata: StoreMetadata) -> None:
+        slot_mapping = store_metadata.kv_indices.cuda()
+        token_ids = store_metadata.token_ids
+        store_mask = torch.ones_like(token_ids, dtype=torch.bool)
+
+        self.lmcache_engine.store(
+            token_ids,
+            mask=store_mask,
+            kvcaches=self.kvcaches,
+            slot_mapping=slot_mapping,
+            offset=store_metadata.offset,
+        )
+        

@@ -5,6 +5,6 @@ packaging>=24.2
 setuptools>=77.0.3,<81.0.0
 setuptools_scm>=8
 # please update ASAP when vllm torch updates
-torch==2.7.1
+torch==2.8.0
 wheel
 
