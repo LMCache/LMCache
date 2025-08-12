@@ -144,17 +144,18 @@ class LMCacheEngine:
         InitializeUsageContext(config.to_original_config(), metadata)
         self.stats_monitor = LMCStatsMonitor.GetOrCreate()
 
+        if config.cache_engine_internal_api_server_enabled and metadata.worker_id == 0:
+            # TODO(baoloongmao): support create api servers for each worker.
+            self.api_server = CacheEngineInternalAPIServer(config)
+            self.api_server.start()
+        else:
+            self.api_server = None
+
         self.post_inited = False
 
         gc.collect()
         if not config.py_enable_gc:
             gc.disable()
-
-        # Start api server
-        if config.cache_engine_internal_api_server_enabled and metadata.worker_id == 0:
-            # TODO(baoloongmao): support create api servers for each worker.
-            self.api_server = CacheEngineInternalAPIServer(config)
-            self.api_server.start()
 
     def post_init(self, **kwargs) -> None:
         if not self.post_inited:
