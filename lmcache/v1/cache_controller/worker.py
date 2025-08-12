@@ -249,7 +249,7 @@ class LMCacheWorker:
                         request_id=request.worker_event_id,
                     )
                     serialized_ret_msg = msgspec.msgpack.encode(
-                        UnpinWorkerRetMsg()
+                        UnpinWorkerRetMsg(msg="Unpin success")
                     )
                 elif isinstance(request, ClearWorkerMsg):
                     num_cleared_tokens = self.lmcache_engine.clear(

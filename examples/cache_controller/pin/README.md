@@ -1,5 +1,5 @@
-# LMCache Pin/Persistence
-This is an example to demonstrate how to pin/persist a request's KV cache in an LMCacheEngine externally.
+# LMCache Pin/Persistence or Unpin
+This is an example to demonstrate how to pin/persistence or unpin a request's KV cache in an LMCacheEngine externally.
 
 ## Prerequisites
 Your server should have at least 1 GPU.  
@@ -58,5 +58,24 @@ curl -X POST http://localhost:9000/pin \
 You should be able to see a return message indicating the number of tokens' KV cache that has been successfully pinned in the system:
 
 ```plaintext
-{"event_id": "xxx", "num_tokens": 12}
+{"event_id": "Pin1cca895a-2ec3-4ebb-868a-34d5789265a9", "num_tokens": 12}
+```
+
+6. Unpin a request's KV cache in the system:
+```bash
+curl -X POST http://localhost:9000/unpin \
+  -H "Content-Type: application/json" \
+  -d '{
+    "event_id": "Pin1cca895a-2ec3-4ebb-868a-34d5789265a9",
+    "instance_id": "lmcache_default_instance",
+    "location": "LocalCPUBackend"
+  }'
+```
+You should be able to see a return message indicating event_id's KV cache that has been successfully unpinned in the system:
+
+```plaintext
+{
+    "event_id": "Pin1cca895a-2ec3-4ebb-868a-34d5789265a9",
+    "msg": "Unpin success"
+}
 ```
