@@ -285,6 +285,8 @@ class TensorMemoryObj(MemoryObj):
     Wraps a raw flat tensor with some metadata
     """
 
+    monitor = LMCStatsMonitor.GetOrCreate()
+
     def __init__(
         self,
         raw_data: torch.Tensor,
@@ -355,12 +357,20 @@ class TensorMemoryObj(MemoryObj):
 
     def pin(self) -> bool:
         with self.lock:
+            # if pin_count is 0, indicates that the object is pinned for the first time
+            if self.meta.pin_count == 0:
+                TensorMemoryObj.monitor.update_pinned_memory_objs_count(1)
+
             self.meta.pin_count += 1
             return True
 
     def unpin(self) -> bool:
         with self.lock:
             self.meta.pin_count -= 1
+
+            # if pin_count is 0, indicates that the object is unpinned
+            if self.meta.pin_count == 0:
+                TensorMemoryObj.monitor.update_pinned_memory_objs_count(-1)
 
             if self.meta.pin_count <= 0 and self.meta.ref_count <= 0:
                 self.parent_allocator.free(self)
@@ -723,6 +733,7 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         self.total_allocated_size += aligned_size
         self.num_active_allocations += 1
         self.stats_monitor.update_local_cache_usage(self.total_allocated_size)
+        self.stats_monitor.update_active_memory_objs_count(self.num_active_allocations)
 
         # Allocate the block
         return TensorMemoryObj(
@@ -791,6 +802,7 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         self.total_allocated_size += total_aligned_size
         self.num_active_allocations += batch_size
         self.stats_monitor.update_local_cache_usage(self.total_allocated_size)
+        self.stats_monitor.update_active_memory_objs_count(self.num_active_allocations)
 
         raw_datas = torch.chunk(
             self.buffer[block.start : block.start + total_aligned_size],
@@ -835,8 +847,9 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         # TODO (Jiayi): need a flag to drop these debug ops
         # Update debug status
         self.total_allocated_size -= memory_obj.meta.phy_size
-        self.num_active_allocations = max(0, self.num_active_allocations - 1)
+        self.num_active_allocations -= 1
         self.stats_monitor.update_local_cache_usage(self.total_allocated_size)
+        self.stats_monitor.update_active_memory_objs_count(self.num_active_allocations)
 
     @_lmcache_nvtx_annotate
     def batched_free(
@@ -897,10 +910,11 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
             # TODO (Jiayi): need a flag to drop these debug ops
             # Update debug status
             self.total_allocated_size -= total_freed_size
-            self.num_active_allocations = max(
-                0, self.num_active_allocations - num_valid_blocks
-            )
+            self.num_active_allocations -= num_valid_blocks
             self.stats_monitor.update_local_cache_usage(self.total_allocated_size)
+            self.stats_monitor.update_active_memory_objs_count(
+                self.num_active_allocations
+            )
 
     def memcheck(self):
         """For debug purposes.
@@ -1043,6 +1057,7 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
         self.num_active_allocations += 1
         self.total_allocated_size += self.align_bytes
         self.stats_monitor.update_local_cache_usage(self.total_allocated_size)
+        self.stats_monitor.update_active_memory_objs_count(self.num_active_allocations)
 
         # Allocate the block
         return free_block
@@ -1097,6 +1112,7 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
         self.num_active_allocations += batch_size
         self.total_allocated_size = self.num_active_allocations * self.align_bytes
         self.stats_monitor.update_local_cache_usage(self.total_allocated_size)
+        self.stats_monitor.update_active_memory_objs_count(self.num_active_allocations)
 
         # Allocate the block
         return allocated_blocks
@@ -1118,8 +1134,9 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
         # is tolerable as this is only used for debugging purposes.
         # Update debug status
         self.total_allocated_size -= self.align_bytes
-        self.num_active_allocations = max(0, self.num_active_allocations - 1)
+        self.num_active_allocations -= 1
         self.stats_monitor.update_local_cache_usage(self.total_allocated_size)
+        self.stats_monitor.update_active_memory_objs_count(self.num_active_allocations)
 
     @_lmcache_nvtx_annotate
     def batched_free(
@@ -1152,10 +1169,11 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
             # is tolerable as this is only used for debugging purposes.
             # Update debug status
             self.total_allocated_size -= self.align_bytes * num_freed_blocks
-            self.num_active_allocations = max(
-                0, self.num_active_allocations - num_freed_blocks
-            )
+            self.num_active_allocations -= num_freed_blocks
             self.stats_monitor.update_local_cache_usage(self.total_allocated_size)
+            self.stats_monitor.update_active_memory_objs_count(
+                self.num_active_allocations
+            )
 
     def memcheck(self):
         """For debug purposes.

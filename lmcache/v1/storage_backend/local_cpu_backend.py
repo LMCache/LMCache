@@ -263,6 +263,7 @@ class LocalCPUBackend(StorageBackendInterface):
                 )
 
                 if not evict_keys:
+                    self.stats_monitor.update_local_cpu_evict_failed_count(1)
                     logger.warning(
                         "No eviction candidates found in local cpu backend. "
                         "Local cpu memory is under pressure."
@@ -332,6 +333,7 @@ class LocalCPUBackend(StorageBackendInterface):
                 # pinned in the cpu memory. This might not be true.
 
                 if not evict_keys:
+                    self.stats_monitor.update_local_cpu_evict_failed_count(1)
                     logger.warning(
                         "No eviction candidates found in local cpu backend. "
                         "Local cpu memory is under pressure."
