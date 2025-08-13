@@ -23,8 +23,11 @@ class LMCacheStats:
     # which will accumulate over time in Counter)
     interval_retrieve_requests: int
     interval_store_requests: int
+    interval_lookup_requests: int
     interval_requested_tokens: int
     interval_hit_tokens: int
+    interval_lookup_tokens: int
+    interval_lookup_hits: int
 
     interval_remote_read_requests: int
     interval_remote_read_bytes: int
@@ -40,8 +43,12 @@ class LMCacheStats:
     interval_remote_ping_success: int  # Number of ping successes
     interval_remote_ping_error_code: int  # Latest ping error code
 
+    interval_local_cpu_evict_count: int  # evict count
+    interval_local_cpu_evict_keys_count: int  # evict keys count
+
     # Real time value measurements (will be reset after each log)
-    cache_hit_rate: float
+    retrieve_hit_rate: float
+    lookup_hit_rate: float
 
     local_cache_usage_bytes: int  # Size of the used local cache in bytes
     remote_cache_usage_bytes: int  # Size of the used remote cache in bytes
@@ -52,6 +59,12 @@ class LMCacheStats:
     time_to_store: List[float]
     retrieve_speed: List[float]  # Tokens per second
     store_speed: List[float]  # Tokens per second
+
+
+@dataclass
+class LookupRequestStats:
+    num_tokens: int
+    hit_tokens: int
 
 
 @dataclass
@@ -98,8 +111,11 @@ class LMCStatsMonitor:
         # Accumulate incremental values in the Prometheus Counter
         self.interval_retrieve_requests = 0
         self.interval_store_requests = 0
-        self.interval_requested_tokens = 0
-        self.interval_hit_tokens = 0
+        self.interval_lookup_requests = 0
+        self.interval_requested_tokens = 0  # total requested tokens retrieve
+        self.interval_hit_tokens = 0  # total hit tokens retrieve
+        self.interval_lookup_tokens = 0  # total requested tokens lookup
+        self.interval_lookup_hits = 0  # total hit tokens lookup
 
         # remote backends read/write metrics
         self.interval_remote_read_requests = 0
@@ -119,6 +135,9 @@ class LMCStatsMonitor:
         self.interval_remote_ping_success = 0
         self.interval_remote_ping_error_code = 0  # 0 means success
 
+        self.interval_local_cpu_evict_count = 0
+        self.interval_local_cpu_evict_keys_count = 0
+
         self.local_cache_usage_bytes = 0
         self.remote_cache_usage_bytes = 0
         self.local_storage_usage_bytes = 0
@@ -128,6 +147,23 @@ class LMCStatsMonitor:
 
         self.retrieve_request_id = 0
         self.store_request_id = 0
+
+    @thread_safe
+    def on_lookup_request(self, num_tokens: int):
+        """
+        This function is called when a lookup request is sent to the cache.
+        It will record the number of tokens requested.
+        """
+        self.interval_lookup_requests += 1
+        self.interval_lookup_tokens += num_tokens
+
+    @thread_safe
+    def on_lookup_finished(self, num_hit_tokens: int):
+        """
+        This function is called when a lookup request is finished.
+        It will record the number of tokens hit.
+        """
+        self.interval_lookup_hits += num_hit_tokens
 
     @thread_safe
     def on_retrieve_request(self, num_tokens: int) -> int:
@@ -228,15 +264,23 @@ class LMCStatsMonitor:
         else:
             self.interval_remote_ping_success += 1
 
+    @thread_safe
+    def update_local_cpu_evict_metrics(self, evict_keys_count: int):
+        self.interval_local_cpu_evict_count += 1
+        self.interval_local_cpu_evict_keys_count += evict_keys_count
+
     def _clear(self):
         """
         Clear all the distribution stats
         """
         self.interval_retrieve_requests = 0
         self.interval_store_requests = 0
+        self.interval_lookup_requests = 0
 
         self.interval_requested_tokens = 0
         self.interval_hit_tokens = 0
+        self.interval_lookup_tokens = 0
+        self.interval_lookup_hits = 0
 
         self.interval_remote_read_requests = 0
         self.interval_remote_read_bytes = 0
@@ -251,6 +295,9 @@ class LMCStatsMonitor:
         self.interval_remote_ping_errors = 0
         self.interval_remote_ping_success = 0
         self.interval_remote_ping_error_code = 0
+
+        self.interval_local_cpu_evict_count = 0
+        self.interval_local_cpu_evict_keys_count = 0
 
         new_retrieve_requests = {}
         for request_id, retrieve_stats in self.retrieve_requests.items():
@@ -272,10 +319,16 @@ class LMCStatsMonitor:
         The function will return the latest states between the current
         call and the previous call.
         """
-        cache_hit_rate = (
+        retrieve_hit_rate = (
             0
             if self.interval_requested_tokens == 0
             else self.interval_hit_tokens / self.interval_requested_tokens
+        )
+
+        lookup_hit_rate = (
+            0
+            if self.interval_lookup_tokens == 0
+            else self.interval_lookup_hits / self.interval_lookup_tokens
         )
 
         def filter_out_invalid(stats: List[float]):
@@ -300,8 +353,11 @@ class LMCStatsMonitor:
         ret = LMCacheStats(
             interval_retrieve_requests=self.interval_retrieve_requests,
             interval_store_requests=self.interval_store_requests,
+            interval_lookup_requests=self.interval_lookup_requests,
             interval_requested_tokens=self.interval_requested_tokens,
             interval_hit_tokens=self.interval_hit_tokens,
+            interval_lookup_tokens=self.interval_lookup_tokens,
+            interval_lookup_hits=self.interval_lookup_hits,
             interval_remote_read_requests=self.interval_remote_read_requests,
             interval_remote_read_bytes=self.interval_remote_read_bytes,
             interval_remote_write_requests=self.interval_remote_write_requests,
@@ -313,7 +369,10 @@ class LMCStatsMonitor:
             interval_remote_ping_errors=self.interval_remote_ping_errors,
             interval_remote_ping_success=self.interval_remote_ping_success,
             interval_remote_ping_error_code=self.interval_remote_ping_error_code,
-            cache_hit_rate=cache_hit_rate,
+            retrieve_hit_rate=retrieve_hit_rate,
+            lookup_hit_rate=lookup_hit_rate,
+            interval_local_cpu_evict_count=self.interval_local_cpu_evict_count,
+            interval_local_cpu_evict_keys_count=self.interval_local_cpu_evict_keys_count,
             local_cache_usage_bytes=self.local_cache_usage_bytes,
             remote_cache_usage_bytes=self.remote_cache_usage_bytes,
             local_storage_usage_bytes=self.local_storage_usage_bytes,
@@ -368,6 +427,12 @@ class PrometheusLogger:
             labelnames=labelnames,
         )
 
+        self.counter_num_lookup_requests = self._counter_cls(
+            name="lmcache:num_lookup_requests",
+            documentation="Total number of lookup requests sent to lmcache",
+            labelnames=labelnames,
+        )
+
         self.counter_num_requested_tokens = self._counter_cls(
             name="lmcache:num_requested_tokens",
             documentation="Total number of tokens requested from lmcache",
@@ -377,6 +442,18 @@ class PrometheusLogger:
         self.counter_num_hit_tokens = self._counter_cls(
             name="lmcache:num_hit_tokens",
             documentation="Total number of tokens hit in lmcache",
+            labelnames=labelnames,
+        )
+
+        self.counter_num_lookup_tokens = self._counter_cls(
+            name="lmcache:num_lookup_tokens",
+            documentation="Total number of tokens requested in lookup from lmcache",
+            labelnames=labelnames,
+        )
+
+        self.counter_num_lookup_hits = self._counter_cls(
+            name="lmcache:num_lookup_hits",
+            documentation="Total number of tokens hit in lookup from lmcache",
             labelnames=labelnames,
         )
 
@@ -406,9 +483,28 @@ class PrometheusLogger:
             labelnames=labelnames,
         )
 
-        self.gauge_cache_hit_rate = self._gauge_cls(
-            name="lmcache:cache_hit_rate",
-            documentation="Cache hit rate of lmcache since last log",
+        self.counter_local_cpu_evict_count = self._counter_cls(
+            name="lmcache:local_cpu_evict_count",
+            documentation="Total number of evict in local cpu backend",
+            labelnames=labelnames,
+        )
+
+        self.counter_local_cpu_evict_keys_count = self._counter_cls(
+            name="lmcache:local_cpu_evict_keys_count",
+            documentation="Total number of evict keys in local cpu backend",
+            labelnames=labelnames,
+        )
+
+        self.gauge_retrieve_hit_rate = self._gauge_cls(
+            name="lmcache:retrieve_hit_rate",
+            documentation="Hit rate of lmcache retrieve requests since last log",
+            labelnames=labelnames,
+            multiprocess_mode="livemostrecent",
+        )
+
+        self.gauge_lookup_hit_rate = self._gauge_cls(
+            name="lmcache:lookup_hit_rate",
+            documentation="Hit rate of lmcache lookup requests since last log",
             labelnames=labelnames,
             multiprocess_mode="livemostrecent",
         )
@@ -654,11 +750,16 @@ class PrometheusLogger:
         self._log_counter(
             self.counter_num_store_requests, stats.interval_store_requests
         )
+        self._log_counter(
+            self.counter_num_lookup_requests, stats.interval_lookup_requests
+        )
 
         self._log_counter(
             self.counter_num_requested_tokens, stats.interval_requested_tokens
         )
         self._log_counter(self.counter_num_hit_tokens, stats.interval_hit_tokens)
+        self._log_counter(self.counter_num_lookup_tokens, stats.interval_lookup_tokens)
+        self._log_counter(self.counter_num_lookup_hits, stats.interval_lookup_hits)
 
         self._log_counter(
             self.counter_num_remote_read_requests,
@@ -675,8 +776,18 @@ class PrometheusLogger:
             self.counter_num_remote_write_bytes,
             stats.interval_remote_write_bytes,
         )
+        self._log_counter(
+            self.counter_local_cpu_evict_count,
+            stats.interval_local_cpu_evict_count,
+        )
+        self._log_counter(
+            self.counter_local_cpu_evict_keys_count,
+            stats.interval_local_cpu_evict_keys_count,
+        )
 
-        self._log_gauge(self.gauge_cache_hit_rate, stats.cache_hit_rate)
+        self._log_gauge(self.gauge_retrieve_hit_rate, stats.retrieve_hit_rate)
+
+        self._log_gauge(self.gauge_lookup_hit_rate, stats.lookup_hit_rate)
 
         self._log_gauge(self.gauge_local_cache_usage, stats.local_cache_usage_bytes)
 

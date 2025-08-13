@@ -186,6 +186,8 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "env_converter": int,
     },
     # Other configurations
+    # (Deprecated) The url of the actual remote lmcache instance for auditing.
+    # Please use extra_config['audit_actual_remote_url'] instead.
     "audit_actual_remote_url": {
         "type": Optional[str],
         "default": None,
