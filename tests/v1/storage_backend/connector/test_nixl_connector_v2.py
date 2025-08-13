@@ -135,7 +135,6 @@ class TestNixlPipeBatchedAllocateForWrite:
 
     def test_batched_allocate_for_write_success(self, mock_nixl_pipe):
         """Test successful batch allocation for write."""
-        # Arrange
         shape = torch.Size([2, 16, 8, 128])
         dtype = torch.bfloat16
         batch_size = 4
