@@ -269,7 +269,7 @@ class LayerCacheEngineKey(CacheEngineKey):
             parts[1],
             int(parts[2]),
             int(parts[3]),
-            int(parts[4]),
+            int(parts[4], 16),
             tags,
             int(parts[5]),
         )
