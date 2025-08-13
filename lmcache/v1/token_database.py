@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import Iterable, List, Optional, Tuple, Union
+from typing import Iterable, List, Optional, OrderedDict, Tuple, Union
 import abc
 
 # Third Party
@@ -75,6 +75,7 @@ class TokenDatabase(metaclass=abc.ABCMeta):
         offsets: Optional[List[int]] = None,
         mask: Optional[torch.Tensor] = None,
         make_key: bool = True,
+        tags: OrderedDict = None,
     ) -> Iterable[Tuple[int, int, Union[CacheEngineKey, int]]]:
         """Process the tokens and return the corresponding cache engine keys.
 
@@ -98,7 +99,7 @@ class TokenDatabase(metaclass=abc.ABCMeta):
 
         raise NotImplementedError
 
-    def _make_key_by_hash(self, chunk_hash: int):
+    def _make_key_by_hash(self, chunk_hash: int, tags: OrderedDict = None):
         assert self.metadata is not None
         return CacheEngineKey(
             self.metadata.fmt,
@@ -106,6 +107,7 @@ class TokenDatabase(metaclass=abc.ABCMeta):
             self.metadata.world_size,
             self.metadata.worker_id,
             chunk_hash,
+            tags,
         )
 
     def _hash_tokens(
@@ -200,6 +202,7 @@ class ChunkedTokenDatabase(TokenDatabase):
         offsets: Optional[List[int]] = None,
         mask: Optional[torch.Tensor] = None,
         make_key: bool = True,
+        tags: OrderedDict = None,
     ) -> Iterable[Tuple[int, int, Union[CacheEngineKey, int]]]:
         """Process the tokens/hashes and return the corresponding cache engine keys.
 
@@ -247,7 +250,7 @@ class ChunkedTokenDatabase(TokenDatabase):
                     continue
                 else:
                     if make_key:
-                        yield start_idx, end_idx, self._make_key_by_hash(hash_val)
+                        yield start_idx, end_idx, self._make_key_by_hash(hash_val, tags)
                     else:
                         yield start_idx, end_idx, hash_val
         elif hashes is not None:
@@ -258,7 +261,7 @@ class ChunkedTokenDatabase(TokenDatabase):
             for hash_val, offset in zip(hashes, offsets, strict=False):
                 end_idx = start_idx + offset
                 if make_key:
-                    yield start_idx, end_idx, self._make_key_by_hash(hash_val)
+                    yield start_idx, end_idx, self._make_key_by_hash(hash_val, tags)
                 else:
                     yield start_idx, end_idx, hash_val
                 start_idx = end_idx
@@ -314,6 +317,7 @@ class SegmentTokenDatabase(TokenDatabase):
         offsets: Optional[List[int]] = None,
         mask: Optional[torch.Tensor] = None,
         make_key: bool = True,
+        tags: OrderedDict = None,
     ) -> Iterable[Tuple[int, int, Union[CacheEngineKey, int]]]:
         """Process the tokens and return the corresponding cache engine keys.
 
@@ -357,7 +361,9 @@ class SegmentTokenDatabase(TokenDatabase):
                     yield (
                         start_idx,
                         end_idx,
-                        self._make_key_by_hash(self._hash_tokens(token_chunk)),
+                        self._make_key_by_hash(
+                            self._hash_tokens(token_chunk), tags=tags
+                        ),
                     )
                 else:
                     yield start_idx, end_idx, self._hash_tokens(token_chunk)

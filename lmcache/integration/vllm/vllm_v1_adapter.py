@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Optional, Union
+from typing import TYPE_CHECKING, Any, Optional, OrderedDict, Union
 import os
 import uuid
 
@@ -21,6 +21,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
 )
+from vllm.sampling_params import SamplingParams
 from vllm.utils import cdiv, get_kv_cache_torch_dtype
 from vllm.v1.core.sched.output import SchedulerOutput
 import torch
@@ -89,6 +90,23 @@ class DisaggSpec:
 tmp_disagg_tracker: dict[str, DisaggSpec] = {}
 
 
+def extract_tags(
+    config: LMCacheEngineConfig, sampling_params: SamplingParams
+) -> OrderedDict:
+    tags = None
+    tag_keys = None
+    if config.extra_config is not None and isinstance(config.extra_config, dict):
+        tag_keys = config.extra_config.get("tag_keys")
+    if sampling_params.extra_args is not None and tag_keys is not None:
+        if kv_transfer_params := sampling_params.extra_args.get("kv_transfer_params"):
+            for k in tag_keys:
+                if v := kv_transfer_params.get(k):
+                    if tags is None:
+                        tags = OrderedDict()
+                    tags[k] = v
+    return tags
+
+
 @dataclass
 class RequestTracker:
     # Request id
@@ -115,6 +133,8 @@ class RequestTracker:
     # Multimodal hashes and positions
     mm_hashes: Optional[list[str]] = None
     mm_positions: Optional[list["PlaceholderRange"]] = None
+    # The request tags
+    tags: Optional[OrderedDict] = None
 
     # Whether the request is in decode phase
     is_decode_phase = False
@@ -122,6 +142,7 @@ class RequestTracker:
     @_lmcache_nvtx_annotate
     @staticmethod
     def from_new_request(
+        lmcache_config: LMCacheEngineConfig,
         new_request: "NewRequestData",
         num_tokens_to_compute: int,
         lmcache_cached_tokens: int,
@@ -129,6 +150,7 @@ class RequestTracker:
         """Create the request tracker from a new request.
 
         Args:
+            lmcache_config (LMCacheEngineConfig): the LMCache engine config.
             new_request (NewRequestData): the new request data.
             num_tokens_to_compute (int): the number of tokens that will
                 be 'computed', including the `num_computed_tokens` (vLLM's
@@ -157,6 +179,8 @@ class RequestTracker:
         # NOTE: Initialized in `update_state_after_alloc`
         disagg_spec = tmp_disagg_tracker.pop(new_request.req_id, None)
 
+        tags = extract_tags(lmcache_config, new_request.sampling_params)
+
         return RequestTracker(
             req_id=new_request.req_id,
             prompt_len=len(new_request.prompt_token_ids),
@@ -166,6 +190,7 @@ class RequestTracker:
             disagg_spec=disagg_spec,
             mm_hashes=new_request.mm_hashes.copy(),
             mm_positions=new_request.mm_positions.copy(),
+            tags=tags,
         )
 
     def update(
@@ -214,6 +239,8 @@ class ReqMeta:
     load_spec: Optional[LoadSpec] = None
     # disagg spec
     disagg_spec: Optional[DisaggSpec] = None
+    # tags
+    tags: Optional[OrderedDict] = None
 
     @staticmethod
     def from_request_tracker(
@@ -339,6 +366,7 @@ class ReqMeta:
             save_spec=save_spec,
             load_spec=load_spec,
             disagg_spec=tracker.disagg_spec,
+            tags=tracker.tags,
         )
 
 
@@ -505,6 +533,7 @@ class LMCacheConnectorV1Impl:
         self.kv_role = vllm_config.kv_transfer_config.kv_role
 
         config = lmcache_get_config()
+        self.config = config
         self.layerwise_retrievers = []
         if role == KVConnectorRole.SCHEDULER:
             # Create lookup client using factory
@@ -685,6 +714,7 @@ class LMCacheConnectorV1Impl:
                     token_mask[:lmcache_cached_tokens],
                     kvcaches=kvcaches,
                     slot_mapping=slot_mapping[:lmcache_cached_tokens],
+                    tags=request.tags,
                 )
 
                 # Check the result
@@ -913,6 +943,7 @@ class LMCacheConnectorV1Impl:
                 slot_mapping=slot_mapping,
                 offset=skip_leading_tokens,
                 transfer_spec=request.disagg_spec,
+                tags=request.tags,
             )
 
             # NOTE(Jiayi): We assume all tokens are saved
@@ -963,13 +994,19 @@ class LMCacheConnectorV1Impl:
 
         lookup_id = str(uuid.uuid4())
         self._lookup_requests_in_step.append(lookup_id)
+
+        tags = extract_tags(self.config, request.sampling_params)
         if self.skip_last_n_tokens > 0:
             num_external_hit_tokens = self.lookup_client.lookup(
-                token_ids[: -self.skip_last_n_tokens], lookup_id=lookup_id
+                token_ids[: -self.skip_last_n_tokens],
+                lookup_id=lookup_id,
+                tags=tags,
             )
         else:
             num_external_hit_tokens = self.lookup_client.lookup(
-                token_ids, lookup_id=lookup_id
+                token_ids,
+                lookup_id=lookup_id,
+                tags=tags,
             )
 
         # When prompt length is divisible by the block size and all
@@ -1102,6 +1139,7 @@ class LMCacheConnectorV1Impl:
             if load_spec is not None:
                 lmcache_cached_tokens = load_spec.lmcache_cached_tokens
             request_tracker = RequestTracker.from_new_request(
+                self.config,
                 request,
                 num_tokens_to_compute,
                 lmcache_cached_tokens,

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from collections import defaultdict
-from typing import Dict, Generator, List, Optional, Tuple, Union
+from typing import Dict, Generator, List, Optional, OrderedDict, Tuple, Union
 import asyncio
 import gc
 import multiprocessing
@@ -212,8 +212,16 @@ class LMCacheEngine:
         tot_token_num = 0
         t = time.perf_counter()
 
+        tags = kwargs.get("tags")
+        if tags is not None and len(tags) != 0:
+            assert isinstance(tags, OrderedDict)
+
         for start, end, key in self.token_database.process_tokens(
-            tokens, hashes, offsets, mask
+            tokens,
+            hashes,
+            offsets,
+            mask,
+            tags=tags,
         ):
             assert isinstance(key, CacheEngineKey)
             # Allocate the memory object
@@ -309,8 +317,12 @@ class LMCacheEngine:
         memory_objs = []
         tot_token_num = 0
         kv_dtype = self.metadata.kv_dtype
+        tags = kwargs.get("tags")
+        if tags is not None and len(tags) != 0:
+            assert isinstance(tags, OrderedDict)
+
         for start, end, key in self.token_database.process_tokens(
-            tokens=tokens, mask=mask
+            tokens=tokens, mask=mask, tags=tags
         ):
             assert isinstance(key, CacheEngineKey)
 
@@ -422,8 +434,14 @@ class LMCacheEngine:
         # [(CacheEngineKey, MemoryObj, start, end)]
         reordered_chunks: List[Tuple[CacheEngineKey, MemoryObj, int, int]] = []
 
+        tags = kwargs.get("tags")
+        if tags is not None and len(tags) != 0:
+            assert isinstance(tags, OrderedDict)
+
         for start, end, key in self.token_database.process_tokens(
-            tokens=tokens, mask=mask
+            tokens=tokens,
+            mask=mask,
+            tags=tags,
         ):
             assert isinstance(key, CacheEngineKey)
 
@@ -561,8 +579,14 @@ class LMCacheEngine:
         starts = []
         ends = []
         keys = []
+
+        tags = kwargs.get("tags")
+        if tags is not None and len(tags) != 0:
+            assert isinstance(tags, OrderedDict)
         for start, end, key in self.token_database.process_tokens(
-            tokens=tokens, mask=mask
+            tokens=tokens,
+            mask=mask,
+            tags=tags,
         ):
             assert isinstance(key, CacheEngineKey)
 
@@ -634,12 +658,13 @@ class LMCacheEngine:
         self,
         tokens: Union[torch.Tensor, List[int]],
         mask: Optional[torch.Tensor] = None,
+        tags: OrderedDict = None,
     ) -> None:
         """Launch the prefetching process in the storage manager to load the
         KV to the local CPU memory
         """
         for start, end, key in self.token_database.process_tokens(
-            tokens=tokens, mask=mask
+            tokens=tokens, mask=mask, tags=tags
         ):
             assert isinstance(key, CacheEngineKey)
             self.storage_manager.prefetch(key)
@@ -651,6 +676,7 @@ class LMCacheEngine:
         search_range: Optional[List[str]] = None,
         lookup_id: Optional[str] = None,
         pin: bool = False,
+        tags: OrderedDict = None,
     ) -> int:
         """
         Checks the existence of KV cache of the tokens from the cache engine.
@@ -682,7 +708,9 @@ class LMCacheEngine:
                 search_range is None or "p2p" in search_range
             )
 
-            for start, end, key in self.token_database.process_tokens(tokens=tokens):
+            for start, end, key in self.token_database.process_tokens(
+                tokens=tokens, tags=tags
+            ):
                 assert isinstance(key, CacheEngineKey)
 
                 if self.use_layerwise:
@@ -853,6 +881,7 @@ class LMCacheEngine:
         self,
         tokens: Optional[Union[torch.Tensor, List[int]]] = None,
         locations: Optional[List[str]] = None,
+        tags: OrderedDict = None,  # TODO: need to clean by tags
     ) -> int:
         assert isinstance(self.storage_manager, StorageManager)
         # Clear all caches if tokens is None
@@ -862,7 +891,9 @@ class LMCacheEngine:
 
         num_removed = 0
         # Only remove the caches for the given tokens
-        for start, end, key in self.token_database.process_tokens(tokens=tokens):
+        for start, end, key in self.token_database.process_tokens(
+            tokens=tokens, tags=tags
+        ):
             assert isinstance(key, CacheEngineKey)
             removed = self.storage_manager.remove(key, locations)
             num_removed += removed
