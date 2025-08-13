@@ -90,10 +90,11 @@ class DisaggSpec:
 tmp_disagg_tracker: dict[str, DisaggSpec] = {}
 
 
-def extract_tags(sampling_params: SamplingParams) -> OrderedDict:
+def extract_tags(
+    config: LMCacheEngineConfig, sampling_params: SamplingParams
+) -> OrderedDict:
     tags = None
     tag_keys = None
-    config = lmcache_get_config()
     if config.extra_config is not None and isinstance(config.extra_config, dict):
         tag_keys = config.extra_config.get("tag_keys")
     if sampling_params.extra_args is not None and tag_keys is not None:
@@ -141,6 +142,7 @@ class RequestTracker:
     @_lmcache_nvtx_annotate
     @staticmethod
     def from_new_request(
+        lmcache_config: LMCacheEngineConfig,
         new_request: "NewRequestData",
         num_tokens_to_compute: int,
         lmcache_cached_tokens: int,
@@ -148,6 +150,7 @@ class RequestTracker:
         """Create the request tracker from a new request.
 
         Args:
+            lmcache_config (LMCacheEngineConfig): the LMCache engine config.
             new_request (NewRequestData): the new request data.
             num_tokens_to_compute (int): the number of tokens that will
                 be 'computed', including the `num_computed_tokens` (vLLM's
@@ -176,7 +179,7 @@ class RequestTracker:
         # NOTE: Initialized in `update_state_after_alloc`
         disagg_spec = tmp_disagg_tracker.pop(new_request.req_id, None)
 
-        tags = extract_tags(new_request.sampling_params)
+        tags = extract_tags(lmcache_config, new_request.sampling_params)
 
         return RequestTracker(
             req_id=new_request.req_id,
@@ -530,6 +533,7 @@ class LMCacheConnectorV1Impl:
         self.kv_role = vllm_config.kv_transfer_config.kv_role
 
         config = lmcache_get_config()
+        self.config = config
         self.layerwise_retrievers = []
         if role == KVConnectorRole.SCHEDULER:
             # Create lookup client using factory
@@ -991,7 +995,7 @@ class LMCacheConnectorV1Impl:
         lookup_id = str(uuid.uuid4())
         self._lookup_requests_in_step.append(lookup_id)
 
-        tags = extract_tags(request.sampling_params)
+        tags = extract_tags(self.config, request.sampling_params)
         if self.skip_last_n_tokens > 0:
             num_external_hit_tokens = self.lookup_client.lookup(
                 token_ids[: -self.skip_last_n_tokens],
@@ -1135,6 +1139,7 @@ class LMCacheConnectorV1Impl:
             if load_spec is not None:
                 lmcache_cached_tokens = load_spec.lmcache_cached_tokens
             request_tracker = RequestTracker.from_new_request(
+                self.config,
                 request,
                 num_tokens_to_compute,
                 lmcache_cached_tokens,
