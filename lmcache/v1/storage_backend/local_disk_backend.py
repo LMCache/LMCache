@@ -454,9 +454,7 @@ class LocalDiskBackend(StorageBackendInterface):
         assert dtype is not None
         assert shape is not None
 
-        memory_obj = self.load_bytes_from_disk(
-            key, path, dtype=dtype, shape=shape, fmt=fmt
-        )
+        memory_obj = self.load_bytes_from_disk(path, dtype=dtype, shape=shape, fmt=fmt)
         self.disk_lock.release()
 
         return memory_obj
@@ -486,28 +484,15 @@ class LocalDiskBackend(StorageBackendInterface):
         """
         kv_chunk = memory_obj.tensor
         assert kv_chunk is not None
-        byte_array = memory_obj.byte_array
+        buffer = memory_obj.byte_array
         path = self._key_to_path(key)
 
-        size = len(byte_array)
+        size = len(buffer)
         self.usage += size
         self.stats_monitor.update_local_storage_usage(self.usage)
 
-        start_time = time.time()
         # FIXME(Jiayi): need to add ref count in disk memory object
-        if size % self.os_disk_bs != 0 or not self.use_odirect:
-            with open(path, "wb") as f:
-                f.write(byte_array)
-        else:
-            fd = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_DIRECT, 0o644)
-            os.write(fd, byte_array)
-            os.close(fd)
-
-        disk_write_time = time.time() - start_time
-        logger.debug(
-            f"Disk write size: {size} bytes, "
-            f"Bandwidth: {size / disk_write_time / 1e6:.2f} MB/s"
-        )
+        self.write_file(buffer, path)
 
         self.insert_key(key, memory_obj)
 
@@ -554,7 +539,7 @@ class LocalDiskBackend(StorageBackendInterface):
         path: str,
         dtype: torch.dtype,
         shape: torch.Size,
-        fmt: MemoryFormat
+        fmt: MemoryFormat,
     ) -> Optional[MemoryObj]:
         """
         Load bytearray from disk.
@@ -593,6 +578,7 @@ class LocalDiskBackend(StorageBackendInterface):
                 "Cannot use O_DIRECT for this file, "
                 "size is not aligned to disk block size."
             )
+
         try:
             if not fblock_aligned or not self.use_odirect:
                 with open(path, "rb") as f:
@@ -605,6 +591,7 @@ class LocalDiskBackend(StorageBackendInterface):
             if self.dict.get(key, None):
                 self.dict.pop(key)
             return
+
         disk_read_time = time.time() - start_time
         logger.debug(
             f"Disk read size: {size} bytes, "
