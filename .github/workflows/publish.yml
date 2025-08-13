@@ -37,7 +37,7 @@ jobs:
         runs-on: ubuntu-latest
         steps:
             - name: "Harden Runner"
-              uses: step-security/harden-runner@6c439dc8bdf85cadbbce9ed30d1c7b959517bc49 # v2.12.2
+              uses: step-security/harden-runner@ec9f2d5744a09debf3a187a3f4f675c53b671911 # v2.13.0
               with:
                 disable-sudo-and-containers: false
                 egress-policy: block
@@ -107,7 +107,7 @@ jobs:
 
         steps:
             - name: Harden Runner
-              uses: step-security/harden-runner@6c439dc8bdf85cadbbce9ed30d1c7b959517bc49 # v2.12.2
+              uses: step-security/harden-runner@ec9f2d5744a09debf3a187a3f4f675c53b671911 # v2.13.0
               with:
                 disable-sudo-and-containers: false
                 egress-policy: block
@@ -148,7 +148,7 @@ jobs:
 
         steps:
             - name: Harden Runner
-              uses: step-security/harden-runner@6c439dc8bdf85cadbbce9ed30d1c7b959517bc49 # v2.12.2
+              uses: step-security/harden-runner@ec9f2d5744a09debf3a187a3f4f675c53b671911 # v2.13.0
               with:
                   disable-sudo-and-containers: false
                   egress-policy: block
@@ -191,7 +191,7 @@ jobs:
 
         steps:
             - name: "Harden Runner"
-              uses: step-security/harden-runner@6c439dc8bdf85cadbbce9ed30d1c7b959517bc49 # v2.12.2
+              uses: step-security/harden-runner@ec9f2d5744a09debf3a187a3f4f675c53b671911 # v2.13.0
               with:
                 disable-sudo-and-containers: false
                 egress-policy: block
@@ -213,7 +213,7 @@ jobs:
                   layers.nvcr.io:443
 
             - name: Login to DockerHub
-              uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
+              uses: docker/login-action@184bdaa0721073962dff0199f1fb9940f07167d1 # v3.5.0
               with:
                 username: ${{ vars.DOCKERHUB_USERNAME }}
                 password: ${{ secrets.DOCKERHUB_TOKEN }}

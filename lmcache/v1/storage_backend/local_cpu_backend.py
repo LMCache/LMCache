@@ -271,6 +271,7 @@ class LocalCPUBackend(StorageBackendInterface):
             self.memory_allocator, NixlCPUMemoryAllocator
         )
 
+        evict_keys_count = 0
         while True:
             # whether or not this request needs to wait for other requests
             wait_other_requests = True
@@ -289,6 +290,7 @@ class LocalCPUBackend(StorageBackendInterface):
                             f"Evicting {len(evict_keys)} chunk from cpu memory"
                         )
                         self.batched_remove(evict_keys, force=False)
+                        evict_keys_count += len(evict_keys)
 
             if wait_other_requests:
                 # TODO: make time_to_wait a config
@@ -306,6 +308,7 @@ class LocalCPUBackend(StorageBackendInterface):
             if memory_obj is not None:
                 break
 
+        self.stats_monitor.update_local_cpu_evict_metrics(evict_keys_count)
         return memory_obj
 
     # TODO
@@ -352,6 +355,7 @@ class LocalCPUBackend(StorageBackendInterface):
             self.memory_allocator, NixlCPUMemoryAllocator
         )
 
+        evict_keys_count = 0
         while True:
             # whether or not this request needs to wait for other requests
             wait_other_requests = True
@@ -367,6 +371,7 @@ class LocalCPUBackend(StorageBackendInterface):
                     # pinned in the cpu memory. This might not be true.
 
                     if evict_keys:
+                        evict_keys_count += len(evict_keys)
                         wait_other_requests = False
                         for evict_key in evict_keys:
                             evict_key_all_layer = evict_key.split_layers(batch_size)
@@ -408,6 +413,7 @@ class LocalCPUBackend(StorageBackendInterface):
             if memory_objs:
                 break
 
+        self.stats_monitor.update_local_cpu_evict_metrics(evict_keys_count)
         return memory_objs
 
     def get_keys(self) -> List[CacheEngineKey]:

@@ -2,7 +2,11 @@
 
 Following is the current list of maintainers on this project
 
-- @yihua98@uchicago.edu, Yihua Cheng, UChicago, Committer
+- @apostacheng@gmail.com, Yihua Cheng, UChicago, Committer
 - @jiayi3@uchicago.edu, Jiayi Yao, UChicago, Committer
 - @kuntai@uchicago.edu, Kuntai Du, UChicago, Committer
-- @sixian@uchicago.edu, Sixian Xiong, UChicago/Peking University, Committer
+- @martin.hickey@ie.ibm.com, Martin Hickey, IBM, Committer
+- @HUAIZHEN001@e.ntu.edu.sg, Hunter Zhang, Bytedance, Committer
+- @307499405@qq.com, Baolong Mao, Tencent, Committer
+- @shaotingf@uchicago.edu, Shaoting Feng, UChicago, Committer
+- @slshen@uchicago.edu, Samuel Shen, UChicago, Committer

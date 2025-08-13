@@ -212,10 +212,10 @@ class MoveWorkerRetMsg(ControlRetMsg):
 class HealthWorkerRetMsg(ControlRetMsg):
     """Health return message for a single lmcache worker"""
 
-    alive: bool
+    error_code: int
 
     def describe(self) -> str:
-        return f"Health check alive: {self.alive}"
+        return f"Health check error code: {self.error_code}"
 
 
 class CheckFinishWorkerRetMsg(ControlRetMsg):
@@ -322,6 +322,7 @@ class MoveMsg(OrchMsg):
 class HealthMsg(OrchMsg):
     """Health message"""
 
+    event_id: str
     instance_id: str
 
     def describe(self) -> str:
@@ -408,10 +409,11 @@ class HealthRetMsg(OrchRetMsg):
     """Health return message"""
 
     event_id: str
-    alive: bool
+    # worker_id -> error_code
+    error_codes: Dict[int, int]
 
     def describe(self) -> str:
-        return f"Alive: {self.alive}"
+        return f"error_codes: {self.error_codes}"
 
 
 class CheckFinishRetMsg(OrchRetMsg):
