@@ -28,7 +28,7 @@ class LMCacheLookupClient(LookupClientInterface):
     ZMQ-based lookup client that communicates with a lookup server.
 
     Related extra_config:
-    - create_lookup_server_only_on_worker_0:
+    - create_lookup_server_only_on_worker_0_for_mla:
         is a flag to control whether to create lookup server only on worker 0.
     """
 
@@ -39,12 +39,14 @@ class LMCacheLookupClient(LookupClientInterface):
             "lmcache_rpc_port", 0
         )
         self.tensor_parallel_size = vllm_config.parallel_config.tensor_parallel_size
-        self.create_lookup_server_only_on_worker_0 = (
+        self.create_lookup_server_only_on_worker_0_for_mla = (
             config.extra_config
-            and config.extra_config.get("create_lookup_server_only_on_worker_0", True)
+            and config.extra_config.get(
+                "create_lookup_server_only_on_worker_0_for_mla", False
+            )
         )
         ranks = self.tensor_parallel_size
-        if self.create_lookup_server_only_on_worker_0:
+        if self.create_lookup_server_only_on_worker_0_for_mla:
             ranks = 1
         for tp_rank in range(ranks):
             socket_path = get_zmq_rpc_path_lmcache(
@@ -64,7 +66,7 @@ class LMCacheLookupClient(LookupClientInterface):
         token_bufs = self.encoder.encode(token_ids)
         lookup_id_buf = lookup_id.encode("utf-8")
         ranks = self.tensor_parallel_size
-        if self.create_lookup_server_only_on_worker_0:
+        if self.create_lookup_server_only_on_worker_0_for_mla:
             ranks = 1
         results = []
         for i in range(ranks):
