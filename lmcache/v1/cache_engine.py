@@ -868,6 +868,16 @@ class LMCacheEngine:
             num_removed += removed
         return num_removed
 
+    @_lmcache_nvtx_annotate
+    def health(
+        self,
+    ) -> int:
+        """
+        Check the health of the cache engine.
+        return: 0 if healthy, otherwise the error code
+        """
+        return 0 if self.memory_allocator.memcheck() else -1
+
     def close(self) -> None:
         """Close the cache engine and free all the resources"""
 
