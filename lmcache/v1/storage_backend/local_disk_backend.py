@@ -454,7 +454,9 @@ class LocalDiskBackend(StorageBackendInterface):
         assert dtype is not None
         assert shape is not None
 
-        memory_obj = self.load_bytes_from_disk(key, path, dtype=dtype, shape=shape, fmt=fmt)
+        memory_obj = self.load_bytes_from_disk(
+            key, path, dtype=dtype, shape=shape, fmt=fmt
+        )
         self.disk_lock.release()
 
         return memory_obj
