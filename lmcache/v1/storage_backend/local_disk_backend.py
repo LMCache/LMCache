@@ -454,7 +454,9 @@ class LocalDiskBackend(StorageBackendInterface):
         assert dtype is not None
         assert shape is not None
 
-        memory_obj = self.load_bytes_from_disk(key, path, dtype=dtype, shape=shape, fmt=fmt)
+        memory_obj = self.load_bytes_from_disk(
+            key, path, dtype=dtype, shape=shape, fmt=fmt
+        )
         self.disk_lock.release()
 
         return memory_obj
@@ -544,9 +546,15 @@ class LocalDiskBackend(StorageBackendInterface):
             with open(path, "rb") as f:
                 f.readinto(buffer)
         else:
-            fd = os.open(path, os.O_RDONLY | os.O_DIRECT)
-            with os.fdopen(fd, "rb", buffering=0) as fdo:
-                fdo.readinto(buffer)
+            try:
+                fd = os.open(path, os.O_RDONLY | os.O_DIRECT)
+                with os.fdopen(fd, "rb", buffering=0) as fdo:
+                    fdo.readinto(buffer)
+            except FileNotFoundError:
+                if self.dict.get(key, None):
+                    self.dict.pop(key)
+                return memory_obj
+
         disk_read_time = time.time() - start_time
         logger.debug(
             f"Disk read size: {size} bytes, "
@@ -568,7 +576,12 @@ class LocalDiskBackend(StorageBackendInterface):
     # TODO(Jiayi): the pinned cpu memory_obj should directly be passed into
     # gpu connector; this gpu buffer could be avoided
     def load_bytes_from_disk(
-        self, key: CacheEngineKey, path: str, dtype: torch.dtype, shape: torch.Size, fmt: MemoryFormat
+        self,
+        key: CacheEngineKey,
+        path: str,
+        dtype: torch.dtype,
+        shape: torch.Size,
+        fmt: MemoryFormat
     ) -> Optional[MemoryObj]:
         """
         Load bytearray from disk.
