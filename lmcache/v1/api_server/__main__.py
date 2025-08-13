@@ -29,10 +29,10 @@ from lmcache.v1.cache_controller.message import (  # noqa: E501
     MoveRetMsg,
     PinMsg,
     PinRetMsg,
-    UnpinMsg,
-    UnpinRetMsg,
     QueryInstMsg,
     QueryInstRetMsg,
+    UnpinMsg,
+    UnpinRetMsg,
 )
 
 logger = init_logger(__name__)

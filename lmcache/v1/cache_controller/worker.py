@@ -25,9 +25,9 @@ from lmcache.v1.cache_controller.message import (
     Msg,
     PinWorkerMsg,
     PinWorkerRetMsg,
+    RegisterMsg,
     UnpinWorkerMsg,
     UnpinWorkerRetMsg,
-    RegisterMsg,
     WorkerMsg,
 )
 from lmcache.v1.config import LMCacheEngineConfig

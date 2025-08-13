@@ -116,6 +116,7 @@ class PinWorkerMsg(ControlMsg):
     def describe(self) -> str:
         return f"Pin tokens {self.tokens} in location {self.location}"
 
+
 class UnpinWorkerMsg(ControlMsg):
     """Unpin message for a single lmcache worker"""
 
@@ -124,6 +125,7 @@ class UnpinWorkerMsg(ControlMsg):
 
     def describe(self) -> str:
         return f"Unpin tokens in location {self.location}"
+
 
 class CompressWorkerMsg(ControlMsg):
     """Compress message for a single lmcache worker"""
@@ -198,6 +200,7 @@ class PinWorkerRetMsg(ControlRetMsg):
     def describe(self) -> str:
         return f"Number of pinned tokens: {self.num_tokens}"
 
+
 class UnpinWorkerRetMsg(ControlRetMsg):
     """Unpin return message for a single lmcache worker"""
 
@@ -205,6 +208,7 @@ class UnpinWorkerRetMsg(ControlRetMsg):
 
     def describe(self) -> str:
         return "Unpin success"
+
 
 class CompressWorkerRetMsg(ControlRetMsg):
     """Compress return message for a single lmcache worker"""
@@ -300,6 +304,7 @@ class PinMsg(OrchMsg):
             f"location {self.location}"
         )
 
+
 class UnpinMsg(OrchMsg):
     """Unpin message"""
 
@@ -311,6 +316,7 @@ class UnpinMsg(OrchMsg):
         return (
             f"Unpin tokens in instance {self.instance_id} and location {self.location}"
         )
+
 
 class CompressMsg(OrchMsg):
     """Compress message"""
@@ -410,6 +416,7 @@ class PinRetMsg(OrchRetMsg):
     def describe(self) -> str:
         return f"Number of pinned tokens: {self.num_tokens}"
 
+
 class UnpinRetMsg(OrchRetMsg):
     """Unpin return message"""
 
@@ -418,6 +425,7 @@ class UnpinRetMsg(OrchRetMsg):
 
     def describe(self) -> str:
         return f"Unpin Event {self.event_id} success"
+
 
 class CompressRetMsg(OrchRetMsg):
     """Compress return message"""

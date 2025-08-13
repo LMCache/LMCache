@@ -179,8 +179,8 @@ class LMCacheClusterExecutor:
             worker_event_id = f"Worker{worker_id}{event_id}"
             serialized_msg = msgspec.msgpack.encode(
                 UnpinWorkerMsg(
-                    worker_event_id = worker_event_id,
-                    location = location,
+                    worker_event_id=worker_event_id,
+                    location=location,
                 )
             )
             serialized_msgs.append(serialized_msg)
