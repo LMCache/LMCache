@@ -389,10 +389,26 @@ class GdsBackend(StorageBackendInterface):
         self, key: CacheEngineKey, memory_obj: MemoryObj
     ) -> Optional[Future]:
         assert memory_obj.tensor is not None
-        memory_obj.ref_count_up()
+
+        # Check if key is already being processed
+        with self.put_lock:
+            if key in self.put_tasks:
+                logger.debug(f"[GDS_BACKEND] Key already in put tasks, skipping: {key}")
+                return None
+
+        # Check if key already exists in cache
+        if self.contains(key):
+            logger.debug(f"[GDS_BACKEND] Key already exists, skipping put: {key}")
+            return None
 
         with self.put_lock:
             self.put_tasks.add(key)
+
+        memory_obj.ref_count_up()
+        logger.debug(
+            f"[GDS_BACKEND] Starting put task for key {key},"
+            f"size: {memory_obj.get_size() / 1024**3:.4f} GB"
+        )
 
         future = asyncio.run_coroutine_threadsafe(
             self._async_save_bytes_to_disk(key, memory_obj), self.loop

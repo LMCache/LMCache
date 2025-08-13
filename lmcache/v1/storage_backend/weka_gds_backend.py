@@ -289,10 +289,23 @@ class WekaGdsBackend(StorageBackendInterface):
         self, key: CacheEngineKey, memory_obj: MemoryObj
     ) -> Optional[Future]:
         assert memory_obj.tensor is not None
-        memory_obj.ref_count_up()
+
+        # Check if key is already in put_tasks
+        if self.exists_in_put_tasks(key):
+            logger.debug(
+                f"[WEKA_GDS_BACKEND] Key already in put_tasks, skipping put: {key}"
+            )
+            return None
+
+        # Check if key already exists in cache
+        if self.contains(key):
+            logger.debug(f"[WEKA_GDS_BACKEND] Key already exists, skipping put: {key}")
+            return None
 
         with self.put_lock:
             self.put_tasks.add(key)
+
+        memory_obj.ref_count_up()
 
         future = asyncio.run_coroutine_threadsafe(
             self._async_save_bytes_to_disk(key, memory_obj), self.loop
