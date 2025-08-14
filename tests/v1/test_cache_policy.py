@@ -235,3 +235,165 @@ def test_s3fifo_fifo_mode_with_pin():
 
     assert key1 not in evict_candidates
     assert evict_candidates == [key2, key4]
+
+
+def test_s3fifo_s3fifo_mode():
+    """
+    Test S3-FIFO cache policy without pinned keys
+    when capacity is not set and eviction does occur
+    """
+    policy = get_cache_policy("S3-FIFO")
+    cache_dict = policy.init_mutable_mapping()
+
+    test_kvs = [(dumb_cache_engine_key(i), DummyMemoryObj()) for i in range(20)]
+    for i in range(10):
+        key, obj = test_kvs[i]
+        cache_dict[key] = obj
+        policy.update_on_put(key)
+
+    evict_candidates = policy.get_evict_candidates(cache_dict, num_candidates=1)
+    cache_dict.pop(evict_candidates[0], None)
+    # by now cache_policy should be:
+    # s queue (cap: 1): [9]
+    # m queue (cap: 9): [8, 7, 6, 5, 4, 3, 2, 1]
+    # g queue (cap: 9): []
+    key0, obj0 = test_kvs[0]
+    assert evict_candidates == [key0]
+
+    key10, obj10 = test_kvs[10]
+    cache_dict[key10] = obj10
+    policy.update_on_put(key10)
+    # by now cache_policy should be:
+    # s queue (cap: 1): [10]
+    # m queue (cap: 9): [8, 7, 6, 5, 4, 3, 2, 1]
+    # g queue (cap: 9): [9]
+    evict_candidates = policy.get_evict_candidates(cache_dict, num_candidates=2)
+    for key in evict_candidates:
+        cache_dict.pop(key, None)
+    # by now cache_policy should be:
+    # s queue (cap: 1): []
+    # m queue (cap: 9): [8, 7, 6, 5, 4, 3, 2, 1]
+    # g queue (cap: 9): []
+    key9, _ = test_kvs[9]
+    assert evict_candidates == [key9, key10]
+
+    key1, _ = test_kvs[1]
+    for _ in range(3):
+        policy.update_on_hit(key1)
+
+    cache_dict[key0] = obj0
+    policy.update_on_put[key0]
+    policy.update_on_hit(key0)
+    # by now cache_policy should be:
+    # s queue (cap: 1): [0]
+    # m queue (cap: 9): [8, 7, 6, 5, 4, 3, 2, 1]
+    # g queue (cap: 9): []
+
+    cache_dict[key10] = obj10
+    policy.update_on_put[key10]
+    policy.update_on_hit(key10)
+    # by now cache_policy should be:
+    # s queue (cap: 1): [10]
+    # m queue (cap: 9): [0, 8, 7, 6, 5, 4, 3, 2, 1]
+    # g queue (cap: 9): []
+
+    for key, obj in test_kvs[11:20]:
+        cache_dict[key] = obj
+        policy.update_on_put(key)
+    # by now cache_policy should be:
+    # s queue (cap: 1): [19]
+    # m queue (cap: 9): [1, 10, 0, 8, 7, 6, 5, 4, 3] -- [2]
+    # g queue (cap: 9): [18, 17, 16, 15, 14, 13, 12, 11]
+
+    evict_candidates = policy.get_evict_candidates(cache_dict, num_candidates=2)
+    for key in evict_candidates:
+        cache_dict.pop(key, None)
+    # by now cache_policy should be:
+    # s queue (cap: 1): [19]
+    # m queue (cap: 9): [1, 10, 0, 8, 7, 6, 5, 4, 3]
+    # g queue (cap: 9): [18, 17, 16, 15, 14, 13, 12]
+    key2, _ = test_kvs[2]
+    key11, _ = test_kvs[11]
+    assert evict_candidates == [key2, key11]
+
+
+def test_s3fifo_s3fifo_mode_with_pin():
+    """
+    Test S3-FIFO cache policy with pinned keys
+    when capacity is not set and eviction does occur
+    """
+    policy = get_cache_policy("S3-FIFO")
+    cache_dict = policy.init_mutable_mapping()
+
+    test_kvs = [(dumb_cache_engine_key(i), DummyMemoryObj()) for i in range(20)]
+    _, obj2 = test_kvs[2]
+    obj2.can_evict = False
+    for i in range(10):
+        key, obj = test_kvs[i]
+        cache_dict[key] = obj
+        policy.update_on_put(key)
+
+    evict_candidates = policy.get_evict_candidates(cache_dict, num_candidates=1)
+    cache_dict.pop(evict_candidates[0], None)
+    # by now cache_policy should be:
+    # s queue (cap: 1): [9]
+    # m queue (cap: 9): [8, 7, 6, 5, 4, 3, 2, 1]
+    # g queue (cap: 9): []
+    key0, obj0 = test_kvs[0]
+    assert evict_candidates == [key0]
+
+    key10, obj10 = test_kvs[10]
+    cache_dict[key10] = obj10
+    policy.update_on_put(key10)
+    # by now cache_policy should be:
+    # s queue (cap: 1): [10]
+    # m queue (cap: 9): [8, 7, 6, 5, 4, 3, 2, 1]
+    # g queue (cap: 9): [9]
+    evict_candidates = policy.get_evict_candidates(cache_dict, num_candidates=2)
+    for key in evict_candidates:
+        cache_dict.pop(key, None)
+    # by now cache_policy should be:
+    # s queue (cap: 1): []
+    # m queue (cap: 9): [8, 7, 6, 5, 4, 3, 2, 1]
+    # g queue (cap: 9): []
+    key9, _ = test_kvs[9]
+    assert evict_candidates == [key9, key10]
+
+    key1, _ = test_kvs[1]
+    for _ in range(3):
+        policy.update_on_hit(key1)
+
+    cache_dict[key0] = obj0
+    policy.update_on_put[key0]
+    policy.update_on_hit(key0)
+    # by now cache_policy should be:
+    # s queue (cap: 1): [0]
+    # m queue (cap: 9): [8, 7, 6, 5, 4, 3, 2, 1]
+    # g queue (cap: 9): []
+
+    cache_dict[key10] = obj10
+    policy.update_on_put[key10]
+    policy.update_on_hit(key10)
+    # by now cache_policy should be:
+    # s queue (cap: 1): [10]
+    # m queue (cap: 9): [0, 8, 7, 6, 5, 4, 3, 2, 1]
+    # g queue (cap: 9): []
+
+    for key, obj in test_kvs[11:20]:
+        cache_dict[key] = obj
+        policy.update_on_put(key)
+    # by now cache_policy should be:
+    # s queue (cap: 1): [19]
+    # m queue (cap: 9): [1, 10, 0, 8, 7, 6, 5, 4, 3] -- [2]
+    # g queue (cap: 9): [18, 17, 16, 15, 14, 13, 12, 11]
+
+    evict_candidates = policy.get_evict_candidates(cache_dict, num_candidates=2)
+    for key in evict_candidates:
+        cache_dict.pop(key, None)
+    # by now cache_policy should be:
+    # s queue (cap: 1): [19]
+    # m queue (cap: 9): [1, 10, 0, 8, 7, 6, 5, 4, 3] -- [2]
+    # g queue (cap: 9): [18, 17, 16, 15, 14, 13]
+    key11, _ = test_kvs[11]
+    key12, _ = test_kvs[12]
+    assert evict_candidates == [key11, key12]
