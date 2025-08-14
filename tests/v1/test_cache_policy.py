@@ -159,3 +159,79 @@ def test_lfu_with_pin():
     evict_candidates = policy.get_evict_candidates(cache_dict, num_candidates=2)
 
     assert evict_candidates == [key3, key2]
+
+
+def test_s3fifo_fifo_mode():
+    """
+    Test S3-FIFO cache policy without pinned keys
+    when capacity is not set and eviction does not occur
+    """
+    policy = get_cache_policy("S3-FIFO")
+    cache_dict = policy.init_mutable_mapping()
+
+    obj1 = DummyMemoryObj()
+    obj2 = DummyMemoryObj()
+    obj3 = DummyMemoryObj()
+    obj4 = DummyMemoryObj()
+    key1 = dumb_cache_engine_key(1)
+    key2 = dumb_cache_engine_key(2)
+    key3 = dumb_cache_engine_key(3)
+    key4 = dumb_cache_engine_key(4)
+
+    cache_dict[key1] = obj1
+    policy.update_on_put(key1)
+    cache_dict[key2] = obj2
+    policy.update_on_put(key2)
+    cache_dict[key3] = obj3
+    policy.update_on_put(key3)
+
+    policy.update_on_hit(key1, cache_dict)
+    policy.update_on_hit(key1, cache_dict)
+    policy.update_on_hit(key1, cache_dict)
+    policy.update_on_hit(key1, cache_dict)
+
+    cache_dict[key4] = obj4
+    policy.update_on_put(key4)
+
+    evict_candidates = policy.get_evict_candidates(cache_dict, num_candidates=2)
+
+    assert evict_candidates == [key1, key2]
+
+
+def test_s3fifo_fifo_mode_with_pin():
+    """
+    Test S3-FIFO cache policy with pinned keys
+    when capacity is not set and eviction does not occur
+    """
+    policy = get_cache_policy("S3-FIFO")
+    cache_dict = policy.init_mutable_mapping()
+
+    obj1 = DummyMemoryObj(can_evict=False)  # Pinned object
+    obj2 = DummyMemoryObj()
+    obj3 = DummyMemoryObj()
+    obj4 = DummyMemoryObj()
+    key1 = dumb_cache_engine_key(1)
+    key2 = dumb_cache_engine_key(2)
+    key3 = dumb_cache_engine_key(3)
+    key4 = dumb_cache_engine_key(4)
+
+    cache_dict[key1] = obj1
+    policy.update_on_put(key1)
+    cache_dict[key2] = obj2
+    policy.update_on_put(key2)
+    cache_dict[key3] = obj3
+    policy.update_on_put(key3)
+
+    policy.update_on_hit(key1, cache_dict)
+    policy.update_on_hit(key3, cache_dict)
+
+    cache_dict[key4] = obj4
+    policy.update_on_put(key4)
+
+    cache_dict.pop(key3, None)
+    policy.update_on_force_evict(key3)
+
+    evict_candidates = policy.get_evict_candidates(cache_dict, num_candidates=2)
+
+    assert key1 not in evict_candidates
+    assert evict_candidates == [key2, key4]
