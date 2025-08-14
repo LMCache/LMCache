@@ -107,6 +107,11 @@ def extract_tags(
                     tags[k] = v
     return tags
 
+def should_enable_cache(sampling_params: SamplingParams) -> bool:
+    if sampling_params.extra_args is not None:
+        if kv_transfer_params := sampling_params.extra_args.get("kv_transfer_params"):
+            return kv_transfer_params.get("caching", True)
+    return True
 
 @dataclass
 class RequestTracker:
@@ -136,6 +141,8 @@ class RequestTracker:
     mm_positions: Optional[list["PlaceholderRange"]] = None
     # The request tags
     tags: Optional[OrderedDict] = None
+    # enable_cache
+    enable_cache: Optional[bool] = True
 
     # Whether the request is in decode phase
     is_decode_phase = False
@@ -181,6 +188,7 @@ class RequestTracker:
         disagg_spec = tmp_disagg_tracker.pop(new_request.req_id, None)
 
         tags = extract_tags(lmcache_config, new_request.sampling_params)
+        enable_cache = should_enable_cache(new_request.sampling_params)
 
         return RequestTracker(
             req_id=new_request.req_id,
@@ -192,6 +200,7 @@ class RequestTracker:
             mm_hashes=new_request.mm_hashes.copy(),
             mm_positions=new_request.mm_positions.copy(),
             tags=tags,
+            enable_cache=enable_cache,
         )
 
     def update(
@@ -242,6 +251,8 @@ class ReqMeta:
     disagg_spec: Optional[DisaggSpec] = None
     # tags
     tags: Optional[OrderedDict] = None
+    # enable_cache
+    enable_cache: Optional[bool] = True
 
     @staticmethod
     def from_request_tracker(
@@ -368,6 +379,7 @@ class ReqMeta:
             load_spec=load_spec,
             disagg_spec=tracker.disagg_spec,
             tags=tracker.tags,
+            enable_cache=tracker.enable_cache,
         )
 
 
@@ -674,6 +686,8 @@ class LMCacheConnectorV1Impl:
         for idx, request in enumerate(metadata.requests):
             if request.load_spec is None:
                 continue
+            if not request.enable_cache:
+                continue
 
             tokens = request.token_ids
             # TODO: have a pre-allocated buffer to hold the slot_mappings
@@ -892,6 +906,9 @@ class LMCacheConnectorV1Impl:
             ) and self.kv_role != "kv_producer":
                 continue
 
+            if not request.enable_cache:
+                continue
+
             token_ids = request.token_ids
             assert isinstance(token_ids, torch.Tensor)
             assert token_ids.is_cpu
@@ -989,6 +1006,9 @@ class LMCacheConnectorV1Impl:
         if self.kv_role == "kv_producer" and not hasattr(
             self.lookup_client, "supports_producer_reuse"
         ):
+            return 0
+
+        if not should_enable_cache(request.sampling_params):
             return 0
 
         token_ids = torch.tensor(request.prompt_token_ids)
