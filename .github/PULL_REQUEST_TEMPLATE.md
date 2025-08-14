@@ -30,7 +30,7 @@ FIX #xxxx (*link existing issues this PR will resolve*)
 
 <ul>
     <li>The code need to be well-documented to ensure future contributors can easily understand the code.</li>
-    <li> Please include sufficient tests to ensure the change is stay correct and robust. This includes both unit tests and integration tests.</li>
+    <li> Please include sufficient unit tests to ensure the change is stay correct and robust. The unit and integration tests will always run and our comprehensive test will be triggered after the "full" label is tagged onto a PR.</li>
 </ul>
 
 <h3>What to Expect for the Reviews</h3>
