@@ -3,6 +3,7 @@
 from concurrent.futures import Future
 from typing import TYPE_CHECKING, List, Optional
 import threading
+import uuid
 
 # Third Party
 from prometheus_client import Gauge
@@ -73,10 +74,14 @@ class LocalCPUBackend(StorageBackendInterface):
         Gauge(
             "lmcache:local_cpu_hot_cache_count",
             "The size of the hot_cache",
+            ["uuid"],
+            _labelvalues=[str(uuid.uuid4())],
         ).set_function(lambda: len(self.hot_cache))
         Gauge(
             "lmcache:local_cpu_keys_in_request_count",
             "The size of the keys_in_request",
+            ["uuid"],
+            _labelvalues=[str(uuid.uuid4())],
         ).set_function(lambda: len(self.keys_in_request))
 
     def __str__(self):

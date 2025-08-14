@@ -7,6 +7,7 @@ import pytest
 import torch
 
 # First Party
+from lmcache.observability import LMCStatsMonitor
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import (
@@ -86,6 +87,10 @@ def local_cpu_backend_disabled(memory_allocator):
 
 class TestLocalCPUBackend:
     """Test cases for LocalCPUBackend."""
+
+    def teardown_method(self, method):
+        LMCStatsMonitor.unregister_all_metrics()
+        LMCStatsMonitor.DestroyInstance()
 
     def test_init(self, memory_allocator):
         """Test LocalCPUBackend initialization."""

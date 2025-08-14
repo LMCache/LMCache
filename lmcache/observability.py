@@ -7,6 +7,7 @@ import threading
 import time
 
 # Third Party
+from prometheus_client import REGISTRY
 import prometheus_client
 
 # First Party
@@ -419,6 +420,15 @@ class LMCStatsMonitor:
     @staticmethod
     def DestroyInstance():
         LMCStatsMonitor._instance = None
+
+    @staticmethod
+    def unregister_all_metrics():
+        collectors = list(REGISTRY._collector_to_names.keys())
+        for collector in collectors:
+            try:
+                REGISTRY.unregister(collector)
+            except KeyError:
+                pass
 
 
 class PrometheusLogger:
