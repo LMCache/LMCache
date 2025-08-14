@@ -125,11 +125,6 @@ class S3FIFOCachePolicy(BaseCachePolicy[dict[CacheEngineKey, Any]]):
         - Then check M queue excess part (FIFO)
         - Finally search in G->S->M order for all queues
         """
-        # cache is full when calling get_evict_candidates
-        # so we can retrieve cache size indirectly
-        # segmented s3 fifo queue size can be confirmed now
-        self._transform_to_s3fifo(cache_dict)
-
         evict_keys: List[CacheEngineKey] = []
 
         # 1. First check G queue excess part (FIFO)
@@ -169,6 +164,11 @@ class S3FIFOCachePolicy(BaseCachePolicy[dict[CacheEngineKey, Any]]):
                         break
                     if key not in evict_keys and cache_dict[key].can_evict:
                         evict_keys.append(key)
+
+        # cache is full when calling get_evict_candidates
+        # so we can retrieve cache size indirectly
+        # segmented s3 fifo queue size can be confirmed now
+        self._transform_to_s3fifo(cache_dict)
 
         # remove key from metadata S3FIFO queue
         for key in evict_keys:
