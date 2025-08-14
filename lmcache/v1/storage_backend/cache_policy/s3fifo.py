@@ -229,6 +229,7 @@ class S3FIFOCachePolicy(BaseCachePolicy[dict[CacheEngineKey, Any]]):
         self.S_cap = max(1, int(total_size * self.small_ratio))
         self.M_cap = max(1, total_size - self.S_cap)
         self.G_cap = self.M_cap
+        self.total_capacity = total_size
 
     def _transform_to_s3fifo(self, cache_dict: dict[CacheEngineKey, Any]) -> None:
         if self._is_s3fifo():
