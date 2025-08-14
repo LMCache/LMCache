@@ -208,6 +208,9 @@ Configuration
    * - ``transfer_timeout``
      - 1
      - Timeout for transfer operations in seconds
+   * - ``storage_root_dir``
+     - ""
+     - The root directory for persistence (e.g., "/mnt/mooncake")
 
 .. important::
    **Understanding global_segment_size**: This parameter defines the amount of memory each vLLM worker contributes to the distributed memory pool. 

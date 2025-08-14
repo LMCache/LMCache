@@ -35,6 +35,7 @@ class MooncakeStoreConfig:
     device_name: str
     master_server_address: str
     transfer_timeout: int
+    storage_root_dir: str
 
     @staticmethod
     def from_file(file_path: str) -> "MooncakeStoreConfig":
@@ -50,6 +51,7 @@ class MooncakeStoreConfig:
             device_name=config.get("device_name", ""),
             master_server_address=config.get("master_server_address"),
             transfer_timeout=config.get("transfer_timeout", 1),
+            storage_root_dir=config.get("storage_root_dir", ""),
         )
 
     @staticmethod
@@ -79,6 +81,7 @@ class MooncakeStoreConfig:
             device_name=extra_config.get("device_name", ""),
             master_server_address=extra_config["master_server_address"],
             transfer_timeout=extra_config.get("transfer_timeout", 1),
+            storage_root_dir=extra_config.get("storage_root_dir", ""),
         )
 
 
@@ -119,6 +122,16 @@ class MooncakestoreConnector(RemoteConnector):
             if dev_name != "":
                 self.config.device_name = dev_name
             logger.info("Mooncake Configuration loaded. config: %s", self.config)
+
+            # Check if storage_root_dir exists and set environment variable
+            if (
+                self.config.storage_root_dir is not None
+                and self.config.storage_root_dir != ""
+            ):
+                os.environ["MOONCAKE_STORAGE_ROOT_DIR"] = self.config.storage_root_dir
+                logger.info(
+                    "Set MOONCAKE_STORAGE_ROOT_DIR to: %s", self.config.storage_root_dir
+                )
 
             self.store.setup(
                 self.config.local_hostname,
