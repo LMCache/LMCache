@@ -21,6 +21,8 @@ from lmcache.v1.cache_controller.message import (  # noqa: E501
     ClearRetMsg,
     CompressMsg,
     CompressRetMsg,
+    DecompressMsg,
+    DecompressRetMsg,
     HealthMsg,
     HealthRetMsg,
     LookupMsg,
@@ -167,6 +169,16 @@ def create_app(controller_url: str) -> FastAPI:
         event_id: str
         num_tokens: int
 
+    class DecompressRequest(BaseModel):
+        instance_id: str
+        method: str
+        location: str
+        tokens: Optional[List[int]] = []
+
+    class DecompressResponse(BaseModel):
+        event_id: str
+        num_tokens: int
+
     @app.post("/compress", response_model=CompressResponse)
     async def compress(req: CompressRequest):
         try:
@@ -181,6 +193,25 @@ def create_app(controller_url: str) -> FastAPI:
             ret_msg = await lmcache_controller_manager.handle_orchestration_message(msg)
             assert isinstance(ret_msg, CompressRetMsg)
             return CompressResponse(
+                event_id=ret_msg.event_id, num_tokens=ret_msg.num_tokens
+            )
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e)) from e
+
+    @app.post("/decompress", response_model=DecompressResponse)
+    async def decompress(req: DecompressRequest):
+        try:
+            event_id = "Decompress" + str(uuid.uuid4())
+            msg = DecompressMsg(
+                event_id=event_id,
+                instance_id=req.instance_id,
+                method=req.method,
+                location=req.location,
+                tokens=req.tokens,
+            )
+            ret_msg = await lmcache_controller_manager.handle_orchestration_message(msg)
+            assert isinstance(ret_msg, DecompressRetMsg)
+            return DecompressResponse(
                 event_id=ret_msg.event_id, num_tokens=ret_msg.num_tokens
             )
         except Exception as e:

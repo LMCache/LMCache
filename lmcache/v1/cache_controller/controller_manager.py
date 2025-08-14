@@ -21,6 +21,7 @@ from lmcache.v1.cache_controller.message import (  # isort: skip
     CheckFinishMsg,
     ClearMsg,
     CompressMsg,
+    DecompressMsg,
     DeRegisterMsg,
     HealthMsg,
     KVAdmitMsg,
@@ -114,6 +115,8 @@ class LMCacheControllerManager:
             return await self.kv_controller.pin(msg)
         elif isinstance(msg, CompressMsg):
             return await self.kv_controller.compress(msg)
+        elif isinstance(msg, DecompressMsg):
+            return await self.kv_controller.decompress(msg)
         elif isinstance(msg, MoveMsg):
             return await self.kv_controller.move(msg)
         elif isinstance(msg, CheckFinishMsg):

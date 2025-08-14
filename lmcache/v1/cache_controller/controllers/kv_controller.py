@@ -10,6 +10,8 @@ from lmcache.v1.cache_controller.message import (
     ClearRetMsg,
     CompressMsg,
     CompressRetMsg,
+    DecompressMsg,
+    DecompressRetMsg,
     KVAdmitMsg,
     KVEvictMsg,
     LookupMsg,
@@ -111,6 +113,12 @@ class KVController:
         Compress kv chunks of instance-worker(s).
         """
         return await self.cluster_executor.execute("compress", msg)
+
+    async def decompress(self, msg: DecompressMsg) -> DecompressRetMsg:
+        """
+        Decompress kv chunks of instance-worker(s).
+        """
+        return await self.cluster_executor.execute("decompress", msg)
 
     async def move(self, msg: MoveMsg) -> MoveRetMsg:
         """

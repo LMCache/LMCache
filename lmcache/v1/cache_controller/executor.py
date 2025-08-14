@@ -19,6 +19,9 @@ from lmcache.v1.cache_controller.message import (  # noqa: E501
     CompressMsg,
     CompressRetMsg,
     CompressWorkerMsg,
+    DecompressMsg,
+    DecompressRetMsg,
+    DecompressWorkerMsg,
     ErrorMsg,
     HealthMsg,
     HealthRetMsg,
@@ -212,6 +215,65 @@ class LMCacheClusterExecutor:
         )
 
         return CompressRetMsg(
+            event_id=event_id,
+            num_tokens=num_tokens_list[0],
+        )
+
+    async def decompress(self, msg: DecompressMsg) -> Union[DecompressRetMsg, ErrorMsg]:
+        """
+        Execute a decompress operation with error handling.
+        """
+        event_id = msg.event_id
+        instance_id = msg.instance_id
+        method = msg.method
+        location = msg.location
+        tokens = msg.tokens
+
+        worker_ids = self.reg_controller.get_workers(instance_id)
+        assert worker_ids is not None
+
+        sockets = []
+        serialized_msgs = []
+        for worker_id in worker_ids:
+            socket = self.reg_controller.get_socket(instance_id, worker_id)
+
+            if socket is None:
+                return ErrorMsg(
+                    error=(
+                        f"Worker {worker_id} not registered for "
+                        f"instance {instance_id} or "
+                    )
+                )
+            sockets.append(socket)
+
+            worker_event_id = f"DecompressWorker{worker_id}{str(uuid.uuid4())}"
+            serialized_msg = msgspec.msgpack.encode(
+                DecompressWorkerMsg(
+                    worker_event_id=worker_event_id,
+                    method=method,
+                    location=location,
+                    tokens=tokens,
+                )
+            )
+            serialized_msgs.append(serialized_msg)
+            logger.debug(
+                f"Sending decompress operation to worker ({instance_id}, {worker_id})"
+            )
+        serialized_results = await self.execute_workers(
+            sockets=sockets,
+            serialized_msgs=serialized_msgs,
+        )
+
+        num_tokens_list = []
+        for serialized_result in serialized_results:
+            result = msgspec.msgpack.decode(serialized_result, type=Msg)
+            num_tokens_list.append(result.num_tokens)
+
+        assert len(set(num_tokens_list)) == 1, (
+            "The number of tokens decompressed should be the same across all workers."
+        )
+
+        return DecompressRetMsg(
             event_id=event_id,
             num_tokens=num_tokens_list[0],
         )
