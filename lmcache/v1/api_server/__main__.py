@@ -222,19 +222,22 @@ def create_app(controller_url: str) -> FastAPI:
 
     class HealthResponse(BaseModel):
         event_id: str
-        alive: bool
+        # worker_id -> error_code
+        error_codes: dict[int, int]
 
     @app.post("/health", response_model=HealthResponse)
     async def health(req: HealthRequest):
         try:
-            event_id = "Health" + str(uuid.uuid4())
+            event_id = "health" + str(uuid.uuid4())
             msg = HealthMsg(
                 event_id=event_id,
                 instance_id=req.instance_id,
             )
             ret_msg = await lmcache_controller_manager.handle_orchestration_message(msg)
             assert isinstance(ret_msg, HealthRetMsg)
-            return HealthResponse(event_id=ret_msg.event_id, alive=ret_msg.alive)
+            return HealthResponse(
+                event_id=ret_msg.event_id, error_codes=ret_msg.error_codes
+            )
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e)) from e
 

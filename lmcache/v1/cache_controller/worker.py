@@ -18,6 +18,8 @@ from lmcache.v1.cache_controller.message import (
     CompressWorkerRetMsg,
     DeRegisterMsg,
     ErrorMsg,
+    HealthWorkerMsg,
+    HealthWorkerRetMsg,
     MoveWorkerMsg,
     MoveWorkerRetMsg,
     Msg,
@@ -248,6 +250,11 @@ class LMCacheWorker:
                     )
                     serialized_ret_msg = msgspec.msgpack.encode(
                         ClearWorkerRetMsg(num_tokens=num_cleared_tokens)
+                    )
+                elif isinstance(request, HealthWorkerMsg):
+                    error_code = self.lmcache_engine.health()
+                    serialized_ret_msg = msgspec.msgpack.encode(
+                        HealthWorkerRetMsg(error_code=error_code)
                     )
                 else:
                     logger.error(f"Unknown message: {request}")

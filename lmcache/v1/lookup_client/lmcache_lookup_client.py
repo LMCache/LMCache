@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Optional, OrderedDict
 import threading
 
 # Third Party
@@ -28,7 +28,7 @@ class LMCacheLookupClient(LookupClientInterface):
     ZMQ-based lookup client that communicates with a lookup server.
 
     Related extra_config:
-    - create_lookup_server_only_on_worker_0:
+    - create_lookup_server_only_on_worker_0_for_mla:
         is a flag to control whether to create lookup server only on worker 0.
     """
 
@@ -39,12 +39,14 @@ class LMCacheLookupClient(LookupClientInterface):
             "lmcache_rpc_port", 0
         )
         self.tensor_parallel_size = vllm_config.parallel_config.tensor_parallel_size
-        self.create_lookup_server_only_on_worker_0 = (
+        self.create_lookup_server_only_on_worker_0_for_mla = (
             config.extra_config
-            and config.extra_config.get("create_lookup_server_only_on_worker_0", True)
+            and config.extra_config.get(
+                "create_lookup_server_only_on_worker_0_for_mla", False
+            )
         )
         ranks = self.tensor_parallel_size
-        if self.create_lookup_server_only_on_worker_0:
+        if self.create_lookup_server_only_on_worker_0_for_mla:
             ranks = 1
         for tp_rank in range(ranks):
             socket_path = get_zmq_rpc_path_lmcache(
@@ -60,15 +62,26 @@ class LMCacheLookupClient(LookupClientInterface):
             else:
                 self.socket.connect(socket_path)
 
-    def lookup(self, token_ids: torch.Tensor, lookup_id: Optional[str] = None) -> int:
+    def lookup(
+        self,
+        token_ids: torch.Tensor,
+        lookup_id: Optional[str] = None,
+        tags: OrderedDict = None,
+    ) -> int:
         token_bufs = self.encoder.encode(token_ids)
         lookup_id_buf = lookup_id.encode("utf-8")
+        tags_str = ""
+        if tags is not None and len(tags) != 0:
+            tags_str = "@".join([f"{k}%{v}" for k, v in tags.items()])
+        tags_buf = tags_str.encode("utf-8")
         ranks = self.tensor_parallel_size
-        if self.create_lookup_server_only_on_worker_0:
+        if self.create_lookup_server_only_on_worker_0_for_mla:
             ranks = 1
         results = []
         for i in range(ranks):
-            self.socket.send_multipart(token_bufs + [lookup_id_buf], copy=False)
+            self.socket.send_multipart(
+                token_bufs + [lookup_id_buf, tags_buf], copy=False
+            )
             resp = self.socket.recv()
             result = int.from_bytes(resp, "big")
             results.append(result)
@@ -114,11 +127,25 @@ class LMCacheLookupServer:
                 # try:
                 # request = self.socket.recv()
                 frames = self.socket.recv_multipart(copy=False)
-                token_frames = frames[:-1]
-                lookup_id = frames[-1].bytes.decode("utf-8")
+                token_frames = frames[:-2]
+                lookup_id = frames[-2].bytes.decode("utf-8")
+                tags_str = frames[-1].bytes.decode("utf-8")
+                tags = None
+                if tags_str != "":
+                    tags = OrderedDict()
+                    tags_list = tags_str.split("@")
+                    for kv in tags_list:
+                        kvs = kv.split("%", 1)
+                        if len(kvs) != 2:
+                            raise ValueError("Unexpected tags_str: {tags_str}")
+                        tags[kvs[0]] = kvs[1]
+
                 token_ids = self.decoder.decode(token_frames)
                 result = self.lmcache_engine.lookup(
-                    token_ids, lookup_id=lookup_id, pin=True
+                    token_ids,
+                    lookup_id=lookup_id,
+                    pin=True,
+                    tags=tags,
                 )
                 response = result.to_bytes(4, "big")
                 self.socket.send(response)
