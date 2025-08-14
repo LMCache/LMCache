@@ -1,12 +1,20 @@
-# Cache by request
-This is an example to cache by request, use the `kv_transfer_params.caching` field to control whether to cache this request.
+Caching by request
+===================================
 
-## Prerequisites
-Your server should have at least 1 GPU.
+LMCache supports caching by request
 
-This will use the port 8000 for 1 vllm.
+For example, if you want to cache some requests and redo prefill for other requests, you can add ``caching`` field to
+``kv_transfer_params`` to control whether to cache this request.
 
-## Steps
+example.yaml
+```
+chunk_size: 256
+local_device: "cpu"
+local_cpu: True
+max_local_cpu_size: 10
+
+```
+
 1. Start the vllm engine at port 8000:
 
 ```bash
@@ -53,3 +61,4 @@ curl -X POST http://localhost:8000/v1/completions \
   }'
 ```
 This request will be cached.
+

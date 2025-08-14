@@ -36,7 +36,7 @@ Welcome to LMCache!
 .. raw:: html
 
    <p style="text-align:justify">
-   LMCache lets LLMs prefill each text only once. By storing the KV caches of all reusable texts, LMCache can reuse the KV caches of any reused text (not necessarily prefix) in any serving engine instance. 
+   LMCache lets LLMs prefill each text only once. By storing the KV caches of all reusable texts, LMCache can reuse the KV caches of any reused text (not necessarily prefix) in any serving engine instance.
    It thus reduces prefill delay, i.e., time to first token (TTFT), as well as saves the precious GPU cycles and memory.
 
    By combining LMCache with vLLM, LMCaches achieves 3-10x delay savings and GPU cycle reduction in many LLM use cases, including multi-round QA and RAG.
@@ -76,6 +76,7 @@ Documentation
 
    kv_cache/storage_backends/index
    kv_cache/caching_policies
+   kv_cache/caching_switch
 
 :raw-html:`<br />`
 
@@ -138,7 +139,7 @@ Documentation
    api_reference/storage_backends
    api_reference/dynamic_connector
    api_reference/multimodality
-   
+
 :raw-html:`<br />`
 
 .. toctree::
@@ -149,4 +150,4 @@ Documentation
    community/blogs
 
 raw-html:`<br />`
-   
+
