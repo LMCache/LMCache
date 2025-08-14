@@ -183,5 +183,5 @@ Serve docs page locally at http://localhost:8000: :code:`python -m http.server -
 Thank You
 ---------
 
-Thank you for your contribution to LMCache and making it a better, and accessible framework for all. 
+Thank you for your contribution to LMCache and making it a better, and accessible framework for all.
 
