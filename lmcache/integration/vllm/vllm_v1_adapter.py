@@ -1146,6 +1146,7 @@ class LMCacheConnectorV1Impl:
         for finished_req_id in scheduler_output.finished_req_ids:
             self._request_trackers.pop(finished_req_id, None)
             self._unfinished_requests.pop(finished_req_id, None)
+            self._skip_save_reqs.pop(finished_req_id, None) # clean up
 
         for request in scheduler_output.scheduled_new_reqs:
             # Right now, we only load KV for new requests
@@ -1165,12 +1166,17 @@ class LMCacheConnectorV1Impl:
             )
             self._request_trackers[request.req_id] = request_tracker
 
+            req_skip_save = (
+                force_skip_save if force_skip_save
+                else self._skip_save_reqs.get(request.req_id, False)
+            )
+
             req_meta = ReqMeta.from_request_tracker(
                 request_tracker,
                 self._block_size,
                 self._lmcache_chunk_size,
                 load_spec=load_spec,
-                skip_save=force_skip_save,
+                skip_save=req_skip_save,
                 discard_partial_chunks=self._discard_partial_chunks,
                 save_decode_cache=self._save_decode_cache,
             )
@@ -1187,12 +1193,17 @@ class LMCacheConnectorV1Impl:
                 request_tracker = self._request_trackers[req.req_id]
                 request_tracker.update(req.new_token_ids, req.new_block_ids)
 
+                req_skip_save = (
+                    force_skip_save if force_skip_save
+                    else self._skip_save_reqs.get(req.req_id, False)
+                )
+
                 req_meta = ReqMeta.from_request_tracker(
                     request_tracker,
                     self._block_size,
                     self._lmcache_chunk_size,
                     load_spec=None,
-                    skip_save=force_skip_save,
+                    skip_save=req_skip_save,
                     discard_partial_chunks=self._discard_partial_chunks,
                 )
                 if req_meta is not None:
@@ -1216,12 +1227,17 @@ class LMCacheConnectorV1Impl:
 
             request_tracker.update(new_token_ids, new_block_ids)
 
+            req_skip_save = (
+                force_skip_save if force_skip_save
+                else self._skip_save_reqs.get(req_id, False)
+            )
+            
             req_meta = ReqMeta.from_request_tracker(
                 request_tracker,
                 self._block_size,
                 self._lmcache_chunk_size,
                 load_spec=None,
-                skip_save=force_skip_save,
+                skip_save=req_skip_save,
                 discard_partial_chunks=self._discard_partial_chunks,
                 save_decode_cache=self._save_decode_cache,
             )
