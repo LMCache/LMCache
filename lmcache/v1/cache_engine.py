@@ -600,7 +600,10 @@ class LMCacheEngine:
 
                 assert None not in tasks
 
-                yield None
+                if layer_id == 0:
+                    yield torch.sum(ret_mask)
+                else:
+                    yield None
 
                 mem_objs_layer = [task.result() for task in tasks]
                 mem_obj_consumer.send(mem_objs_layer)
