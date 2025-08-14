@@ -279,11 +279,11 @@ def test_s3fifo_s3fifo_mode():
 
     key1, _ = test_kvs[1]
     for _ in range(3):
-        policy.update_on_hit(key1)
+        policy.update_on_hit(key1, cache_dict)
 
     cache_dict[key0] = obj0
     policy.update_on_put[key0]
-    policy.update_on_hit(key0)
+    policy.update_on_hit(key0, cache_dict)
     # by now cache_policy should be:
     # s queue (cap: 1): [0]
     # m queue (cap: 9): [8, 7, 6, 5, 4, 3, 2, 1]
@@ -291,7 +291,7 @@ def test_s3fifo_s3fifo_mode():
 
     cache_dict[key10] = obj10
     policy.update_on_put[key10]
-    policy.update_on_hit(key10)
+    policy.update_on_hit(key10, cache_dict)
     # by now cache_policy should be:
     # s queue (cap: 1): [10]
     # m queue (cap: 9): [0, 8, 7, 6, 5, 4, 3, 2, 1]
@@ -361,11 +361,11 @@ def test_s3fifo_s3fifo_mode_with_pin():
 
     key1, _ = test_kvs[1]
     for _ in range(3):
-        policy.update_on_hit(key1)
+        policy.update_on_hit(key1, cache_dict)
 
     cache_dict[key0] = obj0
     policy.update_on_put[key0]
-    policy.update_on_hit(key0)
+    policy.update_on_hit(key0, cache_dict)
     # by now cache_policy should be:
     # s queue (cap: 1): [0]
     # m queue (cap: 9): [8, 7, 6, 5, 4, 3, 2, 1]
@@ -373,7 +373,7 @@ def test_s3fifo_s3fifo_mode_with_pin():
 
     cache_dict[key10] = obj10
     policy.update_on_put[key10]
-    policy.update_on_hit(key10)
+    policy.update_on_hit(key10, cache_dict)
     # by now cache_policy should be:
     # s queue (cap: 1): [10]
     # m queue (cap: 9): [0, 8, 7, 6, 5, 4, 3, 2, 1]
