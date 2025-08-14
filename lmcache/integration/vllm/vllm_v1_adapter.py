@@ -688,8 +688,6 @@ class LMCacheConnectorV1Impl:
         for idx, request in enumerate(metadata.requests):
             if request.load_spec is None:
                 continue
-            if not request.enable_cache:
-                continue
 
             tokens = request.token_ids
             # TODO: have a pre-allocated buffer to hold the slot_mappings
