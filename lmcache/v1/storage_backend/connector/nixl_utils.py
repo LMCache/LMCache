@@ -45,6 +45,7 @@ class NixlConfig:
     buffer_size: int
     buffer_device: str
     enable_gc: bool
+    backends: list[str]
 
     @staticmethod
     def from_cache_engine_config(
@@ -84,6 +85,7 @@ class NixlConfig:
             buffer_size=config.nixl_buffer_size,
             buffer_device=corrected_device,
             enable_gc=config.nixl_enable_gc,
+            backends=config.backends,
         )
 
 
