@@ -578,6 +578,9 @@ class LMCacheConnectorV1Impl:
 
         self.force_skip_save = bool(os.environ.get("LMCACHE_FORCE_SKIP_SAVE", False))
 
+        self._skip_save_reqs: dict[str, bool] = {}
+        self._priority_limit = config.priority_limit
+
     @_lmcache_nvtx_annotate
     def _init_kv_caches_from_forward_context(self, forward_context: "ForwardContext"):
         for layer_name in forward_context.no_compile_layers:
@@ -952,6 +955,15 @@ class LMCacheConnectorV1Impl:
             self.lookup_client, "supports_producer_reuse"
         ):
             return 0
+
+        if self._priority_limit and request.priority > self._priority_limit:
+            logger.info(
+                "Low priority request, qid: %s, bypass the lmache store",
+                request.request_id
+            )
+            self._skip_save_reqs[request.request_id] = True
+        else:
+            self._skip_save_reqs[request.request_id] = False
 
         token_ids = torch.tensor(request.prompt_token_ids)
 

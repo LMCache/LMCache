@@ -217,6 +217,11 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "default": "LRU",
         "env_converter": str,
     },
+    "priority_limit": {
+        "type": Optional[int],
+        "default": None,
+        "env_converter": int,
+    }
 }
 
 
