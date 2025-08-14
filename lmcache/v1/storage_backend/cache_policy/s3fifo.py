@@ -128,7 +128,7 @@ class S3FIFOCachePolicy(BaseCachePolicy[dict[CacheEngineKey, Any]]):
         # cache is full when calling get_evict_candidates
         # so we can retrieve cache size indirectly
         # segmented s3 fifo queue size can be confirmed now
-        self._update_dynamic_caps(cache_dict)
+        self._transform_to_s3fifo(cache_dict)
 
         evict_keys: List[CacheEngineKey] = []
 
@@ -229,6 +229,15 @@ class S3FIFOCachePolicy(BaseCachePolicy[dict[CacheEngineKey, Any]]):
         self.S_cap = max(1, int(total_size * self.small_ratio))
         self.M_cap = max(1, total_size - self.S_cap)
         self.G_cap = self.M_cap
+
+    def _transform_to_s3fifo(self, cache_dict: dict[CacheEngineKey, Any]) -> None:
+        if self._is_s3fifo():
+            return  # fixed mode
+        self._update_dynamic_caps(cache_dict)
+        # segment original FIFO queue to S/M queue
+        for _ in range(self.M_cap):
+            old_key, freq = self.S.popitem(last=False)
+            self.M[old_key] = freq
 
     def _is_s3fifo(self) -> bool:
         """Fixed capacity needs set for S3FIFO, fallback to FIFO otherwise."""
