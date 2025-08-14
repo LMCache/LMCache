@@ -42,6 +42,8 @@ class S3FIFOCachePolicy(BaseCachePolicy[dict[CacheEngineKey, Any]]):
         self.S: "OrderedDict[CacheEngineKey, int]" = OrderedDict()
         self.M: "OrderedDict[CacheEngineKey, int]" = OrderedDict()
         self.G: "OrderedDict[CacheEngineKey, None]" = OrderedDict()
+        # M to M_G when evict_M and m.freq == 0
+        self.M_G: "OrderedDict[CacheEngineKey, None]" = OrderedDict()
 
         # Precompute capacities if total_capacity is given
         if total_capacity:
@@ -115,6 +117,7 @@ class S3FIFOCachePolicy(BaseCachePolicy[dict[CacheEngineKey, Any]]):
         self.S.pop(key, None)
         self.M.pop(key, None)
         self.G.pop(key, None)
+        self.M_G.pop(key, None)
 
     def get_evict_candidates(
         self, cache_dict: dict[CacheEngineKey, Any], num_candidates: int = 1
@@ -141,14 +144,11 @@ class S3FIFOCachePolicy(BaseCachePolicy[dict[CacheEngineKey, Any]]):
                 if cache_dict[key].can_evict:
                     evict_keys.append(key)
 
-        # 2. Then check M queue excess part (FIFO)
+        # 2. Then check M_G queue excess part (FIFO)
         # that's because the memory object evicted by M queue should have been
         # deallocated when update_on_put() according to official S3FIFO
-        if len(evict_keys) < num_candidates and self.M_cap:
-            m_items = list(self.M.keys())
-            m_excess_count = max(0, len(m_items) - self.M_cap)
-            for i in range(m_excess_count):
-                key = m_items[i]
+        if len(evict_keys) < num_candidates:
+            for key in self.M_G.keys():
                 if len(evict_keys) >= num_candidates:
                     break
                 if cache_dict[key].can_evict:
@@ -175,6 +175,7 @@ class S3FIFOCachePolicy(BaseCachePolicy[dict[CacheEngineKey, Any]]):
             self.S.pop(key, None)
             self.M.pop(key, None)
             self.G.pop(key, None)
+            self.M_G.pop(key, None)
 
         return evict_keys
 
@@ -217,7 +218,9 @@ class S3FIFOCachePolicy(BaseCachePolicy[dict[CacheEngineKey, Any]]):
         if evict_freq > 0:
             # Reinsert at head with freq-1
             self.M[evict_key] = evict_freq - 1
-        # If freq == 0, the key is evicted and not reinserted
+        else:
+            # If freq == 0, the key is evicted and not reinserted
+            self.M_G[evict_key] = None
 
     def _update_dynamic_caps(self, cache_dict: dict[CacheEngineKey, Any]) -> None:
         """Recalculate S/M/G capacities based on current hot_cache size."""
@@ -253,6 +256,7 @@ class S3FIFOCachePolicy(BaseCachePolicy[dict[CacheEngineKey, Any]]):
             "S": len(self.S),
             "M": len(self.M),
             "G": len(self.G),
+            "M_G": len(self.M_G),
             "S_cap": self.S_cap or -1,
             "M_cap": self.M_cap or -1,
             "G_cap": self.G_cap or -1,
