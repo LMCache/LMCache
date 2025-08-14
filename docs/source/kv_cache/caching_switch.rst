@@ -6,6 +6,8 @@ LMCache supports caching by request
 For example, if you want to cache some requests and redo prefill for other requests, you can add ``caching`` field to
 ``kv_transfer_params`` to control whether to cache this request.
 
+example.yaml
+
 .. code-block:: yaml
 
 	chunk_size: 256
