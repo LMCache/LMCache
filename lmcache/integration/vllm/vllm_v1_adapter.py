@@ -107,11 +107,13 @@ def extract_tags(
                     tags[k] = v
     return tags
 
+
 def should_enable_cache(sampling_params: SamplingParams) -> bool:
     if sampling_params.extra_args is not None:
         if kv_transfer_params := sampling_params.extra_args.get("kv_transfer_params"):
             return kv_transfer_params.get("caching", True)
     return True
+
 
 @dataclass
 class RequestTracker:
