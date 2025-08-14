@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, List, Optional
 import threading
 
 # Third Party
+from prometheus_client import Gauge
 import torch
 
 # First Party
@@ -66,6 +67,17 @@ class LocalCPUBackend(StorageBackendInterface):
         # assumption: only one request is looked up at a time
         # (only one worker per cache engine)
         self.keys_in_request: List[CacheEngineKey] = []
+        self._setup_metrics()
+
+    def _setup_metrics(self):
+        Gauge(
+            "lmcache:local_cpu_hot_cache_count",
+            "The size of the hot_cache",
+        ).set_function(lambda: len(self.hot_cache))
+        Gauge(
+            "lmcache:local_cpu_keys_in_request_count",
+            "The size of the keys_in_request",
+        ).set_function(lambda: len(self.keys_in_request))
 
     def __str__(self):
         return self.__class__.__name__
