@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 import asyncio
+import logging
 import threading
 
 # Third Party
@@ -23,6 +24,53 @@ app = FastAPI()
 async def get_metrics(request: Request):
     metrics_data = generate_latest(REGISTRY)
     return PlainTextResponse(content=metrics_data, media_type="text/plain")
+
+
+@app.get("/loglevel")
+async def get_or_set_log_level(logger_name: str = None, level: str = None):
+    """
+    Get or set the log level for a logger.
+    - No parameters: List all loggers and their levels.
+    - With logger_name: Get the level of the specified logger.
+    - With logger_name and level: Set the level of the specified logger.
+    """
+    # Use the global logger to record logs
+    logger.debug(f"Get or set log level for logger {logger_name} to level {level}")
+    if not logger_name and not level:
+        # List all loggers and their levels
+        loggers = logging.Logger.manager.loggerDict
+        result = "=== Loggers and Levels ===\n"
+        for name, logger_obj in loggers.items():
+            if isinstance(logger_obj, logging.Logger):
+                result += f"{name}: {logging.getLevelName(logger_obj.level)}\n"
+        return PlainTextResponse(content=result, media_type="text/plain")
+    elif logger_name and not level:
+        # Get the level of the specified logger
+        target_logger = logging.getLogger(logger_name)
+        return PlainTextResponse(
+            content=f"{logger_name}: {logging.getLevelName(target_logger.level)}",
+            media_type="text/plain",
+        )
+    elif logger_name and level:
+        # Set the level of the specified logger
+        target_logger = logging.getLogger(logger_name)
+        try:
+            level_value = getattr(logging, level.upper())
+            target_logger.setLevel(level_value)
+            # Set the level of all handlers
+            for handler in target_logger.handlers:
+                handler.setLevel(level_value)
+            return PlainTextResponse(
+                content=f"Set {logger_name} level to {level.upper()} "
+                "(including all handlers)",
+                media_type="text/plain",
+            )
+        except AttributeError:
+            return PlainTextResponse(
+                content=f"Invalid log level: {level}",
+                media_type="text/plain",
+                status_code=400,
+            )
 
 
 class CacheEngineInternalAPIServer:
