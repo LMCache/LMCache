@@ -226,6 +226,9 @@ class UsageContext:
         return gpu_count, gpu_type, gpu_memory_per_device
 
     def _get_source(self):
+        if self.is_source_k8s():
+            return "K8S"
+
         path = "/proc/1/cgroup"
         if os.path.exists(path):
             with open(path, "r") as f:
@@ -247,6 +250,26 @@ class UsageContext:
             pass
 
         return "UNKNOWN"
+
+    def is_source_k8s(self):
+        # 1. check if kubepods in /proc/1/cgroup
+        try:
+            with open("/proc/1/cgroup") as f:
+                if "kubepods" in f.read():
+                    return True
+        except FileNotFoundError:
+            pass
+
+        # 2. check env related to k8s
+        if "KUBERNETES_SERVICE_HOST" in os.environ:
+            return True
+
+        # 3. check if ServiceAccount token exists
+        # only when autoMountServiceAccountToken is true
+        if os.path.exists("/var/run/secrets/kubernetes.io/serviceaccount/token"):
+            return True
+
+        return False
 
 
 def InitializeUsageContext(
