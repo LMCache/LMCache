@@ -58,7 +58,6 @@ class LocalCPUBackend(StorageBackendInterface):
         self.stream = torch.cuda.Stream()
 
         self.stats_monitor = LMCStatsMonitor.GetOrCreate()
-        self.usage = 0
 
         self.layerwise = config.use_layerwise
         self.enable_blending = config.enable_blending
@@ -109,9 +108,6 @@ class LocalCPUBackend(StorageBackendInterface):
             self.hot_cache[key] = memory_obj
 
             self.cache_policy.update_on_put(key)
-
-            self.usage += memory_obj.get_size()
-            self.stats_monitor.update_local_cache_usage(self.usage)
 
             # TODO(Jiayi): optimize this with batching?
             # push kv admit msg
@@ -209,9 +205,6 @@ class LocalCPUBackend(StorageBackendInterface):
         if force:
             self.cache_policy.update_on_force_evict(key)
             self.cpu_lock.release()
-
-        self.usage -= memory_obj.get_size()
-        self.stats_monitor.update_local_cache_usage(self.usage)
 
         if self.lmcache_worker is not None:
             self.lmcache_worker.put_msg(
