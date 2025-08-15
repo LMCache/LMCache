@@ -813,20 +813,25 @@ class LMCacheEngine:
         )
 
         compressed_memory_objs = []
+        # new_compress_num_tokens indicate the number of tokens need to compress
+        new_compress_num_tokens = num_tokens
         for memory_obj in memory_objs:
-            compressed_memory_obj = serializer.serialize(memory_obj)
-            memory_obj.unpin()
-            compressed_memory_objs.append(compressed_memory_obj)
+            if isinstance(memory_obj, TensorMemoryObj):
+                compressed_memory_obj = serializer.serialize(memory_obj)
+                compressed_memory_objs.append(compressed_memory_obj)
+                memory_obj.unpin()
+            else:
+                compressed_memory_objs.append(memory_obj)
+                new_compress_num_tokens -= memory_obj.get_num_tokens()
 
-        self.storage_manager.batched_remove(keys, locations=[location])
-
-        self.storage_manager.batched_put(
-            keys=keys,
-            memory_objs=compressed_memory_objs,
-            location=location,
-        )
-
-        return num_tokens
+        if new_compress_num_tokens > 0:
+            self.storage_manager.batched_remove(keys, locations=[location])
+            self.storage_manager.batched_put(
+                keys=keys,
+                memory_objs=compressed_memory_objs,
+                location=location,
+            )
+        return new_compress_num_tokens
 
     @_lmcache_nvtx_annotate
     def decompress(
@@ -864,20 +869,26 @@ class LMCacheEngine:
         )
 
         memory_objs = []
+        # new_decompress_num_tokens indicate the number of tokens need to decompress
+        new_decompress_num_tokens = num_tokens
         for compressed_memory_obj in compressed_memory_objs:
-            memory_obj = deserializer.deserialize(compressed_memory_obj)
-            compressed_memory_obj.unpin()
-            memory_objs.append(memory_obj)
+            if not isinstance(compressed_memory_obj, TensorMemoryObj):
+                memory_obj = deserializer.deserialize(compressed_memory_obj)
+                compressed_memory_obj.unpin()
+                memory_objs.append(memory_obj)
+            else:
+                memory_objs.append(compressed_memory_obj)
+                new_decompress_num_tokens -= compressed_memory_obj.get_num_tokens()
 
-        self.storage_manager.batched_remove(keys, locations=[location])
+        if new_decompress_num_tokens > 0:
+            self.storage_manager.batched_remove(keys, locations=[location])
+            self.storage_manager.batched_put(
+                keys=keys,
+                memory_objs=memory_objs,
+                location=location,
+            )
 
-        self.storage_manager.batched_put(
-            keys=keys,
-            memory_objs=memory_objs,
-            location=location,
-        )
-
-        return num_tokens
+        return new_decompress_num_tokens
 
     @_lmcache_nvtx_annotate
     def lookup_unpin(self, lookup_ids: list[str]) -> None:

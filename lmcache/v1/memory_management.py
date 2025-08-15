@@ -95,6 +95,9 @@ class MemoryObjMetadata:
     # cache controller pins are persistent
     pin_count: int = 0
 
+    # the number of token before compress
+    num_tokens: int = 0
+
     # The 'logical' format of the tensor
     fmt: MemoryFormat = MemoryFormat.UNDEFINED
 
@@ -492,8 +495,7 @@ class BytesBufferMemoryObj(MemoryObj):
         return 1
 
     def get_num_tokens(self) -> int:
-        # TODO(Jiayi): record the number of tokens somehow
-        return 1
+        return self.metadata.num_tokens
 
     @property
     def metadata(self) -> MemoryObjMetadata:

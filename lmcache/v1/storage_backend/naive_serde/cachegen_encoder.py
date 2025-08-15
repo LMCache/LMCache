@@ -8,7 +8,12 @@ from lmcache.logging import init_logger
 from lmcache.storage_backend.serde.cachegen_encoder import encode_function
 from lmcache.utils import _lmcache_nvtx_annotate
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.memory_management import BytesBufferMemoryObj, MemoryObj
+from lmcache.v1.memory_management import (
+    BytesBufferMemoryObj,
+    MemoryFormat,
+    MemoryObj,
+    MemoryObjMetadata,
+)
 from lmcache.v1.storage_backend.naive_serde.cachegen_basics import CacheGenConfig
 from lmcache.v1.storage_backend.naive_serde.serde import Serializer
 
@@ -80,5 +85,14 @@ class CacheGenSerializer(Serializer):
             self.value_bins,
             ntokens,
         )
-
-        return BytesBufferMemoryObj(output_dict.to_bytes())
+        meta = MemoryObjMetadata(
+            shape=torch.Size([len(output_dict.to_bytes()), 0, 0, 0]),
+            dtype=None,
+            address=0,
+            phy_size=0,
+            ref_count=1,
+            pin_count=0,
+            num_tokens=memory_obj.get_num_tokens(),
+            fmt=MemoryFormat.BINARY_BUFFER,
+        )
+        return BytesBufferMemoryObj(output_dict.to_bytes(), metadata=meta)
