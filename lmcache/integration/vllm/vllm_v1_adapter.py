@@ -396,27 +396,19 @@ VLLM_PARALLEL_CONFIG: Optional[ParallelConfig] = None
 VLLM_SCHEDULER_CONFIG: Optional[SchedulerConfig] = None
 
 
-def init_lmcache_engine(
-    model_config: ModelConfig,
-    parallel_config: ParallelConfig,
-    cache_config: CacheConfig,
-    scheduler_config: SchedulerConfig,
-    config: LMCacheEngineConfig,
-    vllm_config: Optional["VllmConfig"] = None,
+def _init_lmcache_engine(
+    lmcache_config: LMCacheEngineConfig,
+    vllm_config: "VllmConfig",
 ) -> Optional[LMCacheEngine]:
     """Initialize the LMCache engine by the given model config and parallel
     config. This function will check the environment variable
     `LMCACHE_CONFIG_FILE` to load the configuration file. If that environment
     variable is not set, this function will return None.
 
-    :param model_config: The model configuration in vLLM.
-    :type model_config: ModelConfig
-    :param parallel_config: The parallel configuration in vLLM.
-    :type parallel_config: ParallelConfig
-    :param cache_config: The KV cache configuration in vLLM.
-    :type cache_config: CacheConfig
-    :param scheduler_config: The scheduler configuration in vLLM.
-    :type scheduler_config: SchedulerConfig
+    :param lmcache_config: The LMCache configuration.
+    :type lmcache_config: LMCacheEngineConfig
+    :param vllm_config: The vLLM configuration.
+    :type vllm_config: VllmConfig
 
     :return: The initialized LMCache engine or None (if the environment variable
         `LMCACHE_CONFIG_FILE` is not set).
@@ -424,6 +416,11 @@ def init_lmcache_engine(
     """
     if LMCacheEngineBuilder.get(ENGINE_NAME) is not None:
         return None
+
+    model_config = (vllm_config.model_config,)
+    parallel_config = (vllm_config.parallel_config,)
+    cache_config = (vllm_config.cache_config,)
+    scheduler_config = (vllm_config.scheduler_config,)
 
     global VLLM_CACHE_CONFIG
     global VLLM_PARALLEL_CONFIG
@@ -434,7 +431,7 @@ def init_lmcache_engine(
     VLLM_MODEL_CONFIG = model_config
     VLLM_SCHEDULER_CONFIG = scheduler_config
 
-    assert isinstance(config, LMCacheEngineConfig), (
+    assert isinstance(lmcache_config, LMCacheEngineConfig), (
         "LMCache v1 configuration is should be passed."
     )
 
@@ -448,14 +445,17 @@ def init_lmcache_engine(
     ):
         use_mla = True
 
-    if use_mla and (config.remote_serde != "naive" and config.remote_serde is not None):
+    if use_mla and (
+        lmcache_config.remote_serde != "naive"
+        and lmcache_config.remote_serde is not None
+    ):
         raise ValueError("MLA only works with naive serde mode..")
 
     # construct kv shape (for mem pool)
     num_layer = model_config.get_num_layers(parallel_config)
     num_mtp_layers = _calculate_mtp_layers(vllm_config, model_config)
     num_layer += num_mtp_layers
-    chunk_size = config.chunk_size
+    chunk_size = lmcache_config.chunk_size
     num_kv_head = model_config.get_num_kv_heads(parallel_config)
     head_size = model_config.get_head_size()
     kv_shape = (num_layer, 1 if use_mla else 2, chunk_size, num_kv_head, head_size)
@@ -476,20 +476,20 @@ def init_lmcache_engine(
         use_mla,
     )
 
-    use_gpu = need_gpu_interm_buffer(config)
+    use_gpu = need_gpu_interm_buffer(lmcache_config)
     vllm_gpu_connector: Union[
         VLLMBufferLayerwiseGPUConnector,
         VLLMPagedMemGPUConnectorV2,
         VLLMPagedMemLayerwiseGPUConnector,
     ]
 
-    if use_mla and config.use_layerwise:
+    if use_mla and lmcache_config.use_layerwise:
         raise ValueError("layerwise MLA connector is not supported yet")
 
     # When use_mla is True, num_kv_head is 1
     hidden_dim_size = num_kv_head * head_size
-    if config.use_layerwise:
-        if config.enable_blending:
+    if lmcache_config.use_layerwise:
+        if lmcache_config.enable_blending:
             # Use layerwise connector for blending
             vllm_gpu_connector = VLLMBufferLayerwiseGPUConnector(
                 hidden_dim_size,
@@ -521,7 +521,7 @@ def init_lmcache_engine(
     tpg = get_tp_group()
     engine = LMCacheEngineBuilder.get_or_create(
         ENGINE_NAME,
-        config,
+        lmcache_config,
         metadata,
         vllm_gpu_connector,
         tpg.broadcast,
@@ -567,11 +567,7 @@ class LMCacheConnectorV1Impl:
             self._unfinished_requests: dict[str, Request] = {}
             self._lookup_requests_in_step: list[str] = []
         else:
-            self.lmcache_engine = init_lmcache_engine(
-                vllm_config.model_config,
-                vllm_config.parallel_config,
-                vllm_config.cache_config,
-                vllm_config.scheduler_config,
+            self.lmcache_engine = _init_lmcache_engine(
                 config,
                 vllm_config,
             )
