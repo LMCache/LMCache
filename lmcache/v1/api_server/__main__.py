@@ -21,6 +21,8 @@ from lmcache.v1.cache_controller.message import (  # noqa: E501
     ClearRetMsg,
     CompressMsg,
     CompressRetMsg,
+    DecompressMsg,
+    DecompressRetMsg,
     ErrorMsg,
     HealthMsg,
     HealthRetMsg,
@@ -172,6 +174,16 @@ def create_app(controller_url: str) -> FastAPI:
         event_id: str
         num_tokens: int
 
+    class DecompressRequest(BaseModel):
+        instance_id: str
+        method: str
+        location: str
+        tokens: Optional[List[int]] = []
+
+    class DecompressResponse(BaseModel):
+        event_id: str
+        num_tokens: int
+
     @app.post("/compress", response_model=CompressResponse)
     async def compress(req: CompressRequest):
         try:
@@ -187,6 +199,25 @@ def create_app(controller_url: str) -> FastAPI:
             assert not isinstance(ret_msg, ErrorMsg), ret_msg.error
             assert isinstance(ret_msg, CompressRetMsg)
             return CompressResponse(
+                event_id=ret_msg.event_id, num_tokens=ret_msg.num_tokens
+            )
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e)) from e
+
+    @app.post("/decompress", response_model=DecompressResponse)
+    async def decompress(req: DecompressRequest):
+        try:
+            event_id = "Decompress" + str(uuid.uuid4())
+            msg = DecompressMsg(
+                event_id=event_id,
+                instance_id=req.instance_id,
+                method=req.method,
+                location=req.location,
+                tokens=req.tokens,
+            )
+            ret_msg = await lmcache_controller_manager.handle_orchestration_message(msg)
+            assert isinstance(ret_msg, DecompressRetMsg)
+            return DecompressResponse(
                 event_id=ret_msg.event_id, num_tokens=ret_msg.num_tokens
             )
         except Exception as e:
@@ -229,12 +260,13 @@ def create_app(controller_url: str) -> FastAPI:
 
     class HealthResponse(BaseModel):
         event_id: str
-        alive: bool
+        # worker_id -> error_code
+        error_codes: dict[int, int]
 
     @app.post("/health", response_model=HealthResponse)
     async def health(req: HealthRequest):
         try:
-            event_id = "Health" + str(uuid.uuid4())
+            event_id = "health" + str(uuid.uuid4())
             msg = HealthMsg(
                 event_id=event_id,
                 instance_id=req.instance_id,
@@ -242,7 +274,9 @@ def create_app(controller_url: str) -> FastAPI:
             ret_msg = await lmcache_controller_manager.handle_orchestration_message(msg)
             assert not isinstance(ret_msg, ErrorMsg), ret_msg.error
             assert isinstance(ret_msg, HealthRetMsg)
-            return HealthResponse(event_id=ret_msg.event_id, alive=ret_msg.alive)
+            return HealthResponse(
+                event_id=ret_msg.event_id, error_codes=ret_msg.error_codes
+            )
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e)) from e
 

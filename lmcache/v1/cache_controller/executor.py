@@ -19,9 +19,14 @@ from lmcache.v1.cache_controller.message import (  # noqa: E501
     CompressMsg,
     CompressRetMsg,
     CompressWorkerMsg,
+    DecompressMsg,
+    DecompressRetMsg,
+    DecompressWorkerMsg,
     ErrorMsg,
     HealthMsg,
     HealthRetMsg,
+    HealthWorkerMsg,
+    HealthWorkerRetMsg,
     MoveMsg,
     MoveRetMsg,
     MoveWorkerMsg,
@@ -214,6 +219,65 @@ class LMCacheClusterExecutor:
             num_tokens=num_tokens_list[0],
         )
 
+    async def decompress(self, msg: DecompressMsg) -> Union[DecompressRetMsg, ErrorMsg]:
+        """
+        Execute a decompress operation with error handling.
+        """
+        event_id = msg.event_id
+        instance_id = msg.instance_id
+        method = msg.method
+        location = msg.location
+        tokens = msg.tokens
+
+        worker_ids = self.reg_controller.get_workers(instance_id)
+        assert worker_ids is not None
+
+        sockets = []
+        serialized_msgs = []
+        for worker_id in worker_ids:
+            socket = self.reg_controller.get_socket(instance_id, worker_id)
+
+            if socket is None:
+                return ErrorMsg(
+                    error=(
+                        f"Worker {worker_id} not registered for "
+                        f"instance {instance_id} or "
+                    )
+                )
+            sockets.append(socket)
+
+            worker_event_id = f"DecompressWorker{worker_id}{str(uuid.uuid4())}"
+            serialized_msg = msgspec.msgpack.encode(
+                DecompressWorkerMsg(
+                    worker_event_id=worker_event_id,
+                    method=method,
+                    location=location,
+                    tokens=tokens,
+                )
+            )
+            serialized_msgs.append(serialized_msg)
+            logger.debug(
+                f"Sending decompress operation to worker ({instance_id}, {worker_id})"
+            )
+        serialized_results = await self.execute_workers(
+            sockets=sockets,
+            serialized_msgs=serialized_msgs,
+        )
+
+        num_tokens_list = []
+        for serialized_result in serialized_results:
+            result = msgspec.msgpack.decode(serialized_result, type=Msg)
+            num_tokens_list.append(result.num_tokens)
+
+        assert len(set(num_tokens_list)) == 1, (
+            "The number of tokens decompressed should be the same across all workers."
+        )
+
+        return DecompressRetMsg(
+            event_id=event_id,
+            num_tokens=num_tokens_list[0],
+        )
+
     async def move(self, msg: MoveMsg) -> Union[MoveRetMsg, ErrorMsg]:
         """
         Execute a move cache operation with error handling.
@@ -286,7 +350,71 @@ class LMCacheClusterExecutor:
         )
 
     async def health(self, msg: HealthMsg) -> Union[HealthRetMsg, ErrorMsg]:
-        raise NotImplementedError
+        """
+        Execute a compress operation with error handling.
+        """
+        instance_id = msg.instance_id
+
+        worker_ids = self.reg_controller.get_workers(instance_id)
+        if worker_ids is None:
+            return ErrorMsg(error=f"No workers found for instance {instance_id}")
+
+        # TODO(Jiayi): Currently, we do not support PP or heterogeneous TP.
+        # NOTE(Jiayi): The TP ranks are already sorted in registration_controller.
+
+        sockets = []
+        serialized_msgs = []
+        for worker_id in worker_ids:
+            socket = self.reg_controller.get_socket(instance_id, worker_id)
+
+            if socket is None:
+                return ErrorMsg(
+                    error=(
+                        f"Worker {worker_id} not registered for "
+                        f"instance {instance_id} or socket not found"
+                    )
+                )
+            sockets.append(socket)
+
+            worker_event_id = f"HealthWorker{worker_id}{str(uuid.uuid4())}"
+            serialized_msg = msgspec.msgpack.encode(
+                HealthWorkerMsg(
+                    worker_event_id=worker_event_id,
+                )
+            )
+            serialized_msgs.append(serialized_msg)
+            logger.debug(
+                f"Sending health check operation to worker ({instance_id}, {worker_id})"
+            )
+
+        # Collect results from all workers
+        serialized_results = await self.execute_workers(
+            sockets=sockets,
+            serialized_msgs=serialized_msgs,
+        )
+
+        # Process results
+        error_codes = {}
+        for i, serialized_result in enumerate(serialized_results):
+            try:
+                result = msgspec.msgpack.decode(serialized_result, type=Msg)
+                if isinstance(result, HealthWorkerRetMsg):
+                    error_codes[worker_ids[i]] = result.error_code
+                elif isinstance(result, ErrorMsg):
+                    error_codes[worker_ids[i]] = -1001  # Worker returned error
+                else:
+                    error_codes[worker_ids[i]] = -1002  # Unexpected response
+            except Exception as e:
+                logger.error(
+                    f"Failed to parse health response from worker "
+                    f"{worker_ids[i]}: {str(e)}"
+                )
+                error_codes[worker_ids[i]] = -1003  # Failed to parse response
+
+        return HealthRetMsg(
+            event_id=msg.event_id,
+            error_codes=error_codes,
+        )
 
     async def check_finish(
         self, msg: CheckFinishMsg

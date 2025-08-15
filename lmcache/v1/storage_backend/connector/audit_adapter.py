@@ -28,6 +28,11 @@ class AuditConnectorAdapter(ConnectorAdapter):
         """
         Create an Audit connector. This connector wraps another connector
         and audits all operations.
+        
+        extra_config:
+        - audit_actual_remote_url: The actual remote URL to connect to.
+        - audit_calc_checksum: Whether to calculate checksums.
+        - audit_verify_checksum: Whether to verify checksums.
 
         URL format:
         - audit://host:port[?verify=true|false]
@@ -43,14 +48,27 @@ class AuditConnectorAdapter(ConnectorAdapter):
             raise ValueError(
                 f"Only one host is supported for audit connector, but got {hosts}"
             )
-
-        if not context.config or not context.config.audit_actual_remote_url:
-            raise ValueError("audit_actual_remote_url is not set in the config")
+        if not context.config:
+            raise ValueError("Config is not set")
 
         parse_url = parse_remote_url(context.url)
+        # (Deprecated) verify URL parameter will be removed in future versions
+        # Use the extra config instead
         verify_param = parse_url.query_params.get("verify", ["false"])[0]
         verify_checksum = verify_param.lower() in ("true", "1", "yes")
-        real_url = context.config.audit_actual_remote_url
+        # Get the actual remote URL from the extra config first to keep consistency
+        real_url = context.config.extra_config.get(
+            "audit_actual_remote_url", context.config.audit_actual_remote_url
+        )
+        if not real_url:
+            raise ValueError(
+                "audit_actual_remote_url is not set in the config or extra_config"
+            )
+        # Store verify_checksum in extra_config if not already set
+        if context.config.extra_config is None:
+            context.config.extra_config = {}
+        if "audit_verify_checksum" not in context.config.extra_config:
+            context.config.extra_config["audit_verify_checksum"] = verify_checksum
         connector = CreateConnector(
             real_url,
             context.loop,
@@ -58,4 +76,4 @@ class AuditConnectorAdapter(ConnectorAdapter):
             context.config,
             context.metadata,
         )
-        return AuditConnector(connector, verify_checksum)
+        return AuditConnector(connector.getWrappedConnector(), context.config)

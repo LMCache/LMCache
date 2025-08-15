@@ -100,6 +100,7 @@ Recordings of meetings are available on the [YouTube LMCache channel](https://ww
 
 We welcome and value all contributions and collaborations.  Please check out [Contributing Guide](CONTRIBUTING.md) on how to contribute.
 
+We continually update [[Onboarding] Welcoming contributors with good first issues!](https://github.com/LMCache/LMCache/issues/627)
 
 ## Citation
 
