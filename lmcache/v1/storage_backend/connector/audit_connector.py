@@ -2,6 +2,7 @@
 # Standard
 from threading import Lock
 from typing import Dict, List, Optional
+import asyncio
 import hashlib
 import time
 
@@ -42,12 +43,54 @@ class AuditConnector(RemoteConnector):
         )
         self.checksum_registry: Dict[CacheEngineKey, str] = {}
         self.registry_lock = Lock() if self.verify_checksum else None
+
+        # Parse audit exclude commands
+        self.excluded_cmds = set()
+        if (
+            lmcache_config.extra_config
+            and "audit_exclude_cmds" in lmcache_config.extra_config
+        ):
+            exclude_cmds = lmcache_config.extra_config["audit_exclude_cmds"]
+            if exclude_cmds:
+                self.excluded_cmds = {cmd.strip() for cmd in exclude_cmds.split(",")}
+
         self.logger = logger.getChild("audit")
+
+        # Dynamically replace excluded methods
+        self._replace_excluded_methods()
+
         logger.info(
             f"[REMOTE_AUDIT][{self.real_connector}]:INITIALIZED|"
             f"Calc Checksum:{self.calc_checksum}｜"
-            f"Verify Checksum: {self.verify_checksum}"
+            f"Verify Checksum: {self.verify_checksum}|"
+            f"Excluded Cmds: {self.excluded_cmds}"
         )
+
+    def _replace_excluded_methods(self):
+        """Dynamically replace methods that should be excluded from auditing"""
+        for method_name in self.excluded_cmds:
+            if hasattr(self.real_connector, method_name):
+                # Create a direct pass-through method
+                real_method = getattr(self.real_connector, method_name)
+
+                if asyncio.iscoroutinefunction(real_method):
+
+                    def create_async_wrapper(rm):
+                        async def async_wrapper(*args, **kwargs):
+                            return await rm(*args, **kwargs)
+
+                        return async_wrapper
+
+                    setattr(self, method_name, create_async_wrapper(real_method))
+                else:
+
+                    def create_sync_wrapper(rm):
+                        def sync_wrapper(*args, **kwargs):
+                            return rm(*args, **kwargs)
+
+                        return sync_wrapper
+
+                    setattr(self, method_name, create_sync_wrapper(real_method))
 
     def _calculate_checksum(self, data: bytes) -> str:
         """Calculate SHA-256 checksum for data validation"""
