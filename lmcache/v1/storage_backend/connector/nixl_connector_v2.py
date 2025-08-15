@@ -238,7 +238,8 @@ class NixlPipe:
         self._agent = nixl_agent(
             str(nixl_config.role) + str(nixl_config.buffer_device),
             nixl_agent_config(backends=nixl_config.backends)
-            if nixl_config.backends else None,
+            if nixl_config.backends
+            else None,
         )
         self._reg_descs = self._agent.register_memory(self._transfer_buffers)
         self._local_xfer_descs = self._reg_descs.trim()
