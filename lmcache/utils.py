@@ -4,7 +4,7 @@ from __future__ import annotations
 
 # Standard
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, List, Optional, Tuple
+from typing import TYPE_CHECKING, List, Optional, OrderedDict, Tuple
 import hashlib
 import threading
 
@@ -72,8 +72,19 @@ class CacheEngineKey:
     world_size: int
     worker_id: int
     chunk_hash: int
+    tags: Optional[OrderedDict] = None
 
     def __hash__(self):
+        if self.tags is None:
+            return hash(
+                (
+                    self.fmt,
+                    self.model_name,
+                    self.world_size,
+                    self.worker_id,
+                    self.chunk_hash,
+                )
+            )
         return hash(
             (
                 self.fmt,
@@ -81,14 +92,19 @@ class CacheEngineKey:
                 self.world_size,
                 self.worker_id,
                 self.chunk_hash,
+                "%".join([f"{k}={v}" for k, v in self.tags.items()]),
             )
         )
 
     def to_string(self):
-        return (
+        s = (
             f"{self.fmt}@{self.model_name}@{self.world_size}"
             f"@{self.worker_id}@{self.chunk_hash}"
         )
+        if self.tags is not None and len(self.tags) != 0:
+            tags = [f"{k}%{v}" for k, v in self.tags.items()]
+            s += "@" + "@".join(tags)
+        return s
 
     def split_layers(self, num_layers: int) -> List["LayerCacheEngineKey"]:
         """Split the key into multiple keys for each layer"""
@@ -101,6 +117,7 @@ class CacheEngineKey:
                     self.world_size,
                     self.worker_id,
                     self.chunk_hash,
+                    self.tags,
                     layer_id,
                 )
             )
@@ -114,6 +131,7 @@ class CacheEngineKey:
             self.world_size,
             self.worker_id,
             self.chunk_hash,
+            self.tags,
             0,
         )
         return key
@@ -121,15 +139,23 @@ class CacheEngineKey:
     @staticmethod
     def from_string(s):
         parts = s.split("@")
-        if len(parts) != 5:
+        if len(parts) < 5:
             raise ValueError(f"Invalid key string: {s}")
+        tags = None
+        if len(parts) >= 6:
+            tags = OrderedDict()
+            for kv in parts[5:]:
+                kvs = kv.split("%", 1)
+                if len(kvs) != 2:
+                    raise ValueError(f"Invalid key string: {s}")
+                tags[kvs[0]] = kvs[1]
         return CacheEngineKey(
-            parts[0], parts[1], int(parts[2]), int(parts[3]), int(parts[4])
+            parts[0], parts[1], int(parts[2]), int(parts[3]), int(parts[4]), tags
         )
 
     def to_dict(self):
         # Note(Kuntai): this is used for serializing CacheEngineKey via msgpack.
-        return {
+        msg = {
             "__type__": "CacheEngineKey",
             "fmt": self.fmt,
             "model_name": self.model_name,
@@ -137,15 +163,27 @@ class CacheEngineKey:
             "worker_id": self.worker_id,
             "chunk_hash": self.chunk_hash,
         }
+        if self.tags is not None and len(self.tags) != 0:
+            msg["tags"] = [f"{k}%{v}" for k, v in self.tags.items()]
+        return msg
 
     @staticmethod
     def from_dict(d):
+        tags = None
+        if tag_list := d.get("tags"):
+            tags = OrderedDict()
+            for kv in tag_list:
+                kvs = kv.split("%", 1)
+                if len(kvs) != 2:
+                    raise ValueError(f"Invalid key dict: {d}")
+                tags[kvs[0]] = kvs[1]
         return CacheEngineKey(
             fmt=d["fmt"],
             model_name=d["model_name"],
             world_size=d["world_size"],
             worker_id=d["worker_id"],
             chunk_hash=d["chunk_hash"],
+            tags=tags,
         )
 
 
@@ -153,9 +191,20 @@ class CacheEngineKey:
 class LayerCacheEngineKey(CacheEngineKey):
     """A key for the layer cache engine"""
 
-    layer_id: int
+    layer_id: int = 0
 
     def __hash__(self):
+        if self.tags is None:
+            return hash(
+                (
+                    self.fmt,
+                    self.model_name,
+                    self.world_size,
+                    self.worker_id,
+                    self.chunk_hash,
+                    self.layer_id,
+                )
+            )
         return hash(
             (
                 self.fmt,
@@ -163,15 +212,20 @@ class LayerCacheEngineKey(CacheEngineKey):
                 self.world_size,
                 self.worker_id,
                 self.chunk_hash,
+                "%".join([f"{k}={v}" for k, v in self.tags.items()]),
                 self.layer_id,
             )
         )
 
     def to_string(self):
-        return (
+        s = (
             f"{self.fmt}@{self.model_name}@{self.world_size}"
             f"@{self.worker_id}@{self.chunk_hash}@{self.layer_id}"
         )
+        if self.tags is not None and len(self.tags) != 0:
+            tags = [f"{k}%{v}" for k, v in self.tags.items()]
+            s += "@" + "@".join(tags)
+        return s
 
     def split_layers(self, num_layers: int) -> List["LayerCacheEngineKey"]:
         """Split the key into multiple keys for each layer"""
@@ -184,6 +238,7 @@ class LayerCacheEngineKey(CacheEngineKey):
                     self.world_size,
                     self.worker_id,
                     self.chunk_hash,
+                    self.tags,
                     layer_id,
                 )
             )
@@ -192,14 +247,23 @@ class LayerCacheEngineKey(CacheEngineKey):
     @staticmethod
     def from_string(s):
         parts = s.split("@")
-        if len(parts) != 6:
+        if len(parts) < 6:
             raise ValueError(f"Invalid key string: {s}")
+        tags = None
+        if len(parts) >= 7:
+            tags = OrderedDict()
+            for kv in parts[6:]:
+                kvs = kv.split("%", 1)
+                if len(kvs) != 2:
+                    raise ValueError(f"Invalid key string: {s}")
+                tags[kvs[0]] = kvs[1]
         return LayerCacheEngineKey(
             parts[0],
             parts[1],
             int(parts[2]),
             int(parts[3]),
             int(parts[4]),
+            tags,
             int(parts[5]),
         )
 

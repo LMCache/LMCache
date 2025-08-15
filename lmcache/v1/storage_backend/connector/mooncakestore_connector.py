@@ -189,17 +189,14 @@ class MooncakestoreConnector(RemoteConnector):
         """Initialize chunk metadata and log the configuration."""
         super().init_chunk_meta(config, metadata)
 
-        # Log metadata information after initialization
         if self.meta_shape and self.meta_dtype and self.meta_fmt:
-            logger.info(
-                f"MooncakeConnector metadata initialized: "
-                f"Format: {self.meta_fmt}, "
-                f"Shape: {self.meta_shape}, "
-                f"Dtype: {self.meta_dtype}, "
-                f"Save chunk meta: {not self.save_chunk_meta}"
-            )
+            logger.info("MooncakeConnector using optimized mode")
         else:
-            logger.warning("MooncakeConnector using legacy mode")
+            logger.info("MooncakeConnector using legacy mode")
+            logger.info(
+                "Try setting 'save_chunk_meta' to False in the configuration "
+                "for better performance"
+            )
 
     def _register_cpu_buffer(self):
         """Register CPU buffer for zero-copy operations."""

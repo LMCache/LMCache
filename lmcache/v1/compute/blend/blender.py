@@ -92,7 +92,7 @@ class LMCBlender:
             q = q[top_indices]
             residual = residual[top_indices]
 
-            logger.debug(f"Picking indices: {top_indices}")
+            logger.debug(f"Number of indices picked: {len(top_indices)}")
             self.metadata.imp_indices = top_indices
             self.metadata.positions = self.metadata.positions[top_indices]
             attn_output = attn_output[:topk_num]
