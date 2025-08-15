@@ -23,6 +23,7 @@ from lmcache.v1.cache_controller.message import (  # noqa: E501
     CompressRetMsg,
     DecompressMsg,
     DecompressRetMsg,
+    ErrorMsg,
     HealthMsg,
     HealthRetMsg,
     LookupMsg,
@@ -77,6 +78,7 @@ def create_app(controller_url: str) -> FastAPI:
                 ip=req.ip,
             )
             ret_msg = await lmcache_controller_manager.handle_orchestration_message(msg)
+            assert not isinstance(ret_msg, ErrorMsg), ret_msg.error
             assert isinstance(ret_msg, QueryInstRetMsg)
             return QueryInstResponse(
                 event_id=ret_msg.event_id,
@@ -102,6 +104,7 @@ def create_app(controller_url: str) -> FastAPI:
                 tokens=req.tokens,
             )
             ret_msg = await lmcache_controller_manager.handle_orchestration_message(msg)
+            assert not isinstance(ret_msg, ErrorMsg), ret_msg.error
             assert isinstance(ret_msg, LookupRetMsg)
             return LookupResponse(
                 event_id=ret_msg.event_id, layout_info=ret_msg.layout_info
@@ -127,6 +130,7 @@ def create_app(controller_url: str) -> FastAPI:
                 location=req.location,
             )
             ret_msg = await lmcache_controller_manager.handle_orchestration_message(msg)
+            assert not isinstance(ret_msg, ErrorMsg), ret_msg.error
             assert isinstance(ret_msg, ClearRetMsg)
             return ClearResponse(
                 event_id=ret_msg.event_id, num_tokens=ret_msg.num_tokens
@@ -154,6 +158,7 @@ def create_app(controller_url: str) -> FastAPI:
                 tokens=req.tokens,
             )
             ret_msg = await lmcache_controller_manager.handle_orchestration_message(msg)
+            assert not isinstance(ret_msg, ErrorMsg), ret_msg.error
             assert isinstance(ret_msg, PinRetMsg)
             return PinResponse(event_id=ret_msg.event_id, num_tokens=ret_msg.num_tokens)
         except Exception as e:
@@ -191,6 +196,7 @@ def create_app(controller_url: str) -> FastAPI:
                 tokens=req.tokens,
             )
             ret_msg = await lmcache_controller_manager.handle_orchestration_message(msg)
+            assert not isinstance(ret_msg, ErrorMsg), ret_msg.error
             assert isinstance(ret_msg, CompressRetMsg)
             return CompressResponse(
                 event_id=ret_msg.event_id, num_tokens=ret_msg.num_tokens
@@ -240,6 +246,7 @@ def create_app(controller_url: str) -> FastAPI:
                 copy=req.copy,
             )
             ret_msg = await lmcache_controller_manager.handle_orchestration_message(msg)
+            assert not isinstance(ret_msg, ErrorMsg), ret_msg.error
             assert isinstance(ret_msg, MoveRetMsg)
             return MoveResponse(
                 event_id=ret_msg.event_id,
@@ -265,6 +272,7 @@ def create_app(controller_url: str) -> FastAPI:
                 instance_id=req.instance_id,
             )
             ret_msg = await lmcache_controller_manager.handle_orchestration_message(msg)
+            assert not isinstance(ret_msg, ErrorMsg), ret_msg.error
             assert isinstance(ret_msg, HealthRetMsg)
             return HealthResponse(
                 event_id=ret_msg.event_id, error_codes=ret_msg.error_codes
@@ -285,6 +293,7 @@ def create_app(controller_url: str) -> FastAPI:
                 event_id=req.event_id,
             )
             ret_msg = await lmcache_controller_manager.handle_orchestration_message(msg)
+            assert not isinstance(ret_msg, ErrorMsg), ret_msg.error
             assert isinstance(ret_msg, CheckFinishRetMsg)
             return CheckFinishResponse(status=ret_msg.status)
         except Exception as e:
