@@ -42,6 +42,7 @@ jobs:
                 disable-sudo-and-containers: false
                 egress-policy: block
                 allowed-endpoints: >
+                  api.github.com:443
                   github.com:443
                   registry-1.docker.io:443
                   production.cloudflare.docker.com:443
