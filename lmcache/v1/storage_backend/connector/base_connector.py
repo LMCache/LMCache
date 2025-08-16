@@ -109,7 +109,7 @@ class RemoteConnector(metaclass=abc.ABCMeta):
         Check if the remote server contains the key
 
         Input:
-            key: a string
+            key: a CacheEngineKey
 
         Returns:
             True if the cache engine contains the key, False otherwise
@@ -122,7 +122,7 @@ class RemoteConnector(metaclass=abc.ABCMeta):
         Check if the remote server contains the key synchronized
 
         Input:
-            key: a string
+            key: a CacheEngineKey
 
         Returns:
             True if the cache engine contains the key, False otherwise
