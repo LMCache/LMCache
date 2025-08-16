@@ -20,22 +20,38 @@ Prerequisites
 Install Stable LMCache from PyPI
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The simplest way to install the latest stable release of LMCache is through PyPI:
+The simplest way to install the latest stable release of LMCache is through PyPI. If other dependencies
+demand a version of torch that differs across major versions (e.g. 2.7.1 versus 2.8.0), LMCache stays compatible
+through installation from source (see below). The LMCache torch version is always the latest and unpinned
+so it will be overridden by other dependencies (e.g. vllm). 
 
 .. code-block:: bash
-
+    
+    # by default, this will port the latest version of torch (at the time of the latest lmcache release)
+    # if your serving engine demands a different version of torch, it will 
+    # override the torch version installed by lmcache
+    # if these torch versions differ across major versions, ABI compatibility
+    # may break so please install from source (see below)
     pip install lmcache
 
 Install Latest LMCache from TestPyPI
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-These wheels are continually built from the latest LMCache source code (not officially stable release).
+These wheels are continually built from the latest LMCache source code (not officially stable release). 
+If other dependencies demand a version of torch that differs across major versions (e.g. 2.7.1 versus 2.8.0), 
+LMCache stays compatible through installation from source (see below). The LMCache torch version is always the 
+latest and unpinned so it will be overridden by other dependencies (e.g. vllm).
 
 .. code-block:: bash
 
-    pip install --index-url https://pypi.org/simple --extra-index-url https://test.pypi.org/simple lmcache==0.2.2.dev57
+    # by default, this will port the latest version of torch (at the time of the latest lmcache github commit)
+    # if your serving engine demands a different version of torch, it will 
+    # override the torch version installed by lmcache
+    # if these torch versions differ across major versions, ABI compatibility
+    # may break so please install from source (see below)
+    pip install --index-url https://pypi.org/simple --extra-index-url https://test.pypi.org/simple lmcache==0.3.4.dev61
 
-See the latest pre-release of LMCache: `latest LMCache pre-releases <https://test.pypi.org/project/lmcache/#history>`__ and replace `0.2.2.dev57` with the latest pre-release version.
+See the latest pre-release of LMCache: `latest LMCache pre-releases <https://test.pypi.org/project/lmcache/#history>`__ and replace `0.3.4.dev61` with the latest pre-release version.
 
 This will install all dependencies from the real PyPI and only LMCache itself from TestPyPI.
 
@@ -55,11 +71,12 @@ Install Latest LMCache from Source
 To install from source, clone the repository and install in editable mode. 
 
 The reason that torch installation is separated is:
-- different serving engines and different versions of those serving engines 
-have different torch dependencies and we want to maintain compatibility. 
-- no build isolation bypasses `PEP 517 <https://peps.python.org/pep-0517/>`_ / `PEP 518 <https://peps.python.org/pep-0518/>`_
-avoiding a separate build environment where LMCache GPU kernels are compiled with `torch.utils.cuda_extension` or `torch.utils.hipify`
-inside of `setup.py` with one torch version and the runtime dependencies export another torch version causing undefined symbol references. 
+1. different serving engines and different versions of those serving engines 
+have different torch dependencies and we want to maintain flexibility 
+(torch versions only break across major versions where the ABI may change e.g. 2.7.1 -> 2.8.0). 
+2. no build isolation bypasses `PEP 517 <https://peps.python.org/pep-0517/>`_ / `PEP 518 <https://peps.python.org/pep-0518/>`_
+so that when LMCache GPU kernels are compiled with `torch.utils.cuda_extension` or `torch.utils.hipify`
+inside of `setup.py` with one torch version, the runtime dependencies export another torch version causing undefined symbol references. 
 
 .. code-block:: bash
 
@@ -98,7 +115,7 @@ We recommend developers to use `uv` for faster package management:
 
     # we need to install these packages because we are avoiding build isolation
     uv pip install -U pip setuptools wheel ninja
-    
+
     # Option 1. 
     # select the torch version that matches the dependency of your serving engine
     # 2.7.1 is an example for vllm 0.10.0

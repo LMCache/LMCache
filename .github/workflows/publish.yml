@@ -67,6 +67,11 @@ jobs:
             - name: Install dependencies
               run: |
                 python -m pip install --upgrade pip
+                # this will build lmcache with the latest torch version
+                # however, lmcache does not pin its torch version so other 
+                # dependencies can easily override the torch version installed
+                # if these torch versions differ across major versions (ABI compatibility)
+                # lmcache will break and so the wheels cannot be directly used
                 pip install build cibuildwheel
 
             - name: Clean up release artifacts
