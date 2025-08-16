@@ -26,6 +26,7 @@ from lmcache.logging import init_logger
 from lmcache.observability import LMCacheStatsLogger, LMCStatsMonitor
 from lmcache.usage_context import InitializeUsageContext
 from lmcache.utils import CacheEngineKey, _lmcache_nvtx_annotate
+from lmcache.v1.cache_engine_internal_api_server import CacheEngineInternalAPIServer
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.distributed_server import (
     DistributedServerInterface,
@@ -166,6 +167,13 @@ class LMCacheEngine:
 
         InitializeUsageContext(config.to_original_config(), metadata)
         self.stats_monitor = LMCStatsMonitor.GetOrCreate()
+
+        if config.cache_engine_internal_api_server_enabled and metadata.worker_id == 0:
+            # TODO(baoloongmao): support create api servers for each worker.
+            self.api_server = CacheEngineInternalAPIServer(config)
+            self.api_server.start()
+        else:
+            self.api_server = None
 
         self.post_inited = False
 
@@ -829,6 +837,57 @@ class LMCacheEngine:
         return num_tokens
 
     @_lmcache_nvtx_annotate
+    def decompress(
+        self,
+        tokens: Union[torch.Tensor, List[int]],
+        method: str,
+        location: str,
+        event_id: str,
+    ) -> int:
+        if method not in ["cachegen"]:
+            logger.warning(f"Unsupported decompression method: {method}.")
+            return 0
+
+        # First Party
+        from lmcache.v1.storage_backend.naive_serde import CreateSerde
+
+        _, deserializer = CreateSerde(method, self.metadata, self.config)
+
+        num_tokens = self.lookup(
+            tokens,
+            search_range=[location],
+            lookup_id=event_id,
+            pin=True,
+        )
+
+        if not num_tokens:
+            logger.debug("there are no tokens to decompress.")
+            return 0
+
+        keys = self.lookup_pins[event_id]
+
+        compressed_memory_objs = self.storage_manager.batched_get(
+            keys=keys,
+            location=location,
+        )
+
+        memory_objs = []
+        for compressed_memory_obj in compressed_memory_objs:
+            memory_obj = deserializer.deserialize(compressed_memory_obj)
+            compressed_memory_obj.unpin()
+            memory_objs.append(memory_obj)
+
+        self.storage_manager.batched_remove(keys, locations=[location])
+
+        self.storage_manager.batched_put(
+            keys=keys,
+            memory_objs=memory_objs,
+            location=location,
+        )
+
+        return num_tokens
+
+    @_lmcache_nvtx_annotate
     def lookup_unpin(self, lookup_ids: list[str]) -> None:
         for lookup_id in lookup_ids:
             if lookup_id in self.lookup_pins:
@@ -896,6 +955,10 @@ class LMCacheEngine:
         self.storage_manager.close()
 
         self.memory_allocator.close()
+
+        # Stop the API server
+        if self.api_server is not None:
+            self.api_server.stop()
 
         logger.info("LMCacheEngine closed.")
 

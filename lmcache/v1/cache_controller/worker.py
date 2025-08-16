@@ -16,6 +16,8 @@ from lmcache.v1.cache_controller.message import (
     ClearWorkerRetMsg,
     CompressWorkerMsg,
     CompressWorkerRetMsg,
+    DecompressWorkerMsg,
+    DecompressWorkerRetMsg,
     DeRegisterMsg,
     ErrorMsg,
     HealthWorkerMsg,
@@ -233,6 +235,16 @@ class LMCacheWorker:
                     )
                     serialized_ret_msg = msgspec.msgpack.encode(
                         CompressWorkerRetMsg(num_tokens=num_compressed_tokens)
+                    )
+                elif isinstance(request, DecompressWorkerMsg):
+                    num_decompressed_tokens = self.lmcache_engine.decompress(
+                        tokens=request.tokens,
+                        method=request.method,
+                        location=request.location,
+                        event_id=request.worker_event_id,
+                    )
+                    serialized_ret_msg = msgspec.msgpack.encode(
+                        DecompressWorkerRetMsg(num_tokens=num_decompressed_tokens)
                     )
                 elif isinstance(request, PinWorkerMsg):
                     num_pinned_tokens = self.lmcache_engine.lookup(

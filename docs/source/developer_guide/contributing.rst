@@ -8,6 +8,8 @@ Thank you for your interest in contributing to LMCache! We welcome and accept al
 - Suggest or implement new features
 - Improve documentation or contribute a how-to guide
 
+A comprehensive list of good first issues can be found in the issue `[Onboarding]: Welcoming contributors with good first issues! <https://github.com/LMCache/LMCache/issues/627>`_.
+
 If you'd like to support our community further, then answering queries, offering PR reviews, and assisting others are also impactful ways to contribute and take LMCache further.
 
 Finally, you can support us by raising awareness about LMCache. Feel free to share our blog posts, check out our handle on X at `LMCache <https://x.com/lmcache>`_ and see the latest of what we are up to. If using LMCache helped your project or product in any way, you can simply offer your appreciation by starring our repository!
