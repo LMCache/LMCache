@@ -994,7 +994,7 @@ class LMCacheConnectorV1Impl:
         ):
             return 0
 
-        if self._priority_limit and request.priority > self._priority_limit:
+        if self._priority_limit is not None and request.priority > self._priority_limit:
             logger.info(
                 "Low priority request, qid: %s, bypass the lmache store",
                 request.request_id
