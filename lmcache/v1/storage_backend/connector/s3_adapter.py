@@ -4,7 +4,6 @@ from lmcache.logging import init_logger
 from lmcache.v1.storage_backend.connector import (
     ConnectorAdapter,
     ConnectorContext,
-    parse_remote_url,
 )
 from lmcache.v1.storage_backend.connector.base_connector import RemoteConnector
 
@@ -24,32 +23,31 @@ class S3ConnectorAdapter(ConnectorAdapter):
         # Local
         from .s3_connector import S3Connector
 
-        if config.extra_config is not None:
+        config = context.config
 
+        if config.extra_config is not None:
             # Different parts can be transferred in parallel.
-            self.s3_part_size = config.extra_config.get(
-                "s3_part_size", None)
+            self.s3_part_size = config.extra_config.get("s3_part_size", None)
             self.s3_max_io_concurrency = config.extra_config.get(
-                "s3_max_io_concurrency", None)
+                "s3_max_io_concurrency", None
+            )
             self.s3_max_inflight_reqs = config.extra_config.get(
-                "s3_max_inflight_reqs", None)
-            self.s3_prefer_http2 = config.extra_config.get(
-                "s3_prefer_http2", True)
-            self.s3_region = config.extra_config.get(
-                "region", None)
+                "s3_max_inflight_reqs", None
+            )
+            self.s3_prefer_http2 = config.extra_config.get("s3_prefer_http2", True)
+            self.s3_region = config.extra_config.get("region", None)
             self.s3_enable_s3express = config.extra_config.get(
-                "s3_enable_s3express", False)
+                "s3_enable_s3express", False
+            )
 
         logger.info(f"Creating S3 connector for URL: {context.url}")
 
         s3_endpoint = context.url
 
-
         return S3Connector(
             s3_endpoint=s3_endpoint,
             loop=context.loop,
             local_cpu_backend=context.local_cpu_backend,
-
             s3_part_size=self.s3_part_size,
             s3_max_io_concurrency=self.s3_max_io_concurrency,
             s3_max_inflight_reqs=self.s3_max_inflight_reqs,
