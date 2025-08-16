@@ -6,7 +6,6 @@ import mmap
 import os
 import tempfile
 import threading
-import time
 
 # Third Party
 from awscrt import auth, io, s3
@@ -297,7 +296,7 @@ class S3Connector(RemoteConnector):
         )
 
         while not done_event.is_set():
-            time.sleep(0.005)
+            await asyncio.sleep(0.005)
 
         dst_buffer = memory_obj.byte_array
         dst_buffer[:] = self.adhoc_shm_manager.get_buffer(shm)[:obj_size]
@@ -374,7 +373,7 @@ class S3Connector(RemoteConnector):
             shms.append(shm)
 
         while not all(e.is_set() for e in done_events):
-            time.sleep(0.005)
+            await asyncio.sleep(0.005)
 
         for obj_size, memory_obj, shm in zip(
             obj_sizes, memory_objs, shms, strict=False
@@ -391,7 +390,12 @@ class S3Connector(RemoteConnector):
 
         return memory_objs
 
-    async def _s3_upload(self, key_str: str, send_path: str):
+    async def _s3_upload(
+        self,
+        key_str: str,
+        send_path: str,
+        done_event: threading.Event,
+    ):
         headers = HttpHeaders()
         headers.add("Host", self.s3_end_point)
 
@@ -403,7 +407,7 @@ class S3Connector(RemoteConnector):
             done["err"] = error
             done["status"] = status_code
 
-            # FIXME(Jiayi): need set evet here
+            done_event.set()
 
         await self.inflight_sema.acquire()
 
@@ -440,7 +444,10 @@ class S3Connector(RemoteConnector):
         shm_buffer[: memory_obj.get_size()] = buffer[:]
 
         try:
-            await self._s3_upload(key_str, memory_obj)
+            done_event = threading.Event()
+            await self._s3_upload(key_str, send_path, done_event)
+            while not done_event.is_set():
+                await asyncio.sleep(0.005)
         except Exception as e:
             logger.error(f"Failed to upload {key_str} to S3: {e}")
             raise
