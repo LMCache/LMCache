@@ -50,6 +50,8 @@ jobs:
                   azure.archive.ubuntu.com:80
                   pypi.org:443
                   files.pythonhosted.org:443
+                  codeload.github.com:443
+                  objects.githubusercontent.com:443
 
             - name: Checkout code
               uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
