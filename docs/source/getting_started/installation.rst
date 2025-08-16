@@ -52,18 +52,41 @@ Confirm that you have the latest pre-release:
 Install Latest LMCache from Source
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-To install from source, clone the repository and install in editable mode:
+To install from source, clone the repository and install in editable mode. 
+
+The reason that torch installation is separated is:
+- different serving engines and different versions of those serving engines 
+have different torch dependencies and we want to maintain compatibility. 
+- no build isolation bypasses `PEP 517 <https://peps.python.org/pep-0517/>`_ / `PEP 518 <https://peps.python.org/pep-0518/>`_
+avoiding a separate build environment where LMCache GPU kernels are compiled with `torch.utils.cuda_extension` or `torch.utils.hipify`
+inside of `setup.py` with one torch version and the runtime dependencies export another torch version causing undefined symbol references. 
 
 .. code-block:: bash
 
     git clone https://github.com/LMCache/LMCache.git
     cd LMCache
-    pip install -e .
+
+    # we need to install these packages because we are avoiding build isolation
+    pip install -U pip setuptools wheel ninja
+
+    # Option 1. 
+    # select the torch version that matches the dependency of your serving engine
+    # 2.7.1 is an example for vllm 0.10.0
+    pip install torch==2.7.1
+
+    # Option 2. 
+    # install your serving engine with its required torch version declared already
+    # example: vllm 0.10.0 will install torch 2.7.1
+    pip install vllm==0.10.0
+
+    # requires torch to already be installed
+    # with your desired version
+    pip install -e . --no-build-isolation
 
 Install LMCache with uv
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
-We recommend developers to use `uv` for a better package management:
+We recommend developers to use `uv` for faster package management:
 
 .. code-block:: bash
 
@@ -72,7 +95,23 @@ We recommend developers to use `uv` for a better package management:
 
     uv venv --python 3.12
     source .venv/bin/activate
-    uv pip install -e .
+
+    # we need to install these packages because we are avoiding build isolation
+    uv pip install -U pip setuptools wheel ninja
+    
+    # Option 1. 
+    # select the torch version that matches the dependency of your serving engine
+    # 2.7.1 is an example for vllm 0.10.0
+    uv pip install torch==2.7.1
+
+    # Option 2. 
+    # install your serving engine with its required torch version declared already
+    # example: vllm 0.10.0 will install torch 2.7.1
+    pip install vllm==0.10.0
+
+    # requires torch to already be installed
+    # with your desired version
+    uv pip install -e . --no-build-isolation
 
 
 LMCache with vLLM v1

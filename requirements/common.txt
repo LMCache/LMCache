@@ -15,7 +15,12 @@ safetensors
 setuptools>=77.0.3,<81.0.0
 setuptools_scm>=8
 sortedcontainers
-# please update ASAP when vllm torch updates
-# MUST match the [build-system].requires in pyproject.toml
-torch==2.7.1
+# avoid pinning torch version in the runtime dependencies so that 
+# installing lmcache (from source or from pypi) will not override
+# the user's preexisting torch version 
+# this keeps lmcache torch version flexible for many serving engines
+# and versions of those serving engines
+# if NO pre-existing torch version is installed, `pip install lmcache` or 
+# `pip install -e . --no-build-isolation` will install the latest torch version
+torch
 transformers >= 4.51.1
