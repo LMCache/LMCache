@@ -70,8 +70,8 @@ jobs:
 
             - name: Install build tooling
               run: |
-                pip install --system --upgrade pip
-                pip install --system build cibuildwheel
+                pip install --upgrade pip
+                pip install build cibuildwheel
 
             - name: Clean up release artifacts
               run: |
@@ -88,7 +88,7 @@ jobs:
               # non-collisional with the torch version that vllm uses. 
               # the installation is the same as the image-release in docker/Dockerfile
               run: |
-                pip install --prerelease=allow vllm[runai,tensorizer]
+                pip install --prerelease=allow "vllm[runai,tensorizer]"
                 python -m cibuildwheel --output-dir dist
 
             - name: Upload release artifacts to GHA
