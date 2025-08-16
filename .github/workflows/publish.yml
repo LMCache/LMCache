@@ -64,10 +64,8 @@ jobs:
               with:
                 python-version: "3.11"
 
-            - name: Install uv
-              run: |
-                curl -LsSf https://astral.sh/uv/install.sh | sh
-                echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+            - name: Install the latest version of uv
+              uses: astral-sh/setup-uv@v6
             
             - name: Cache uv cache
               uses: actions/cache@v4

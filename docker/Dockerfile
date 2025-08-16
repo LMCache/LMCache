@@ -117,15 +117,14 @@ WORKDIR /workspace/LMCache
 # Build LMCache
 # since we are installing vllm before lmcache, we will implicitly use
 # the same torch version as the vllm nightly when running setup.py bdist_wheel
-RUN --mount=type=cache,target=/root/.cache/ccache \
-    --mount=type=cache,target=/root/.cache/pip \
+RUN --mount=type=cache,target=/root/.cache/ccache,id=ccache \
+    --mount=type=cache,target=/root/.cache/uv,id=uv-cache,sharing=locked \
     . /opt/venv/bin/activate && \
-    python3 setup.py bdist_wheel --dist-dir=dist_lmcache
-
-# Install LMCache latest build and vLLM nightly build
-RUN . /opt/venv/bin/activate && \
-    uv pip install --prerelease=allow vllm[runai,tensorizer] --extra-index-url https://wheels.vllm.ai/nightly && \
-    uv pip install /workspace/LMCache/dist_lmcache/*.whl --verbose
+    uv pip install --prerelease=allow 'vllm[runai,tensorizer]' \
+        --extra-index-url https://wheels.vllm.ai/nightly && \
+    python3 -c 'import torch; print("TORCH=", torch.__version__)' && \
+    python3 setup.py bdist_wheel --dist-dir=dist_lmcache && \
+    uv pip install ./dist_lmcache/*.whl --verbose
 
 WORKDIR /workspace
 ENTRYPOINT ["/opt/venv/bin/vllm", "serve"]
