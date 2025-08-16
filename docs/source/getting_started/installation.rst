@@ -27,7 +27,7 @@ so it will be overridden by other dependencies (e.g. vllm).
 
 .. code-block:: bash
     
-    # by default, this will port the latest version of torch (at the time of the latest lmcache release)
+    # by default, this will port the version of torch of the latest *STABLE* vllm wheel
     # if your serving engine demands a different version of torch, it will 
     # override the torch version installed by lmcache
     # if these torch versions differ across major versions, ABI compatibility
@@ -44,7 +44,7 @@ latest and unpinned so it will be overridden by other dependencies (e.g. vllm).
 
 .. code-block:: bash
 
-    # by default, this will port the latest version of torch (at the time of the latest lmcache github commit)
+    # by default, this will port the version of torch of the latest *NIGHTLY* vllm wheel
     # if your serving engine demands a different version of torch, it will 
     # override the torch version installed by lmcache
     # if these torch versions differ across major versions, ABI compatibility
@@ -84,7 +84,7 @@ inside of `setup.py` with one torch version, the runtime dependencies export ano
     cd LMCache
 
     # we need to install these packages because we are avoiding build isolation
-    pip install -U pip setuptools wheel ninja
+    pip install -r requirements/build.txt
 
     # Option 1. 
     # select the torch version that matches the dependency of your serving engine
@@ -96,7 +96,7 @@ inside of `setup.py` with one torch version, the runtime dependencies export ano
     # example: vllm 0.10.0 will install torch 2.7.1
     pip install vllm==0.10.0
 
-    # requires torch to already be installed
+    # no build isolation requires torch to already be installed
     # with your desired version
     pip install -e . --no-build-isolation
 
@@ -114,7 +114,7 @@ We recommend developers to use `uv` for faster package management:
     source .venv/bin/activate
 
     # we need to install these packages because we are avoiding build isolation
-    uv pip install -U pip setuptools wheel ninja
+    uv pip install -r requirements/build.txt
 
     # Option 1. 
     # select the torch version that matches the dependency of your serving engine
@@ -126,7 +126,7 @@ We recommend developers to use `uv` for faster package management:
     # example: vllm 0.10.0 will install torch 2.7.1
     pip install vllm==0.10.0
 
-    # requires torch to already be installed
+    # no build isolation requires torch to already be installed
     # with your desired version
     uv pip install -e . --no-build-isolation
 

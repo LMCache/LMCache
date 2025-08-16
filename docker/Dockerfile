@@ -1,4 +1,4 @@
-# The LMcache Dockerfile is used to build a LMCache image that is integrated
+# The LMCache Dockerfile is used to build a LMCache image that is integrated
 # to run with vLLM OpenAI server.
 
 # Please update any changes made here to
@@ -90,6 +90,8 @@ ENV VLLM_FA_CMAKE_GPU_ARCHES=${vllm_fa_cmake_gpu_arches}
 # Integrate vLLM nightly build and LMCache build and
 # expose vLLM OpenAI API
 
+# Will trigger from `.github/workflows/nightly_build.yml`
+
 FROM base AS image-build
 
 # install build dependencies
@@ -113,6 +115,8 @@ COPY . /workspace/LMCache
 WORKDIR /workspace/LMCache
 
 # Build LMCache
+# since we are installing vllm before lmcache, we will implicitly use
+# the same torch version as the vllm nightly when running setup.py bdist_wheel
 RUN --mount=type=cache,target=/root/.cache/ccache \
     --mount=type=cache,target=/root/.cache/pip \
     . /opt/venv/bin/activate && \
@@ -130,9 +134,14 @@ ENTRYPOINT ["/opt/venv/bin/vllm", "serve"]
 # Integrate vLLM and LMCache stable releases and expose vLLM
 # OpenAI API
 
+# Will trigger from `.github/workflows/publish.yml`
+
 FROM base AS image-release
 
 # Install LMCache and vLLM stable releases
+# this happens right after we build and publish lmcache wheels in the release pipeline
+# this means that we should publish lmcache wheels that use the same torch version 
+# as vllm when building the wheels
 RUN . /opt/venv/bin/activate && \
     uv pip install --prerelease=allow vllm[runai,tensorizer] && \
     uv pip install lmcache --verbose

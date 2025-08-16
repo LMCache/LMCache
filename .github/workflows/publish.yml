@@ -64,15 +64,23 @@ jobs:
               with:
                 python-version: "3.11"
 
-            - name: Install dependencies
+            - name: Install uv
               run: |
-                python -m pip install --upgrade pip
-                # this will build lmcache with the latest torch version
-                # however, lmcache does not pin its torch version so other 
-                # dependencies can easily override the torch version installed
-                # if these torch versions differ across major versions (ABI compatibility)
-                # lmcache will break and so the wheels cannot be directly used
-                pip install build cibuildwheel
+                curl -LsSf https://astral.sh/uv/install.sh | sh
+                echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+            
+            - name: Cache uv cache
+              uses: actions/cache@v4
+              with:
+                path: ~/.cache/uv
+                key: ${{ runner.os }}-uv-${{ hashFiles('**/pyproject.toml') }}
+                restore-keys: |
+                  ${{ runner.os }}-uv-
+
+            - name: Install build tooling
+              run: |
+                uv pip install --system --upgrade pip
+                uv pip install --system build cibuildwheel
 
             - name: Clean up release artifacts
               run: |
@@ -84,7 +92,12 @@ jobs:
 
             - name: Build CUDA wheels with cibuildwheel
               # Configuration is set in pyproject.toml
+              # this will build lmcache with the latest version that vllm uses to 
+              # keep torch versions compatible. It is important to keep other dependencies
+              # non-collisional with the torch version that vllm uses. 
+              # the installation is the same as the image-release in docker/Dockerfile
               run: |
+                CIBW_BEFORE_BUILD="uv pip install --prerelease=allow vllm[runai,tensorizer]" \
                 python -m cibuildwheel --output-dir dist
 
             - name: Upload release artifacts to GHA
