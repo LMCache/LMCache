@@ -52,6 +52,7 @@ jobs:
                   files.pythonhosted.org:443
                   codeload.github.com:443
                   objects.githubusercontent.com:443
+                  releases.githubusercontent.com:443
 
             - name: Checkout code
               uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -69,6 +70,8 @@ jobs:
 
             - name: Install the latest version of uv
               uses: astral-sh/setup-uv@v6
+              with:
+                version: "0.8.11"
             
             - name: Cache uv cache
               uses: actions/cache@v4
