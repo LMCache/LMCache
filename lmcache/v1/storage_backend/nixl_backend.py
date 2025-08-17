@@ -390,10 +390,10 @@ class NixlBackend(StorageBackendInterface):
         return self._nixl_channel.get_allocator()
 
     def pin(self, key: CacheEngineKey) -> bool:
-        raise NotImplementedError
+        return True
 
     def unpin(self, key: CacheEngineKey) -> bool:
-        raise NotImplementedError
+        return True
 
     @staticmethod
     def CreateNixlBackend(
