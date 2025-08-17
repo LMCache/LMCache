@@ -46,21 +46,21 @@ class LMCacheLookupClient(LookupClientInterface):
             )
         )
         ranks = self.tensor_parallel_size
+        self.sockets = []
         if self.create_lookup_server_only_on_worker_0_for_mla:
             ranks = 1
         for tp_rank in range(ranks):
             socket_path = get_zmq_rpc_path_lmcache(
                 vllm_config, "lookup", rpc_port, tp_rank
             )
-            if tp_rank == 0:
-                self.socket = make_zmq_socket(
-                    self.ctx,
-                    socket_path,
-                    zmq.REQ,  # type: ignore[attr-defined]
-                    bind=False,
-                )
-            else:
-                self.socket.connect(socket_path)
+            socket = self.socket = make_zmq_socket(
+                self.ctx,
+                socket_path,
+                zmq.REQ,  # type: ignore[attr-defined]
+                bind=False,
+            )
+
+            self.sockets.append(socket)
 
     def lookup(
         self,
@@ -78,13 +78,16 @@ class LMCacheLookupClient(LookupClientInterface):
         if self.create_lookup_server_only_on_worker_0_for_mla:
             ranks = 1
         results = []
+        msg_buf = token_bufs + [lookup_id_buf, tags_buf]
         for i in range(ranks):
-            self.socket.send_multipart(
-                token_bufs + [lookup_id_buf, tags_buf], copy=False
-            )
-            resp = self.socket.recv()
+            self.sockets[i].send_multipart(msg_buf, copy=False)
+
+        # TODO(Jiayi): we can use zmq poll to optimize a bit
+        for i in range(ranks):
+            resp = self.sockets[i].recv()
             result = int.from_bytes(resp, "big")
             results.append(result)
+
         if not all(x == results[0] for x in results):
             raise RuntimeError(
                 f"Lookup results (number of hit tokens) differ "

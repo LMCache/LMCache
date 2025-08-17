@@ -33,7 +33,8 @@ Second, we need a yaml file ``example.yaml`` to properly configure the lmcache i
     enable_controller: True
     lmcache_instance_id: "lmcache_default_instance"
     controller_url: "localhost:9001"
-    lmcache_worker_url: "localhost:8001"
+    distributed_url: "localhost:8002"
+    lmcache_worker_port: 8001
 
 Third, we need to start the vllm/lmcache instance:
 
@@ -67,6 +68,6 @@ We should be able to see the response like this:
 
 .. code-block:: text
 
-    {"lmcache_default_instance_id": ("cpu", 12)}
+    {"lmcache_default_instance_id": ["LocalCPUBackend",12]}
 
 This means that the KV cache for the given tokens is stored in ``lmcache_default_instance``'s CPU memory and the matched prefix length is 12.

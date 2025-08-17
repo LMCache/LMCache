@@ -25,6 +25,8 @@ for pid in "${pids[@]}"; do
   fi
 done
 
-docker system prune -af
+docker system prune -af --volumes
+docker builder prune -af
+rm -rf ~/.cache/huggingface
 
 echo "Done."

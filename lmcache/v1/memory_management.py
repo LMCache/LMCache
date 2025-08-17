@@ -7,6 +7,7 @@ from enum import Enum
 from typing import List, Optional, Tuple, Union
 import abc
 import ctypes
+import math
 import threading
 
 # Third Party
@@ -101,19 +102,6 @@ class MemoryObjMetadata:
     # Positions when the cache is stored
     cached_positions: Optional[torch.Tensor] = None
 
-    def get_size(self):
-        """
-        Calculate the size of the memory object in bytes
-        """
-        if self.shape.numel() == 0:
-            return 0
-        if self.dtype is None:
-            return 0
-        num_elements = self.shape.numel()
-        element_size = self.dtype.itemsize
-        size_in_bytes = num_elements * element_size
-        return size_in_bytes
-
     def to_dict(self):
         # Note(Kuntai): this is used for serializing MemoryObjMetadata via
         # msgpack.
@@ -167,6 +155,8 @@ class MemoryObj(metaclass=abc.ABCMeta):
     def get_size(self) -> int:
         """
         Get the size of the MemoryObj in bytes.
+        Note that this number could be smaller than the physical size.
+        The physical size is aligned to the allocator's alignment.
         """
         raise NotImplementedError
 
@@ -260,6 +250,7 @@ class MemoryObj(metaclass=abc.ABCMeta):
     def byte_array(self) -> bytes:
         """
         Get the byte array from the MemoryObj.
+        The size is will be the physical size instead of the unaligned size.
         """
         raise NotImplementedError
 
@@ -306,8 +297,8 @@ class TensorMemoryObj(MemoryObj):
         return self.valid
 
     def get_size(self) -> int:
-        num_elements = self.raw_data.numel()
-        element_size = self.raw_data.element_size()
+        num_elements = math.prod(self.meta.shape)
+        element_size = self.meta.dtype.itemsize
         size_in_bytes = num_elements * element_size
         return size_in_bytes
 
@@ -396,14 +387,15 @@ class TensorMemoryObj(MemoryObj):
             logger.warning("Trying to access an invalidated MemoryObj")
             return None
         assert self.meta.dtype is not None
-        return self.raw_data.view(self.meta.dtype).view(self.meta.shape)
+        # TODO(Jiayi): consider caching the `get_size()`
+        return (
+            self.raw_data[: self.get_size()].view(self.meta.dtype).view(self.meta.shape)
+        )
 
     @property
     def byte_array(self) -> bytes:
-        kv_chunk = self.tensor
-        assert kv_chunk is not None
-        num_bytes = kv_chunk.numel() * kv_chunk.element_size()
-        ptr = kv_chunk.data_ptr()
+        num_bytes = self.raw_data.numel() * self.raw_data.element_size()
+        ptr = self.raw_data.data_ptr()
         ubyte_ptr = ctypes.cast(ptr, ctypes.POINTER(ctypes.c_ubyte))
         byte_array = (ctypes.c_ubyte * num_bytes).from_address(
             ctypes.addressof(ubyte_ptr.contents)
@@ -994,7 +986,7 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
                 self.shape,
                 self.dtype,
                 idx,
-                1,  # 1 page
+                self.align_bytes,  # 1 page
                 1,  # ref_count=1
                 0,  # pin_count=0
                 self.fmt,

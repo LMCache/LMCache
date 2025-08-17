@@ -219,6 +219,16 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "default": "LRU",
         "env_converter": str,
     },
+    "cache_engine_internal_api_server_enabled": {
+        "type": bool,
+        "default": False,
+        "env_converter": lambda x: x.lower() in ["true", "1"],
+    },
+    "cache_engine_internal_api_server_port_start": {
+        "type": int,
+        "default": 7000,
+        "env_converter": int,
+    },
 }
 
 
