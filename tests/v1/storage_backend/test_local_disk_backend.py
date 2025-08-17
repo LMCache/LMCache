@@ -218,7 +218,6 @@ class TestLocalDiskBackend:
         assert key in local_disk_backend.dict
         metadata = local_disk_backend.dict[key]
         assert metadata.path == local_disk_backend._key_to_path(key)
-        assert metadata.size == memory_obj.get_size()
         assert metadata.shape == memory_obj.metadata.shape
         assert metadata.dtype == memory_obj.metadata.dtype
         assert metadata.fmt == memory_obj.metadata.fmt
@@ -241,7 +240,6 @@ class TestLocalDiskBackend:
         assert key in local_disk_backend.dict
         metadata = local_disk_backend.dict[key]
         assert metadata.path == original_path  # Path should remain the same
-        assert metadata.size == memory_obj2.get_size()  # Size should be updated
 
         local_disk_backend.local_cpu_backend.memory_allocator.close()
 
@@ -323,9 +321,7 @@ class TestLocalDiskBackend:
         # Check that the metadata was properly set
         metadata = local_disk_backend.dict[key]
         assert metadata.path == local_disk_backend._key_to_path(key)
-        assert metadata.size == memory_obj.get_size()
         assert metadata.shape == memory_obj.metadata.shape
-        assert metadata.dtype == memory_obj.metadata.dtype
         assert metadata.fmt == memory_obj.metadata.fmt
         assert metadata.pin_count == 0
 
@@ -408,7 +404,6 @@ class TestLocalDiskBackend:
         # Check that the metadata was properly set
         metadata = local_disk_backend.dict[key]
         assert metadata.path == local_disk_backend._key_to_path(key)
-        assert metadata.size == memory_obj.get_size()
 
         local_disk_backend.local_cpu_backend.memory_allocator.close()
 

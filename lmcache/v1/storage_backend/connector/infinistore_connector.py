@@ -144,7 +144,7 @@ class InfinistoreConnector(RemoteConnector):
 
         buffer[METADATA_BYTES_LEN : METADATA_BYTES_LEN + len(kv_bytes)] = kv_bytes
 
-        size = memory_obj.get_size()
+        size = memory_obj.get_physical_size()
 
         if size + METADATA_BYTES_LEN > self.buffer_size:
             raise ValueError(

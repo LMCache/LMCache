@@ -347,7 +347,7 @@ class WekaGdsBackend(StorageBackendInterface):
 
     def insert_key(self, key: CacheEngineKey, memory_obj: MemoryObj) -> None:
         path, _, _, _ = self._key_to_path(key)
-        size = memory_obj.get_size()
+        size = memory_obj.get_physical_size()
         shape = memory_obj.metadata.shape
         dtype = memory_obj.metadata.dtype
         with self.hot_lock:
@@ -424,8 +424,10 @@ class WekaGdsBackend(StorageBackendInterface):
         else:
             addr = ctypes.c_void_p(self.cufile_base_pointer)
             dev_offset = memory_obj.metadata.address
+
+        # TODO(Jiayi): We can optimize a bit by reading size instead of physical size.
         ret = self._load_gds_cufile(
-            path, offset, addr, memory_obj.get_size(), dev_offset
+            path, offset, addr, memory_obj.get_physical_size(), dev_offset
         )
         if ret != memory_obj.get_size():
             if ret < 0:
@@ -439,7 +441,7 @@ class WekaGdsBackend(StorageBackendInterface):
                 # remove the entry if it's a persistent problem.
                 logger.error(
                     f"Error loading {path}: got only {ret} bytes "
-                    f"out of {memory_obj.get_size()}, ignoring"
+                    f"out of {memory_obj.get_physical_size()}, ignoring"
                 )
             memory_obj.ref_count_down()
             return None
