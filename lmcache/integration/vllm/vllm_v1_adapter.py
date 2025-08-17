@@ -997,7 +997,7 @@ class LMCacheConnectorV1Impl:
         if self._priority_limit is not None and request.priority > self._priority_limit:
             logger.info(
                 "Low priority request, qid: %s, bypass the lmache store",
-                request.request_id
+                request.request_id,
             )
             self._skip_save_reqs[request.request_id] = True
         else:
@@ -1150,7 +1150,7 @@ class LMCacheConnectorV1Impl:
         for finished_req_id in scheduler_output.finished_req_ids:
             self._request_trackers.pop(finished_req_id, None)
             self._unfinished_requests.pop(finished_req_id, None)
-            self._skip_save_reqs.pop(finished_req_id, None) # clean up
+            self._skip_save_reqs.pop(finished_req_id, None)  # clean up
 
         for request in scheduler_output.scheduled_new_reqs:
             # Right now, we only load KV for new requests
@@ -1171,7 +1171,8 @@ class LMCacheConnectorV1Impl:
             self._request_trackers[request.req_id] = request_tracker
 
             req_skip_save = (
-                force_skip_save if force_skip_save
+                force_skip_save
+                if force_skip_save
                 else self._skip_save_reqs.get(request.req_id, False)
             )
 
@@ -1198,7 +1199,8 @@ class LMCacheConnectorV1Impl:
                 request_tracker.update(req.new_token_ids, req.new_block_ids)
 
                 req_skip_save = (
-                    force_skip_save if force_skip_save
+                    force_skip_save
+                    if force_skip_save
                     else self._skip_save_reqs.get(req.req_id, False)
                 )
 
@@ -1232,10 +1234,11 @@ class LMCacheConnectorV1Impl:
             request_tracker.update(new_token_ids, new_block_ids)
 
             req_skip_save = (
-                force_skip_save if force_skip_save
+                force_skip_save
+                if force_skip_save
                 else self._skip_save_reqs.get(req_id, False)
             )
-            
+
             req_meta = ReqMeta.from_request_tracker(
                 request_tracker,
                 self._block_size,

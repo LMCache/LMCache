@@ -233,7 +233,7 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "type": Optional[int],
         "default": None,
         "env_converter": int,
-    }
+    },
 }
 
 
