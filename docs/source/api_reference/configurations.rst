@@ -52,6 +52,9 @@ Basic cache settings that control the core functionality of LMCache.
    * - error_handling
      - LMCACHE_ERROR_HANDLING
      - Whether to enable error handling. Values: true/false. Default: false
+   * - priority_limit
+     - LMCACHE_PRIORITY_LIMIT
+     - Store cache only if request priority ≥ this limit. Type: int. Default: None
 
 Cache Blending Configurations
 -----------------------------
