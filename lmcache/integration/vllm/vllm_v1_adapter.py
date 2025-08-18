@@ -7,10 +7,6 @@ import uuid
 
 # Third Party
 from vllm.config import (
-    CacheConfig,
-    ModelConfig,
-    ParallelConfig,
-    SchedulerConfig,
     VllmConfig,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -390,12 +386,6 @@ def _calculate_mtp_layers(vllm_config, model_config):
     return num_mtp_layers
 
 
-VLLM_CACHE_CONFIG: Optional[CacheConfig] = None
-VLLM_MODEL_CONFIG: Optional[ModelConfig] = None
-VLLM_PARALLEL_CONFIG: Optional[ParallelConfig] = None
-VLLM_SCHEDULER_CONFIG: Optional[SchedulerConfig] = None
-
-
 def _init_lmcache_engine(
     lmcache_config: LMCacheEngineConfig,
     vllm_config: "VllmConfig",
@@ -417,19 +407,9 @@ def _init_lmcache_engine(
     if LMCacheEngineBuilder.get(ENGINE_NAME) is not None:
         return None
 
-    model_config = (vllm_config.model_config,)
-    parallel_config = (vllm_config.parallel_config,)
-    cache_config = (vllm_config.cache_config,)
-    scheduler_config = (vllm_config.scheduler_config,)
-
-    global VLLM_CACHE_CONFIG
-    global VLLM_PARALLEL_CONFIG
-    global VLLM_MODEL_CONFIG
-    global VLLM_SCHEDULER_CONFIG
-    VLLM_CACHE_CONFIG = cache_config
-    VLLM_PARALLEL_CONFIG = parallel_config
-    VLLM_MODEL_CONFIG = model_config
-    VLLM_SCHEDULER_CONFIG = scheduler_config
+    model_config = vllm_config.model_config
+    parallel_config = vllm_config.parallel_config
+    cache_config = vllm_config.cache_config
 
     assert isinstance(lmcache_config, LMCacheEngineConfig), (
         "LMCache v1 configuration is should be passed."
