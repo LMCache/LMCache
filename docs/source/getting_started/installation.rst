@@ -126,7 +126,7 @@ We recommend developers to use `uv` for faster package management:
     # Option 2. 
     # install your serving engine with its required torch version declared already
     # example: vllm 0.10.0 will install torch 2.7.1
-    pip install vllm==0.10.0
+    uv pip install vllm==0.10.0
 
     # no build isolation requires torch to already be installed
     # with your desired version
