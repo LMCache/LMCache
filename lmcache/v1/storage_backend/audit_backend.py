@@ -174,7 +174,7 @@ class AuditBackend(StorageBackendInterface):
     def batched_get_blocking(
         self,
         keys: List[CacheEngineKey],
-    ) -> List[MemoryObj]:
+    ) -> List[Optional[MemoryObj]]:
         start_time = time.perf_counter()
         try:
             result = self.real_backend.batched_get_blocking(keys)
