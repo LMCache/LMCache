@@ -446,7 +446,7 @@ class UserSessionManager:
         start_time: Optional[float] = None,
         end_time: Optional[float] = None,
         pending_queries: int = 0,
-        qps: Optional[int] = None,
+        config_qps: Optional[int] = None,
     ):
         if start_time and end_time:
             launched_queries = len(
@@ -462,8 +462,8 @@ class UserSessionManager:
             f"finished queries: {len(df)}"
         )
 
-        if qps is None:
-            qps = 0.0
+        if config_qps is None:
+            config_qps = 0.0
 
         if start_time is None:
             start_time = df["launch_time"].min()
@@ -472,7 +472,7 @@ class UserSessionManager:
         total_time = end_time - start_time
 
         total_requests = launched_queries + pending_queries
-        _qps = total_requests / total_time
+        actual_qps = total_requests / total_time
 
         total_finished_requests = len(df)
         finished_qps = total_finished_requests / total_time
@@ -488,7 +488,8 @@ class UserSessionManager:
         logger.info("Calculating performance summary")
         print("\n")
         print("==================== Performance summary ======================")
-        print(f"  \033[33mQPS: \033[32m{qps:.4f} reqs/s\033[0m\n")
+        print(f"  \033[33mConfig QPS: \033[32m{config_qps:.4f} reqs/s\033[0m\n")
+        print(f"  \033[33mActual QPS: \033[32m{actual_qps:.4f} reqs/s\033[0m\n")
 
         print(f"  \033[33mProcessing speed: \033[32m{finished_qps:.4f} reqs/s\033[0m\n")
 
