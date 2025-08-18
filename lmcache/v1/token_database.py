@@ -15,14 +15,7 @@ from lmcache.v1.config import LMCacheEngineConfig
 
 logger = init_logger(__name__)
 
-# NOTE: For centralized cache sharing, ensure PYTHONHASHSEED is
-# set consistently across all processes (e.g., export PYTHONHASHSEED=0).
-try:
-    # Third Party
-    from vllm.v1.core.kv_cache_utils import NONE_HASH
-except ImportError:
-    # Fallback to a default value if vllm is not available
-    NONE_HASH = 0
+NONE_HASH: int
 
 
 class TokenDatabase(metaclass=abc.ABCMeta):
@@ -42,6 +35,8 @@ class TokenDatabase(metaclass=abc.ABCMeta):
         config: Optional[LMCacheEngineConfig] = None,
         metadata: Optional[LMCacheEngineMetadata] = None,
     ):
+        global NONE_HASH
+
         vllm_is_available = True
         try:
             # Third Party
@@ -64,6 +59,18 @@ class TokenDatabase(metaclass=abc.ABCMeta):
             if hash_algorithm == "sha256" and vllm_is_available
             else hash
         )
+
+        # NOTE: For centralized cache sharing, ensure PYTHONHASHSEED is
+        # set consistently across all processes (e.g., export PYTHONHASHSEED=0).
+        try:
+            # Third Party
+            from vllm.v1.core.kv_cache_utils import NONE_HASH
+        except ImportError:
+            # Third Party
+            from vllm.v1.core import kv_cache_utils
+
+            kv_cache_utils.init_none_hash(self.hash_func)
+            NONE_HASH = kv_cache_utils.NONE_HASH
 
         self.metadata = metadata
 
@@ -121,7 +128,11 @@ class TokenDatabase(metaclass=abc.ABCMeta):
             raise ValueError(f"Unsupported tokens type: {type(tokens)}")
 
         if prefix_hash is not None:
-            return self.hash_func((prefix_hash, tokens_tuple))
+            # Ignore extra keys for now
+            # Extra keys are for multi-modal inputs and
+            # request specific metadata (e.g., LoRA ID).
+            extra_keys = None
+            return self.hash_func((prefix_hash, tokens_tuple, extra_keys))
         return self.hash_func(tokens_tuple)
 
 
