@@ -3,15 +3,13 @@
 from concurrent.futures import Future
 from typing import TYPE_CHECKING, List, Optional
 import threading
-import uuid
 
 # Third Party
-from prometheus_client import Gauge
 import torch
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.observability import LMCStatsMonitor
+from lmcache.observability import LMCStatsMonitor, PrometheusLogger
 from lmcache.utils import CacheEngineKey, _lmcache_nvtx_annotate
 from lmcache.v1.cache_controller.message import KVAdmitMsg, KVEvictMsg
 from lmcache.v1.config import LMCacheEngineConfig
@@ -71,18 +69,12 @@ class LocalCPUBackend(StorageBackendInterface):
         self._setup_metrics()
 
     def _setup_metrics(self):
-        Gauge(
-            "lmcache:local_cpu_hot_cache_count",
-            "The size of the hot_cache",
-            ["uuid"],
-            _labelvalues=[str(uuid.uuid4())],
-        ).set_function(lambda: len(self.hot_cache))
-        Gauge(
-            "lmcache:local_cpu_keys_in_request_count",
-            "The size of the keys_in_request",
-            ["uuid"],
-            _labelvalues=[str(uuid.uuid4())],
-        ).set_function(lambda: len(self.keys_in_request))
+        PrometheusLogger.GetInstance().local_cpu_hot_cache_count.set_function(
+            lambda: len(self.hot_cache)
+        )
+        PrometheusLogger.GetInstance().local_cpu_keys_in_request_count.set_function(
+            lambda: len(self.keys_in_request)
+        )
 
     def __str__(self):
         return self.__class__.__name__

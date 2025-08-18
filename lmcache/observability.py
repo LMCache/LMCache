@@ -780,6 +780,21 @@ class PrometheusLogger:
             labelnames=labelnames,
             multiprocess_mode="livemostrecent",
         )
+        # Dynamically get value while capture
+        self.local_cpu_hot_cache_count = self._gauge_cls(
+            name="lmcache:remote_ping_error_code",
+            documentation="The size of the hot_cache",
+            labelnames=labelnames,
+            _labelvalues=self.labels,
+            multiprocess_mode="livemostrecent",
+        )
+        self.local_cpu_keys_in_request_count = self._gauge_cls(
+            name="lmcache:local_cpu_keys_in_request_count",
+            documentation="The size of the keys_in_request",
+            labelnames=labelnames,
+            _labelvalues=self.labels,
+            multiprocess_mode="livemostrecent",
+        )
 
     def _log_gauge(self, gauge, data: Union[int, float]) -> None:
         # Convenience function for logging to gauge.
