@@ -114,13 +114,13 @@ def CreateStorageBackends(
         audited_backends = OrderedDict()
         for name, backend in storage_backends.items():
             # Wrap each normal backend with AuditBackend
-            if backend.is_normal_backend():
+            if not isinstance(backend, LocalCPUBackend):
                 audited_backend = AuditBackend(backend)
                 audited_backends[name] = audited_backend
                 logger.info(f"Wrapped {name} with AuditBackend")
             else:
                 audited_backends[name] = backend
-                logger.info(f"Do not wrap {name} as it is not a normal backend")
+                logger.info(f"Do not wrap {name} as it is a LocalCPUBackend")
         return audited_backends
     else:
         # If audit is not enabled, use the original backends
