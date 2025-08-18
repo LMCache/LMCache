@@ -64,13 +64,12 @@ class TokenDatabase(metaclass=abc.ABCMeta):
         # set consistently across all processes (e.g., export PYTHONHASHSEED=0).
         try:
             # Third Party
-            from vllm.v1.core.kv_cache_utils import NONE_HASH
-        except ImportError:
-            # Third Party
             from vllm.v1.core import kv_cache_utils
 
             kv_cache_utils.init_none_hash(self.hash_func)
             NONE_HASH = kv_cache_utils.NONE_HASH
+        except (ImportError, AttributeError):
+            NONE_HASH = 0
 
         self.metadata = metadata
 
