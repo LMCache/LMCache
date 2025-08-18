@@ -258,6 +258,9 @@ class S3Connector(RemoteConnector):
         recv_path: str,
         done_event: threading.Event,
     ):
+        """
+        Download a file from S3.
+        """
         headers = HttpHeaders()
         headers.add("Host", self.s3_endpoint)
 
@@ -429,6 +432,9 @@ class S3Connector(RemoteConnector):
         send_path: str,
         done_event: threading.Event,
     ):
+        """
+        Upload a file to S3.
+        """
         headers = HttpHeaders()
         headers.add("Host", self.s3_endpoint)
 
