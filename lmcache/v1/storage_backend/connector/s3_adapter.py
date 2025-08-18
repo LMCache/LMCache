@@ -26,18 +26,19 @@ class S3ConnectorAdapter(ConnectorAdapter):
         config = context.config
 
         if config.extra_config is not None:
+            logger.info(config.extra_config)
             # Different parts can be transferred in parallel.
             self.s3_part_size = config.extra_config.get("s3_part_size", None)
             self.s3_max_io_concurrency = config.extra_config.get(
-                "s3_max_io_concurrency", None
+                "s3_max_io_concurrency", 64
             )
             self.s3_max_inflight_reqs = config.extra_config.get(
-                "s3_max_inflight_reqs", None
+                "s3_max_inflight_reqs", 64
             )
             self.s3_prefer_http2 = config.extra_config.get("s3_prefer_http2", True)
-            self.s3_region = config.extra_config.get("region", None)
+            self.s3_region = config.extra_config.get("s3_region", None)
             self.s3_enable_s3express = config.extra_config.get(
-                "s3_enable_s3express", False
+                "s3_enable_s3express", True
             )
 
         logger.info(f"Creating S3 connector for URL: {context.url}")

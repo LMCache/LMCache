@@ -434,7 +434,7 @@ def _from_file(cls, file_path: str):
 
         # Validate remote_url format
         if name == "remote_url" and value is not None:
-            if not re.match(r"(.*)://(.*):(\d+)", value):
+            if not re.match(r"(.*)://(.*)", value):
                 raise ValueError(f"Invalid remote storage url: {value}")
 
         config_values[name] = value

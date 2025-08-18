@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import IO, List, Optional
+from typing import List, Optional
+from urllib.parse import quote as url_quote
 import asyncio
+import ctypes
 import mmap
 import os
 import tempfile
@@ -30,6 +32,8 @@ logger = init_logger(__name__)
 # to achieve zero-copy.
 # (3) Need a job manager so that we can do sth like
 # write priority, read priority, etc.
+# (4) Potentially can drop the semaphore to reduce the complexity.
+# Let crt handle the scheduling.
 
 
 class AdhocSharedMemoryManager:
@@ -38,14 +42,17 @@ class AdhocSharedMemoryManager:
     on demand.
     """
 
-    def __init__(self, shm_buffers: list[IO[bytes]], shm_names: List[str]):
+    def __init__(
+        self,
+        shm_buffers: list[int],
+        shm_names: list[str],
+        mmaps: list[mmap.mmap],
+    ):
         self.shm_buffers = shm_buffers
         self.shm_names = shm_names
-        self.dict = {
-            name: shm for name, shm in zip(shm_names, shm_buffers, strict=False)
-        }
+        self.mmaps = mmaps
 
-    def allocate(self) -> tuple[str, IO[bytes]]:
+    def allocate(self) -> tuple[str, int]:
         """
         Allocate a shared memory buffer and return its name and a bytearray
         that can be used to access the buffer.
@@ -60,21 +67,14 @@ class AdhocSharedMemoryManager:
     def free(
         self,
         shm_name: str,
-        shm: IO[bytes],
+        shm: int,
     ) -> None:
-        if shm_name not in self.dict:
-            raise RuntimeError(f"Shared memory {shm_name} not found")
-
-        self.dict[shm_name] = shm
-
-    def get_buffer(self, shm: IO[bytes], size: int = 0) -> memoryview:
         """
-        Get a bytearray that can be used to access the shared memory buffer.
+        Free a shared memory buffer.
         """
-        with open(shm.name, "r+b") as f:
-            # length=0 means whole file
-            mm = mmap.mmap(f.fileno(), size)
-            return memoryview(mm)
+
+        self.shm_buffers.append(shm)
+        self.shm_names.append(shm_name)
 
 
 class S3Connector(RemoteConnector):
@@ -84,23 +84,27 @@ class S3Connector(RemoteConnector):
 
     def __init__(
         self,
-        s3_end_point: str,
+        s3_endpoint: str,
         loop: asyncio.AbstractEventLoop,
         local_cpu_backend: LocalCPUBackend,
-        s3_part_size: int,
+        s3_part_size: Optional[int],
         s3_max_io_concurrency: int,
         s3_max_inflight_reqs: int,
         s3_prefer_http2: bool,
         s3_region: str,
         s3_enable_s3express: bool,
     ):
-        self.s3_end_point = s3_end_point
+        if not s3_endpoint.startswith("s3://"):
+            raise ValueError("S3 url must start with 's3://'")
+
+        self.s3_endpoint = s3_endpoint.removeprefix("s3://")
         self.loop = loop
         self.local_cpu_backend = local_cpu_backend
 
         self.s3_part_size = s3_part_size
+
         # TODO(Jiayi): Now we only assume S3 part size = chunk size
-        assert s3_part_size == self.full_chunk_size, (
+        assert self.s3_part_size == self.full_chunk_size, (
             "S3 part size must be equal to chunk size in S3Connector"
         )
 
@@ -118,7 +122,7 @@ class S3Connector(RemoteConnector):
         )
 
         tls_opts = None
-        if s3_prefer_http2:
+        if self.s3_prefer_http2:
             # Use HTTP/2 multiplexing if possible.
             tls_ctx = ClientTlsContext(TlsContextOptions())
             tls_opts = TlsConnectionOptions(tls_ctx)
@@ -127,6 +131,7 @@ class S3Connector(RemoteConnector):
             except Exception:
                 tls_opts = None
 
+        logger.info("Initializing S3 client")
         self.s3_client = s3.S3Client(
             bootstrap=client_bootstrap,
             region=s3_region,
@@ -142,10 +147,21 @@ class S3Connector(RemoteConnector):
 
         self.inflight_sema = asyncio.Semaphore(s3_max_inflight_reqs)
 
+    def post_init(self):
+        logger.info("Post-initializing S3 connector")
+
+        if self.s3_part_size is None:
+            # Default to chunk size
+            self.s3_part_size = self.full_chunk_size
+        assert self.s3_part_size == self.full_chunk_size, (
+            "S3 part size must be equal to chunk size in S3Connector"
+        )
+
         shm_name_prefix = "my_shm"
-        self.shms = []
-        self.shm_names = []
-        for i in range(s3_max_inflight_reqs):
+        shms = []
+        shm_names = []
+        mmaps = []
+        for i in range(self.s3_max_inflight_reqs):
             shm_name = f"{shm_name_prefix}_{i}"
 
             shm = tempfile.NamedTemporaryFile(
@@ -153,19 +169,37 @@ class S3Connector(RemoteConnector):
             )
 
             os.ftruncate(shm.fileno(), self.full_chunk_size)
-            self.shms.append(shm)
-            self.shm_names.append(shm_name)
+
+            with open(shm.name, "r+b") as f:
+                mm = mmap.mmap(f.fileno(), self.full_chunk_size)
+                # create a char buffer view over the mmap
+                buf = ctypes.c_char.from_buffer(mm)
+                addr = ctypes.addressof(buf)
+
+            shms.append(addr)
+            shm_names.append(shm.name)
+            mmaps.append(mm)
 
         self.adhoc_shm_manager = AdhocSharedMemoryManager(
-            shm_buffers=self.shms,
-            shm_names=self.shm_names,
+            shm_buffers=shms,
+            shm_names=shm_names,
+            mmaps=mmaps,
         )
+
+    def _format_safe_path(self, key_str: str) -> str:
+        """
+        Generate a safe HTTP path for the S3 key.
+        This is necessary because S3 keys can contain special characters
+        that need to be URL-encoded.
+        """
+        flat_key_str = key_str.replace("/", "_")
+        return url_quote(flat_key_str, safe="")
 
     # TODO(Jiayi): optimize this with async
     def _get_object_size(self, key_str: str) -> int:
         headers = HttpHeaders()
-        headers.add("Host", self.s3_end_point)
-        req = HttpRequest("HEAD", f"/{key_str}", headers)
+        headers.add("Host", self.s3_endpoint)
+        req = HttpRequest("HEAD", f"/{self._format_safe_path(key_str)}", headers)
 
         got = {"len": None, "status": None, "err": None}
 
@@ -195,7 +229,7 @@ class S3Connector(RemoteConnector):
         try:
             s3_req.finished_future.result()
         except Exception as e:
-            logger.error(f"Failed to get object size for {key_str}: {str(e)}")
+            logger.debug(f"Exception in `_get_object_size`: {e}")
             return 0
         if got["err"] or got["status"] != 200:
             logger.warning("Encountering error in S3 HEAD request")
@@ -225,13 +259,13 @@ class S3Connector(RemoteConnector):
         done_event: threading.Event,
     ):
         headers = HttpHeaders()
-        headers.add("Host", self.s3_end_point)
+        headers.add("Host", self.s3_endpoint)
 
         # TODO(Jiayi): Enable more finegrained data partition
         # range_header = f"bytes={start_byte}-{end_byte}"
         # headers.add("Range", range_header)
 
-        req = HttpRequest("GET", f"/{key_str}", headers)
+        req = HttpRequest("GET", f"/{self._format_safe_path(key_str)}", headers)
 
         # NOTE(Jiayi): Run in crt threads (not this thread) with GIL
         # See https://github.com/awslabs/aws-crt-python/blob/4250709624119de1af3ca86816e1a154fcac7cc8/source/common.c#L51
@@ -298,8 +332,8 @@ class S3Connector(RemoteConnector):
         while not done_event.is_set():
             await asyncio.sleep(0.005)
 
-        dst_buffer = memory_obj.byte_array
-        dst_buffer[:] = self.adhoc_shm_manager.get_buffer(shm)[:obj_size]
+        dst_ptr = memory_obj.data_ptr
+        ctypes.memmove(dst_ptr, shm, obj_size)
 
         self.adhoc_shm_manager.free(recv_path, shm)
 
@@ -381,11 +415,10 @@ class S3Connector(RemoteConnector):
             if memory_obj is None:
                 continue
 
-            shm_buffer = self.adhoc_shm_manager.get_buffer(shm)
-            dst_buffer = memory_obj.byte_array
-            dst_buffer[:] = shm_buffer[:obj_size]
+            dst_ptr = memory_obj.data_ptr
+            ctypes.memmove(dst_ptr, shm, obj_size)
 
-            self.adhoc_shm_manager.free(recv_path, shm_buffer)
+            self.adhoc_shm_manager.free(recv_path, shm)
             self.inflight_sema.release()
 
         return memory_objs
@@ -397,15 +430,18 @@ class S3Connector(RemoteConnector):
         done_event: threading.Event,
     ):
         headers = HttpHeaders()
-        headers.add("Host", self.s3_end_point)
+        headers.add("Host", self.s3_endpoint)
 
-        req = HttpRequest("PUT", f"/{key_str}", headers)
+        req = HttpRequest("PUT", f"/{self._format_safe_path(key_str)}", headers)
 
         done = {"err": None, "status": None}
 
         def on_done(error=None, status_code=None, **kwargs):
             done["err"] = error
             done["status"] = status_code
+
+            if done["err"] or done["status"] not in (200, 201):
+                raise RuntimeError(f"Upload failed in S3Connector: {done}")
 
             done_event.set()
 
@@ -422,26 +458,30 @@ class S3Connector(RemoteConnector):
             on_done=on_done,
         )
 
-        if done["err"] or done["status"] not in (200, 201):
-            raise RuntimeError(f"Upload failed in S3Connector: {done}")
-
     async def put(self, key: CacheEngineKey, memory_obj: MemoryObj):
         """
         Store data to S3
         """
+
         key_str = key.to_string()
 
+        logger.debug(f"Uploading {key_str} to S3")
+
         # TODO(Jiayi): Please support this
-        assert memory_obj.get_size() == self.s3_part_size, (
+        assert memory_obj.get_physical_size() == self.s3_part_size, (
             "Saving unfull chunk is not supported in S3Connector."
         )
 
         await self.inflight_sema.acquire()
         send_path, shm = self.adhoc_shm_manager.allocate()
+        logger.debug("Allocated shared memory for S3 upload")
 
-        buffer = memory_obj.byte_array
-        shm_buffer = self.adhoc_shm_manager.get_buffer(shm)
-        shm_buffer[: memory_obj.get_size()] = buffer[:]
+        try:
+            buffer_ptr = memory_obj.data_ptr
+            ctypes.memmove(shm, buffer_ptr, memory_obj.get_physical_size())
+        except Exception as e:
+            logger.error(f"Failed to copy data to S3 buffer: {e}")
+        logger.debug("Data copy to S3 buffer completed")
 
         try:
             done_event = threading.Event()
@@ -453,6 +493,7 @@ class S3Connector(RemoteConnector):
             raise
         finally:
             self.inflight_sema.release()
+            logger.debug(f"Uploaded {key_str} to S3 successfully")
 
     async def list(self) -> List[str]:
         raise NotImplementedError

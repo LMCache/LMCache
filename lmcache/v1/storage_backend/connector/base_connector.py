@@ -103,6 +103,13 @@ class RemoteConnector(metaclass=abc.ABCMeta):
 
         return memory_obj
 
+    def post_init(self):
+        """
+        Post-initialization method to be called after the connector is created.
+        This can be used to perform any additional setup required by the connector.
+        """
+        logger.info("Dummy post-initializing remote connector")
+
     @abc.abstractmethod
     async def exists(self, key: CacheEngineKey) -> bool:
         """

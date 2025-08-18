@@ -138,6 +138,7 @@ class ConnectorManager:
         config: Optional[LMCacheEngineConfig] = None,
         metadata: Optional[LMCacheEngineMetadata] = None,
     ) -> None:
+        logger.info("Initializing ConnectorManager")
         self.context = ConnectorContext(
             url=url,
             loop=loop,
@@ -189,6 +190,7 @@ class ConnectorManager:
             if adapter.can_parse(self.context.url):
                 connector = adapter.create_connector(self.context)
                 connector.init_chunk_meta(self.context.config, self.context.metadata)
+                connector.post_init()
                 return connector
 
         raise ValueError(f"No adapter found for URL: {self.context.url}")

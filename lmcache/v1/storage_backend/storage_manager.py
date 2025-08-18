@@ -18,7 +18,11 @@ import torch
 # First Party
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
-from lmcache.utils import CacheEngineKey, _lmcache_nvtx_annotate
+from lmcache.utils import (
+    CacheEngineKey,
+    _lmcache_nvtx_annotate,
+    start_loop_in_thread_with_exceptions,
+)
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.lookup_server import LookupServerInterface
 from lmcache.v1.memory_management import (
@@ -52,7 +56,12 @@ class StorageManager:
         lookup_server: Optional[LookupServerInterface] = None,
     ):
         self.loop = asyncio.new_event_loop()
-        self.thread = threading.Thread(target=self.loop.run_forever)
+
+        self.thread = threading.Thread(
+            target=start_loop_in_thread_with_exceptions,
+            args=(self.loop,),
+            name="storage-manger-event-loop",
+        )
         self.thread.start()
 
         dst_device = "cuda"
