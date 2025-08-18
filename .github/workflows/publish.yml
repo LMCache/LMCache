@@ -85,7 +85,7 @@ jobs:
               # Configuration is set in pyproject.toml
               # this will build lmcache with the latest version of torch
               # building from source will be required if a serving engine uses
-              # an early non-ABI compatible version of torch
+              # an earlier non-ABI compatible version of torch
               run: |
                 python -m cibuildwheel --output-dir dist
 
