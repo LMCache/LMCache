@@ -128,7 +128,7 @@ class CacheBlendImpl(BlendExecutor):
         """
         # Consider TP here.
         # But we cannot couple it with serving engine,
-        # so pass a all_reduce_function.
+        # so pass an all_reduce_function.
 
         # We compare the retrieved KVs with the fresh KVs and keep the
         # following tokens:

@@ -31,7 +31,7 @@ class BaseEvictor(metaclass=abc.ABCMeta):
         self, key: Union[CacheEngineKey, str], cache_dict: OrderedDict
     ) -> None:
         """
-        Update cache_dict when a cache is used is used
+        Update cache_dict when a cache is used
 
         Input:
             key: a CacheEngineKey

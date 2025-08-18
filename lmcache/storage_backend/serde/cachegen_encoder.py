@@ -115,7 +115,7 @@ def _convert_to_int_and_normalize(cdf_float, needs_normalization):
     with 2**16 - (Lp - 1). This means that now,
       cdf in [0, 2**16 - (Lp - 1)].
     Then, in a final step, we add an arange(Lp), which is just a line with
-    slope one. This ensure that for sure, we will get unique, strictly
+    slope one. This ensures that for sure, we will get unique, strictly
     monotonically increasing CDFs, which are in [0, 2**16)
     """
     PRECISION = 16
@@ -205,7 +205,7 @@ class CacheGenEncoderImpl:
 
         def process_layers(X, max_val):
             """
-            x is a iterator of dict values
+            x is an iterator of dict values
             each element's shape is [tokens, channels]
             """
             results = []

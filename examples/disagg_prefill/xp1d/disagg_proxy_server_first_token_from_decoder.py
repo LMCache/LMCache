@@ -143,7 +143,7 @@ async def handle_completions(request: Request):
         stream = req_data.get("stream", False)
         media_type = "text/event-stream" if stream else "application/json"
 
-        # Send request to prefill service round robin, ignore the response
+        # Send request to prefill service round-robin, ignore the response
         client = pick_prefill_client(app.state.prefill_clients, counter)
         await send_request_to_service(client, "/completions", req_data)
 

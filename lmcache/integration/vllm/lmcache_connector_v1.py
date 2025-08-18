@@ -73,7 +73,7 @@ class LMCacheConnectorV1Dynamic(KVConnectorBase_V1):
         **kwargs,
     ) -> None:
         """
-        Start saving the a layer of KV cache from vLLM's paged buffer
+        Start saving the layer of KV cache from vLLM's paged buffer
         to the connector. This is called from within attention layer to
         enable async copying during execution.
 

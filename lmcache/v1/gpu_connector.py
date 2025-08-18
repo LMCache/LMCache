@@ -166,7 +166,7 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
         Note:
           1. This function expects the 'slot_mapping' is a "full slot mapping"
              where it's length is the same as the whole token sequence.
-          2. In the case that there is prefix caching, slot_mapping will starts
+          2. In the case that there is prefix caching, slot_mapping will start
              with -1s until the end of the matched prefix. The start and end
              should NEVER overlap with the prefix caching (which means the
              underlying CUDA kernel will never see -1 in slot_mapping)
@@ -224,7 +224,7 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
         Note:
           1. This function expects the 'slot_mapping' is a "full slot mapping"
              where it's length is the same as the whole token sequence.
-          2. In the case that there is prefix caching, slot_mapping will starts
+          2. In the case that there is prefix caching, slot_mapping will start
              with -1s until the end of the matched prefix. The start and end
              should NEVER overlap with the prefix caching (which means the
              underlying CUDA kernel will never see -1 in slot_mapping)
@@ -997,7 +997,7 @@ class SGLangGPUConnector(GPUConnectorInterface):
         Note:
           1. This function expects the 'slot_mapping' is a "partial slot mapping"
              where its length is the same as the uncached token sequence.
-          2. In the case that there is prefix caching, slot_mapping will starts
+          2. In the case that there is prefix caching, slot_mapping will start
              with -1s until the end of the matched prefix. The start and end
              should NEVER overlap with the prefix caching (which means the
              underlying CUDA kernel will never see -1 in slot_mapping)
@@ -1054,7 +1054,7 @@ class SGLangGPUConnector(GPUConnectorInterface):
         Note:
           1. This function expects the 'slot_mapping' is a "partial slot mapping"
              where its length is the same as the uncached token sequence.
-          2. In the case that there is prefix caching, slot_mapping will starts
+          2. In the case that there is prefix caching, slot_mapping will start
              with -1s until the end of the matched prefix. The start and end
              should NEVER overlap with the prefix caching (which means the
              underlying CUDA kernel will never see -1 in slot_mapping)

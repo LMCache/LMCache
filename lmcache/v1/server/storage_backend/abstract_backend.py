@@ -55,7 +55,7 @@ class LMSBackendInterface(metaclass=abc.ABCMeta):
 
         Output:
             An LMSMemoryObj object that contains the KV cache bytearray
-            with the some metadata
+            with some metadata
         """
         raise NotImplementedError
 

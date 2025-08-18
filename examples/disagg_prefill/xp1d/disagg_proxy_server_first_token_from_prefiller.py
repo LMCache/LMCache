@@ -154,7 +154,7 @@ async def handle_completions(request: Request):
         req_data["stream"] = False
         stream_options = req_data.pop("stream_options", None)
 
-        # Send request to prefill service round robin, ignore the response
+        # Send request to prefill service round-robin, ignore the response
         client = round_robin_pick_client(app.state.prefill_clients, counter)
         prefill_output = await send_request_to_service(
             client, "/v1/completions", req_data

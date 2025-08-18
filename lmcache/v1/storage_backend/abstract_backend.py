@@ -185,7 +185,7 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
         :param list[CacheEngineKey] keys: The keys of the MemoryObjs.
         :param bool force: Whether to force remove the memory objects.
 
-        :return: a int indicates the number of removed memory objects.
+        :return: an int indicates the number of removed memory objects.
         """
         num_removed = 0
         for key in keys:
