@@ -454,7 +454,9 @@ class LocalDiskBackend(StorageBackendInterface):
         assert dtype is not None
         assert shape is not None
 
-        memory_obj = self.load_bytes_from_disk(path, dtype=dtype, shape=shape, fmt=fmt)
+        memory_obj = self.load_bytes_from_disk(
+            key, path, dtype=dtype, shape=shape, fmt=fmt
+        )
         self.disk_lock.release()
 
         return memory_obj
@@ -517,7 +519,7 @@ class LocalDiskBackend(StorageBackendInterface):
         logger.debug("Executing `async_load_bytes` from disk.")
         # FIXME (Jiayi): handle the case where loading fails.
         buffer = memory_obj.byte_array
-        self.read_file(buffer, path)
+        self.read_file(key, buffer, path)
 
         self.disk_lock.acquire()
         self.dict[key].unpin()
@@ -534,7 +536,12 @@ class LocalDiskBackend(StorageBackendInterface):
     # TODO(Jiayi): the pinned cpu memory_obj should directly be passed into
     # gpu connector; this gpu buffer could be avoided
     def load_bytes_from_disk(
-        self, path: str, dtype: torch.dtype, shape: torch.Size, fmt: MemoryFormat
+        self,
+        key: CacheEngineKey,
+        path: str,
+        dtype: torch.dtype,
+        shape: torch.Size,
+        fmt: MemoryFormat,
     ) -> Optional[MemoryObj]:
         """
         Load bytearray from disk.
@@ -545,7 +552,7 @@ class LocalDiskBackend(StorageBackendInterface):
         assert memory_obj is not None, "Memory allocation failed during disk load."
 
         buffer = memory_obj.byte_array
-        self.read_file(buffer, path)
+        self.read_file(key, buffer, path)
         return memory_obj
 
     def write_file(self, buffer, path):
@@ -564,7 +571,7 @@ class LocalDiskBackend(StorageBackendInterface):
             f"Bandwidth: {size / disk_write_time / 1e6:.2f} MB/s"
         )
 
-    def read_file(self, buffer, path):
+    def read_file(self, key, buffer, path):
         start_time = time.time()
         size = len(buffer)
         fblock_aligned = size % self.os_disk_bs == 0
@@ -574,13 +581,19 @@ class LocalDiskBackend(StorageBackendInterface):
                 "size is not aligned to disk block size."
             )
 
-        if not fblock_aligned or not self.use_odirect:
-            with open(path, "rb") as f:
-                f.readinto(buffer)
-        else:
-            fd = os.open(path, os.O_RDONLY | os.O_DIRECT)
-            with os.fdopen(fd, "rb", buffering=0) as fdo:
-                fdo.readinto(buffer)
+        try:
+            if not fblock_aligned or not self.use_odirect:
+                with open(path, "rb") as f:
+                    f.readinto(buffer)
+            else:
+                fd = os.open(path, os.O_RDONLY | os.O_DIRECT)
+                with os.fdopen(fd, "rb", buffering=0) as fdo:
+                    fdo.readinto(buffer)
+        except FileNotFoundError:
+            if self.dict.get(key, None):
+                self.dict.pop(key)
+            return
+
         disk_read_time = time.time() - start_time
         logger.debug(
             f"Disk read size: {size} bytes, "

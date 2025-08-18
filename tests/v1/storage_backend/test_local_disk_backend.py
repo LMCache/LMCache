@@ -418,6 +418,7 @@ class TestLocalDiskBackend:
             f.write(memory_obj.byte_array)
 
         result = local_disk_backend.load_bytes_from_disk(
+            key,
             path,
             memory_obj.metadata.dtype,
             memory_obj.metadata.shape,
@@ -442,6 +443,7 @@ class TestLocalDiskBackend:
             f.write(memory_obj.byte_array)
 
         result = local_disk_backend.load_bytes_from_disk(
+            key,
             path,
             memory_obj.metadata.dtype,
             memory_obj.metadata.shape,
@@ -506,16 +508,17 @@ class TestLocalDiskBackend:
     def test_file_operations_error_handling(self, local_disk_backend):
         """Test error handling in file operations."""
         # Test with non-existent file
+        key = create_test_key("test_key")
         non_existent_path = "/non/existent/path/file.pt"
 
-        with pytest.raises(FileNotFoundError):
-            local_disk_backend.load_bytes_from_disk(
-                non_existent_path,
-                torch.bfloat16,
-                torch.Size([2, 16, 8, 128]),
-                MemoryFormat.KV_T2D,
-            )
-
+        memory_obj = local_disk_backend.load_bytes_from_disk(
+            key,
+            non_existent_path,
+            torch.bfloat16,
+            torch.Size([2, 16, 8, 128]),
+            MemoryFormat.KV_T2D,
+        )
+        assert memory_obj is not None
         local_disk_backend.local_cpu_backend.memory_allocator.close()
 
     def test_cleanup_on_remove(self, local_disk_backend):
