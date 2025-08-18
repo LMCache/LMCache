@@ -22,13 +22,13 @@ Install Stable LMCache from PyPI
 
 The simplest way to install the latest stable release of LMCache is through PyPI. If other dependencies
 demand a version of torch that differs across major versions (e.g. 2.7.1 versus 2.8.0), LMCache stays compatible
-through installation from source (see below). The LMCache torch version always matches the latest stable version
-of vllm. Installing from source allows torch version flexibility. 
+through installation from source (see below). The LMCache is always build with the latest version of torch. 
+Installing from source allows torch version flexibility. 
 
 .. code-block:: bash
     
-    # by default, this will port the version of torch of the latest *STABLE* vllm wheel
-    # if your serving engine demands a different version of torch, it will 
+    # LMCache wheels are built with the latest version of torch.
+    # If your serving engine pins a different version of torch, it will 
     # override the torch version installed by lmcache
     # if these torch versions differ across major versions, ABI compatibility
     # may break so please install from source (see below)
@@ -77,7 +77,7 @@ have different torch dependencies and we want to maintain flexibility
 2. no build isolation bypasses `PEP 517 <https://peps.python.org/pep-0517/>`_ / `PEP 518 <https://peps.python.org/pep-0518/>`_
 avoiding the case where LMCache GPU kernels are compiled with `torch.utils.cuda_extension` or `torch.utils.hipify`
 inside of `setup.py` with one torch version while runtime dependencies (unpinned torch version in `requirements/common.txt`)
-are overriden, causing undefined symbol references. This forces LMCache to be built with the torch version already in your
+are overridden, causing undefined symbol references. This forces LMCache to be built with the torch version already in your
 environment.
 
 .. code-block:: bash

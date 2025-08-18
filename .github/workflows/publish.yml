@@ -83,12 +83,10 @@ jobs:
 
             - name: Build CUDA wheels with cibuildwheel
               # Configuration is set in pyproject.toml
-              # this will build lmcache with the latest version that vllm uses to 
-              # keep torch versions compatible. It is important to keep other dependencies
-              # non-collisional with the torch version that vllm uses. 
-              # the installation is the same as the image-release in docker/Dockerfile
+              # this will build lmcache with the latest version of torch
+              # building from source will be required if a serving engine uses
+              # an early non-ABI compatible version of torch
               run: |
-                pip install vllm
                 python -m cibuildwheel --output-dir dist
 
             - name: Upload release artifacts to GHA
