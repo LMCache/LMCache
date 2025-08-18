@@ -4,7 +4,7 @@ from __future__ import annotations
 
 # Standard
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, List, Optional, OrderedDict, Tuple
+from typing import TYPE_CHECKING, List, Optional, Tuple
 import asyncio
 import hashlib
 import threading
@@ -79,7 +79,17 @@ class CacheEngineKey:
     world_size: int
     worker_id: int
     chunk_hash: int
-    tags: Optional[OrderedDict] = None
+    extra_configs: Optional[dict] = None
+
+    def __post_init__(self):
+        tags = None
+        if self.extra_configs is not None:
+            for k, v in self.extra_configs.items():
+                if k.startswith("lmcache.tag."):
+                    if tags is None:
+                        tags = {}
+                    tags[k[len("lmcache.tag."):]] = v
+        self.tags = tags
 
     def __hash__(self):
         if self.tags is None:
@@ -124,7 +134,7 @@ class CacheEngineKey:
                     self.world_size,
                     self.worker_id,
                     self.chunk_hash,
-                    self.tags,
+                    self.extra_configs,
                     layer_id,
                 )
             )
@@ -138,7 +148,7 @@ class CacheEngineKey:
             self.world_size,
             self.worker_id,
             self.chunk_hash,
-            self.tags,
+            self.extra_configs,
             0,
         )
         return key
@@ -148,16 +158,16 @@ class CacheEngineKey:
         parts = s.split("@")
         if len(parts) < 5:
             raise ValueError(f"Invalid key string: {s}")
-        tags = None
+        extra_configs = None
         if len(parts) >= 6:
-            tags = OrderedDict()
+            extra_configs = {}
             for kv in parts[5:]:
                 kvs = kv.split("%", 1)
                 if len(kvs) != 2:
                     raise ValueError(f"Invalid key string: {s}")
-                tags[kvs[0]] = kvs[1]
+                extra_configs[kvs[0]] = kvs[1]
         return CacheEngineKey(
-            parts[0], parts[1], int(parts[2]), int(parts[3]), int(parts[4], 16), tags
+            parts[0], parts[1], int(parts[2]), int(parts[3]), int(parts[4], 16), extra_configs
         )
 
     def to_dict(self):
@@ -170,27 +180,27 @@ class CacheEngineKey:
             "worker_id": self.worker_id,
             "chunk_hash": self.chunk_hash,
         }
-        if self.tags is not None and len(self.tags) != 0:
-            msg["tags"] = [f"{k}%{v}" for k, v in self.tags.items()]
+        if self.extra_configs is not None and len(self.extra_configs) != 0:
+            msg["extra_configs"] = [f"{k}%{v}" for k, v in self.extra_configs.items()]
         return msg
 
     @staticmethod
     def from_dict(d):
-        tags = None
-        if tag_list := d.get("tags"):
-            tags = OrderedDict()
-            for kv in tag_list:
+        extra_configs = None
+        if extra_configs_list := d.get("extra_configs"):
+            extra_configs = {}
+            for kv in extra_configs_list:
                 kvs = kv.split("%", 1)
                 if len(kvs) != 2:
                     raise ValueError(f"Invalid key dict: {d}")
-                tags[kvs[0]] = kvs[1]
+                extra_configs[kvs[0]] = kvs[1]
         return CacheEngineKey(
             fmt=d["fmt"],
             model_name=d["model_name"],
             world_size=d["world_size"],
             worker_id=d["worker_id"],
             chunk_hash=d["chunk_hash"],
-            tags=tags,
+            extra_configs=extra_configs,
         )
 
 
@@ -245,7 +255,7 @@ class LayerCacheEngineKey(CacheEngineKey):
                     self.world_size,
                     self.worker_id,
                     self.chunk_hash,
-                    self.tags,
+                    self.extra_configs,
                     layer_id,
                 )
             )
@@ -256,21 +266,21 @@ class LayerCacheEngineKey(CacheEngineKey):
         parts = s.split("@")
         if len(parts) < 6:
             raise ValueError(f"Invalid key string: {s}")
-        tags = None
+        extra_configs = None
         if len(parts) >= 7:
-            tags = OrderedDict()
+            extra_configs = {}
             for kv in parts[6:]:
                 kvs = kv.split("%", 1)
                 if len(kvs) != 2:
                     raise ValueError(f"Invalid key string: {s}")
-                tags[kvs[0]] = kvs[1]
+                extra_configs[kvs[0]] = kvs[1]
         return LayerCacheEngineKey(
             parts[0],
             parts[1],
             int(parts[2]),
             int(parts[3]),
             int(parts[4], 16),
-            tags,
+            extra_configs,
             int(parts[5]),
         )
 
