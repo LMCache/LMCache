@@ -138,6 +138,7 @@ class ConnectorManager:
         config: Optional[LMCacheEngineConfig] = None,
         metadata: Optional[LMCacheEngineMetadata] = None,
     ) -> None:
+        logger.info("Initializing ConnectorManager")
         self.context = ConnectorContext(
             url=url,
             loop=loop,
@@ -189,6 +190,7 @@ class ConnectorManager:
             if adapter.can_parse(self.context.url):
                 connector = adapter.create_connector(self.context)
                 connector.init_chunk_meta(self.context.config, self.context.metadata)
+                connector.post_init()
                 return connector
 
         raise ValueError(f"No adapter found for URL: {self.context.url}")
@@ -214,6 +216,9 @@ def CreateConnector(
     - blackhole://[any_text]
     - audit://host:port[?verify=true|false]
     - fs://[host:port]/path
+    - s3://[bucket].s3express-[az_id].[region].amazonaws.com"
+    or
+    - s3://[bucket].s3.[region].amazonaws.com
 
     Examples:
     - redis://localhost:6379
@@ -226,6 +231,9 @@ def CreateConnector(
     - audit://localhost:8080?verify=true
     - fs:///tmp/lmcache
     - external://host:0/external_log_connector.lmc_external_log_connector/?connector_name=ExternalLogConnector
+    - s3://fakefile--use1-az4--x-s3.s3express-use1-az4.us-east-1.amazonaws.com
+    or
+    - s3://fakefile--use1-az4--x-s3.s3.us-east-1.amazonaws.com
 
     Args:
         url: The remote URL

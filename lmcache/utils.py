@@ -5,16 +5,23 @@ from __future__ import annotations
 # Standard
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, List, Optional, OrderedDict, Tuple
+import asyncio
 import hashlib
 import threading
+import traceback
 
 # Third Party
 from nvtx import annotate  # type: ignore
 import torch
 
+# First Party
+from lmcache.logging import init_logger
+
 if TYPE_CHECKING:
     # First Party
     from lmcache.v1.memory_management import MemoryFormat
+
+logger = init_logger(__name__)
 
 # Type definition
 KVCache = Tuple[Tuple[torch.Tensor, torch.Tensor], ...]
@@ -300,3 +307,26 @@ def thread_safe(func):
         return result
 
     return wrapper
+
+
+#### Thread/asyncio-related utilities ####
+def handle_thread_exception(args):
+    logger.error(
+        f"Thread {args.thread.name} crashed: {args.exc_type.__name__}: {args.exc_value}"
+    )
+
+
+def start_loop_in_thread_with_exceptions(loop: asyncio.AbstractEventLoop):
+    # The loop must be set in the *same* thread where it runs.
+    asyncio.set_event_loop(loop)
+
+    # Catch unhandled exceptions from callbacks/tasks in this loop:
+    def loop_excepthook(loop, context):
+        msg = context.get("message", "Unhandled exception in event loop")
+        exc = context.get("exception")
+        logger.error(f"[asyncio] {msg}")
+        if exc:
+            traceback.print_exception(type(exc), exc, exc.__traceback__)
+
+    loop.set_exception_handler(loop_excepthook)
+    loop.run_forever()

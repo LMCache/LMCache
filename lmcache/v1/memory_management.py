@@ -256,6 +256,15 @@ class MemoryObj(metaclass=abc.ABCMeta):
 
     @property
     @abc.abstractmethod
+    def data_ptr(self) -> int:
+        """
+        Get the data pointer of the MemoryObj.
+        This is used to access the raw data in the memory.
+        """
+        raise NotImplementedError
+
+    @property
+    @abc.abstractmethod
     def is_pinned(self) -> bool:
         """
         Check whether the memory obj is pinned.
@@ -403,6 +412,10 @@ class TensorMemoryObj(MemoryObj):
         return memoryview(byte_array)
 
     @property
+    def data_ptr(self) -> int:
+        return self.raw_data.data_ptr()
+
+    @property
     def is_pinned(self) -> bool:
         return self.metadata.pin_count > 0
 
@@ -501,6 +514,12 @@ class BytesBufferMemoryObj(MemoryObj):
     @property
     def byte_array(self) -> bytes:
         return self.raw_data
+
+    @property
+    def data_ptr(self) -> int:
+        mv = memoryview(self.raw_data)
+        addr = ctypes.addressof(ctypes.c_char.from_buffer(mv))
+        return addr
 
     @property
     def is_pinned(self) -> bool:
