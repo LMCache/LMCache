@@ -38,8 +38,9 @@ def main():
             config_data["kv_lora_rank"] = getattr(config, "kv_lora_rank", None)
             config_data["qk_rope_head_dim"] = getattr(config, "qk_rope_head_dim", None)
 
-        # Check for Qwen3 models (fuzzy matching)
-        if "qwen/qwen3-" in args.model.lower():
+        # Check for models that require head_dim
+        model_prefixes = ["qwen/qwen3-", "janhq/jan-", "casperhansen/llama-", "openai/gpt-"]
+        if any(prefix in args.model.lower() for prefix in model_prefixes):
             config_data["head_dim"] = getattr(config, "head_dim", None)
 
         # Convert to JSON and print
