@@ -22,8 +22,8 @@ Install Stable LMCache from PyPI
 
 The simplest way to install the latest stable release of LMCache is through PyPI. If other dependencies
 demand a version of torch that differs across major versions (e.g. 2.7.1 versus 2.8.0), LMCache stays compatible
-through installation from source (see below). The LMCache torch version is always the latest and unpinned
-so it will be overridden by other dependencies (e.g. vllm). 
+through installation from source (see below). The LMCache torch version always matches the latest stable version
+of vllm. Installing from source allows torch version flexibility. 
 
 .. code-block:: bash
     
@@ -39,8 +39,8 @@ Install Latest LMCache from TestPyPI
 
 These wheels are continually built from the latest LMCache source code (not officially stable release). 
 If other dependencies demand a version of torch that differs across major versions (e.g. 2.7.1 versus 2.8.0), 
-LMCache stays compatible through installation from source (see below). The LMCache torch version is always the 
-latest and unpinned so it will be overridden by other dependencies (e.g. vllm).
+LMCache stays compatible through installation from source (see below). The LMCache torch version always 
+matches the latest nightly version of vllm. Installing from source allows torch version flexibility. 
 
 .. code-block:: bash
 
@@ -63,7 +63,7 @@ Confirm that you have the latest pre-release:
     >>> import lmcache
     >>> from importlib.metadata import version
     >>> print(version("lmcache"))
-    0.2.2.dev57 # should be the latest pre-release version you installed
+    0.3.4.dev61 # should be the latest pre-release version you installed
 
 Install Latest LMCache from Source
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
