@@ -114,7 +114,11 @@ class TokenDatabase(metaclass=abc.ABCMeta):
         self, tokens: Union[torch.Tensor, List[int]], prefix_hash: Optional[int] = None
     ) -> int:
         if isinstance(tokens, torch.Tensor):
-            tokens_tuple = tuple(tokens.cpu().tolist())
+            # if already on cpu
+            if tokens.device == torch.device("cpu"):
+                tokens_tuple = tuple(tokens.tolist())
+            else:
+                tokens_tuple = tuple(tokens.cpu().tolist())
         elif isinstance(tokens, list):
             tokens_tuple = tuple(tokens)
         else:

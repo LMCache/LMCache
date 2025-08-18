@@ -993,7 +993,7 @@ class LMCacheConnectorV1Impl:
         ):
             return 0
 
-        token_ids = torch.tensor(request.prompt_token_ids)
+        token_ids = torch.tensor(request.prompt_token_ids, device="cpu")
 
         # If the request has multimodal hashes, apply them to the token ids
         if request.mm_hashes:
