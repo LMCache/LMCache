@@ -75,8 +75,10 @@ The reason that torch installation is separated is:
 have different torch dependencies and we want to maintain flexibility 
 (torch versions only break across major versions where the ABI may change e.g. 2.7.1 -> 2.8.0). 
 2. no build isolation bypasses `PEP 517 <https://peps.python.org/pep-0517/>`_ / `PEP 518 <https://peps.python.org/pep-0518/>`_
-so that when LMCache GPU kernels are compiled with `torch.utils.cuda_extension` or `torch.utils.hipify`
-inside of `setup.py` with one torch version, the runtime dependencies export another torch version causing undefined symbol references. 
+avoiding the case where LMCache GPU kernels are compiled with `torch.utils.cuda_extension` or `torch.utils.hipify`
+inside of `setup.py` with one torch version while runtime dependencies (unpinned torch version in `requirements/common.txt`)
+are overriden, causing undefined symbol references. This forces LMCache to be built with the torch version already in your
+environment.
 
 .. code-block:: bash
 
