@@ -15,7 +15,16 @@ safetensors
 setuptools>=77.0.3,<81.0.0
 setuptools_scm>=8
 sortedcontainers
-# please update ASAP when vllm torch updates
-# MUST match the [build-system].requires in pyproject.toml
-torch==2.7.1
+# 1. avoid pinning torch version in the runtime dependencies so that 
+# installing lmcache (from source or from pypi) will not override
+# the user's preexisting torch version 
+# 2. this keeps lmcache torch version flexible for many serving engines
+# and versions of those serving engines
+# if NO pre-existing torch version is installed, `pip install lmcache` or 
+# `pip install -e . --no-build-isolation` will install the latest torch version
+# 3. the extra benefit of not pinning is so that when vllm releases their docker
+# image (which has lmcache as a dependency), we will never forcefully collide with
+# whatever torch version that they have
+# 4. this torch version may also be overridden inside of LMCache/docker/Dockerfile
+torch
 transformers >= 4.51.1

@@ -20,22 +20,38 @@ Prerequisites
 Install Stable LMCache from PyPI
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The simplest way to install the latest stable release of LMCache is through PyPI:
+The simplest way to install the latest stable release of LMCache is through PyPI. If other dependencies
+demand a version of torch that differs across major versions (e.g. 2.7.1 versus 2.8.0), LMCache stays compatible
+through installation from source (see below). The LMCache is always build with the latest version of torch. 
+Installing from source allows torch version flexibility. 
 
 .. code-block:: bash
-
+    
+    # LMCache wheels are built with the latest version of torch.
+    # If your serving engine pins a different version of torch, it will 
+    # override the torch version installed by lmcache
+    # if these torch versions differ across major versions, ABI compatibility
+    # may break so please install from source (see below)
     pip install lmcache
 
 Install Latest LMCache from TestPyPI
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-These wheels are continually built from the latest LMCache source code (not officially stable release).
+These wheels are continually built from the latest LMCache source code (not officially stable release). 
+If other dependencies demand a version of torch that differs across major versions (e.g. 2.7.1 versus 2.8.0), 
+LMCache stays compatible through installation from source (see below). The LMCache torch version always 
+matches the latest nightly version of vllm. Installing from source allows torch version flexibility. 
 
 .. code-block:: bash
 
-    pip install --index-url https://pypi.org/simple --extra-index-url https://test.pypi.org/simple lmcache==0.2.2.dev57
+    # by default, this will port the version of torch of the latest *NIGHTLY* vllm wheel
+    # if your serving engine demands a different version of torch, it will 
+    # override the torch version installed by lmcache
+    # if these torch versions differ across major versions, ABI compatibility
+    # may break so please install from source (see below)
+    pip install --index-url https://pypi.org/simple --extra-index-url https://test.pypi.org/simple lmcache==0.3.4.dev61
 
-See the latest pre-release of LMCache: `latest LMCache pre-releases <https://test.pypi.org/project/lmcache/#history>`__ and replace `0.2.2.dev57` with the latest pre-release version.
+See the latest pre-release of LMCache: `latest LMCache pre-releases <https://test.pypi.org/project/lmcache/#history>`__ and replace `0.3.4.dev61` with the latest pre-release version.
 
 This will install all dependencies from the real PyPI and only LMCache itself from TestPyPI.
 
@@ -47,23 +63,49 @@ Confirm that you have the latest pre-release:
     >>> import lmcache
     >>> from importlib.metadata import version
     >>> print(version("lmcache"))
-    0.2.2.dev57 # should be the latest pre-release version you installed
+    0.3.4.dev61 # should be the latest pre-release version you installed
 
 Install Latest LMCache from Source
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-To install from source, clone the repository and install in editable mode:
+To install from source, clone the repository and install in editable mode. 
+
+The reason that torch installation is separated is:
+1. different serving engines and different versions of those serving engines 
+have different torch dependencies and we want to maintain flexibility 
+(torch versions only break across major versions where the ABI may change e.g. 2.7.1 -> 2.8.0). 
+2. no build isolation bypasses `PEP 517 <https://peps.python.org/pep-0517/>`_ / `PEP 518 <https://peps.python.org/pep-0518/>`_
+avoiding the case where LMCache GPU kernels are compiled with `torch.utils.cuda_extension` or `torch.utils.hipify`
+inside of `setup.py` with one torch version while runtime dependencies (unpinned torch version in `requirements/common.txt`)
+are overridden, causing undefined symbol references. This forces LMCache to be built with the torch version already in your
+environment.
 
 .. code-block:: bash
 
     git clone https://github.com/LMCache/LMCache.git
     cd LMCache
-    pip install -e .
+
+    # we need to install these packages because we are avoiding build isolation
+    pip install -r requirements/build.txt
+
+    # Option 1. 
+    # select the torch version that matches the dependency of your serving engine
+    # 2.7.1 is an example for vllm 0.10.0
+    pip install torch==2.7.1
+
+    # Option 2. 
+    # install your serving engine with its required torch version declared already
+    # example: vllm 0.10.0 will install torch 2.7.1
+    pip install vllm==0.10.0
+
+    # no build isolation requires torch to already be installed
+    # with your desired version
+    pip install -e . --no-build-isolation
 
 Install LMCache with uv
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
-We recommend developers to use `uv` for a better package management:
+We recommend developers to use `uv` for faster package management:
 
 .. code-block:: bash
 
@@ -72,7 +114,23 @@ We recommend developers to use `uv` for a better package management:
 
     uv venv --python 3.12
     source .venv/bin/activate
-    uv pip install -e .
+
+    # we need to install these packages because we are avoiding build isolation
+    uv pip install -r requirements/build.txt
+
+    # Option 1. 
+    # select the torch version that matches the dependency of your serving engine
+    # 2.7.1 is an example for vllm 0.10.0
+    uv pip install torch==2.7.1
+
+    # Option 2. 
+    # install your serving engine with its required torch version declared already
+    # example: vllm 0.10.0 will install torch 2.7.1
+    uv pip install vllm==0.10.0
+
+    # no build isolation requires torch to already be installed
+    # with your desired version
+    uv pip install -e . --no-build-isolation
 
 
 LMCache with vLLM v1
