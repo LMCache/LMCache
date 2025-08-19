@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import Iterable, List, Optional, OrderedDict, Tuple, Union
+from typing import Any, Iterable, List, Optional, OrderedDict, Tuple, Union
 import abc
 
 # Third Party
@@ -117,7 +117,10 @@ class TokenDatabase(metaclass=abc.ABCMeta):
         )
 
     def _hash_tokens(
-        self, tokens: Union[torch.Tensor, List[int]], prefix_hash: Optional[int] = None
+        self,
+        tokens: Union[torch.Tensor, List[int]],
+        prefix_hash: Optional[int] = None,
+        extra_keys: Optional[list[Any]] = None,
     ) -> int:
         if isinstance(tokens, torch.Tensor):
             tokens_tuple = tuple(tokens.cpu().tolist())
@@ -126,13 +129,10 @@ class TokenDatabase(metaclass=abc.ABCMeta):
         else:
             raise ValueError(f"Unsupported tokens type: {type(tokens)}")
 
-        if prefix_hash is not None:
-            # Ignore extra keys for now
-            # Extra keys are for multi-modal inputs and
-            # request specific metadata (e.g., LoRA ID).
-            extra_keys = None
-            return self.hash_func((prefix_hash, tokens_tuple, extra_keys))
-        return self.hash_func(tokens_tuple)
+        # Ignore extra keys for now
+        # Extra keys are for multi-modal inputs and
+        # request specific metadata (e.g., LoRA ID).
+        return self.hash_func((prefix_hash, tokens_tuple, extra_keys))
 
 
 class ChunkedTokenDatabase(TokenDatabase):
