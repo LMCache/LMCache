@@ -81,7 +81,7 @@ class TokenDatabase(metaclass=abc.ABCMeta):
         offsets: Optional[List[int]] = None,
         mask: Optional[torch.Tensor] = None,
         make_key: bool = True,
-        extra_configs: Optional[dict] = None,
+        request_configs: Optional[dict] = None,
     ) -> Iterable[Tuple[int, int, Union[CacheEngineKey, int]]]:
         """Process the tokens and return the corresponding cache engine keys.
 
@@ -100,7 +100,7 @@ class TokenDatabase(metaclass=abc.ABCMeta):
         :param bool make_key: Whether to make the cache engine key or not.
             If False, the hash value will be returned instead.
 
-        :param Optional[dict] extra_configs: The extra configs of the request.
+        :param Optional[dict] request_configs: The configs of the request.
 
         :returns: A iterable of tuples with three elements. The first element
             is the start index of the tokens for the key. The second element
@@ -110,7 +110,7 @@ class TokenDatabase(metaclass=abc.ABCMeta):
 
         raise NotImplementedError
 
-    def _make_key_by_hash(self, chunk_hash: int, extra_configs: Optional[dict] = None):
+    def _make_key_by_hash(self, chunk_hash: int, request_configs: Optional[dict] = None):
         assert self.metadata is not None
         return CacheEngineKey(
             self.metadata.fmt,
@@ -118,7 +118,7 @@ class TokenDatabase(metaclass=abc.ABCMeta):
             self.metadata.world_size,
             self.metadata.worker_id,
             chunk_hash,
-            extra_configs,
+            request_configs,
         )
 
     def _hash_tokens(
@@ -217,7 +217,7 @@ class ChunkedTokenDatabase(TokenDatabase):
         offsets: Optional[List[int]] = None,
         mask: Optional[torch.Tensor] = None,
         make_key: bool = True,
-        extra_configs: Optional[dict] = None,
+        request_configs: Optional[dict] = None,
     ) -> Iterable[Tuple[int, int, Union[CacheEngineKey, int]]]:
         """Process the tokens/hashes and return the corresponding cache engine keys.
 
@@ -236,7 +236,7 @@ class ChunkedTokenDatabase(TokenDatabase):
         :param bool make_key: Whether to make the cache engine key or not.
             If False, the hash value will be returned instead.
 
-        :param Optional[dict] extra_configs: The extra configs of the request.
+        :param Optional[dict] request_configs: The configs of the request.
 
         :returns: A iterable of tuples with three elements. The first element
             is the start index of the tokens for the key. The second element
@@ -270,7 +270,7 @@ class ChunkedTokenDatabase(TokenDatabase):
                         yield (
                             start_idx,
                             end_idx,
-                            self._make_key_by_hash(hash_val, extra_configs),
+                            self._make_key_by_hash(hash_val, request_configs),
                         )
                     else:
                         yield start_idx, end_idx, hash_val
@@ -285,7 +285,7 @@ class ChunkedTokenDatabase(TokenDatabase):
                     yield (
                         start_idx,
                         end_idx,
-                        self._make_key_by_hash(hash_val, extra_configs),
+                        self._make_key_by_hash(hash_val, request_configs),
                     )
                 else:
                     yield start_idx, end_idx, hash_val
@@ -342,7 +342,7 @@ class SegmentTokenDatabase(TokenDatabase):
         offsets: Optional[List[int]] = None,
         mask: Optional[torch.Tensor] = None,
         make_key: bool = True,
-        extra_configs: Optional[dict] = None,
+        request_configs: Optional[dict] = None,
     ) -> Iterable[Tuple[int, int, Union[CacheEngineKey, int]]]:
         """Process the tokens and return the corresponding cache engine keys.
 
@@ -361,7 +361,7 @@ class SegmentTokenDatabase(TokenDatabase):
         :param bool make_key: Whether to make the cache engine key or not.
             If False, the hash value will be returned instead.
 
-        :param Optional[dict] extra_configs: The extra configs of the request.
+        :param Optional[dict] request_configs: The configs of the request.
 
         :returns: A iterable of tuples with three elements. The first element
             is the start index of the tokens for the key. The second element
@@ -397,7 +397,7 @@ class SegmentTokenDatabase(TokenDatabase):
                         start_idx,
                         end_idx,
                         self._make_key_by_hash(
-                            self._hash_tokens(token_chunk), extra_configs
+                            self._hash_tokens(token_chunk), request_configs
                         ),
                     )
                 else:

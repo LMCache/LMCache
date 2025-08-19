@@ -19,7 +19,7 @@ class LookupClientInterface(metaclass=abc.ABCMeta):
         self,
         token_ids: torch.Tensor,
         lookup_id: Optional[str] = None,
-        extra_configs: Optional[dict] = None,
+        request_configs: Optional[dict] = None,
     ) -> int:
         """
         Perform lookup for the given token IDs.
@@ -29,7 +29,7 @@ class LookupClientInterface(metaclass=abc.ABCMeta):
 
             lookup_id: The lookup ID to associate with the lookup
 
-            extra_configs: The extra configs of the request,
+            request_configs: The configs of the request,
             includes tags and the other configs
 
         Returns:

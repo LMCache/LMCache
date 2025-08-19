@@ -60,7 +60,7 @@ class MooncakeLookupClient(LookupClientInterface):
         self,
         token_ids: torch.Tensor,
         lookup_id: Optional[str] = None,
-        extra_configs: Optional[dict] = None,
+        request_configs: Optional[dict] = None,
     ) -> int:
         # process token_ids to cacheengine keys
         keys = []

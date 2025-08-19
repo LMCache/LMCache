@@ -88,16 +88,16 @@ class DisaggSpec:
 tmp_disagg_tracker: dict[str, DisaggSpec] = {}
 
 
-def extract_request_extra_configs(sampling_params: SamplingParams) -> Optional[dict]:
-    extra_configs = None
+def extract_request_configs(sampling_params: SamplingParams) -> Optional[dict]:
+    request_configs = None
     if sampling_params.extra_args is not None:
         if kv_transfer_params := sampling_params.extra_args.get("kv_transfer_params"):
             for k, v in kv_transfer_params.items():
                 if k.startswith("lmcache."):
-                    if extra_configs is None:
-                        extra_configs = {}
-                    extra_configs[k] = v
-    return extra_configs
+                    if request_configs is None:
+                        request_configs = {}
+                    request_configs[k] = v
+    return request_configs
 
 
 @dataclass
@@ -127,8 +127,8 @@ class RequestTracker:
     mm_hashes: Optional[list[str]] = None
     mm_positions: Optional[list["PlaceholderRange"]] = None
 
-    # The extra configs of the request, includes tags and other configs
-    extra_configs: Optional[dict] = None
+    # The configs of the request, includes tags and other configs
+    request_configs: Optional[dict] = None
 
     # Whether the request is in decode phase
     is_decode_phase = False
@@ -173,7 +173,7 @@ class RequestTracker:
         # NOTE: Initialized in `update_state_after_alloc`
         disagg_spec = tmp_disagg_tracker.pop(new_request.req_id, None)
 
-        extra_configs = extract_request_extra_configs(new_request.sampling_params)
+        request_configs = extract_request_configs(new_request.sampling_params)
 
         return RequestTracker(
             req_id=new_request.req_id,
@@ -184,7 +184,7 @@ class RequestTracker:
             disagg_spec=disagg_spec,
             mm_hashes=new_request.mm_hashes.copy(),
             mm_positions=new_request.mm_positions.copy(),
-            extra_configs=extra_configs,
+            request_configs=request_configs,
         )
 
     def update(
@@ -233,8 +233,8 @@ class ReqMeta:
     load_spec: Optional[LoadSpec] = None
     # disagg spec
     disagg_spec: Optional[DisaggSpec] = None
-    # the extra configs
-    extra_configs: Optional[dict] = None
+    # the configs of the request
+    request_configs: Optional[dict] = None
 
     @staticmethod
     def from_request_tracker(
@@ -360,7 +360,7 @@ class ReqMeta:
             save_spec=save_spec,
             load_spec=load_spec,
             disagg_spec=tracker.disagg_spec,
-            extra_configs=tracker.extra_configs,
+            request_configs=tracker.request_configs,
         )
 
 
@@ -720,7 +720,7 @@ class LMCacheConnectorV1Impl:
                     token_mask[:lmcache_cached_tokens],
                     kvcaches=kvcaches,
                     slot_mapping=slot_mapping[:lmcache_cached_tokens],
-                    extra_configs=request.extra_configs,
+                    request_configs=request.request_configs,
                 )
 
                 # Check the result
@@ -949,7 +949,7 @@ class LMCacheConnectorV1Impl:
                 slot_mapping=slot_mapping,
                 offset=skip_leading_tokens,
                 transfer_spec=request.disagg_spec,
-                extra_configs=request.extra_configs,
+                request_configs=request.request_configs,
             )
 
             # NOTE(Jiayi): We assume all tokens are saved
@@ -1001,18 +1001,18 @@ class LMCacheConnectorV1Impl:
         lookup_id = str(uuid.uuid4())
         self._lookup_requests_in_step.append(lookup_id)
 
-        extra_configs = extract_request_extra_configs(request.sampling_params)
+        request_configs = extract_request_configs(request.sampling_params)
         if self.skip_last_n_tokens > 0:
             num_external_hit_tokens = self.lookup_client.lookup(
                 token_ids[: -self.skip_last_n_tokens],
                 lookup_id=lookup_id,
-                extra_configs=extra_configs,
+                request_configs=request_configs,
             )
         else:
             num_external_hit_tokens = self.lookup_client.lookup(
                 token_ids,
                 lookup_id=lookup_id,
-                extra_configs=extra_configs,
+                request_configs=request_configs,
             )
 
         # When prompt length is divisible by the block size and all

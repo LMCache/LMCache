@@ -133,7 +133,7 @@ class RemoteBackend(StorageBackendInterface):
                 key.world_size,
                 0,
                 key.chunk_hash,
-                key.extra_configs,
+                key.request_configs,
             )
 
         try:
@@ -235,7 +235,7 @@ class RemoteBackend(StorageBackendInterface):
                 key.world_size,
                 0,
                 key.chunk_hash,
-                key.extra_configs,
+                key.request_configs,
             )
         t1 = time.perf_counter()
         future = asyncio.run_coroutine_threadsafe(self.connection.get(key), self.loop)
@@ -285,7 +285,7 @@ class RemoteBackend(StorageBackendInterface):
                     key.world_size,
                     0,
                     key.chunk_hash,
-                    key.extra_configs,
+                    key.request_configs,
                 )
                 for key in keys
             ]
