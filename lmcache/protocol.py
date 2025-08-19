@@ -1,16 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from dataclasses import dataclass
+from enum import Enum, auto
 import struct
 
 MAX_KEY_LENGTH = 150
 
 
-class Constants:
-    CLIENT_PUT = 1
-    CLIENT_GET = 2
-    CLIENT_EXIST = 3
-    CLIENT_LIST = 4
+class Constants(Enum):
+    CLIENT_PUT = auto()
+    CLIENT_GET = auto()
+    CLIENT_EXIST = auto()
+    CLIENT_LIST = auto()
 
     SERVER_SUCCESS = 200
     SERVER_FAIL = 400
