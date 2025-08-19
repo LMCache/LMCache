@@ -1,13 +1,16 @@
 [build-system]
 # Requirements for package build
 # Should be mirrored in requirements/build.txt (for builds external to setuptools)
-# the torch version in requirements/common.txt MUST match
+# The recommended installation from source will avoid the requirements here in order
+# to stay flexible for the torch version with `--no-build-isolation`. Thus, these packages
+# should be installed before `pip install -e . --no-build-isolation`. 
+# However, build isolation is still used for the cibuildwheel releases
 requires = [
     "ninja",
     "packaging>=24.2",
     "setuptools>=77.0.3,<81.0.0",
     "setuptools_scm>=8",
-    "torch==2.7.1",
+    "torch",
     "wheel",
 ]
 build-backend = "setuptools.build_meta"
