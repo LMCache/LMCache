@@ -71,7 +71,7 @@ def main():
     draw_quadratic_interpolation()
 
 
-def set_hit_multiplier():
+def set_hi_multiplier():
     global hi_multiplier
     prompt = "hi" * 10000
     hi_multiplier = len(tokenizer.encode(prompt))
@@ -112,5 +112,5 @@ def draw_quadratic_interpolation():
 if __name__ == "__main__":
     args = parse_args()
     tokenizer = AutoTokenizer.from_pretrained(args.model)
-    set_hit_multiplier()
+    set_hi_multiplier()
     main()
