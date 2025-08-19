@@ -105,6 +105,10 @@ def draw_quadratic_interpolation():
     ys = [ttft for _, ttft in context_length_ttfts]
     # degree 2
     coeffs = np.polyfit(xs, ys, 2)
+    print(
+        f"Interpolation is: Prefill Time = {coeffs[0]} * Context Length^2 +"
+        f"{coeffs[1]} * Context Length + {coeffs[2]}"
+    )
     quadratic = np.poly1d(coeffs)
 
     x_smooth = np.linspace(min(xs), max(xs), 200)
