@@ -16,7 +16,6 @@ python ttft-estimator.py \
 
 # Standard
 import argparse
-import random
 import time
 
 # Third Party
@@ -30,6 +29,7 @@ tokenizer = None
 # the number of tokens in 10,000 "hi"s
 hi_multiplier = None
 context_length_ttfts = []
+used_ints = set()
 
 client = OpenAI(api_key="dummy-key", base_url="http://localhost:8000/v1")
 
@@ -58,13 +58,12 @@ def query_and_measure_ttft(prompt):
 
 
 def main():
-    for context_length in map(
-        int, (s.strip() for s in args.context_lengths.split(","))
+    for i, context_length in enumerate(
+        map(int, (s.strip() for s in args.context_lengths.split(",")))
     ):
         number_of_his = context_length * hi_multiplier // 10_000
-        # insert a random integer to break prefixes between context lengths
-        random_int = random.randint(0, 10000)
-        prompt = f"{random_int}" + "hi" * number_of_his
+        # break the prefix with the enumeration
+        prompt = f"{i}" + "hi" * number_of_his
         ttft = query_and_measure_ttft(prompt)
         print(f"Context length: {context_length}, TTFT: {ttft}")
         context_length_ttfts.append((context_length, ttft))
@@ -82,9 +81,9 @@ def parse_args():
     global tokenizer
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", type=str, required=True)
-    parser.add_argument("--host", type=str, required=True, default="localhost")
-    parser.add_argument("--port", type=str, required=True, default="8000")
-    parser.add_argument("--context-lengths", type=str, required=True, default="1024")
+    parser.add_argument("--host", type=str, required=False, default="localhost")
+    parser.add_argument("--port", type=str, required=False, default="8000")
+    parser.add_argument("--context-lengths", type=str, required=False, default="1024")
     return parser.parse_args()
 
 
