@@ -5,8 +5,67 @@ import json
 import os
 
 # Third Party
+from tqdm import tqdm
 from transformers import AutoTokenizer
 import numpy as np
+
+
+def estimate_num_tokens(text: str) -> int:
+    if not hasattr(estimate_num_tokens, "tokenizer"):
+        os.environ["TOKENIZERS_PARALLELISM"] = "false"
+        estimate_num_tokens.tokenizer = AutoTokenizer.from_pretrained(args.model)
+    return len(estimate_num_tokens.tokenizer.tokenize(text))
+
+
+def is_human(human):
+    return human in ["human", "user"]
+
+
+def is_gpt(gpt):
+    return gpt in ["gpt", "chatgpt", "bing", "bard"]
+
+
+def is_system(system):
+    return system in ["system"]
+
+
+def invalid_conversations(conversations):
+    # pair does not match
+    if len(conversations) < 2:
+        return True
+
+    # starting from gpt or systems
+    entry = conversations[0]
+    if is_gpt(entry["from"]) or is_system(entry["from"]):
+        return True
+
+    # ending with human
+    entry = conversations[-1]
+    if is_human(entry["from"]):
+        return True
+
+    prev_from = None
+    total_tokens = 0
+    for conv in conversations:
+        _from = conv["from"]
+        total_tokens += estimate_num_tokens(conv["value"])
+
+        # consecutive rounds (gpt followed by gpt, human followed by human, ..)
+        if prev_from == _from:
+            return True
+
+        # too long conversations
+        if total_tokens > (128 * 1024):
+            return True
+
+        # unknown from
+        if not is_human(_from) and not is_gpt(_from) and not is_system(_from):
+            return True
+
+        prev_from = _from
+
+    return False
+
 
 parser = argparse.ArgumentParser(description="Process data percentage.")
 parser.add_argument(
@@ -15,39 +74,55 @@ parser.add_argument(
     default=1,
     help="The percentage of data to process (0 to 1). Default is 1 (100%).",
 )
+parser.add_argument(
+    "--model",
+    type=str,
+    default="mistralai/Mistral-7B-Instruct-v0.2",
+    help="Model for tokenizer. Default is mistralai/Mistral-7B-Instruct-v0.2.",
+)
+parser.add_argument(
+    "--trace",
+    type=str,
+    default="ShareGPT_V3_unfiltered_cleaned_split.json",
+    help="Trace file. Default is ShareGPT_V3_unfiltered_cleaned_split.json",
+)
 
 args = parser.parse_args()
 
-with open("ShareGPT_V3_unfiltered_cleaned_split.json", "r", encoding="utf-8") as file:
+print("Loading trace file..")
+with open(args.trace, "r", encoding="utf-8") as file:
     data = json.load(file)
-
-
-def estimate_num_tokens(text: str) -> int:
-    if not hasattr(estimate_num_tokens, "tokenizer"):
-        os.environ["TOKENIZERS_PARALLELISM"] = "false"
-        estimate_num_tokens.tokenizer = AutoTokenizer.from_pretrained(
-            "mistralai/Mistral-7B-Instruct-v0.2"
-        )
-    return len(estimate_num_tokens.tokenizer.tokenize(text))
-
 
 num_of_ids = len(data)
 print(f"Number of IDs: {num_of_ids}")
-data = data[: int(num_of_ids * args.parse)]
 
-count = 0
+# exclude invalid data
+print("Veryfing trace..")
+data = [d for d in tqdm(data) if not invalid_conversations(d["conversations"])]
+excluded_ids = len(data)
+num_of_ids -= excluded_ids
+print(f"Excluded number of IDs: {excluded_ids}")
 
-for d in data:
-    d["num_round"] = len(d["conversations"])  # human is one round, gpt is another round
+data_to_process = int(num_of_ids * args.parse)
+data = data[:data_to_process]
+print(f"Data to process: {data_to_process}")
+
+for d in tqdm(data):
+    conversations = d["conversations"]
+    d["num_round"] = len(conversations)  # human is one round, gpt is another round
     human_tokens = []
     gpt_tokens = []
-    for conv in d["conversations"]:
-        if conv["from"] == "human":
-            human_tokens.append(estimate_num_tokens(conv["value"]))
-        if conv["from"] == "gpt":
-            token_number = estimate_num_tokens(conv["value"])
-            conv["num_tokens"] = token_number
-            gpt_tokens.append(token_number)
+    for conv in conversations:
+        num_tokens = estimate_num_tokens(conv["value"])
+
+        if is_human(conv["from"]):
+            human_tokens.append(num_tokens)
+        elif is_gpt(conv["from"]):
+            conv["num_tokens"] = num_tokens
+            gpt_tokens.append(num_tokens)
+        else:
+            print("Invalid _from_")
+
     if len(human_tokens) == 0:
         d["average_human_token"] = 0
         d["max_human_token"] = 0
@@ -60,12 +135,6 @@ for d in data:
     else:
         d["average_gpt_token"] = float(np.mean(gpt_tokens))
         d["max_gpt_token"] = float(np.max(gpt_tokens))
-
-    count += 1
-    print(f"Finished {count}")
-
-# Remove the data that has two consecutive human rounds
-del data[260]
 
 with open("ShareGPT.json", "w", encoding="utf-8") as file:
     json.dump(data, file, ensure_ascii=False, indent=2)
