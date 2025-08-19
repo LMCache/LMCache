@@ -67,14 +67,14 @@ def test_segment_token_database(prefix_length, chunk_lengths):
     starts = [0]
     ends = [sys_length]
     sys_tuple = tuple(sys_tokens.cpu().tolist())
-    sys_hash = hash(sys_tuple)
+    sys_hash = hash((None, sys_tuple, None))
     hashes = [sys_hash]
     start = sys_length + len(sep_tokens)
     for idx, chunk_length in enumerate(chunk_lengths):
         token_chunk = generate_tokens(chunk_length, "cpu", fixed=True)
 
         token_tuple = tuple(token_chunk.cpu().tolist())
-        token_hash = hash(token_tuple)
+        token_hash = hash((None, token_tuple, None))
         hashes.append(token_hash)
 
         token_chunk = torch.cat([sep_tokens, token_chunk])
@@ -84,7 +84,7 @@ def test_segment_token_database(prefix_length, chunk_lengths):
         start += chunk_length + len(sep_tokens)
 
     query_tuple = tuple(query_tokens.cpu().tolist())
-    query_hash = hash(query_tuple)
+    query_hash = hash((None, query_tuple, None))
     hashes.append(query_hash)
     starts.append(start)
     ends.append(start + query_length)
