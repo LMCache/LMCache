@@ -1,318 +1,0 @@
-INFO 05-11 21:26:24 __init__.py:186] Automatically detected platform cuda.
-INFO 05-11 21:26:26 api_server.py:840] vLLM API server version 0.1.dev4433+geb5db26
-INFO 05-11 21:26:26 api_server.py:841] args: Namespace(subparser='serve', model_tag='meta-llama/Llama-3.1-8B-Instruct', config='', host=None, port=8001, uvicorn_log_level='info', allow_credentials=False, allowed_origins=['*'], allowed_methods=['*'], allowed_headers=['*'], api_key=None, lora_modules=None, prompt_adapters=None, chat_template=None, chat_template_content_format='auto', response_role='assistant', ssl_keyfile=None, ssl_certfile=None, ssl_ca_certs=None, ssl_cert_reqs=0, root_path=None, middleware=[], return_tokens_as_token_ids=False, disable_frontend_multiprocessing=False, enable_request_id_headers=False, enable_auto_tool_choice=False, enable_reasoning=False, reasoning_parser=None, tool_call_parser=None, tool_parser_plugin='', model='meta-llama/Llama-3.1-8B-Instruct', task='auto', tokenizer=None, skip_tokenizer_init=False, revision=None, code_revision=None, tokenizer_revision=None, tokenizer_mode='auto', trust_remote_code=True, allowed_local_media_path=None, download_dir=None, load_format='auto', config_format=<ConfigFormat.AUTO: 'auto'>, dtype='auto', kv_cache_dtype='auto', max_model_len=50000, guided_decoding_backend='xgrammar', logits_processor_pattern=None, model_impl='auto', distributed_executor_backend=None, pipeline_parallel_size=1, tensor_parallel_size=1, max_parallel_loading_workers=None, ray_workers_use_nsight=False, block_size=None, enable_prefix_caching=None, disable_sliding_window=False, use_v2_block_manager=True, num_lookahead_slots=0, seed=0, swap_space=4, cpu_offload_gb=0, gpu_memory_utilization=0.9, num_gpu_blocks_override=None, max_num_batched_tokens=None, max_num_seqs=None, max_logprobs=20, disable_log_stats=True, quantization=None, rope_scaling=None, rope_theta=None, hf_overrides=None, enforce_eager=False, max_seq_len_to_capture=8192, disable_custom_all_reduce=False, tokenizer_pool_size=0, tokenizer_pool_type='ray', tokenizer_pool_extra_config=None, limit_mm_per_prompt=None, mm_processor_kwargs=None, disable_mm_preprocessor_cache=False, enable_lora=False, enable_lora_bias=False, max_loras=1, max_lora_rank=16, lora_extra_vocab_size=256, lora_dtype='auto', long_lora_scaling_factors=None, max_cpu_loras=None, fully_sharded_loras=False, enable_prompt_adapter=False, max_prompt_adapters=1, max_prompt_adapter_token=0, device='auto', num_scheduler_steps=1, multi_step_stream_outputs=True, scheduler_delay_factor=0.0, enable_chunked_prefill=False, speculative_model=None, speculative_model_quantization=None, num_speculative_tokens=None, speculative_disable_mqa_scorer=False, speculative_draft_tensor_parallel_size=None, speculative_max_model_len=None, speculative_disable_by_batch_size=None, ngram_prompt_lookup_max=None, ngram_prompt_lookup_min=None, spec_decoding_acceptance_method='rejection_sampler', typical_acceptance_sampler_posterior_threshold=None, typical_acceptance_sampler_posterior_alpha=None, disable_logprobs_during_spec_decoding=None, model_loader_extra_config=None, ignore_patterns=[], preemption_mode=None, served_model_name=None, qlora_adapter_name_or_path=None, otlp_traces_endpoint=None, collect_detailed_traces=None, disable_async_output_proc=False, scheduling_policy='fcfs', override_neuron_config=None, override_pooler_config=None, compilation_config=None, kv_transfer_config=KVTransferConfig(kv_connector='LMCacheConnector', kv_buffer_device='cuda', kv_buffer_size=1000000000.0, kv_role='kv_both', kv_rank=None, kv_parallel_size=1, kv_ip='127.0.0.1', kv_port=14579), worker_cls='auto', generation_config=None, override_generation_config=None, enable_sleep_mode=False, calculate_kv_scales=False, disable_log_requests=False, max_log_len=None, disable_fastapi_docs=False, enable_prompt_tokens_details=False, dispatch_function=<function serve at 0x797315effba0>)
-INFO 05-11 21:26:26 api_server.py:206] Started engine process with PID 790484
-INFO 05-11 21:26:29 __init__.py:186] Automatically detected platform cuda.
-INFO 05-11 21:26:32 config.py:542] This model supports multiple tasks: {'reward', 'score', 'classify', 'embed', 'generate'}. Defaulting to 'generate'.
-WARNING 05-11 21:26:32 arg_utils.py:1145] The model has a long context length (50000). This may cause OOM errors during the initial memory profiling phase, or result in low performance due to small KV cache space. Consider setting --max-model-len to a smaller value.
-INFO 05-11 21:26:37 config.py:542] This model supports multiple tasks: {'generate', 'score', 'classify', 'reward', 'embed'}. Defaulting to 'generate'.
-WARNING 05-11 21:26:37 arg_utils.py:1145] The model has a long context length (50000). This may cause OOM errors during the initial memory profiling phase, or result in low performance due to small KV cache space. Consider setting --max-model-len to a smaller value.
-INFO 05-11 21:26:37 llm_engine.py:234] Initializing a V0 LLM engine (v0.1.dev4433+geb5db26) with config: model='meta-llama/Llama-3.1-8B-Instruct', speculative_config=None, tokenizer='meta-llama/Llama-3.1-8B-Instruct', skip_tokenizer_init=False, tokenizer_mode=auto, revision=None, override_neuron_config=None, tokenizer_revision=None, trust_remote_code=True, dtype=torch.bfloat16, max_seq_len=50000, download_dir=None, load_format=LoadFormat.AUTO, tensor_parallel_size=1, pipeline_parallel_size=1, disable_custom_all_reduce=False, quantization=None, enforce_eager=False, kv_cache_dtype=auto,  device_config=cuda, decoding_config=DecodingConfig(guided_decoding_backend='xgrammar'), observability_config=ObservabilityConfig(otlp_traces_endpoint=None, collect_model_forward_time=False, collect_model_execute_time=False), seed=0, served_model_name=meta-llama/Llama-3.1-8B-Instruct, num_scheduler_steps=1, multi_step_stream_outputs=True, enable_prefix_caching=False, chunked_prefill_enabled=False, use_async_output_proc=True, disable_mm_preprocessor_cache=False, mm_processor_kwargs=None, pooler_config=None, compilation_config={"splitting_ops":[],"compile_sizes":[],"cudagraph_capture_sizes":[256,248,240,232,224,216,208,200,192,184,176,168,160,152,144,136,128,120,112,104,96,88,80,72,64,56,48,40,32,24,16,8,4,2,1],"max_capture_size":256}, use_cached_outputs=True, 
-INFO 05-11 21:26:39 cuda.py:230] Using Flash Attention backend.
-INFO 05-11 21:26:39 lmcache_connector.py:42] Initializing LMCacheConfig under kv_transfer_config kv_connector='LMCacheConnector' kv_buffer_device='cuda' kv_buffer_size=1000000000.0 kv_role='kv_both' kv_rank=None kv_parallel_size=1 kv_ip='127.0.0.1' kv_port=14579
-[33mINFO LMCache: [0mLoading LMCache config file ../config/qmsum2.yaml [2025-05-11 21:26:39,829] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/utils.py:32
-[33mINFO LMCache: [0mCreating LMCacheEngine instance vllm-instance [2025-05-11 21:26:39,833] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/cache_engine.py:265
-[33mINFO LMCache: [0mChunkedTokenDatabase initialized with alpha 0.01. [2025-05-11 21:27:13,182] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/token_database.py:69
-[33mINFO LMCache: [0mKVCacheManager initialized with self.method: disk and self.rate: 0.728571429 [2025-05-11 21:27:13,184] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:93
-[33mINFO LMCache: [0mInitializing usage context. [2025-05-11 21:27:13,184] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/usage_context.py:235
-[33mDEBUG LMCache: [0mcontext message updated [2025-05-11 21:27:14,424] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/usage_context.py:98
-[33mDEBUG LMCache: [0mcontext message updated [2025-05-11 21:27:14,670] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/usage_context.py:98
-[33mDEBUG LMCache: [0mcontext message updated [2025-05-11 21:27:14,890] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/usage_context.py:98
-INFO 05-11 21:27:14 model_runner.py:1115] Starting to load model meta-llama/Llama-3.1-8B-Instruct...
-INFO 05-11 21:27:15 weight_utils.py:252] Using model weights format ['*.safetensors']
-Loading safetensors checkpoint shards:   0% Completed | 0/4 [00:00<?, ?it/s]
-Loading safetensors checkpoint shards:  25% Completed | 1/4 [00:00<00:02,  1.49it/s]
-Loading safetensors checkpoint shards:  50% Completed | 2/4 [00:01<00:01,  1.96it/s]
-Loading safetensors checkpoint shards:  75% Completed | 3/4 [00:01<00:00,  1.65it/s]
-Loading safetensors checkpoint shards: 100% Completed | 4/4 [00:02<00:00,  1.37it/s]
-Loading safetensors checkpoint shards: 100% Completed | 4/4 [00:02<00:00,  1.48it/s]
-
-INFO 05-11 21:27:18 model_runner.py:1120] Loading model weights took 14.9888 GB
-INFO 05-11 21:27:22 worker.py:267] Memory profiling takes 3.26 seconds
-INFO 05-11 21:27:22 worker.py:267] the current vLLM instance can use total_gpu_memory (39.49GiB) x gpu_memory_utilization (0.90) = 35.55GiB
-INFO 05-11 21:27:22 worker.py:267] model weights take 14.99GiB; non_torch_memory takes 0.19GiB; PyTorch activation peak memory takes 5.16GiB; the rest of the memory reserved for KV Cache is 15.21GiB.
-INFO 05-11 21:27:22 executor_base.py:110] # CUDA blocks: 7786, # CPU blocks: 2048
-INFO 05-11 21:27:22 executor_base.py:115] Maximum concurrency for 50000 tokens per request: 2.49x
-INFO 05-11 21:27:25 model_runner.py:1439] Capturing cudagraphs for decoding. This may lead to unexpected consequences if the model is not static. To run the model in eager mode, set 'enforce_eager=True' or use '--enforce-eager' in the CLI. If out-of-memory error occurs during cudagraph capture, consider decreasing `gpu_memory_utilization` or switching to eager mode. You can also reduce the `max_num_seqs` as needed to decrease memory usage.
-Capturing CUDA graph shapes:   0%|          | 0/35 [00:00<?, ?it/s]Capturing CUDA graph shapes:   3%|▎         | 1/35 [00:00<00:14,  2.35it/s]Capturing CUDA graph shapes:   6%|▌         | 2/35 [00:00<00:13,  2.45it/s]Capturing CUDA graph shapes:   9%|▊         | 3/35 [00:01<00:13,  2.42it/s]Capturing CUDA graph shapes:  11%|█▏        | 4/35 [00:01<00:12,  2.43it/s]Capturing CUDA graph shapes:  14%|█▍        | 5/35 [00:02<00:12,  2.46it/s]Capturing CUDA graph shapes:  17%|█▋        | 6/35 [00:02<00:11,  2.48it/s]Capturing CUDA graph shapes:  20%|██        | 7/35 [00:02<00:11,  2.49it/s]Capturing CUDA graph shapes:  23%|██▎       | 8/35 [00:03<00:10,  2.51it/s]Capturing CUDA graph shapes:  26%|██▌       | 9/35 [00:03<00:10,  2.52it/s]Capturing CUDA graph shapes:  29%|██▊       | 10/35 [00:04<00:09,  2.53it/s]Capturing CUDA graph shapes:  31%|███▏      | 11/35 [00:04<00:09,  2.54it/s]Capturing CUDA graph shapes:  34%|███▍      | 12/35 [00:04<00:09,  2.55it/s]Capturing CUDA graph shapes:  37%|███▋      | 13/35 [00:05<00:08,  2.54it/s]Capturing CUDA graph shapes:  40%|████      | 14/35 [00:05<00:08,  2.55it/s]Capturing CUDA graph shapes:  43%|████▎     | 15/35 [00:05<00:07,  2.54it/s]Capturing CUDA graph shapes:  46%|████▌     | 16/35 [00:06<00:07,  2.54it/s]Capturing CUDA graph shapes:  49%|████▊     | 17/35 [00:06<00:07,  2.55it/s]Capturing CUDA graph shapes:  51%|█████▏    | 18/35 [00:07<00:06,  2.55it/s]Capturing CUDA graph shapes:  54%|█████▍    | 19/35 [00:07<00:06,  2.57it/s]Capturing CUDA graph shapes:  57%|█████▋    | 20/35 [00:07<00:05,  2.58it/s]Capturing CUDA graph shapes:  60%|██████    | 21/35 [00:08<00:05,  2.60it/s]Capturing CUDA graph shapes:  63%|██████▎   | 22/35 [00:08<00:04,  2.63it/s]Capturing CUDA graph shapes:  66%|██████▌   | 23/35 [00:09<00:04,  2.63it/s]Capturing CUDA graph shapes:  69%|██████▊   | 24/35 [00:09<00:04,  2.62it/s]Capturing CUDA graph shapes:  71%|███████▏  | 25/35 [00:09<00:03,  2.64it/s]Capturing CUDA graph shapes:  74%|███████▍  | 26/35 [00:10<00:03,  2.62it/s]Capturing CUDA graph shapes:  77%|███████▋  | 27/35 [00:10<00:03,  2.64it/s]Capturing CUDA graph shapes:  80%|████████  | 28/35 [00:10<00:02,  2.67it/s]Capturing CUDA graph shapes:  83%|████████▎ | 29/35 [00:11<00:02,  2.68it/s]Capturing CUDA graph shapes:  86%|████████▌ | 30/35 [00:11<00:01,  2.69it/s]Capturing CUDA graph shapes:  89%|████████▊ | 31/35 [00:12<00:01,  2.71it/s]Capturing CUDA graph shapes:  91%|█████████▏| 32/35 [00:12<00:01,  2.70it/s]Capturing CUDA graph shapes:  94%|█████████▍| 33/35 [00:12<00:00,  2.72it/s]Capturing CUDA graph shapes:  97%|█████████▋| 34/35 [00:13<00:00,  2.72it/s]Capturing CUDA graph shapes: 100%|██████████| 35/35 [00:13<00:00,  2.70it/s]Capturing CUDA graph shapes: 100%|██████████| 35/35 [00:13<00:00,  2.59it/s]
-INFO 05-11 21:27:39 model_runner.py:1567] Graph capturing finished in 14 secs, took 0.24 GiB
-INFO 05-11 21:27:39 llm_engine.py:431] init engine (profile, create kv cache, warmup model) took 20.64 seconds
-INFO 05-11 21:27:39 api_server.py:756] Using supplied chat template:
-INFO 05-11 21:27:39 api_server.py:756] None
-INFO 05-11 21:27:39 launcher.py:21] Available routes are:
-INFO 05-11 21:27:39 launcher.py:29] Route: /openapi.json, Methods: HEAD, GET
-INFO 05-11 21:27:39 launcher.py:29] Route: /docs, Methods: HEAD, GET
-INFO 05-11 21:27:39 launcher.py:29] Route: /docs/oauth2-redirect, Methods: HEAD, GET
-INFO 05-11 21:27:39 launcher.py:29] Route: /redoc, Methods: HEAD, GET
-INFO 05-11 21:27:39 launcher.py:29] Route: /health, Methods: GET
-INFO 05-11 21:27:39 launcher.py:29] Route: /ping, Methods: POST, GET
-INFO 05-11 21:27:39 launcher.py:29] Route: /tokenize, Methods: POST
-INFO 05-11 21:27:39 launcher.py:29] Route: /detokenize, Methods: POST
-INFO 05-11 21:27:39 launcher.py:29] Route: /v1/models, Methods: GET
-INFO 05-11 21:27:39 launcher.py:29] Route: /version, Methods: GET
-INFO 05-11 21:27:39 launcher.py:29] Route: /v1/chat/completions, Methods: POST
-INFO 05-11 21:27:39 launcher.py:29] Route: /v1/completions, Methods: POST
-INFO 05-11 21:27:39 launcher.py:29] Route: /v1/embeddings, Methods: POST
-INFO 05-11 21:27:39 launcher.py:29] Route: /pooling, Methods: POST
-INFO 05-11 21:27:39 launcher.py:29] Route: /score, Methods: POST
-INFO 05-11 21:27:39 launcher.py:29] Route: /v1/score, Methods: POST
-INFO 05-11 21:27:39 launcher.py:29] Route: /rerank, Methods: POST
-INFO 05-11 21:27:39 launcher.py:29] Route: /v1/rerank, Methods: POST
-INFO 05-11 21:27:39 launcher.py:29] Route: /v2/rerank, Methods: POST
-INFO 05-11 21:27:39 launcher.py:29] Route: /invocations, Methods: POST
-INFO:     Started server process [790403]
-INFO:     Waiting for application startup.
-INFO:     Application startup complete.
-INFO:     Uvicorn running on http://0.0.0.0:8001 (Press CTRL+C to quit)
-INFO:     127.0.0.1:47756 - "GET /health HTTP/1.1" 200 OK
-INFO 05-11 21:27:40 chat_utils.py:332] Detected the chat template content format to be 'string'. You can set `--chat-template-content-format` to override this.
-INFO:     127.0.0.1:47766 - "POST /v1/chat/completions HTTP/1.1" 200 OK
-INFO 05-11 21:27:40 engine.py:275] Added request chatcmpl-b09bc98bbdf14100b7c2dd7632951783.
-[33mDEBUG LMCache: [0mReturning the original input! [2025-05-11 21:27:41,183] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
-[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 616 tokens [2025-05-11 21:27:41,262] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
-INFO 05-11 21:27:41 llm_engine.py:1143] Start updating memory
-INFO:     127.0.0.1:47766 - "POST /v1/chat/completions HTTP/1.1" 200 OK
-INFO 05-11 21:27:41 engine.py:275] Added request chatcmpl-69450b9716b14caba61f4c2d5d342bfe.
-[33mDEBUG LMCache: [0mReturning the original input! [2025-05-11 21:27:41,888] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
-[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 616 tokens [2025-05-11 21:27:41,954] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
-INFO 05-11 21:27:42 llm_engine.py:1143] Start updating memory
-INFO:     127.0.0.1:47766 - "POST /v1/chat/completions HTTP/1.1" 200 OK
-INFO 05-11 21:27:42 engine.py:275] Added request chatcmpl-a2698c225c5847648f8d9e9d15f37862.
-[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-11 21:27:42,082] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
-[33mDEBUG LMCache: [0mReturning the original input! [2025-05-11 21:27:42,082] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
-[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 8116 tokens [2025-05-11 21:27:42,882] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
-INFO 05-11 21:27:43 llm_engine.py:1143] Start updating memory
-INFO:     127.0.0.1:47766 - "POST /v1/chat/completions HTTP/1.1" 200 OK
-INFO 05-11 21:27:43 engine.py:275] Added request chatcmpl-ded6c57bf0794146a1fdd51a00a961f8.
-[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-11 21:27:43,837] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
-[33mDEBUG LMCache: [0mReturning the original input! [2025-05-11 21:27:43,837] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
-[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 10116 tokens [2025-05-11 21:27:44,853] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
-INFO 05-11 21:27:45 llm_engine.py:1143] Start updating memory
-INFO:     127.0.0.1:47766 - "POST /v1/chat/completions HTTP/1.1" 200 OK
-INFO 05-11 21:27:45 engine.py:275] Added request chatcmpl-92d6dfc64ce24074b212b034478e57e3.
-[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-11 21:27:45,363] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
-[33mDEBUG LMCache: [0mReturning the original input! [2025-05-11 21:27:45,363] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
-[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 12116 tokens [2025-05-11 21:27:46,611] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
-INFO 05-11 21:27:46 llm_engine.py:1143] Start updating memory
-INFO:     127.0.0.1:47766 - "POST /v1/chat/completions HTTP/1.1" 200 OK
-INFO 05-11 21:27:47 engine.py:275] Added request chatcmpl-1534da3756c3460fa3220d4570d233a5.
-[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-11 21:27:47,194] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
-[33mDEBUG LMCache: [0mReturning the original input! [2025-05-11 21:27:47,194] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
-[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 14116 tokens [2025-05-11 21:27:48,682] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
-INFO 05-11 21:27:49 llm_engine.py:1143] Start updating memory
-INFO:     127.0.0.1:47766 - "POST /v1/chat/completions HTTP/1.1" 200 OK
-INFO 05-11 21:27:49 engine.py:275] Added request chatcmpl-071fc4dee61e40f8bcba472e66e5d26b.
-[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-11 21:27:49,834] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
-[33mDEBUG LMCache: [0mReturning the original input! [2025-05-11 21:27:49,834] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
-[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 16116 tokens [2025-05-11 21:27:51,553] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
-INFO 05-11 21:27:51 llm_engine.py:1143] Start updating memory
-INFO:     127.0.0.1:47766 - "POST /v1/chat/completions HTTP/1.1" 200 OK
-INFO 05-11 21:27:52 engine.py:275] Added request chatcmpl-2d9654434aeb4b30937ef72751d87939.
-[33mINFO LMCache: [0mDirect I/O: read 75497472 bytes from /home/ubuntu/kvcache/vllm@meta-llama-Llama-3.1-8B-Instruct@1@0@ceffeb578af27fd0f6b8b6564d2b25e31fb02ae9b467c9973c2f82c0c5566693.pt in 0.009 s (≈ 8.21 GiB/s) [2025-05-11 21:27:52,254] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/local_disk_backend.py:280
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 21:27:52,320] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDirect I/O: read 75497472 bytes from /home/ubuntu/kvcache/vllm@meta-llama-Llama-3.1-8B-Instruct@1@0@01d457bfd58e82da4d61f1a4b2377988226ae08871286f8b9e8992ec6ac6dd2c.pt in 0.010 s (≈ 6.87 GiB/s) [2025-05-11 21:27:52,330] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/local_disk_backend.py:280
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 21:27:52,347] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDirect I/O: read 75497472 bytes from /home/ubuntu/kvcache/vllm@meta-llama-Llama-3.1-8B-Instruct@1@0@4b67b0a86638d7d5c61d5586b2dc90141f8a11cb2908399d50002b66a7e4b224.pt in 0.007 s (≈ 9.63 GiB/s) [2025-05-11 21:27:52,354] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/local_disk_backend.py:280
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 21:27:52,371] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDirect I/O: read 75497472 bytes from /home/ubuntu/kvcache/vllm@meta-llama-Llama-3.1-8B-Instruct@1@0@2de240bf971af298d122523ddea6c39d235eca1ad95c8cee9a70cd26c64127c5.pt in 0.008 s (≈ 8.48 GiB/s) [2025-05-11 21:27:52,379] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/local_disk_backend.py:280
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 21:27:52,395] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDirect I/O: read 75497472 bytes from /home/ubuntu/kvcache/vllm@meta-llama-Llama-3.1-8B-Instruct@1@0@d38f3ea8cea62847e6f7f4a3e55fea4cef0c99ce3f967a3681d2db804001f895.pt in 0.009 s (≈ 8.18 GiB/s) [2025-05-11 21:27:52,404] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/local_disk_backend.py:280
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 21:27:52,421] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDirect I/O: read 75497472 bytes from /home/ubuntu/kvcache/vllm@meta-llama-Llama-3.1-8B-Instruct@1@0@de6d633ecd07df85d71b9fbd1a8aee01d4c3b4939fc9f2988e5ddab1087254df.pt in 0.007 s (≈ 10.82 GiB/s) [2025-05-11 21:27:52,428] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/local_disk_backend.py:280
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 21:27:52,444] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDirect I/O: read 75497472 bytes from /home/ubuntu/kvcache/vllm@meta-llama-Llama-3.1-8B-Instruct@1@0@bdf52ab06bb12d554177f265597e2bdc224754b252351c0ea6805f28cd725eb8.pt in 0.008 s (≈ 8.94 GiB/s) [2025-05-11 21:27:52,452] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/local_disk_backend.py:280
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 21:27:52,472] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDirect I/O: read 72876032 bytes from /home/ubuntu/kvcache/vllm@meta-llama-Llama-3.1-8B-Instruct@1@0@c15c672920bddf9185c0bbc47c7d63dda92a77d6564aa02ac18f5e9517bc67eb.pt in 0.007 s (≈ 10.05 GiB/s) [2025-05-11 21:27:52,479] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/local_disk_backend.py:280
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 21:27:52,498] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mDEBUG LMCache: [0mInjected token number: 8115 [2025-05-11 21:27:52,498] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
-[33mDEBUG LMCache: [0mRebuilt the input! [2025-05-11 21:27:52,507] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:769
-[33mDEBUG LMCache: [0mStore skips 8116 tokens and then stores 0 tokens [2025-05-11 21:27:52,527] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
-INFO 05-11 21:27:53 llm_engine.py:1143] Start updating memory
-INFO:     127.0.0.1:47766 - "POST /v1/chat/completions HTTP/1.1" 200 OK
-INFO 05-11 21:27:53 engine.py:275] Added request chatcmpl-cb1625fce76548579e894978a1a1405e.
-[33mINFO LMCache: [0mDirect I/O: read 75497472 bytes from /home/ubuntu/kvcache/vllm@meta-llama-Llama-3.1-8B-Instruct@1@0@b95eb40c2a38bc954305990b74d303895a75ce63f6a49c396d506ff67e714ef1.pt in 0.032 s (≈ 2.18 GiB/s) [2025-05-11 21:27:53,238] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/local_disk_backend.py:280
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 21:27:53,255] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDirect I/O: read 75497472 bytes from /home/ubuntu/kvcache/vllm@meta-llama-Llama-3.1-8B-Instruct@1@0@80ca1c1609a164452747e3b68f46290afe47eec41a78a6d2d61672e6cbdb0520.pt in 0.033 s (≈ 2.12 GiB/s) [2025-05-11 21:27:53,289] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/local_disk_backend.py:280
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 21:27:53,305] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDirect I/O: read 75497472 bytes from /home/ubuntu/kvcache/vllm@meta-llama-Llama-3.1-8B-Instruct@1@0@9489ca49f1938f2cdb6db2f08e200f3d8ae77338a29487b0f9a67ebb65ec87a0.pt in 0.034 s (≈ 2.10 GiB/s) [2025-05-11 21:27:53,339] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/local_disk_backend.py:280
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 21:27:53,355] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDirect I/O: read 75497472 bytes from /home/ubuntu/kvcache/vllm@meta-llama-Llama-3.1-8B-Instruct@1@0@415c42690c9e61bd55e11e9c2f2efeef6e3de18691ccce4e6fa5fe1d8a68db22.pt in 0.033 s (≈ 2.16 GiB/s) [2025-05-11 21:27:53,388] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/local_disk_backend.py:280
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 21:27:53,404] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDirect I/O: read 75497472 bytes from /home/ubuntu/kvcache/vllm@meta-llama-Llama-3.1-8B-Instruct@1@0@0999664ef96eefcb152c8d73e175a4530b76769ce0489db84b8d35a52d98b424.pt in 0.032 s (≈ 2.19 GiB/s) [2025-05-11 21:27:53,436] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/local_disk_backend.py:280
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 21:27:53,453] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDirect I/O: read 75497472 bytes from /home/ubuntu/kvcache/vllm@meta-llama-Llama-3.1-8B-Instruct@1@0@83403023916606e06ab0ee435be4e0014475b36d2b95fc247ad8340a6633a131.pt in 0.032 s (≈ 2.21 GiB/s) [2025-05-11 21:27:53,485] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/local_disk_backend.py:280
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 21:27:53,501] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDirect I/O: read 75497472 bytes from /home/ubuntu/kvcache/vllm@meta-llama-Llama-3.1-8B-Instruct@1@0@28922dcea849c98bb0e1188fe4f39469475e3f4a6fcc67c5cf73dac5b84929cd.pt in 0.032 s (≈ 2.17 GiB/s) [2025-05-11 21:27:53,534] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/local_disk_backend.py:280
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 21:27:53,550] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDirect I/O: read 75497472 bytes from /home/ubuntu/kvcache/vllm@meta-llama-Llama-3.1-8B-Instruct@1@0@07d001bafcc461005ad278965d3d1f81b9da222ab91edd2bc4ff82423751d9a2.pt in 0.033 s (≈ 2.13 GiB/s) [2025-05-11 21:27:53,583] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/local_disk_backend.py:280
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 21:27:53,599] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDirect I/O: read 75497472 bytes from /home/ubuntu/kvcache/vllm@meta-llama-Llama-3.1-8B-Instruct@1@0@515f00a3be98f23c5498de886a0eaf1030ce246176c81ecfd51d78d40f9e655a.pt in 0.032 s (≈ 2.20 GiB/s) [2025-05-11 21:27:53,632] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/local_disk_backend.py:280
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 21:27:53,648] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDirect I/O: read 66584576 bytes from /home/ubuntu/kvcache/vllm@meta-llama-Llama-3.1-8B-Instruct@1@0@ae78513f9aad6d3be4fdd7b754c1caef1d6bc9cbf10b3be1100686444a010d3c.pt in 0.029 s (≈ 2.17 GiB/s) [2025-05-11 21:27:53,677] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/local_disk_backend.py:280
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 21:27:53,695] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mDEBUG LMCache: [0mInjected token number: 10115 [2025-05-11 21:27:53,695] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
-[33mDEBUG LMCache: [0mRebuilt the input! [2025-05-11 21:27:53,705] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:769
-[33mDEBUG LMCache: [0mStore skips 10116 tokens and then stores 0 tokens [2025-05-11 21:27:53,725] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
-INFO 05-11 21:27:53 llm_engine.py:1143] Start updating memory
-INFO:     127.0.0.1:47766 - "POST /v1/chat/completions HTTP/1.1" 200 OK
-INFO 05-11 21:27:53 engine.py:275] Added request chatcmpl-51ddf79d160d4b9294a2725e4e3e91ed.
-[33mINFO LMCache: [0mDirect I/O: read 75497472 bytes from /home/ubuntu/kvcache/vllm@meta-llama-Llama-3.1-8B-Instruct@1@0@cca745d9dc338c43965d616a83fab4a534c814c599d2dc37c0c2e6e9f76e1af3.pt in 0.033 s (≈ 2.13 GiB/s) [2025-05-11 21:27:53,956] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/local_disk_backend.py:280
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 21:27:53,972] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDirect I/O: read 75497472 bytes from /home/ubuntu/kvcache/vllm@meta-llama-Llama-3.1-8B-Instruct@1@0@7df5189921d1854c7bf2b42f3ef054b31fd7e8048139ed04ad0e03b1bbb42895.pt in 0.034 s (≈ 2.06 GiB/s) [2025-05-11 21:27:54,007] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/local_disk_backend.py:280
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 21:27:54,023] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDirect I/O: read 75497472 bytes from /home/ubuntu/kvcache/vllm@meta-llama-Llama-3.1-8B-Instruct@1@0@36e61173a5187c55a4ba7edfe9cc7d3d381a6a6611ad6f81cc4487d8af4658b7.pt in 0.034 s (≈ 2.10 GiB/s) [2025-05-11 21:27:54,057] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/local_disk_backend.py:280
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 21:27:54,073] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDirect I/O: read 75497472 bytes from /home/ubuntu/kvcache/vllm@meta-llama-Llama-3.1-8B-Instruct@1@0@82655e07b1f85f4bd2d99b8c67663439e76caaf6b078a7e88375d0f10790c475.pt in 0.033 s (≈ 2.13 GiB/s) [2025-05-11 21:27:54,107] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/local_disk_backend.py:280
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 21:27:54,123] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDirect I/O: read 75497472 bytes from /home/ubuntu/kvcache/vllm@meta-llama-Llama-3.1-8B-Instruct@1@0@702a9fe3311187af43d1c2a1a762ee723f8f80958d9399308609bd9649e361d5.pt in 0.032 s (≈ 2.18 GiB/s) [2025-05-11 21:27:54,156] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/local_disk_backend.py:280
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 21:27:54,172] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDirect I/O: read 75497472 bytes from /home/ubuntu/kvcache/vllm@meta-llama-Llama-3.1-8B-Instruct@1@0@87731f89ac8d8fadb9ed605e3e6ee7952ab5a836eaf9be9a374f8e4092882123.pt in 0.034 s (≈ 2.10 GiB/s) [2025-05-11 21:27:54,206] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/local_disk_backend.py:280
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 21:27:54,222] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDirect I/O: read 75497472 bytes from /home/ubuntu/kvcache/vllm@meta-llama-Llama-3.1-8B-Instruct@1@0@180bfb436fb4a0ea762bb693aa6d764a4fc5f12f5a21b6daed923805ba1dfa6b.pt in 0.033 s (≈ 2.12 GiB/s) [2025-05-11 21:27:54,255] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/local_disk_backend.py:280
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 21:27:54,272] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDirect I/O: read 75497472 bytes from /home/ubuntu/kvcache/vllm@meta-llama-Llama-3.1-8B-Instruct@1@0@8a664a0831399fef9ac734b34b5add789299cf6b00259ce89d3cc9219f520a44.pt in 0.033 s (≈ 2.10 GiB/s) [2025-05-11 21:27:54,305] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/local_disk_backend.py:280
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 21:27:54,322] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDirect I/O: read 75497472 bytes from /home/ubuntu/kvcache/vllm@meta-llama-Llama-3.1-8B-Instruct@1@0@e48de0da30cbb4d8f7e81fae341e99a72b330ffdbd07a58a5b202218d2e2d148.pt in 0.033 s (≈ 2.15 GiB/s) [2025-05-11 21:27:54,355] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/local_disk_backend.py:280
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 21:27:54,371] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDirect I/O: read 75497472 bytes from /home/ubuntu/kvcache/vllm@meta-llama-Llama-3.1-8B-Instruct@1@0@73a6472a8e8279c7d624f3ee25ae08f415942ca70565a225b338e69d3d799824.pt in 0.033 s (≈ 2.11 GiB/s) [2025-05-11 21:27:54,405] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/local_disk_backend.py:280
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 21:27:54,421] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDirect I/O: read 75497472 bytes from /home/ubuntu/kvcache/vllm@meta-llama-Llama-3.1-8B-Instruct@1@0@168ac8f657825cca964967f137cb48e225508ac65c1337517fe5dbb718355bc4.pt in 0.029 s (≈ 2.43 GiB/s) [2025-05-11 21:27:54,450] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/local_disk_backend.py:280
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 21:27:54,466] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDirect I/O: read 67633152 bytes from /home/ubuntu/kvcache/vllm@meta-llama-Llama-3.1-8B-Instruct@1@0@d05d02c316c07cb025c81dbec6e9b9c68cbdaa69b323ce87ae0f8ac754cc44cf.pt in 0.028 s (≈ 2.28 GiB/s) [2025-05-11 21:27:54,494] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/local_disk_backend.py:280
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 21:27:54,513] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mDEBUG LMCache: [0mInjected token number: 12115 [2025-05-11 21:27:54,513] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
-[33mDEBUG LMCache: [0mRebuilt the input! [2025-05-11 21:27:54,525] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:769
-[33mDEBUG LMCache: [0mStore skips 12116 tokens and then stores 0 tokens [2025-05-11 21:27:54,545] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
-INFO 05-11 21:27:54 llm_engine.py:1143] Start updating memory
-INFO:     127.0.0.1:47766 - "POST /v1/chat/completions HTTP/1.1" 200 OK
-INFO 05-11 21:27:54 engine.py:275] Added request chatcmpl-f07dbd98602a4056929fc39a8a240594.
-[33mINFO LMCache: [0mDirect I/O: read 75497472 bytes from /home/ubuntu/kvcache/vllm@meta-llama-Llama-3.1-8B-Instruct@1@0@dab41359226fabaa19c1bdc2516b173acfb7820be98338dcf7c4eaf4a0ab38a4.pt in 0.032 s (≈ 2.18 GiB/s) [2025-05-11 21:27:54,780] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/local_disk_backend.py:280
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 21:27:54,796] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDirect I/O: read 75497472 bytes from /home/ubuntu/kvcache/vllm@meta-llama-Llama-3.1-8B-Instruct@1@0@d415886971a5a63f0ef6ca42a05a80d1755da0d3f07cc510ae5cb3ffdcff77a6.pt in 0.030 s (≈ 2.31 GiB/s) [2025-05-11 21:27:54,827] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/local_disk_backend.py:280
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 21:27:54,843] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDirect I/O: read 75497472 bytes from /home/ubuntu/kvcache/vllm@meta-llama-Llama-3.1-8B-Instruct@1@0@3598a76595cf4767fe93cb352575e3e4192ce7f4877febb0d527efbef295c951.pt in 0.030 s (≈ 2.34 GiB/s) [2025-05-11 21:27:54,874] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/local_disk_backend.py:280
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 21:27:54,890] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDirect I/O: read 75497472 bytes from /home/ubuntu/kvcache/vllm@meta-llama-Llama-3.1-8B-Instruct@1@0@20311b0afbe468fb2f4637902f7eba2dcdc6fce8729f7612abf2f50c774a2619.pt in 0.031 s (≈ 2.27 GiB/s) [2025-05-11 21:27:54,921] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/local_disk_backend.py:280
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 21:27:54,938] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDirect I/O: read 75497472 bytes from /home/ubuntu/kvcache/vllm@meta-llama-Llama-3.1-8B-Instruct@1@0@82f02d30b8a52ace124468d35f3efe0328ed8227ae59b4c98d4ce04e4207cd62.pt in 0.030 s (≈ 2.31 GiB/s) [2025-05-11 21:27:54,969] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/local_disk_backend.py:280
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 21:27:54,985] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDirect I/O: read 75497472 bytes from /home/ubuntu/kvcache/vllm@meta-llama-Llama-3.1-8B-Instruct@1@0@47e53259d0a1d1293eafb5574fe6f99ab71a91cb5e51d9c5e78d2a170d1d5017.pt in 0.029 s (≈ 2.39 GiB/s) [2025-05-11 21:27:55,015] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/local_disk_backend.py:280
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 21:27:55,031] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDirect I/O: read 75497472 bytes from /home/ubuntu/kvcache/vllm@meta-llama-Llama-3.1-8B-Instruct@1@0@9e583b4de958f910171ced2478410fb2b3503862e2a1dd8bd6d48d57da750bcc.pt in 0.030 s (≈ 2.37 GiB/s) [2025-05-11 21:27:55,061] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/local_disk_backend.py:280
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 21:27:55,077] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDirect I/O: read 75497472 bytes from /home/ubuntu/kvcache/vllm@meta-llama-Llama-3.1-8B-Instruct@1@0@34003404231f17fe2a7bea917652d4c763a5f2767e13e6ceaa53cc27b6ddcbd2.pt in 0.030 s (≈ 2.35 GiB/s) [2025-05-11 21:27:55,107] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/local_disk_backend.py:280
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 21:27:55,123] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDirect I/O: read 75497472 bytes from /home/ubuntu/kvcache/vllm@meta-llama-Llama-3.1-8B-Instruct@1@0@a163b2f195da5f7e0f10ba71e65f891d1d108ce5bfca6c9d8fe8d8ac1a832025.pt in 0.030 s (≈ 2.32 GiB/s) [2025-05-11 21:27:55,154] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/local_disk_backend.py:280
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 21:27:55,170] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDirect I/O: read 75497472 bytes from /home/ubuntu/kvcache/vllm@meta-llama-Llama-3.1-8B-Instruct@1@0@b5b0a3d616bbcc8e5444b067a8c14b38190ca12c893e26039f2510d9f09d20c3.pt in 0.030 s (≈ 2.38 GiB/s) [2025-05-11 21:27:55,200] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/local_disk_backend.py:280
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 21:27:55,217] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDirect I/O: read 75497472 bytes from /home/ubuntu/kvcache/vllm@meta-llama-Llama-3.1-8B-Instruct@1@0@a28f3b8bc154ae4939c5c952c870a2e9836e3d4f931fef9c08a1bb9d21699b0f.pt in 0.029 s (≈ 2.38 GiB/s) [2025-05-11 21:27:55,246] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/local_disk_backend.py:280
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 21:27:55,263] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDirect I/O: read 75497472 bytes from /home/ubuntu/kvcache/vllm@meta-llama-Llama-3.1-8B-Instruct@1@0@610da02a1974fee6ec1213ea637a95b47045805ef166f7d0e2a91a0b80c5ac8d.pt in 0.031 s (≈ 2.30 GiB/s) [2025-05-11 21:27:55,293] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/local_disk_backend.py:280
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 21:27:55,310] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDirect I/O: read 75497472 bytes from /home/ubuntu/kvcache/vllm@meta-llama-Llama-3.1-8B-Instruct@1@0@2481764007ee8ddf93966131fc90cd82c326c2b667b3c7e15e8cec0fa5c643d5.pt in 0.030 s (≈ 2.33 GiB/s) [2025-05-11 21:27:55,340] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/local_disk_backend.py:280
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 21:27:55,357] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDirect I/O: read 61341696 bytes from /home/ubuntu/kvcache/vllm@meta-llama-Llama-3.1-8B-Instruct@1@0@e16a8d9333706361f35c75e64161b7e74d2297ccb319a69bce0d858654dd9078.pt in 0.025 s (≈ 2.25 GiB/s) [2025-05-11 21:27:55,383] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/local_disk_backend.py:280
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 21:27:55,400] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mDEBUG LMCache: [0mInjected token number: 14115 [2025-05-11 21:27:55,401] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
-[33mDEBUG LMCache: [0mRebuilt the input! [2025-05-11 21:27:55,414] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:769
-[33mDEBUG LMCache: [0mStore skips 14116 tokens and then stores 0 tokens [2025-05-11 21:27:55,434] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
-INFO 05-11 21:27:56 llm_engine.py:1143] Start updating memory
-INFO:     127.0.0.1:47766 - "POST /v1/chat/completions HTTP/1.1" 200 OK
-INFO 05-11 21:27:56 engine.py:275] Added request chatcmpl-5042fe143848473eb67cafb4a6b8db95.
-[33mINFO LMCache: [0mDirect I/O: read 75497472 bytes from /home/ubuntu/kvcache/vllm@meta-llama-Llama-3.1-8B-Instruct@1@0@e1373df1f0f8711cca5619f39fa98b87a5360483af5d3edc27f1f268fe5fabfd.pt in 0.032 s (≈ 2.20 GiB/s) [2025-05-11 21:27:56,307] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/local_disk_backend.py:280
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 21:27:56,324] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDirect I/O: read 75497472 bytes from /home/ubuntu/kvcache/vllm@meta-llama-Llama-3.1-8B-Instruct@1@0@2b74863b401908de0d8a86341b10430caf669c8f0533d4cdee63df0eb3f4f00e.pt in 0.033 s (≈ 2.12 GiB/s) [2025-05-11 21:27:56,358] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/local_disk_backend.py:280
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 21:27:56,374] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDirect I/O: read 75497472 bytes from /home/ubuntu/kvcache/vllm@meta-llama-Llama-3.1-8B-Instruct@1@0@4722540941982e90c9ec1533babe611df960fe8d6e42231f1175769ec2f32ee2.pt in 0.032 s (≈ 2.17 GiB/s) [2025-05-11 21:27:56,407] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/local_disk_backend.py:280
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 21:27:56,423] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDirect I/O: read 75497472 bytes from /home/ubuntu/kvcache/vllm@meta-llama-Llama-3.1-8B-Instruct@1@0@6a2fae39135d483c28c2b4e93cc20098e2640708c4a9612c80ba56008a093abe.pt in 0.032 s (≈ 2.20 GiB/s) [2025-05-11 21:27:56,455] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/local_disk_backend.py:280
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 21:27:56,472] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDirect I/O: read 75497472 bytes from /home/ubuntu/kvcache/vllm@meta-llama-Llama-3.1-8B-Instruct@1@0@3cbd26f31ff92b4c5fd7097be7b05d7a6301d0921a1dcf686b61d530cd4b524d.pt in 0.031 s (≈ 2.29 GiB/s) [2025-05-11 21:27:56,503] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/local_disk_backend.py:280
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 21:27:56,519] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDirect I/O: read 75497472 bytes from /home/ubuntu/kvcache/vllm@meta-llama-Llama-3.1-8B-Instruct@1@0@d7665fcb65d359b52296b4e65ec31acf19151c77fc03409c1fa9027105d4b17f.pt in 0.032 s (≈ 2.18 GiB/s) [2025-05-11 21:27:56,551] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/local_disk_backend.py:280
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 21:27:56,568] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDirect I/O: read 75497472 bytes from /home/ubuntu/kvcache/vllm@meta-llama-Llama-3.1-8B-Instruct@1@0@def45cf77bd35fa05878fa06b80c05202653dfb10cb1b1fc87879262da69f01d.pt in 0.034 s (≈ 2.07 GiB/s) [2025-05-11 21:27:56,602] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/local_disk_backend.py:280
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 21:27:56,618] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDirect I/O: read 75497472 bytes from /home/ubuntu/kvcache/vllm@meta-llama-Llama-3.1-8B-Instruct@1@0@1d5ad3b71a02608c0f20debeb4f74396f75e3a664611b1447b11b9210537a445.pt in 0.032 s (≈ 2.18 GiB/s) [2025-05-11 21:27:56,651] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/local_disk_backend.py:280
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 21:27:56,667] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDirect I/O: read 75497472 bytes from /home/ubuntu/kvcache/vllm@meta-llama-Llama-3.1-8B-Instruct@1@0@c0ec7e88af3c0b73de153353b811bda40e12617387bc836e0d5499e25c040bda.pt in 0.033 s (≈ 2.15 GiB/s) [2025-05-11 21:27:56,700] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/local_disk_backend.py:280
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 21:27:56,717] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDirect I/O: read 75497472 bytes from /home/ubuntu/kvcache/vllm@meta-llama-Llama-3.1-8B-Instruct@1@0@f472c4f6a4e2ace49e5b35a9fb5f6ebbecd23f007d2e13199eb0eaab2e83a4ee.pt in 0.034 s (≈ 2.07 GiB/s) [2025-05-11 21:27:56,751] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/local_disk_backend.py:280
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 21:27:56,767] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDirect I/O: read 75497472 bytes from /home/ubuntu/kvcache/vllm@meta-llama-Llama-3.1-8B-Instruct@1@0@c5e9a5d78a8333483ea3b555472a25e69b926cc7455c9131468af205dd09b437.pt in 0.033 s (≈ 2.14 GiB/s) [2025-05-11 21:27:56,801] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/local_disk_backend.py:280
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 21:27:56,817] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDirect I/O: read 75497472 bytes from /home/ubuntu/kvcache/vllm@meta-llama-Llama-3.1-8B-Instruct@1@0@be77cc206af86cccef1855538a39b496bb4e4d23240a0ba21e8697a30f08a3b9.pt in 0.034 s (≈ 2.09 GiB/s) [2025-05-11 21:27:56,851] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/local_disk_backend.py:280
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 21:27:56,867] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDirect I/O: read 75497472 bytes from /home/ubuntu/kvcache/vllm@meta-llama-Llama-3.1-8B-Instruct@1@0@deb7031655f054669eb269f6896144a32e212a7fa9671fdd761c764cecbf2760.pt in 0.034 s (≈ 2.09 GiB/s) [2025-05-11 21:27:56,901] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/local_disk_backend.py:280
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 21:27:56,917] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDirect I/O: read 75497472 bytes from /home/ubuntu/kvcache/vllm@meta-llama-Llama-3.1-8B-Instruct@1@0@fab1f373cc05b46debb7e50fa7ed26aaebbaaf68294076d89b3a63b4d3d8e0a4.pt in 0.033 s (≈ 2.13 GiB/s) [2025-05-11 21:27:56,951] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/local_disk_backend.py:280
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 21:27:56,967] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDirect I/O: read 75497472 bytes from /home/ubuntu/kvcache/vllm@meta-llama-Llama-3.1-8B-Instruct@1@0@34a4b5f5f272349368f4e996a8c10687f2aeefbd0392f73f88a8c8ec19790f7c.pt in 0.033 s (≈ 2.16 GiB/s) [2025-05-11 21:27:57,000] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/local_disk_backend.py:280
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 21:27:57,016] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDirect I/O: read 62390272 bytes from /home/ubuntu/kvcache/vllm@meta-llama-Llama-3.1-8B-Instruct@1@0@b5d3bd8a2df32f491c3855fedf6c823552961185f3e118f7323145c42351e1c8.pt in 0.028 s (≈ 2.07 GiB/s) [2025-05-11 21:27:57,044] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/local_disk_backend.py:280
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 21:27:57,062] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mDEBUG LMCache: [0mInjected token number: 16115 [2025-05-11 21:27:57,062] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
-[33mDEBUG LMCache: [0mRebuilt the input! [2025-05-11 21:27:57,078] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:769
-[33mDEBUG LMCache: [0mStore skips 16116 tokens and then stores 0 tokens [2025-05-11 21:27:57,098] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
-INFO 05-11 21:27:57 llm_engine.py:1143] Start updating memory

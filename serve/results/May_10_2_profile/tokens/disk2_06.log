@@ -1,258 +1,0 @@
-INFO 05-11 20:53:18 __init__.py:186] Automatically detected platform cuda.
-INFO 05-11 20:53:20 api_server.py:840] vLLM API server version 0.1.dev4433+geb5db26
-INFO 05-11 20:53:20 api_server.py:841] args: Namespace(subparser='serve', model_tag='meta-llama/Llama-3.1-8B-Instruct', config='', host=None, port=8001, uvicorn_log_level='info', allow_credentials=False, allowed_origins=['*'], allowed_methods=['*'], allowed_headers=['*'], api_key=None, lora_modules=None, prompt_adapters=None, chat_template=None, chat_template_content_format='auto', response_role='assistant', ssl_keyfile=None, ssl_certfile=None, ssl_ca_certs=None, ssl_cert_reqs=0, root_path=None, middleware=[], return_tokens_as_token_ids=False, disable_frontend_multiprocessing=False, enable_request_id_headers=False, enable_auto_tool_choice=False, enable_reasoning=False, reasoning_parser=None, tool_call_parser=None, tool_parser_plugin='', model='meta-llama/Llama-3.1-8B-Instruct', task='auto', tokenizer=None, skip_tokenizer_init=False, revision=None, code_revision=None, tokenizer_revision=None, tokenizer_mode='auto', trust_remote_code=True, allowed_local_media_path=None, download_dir=None, load_format='auto', config_format=<ConfigFormat.AUTO: 'auto'>, dtype='auto', kv_cache_dtype='auto', max_model_len=50000, guided_decoding_backend='xgrammar', logits_processor_pattern=None, model_impl='auto', distributed_executor_backend=None, pipeline_parallel_size=1, tensor_parallel_size=1, max_parallel_loading_workers=None, ray_workers_use_nsight=False, block_size=None, enable_prefix_caching=None, disable_sliding_window=False, use_v2_block_manager=True, num_lookahead_slots=0, seed=0, swap_space=4, cpu_offload_gb=0, gpu_memory_utilization=0.9, num_gpu_blocks_override=None, max_num_batched_tokens=None, max_num_seqs=None, max_logprobs=20, disable_log_stats=True, quantization=None, rope_scaling=None, rope_theta=None, hf_overrides=None, enforce_eager=False, max_seq_len_to_capture=8192, disable_custom_all_reduce=False, tokenizer_pool_size=0, tokenizer_pool_type='ray', tokenizer_pool_extra_config=None, limit_mm_per_prompt=None, mm_processor_kwargs=None, disable_mm_preprocessor_cache=False, enable_lora=False, enable_lora_bias=False, max_loras=1, max_lora_rank=16, lora_extra_vocab_size=256, lora_dtype='auto', long_lora_scaling_factors=None, max_cpu_loras=None, fully_sharded_loras=False, enable_prompt_adapter=False, max_prompt_adapters=1, max_prompt_adapter_token=0, device='auto', num_scheduler_steps=1, multi_step_stream_outputs=True, scheduler_delay_factor=0.0, enable_chunked_prefill=False, speculative_model=None, speculative_model_quantization=None, num_speculative_tokens=None, speculative_disable_mqa_scorer=False, speculative_draft_tensor_parallel_size=None, speculative_max_model_len=None, speculative_disable_by_batch_size=None, ngram_prompt_lookup_max=None, ngram_prompt_lookup_min=None, spec_decoding_acceptance_method='rejection_sampler', typical_acceptance_sampler_posterior_threshold=None, typical_acceptance_sampler_posterior_alpha=None, disable_logprobs_during_spec_decoding=None, model_loader_extra_config=None, ignore_patterns=[], preemption_mode=None, served_model_name=None, qlora_adapter_name_or_path=None, otlp_traces_endpoint=None, collect_detailed_traces=None, disable_async_output_proc=False, scheduling_policy='fcfs', override_neuron_config=None, override_pooler_config=None, compilation_config=None, kv_transfer_config=KVTransferConfig(kv_connector='LMCacheConnector', kv_buffer_device='cuda', kv_buffer_size=1000000000.0, kv_role='kv_both', kv_rank=None, kv_parallel_size=1, kv_ip='127.0.0.1', kv_port=14579), worker_cls='auto', generation_config=None, override_generation_config=None, enable_sleep_mode=False, calculate_kv_scales=False, disable_log_requests=False, max_log_len=None, disable_fastapi_docs=False, enable_prompt_tokens_details=False, dispatch_function=<function serve at 0x7fcd71a3fba0>)
-INFO 05-11 20:53:20 api_server.py:206] Started engine process with PID 777454
-INFO 05-11 20:53:23 __init__.py:186] Automatically detected platform cuda.
-INFO 05-11 20:53:27 config.py:542] This model supports multiple tasks: {'reward', 'embed', 'classify', 'score', 'generate'}. Defaulting to 'generate'.
-WARNING 05-11 20:53:27 arg_utils.py:1145] The model has a long context length (50000). This may cause OOM errors during the initial memory profiling phase, or result in low performance due to small KV cache space. Consider setting --max-model-len to a smaller value.
-INFO 05-11 20:53:31 config.py:542] This model supports multiple tasks: {'classify', 'generate', 'reward', 'embed', 'score'}. Defaulting to 'generate'.
-WARNING 05-11 20:53:31 arg_utils.py:1145] The model has a long context length (50000). This may cause OOM errors during the initial memory profiling phase, or result in low performance due to small KV cache space. Consider setting --max-model-len to a smaller value.
-INFO 05-11 20:53:31 llm_engine.py:234] Initializing a V0 LLM engine (v0.1.dev4433+geb5db26) with config: model='meta-llama/Llama-3.1-8B-Instruct', speculative_config=None, tokenizer='meta-llama/Llama-3.1-8B-Instruct', skip_tokenizer_init=False, tokenizer_mode=auto, revision=None, override_neuron_config=None, tokenizer_revision=None, trust_remote_code=True, dtype=torch.bfloat16, max_seq_len=50000, download_dir=None, load_format=LoadFormat.AUTO, tensor_parallel_size=1, pipeline_parallel_size=1, disable_custom_all_reduce=False, quantization=None, enforce_eager=False, kv_cache_dtype=auto,  device_config=cuda, decoding_config=DecodingConfig(guided_decoding_backend='xgrammar'), observability_config=ObservabilityConfig(otlp_traces_endpoint=None, collect_model_forward_time=False, collect_model_execute_time=False), seed=0, served_model_name=meta-llama/Llama-3.1-8B-Instruct, num_scheduler_steps=1, multi_step_stream_outputs=True, enable_prefix_caching=False, chunked_prefill_enabled=False, use_async_output_proc=True, disable_mm_preprocessor_cache=False, mm_processor_kwargs=None, pooler_config=None, compilation_config={"splitting_ops":[],"compile_sizes":[],"cudagraph_capture_sizes":[256,248,240,232,224,216,208,200,192,184,176,168,160,152,144,136,128,120,112,104,96,88,80,72,64,56,48,40,32,24,16,8,4,2,1],"max_capture_size":256}, use_cached_outputs=True, 
-INFO 05-11 20:53:33 cuda.py:230] Using Flash Attention backend.
-INFO 05-11 20:53:33 lmcache_connector.py:42] Initializing LMCacheConfig under kv_transfer_config kv_connector='LMCacheConnector' kv_buffer_device='cuda' kv_buffer_size=1000000000.0 kv_role='kv_both' kv_rank=None kv_parallel_size=1 kv_ip='127.0.0.1' kv_port=14579
-[33mINFO LMCache: [0mLoading LMCache config file ../config/qmsum2.yaml [2025-05-11 20:53:33,761] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/utils.py:32
-[33mINFO LMCache: [0mCreating LMCacheEngine instance vllm-instance [2025-05-11 20:53:33,766] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/cache_engine.py:265
-[33mINFO LMCache: [0mChunkedTokenDatabase initialized with alpha 0.01. [2025-05-11 20:54:07,114] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/token_database.py:69
-[33mINFO LMCache: [0mKVCacheManager initialized with self.method: disk and self.rate: 0.728571429 [2025-05-11 20:54:07,116] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:93
-[33mINFO LMCache: [0mInitializing usage context. [2025-05-11 20:54:07,116] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/usage_context.py:235
-[33mDEBUG LMCache: [0mcontext message updated [2025-05-11 20:54:08,339] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/usage_context.py:98
-[33mDEBUG LMCache: [0mcontext message updated [2025-05-11 20:54:08,602] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/usage_context.py:98
-[33mDEBUG LMCache: [0mcontext message updated [2025-05-11 20:54:08,839] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/usage_context.py:98
-INFO 05-11 20:54:08 model_runner.py:1115] Starting to load model meta-llama/Llama-3.1-8B-Instruct...
-INFO 05-11 20:54:09 weight_utils.py:252] Using model weights format ['*.safetensors']
-Loading safetensors checkpoint shards:   0% Completed | 0/4 [00:00<?, ?it/s]
-Loading safetensors checkpoint shards:  25% Completed | 1/4 [00:00<00:02,  1.49it/s]
-Loading safetensors checkpoint shards:  50% Completed | 2/4 [00:01<00:01,  1.93it/s]
-Loading safetensors checkpoint shards:  75% Completed | 3/4 [00:01<00:00,  1.63it/s]
-Loading safetensors checkpoint shards: 100% Completed | 4/4 [00:02<00:00,  1.35it/s]
-Loading safetensors checkpoint shards: 100% Completed | 4/4 [00:02<00:00,  1.46it/s]
-
-INFO 05-11 20:54:12 model_runner.py:1120] Loading model weights took 14.9888 GB
-INFO 05-11 20:54:15 worker.py:267] Memory profiling takes 3.27 seconds
-INFO 05-11 20:54:15 worker.py:267] the current vLLM instance can use total_gpu_memory (39.49GiB) x gpu_memory_utilization (0.90) = 35.55GiB
-INFO 05-11 20:54:15 worker.py:267] model weights take 14.99GiB; non_torch_memory takes 0.19GiB; PyTorch activation peak memory takes 5.16GiB; the rest of the memory reserved for KV Cache is 15.21GiB.
-INFO 05-11 20:54:15 executor_base.py:110] # CUDA blocks: 7786, # CPU blocks: 2048
-INFO 05-11 20:54:15 executor_base.py:115] Maximum concurrency for 50000 tokens per request: 2.49x
-INFO 05-11 20:54:19 model_runner.py:1439] Capturing cudagraphs for decoding. This may lead to unexpected consequences if the model is not static. To run the model in eager mode, set 'enforce_eager=True' or use '--enforce-eager' in the CLI. If out-of-memory error occurs during cudagraph capture, consider decreasing `gpu_memory_utilization` or switching to eager mode. You can also reduce the `max_num_seqs` as needed to decrease memory usage.
-Capturing CUDA graph shapes:   0%|          | 0/35 [00:00<?, ?it/s]Capturing CUDA graph shapes:   3%|▎         | 1/35 [00:00<00:14,  2.31it/s]Capturing CUDA graph shapes:   6%|▌         | 2/35 [00:00<00:13,  2.41it/s]Capturing CUDA graph shapes:   9%|▊         | 3/35 [00:01<00:13,  2.43it/s]Capturing CUDA graph shapes:  11%|█▏        | 4/35 [00:01<00:12,  2.43it/s]Capturing CUDA graph shapes:  14%|█▍        | 5/35 [00:02<00:12,  2.43it/s]Capturing CUDA graph shapes:  17%|█▋        | 6/35 [00:02<00:11,  2.46it/s]Capturing CUDA graph shapes:  20%|██        | 7/35 [00:02<00:11,  2.48it/s]Capturing CUDA graph shapes:  23%|██▎       | 8/35 [00:03<00:10,  2.50it/s]Capturing CUDA graph shapes:  26%|██▌       | 9/35 [00:03<00:10,  2.49it/s]Capturing CUDA graph shapes:  29%|██▊       | 10/35 [00:04<00:09,  2.50it/s]Capturing CUDA graph shapes:  31%|███▏      | 11/35 [00:04<00:09,  2.49it/s]Capturing CUDA graph shapes:  34%|███▍      | 12/35 [00:04<00:09,  2.49it/s]Capturing CUDA graph shapes:  37%|███▋      | 13/35 [00:05<00:08,  2.50it/s]Capturing CUDA graph shapes:  40%|████      | 14/35 [00:05<00:08,  2.51it/s]Capturing CUDA graph shapes:  43%|████▎     | 15/35 [00:06<00:07,  2.52it/s]Capturing CUDA graph shapes:  46%|████▌     | 16/35 [00:06<00:07,  2.50it/s]Capturing CUDA graph shapes:  49%|████▊     | 17/35 [00:06<00:07,  2.51it/s]Capturing CUDA graph shapes:  51%|█████▏    | 18/35 [00:07<00:06,  2.53it/s]Capturing CUDA graph shapes:  54%|█████▍    | 19/35 [00:07<00:06,  2.54it/s]Capturing CUDA graph shapes:  57%|█████▋    | 20/35 [00:08<00:05,  2.55it/s]Capturing CUDA graph shapes:  60%|██████    | 21/35 [00:08<00:05,  2.56it/s]Capturing CUDA graph shapes:  63%|██████▎   | 22/35 [00:08<00:05,  2.56it/s]Capturing CUDA graph shapes:  66%|██████▌   | 23/35 [00:09<00:04,  2.58it/s]Capturing CUDA graph shapes:  69%|██████▊   | 24/35 [00:09<00:04,  2.57it/s]Capturing CUDA graph shapes:  71%|███████▏  | 25/35 [00:09<00:03,  2.56it/s]Capturing CUDA graph shapes:  74%|███████▍  | 26/35 [00:10<00:03,  2.58it/s]Capturing CUDA graph shapes:  77%|███████▋  | 27/35 [00:10<00:03,  2.59it/s]Capturing CUDA graph shapes:  80%|████████  | 28/35 [00:11<00:02,  2.60it/s]Capturing CUDA graph shapes:  83%|████████▎ | 29/35 [00:11<00:02,  2.61it/s]Capturing CUDA graph shapes:  86%|████████▌ | 30/35 [00:11<00:01,  2.62it/s]Capturing CUDA graph shapes:  89%|████████▊ | 31/35 [00:12<00:01,  2.63it/s]Capturing CUDA graph shapes:  91%|█████████▏| 32/35 [00:12<00:01,  2.63it/s]Capturing CUDA graph shapes:  94%|█████████▍| 33/35 [00:12<00:00,  2.66it/s]Capturing CUDA graph shapes:  97%|█████████▋| 34/35 [00:13<00:00,  2.67it/s]Capturing CUDA graph shapes: 100%|██████████| 35/35 [00:13<00:00,  2.66it/s]Capturing CUDA graph shapes: 100%|██████████| 35/35 [00:13<00:00,  2.55it/s]
-INFO 05-11 20:54:33 model_runner.py:1567] Graph capturing finished in 14 secs, took 0.24 GiB
-INFO 05-11 20:54:33 llm_engine.py:431] init engine (profile, create kv cache, warmup model) took 20.79 seconds
-INFO 05-11 20:54:33 api_server.py:756] Using supplied chat template:
-INFO 05-11 20:54:33 api_server.py:756] None
-INFO 05-11 20:54:33 launcher.py:21] Available routes are:
-INFO 05-11 20:54:33 launcher.py:29] Route: /openapi.json, Methods: GET, HEAD
-INFO 05-11 20:54:33 launcher.py:29] Route: /docs, Methods: GET, HEAD
-INFO 05-11 20:54:33 launcher.py:29] Route: /docs/oauth2-redirect, Methods: GET, HEAD
-INFO 05-11 20:54:33 launcher.py:29] Route: /redoc, Methods: GET, HEAD
-INFO 05-11 20:54:33 launcher.py:29] Route: /health, Methods: GET
-INFO 05-11 20:54:33 launcher.py:29] Route: /ping, Methods: POST, GET
-INFO 05-11 20:54:33 launcher.py:29] Route: /tokenize, Methods: POST
-INFO 05-11 20:54:33 launcher.py:29] Route: /detokenize, Methods: POST
-INFO 05-11 20:54:33 launcher.py:29] Route: /v1/models, Methods: GET
-INFO 05-11 20:54:33 launcher.py:29] Route: /version, Methods: GET
-INFO 05-11 20:54:33 launcher.py:29] Route: /v1/chat/completions, Methods: POST
-INFO 05-11 20:54:33 launcher.py:29] Route: /v1/completions, Methods: POST
-INFO 05-11 20:54:33 launcher.py:29] Route: /v1/embeddings, Methods: POST
-INFO 05-11 20:54:33 launcher.py:29] Route: /pooling, Methods: POST
-INFO 05-11 20:54:33 launcher.py:29] Route: /score, Methods: POST
-INFO 05-11 20:54:33 launcher.py:29] Route: /v1/score, Methods: POST
-INFO 05-11 20:54:33 launcher.py:29] Route: /rerank, Methods: POST
-INFO 05-11 20:54:33 launcher.py:29] Route: /v1/rerank, Methods: POST
-INFO 05-11 20:54:33 launcher.py:29] Route: /v2/rerank, Methods: POST
-INFO 05-11 20:54:33 launcher.py:29] Route: /invocations, Methods: POST
-INFO:     Started server process [777372]
-INFO:     Waiting for application startup.
-INFO:     Application startup complete.
-INFO:     Uvicorn running on http://0.0.0.0:8001 (Press CTRL+C to quit)
-INFO:     127.0.0.1:52196 - "GET /health HTTP/1.1" 200 OK
-INFO 05-11 20:54:34 chat_utils.py:332] Detected the chat template content format to be 'string'. You can set `--chat-template-content-format` to override this.
-INFO:     127.0.0.1:52210 - "POST /v1/chat/completions HTTP/1.1" 200 OK
-INFO 05-11 20:54:34 engine.py:275] Added request chatcmpl-dfe24871026440f19488123751ac9df7.
-[33mDEBUG LMCache: [0mReturning the original input! [2025-05-11 20:54:35,139] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
-[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 616 tokens [2025-05-11 20:54:35,219] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
-INFO 05-11 20:54:35 llm_engine.py:1143] Start updating memory
-INFO:     127.0.0.1:52210 - "POST /v1/chat/completions HTTP/1.1" 200 OK
-INFO 05-11 20:54:35 engine.py:275] Added request chatcmpl-59ae76a7212643898c29680260e322bd.
-[33mDEBUG LMCache: [0mReturning the original input! [2025-05-11 20:54:35,844] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
-[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 616 tokens [2025-05-11 20:54:35,910] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
-INFO 05-11 20:54:35 llm_engine.py:1143] Start updating memory
-INFO:     127.0.0.1:52210 - "POST /v1/chat/completions HTTP/1.1" 200 OK
-INFO 05-11 20:54:36 engine.py:275] Added request chatcmpl-d18055856d12437f83e4bbe9a26c7c66.
-[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-11 20:54:36,038] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
-[33mDEBUG LMCache: [0mReturning the original input! [2025-05-11 20:54:36,038] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
-[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 8116 tokens [2025-05-11 20:54:36,837] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
-INFO 05-11 20:54:37 llm_engine.py:1143] Start updating memory
-INFO:     127.0.0.1:52210 - "POST /v1/chat/completions HTTP/1.1" 200 OK
-INFO 05-11 20:54:37 engine.py:275] Added request chatcmpl-86ee980c9f174befab81576392dc627e.
-[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-11 20:54:37,795] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
-[33mDEBUG LMCache: [0mReturning the original input! [2025-05-11 20:54:37,795] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
-[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 10116 tokens [2025-05-11 20:54:38,810] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
-INFO 05-11 20:54:38 llm_engine.py:1143] Start updating memory
-INFO:     127.0.0.1:52210 - "POST /v1/chat/completions HTTP/1.1" 200 OK
-INFO 05-11 20:54:39 engine.py:275] Added request chatcmpl-9a3ed68aae1a4810ab2ea15e41ac54b9.
-[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-11 20:54:39,317] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
-[33mDEBUG LMCache: [0mReturning the original input! [2025-05-11 20:54:39,317] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
-[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 12116 tokens [2025-05-11 20:54:40,568] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
-INFO 05-11 20:54:40 llm_engine.py:1143] Start updating memory
-INFO:     127.0.0.1:52210 - "POST /v1/chat/completions HTTP/1.1" 200 OK
-INFO 05-11 20:54:41 engine.py:275] Added request chatcmpl-ecec74d1f3ef4081a23d67a7f4db56e5.
-[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-11 20:54:41,149] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
-[33mDEBUG LMCache: [0mReturning the original input! [2025-05-11 20:54:41,149] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
-[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 14116 tokens [2025-05-11 20:54:42,636] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
-INFO 05-11 20:54:43 llm_engine.py:1143] Start updating memory
-INFO:     127.0.0.1:52210 - "POST /v1/chat/completions HTTP/1.1" 200 OK
-INFO 05-11 20:54:43 engine.py:275] Added request chatcmpl-a2b92df6024640a8a93754a8282604d1.
-[33mDEBUG LMCache: [0mInjected token number: 0 [2025-05-11 20:54:43,776] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
-[33mDEBUG LMCache: [0mReturning the original input! [2025-05-11 20:54:43,776] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:772
-[33mDEBUG LMCache: [0mStore skips 0 tokens and then stores 16116 tokens [2025-05-11 20:54:45,495] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
-INFO 05-11 20:54:45 llm_engine.py:1143] Start updating memory
-INFO:     127.0.0.1:52210 - "POST /v1/chat/completions HTTP/1.1" 200 OK
-INFO 05-11 20:54:46 engine.py:275] Added request chatcmpl-2ce1a01609404a33b53910ae25458305.
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 20:54:46,268] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 20:54:46,295] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 20:54:46,320] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 20:54:46,344] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 20:54:46,369] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 20:54:46,393] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 20:54:46,417] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 20:54:46,444] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mDEBUG LMCache: [0mInjected token number: 8115 [2025-05-11 20:54:46,444] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
-[33mDEBUG LMCache: [0mRebuilt the input! [2025-05-11 20:54:46,453] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:769
-[33mDEBUG LMCache: [0mStore skips 8116 tokens and then stores 0 tokens [2025-05-11 20:54:46,473] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
-INFO 05-11 20:54:47 llm_engine.py:1143] Start updating memory
-INFO:     127.0.0.1:52210 - "POST /v1/chat/completions HTTP/1.1" 200 OK
-INFO 05-11 20:54:47 engine.py:275] Added request chatcmpl-4be423abd9524c92b6283df27ba2439b.
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 20:54:47,178] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 20:54:47,203] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 20:54:47,227] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 20:54:47,252] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 20:54:47,277] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 20:54:47,301] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 20:54:47,326] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 20:54:47,351] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 20:54:47,375] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 20:54:47,401] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mDEBUG LMCache: [0mInjected token number: 10115 [2025-05-11 20:54:47,401] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
-[33mDEBUG LMCache: [0mRebuilt the input! [2025-05-11 20:54:47,411] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:769
-[33mDEBUG LMCache: [0mStore skips 10116 tokens and then stores 0 tokens [2025-05-11 20:54:47,431] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
-INFO 05-11 20:54:47 llm_engine.py:1143] Start updating memory
-INFO:     127.0.0.1:52210 - "POST /v1/chat/completions HTTP/1.1" 200 OK
-INFO 05-11 20:54:47 engine.py:275] Added request chatcmpl-54cf40d1e84a49f88a6ebd19c6d52e2c.
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 20:54:47,653] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 20:54:47,678] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 20:54:47,702] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 20:54:47,726] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 20:54:47,751] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 20:54:47,775] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 20:54:47,800] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 20:54:47,824] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 20:54:47,849] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 20:54:47,873] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 20:54:47,898] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 20:54:47,923] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mDEBUG LMCache: [0mInjected token number: 12115 [2025-05-11 20:54:47,924] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
-[33mDEBUG LMCache: [0mRebuilt the input! [2025-05-11 20:54:47,936] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:769
-[33mDEBUG LMCache: [0mStore skips 12116 tokens and then stores 0 tokens [2025-05-11 20:54:47,956] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
-INFO 05-11 20:54:48 llm_engine.py:1143] Start updating memory
-INFO:     127.0.0.1:52210 - "POST /v1/chat/completions HTTP/1.1" 200 OK
-INFO 05-11 20:54:48 engine.py:275] Added request chatcmpl-6ef67b8a7e3b4ec3ad4d0e7e28898634.
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 20:54:48,185] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 20:54:48,209] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 20:54:48,234] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 20:54:48,258] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 20:54:48,283] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 20:54:48,307] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 20:54:48,332] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 20:54:48,357] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 20:54:48,382] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 20:54:48,406] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 20:54:48,431] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 20:54:48,455] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 20:54:48,480] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 20:54:48,505] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mDEBUG LMCache: [0mInjected token number: 14115 [2025-05-11 20:54:48,505] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
-[33mDEBUG LMCache: [0mRebuilt the input! [2025-05-11 20:54:48,518] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:769
-[33mDEBUG LMCache: [0mStore skips 14116 tokens and then stores 0 tokens [2025-05-11 20:54:48,539] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
-INFO 05-11 20:54:49 llm_engine.py:1143] Start updating memory
-INFO:     127.0.0.1:52210 - "POST /v1/chat/completions HTTP/1.1" 200 OK
-INFO 05-11 20:54:49 engine.py:275] Added request chatcmpl-ba7ca37e14894c608378a477680395f1.
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 20:54:49,375] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 20:54:49,400] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 20:54:49,425] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 20:54:49,449] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 20:54:49,474] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 20:54:49,498] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 20:54:49,523] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 20:54:49,547] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 20:54:49,572] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 20:54:49,596] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 20:54:49,621] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 20:54:49,645] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 20:54:49,670] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 20:54:49,694] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 20:54:49,719] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mINFO LMCache: [0mDecompressed memory object from disk, rate: 0.728571429.
- [2025-05-11 20:54:49,744] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/experimental/storage_backend/storage_manager.py:640
-[33mDEBUG LMCache: [0mInjected token number: 16115 [2025-05-11 20:54:49,745] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:741
-[33mDEBUG LMCache: [0mRebuilt the input! [2025-05-11 20:54:49,760] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:769
-[33mDEBUG LMCache: [0mStore skips 16116 tokens and then stores 0 tokens [2025-05-11 20:54:49,781] -- /home/ubuntu/st-prodstack-v/LMCache/lmcache/integration/vllm/vllm_adapter.py:565
-INFO 05-11 20:54:49 llm_engine.py:1143] Start updating memory

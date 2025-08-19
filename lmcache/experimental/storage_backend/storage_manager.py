@@ -57,7 +57,7 @@ def compute_best_rate_and_drop(score_tables, orig_rate, length, disk_score_table
         total_drop = 0.0
 
         table_idx = 0
-        recorded_rate = []
+        recorded_rate = None
         for table in score_tables:
             # pick the largest r_sel < r_cand, else the table’s min rate
             elig = [(r, s) for r, s in table if r <= r_cand]
@@ -73,7 +73,7 @@ def compute_best_rate_and_drop(score_tables, orig_rate, length, disk_score_table
             else:
                 baseline_rate, baseline_score = max(table, key=lambda x: x[0])
 
-            if r_sel == 0:
+            if r_sel == 0: # This part only works for one disk_score_table
                 max_score = float('-inf')
                 for rate, score in disk_score_tables[table_idx]:
                     if rate > baseline_rate:
@@ -84,7 +84,7 @@ def compute_best_rate_and_drop(score_tables, orig_rate, length, disk_score_table
                         tmp_recorded_rate = rate
                 if max_score > s_sel:
                     s_sel = max_score
-                    recorded_rate.append(tmp_recorded_rate)
+                    recorded_rate = tmp_recorded_rate
 
             # accumulate drop
             total_drop += (
@@ -96,8 +96,8 @@ def compute_best_rate_and_drop(score_tables, orig_rate, length, disk_score_table
 
         if total_drop < min_total_drop:
             min_total_drop = total_drop
-            if r_cand == 0 and len(recorded_rate) > 0:
-                best_rate = -max(recorded_rate)
+            if r_cand == 0 and recorded_rate:
+                best_rate = -recorded_rate
             else:
                 best_rate = r_cand
 
