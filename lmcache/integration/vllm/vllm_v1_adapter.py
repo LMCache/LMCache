@@ -900,7 +900,7 @@ class LMCacheConnectorV1Impl:
             slot_mapping = slot_mapping.cuda()
 
             skip_leading_tokens = save_spec.skip_leading_tokens
-            if self.kv_role == "kv_producer":
+            if self.kv_role == "kv_producer" and request.disagg_spec:
                 skip_leading_tokens = min(
                     skip_leading_tokens, request.disagg_spec.num_transferred_tokens
                 )
