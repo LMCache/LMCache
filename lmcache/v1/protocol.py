@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from dataclasses import dataclass
-from enum import Enum, auto
+from enum import IntEnum, auto
 from typing import Optional
 import struct
 
@@ -15,15 +15,17 @@ from lmcache.v1.memory_management import MemoryFormat
 MAX_KEY_LENGTH = 150
 
 
-class Constants(Enum):
-    CLIENT_PUT = auto()
-    CLIENT_GET = auto()
-    CLIENT_EXIST = auto()
-    CLIENT_LIST = auto()
-    CLIENT_HEALTH = auto()
+class ClientCommands(IntEnum):
+    PUT = auto()
+    GET = auto()
+    EXIST = auto()
+    LIST = auto()
+    HEALTH = auto()
 
-    SERVER_SUCCESS = 200
-    SERVER_FAIL = 400
+
+class ServerReturnCodes(IntEnum):
+    SUCCESS = 200
+    FAIL = 400
 
 
 DTYPE_TO_INT = {
@@ -128,7 +130,7 @@ class ClientMetaMessage:
     Request message from LMCache workers or servers.
     """
 
-    command: Constants
+    command: ClientCommands
     key: CacheEngineKey
     length: int
     fmt: MemoryFormat
@@ -148,7 +150,7 @@ class ClientMetaMessage:
 
         packed_bytes = struct.pack(
             f"iiiiiiiii{MAX_KEY_LENGTH}s",
-            self.command.value,
+            self.command,
             self.length,
             int(self.fmt.value),
             DTYPE_TO_INT[self.dtype],
@@ -167,8 +169,8 @@ class ClientMetaMessage:
             struct.unpack(f"iiiiiiiii{MAX_KEY_LENGTH}s", s)
         )
         return ClientMetaMessage(
-            command,
-            CacheEngineKey.from_string(key.decode().strip()),
+            ClientCommands(command),
+            CacheEngineKey.from_string(key.decode().rstrip()),
             length,
             MemoryFormat(fmt),
             INT_TO_DTYPE[dtype],
@@ -188,7 +190,7 @@ class ServerMetaMessage:
     Reply message from LMCache workers or servers.
     """
 
-    code: Constants
+    code: ServerReturnCodes
     length: int
     fmt: MemoryFormat
     dtype: Optional[torch.dtype]
@@ -199,7 +201,7 @@ class ServerMetaMessage:
         assert len(self.shape) == 4, "Shape dimension should be 4"
         packed_bytes = struct.pack(
             "iiiiiiiii",
-            self.code.value,
+            self.code,
             self.length,
             int(self.fmt.value),
             DTYPE_TO_INT[self.dtype],
@@ -221,7 +223,7 @@ class ServerMetaMessage:
             struct.unpack("iiiiiiiii", s)
         )
         return ServerMetaMessage(
-            code,
+            ServerReturnCodes(code),
             length,
             MemoryFormat(fmt),
             INT_TO_DTYPE[dtype],

@@ -24,10 +24,10 @@ logger = init_logger(__name__)
 
 
 class MemoryFormat(Enum):
-    UNDEFINED = auto()
+    UNDEFINED = 0
     """[2, num_layers, num_tokens, hidden_dim]
     """
-    # KV_BLOB = auto()
+    # KV_BLOB = 1
     KV_2LTD = auto()
     """[num_tokens, 2, hidden_dim]
     """

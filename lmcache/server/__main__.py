@@ -5,7 +5,12 @@ import threading
 import time
 
 # First Party
-from lmcache.protocol import ClientMetaMessage, Constants, ServerMetaMessage
+from lmcache.protocol import (
+    ClientCommands,
+    ClientMetaMessage,
+    ServerMetaMessage,
+    ServerReturnCodes,
+)
 from lmcache.server.server_storage_backend import CreateStorageBackend
 
 
@@ -38,7 +43,7 @@ class LMCacheServer:
                 meta = ClientMetaMessage.deserialize(header)
 
                 match meta.command:
-                    case Constants.CLIENT_PUT:
+                    case ClientCommands.PUT:
                         t0 = time.perf_counter()
                         s = self.receive_all(client_socket, meta.length)
                         t1 = time.perf_counter()
@@ -46,14 +51,14 @@ class LMCacheServer:
                         self.data_store.put(meta.key, s)
                         t2 = time.perf_counter()
                         # client_socket.sendall(ServerMetaMessage(
-                        # Constants.SERVER_SUCCESS, 0).serialize())
+                        # ServerReturnCodes.SUCCESS, 0).serialize())
                         # t3 = time.perf_counter()
                         print(
                             f"Time to receive data: {t1 - t0}, time to store "
                             f"data: {t2 - t1}"
                         )
 
-                    case Constants.CLIENT_GET:
+                    case ClientCommands.GET:
                         t0 = time.perf_counter()
                         # data_string = self.data_store.get(meta.key, None)
                         data_string = self.data_store.get(meta.key)
@@ -61,7 +66,7 @@ class LMCacheServer:
                         if data_string is not None:
                             client_socket.sendall(
                                 ServerMetaMessage(
-                                    Constants.SERVER_SUCCESS, len(data_string)
+                                    ServerReturnCodes.SUCCESS, len(data_string)
                                 ).serialize()
                             )
                             t2 = time.perf_counter()
@@ -73,25 +78,25 @@ class LMCacheServer:
                             )
                         else:
                             client_socket.sendall(
-                                ServerMetaMessage(Constants.SERVER_FAIL, 0).serialize()
+                                ServerMetaMessage(ServerReturnCodes.FAIL, 0).serialize()
                             )
 
-                    case Constants.CLIENT_EXIST:
-                        # code = Constants.SERVER_SUCCESS if meta.key in
-                        # self.data_store else Constants.SERVER_FAIL
+                    case ClientCommands.EXIST:
+                        # code = ServerReturnCodes.SUCCESS if meta.key in
+                        # self.data_store else ServerReturnCodes.FAIL
                         code = (
-                            Constants.SERVER_SUCCESS
+                            ServerReturnCodes.SUCCESS
                             if meta.key in self.data_store.list_keys()
-                            else Constants.SERVER_FAIL
+                            else ServerReturnCodes.FAIL
                         )
                         client_socket.sendall(ServerMetaMessage(code, 0).serialize())
 
-                    case Constants.CLIENT_LIST:
+                    case ClientCommands.LIST:
                         keys = list(self.data_store.list_keys())
                         data = "\n".join(keys).encode()
                         client_socket.sendall(
                             ServerMetaMessage(
-                                Constants.SERVER_SUCCESS, len(data)
+                                ServerReturnCodes.SUCCESS, len(data)
                             ).serialize()
                         )
                         client_socket.sendall(data)

@@ -6,7 +6,12 @@ import threading
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.protocol import ClientMetaMessage, Constants, ServerMetaMessage
+from lmcache.protocol import (
+    ClientCommands,
+    ClientMetaMessage,
+    ServerMetaMessage,
+    ServerReturnCodes,
+)
 from lmcache.storage_backend.connector.base_connector import (
     RemoteBytesConnector,
 )
@@ -45,38 +50,36 @@ class LMCServerConnector(RemoteBytesConnector):
 
     def exists(self, key: str) -> bool:
         logger.debug("Call to exists()!")
-        self.send_all(ClientMetaMessage(Constants.CLIENT_EXIST, key, 0).serialize())
+        self.send_all(ClientMetaMessage(ClientCommands.EXIST, key, 0).serialize())
         response = self.client_socket.recv(ServerMetaMessage.packlength())
-        return ServerMetaMessage.deserialize(response).code == Constants.SERVER_SUCCESS
+        return ServerMetaMessage.deserialize(response).code == ServerReturnCodes.SUCCESS
 
     def set(self, key: str, obj: bytes):  # type: ignore[override]
         logger.debug("Call to set()!")
-        self.send_all(
-            ClientMetaMessage(Constants.CLIENT_PUT, key, len(obj)).serialize()
-        )
+        self.send_all(ClientMetaMessage(ClientCommands.PUT, key, len(obj)).serialize())
         self.send_all(obj)
         # response = self.client_socket.recv(ServerMetaMessage.packlength())
         # if ServerMetaMessage.deserialize(response).code
-        #   != Constants.SERVER_SUCCESS:
+        #   != ServerReturnCodes.SUCCESS:
         #    raise RuntimeError(f"Failed to set key:
         # {ServerMetaMessage.deserialize(response).code}")
 
     @_lmcache_nvtx_annotate
     def get(self, key: str) -> Optional[bytes]:
-        self.send_all(ClientMetaMessage(Constants.CLIENT_GET, key, 0).serialize())
+        self.send_all(ClientMetaMessage(ClientCommands.GET, key, 0).serialize())
         data = self.client_socket.recv(ServerMetaMessage.packlength())
         meta = ServerMetaMessage.deserialize(data)
-        if meta.code != Constants.SERVER_SUCCESS:
+        if meta.code != ServerReturnCodes.SUCCESS:
             return None
         length = meta.length
         data = self.receive_all(length)
         return data if data is None else bytes(data)
 
     def list(self) -> List[str]:
-        self.send_all(ClientMetaMessage(Constants.CLIENT_LIST, "", 0).serialize())
+        self.send_all(ClientMetaMessage(ClientCommands.LIST, "", 0).serialize())
         data = self.client_socket.recv(ServerMetaMessage.packlength())
         meta = ServerMetaMessage.deserialize(data)
-        if meta.code != Constants.SERVER_SUCCESS:
+        if meta.code != ServerReturnCodes.SUCCESS:
             logger.error("LMCServerConnector: Cannot list keys from the remote server!")
             return []
         length = meta.length

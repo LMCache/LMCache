@@ -1,20 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from dataclasses import dataclass
-from enum import Enum, auto
+from enum import IntEnum, auto
 import struct
 
 MAX_KEY_LENGTH = 150
 
 
-class Constants(Enum):
-    CLIENT_PUT = auto()
-    CLIENT_GET = auto()
-    CLIENT_EXIST = auto()
-    CLIENT_LIST = auto()
+class ClientCommands(IntEnum):
+    PUT = auto()
+    GET = auto()
+    EXIST = auto()
+    LIST = auto()
 
-    SERVER_SUCCESS = 200
-    SERVER_FAIL = 400
+
+class ServerReturnCodes(IntEnum):
+    SUCCESS = 200
+    FAIL = 400
 
 
 @dataclass
@@ -23,7 +25,7 @@ class ClientMetaMessage:
     Control message from LMCServerConnector to LMCacheServer
     """
 
-    command: Constants
+    command: ClientCommands
     key: str
     length: int
 
@@ -33,7 +35,7 @@ class ClientMetaMessage:
         )
         packed_bytes = struct.pack(
             f"ii{MAX_KEY_LENGTH}s",
-            self.command.value,
+            self.command,
             self.length,
             self.key.encode().ljust(MAX_KEY_LENGTH),
         )
@@ -42,7 +44,7 @@ class ClientMetaMessage:
     @staticmethod
     def deserialize(s: bytes) -> "ClientMetaMessage":
         command, length, key = struct.unpack(f"ii{MAX_KEY_LENGTH}s", s)
-        return ClientMetaMessage(Constants(command), key.decode().rstrip(), length)
+        return ClientMetaMessage(ClientCommands(command), key.decode().strip(), length)
 
     @staticmethod
     def packlength() -> int:
@@ -55,7 +57,7 @@ class ServerMetaMessage:
     Control message from LMCacheServer to LMCServerConnector
     """
 
-    code: Constants
+    code: ServerReturnCodes
     length: int
 
     def serialize(self) -> bytes:
@@ -69,4 +71,4 @@ class ServerMetaMessage:
     @staticmethod
     def deserialize(s: bytes) -> "ServerMetaMessage":
         code, length = struct.unpack("ii", s)
-        return ServerMetaMessage(Constants(code), length)
+        return ServerMetaMessage(ServerReturnCodes(code), length)
