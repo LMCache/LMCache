@@ -54,7 +54,7 @@ Basic cache settings that control the core functionality of LMCache.
      - Whether to enable error handling. Values: true/false. Default: false
    * - priority_limit
      - LMCACHE_PRIORITY_LIMIT
-     - Store in cache if request priority value ≤ limit. Type: int. Default: None
+     - Caches requests only if priority value ≤ limit. (**Not applicable for PD Disaggregation**) Type: int. Default: None
 
 Cache Blending Configurations
 -----------------------------
