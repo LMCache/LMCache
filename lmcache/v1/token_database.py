@@ -267,7 +267,11 @@ class ChunkedTokenDatabase(TokenDatabase):
                     continue
                 else:
                     if make_key:
-                        yield start_idx, end_idx, self._make_key_by_hash(hash_val, extra_configs)
+                        yield (
+                            start_idx,
+                            end_idx,
+                            self._make_key_by_hash(hash_val, extra_configs),
+                        )
                     else:
                         yield start_idx, end_idx, hash_val
         elif hashes is not None:
@@ -278,7 +282,11 @@ class ChunkedTokenDatabase(TokenDatabase):
             for hash_val, offset in zip(hashes, offsets, strict=False):
                 end_idx = start_idx + offset
                 if make_key:
-                    yield start_idx, end_idx, self._make_key_by_hash(hash_val, extra_configs)
+                    yield (
+                        start_idx,
+                        end_idx,
+                        self._make_key_by_hash(hash_val, extra_configs),
+                    )
                 else:
                     yield start_idx, end_idx, hash_val
                 start_idx = end_idx

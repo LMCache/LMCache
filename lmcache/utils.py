@@ -88,7 +88,7 @@ class CacheEngineKey:
                 if k.startswith("lmcache.tag."):
                     if tags is None:
                         tags = {}
-                    tags[k[len("lmcache.tag."):]] = v
+                    tags[k[len("lmcache.tag.") :]] = v
         self.tags = tags
 
     def __hash__(self):
@@ -167,7 +167,12 @@ class CacheEngineKey:
                     raise ValueError(f"Invalid key string: {s}")
                 extra_configs[kvs[0]] = kvs[1]
         return CacheEngineKey(
-            parts[0], parts[1], int(parts[2]), int(parts[3]), int(parts[4], 16), extra_configs
+            parts[0],
+            parts[1],
+            int(parts[2]),
+            int(parts[3]),
+            int(parts[4], 16),
+            extra_configs,
         )
 
     def to_dict(self):
