@@ -72,7 +72,9 @@ class LMCacheLookupClient(LookupClientInterface):
         lookup_id_buf = lookup_id.encode("utf-8")
         request_configs_str = ""
         if request_configs is not None and len(request_configs) != 0:
-            request_configs_str = "@".join([f"{k}%{v}" for k, v in request_configs.items()])
+            request_configs_str = "@".join(
+                [f"{k}%{v}" for k, v in request_configs.items()]
+            )
         request_configs_buf = request_configs_str.encode("utf-8")
         ranks = self.tensor_parallel_size
         if self.create_lookup_server_only_on_worker_0_for_mla:

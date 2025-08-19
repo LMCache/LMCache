@@ -110,7 +110,9 @@ class TokenDatabase(metaclass=abc.ABCMeta):
 
         raise NotImplementedError
 
-    def _make_key_by_hash(self, chunk_hash: int, request_configs: Optional[dict] = None):
+    def _make_key_by_hash(
+        self, chunk_hash: int, request_configs: Optional[dict] = None
+    ):
         assert self.metadata is not None
         return CacheEngineKey(
             self.metadata.fmt,

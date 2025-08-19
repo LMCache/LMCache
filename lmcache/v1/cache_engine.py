@@ -892,8 +892,9 @@ class LMCacheEngine:
         self,
         tokens: Optional[Union[torch.Tensor, List[int]]] = None,
         locations: Optional[List[str]] = None,
-        request_configs: Optional[dict] = None,  # TODO: need to clean by request_configs
+        request_configs: Optional[dict] = None,
     ) -> int:
+        # TODO: need to clear by request_configs
         if self.save_only_first_rank:
             if self.metadata.is_first_rank():
                 num_removed = self._clear(tokens, locations, request_configs)
@@ -908,7 +909,7 @@ class LMCacheEngine:
         self,
         tokens: Optional[Union[torch.Tensor, List[int]]] = None,
         locations: Optional[List[str]] = None,
-        request_configs: Optional[dict] = None,  # TODO: need to clean by request_configs
+        request_configs: Optional[dict] = None,
     ) -> int:
         assert isinstance(self.storage_manager, StorageManager)
         # Clear all caches if tokens is None

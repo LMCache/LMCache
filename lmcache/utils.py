@@ -186,7 +186,9 @@ class CacheEngineKey:
             "chunk_hash": self.chunk_hash,
         }
         if self.request_configs is not None and len(self.request_configs) != 0:
-            msg["request_configs"] = [f"{k}%{v}" for k, v in self.request_configs.items()]
+            msg["request_configs"] = [
+                f"{k}%{v}" for k, v in self.request_configs.items()
+            ]
         return msg
 
     @staticmethod
