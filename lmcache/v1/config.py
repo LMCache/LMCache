@@ -42,13 +42,11 @@ def _to_int_list(
 # Configuration aliases and deprecated mappings
 _CONFIG_ALIASES = {
     # Maps deprecated names to current names
-    "nixl_peer_host": "nixl_receiver_host",
     "nixl_peer_port": "nixl_receiver_port",
 }
 
 _DEPRECATED_CONFIGS = {
     # Maps deprecated names to warning messages
-    "nixl_peer_host": "nixl_peer_host is deprecated, use nixl_receiver_host instead",
     "nixl_peer_port": "nixl_peer_port is deprecated, use nixl_receiver_port instead",
 }
 
