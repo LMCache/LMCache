@@ -939,7 +939,7 @@ class PrometheusLogger:
         return PrometheusLogger._instance
 
     @staticmethod
-    def GetInstanceIfCreate() -> Optional["PrometheusLogger"]:
+    def GetInstanceOrNone() -> Optional["PrometheusLogger"]:
         """
         Returns the singleton instance of PrometheusLogger if it exists,
         otherwise returns None.
