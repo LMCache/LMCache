@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from collections import OrderedDict
-from concurrent.futures import Future
+from concurrent.futures import Future, ThreadPoolExecutor
 from typing import List, Optional, Tuple
 import asyncio
 import ctypes
@@ -153,14 +153,14 @@ class WekaGdsBackend(StorageBackendInterface):
         self.put_tasks: set[CacheEngineKey] = set()
 
         self.rand = random.Random(self.dst_device)
+        thread_count = config.extra_config.get("gds_io_threads", 4)
+        self._thread_pool = ThreadPoolExecutor(
+            max_workers=thread_count, thread_name_prefix="weka-gds-io"
+        )
 
         self._cufile_driver = self.cufile.CuFileDriver()
-        if hasattr(self.memory_allocator, "base_pointer"):
-            logger.debug(f"Using base pointer {self.memory_allocator.base_pointer}")
-            self.cufile_base_pointer = self.memory_allocator.base_pointer
-        else:
-            logger.info("No base pointer found, cufile will use bounce buffers")
-            self.cufile_base_pointer = None
+        assert hasattr(self.memory_allocator, "base_pointer")
+        self.cufile_base_pointer = self.memory_allocator.base_pointer
         asyncio.run_coroutine_threadsafe(self._scan_metadata(), self.loop)
         self.save_metadata_tasks: set[asyncio.Task] = set()
 
@@ -208,7 +208,7 @@ class WekaGdsBackend(StorageBackendInterface):
                         if not fentry.name.endswith(target_suffix):
                             continue
                         filename = os.path.basename(fentry.name)
-                        key_str = filename[:-14].replace("_", "/")
+                        key_str = filename[: -len(target_suffix)].replace("_", "/")
                         try:
                             key = CacheEngineKey.from_string(key_str)
                         except ValueError as e:
@@ -381,7 +381,7 @@ class WekaGdsBackend(StorageBackendInterface):
         dtype: torch.dtype,
         shape: torch.Size,
     ) -> Optional[MemoryObj]:
-        return self._load_bytes_from_disk(key, path, dtype, shape)
+        return self._load_bytes_from_disk_with_allocation(key, path, dtype, shape)
 
     def get_blocking(
         self,
@@ -397,39 +397,38 @@ class WekaGdsBackend(StorageBackendInterface):
         shape = entry.shape
         assert dtype is not None
         assert shape is not None
-        return self._load_bytes_from_disk(key, path, dtype=dtype, shape=shape)
+        return self._load_bytes_from_disk_with_allocation(key, path, dtype, shape)
 
-    def _load_bytes_from_disk(
+    def _load_bytes_from_disk_with_memory(
         self,
         key: CacheEngineKey,
         path: str,
-        dtype: torch.dtype,
-        shape: torch.Size,
+        memory_obj: Optional[MemoryObj],
     ) -> Optional[MemoryObj]:
         """
-        Load byte array from disk.
+        Load byte array from disk into a pre-allocated memory object.
+
+        Args:
+            key: Cache key for error handling
+            path: File path to load from
+            memory_obj: Pre-allocated memory object to load data into
+
+        Returns:
+            The memory object with loaded data, or None if loading failed
         """
-        memory_obj = self.memory_allocator.allocate(shape, dtype)
         if memory_obj is None:
-            logger.debug("Memory allocation failed during sync disk load.")
             return None
-        assert memory_obj.tensor is not None
         assert memory_obj.tensor.is_cuda
         assert torch.device(self.dst_device) == torch.device(memory_obj.tensor.device)
-
-        offset = _METADATA_MAX_SIZE
-        if self.cufile_base_pointer is None:
-            addr = ctypes.c_void_p(memory_obj.tensor.data_ptr())
-            dev_offset = 0
-        else:
-            addr = ctypes.c_void_p(self.cufile_base_pointer)
-            dev_offset = memory_obj.metadata.address
-
         # TODO(Jiayi): We can optimize a bit by reading size instead of physical size.
         ret = self._load_gds_cufile(
-            path, offset, addr, memory_obj.get_physical_size(), dev_offset
+            path,
+            _METADATA_MAX_SIZE,
+            ctypes.c_void_p(self.cufile_base_pointer),
+            memory_obj.get_physical_size(),
+            memory_obj.metadata.address,
         )
-        if ret != memory_obj.get_size():
+        if ret != memory_obj.get_physical_size():
             if ret < 0:
                 logger.error(
                     f"Error loading {path}: ret: {ret} removing entry from cache"
@@ -446,6 +445,81 @@ class WekaGdsBackend(StorageBackendInterface):
             memory_obj.ref_count_down()
             return None
         return memory_obj
+
+    def _load_bytes_from_disk_with_allocation(
+        self,
+        key: CacheEngineKey,
+        path: str,
+        dtype: torch.dtype,
+        shape: torch.Size,
+    ) -> Optional[MemoryObj]:
+        """
+        Load byte array from disk by first allocating memory, then loading.
+
+        Args:
+            key: Cache key for error handling
+            path: File path to load from
+            dtype: Data type for memory allocation
+            shape: Shape for memory allocation
+
+        Returns:
+            A new memory object with loaded data, or None if allocation or
+            loading failed
+        """
+        memory_obj = self.memory_allocator.allocate(shape, dtype)
+        if memory_obj is None:
+            logger.debug("Memory allocation failed during sync disk load.")
+            return None
+        assert memory_obj.tensor is not None
+        assert memory_obj.tensor.is_cuda
+        assert torch.device(self.dst_device) == torch.device(memory_obj.tensor.device)
+
+        return self._load_bytes_from_disk_with_memory(key, path, memory_obj)
+
+    def batched_get_blocking(
+        self,
+        keys: List[CacheEngineKey],
+    ) -> list[MemoryObj | None]:
+        paths, dtypes, shapes = [], [], []
+        with self.hot_lock:
+            for key in keys:
+                entry = self.hot_cache.get(key)
+                if entry is None:
+                    logger.error(f"Lookup failed during get_blocking for {key}")
+                    paths.append(None)
+                    dtypes.append(None)
+                    shapes.append(None)
+                    continue
+                paths.append(entry.path)
+                dtypes.append(entry.dtype)
+                shapes.append(entry.shape)
+
+        memory_objs = []
+        gds_reads, gds_read_bytes = 0, 0
+        for dtype, shape, path in zip(dtypes, shapes, paths, strict=True):
+            if path is None:
+                memory_objs.append(None)
+                continue
+            memory_obj = self.memory_allocator.allocate(shape, dtype)
+            if memory_obj is None:
+                logger.error(f"Memory allocation failed during get_blocking for {path}")
+            else:
+                gds_reads += 1
+                gds_read_bytes += memory_obj.get_size()
+            memory_objs.append(memory_obj)
+
+        start_time = time.perf_counter()
+        results = list(
+            self._thread_pool.map(
+                self._load_bytes_from_disk_with_memory, keys, paths, memory_objs
+            )
+        )
+        total_time = time.perf_counter() - start_time
+        logger.info(
+            f"Time taken for batched_get_blocking: {total_time:.3f}s |"
+            f" {gds_read_bytes / 1024 / 1024}MiB | {gds_reads} ops."
+        )
+        return results
 
     def get_non_blocking(
         self,
@@ -515,4 +589,5 @@ class WekaGdsBackend(StorageBackendInterface):
         raise NotImplementedError("Remote backend does not support remove now.")
 
     def close(self) -> None:
+        self._thread_pool.shutdown(wait=True)
         logger.info("Weka backend closed.")

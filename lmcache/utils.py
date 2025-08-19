@@ -157,7 +157,7 @@ class CacheEngineKey:
                     raise ValueError(f"Invalid key string: {s}")
                 tags[kvs[0]] = kvs[1]
         return CacheEngineKey(
-            parts[0], parts[1], int(parts[2]), int(parts[3]), int(parts[4]), tags
+            parts[0], parts[1], int(parts[2]), int(parts[3]), int(parts[4], 16), tags
         )
 
     def to_dict(self):
@@ -269,7 +269,7 @@ class LayerCacheEngineKey(CacheEngineKey):
             parts[1],
             int(parts[2]),
             int(parts[3]),
-            int(parts[4]),
+            int(parts[4], 16),
             tags,
             int(parts[5]),
         )
