@@ -25,6 +25,7 @@ from lmcache.v1.gpu_connector import (
     GPUConnectorInterface,
     VLLMBufferLayerwiseGPUConnector,
     VLLMPagedMemLayerwiseGPUConnector,
+    SGLangLayerwiseGPUConnector,
 )
 from lmcache.v1.lookup_server import LookupServerInterface, RedisLookupServer
 from lmcache.v1.memory_management import CuFileMemoryAllocator  # noqa: E501
@@ -315,7 +316,6 @@ class LMCacheEngine:
             assert isinstance(key, CacheEngineKey)
 
             keys_multi_layer = key.split_layers(self.num_layers)
-
             # Only check the first layer
             if self.storage_manager.contains(keys_multi_layer[0]):
                 continue
@@ -355,7 +355,7 @@ class LMCacheEngine:
 
             assert isinstance(
                 self.gpu_connector,
-                (VLLMPagedMemLayerwiseGPUConnector, VLLMBufferLayerwiseGPUConnector),
+                (VLLMPagedMemLayerwiseGPUConnector, VLLMBufferLayerwiseGPUConnector, SGLangLayerwiseGPUConnector),
             )
 
             mem_obj_generator = self.gpu_connector.batched_from_gpu(
@@ -589,6 +589,7 @@ class LMCacheEngine:
                 (
                     VLLMPagedMemLayerwiseGPUConnector,
                     VLLMBufferLayerwiseGPUConnector,
+                    SGLangLayerwiseGPUConnector,
                 ),
             )
             mem_obj_consumer = self.gpu_connector.batched_to_gpu(starts, ends, **kwargs)
@@ -624,7 +625,7 @@ class LMCacheEngine:
 
         retrieved_tokens = torch.sum(ret_mask)
         self.stats_monitor.on_retrieve_finished(monitor_req_id, retrieved_tokens)
-        logger.debug(
+        logger.info(
             f"Retrieved {retrieved_tokens} "
             f"out of {num_required_tokens} "
             f"out of total {len(tokens)} tokens"

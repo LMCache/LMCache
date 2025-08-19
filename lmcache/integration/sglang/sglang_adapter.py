@@ -14,6 +14,7 @@ from lmcache.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.gpu_connector import (
     SGLangGPUConnector,
+    SGLangLayerwiseGPUConnector,
 )
 
 from sglang.srt.configs.model_config import ModelConfig
@@ -83,7 +84,14 @@ def init_lmcache_engine(
     hidden_dim_size = num_kv_head * head_dim
 
     if config.use_layerwise:
-        raise ValueError("Layerwise connector is not supported yet")
+        sglang_gpu_connector = SGLangLayerwiseGPUConnector(
+            hidden_dim_size,
+            num_layer,
+            use_gpu=use_gpu,
+            chunk_size=chunk_size,
+            dtype=kv_dtype,
+            device=device,
+        )
     else:
         sglang_gpu_connector = SGLangGPUConnector(
             hidden_dim_size,
@@ -119,15 +127,21 @@ class LMCacheConnector:
         self.sgl_config = sgl_config
         self.tp_size = tp_size
         self.rank = rank
-        self.kvcaches = k_pool + v_pool
+        self.kvcaches = [k_pool, v_pool]
+        # self.kvcaches = k_pool + v_pool
+        self.num_layer = sgl_config.num_hidden_layers
 
     ####################
     # Worker side APIs
     ####################
 
     def load_kv(
-        self, token_ids: torch.Tensor, slot_mapping: torch.Tensor, offset: int = 0
+        self, load_metadata: LoadMetadata
     ) -> None:
+        token_ids = torch.tensor(load_metadata.token_ids, dtype=torch.int64).cuda()
+        slot_mapping = load_metadata.slot_mapping.cuda()
+        offset = load_metadata.offset
+
         assert isinstance(token_ids, torch.Tensor)
         assert isinstance(slot_mapping, torch.Tensor)
         assert (len(token_ids) - offset) == len(slot_mapping)
@@ -149,8 +163,12 @@ class LMCacheConnector:
         return num_retrieved_tokens
 
     def store_kv(
-        self, token_ids: torch.Tensor, slot_mapping: torch.Tensor, offset: int = 0
+        self, store_metadata: StoreMetadata
     ) -> None:
+        token_ids = torch.tensor(store_metadata.token_ids, dtype=torch.int64).cuda()
+        slot_mapping = store_metadata.kv_indices.to(torch.int64).cuda()
+        offset = store_metadata.offset
+
         assert isinstance(token_ids, torch.Tensor)
         assert isinstance(slot_mapping, torch.Tensor)
         assert len(token_ids) == len(slot_mapping)
@@ -197,6 +215,7 @@ class LMCacheLayerwiseConnector(LMCacheConnector):
         self.layerwise_retrievers = []
 
     def load_kv_layerwise(self) -> None:
+        # print(f"len of layerwise_retrievers: {len(self.layerwise_retrievers)}")
         for layerwise_retriever in self.layerwise_retrievers:
             next(layerwise_retriever)
             self.current_layer += 1
@@ -227,10 +246,41 @@ class LMCacheLayerwiseConnector(LMCacheConnector):
         )
 
         retrieve_token_num = next(layerwise_retriever)
-        assert retrieve_token_num is not None
+        if retrieve_token_num is None:
+            return 0
 
         retrieved_token_num = retrieve_token_num.item()
         self.layerwise_retrievers.append(layerwise_retriever)
+
+        return retrieved_token_num
+
+    def load_kv(self, load_metadata: LoadMetadata) -> None:
+        token_ids = torch.tensor(load_metadata.token_ids, dtype=torch.int64).cuda()
+        slot_mapping = load_metadata.slot_mapping.cuda()
+        offset = load_metadata.offset
+        self.current_layer = 0
+
+        assert self.lmcache_engine is not None
+
+        load_mask = torch.ones_like(token_ids, dtype=torch.bool)
+        load_mask[:offset] = False
+        
+        layerwise_retriever = self.lmcache_engine.retrieve_layer(
+            token_ids,
+            mask=load_mask,
+            kvcaches=self.kvcaches,
+            slot_mapping=slot_mapping,
+            sync=False,
+        )
+
+        retrieve_token_num = next(layerwise_retriever)
+        if retrieve_token_num is None:
+            return 0
+
+        retrieved_token_num = retrieve_token_num.item()
+
+        for _ in range(self.sgl_config.num_hidden_layers):
+            next(layerwise_retriever)
 
         return retrieved_token_num
 
@@ -247,10 +297,8 @@ class LMCacheLayerwiseConnector(LMCacheConnector):
             offset=store_metadata.offset,
             sync=False,
         )
-        
         next(layerwise_storer)
-
-        for _ in range(self.current_layer):
+        for _ in range(self.sgl_config.num_hidden_layers):
             next(layerwise_storer)
 
         
