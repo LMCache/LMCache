@@ -1,12 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from dataclasses import dataclass
-from typing import Dict, List, Union
+from typing import Dict, List, Optional, Union
 import os
 import threading
 import time
 
 # Third Party
+from prometheus_client import REGISTRY
 import prometheus_client
 
 # First Party
@@ -420,6 +421,15 @@ class LMCStatsMonitor:
     def DestroyInstance():
         LMCStatsMonitor._instance = None
 
+    @staticmethod
+    def unregister_all_metrics():
+        collectors = list(REGISTRY._collector_to_names.keys())
+        for collector in collectors:
+            try:
+                REGISTRY.unregister(collector)
+            except KeyError:
+                pass
+
 
 class PrometheusLogger:
     _gauge_cls = prometheus_client.Gauge
@@ -770,6 +780,24 @@ class PrometheusLogger:
             labelnames=labelnames,
             multiprocess_mode="livemostrecent",
         )
+        self._dynamic_metrics(labelnames)
+
+    def _dynamic_metrics(self, labelnames):
+        """
+        Dynamically get value by lambda function while capture
+        """
+        self.local_cpu_hot_cache_count = self._gauge_cls(
+            name="lmcache:local_cpu_hot_cache_count",
+            documentation="The size of the hot_cache",
+            labelnames=labelnames,
+            multiprocess_mode="livemostrecent",
+        ).labels(**self.labels)
+        self.local_cpu_keys_in_request_count = self._gauge_cls(
+            name="lmcache:local_cpu_keys_in_request_count",
+            documentation="The size of the keys_in_request",
+            labelnames=labelnames,
+            multiprocess_mode="livemostrecent",
+        ).labels(**self.labels)
 
     def _log_gauge(self, gauge, data: Union[int, float]) -> None:
         # Convenience function for logging to gauge.
@@ -908,6 +936,14 @@ class PrometheusLogger:
         assert PrometheusLogger._instance is not None, (
             "PrometheusLogger instance not created yet"
         )
+        return PrometheusLogger._instance
+
+    @staticmethod
+    def GetInstanceOrNone() -> Optional["PrometheusLogger"]:
+        """
+        Returns the singleton instance of PrometheusLogger if it exists,
+        otherwise returns None.
+        """
         return PrometheusLogger._instance
 
 

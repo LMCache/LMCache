@@ -9,7 +9,7 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.observability import LMCStatsMonitor
+from lmcache.observability import LMCStatsMonitor, PrometheusLogger
 from lmcache.utils import CacheEngineKey, _lmcache_nvtx_annotate
 from lmcache.v1.cache_controller.message import KVAdmitMsg, KVEvictMsg
 from lmcache.v1.config import LMCacheEngineConfig
@@ -66,6 +66,17 @@ class LocalCPUBackend(StorageBackendInterface):
         # assumption: only one request is looked up at a time
         # (only one worker per cache engine)
         self.keys_in_request: List[CacheEngineKey] = []
+        self._setup_metrics()
+
+    def _setup_metrics(self):
+        prometheus_logger = PrometheusLogger.GetInstanceOrNone()
+        if prometheus_logger is not None:
+            prometheus_logger.local_cpu_hot_cache_count.set_function(
+                lambda: len(self.hot_cache)
+            )
+            prometheus_logger.local_cpu_keys_in_request_count.set_function(
+                lambda: len(self.keys_in_request)
+            )
 
     def __str__(self):
         return self.__class__.__name__
