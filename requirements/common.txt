@@ -1,6 +1,7 @@
 aiofile
 aiofiles
 aiohttp
+awscrt
 cufile-python
 infinistore
 msgspec
