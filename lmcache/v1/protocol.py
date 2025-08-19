@@ -128,7 +128,7 @@ class ClientMetaMessage:
     Request message from LMCache workers or servers.
     """
 
-    command: int
+    command: Constants
     key: CacheEngineKey
     length: int
     fmt: MemoryFormat
@@ -148,7 +148,7 @@ class ClientMetaMessage:
 
         packed_bytes = struct.pack(
             f"iiiiiiiii{MAX_KEY_LENGTH}s",
-            self.command,
+            self.command.value,
             self.length,
             int(self.fmt.value),
             DTYPE_TO_INT[self.dtype],
@@ -188,7 +188,7 @@ class ServerMetaMessage:
     Reply message from LMCache workers or servers.
     """
 
-    code: int
+    code: Constants
     length: int
     fmt: MemoryFormat
     dtype: Optional[torch.dtype]
@@ -199,7 +199,7 @@ class ServerMetaMessage:
         assert len(self.shape) == 4, "Shape dimension should be 4"
         packed_bytes = struct.pack(
             "iiiiiiiii",
-            self.code,
+            self.code.value,
             self.length,
             int(self.fmt.value),
             DTYPE_TO_INT[self.dtype],

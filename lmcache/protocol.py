@@ -23,7 +23,7 @@ class ClientMetaMessage:
     Control message from LMCServerConnector to LMCacheServer
     """
 
-    command: int
+    command: Constants
     key: str
     length: int
 
@@ -33,7 +33,7 @@ class ClientMetaMessage:
         )
         packed_bytes = struct.pack(
             f"ii{MAX_KEY_LENGTH}s",
-            self.command,
+            self.command.value,
             self.length,
             self.key.encode().ljust(MAX_KEY_LENGTH),
         )
@@ -42,7 +42,7 @@ class ClientMetaMessage:
     @staticmethod
     def deserialize(s: bytes) -> "ClientMetaMessage":
         command, length, key = struct.unpack(f"ii{MAX_KEY_LENGTH}s", s)
-        return ClientMetaMessage(command, key.decode().strip(), length)
+        return ClientMetaMessage(Constants(command), key.decode().rstrip(), length)
 
     @staticmethod
     def packlength() -> int:
@@ -55,7 +55,7 @@ class ServerMetaMessage:
     Control message from LMCacheServer to LMCServerConnector
     """
 
-    code: int
+    code: Constants
     length: int
 
     def serialize(self) -> bytes:
@@ -69,4 +69,4 @@ class ServerMetaMessage:
     @staticmethod
     def deserialize(s: bytes) -> "ServerMetaMessage":
         code, length = struct.unpack("ii", s)
-        return ServerMetaMessage(code, length)
+        return ServerMetaMessage(Constants(code), length)
