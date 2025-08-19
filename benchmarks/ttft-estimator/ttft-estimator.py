@@ -4,7 +4,11 @@ Startup:
 - serving engine agnostic benchmark but example is with vllm, 
   where we can increase the max model length more by restricting
   the concurrency to 1 since this estimator will only send one request at a time
-vllm serve meta-llama/Llama-3.1-8B-Instruct --max-model-len 130000 --port 8000 \
+- load-format dummy to make weight loading faster and we don't care about the
+  outputs only the prefill speed
+vllm serve meta-llama/Llama-3.1-8B-Instruct \
+    --max-model-len 130000 --port 8000 \
+    --load-format dummy \
     --max-num-seqs 1
 
 Example Usage: 
