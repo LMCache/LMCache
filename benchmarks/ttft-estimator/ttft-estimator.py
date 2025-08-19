@@ -62,6 +62,13 @@ def query_and_measure_ttft(prompt):
 
 
 def main():
+    # first send a dummy request
+    # e.g. on vLLM the very first request sometimes has higher
+    # TTFT due to kernel JIT compilation
+    warm_up_prompt = "bye" * 50
+    query_and_measure_ttft(warm_up_prompt)
+    print("Warm up complete")
+
     for i, context_length in enumerate(
         map(int, (s.strip() for s in args.context_lengths.split(",")))
     ):
