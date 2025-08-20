@@ -43,6 +43,7 @@ from lmcache.v1.gpu_connector import (
 from lmcache.v1.internal_api_server.api_server import InternalAPIServer
 from lmcache.v1.lookup_client import LookupClientFactory
 from lmcache.v1.offload_server.zmq_server import ZMQOffloadServer
+from lmcache.v1.plugin.plugin_launcher import PluginLauncher
 from lmcache.v1.storage_backend.connector.nixl_connector_v3 import (
     NixlReceiverInfo,
 )
@@ -616,6 +617,16 @@ class LMCacheConnectorV1Impl:
         # The enabled check is in the InternalAPIServer constructor
         self.api_server = InternalAPIServer(self)
         self.api_server.start()
+
+        # Launch plugins
+        self.plugin_launcher = PluginLauncher(
+            self.config,
+            role,
+            -1
+            if role == KVConnectorRole.SCHEDULER
+            else self.lmcache_engine.metadata.worker_id,
+        )
+        self.plugin_launcher.launch_plugins()
 
     @_lmcache_nvtx_annotate
     def _init_kv_caches_from_forward_context(self, forward_context: "ForwardContext"):
