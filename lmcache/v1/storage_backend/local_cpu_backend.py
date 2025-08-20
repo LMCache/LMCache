@@ -355,7 +355,7 @@ class LocalCPUBackend(StorageBackendInterface):
                     for key in evict_key_all_layer:
                         old_mem_objs.append(self.hot_cache[key])
                         self.cache_policy.update_on_force_evict(key)
-                        self.hot_cache.pop(evict_key, None)
+                        self.hot_cache.pop(key, None)
 
                     self.memory_allocator.batched_free(old_mem_objs)
 
