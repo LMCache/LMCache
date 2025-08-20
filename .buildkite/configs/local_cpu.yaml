@@ -19,3 +19,6 @@ docker:
 
 vllm:
   model: "meta-llama/Llama-3.2-1B-Instruct"
+  args:
+    - "--load-format"
+    - "dummy"

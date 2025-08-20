@@ -15,3 +15,5 @@ vllm:
     - "--gpu-memory-utilization"
     - "0.35"
     - "--enforce-eager"
+    - "--load-format"
+    - "dummy"
