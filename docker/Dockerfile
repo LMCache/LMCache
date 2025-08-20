@@ -1,4 +1,4 @@
-# The LMcache Dockerfile is used to build a LMCache image that is integrated
+# The LMCache Dockerfile is used to build a LMCache image that is integrated
 # to run with vLLM OpenAI server.
 
 # Please update any changes made here to
@@ -90,6 +90,8 @@ ENV VLLM_FA_CMAKE_GPU_ARCHES=${vllm_fa_cmake_gpu_arches}
 # Integrate vLLM nightly build and LMCache build and
 # expose vLLM OpenAI API
 
+# Will trigger from `.github/workflows/nightly_build.yml`
+
 FROM base AS image-build
 
 # install build dependencies
@@ -113,15 +115,18 @@ COPY . /workspace/LMCache
 WORKDIR /workspace/LMCache
 
 # Build LMCache
-RUN --mount=type=cache,target=/root/.cache/ccache \
-    --mount=type=cache,target=/root/.cache/pip \
+# since we are installing vllm before lmcache, we will implicitly use
+# the same torch version as the vllm nightly when running setup.py bdist_wheel
+# fall back to stable vllm if nightly is not available
+RUN --mount=type=cache,target=/root/.cache/ccache,id=ccache \
+    --mount=type=cache,target=/root/.cache/uv,id=uv-cache,sharing=locked \
     . /opt/venv/bin/activate && \
-    python3 setup.py bdist_wheel --dist-dir=dist_lmcache
-
-# Install LMCache latest build and vLLM nightly build
-RUN . /opt/venv/bin/activate && \
-    uv pip install --prerelease=allow vllm[runai,tensorizer] --extra-index-url https://wheels.vllm.ai/nightly && \
-    uv pip install /workspace/LMCache/dist_lmcache/*.whl --verbose
+    uv pip install --prerelease=allow 'vllm[runai,tensorizer]' \
+        --extra-index-url https://wheels.vllm.ai/nightly \
+        --index-strategy unsafe-best-match && \
+    python3 -c 'import torch; print("TORCH=", torch.__version__)' && \
+    python3 setup.py bdist_wheel --dist-dir=dist_lmcache && \
+    uv pip install ./dist_lmcache/*.whl --verbose
 
 WORKDIR /workspace
 ENTRYPOINT ["/opt/venv/bin/vllm", "serve"]
@@ -130,9 +135,14 @@ ENTRYPOINT ["/opt/venv/bin/vllm", "serve"]
 # Integrate vLLM and LMCache stable releases and expose vLLM
 # OpenAI API
 
+# Will trigger from `.github/workflows/publish.yml`
+
 FROM base AS image-release
 
 # Install LMCache and vLLM stable releases
+# this happens right after we build and publish lmcache wheels in the release pipeline
+# this means that we should publish lmcache wheels that use the same torch version 
+# as vllm when building the wheels
 RUN . /opt/venv/bin/activate && \
     uv pip install --prerelease=allow vllm[runai,tensorizer] && \
     uv pip install lmcache --verbose

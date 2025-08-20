@@ -128,7 +128,7 @@ class RemoteBackend(StorageBackendInterface):
         # For MLA worker id as 0 mode, use worker_id 0
         if self._mla_worker_id_as0_mode:
             key = CacheEngineKey(
-                key.fmt, key.model_name, key.world_size, 0, key.chunk_hash
+                key.fmt, key.model_name, key.world_size, 0, key.chunk_hash, key.tags
             )
 
         try:
@@ -170,6 +170,9 @@ class RemoteBackend(StorageBackendInterface):
 
         # If MLA worker id as 0 mode is enabled, skip put tasks
         if self._mla_worker_id_as0_mode:
+            return None
+
+        if self.exists_in_put_tasks(key):
             return None
 
         memory_obj.ref_count_up()
@@ -222,7 +225,7 @@ class RemoteBackend(StorageBackendInterface):
         # For MLA worker id as 0 mode, use worker_id 0
         if self._mla_worker_id_as0_mode:
             key = CacheEngineKey(
-                key.fmt, key.model_name, key.world_size, 0, key.chunk_hash
+                key.fmt, key.model_name, key.world_size, 0, key.chunk_hash, key.tags
             )
         t1 = time.perf_counter()
         future = asyncio.run_coroutine_threadsafe(self.connection.get(key), self.loop)

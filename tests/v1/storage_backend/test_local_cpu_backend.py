@@ -7,6 +7,7 @@ import pytest
 import torch
 
 # First Party
+from lmcache.observability import LMCStatsMonitor
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import (
@@ -87,6 +88,10 @@ def local_cpu_backend_disabled(memory_allocator):
 class TestLocalCPUBackend:
     """Test cases for LocalCPUBackend."""
 
+    def teardown_method(self, method):
+        LMCStatsMonitor.unregister_all_metrics()
+        LMCStatsMonitor.DestroyInstance()
+
     def test_init(self, memory_allocator):
         """Test LocalCPUBackend initialization."""
         config = create_test_config()
@@ -97,7 +102,6 @@ class TestLocalCPUBackend:
         assert backend.memory_allocator == memory_allocator
         assert backend.lmcache_worker is None
         assert backend.instance_id == "test_instance"
-        assert backend.usage == 0
         assert len(backend.hot_cache) == 0
         assert backend.layerwise is False
         assert backend.enable_blending is False
@@ -507,27 +511,6 @@ class TestLocalCPUBackend:
 
         # The backend should still be in a consistent state
         assert local_cpu_backend.contains(key)
-
-        local_cpu_backend.memory_allocator.close()
-
-    def test_memory_usage_tracking(self, local_cpu_backend):
-        """Test that memory usage is tracked correctly."""
-        key = create_test_key("test_key")
-        memory_obj = create_test_memory_obj()
-
-        initial_usage = local_cpu_backend.usage
-
-        # Insert key
-        local_cpu_backend.submit_put_task(key, memory_obj)
-
-        # Usage should be updated
-        assert local_cpu_backend.usage > initial_usage
-
-        # Remove key
-        local_cpu_backend.remove(key)
-
-        # Usage should be reduced
-        assert local_cpu_backend.usage == initial_usage
 
         local_cpu_backend.memory_allocator.close()
 

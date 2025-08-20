@@ -61,8 +61,10 @@ class LocalDiskWorker:
         if task_type == "prefetch":
             priority = 0
             self.insert_prefetch_task(kwargs["key"], None)
-        elif task_type == "put":
+        elif task_type == "delete":
             priority = 1
+        elif task_type == "put":
+            priority = 2
             self.insert_put_task(kwargs["key"])
         else:
             raise ValueError(f"Unknown task type: {task_type}")
@@ -77,6 +79,8 @@ class LocalDiskWorker:
             if task_type == "prefetch":
                 # Remove the prefetch task from the queue
                 self.insert_prefetch_task(kwargs["key"], future)
+
+            self.pq.task_done()
 
     def remove_put_task(self, key: CacheEngineKey):
         with self.put_lock:
@@ -269,7 +273,7 @@ class LocalDiskBackend(StorageBackendInterface):
         size = meta.size
         self.usage -= size
         self.stats_monitor.update_local_storage_usage(self.usage)
-        os.remove(path)
+        self.disk_worker.submit_task("delete", os.remove, path=path)
 
         if force:
             self.cache_policy.update_on_force_evict(key)
@@ -285,7 +289,7 @@ class LocalDiskBackend(StorageBackendInterface):
 
     def insert_key(self, key: CacheEngineKey, memory_obj: MemoryObj) -> None:
         path = self._key_to_path(key)
-        size = memory_obj.get_size()
+        size = memory_obj.get_physical_size()
         shape = memory_obj.metadata.shape
         dtype = memory_obj.metadata.dtype
         fmt = memory_obj.metadata.fmt
@@ -452,7 +456,9 @@ class LocalDiskBackend(StorageBackendInterface):
         assert shape is not None
 
         self.disk_lock.release()
-        memory_obj = self.load_bytes_from_disk(path, dtype=dtype, shape=shape, fmt=fmt)
+        memory_obj = self.load_bytes_from_disk(
+            key, path, dtype=dtype, shape=shape, fmt=fmt
+        )
 
         return memory_obj
 
@@ -481,28 +487,15 @@ class LocalDiskBackend(StorageBackendInterface):
         """
         kv_chunk = memory_obj.tensor
         assert kv_chunk is not None
-        byte_array = memory_obj.byte_array
+        buffer = memory_obj.byte_array
         path = self._key_to_path(key)
 
-        size = len(byte_array)
+        size = len(buffer)
         self.usage += size
         self.stats_monitor.update_local_storage_usage(self.usage)
 
-        start_time = time.time()
         # FIXME(Jiayi): need to add ref count in disk memory object
-        if size % self.os_disk_bs != 0 or not self.use_odirect:
-            with open(path, "wb") as f:
-                f.write(byte_array)
-        else:
-            fd = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_DIRECT, 0o644)
-            os.write(fd, byte_array)
-            os.close(fd)
-
-        disk_write_time = time.time() - start_time
-        logger.debug(
-            f"Disk write size: {size} bytes, "
-            f"Bandwidth: {size / disk_write_time / 1e6:.2f} MB/s"
-        )
+        self.write_file(buffer, path)
 
         self.insert_key(key, memory_obj)
 
@@ -527,28 +520,7 @@ class LocalDiskBackend(StorageBackendInterface):
         logger.debug("Executing `async_load_bytes` from disk.")
         # FIXME (Jiayi): handle the case where loading fails.
         buffer = memory_obj.byte_array
-        size = len(buffer)
-
-        fblock_aligned = size % self.os_disk_bs == 0
-        if not fblock_aligned and self.use_odirect:
-            logger.warning(
-                "Cannot use O_DIRECT for this file, "
-                "size is not aligned to disk block size."
-            )
-
-        start_time = time.time()
-        if not fblock_aligned or not self.use_odirect:
-            with open(path, "rb") as f:
-                f.readinto(buffer)
-        else:
-            fd = os.open(path, os.O_RDONLY | os.O_DIRECT)
-            with os.fdopen(fd, "rb", buffering=0) as fdo:
-                fdo.readinto(buffer)
-        disk_read_time = time.time() - start_time
-        logger.debug(
-            f"Disk read size: {size} bytes, "
-            f"Bandwidth: {size / disk_read_time / 1e6:.2f} MB/s"
-        )
+        self.read_file(key, buffer, path)
 
         self.disk_lock.acquire()
         self.dict[key].unpin()
@@ -565,7 +537,12 @@ class LocalDiskBackend(StorageBackendInterface):
     # TODO(Jiayi): the pinned cpu memory_obj should directly be passed into
     # gpu connector; this gpu buffer could be avoided
     def load_bytes_from_disk(
-        self, path: str, dtype: torch.dtype, shape: torch.Size, fmt: MemoryFormat
+        self,
+        key: CacheEngineKey,
+        path: str,
+        dtype: torch.dtype,
+        shape: torch.Size,
+        fmt: MemoryFormat,
     ) -> Optional[MemoryObj]:
         """
         Load bytearray from disk.
@@ -576,8 +553,28 @@ class LocalDiskBackend(StorageBackendInterface):
         assert memory_obj is not None, "Memory allocation failed during disk load."
 
         buffer = memory_obj.byte_array
-        size = len(buffer)
+        self.read_file(key, buffer, path)
+        return memory_obj
 
+    def write_file(self, buffer, path):
+        start_time = time.time()
+        size = len(buffer)
+        if size % self.os_disk_bs != 0 or not self.use_odirect:
+            with open(path, "wb") as f:
+                f.write(buffer)
+        else:
+            fd = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_DIRECT, 0o644)
+            os.write(fd, buffer)
+            os.close(fd)
+        disk_write_time = time.time() - start_time
+        logger.debug(
+            f"Disk write size: {size} bytes, "
+            f"Bandwidth: {size / disk_write_time / 1e6:.2f} MB/s"
+        )
+
+    def read_file(self, key, buffer, path):
+        start_time = time.time()
+        size = len(buffer)
         fblock_aligned = size % self.os_disk_bs == 0
         if not fblock_aligned and self.use_odirect:
             logger.warning(
@@ -585,20 +582,24 @@ class LocalDiskBackend(StorageBackendInterface):
                 "size is not aligned to disk block size."
             )
 
-        start_time = time.time()
-        if not fblock_aligned or not self.use_odirect:
-            with open(path, "rb") as f:
-                f.readinto(buffer)
-        else:
-            fd = os.open(path, os.O_RDONLY | os.O_DIRECT)
-            with os.fdopen(fd, "rb", buffering=0) as fdo:
-                fdo.readinto(buffer)
+        try:
+            if not fblock_aligned or not self.use_odirect:
+                with open(path, "rb") as f:
+                    f.readinto(buffer)
+            else:
+                fd = os.open(path, os.O_RDONLY | os.O_DIRECT)
+                with os.fdopen(fd, "rb", buffering=0) as fdo:
+                    fdo.readinto(buffer)
+        except FileNotFoundError:
+            if self.dict.get(key, None):
+                self.dict.pop(key)
+            return
+
         disk_read_time = time.time() - start_time
         logger.debug(
             f"Disk read size: {size} bytes, "
             f"Bandwidth: {size / disk_read_time / 1e6:.2f} MB/s"
         )
-        return memory_obj
 
     def close(self) -> None:
         with self.disk_lock:

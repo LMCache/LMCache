@@ -262,13 +262,17 @@ class UserSession:
             max_tokens = min(max_tokens, self.user_config.answer_len)
         else:
             max_tokens = self.user_config.answer_len
-        request_executor.launch_request(
-            self.chat_history,
-            max_tokens,
-            self._on_request_finished,
-            extra_headers={"x-user-id": str(self.user_config.user_id)},
-        )
-        self.has_unfinished_request = True
+        if request_executor is not None:
+            request_executor.launch_request(
+                self.chat_history,
+                max_tokens,
+                self._on_request_finished,
+                extra_headers={"x-user-id": str(self.user_config.user_id)},
+            )
+            self.has_unfinished_request = True
+        else:  # dry-run
+            self.chat_history.on_system_response("")
+            self.has_unfinished_request = False
         self.last_request_time = timestamp
 
     def _on_request_finished(self, response: Response):
@@ -380,6 +384,9 @@ class UserSessionManager:
             if d["num_round"] > 2 * self.workload_config.num_rounds
         ]
         logger.info(f"There are {len(self.sharegpt_data)} users satisfying ")
+        assert len(self.sharegpt_data) >= self.workload_config.num_users, (
+            "Not enough data! Reduce --num-users or --num-rounds"
+        )
 
     def _ramp_up(self, timestamp: float, ramp_up_time: float):
         for i in range(self.workload_config.num_users):
@@ -439,7 +446,7 @@ class UserSessionManager:
         start_time: Optional[float] = None,
         end_time: Optional[float] = None,
         pending_queries: int = 0,
-        qps: Optional[int] = None,
+        config_qps: Optional[int] = None,
     ):
         if start_time and end_time:
             launched_queries = len(
@@ -455,8 +462,8 @@ class UserSessionManager:
             f"finished queries: {len(df)}"
         )
 
-        if qps is None:
-            qps = 0.0
+        if config_qps is None:
+            config_qps = 0.0
 
         if start_time is None:
             start_time = df["launch_time"].min()
@@ -465,7 +472,7 @@ class UserSessionManager:
         total_time = end_time - start_time
 
         total_requests = launched_queries + pending_queries
-        _qps = total_requests / total_time
+        actual_qps = total_requests / total_time
 
         total_finished_requests = len(df)
         finished_qps = total_finished_requests / total_time
@@ -481,7 +488,8 @@ class UserSessionManager:
         logger.info("Calculating performance summary")
         print("\n")
         print("==================== Performance summary ======================")
-        print(f"  \033[33mQPS: \033[32m{qps:.4f} reqs/s\033[0m\n")
+        print(f"  \033[33mConfig QPS: \033[32m{config_qps:.4f} reqs/s\033[0m\n")
+        print(f"  \033[33mActual QPS: \033[32m{actual_qps:.4f} reqs/s\033[0m\n")
 
         print(f"  \033[33mProcessing speed: \033[32m{finished_qps:.4f} reqs/s\033[0m\n")
 
@@ -622,6 +630,11 @@ def parse_arguments() -> WorkloadConfig:
         action="store_true",
         help="Whether to use ShareGPT dataset",
     )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Does not send requests to the endpoint (server)",
+    )
     args = parser.parse_args()
     return args
 
@@ -654,15 +667,18 @@ def main():
     args = parse_arguments()
     if args.verbose:
         global logger
-        logger = init_logger(__name__, level=logging.DEBUG)
+        logger = init_logger(__name__, logging.DEBUG)
 
     step_interval = 0.1
 
-    executor = RequestExecutor(
-        base_url=args.base_url, api_key="EMPTY", model=args.model
-    )
+    executor = None
+    if not args.dry_run:
+        executor = RequestExecutor(
+            base_url=args.base_url, api_key="EMPTY", model=args.model
+        )
 
-    warmup_engine(executor)
+        warmup_engine(executor)
+
     workload_config = WorkloadConfig(
         num_users=args.num_users,
         system_prompt_len=args.shared_system_prompt,

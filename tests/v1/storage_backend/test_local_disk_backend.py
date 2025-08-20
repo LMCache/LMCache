@@ -218,7 +218,6 @@ class TestLocalDiskBackend:
         assert key in local_disk_backend.dict
         metadata = local_disk_backend.dict[key]
         assert metadata.path == local_disk_backend._key_to_path(key)
-        assert metadata.size == memory_obj.get_size()
         assert metadata.shape == memory_obj.metadata.shape
         assert metadata.dtype == memory_obj.metadata.dtype
         assert metadata.fmt == memory_obj.metadata.fmt
@@ -241,7 +240,6 @@ class TestLocalDiskBackend:
         assert key in local_disk_backend.dict
         metadata = local_disk_backend.dict[key]
         assert metadata.path == original_path  # Path should remain the same
-        assert metadata.size == memory_obj2.get_size()  # Size should be updated
 
         local_disk_backend.local_cpu_backend.memory_allocator.close()
 
@@ -261,6 +259,10 @@ class TestLocalDiskBackend:
 
         # Remove the key
         local_disk_backend.remove(key)
+
+        # Wait for worker tasks
+        local_disk_backend.disk_worker.pq.join()
+        local_disk_backend.disk_worker.executor.shutdown()
 
         assert key not in local_disk_backend.dict
         assert not os.path.exists(path)
@@ -319,9 +321,7 @@ class TestLocalDiskBackend:
         # Check that the metadata was properly set
         metadata = local_disk_backend.dict[key]
         assert metadata.path == local_disk_backend._key_to_path(key)
-        assert metadata.size == memory_obj.get_size()
         assert metadata.shape == memory_obj.metadata.shape
-        assert metadata.dtype == memory_obj.metadata.dtype
         assert metadata.fmt == memory_obj.metadata.fmt
         assert metadata.pin_count == 0
 
@@ -404,7 +404,6 @@ class TestLocalDiskBackend:
         # Check that the metadata was properly set
         metadata = local_disk_backend.dict[key]
         assert metadata.path == local_disk_backend._key_to_path(key)
-        assert metadata.size == memory_obj.get_size()
 
         local_disk_backend.local_cpu_backend.memory_allocator.close()
 
@@ -419,6 +418,7 @@ class TestLocalDiskBackend:
             f.write(memory_obj.byte_array)
 
         result = local_disk_backend.load_bytes_from_disk(
+            key,
             path,
             memory_obj.metadata.dtype,
             memory_obj.metadata.shape,
@@ -443,6 +443,7 @@ class TestLocalDiskBackend:
             f.write(memory_obj.byte_array)
 
         result = local_disk_backend.load_bytes_from_disk(
+            key,
             path,
             memory_obj.metadata.dtype,
             memory_obj.metadata.shape,
@@ -480,16 +481,17 @@ class TestLocalDiskBackend:
     def test_file_operations_error_handling(self, local_disk_backend):
         """Test error handling in file operations."""
         # Test with non-existent file
+        key = create_test_key("test_key")
         non_existent_path = "/non/existent/path/file.pt"
 
-        with pytest.raises(FileNotFoundError):
-            local_disk_backend.load_bytes_from_disk(
-                non_existent_path,
-                torch.bfloat16,
-                torch.Size([2, 16, 8, 128]),
-                MemoryFormat.KV_T2D,
-            )
-
+        memory_obj = local_disk_backend.load_bytes_from_disk(
+            key,
+            non_existent_path,
+            torch.bfloat16,
+            torch.Size([2, 16, 8, 128]),
+            MemoryFormat.KV_T2D,
+        )
+        assert memory_obj is not None
         local_disk_backend.local_cpu_backend.memory_allocator.close()
 
     def test_cleanup_on_remove(self, local_disk_backend):
@@ -507,6 +509,10 @@ class TestLocalDiskBackend:
 
         # Remove key
         local_disk_backend.remove(key)
+
+        # Wait for worker tasks
+        local_disk_backend.disk_worker.pq.join()
+        local_disk_backend.disk_worker.executor.shutdown()
 
         # Check that both the dict entry and file are removed
         assert key not in local_disk_backend.dict

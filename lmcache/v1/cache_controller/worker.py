@@ -16,8 +16,12 @@ from lmcache.v1.cache_controller.message import (
     ClearWorkerRetMsg,
     CompressWorkerMsg,
     CompressWorkerRetMsg,
+    DecompressWorkerMsg,
+    DecompressWorkerRetMsg,
     DeRegisterMsg,
     ErrorMsg,
+    HealthWorkerMsg,
+    HealthWorkerRetMsg,
     MoveWorkerMsg,
     MoveWorkerRetMsg,
     Msg,
@@ -232,6 +236,16 @@ class LMCacheWorker:
                     serialized_ret_msg = msgspec.msgpack.encode(
                         CompressWorkerRetMsg(num_tokens=num_compressed_tokens)
                     )
+                elif isinstance(request, DecompressWorkerMsg):
+                    num_decompressed_tokens = self.lmcache_engine.decompress(
+                        tokens=request.tokens,
+                        method=request.method,
+                        location=request.location,
+                        event_id=request.worker_event_id,
+                    )
+                    serialized_ret_msg = msgspec.msgpack.encode(
+                        DecompressWorkerRetMsg(num_tokens=num_decompressed_tokens)
+                    )
                 elif isinstance(request, PinWorkerMsg):
                     num_pinned_tokens = self.lmcache_engine.lookup(
                         tokens=request.tokens,
@@ -248,6 +262,11 @@ class LMCacheWorker:
                     )
                     serialized_ret_msg = msgspec.msgpack.encode(
                         ClearWorkerRetMsg(num_tokens=num_cleared_tokens)
+                    )
+                elif isinstance(request, HealthWorkerMsg):
+                    error_code = self.lmcache_engine.health()
+                    serialized_ret_msg = msgspec.msgpack.encode(
+                        HealthWorkerRetMsg(error_code=error_code)
                     )
                 else:
                     logger.error(f"Unknown message: {request}")
