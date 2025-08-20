@@ -339,4 +339,3 @@ def mla_enabled(model_config: "ModelConfig") -> bool:
         and isinstance(model_config.use_mla, bool)
         and model_config.use_mla
     )
-
