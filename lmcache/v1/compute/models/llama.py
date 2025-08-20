@@ -60,22 +60,13 @@ class LMCLlamaModel(nn.Module):
         hidden_states = self.vllm_model.get_input_embeddings(input_ids.cuda())
         residual = None
 
-        # TODO (Jiayi): reduce the number of calls
         attn_output = None
 
         # TODO(Jiayi): Need to build `attn_metadata` more elegantly.
-        attn_metadata = LMCFlashAttnMetadata(
-            query_start_loc=torch.tensor(
-                [0, input_ids.shape[0]], dtype=torch.int32, device=hidden_states.device
-            ),
-            seq_lens=torch.tensor([input_ids.shape[0]], device=hidden_states.device),
-            cu_seqlens_k=torch.tensor(
-                [0, input_ids.shape[0]], dtype=torch.int32, device=hidden_states.device
-            ),
-            max_query_len=input_ids.shape[0],
-            max_seq_len=input_ids.shape[0],
+        attn_metadata = self.lmc_attn_layers[0].init_attn_metadata(
+            input_ids=input_ids,
         )
-
+        
         for idx, layer in enumerate(
             self.vllm_model.model.layers[
                 self.vllm_model.model.start_layer : self.vllm_model.model.end_layer

@@ -7,6 +7,7 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.compute.attention.metadata import LMCAttnMetadata
 from lmcache.v1.compute.blend.metadata import LMCBlendCommonMetadata, LMCBlendMetadata
 from lmcache.v1.compute.models.utils import infer_model_from_vllm
 
@@ -55,7 +56,7 @@ class LMCBlender:
         residual: torch.Tensor,
         layer_id: int,
         attn_output: Optional[torch.Tensor],
-        attn_metadata,
+        attn_metadata: LMCAttnMetadata,
     ):
         logger.debug(f"Blender is processing KV for layer {layer_id}")
         old_k, old_v = self.gpu_connector.get_kv(layer_id)
@@ -93,14 +94,12 @@ class LMCBlender:
             residual = residual[top_indices]
 
             logger.debug(f"Number of indices picked: {len(top_indices)}")
+
             self.metadata.imp_indices = top_indices
             self.metadata.positions = self.metadata.positions[top_indices]
             attn_output = attn_output[:topk_num]
 
-            attn_metadata.max_query_len = topk_num
-            attn_metadata.query_start_loc = torch.tensor(
-                [0, topk_num], dtype=torch.int32, device=q.device
-            )
+            attn_metadata.update_from_topk(topk_num)
 
         if self.metadata.imp_indices is not None:
             old_k[self.metadata.imp_indices] = k

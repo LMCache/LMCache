@@ -17,10 +17,21 @@ class AttentionInterface(metaclass=abc.ABCMeta):
         key: torch.Tensor,
         value: torch.Tensor,
         output: torch.Tensor,
-        attn_metadata: "LMCFlashAttnMetadata",
+        attn_metadata: "LMCAttnMetadata",
         **kwargs,
     ) -> torch.Tensor:
         """
         Perform forward pass of the attention mechanism.
+        """
+        raise NotImplementedError
+    
+    @abc.abstractmethod
+    def init_attn_metadata(
+        self,
+        input_ids: torch.Tensor,
+        **kwargs,
+    ) -> "LMCAttnMetadata":
+        """
+        Initialize attention metadata.
         """
         raise NotImplementedError

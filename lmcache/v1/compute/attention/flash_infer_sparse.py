@@ -1,16 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # Third Party
 from vllm.attention import Attention
-from vllm.v1.attention.backends.flash_attn import FlashAttentionImpl
+import flashinfer
 from vllm.vllm_flash_attn import flash_attn_varlen_func, get_scheduler_metadata
 import torch
 
 # First Party
 from lmcache.v1.compute.attention.abstract import AttentionInterface
-from lmcache.v1.compute.attention.metadata import LMCFlashAttnMetadata
+from lmcache.v1.compute.attention.metadata import LMCFlashInferSparseMetadata
 
 
-class LMCFlashAttnBackend(AttentionInterface):
+class LMCFlashInferSparseBackend(AttentionInterface):
     """
     FlashAttention backend for LMCache.
     This backend uses the FlashAttention implementation
@@ -24,11 +24,10 @@ class LMCFlashAttnBackend(AttentionInterface):
         self.vllm_attn = vllm_attn
         self.vllm_attn_impl: FlashAttentionImpl = vllm_attn.impl
 
-        # TODO(Jiayi): remove this hardcode
-        self.aot_schedule = False
-
         idx = torch.cuda.current_device()
         self.device = torch.device(f"cuda:{idx}")
+
+        workspace_buffer = torch.empty(128 * 1024 * 1024, dtype=torch.uint8, device="cuda:0")
 
     def forward_contiguous(
         self,
@@ -49,7 +48,6 @@ class LMCFlashAttnBackend(AttentionInterface):
 
         descale_shape = (cu_seqlens_q.shape[0] - 1, key.shape[1])
 
-        # TODO(Jiayi): Figure out how to use aot_schedule.
         scheduler_metadata = self._schedule(
             batch_size=1,  # NOTE(Jiayi): Assuming batch size is 1,
             # since we are processing request by request.
@@ -85,37 +83,14 @@ class LMCFlashAttnBackend(AttentionInterface):
 
         return output
 
-    def _schedule(
-        self, batch_size, cu_query_lens, max_query_len, seqlens, max_seq_len, causal
-    ):
-        if self.aot_schedule:
-            return get_scheduler_metadata(
-                batch_size=batch_size,
-                max_seqlen_q=max_query_len,
-                max_seqlen_k=max_seq_len,
-                cache_seqlens=seqlens,
-                num_heads_q=self.vllm_attn_impl.num_heads_q,
-                num_heads_kv=self.vllm_attn_impl.num_heads_kv,
-                headdim=self.vllm_attn_impl.headdim,
-                page_size=self.vllm_attn_impl.block_size,
-                cu_seqlens_q=cu_query_lens,
-                causal=causal,
-                window_size=self.vllm_attn_impl.aot_sliding_window,
-            )
-        return None
-    
     def init_attn_metadata(
-        input_ids: torch.tensor,
+        self,
+        input_ids: torch.Tensor,
         **kwargs,
-    ):
-        return LMCFlashAttnMetadata(
-                query_start_loc=torch.tensor(
-                    [0, input_ids.shape[0]], dtype=torch.int32, device=hidden_states.device
-                ),
-                seq_lens=torch.tensor([input_ids.shape[0]], device=hidden_states.device),
-                cu_seqlens_k=torch.tensor(
-                    [0, input_ids.shape[0]], dtype=torch.int32, device=hidden_states.device
-                ),
-                max_query_len=input_ids.shape[0],
-                max_seq_len=input_ids.shape[0],
-            )
+    ) -> LMCFlashInferSparseMetadata:
+        """
+        Initialize non-sparse attention metadata first.
+        """
+
+        wrapper = flashinfer.VariableBlockSparseAttentionWrapper(workspace_buffer)
+        
