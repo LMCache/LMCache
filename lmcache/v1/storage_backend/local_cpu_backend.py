@@ -9,7 +9,7 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.observability import LMCStatsMonitor
+from lmcache.observability import LMCStatsMonitor, PrometheusLogger
 from lmcache.utils import CacheEngineKey, _lmcache_nvtx_annotate
 from lmcache.v1.cache_controller.message import KVAdmitMsg, KVEvictMsg
 from lmcache.v1.config import LMCacheEngineConfig
@@ -58,7 +58,6 @@ class LocalCPUBackend(StorageBackendInterface):
         self.stream = torch.cuda.Stream()
 
         self.stats_monitor = LMCStatsMonitor.GetOrCreate()
-        self.usage = 0
 
         self.layerwise = config.use_layerwise
         self.enable_blending = config.enable_blending
@@ -67,6 +66,17 @@ class LocalCPUBackend(StorageBackendInterface):
         # assumption: only one request is looked up at a time
         # (only one worker per cache engine)
         self.keys_in_request: List[CacheEngineKey] = []
+        self._setup_metrics()
+
+    def _setup_metrics(self):
+        prometheus_logger = PrometheusLogger.GetInstanceOrNone()
+        if prometheus_logger is not None:
+            prometheus_logger.local_cpu_hot_cache_count.set_function(
+                lambda: len(self.hot_cache)
+            )
+            prometheus_logger.local_cpu_keys_in_request_count.set_function(
+                lambda: len(self.keys_in_request)
+            )
 
     def __str__(self):
         return self.__class__.__name__
@@ -109,9 +119,6 @@ class LocalCPUBackend(StorageBackendInterface):
             self.hot_cache[key] = memory_obj
 
             self.cache_policy.update_on_put(key)
-
-            self.usage += memory_obj.get_size()
-            self.stats_monitor.update_local_cache_usage(self.usage)
 
             # TODO(Jiayi): optimize this with batching?
             # push kv admit msg
@@ -210,9 +217,6 @@ class LocalCPUBackend(StorageBackendInterface):
             self.cache_policy.update_on_force_evict(key)
             self.cpu_lock.release()
 
-        self.usage -= memory_obj.get_size()
-        self.stats_monitor.update_local_cache_usage(self.usage)
-
         if self.lmcache_worker is not None:
             self.lmcache_worker.put_msg(
                 KVEvictMsg(self.instance_id, key.worker_id, key.chunk_hash, str(self))
@@ -263,6 +267,7 @@ class LocalCPUBackend(StorageBackendInterface):
                 )
 
                 if not evict_keys:
+                    self.stats_monitor.update_local_cpu_evict_failed_count(1)
                     logger.warning(
                         "No eviction candidates found in local cpu backend. "
                         "Local cpu memory is under pressure."
@@ -332,6 +337,7 @@ class LocalCPUBackend(StorageBackendInterface):
                 # pinned in the cpu memory. This might not be true.
 
                 if not evict_keys:
+                    self.stats_monitor.update_local_cpu_evict_failed_count(1)
                     logger.warning(
                         "No eviction candidates found in local cpu backend. "
                         "Local cpu memory is under pressure."
@@ -353,9 +359,9 @@ class LocalCPUBackend(StorageBackendInterface):
                     for key in evict_key_all_layer:
                         old_mem_objs.append(self.hot_cache[key])
                         self.cache_policy.update_on_force_evict(key)
+                        self.hot_cache.pop(key, None)
 
                     self.memory_allocator.batched_free(old_mem_objs)
-                    self.hot_cache.pop(evict_key, None)
 
                     if self.lookup_server is not None:
                         self.lookup_server.batched_remove(evict_key_all_layer)

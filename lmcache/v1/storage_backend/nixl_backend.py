@@ -95,7 +95,7 @@ class RecvObjPool:
         recent_keys = set(self._recent_added_keys)
         keys_to_evict = current_keys - recent_keys
         for key in keys_to_evict:
-            freed_size += self._data[key].get_size()
+            freed_size += self._data[key].get_physical_size()
             self._data.pop(key)
             self._cnt.pop(key)
         ed = time.perf_counter()

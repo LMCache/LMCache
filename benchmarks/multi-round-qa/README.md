@@ -64,6 +64,7 @@ vllm serve mistralai/Mistral-7B-Instruct-v0.2 --disable-log-requests
 - `--output <str>`: The csv file to dump the detailed stats for each query (default = summary.csv)
 - `--log-interval <float>`: Time between each performance summary log in seconds (default = 30)
 - `--time <float>`: Total time to run the experiment (default = forever)
+- `--dry-run`: If this option is present, the script will not send requests to the endpoint (server). This option is useful when quickly verifying whether a script can properly process trace data.
 
 #### Processing previous outputs only (Optional)
 - `--process-summary <filename>`: if this option is present, the script will only process the existing output csv and print out the summary without running any experiment.
@@ -92,13 +93,21 @@ The `multi-round-qa.py` script works by:
 ## ShareGPT Datasets
 
 1. Download and prepare the ShareGPT dataset 
-    You can specify the proportion of data to process by providing a number between 0 and 1 as an argument to the script.
+    You can easily download the ShareGPT dataset and perform the preparation step to remove invalid traces by running the script below.
 
     ```bash
     bash prepare_sharegpt_data.sh 1
     ```
 
-    In this example, 1 indicates processing 100% of the dataset. You can adjust this value as needed.
+    You can specify the proportion of data to process by providing a number between `0` and `1` as an argument to the script. In this example, `1` indicates processing 100% of the dataset. You can adjust this value as needed.
+
+    Once the script runs successfully, `ShareGPT_V3_unfiltered_cleaned_split.json` will be downloaded, and the prepared `ShareGPT.json` will be generated.
+
+    The `prepare_sharegpt_data.sh` script internally executes `data_preprocessing.py`, which provides the following options:
+
+    - `--parse`: proportion of data to process by providing a number between `0` and `1` (default = 1)
+    - `--model`: model name for tokenizer (default = `mistralai/Mistral-7B-Instruct-v0.2`)
+    - `--trace`: trace file name to process (default = `ShareGPT_V3_unfiltered_cleaned_split.json`)
 
 2. Run the benchmark
     Example:

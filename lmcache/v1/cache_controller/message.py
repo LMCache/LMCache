@@ -128,7 +128,23 @@ class CompressWorkerMsg(ControlMsg):
     def describe(self) -> str:
         return (
             f"Compress tokens {self.tokens} in "
-            f"locations {self.locations} with "
+            f"locations {self.location} with "
+            f"method {self.method}"
+        )
+
+
+class DecompressWorkerMsg(ControlMsg):
+    """Decompress message for a single lmcache worker"""
+
+    worker_event_id: str
+    method: str
+    location: str
+    tokens: Optional[list[int]] = None
+
+    def describe(self) -> str:
+        return (
+            f"Decompress tokens {self.tokens} in "
+            f"locations {self.location} with "
             f"method {self.method}"
         )
 
@@ -197,7 +213,16 @@ class CompressWorkerRetMsg(ControlRetMsg):
     num_tokens: int
 
     def describe(self) -> str:
-        return f"Compress success: {self.success}"
+        return f"Compress success: {self.num_tokens}"
+
+
+class DecompressWorkerRetMsg(ControlRetMsg):
+    """Decompress return message for a single lmcache worker"""
+
+    num_tokens: int
+
+    def describe(self) -> str:
+        return f"Decompress success: {self.num_tokens}"
 
 
 class MoveWorkerRetMsg(ControlRetMsg):
@@ -212,10 +237,10 @@ class MoveWorkerRetMsg(ControlRetMsg):
 class HealthWorkerRetMsg(ControlRetMsg):
     """Health return message for a single lmcache worker"""
 
-    alive: bool
+    error_code: int
 
     def describe(self) -> str:
-        return f"Health check alive: {self.alive}"
+        return f"Health check error code: {self.error_code}"
 
 
 class CheckFinishWorkerRetMsg(ControlRetMsg):
@@ -299,7 +324,25 @@ class CompressMsg(OrchMsg):
         return (
             f"Compress tokens {self.tokens} in instance "
             f"{self.instance_id} and "
-            f"locations {self.locations} with "
+            f"locations {self.location} with "
+            f"method {self.method}"
+        )
+
+
+class DecompressMsg(OrchMsg):
+    """Decompress message"""
+
+    event_id: str
+    instance_id: str
+    method: str
+    location: str
+    tokens: Optional[list[int]] = None  # `None` means compress all tokens
+
+    def describe(self) -> str:
+        return (
+            f"Decompress tokens {self.tokens} in instance "
+            f"{self.instance_id} and "
+            f"locations {self.location} with "
             f"method {self.method}"
         )
 
@@ -322,6 +365,7 @@ class MoveMsg(OrchMsg):
 class HealthMsg(OrchMsg):
     """Health message"""
 
+    event_id: str
     instance_id: str
 
     def describe(self) -> str:
@@ -394,6 +438,16 @@ class CompressRetMsg(OrchRetMsg):
         return f"Compressed {self.num_tokens} tokens"
 
 
+class DecompressRetMsg(OrchRetMsg):
+    """Decompress return message"""
+
+    event_id: str
+    num_tokens: int
+
+    def describe(self) -> str:
+        return f"Decompressed {self.num_tokens} tokens"
+
+
 class MoveRetMsg(OrchRetMsg):
     """Move return message"""
 
@@ -408,10 +462,11 @@ class HealthRetMsg(OrchRetMsg):
     """Health return message"""
 
     event_id: str
-    alive: bool
+    # worker_id -> error_code
+    error_codes: Dict[int, int]
 
     def describe(self) -> str:
-        return f"Alive: {self.alive}"
+        return f"error_codes: {self.error_codes}"
 
 
 class CheckFinishRetMsg(OrchRetMsg):
@@ -443,6 +498,8 @@ Msg = Union[
     PinWorkerRetMsg,
     CompressWorkerMsg,
     CompressWorkerRetMsg,
+    DecompressWorkerMsg,
+    DecompressWorkerRetMsg,
     MoveWorkerMsg,
     MoveWorkerRetMsg,
     HealthWorkerMsg,
@@ -457,6 +514,8 @@ Msg = Union[
     PinRetMsg,
     CompressMsg,
     CompressRetMsg,
+    DecompressMsg,
+    DecompressRetMsg,
     MoveMsg,
     MoveRetMsg,
     HealthMsg,
