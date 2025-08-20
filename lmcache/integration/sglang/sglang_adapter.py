@@ -246,6 +246,8 @@ class LMCacheLayerwiseConnector(LMCacheConnector):
         )
 
         retrieve_token_num = next(layerwise_retriever)
+        next(layerwise_retriever)
+        self.current_layer = 1
         if retrieve_token_num is None:
             return 0
 
