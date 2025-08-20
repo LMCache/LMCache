@@ -215,7 +215,6 @@ class LMCacheLayerwiseConnector(LMCacheConnector):
         self.layerwise_retrievers = []
 
     def load_kv_layerwise(self) -> None:
-        # print(f"len of layerwise_retrievers: {len(self.layerwise_retrievers)}")
         for layerwise_retriever in self.layerwise_retrievers:
             next(layerwise_retriever)
             self.current_layer += 1
