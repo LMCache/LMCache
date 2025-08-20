@@ -6,7 +6,6 @@ import abc
 import torch
 
 # First Party
-from lmcache.v1.compute.attention.metadata import LMCFlashAttnMetadata
 
 
 class AttentionInterface(metaclass=abc.ABCMeta):
@@ -24,7 +23,7 @@ class AttentionInterface(metaclass=abc.ABCMeta):
         Perform forward pass of the attention mechanism.
         """
         raise NotImplementedError
-    
+
     @abc.abstractmethod
     def init_attn_metadata(
         self,

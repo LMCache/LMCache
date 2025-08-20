@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Third Party
 from vllm.attention import Attention
+from vllm.vllm_flash_attn import flash_attn_varlen_func
 import flashinfer
-from vllm.vllm_flash_attn import flash_attn_varlen_func, get_scheduler_metadata
 import torch
 
 # First Party
@@ -27,7 +27,9 @@ class LMCFlashInferSparseBackend(AttentionInterface):
         idx = torch.cuda.current_device()
         self.device = torch.device(f"cuda:{idx}")
 
-        workspace_buffer = torch.empty(128 * 1024 * 1024, dtype=torch.uint8, device="cuda:0")
+        workspace_buffer = torch.empty(
+            128 * 1024 * 1024, dtype=torch.uint8, device="cuda:0"
+        )
 
     def forward_contiguous(
         self,
@@ -93,4 +95,3 @@ class LMCFlashInferSparseBackend(AttentionInterface):
         """
 
         wrapper = flashinfer.VariableBlockSparseAttentionWrapper(workspace_buffer)
-        

@@ -5,7 +5,6 @@ import torch
 
 # First Party
 from lmcache.v1.compute.attention.flash_attn import LMCFlashAttnBackend
-from lmcache.v1.compute.attention.metadata import LMCFlashAttnMetadata
 from lmcache.v1.compute.positional_encoding import get_fused_rope
 
 # FIXME(Jiayi): A few things need to be tested/supported:
@@ -66,7 +65,7 @@ class LMCLlamaModel(nn.Module):
         attn_metadata = self.lmc_attn_layers[0].init_attn_metadata(
             input_ids=input_ids,
         )
-        
+
         for idx, layer in enumerate(
             self.vllm_model.model.layers[
                 self.vllm_model.model.start_layer : self.vllm_model.model.end_layer

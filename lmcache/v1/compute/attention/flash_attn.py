@@ -103,19 +103,19 @@ class LMCFlashAttnBackend(AttentionInterface):
                 window_size=self.vllm_attn_impl.aot_sliding_window,
             )
         return None
-    
+
     def init_attn_metadata(
         input_ids: torch.tensor,
         **kwargs,
     ):
         return LMCFlashAttnMetadata(
-                query_start_loc=torch.tensor(
-                    [0, input_ids.shape[0]], dtype=torch.int32, device=hidden_states.device
-                ),
-                seq_lens=torch.tensor([input_ids.shape[0]], device=hidden_states.device),
-                cu_seqlens_k=torch.tensor(
-                    [0, input_ids.shape[0]], dtype=torch.int32, device=hidden_states.device
-                ),
-                max_query_len=input_ids.shape[0],
-                max_seq_len=input_ids.shape[0],
-            )
+            query_start_loc=torch.tensor(
+                [0, input_ids.shape[0]], dtype=torch.int32, device=hidden_states.device
+            ),
+            seq_lens=torch.tensor([input_ids.shape[0]], device=hidden_states.device),
+            cu_seqlens_k=torch.tensor(
+                [0, input_ids.shape[0]], dtype=torch.int32, device=hidden_states.device
+            ),
+            max_query_len=input_ids.shape[0],
+            max_seq_len=input_ids.shape[0],
+        )
