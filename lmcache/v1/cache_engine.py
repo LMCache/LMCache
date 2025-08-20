@@ -98,10 +98,10 @@ class LMCacheEngine:
         self.broadcast_fn = broadcast_fn
         self.broadcast_object_fn = broadcast_object_fn
         # save_only_first_rank only works when use mla
-        self.save_only_first_rank = self.config.get_extra_config_value(
-            "save_only_first_rank", metadata.use_mla
-        ) and metadata.use_mla
-
+        self.save_only_first_rank = (
+            self.config.get_extra_config_value("save_only_first_rank", metadata.use_mla)
+            and metadata.use_mla
+        )
         self.enable_p2p = config.enable_p2p
 
         self.enable_controller = config.enable_controller
@@ -1186,9 +1186,10 @@ class LMCacheEngineBuilder:
 
         max_local_cpu_size = config.max_local_cpu_size
         # save_only_first_rank only works when use mla
-        save_only_first_rank = config.get_extra_config_value(
-            "save_only_first_rank", metadata.use_mla
-        ) and metadata.use_mla
+        save_only_first_rank = (
+            config.get_extra_config_value("save_only_first_rank", metadata.use_mla)
+            and metadata.use_mla
+        )
         if save_only_first_rank and metadata.is_first_rank():
             # Only the first rank will save the cache,
             # so we need to set it lager than other ranks

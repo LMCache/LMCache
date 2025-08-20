@@ -376,7 +376,7 @@ def _to_original_config(self):
     )
 
 
-def _get_extra_config_value(self, key, default_value = None):
+def _get_extra_config_value(self, key, default_value=None):
     if hasattr(self, "extra_config") and self.extra_config is not None:
         return self.extra_config.get(key, default_value)
     else:
