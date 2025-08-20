@@ -94,6 +94,7 @@ wait_for_openai_api_server() {
 run_lmcache_vllmopenai_container() {
     local docker="$1"
     local vllm="$2"
+    local cfg_name="$3"
     LOGFILE="/tmp/build_${BUILD_ID}_${cfg_name}.log"
 
     # Pick the GPU with the largest free memory
@@ -306,7 +307,7 @@ for cfg_name in "${CONFIG_NAMES[@]}"; do
     # Start server
     docker_args="$(yq '.docker' "$cfg_file")"
     vllm_args="$(yq '.vllm' "$cfg_file")"
-    run_lmcache_vllmopenai_container "$docker_args" "$vllm_args"
+    run_lmcache_vllmopenai_container "$docker_args" "$vllm_args" "$cfg_name"
 
     # Send request
     test_mode="$(yq -r '.workload.type' "$cfg_file")"
@@ -319,8 +320,8 @@ for cfg_name in "${CONFIG_NAMES[@]}"; do
         repeat_count="$(yq -r '.workload.repeat_count' "$cfg_file")"
         repeat_mode="$(yq -r '.workload.repeat_mode' "$cfg_file")"
         shuffle_seed="$(yq -r '.workload.shuffle_seed' "$cfg_file")"
-        max_inflight="$(yq -r '.workload.max_inflight_requests' "$cfg_file")"
-        sleep_after="$(yq -r '.workload.sleep_time_after_warmup' "$cfg_file")"
+        max_inflight="$(yq -r '.workload.max_inflight' "$cfg_file")"
+        sleep_after="$(yq -r '.workload.sleep_after' "$cfg_file")"
         expected_ttft_gain="$(yq -r '.workload.expected_ttft_gain' "$cfg_file")"
         expected_latency_gain="$(yq -r '.workload.expected_latency_gain' "$cfg_file")"
         run_long_doc_qa "$num_docs" "$doc_len" "$out_len" \
