@@ -245,17 +245,22 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "default": "LRU",
         "env_converter": str,
     },
-    "cache_engine_internal_api_server_enabled": {
+    "internal_api_server_enabled": {
         "type": bool,
         "default": False,
         "env_converter": lambda x: x
         if isinstance(x, bool)
         else str(x).lower() in ["true", "1"],
     },
-    "cache_engine_internal_api_server_port_start": {
+    "internal_api_server_port_start": {
         "type": int,
-        "default": 7000,
+        "default": 6999,
         "env_converter": int,
+    },
+    "internal_api_server_include_index_list": {
+        "type": Optional[list[int]],
+        "default": None,
+        "env_converter": _to_int_list,
     },
 }
 

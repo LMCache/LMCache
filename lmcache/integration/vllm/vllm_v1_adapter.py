@@ -40,6 +40,7 @@ from lmcache.v1.gpu_connector import (
     VLLMPagedMemGPUConnectorV2,
     VLLMPagedMemLayerwiseGPUConnector,
 )
+from lmcache.v1.internal_api_server.api_server import InternalAPIServer
 from lmcache.v1.lookup_client import LookupClientFactory
 from lmcache.v1.offload_server.zmq_server import ZMQOffloadServer
 from lmcache.v1.storage_backend.connector.nixl_connector_v3 import (
@@ -548,6 +549,7 @@ class LMCacheConnectorV1Impl:
             )
             self._unfinished_requests: dict[str, Request] = {}
             self._lookup_requests_in_step: list[str] = []
+            self.lmcache_engine = None
         else:
             self.lmcache_engine = _init_lmcache_engine(
                 config,
@@ -609,6 +611,11 @@ class LMCacheConnectorV1Impl:
         self.current_layer = 0
 
         self.force_skip_save = bool(os.environ.get("LMCACHE_FORCE_SKIP_SAVE", False))
+
+        # Start internal API server if enabled
+        # The enabled check is in the InternalAPIServer constructor
+        self.api_server = InternalAPIServer(self)
+        self.api_server.start()
 
     @_lmcache_nvtx_annotate
     def _init_kv_caches_from_forward_context(self, forward_context: "ForwardContext"):
