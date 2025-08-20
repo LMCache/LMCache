@@ -42,6 +42,7 @@ jobs:
                 disable-sudo-and-containers: false
                 egress-policy: block
                 allowed-endpoints: >
+                  api.github.com:443
                   github.com:443
                   registry-1.docker.io:443
                   production.cloudflare.docker.com:443
@@ -49,6 +50,9 @@ jobs:
                   azure.archive.ubuntu.com:80
                   pypi.org:443
                   files.pythonhosted.org:443
+                  codeload.github.com:443
+                  objects.githubusercontent.com:443
+                  releases.githubusercontent.com:443
 
             - name: Checkout code
               uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -64,7 +68,7 @@ jobs:
               with:
                 python-version: "3.11"
 
-            - name: Install dependencies
+            - name: Install build tooling
               run: |
                 python -m pip install --upgrade pip
                 pip install build cibuildwheel
@@ -79,6 +83,9 @@ jobs:
 
             - name: Build CUDA wheels with cibuildwheel
               # Configuration is set in pyproject.toml
+              # this will build lmcache with the latest version of torch
+              # building from source will be required if a serving engine uses
+              # an earlier non-ABI compatible version of torch
               run: |
                 python -m cibuildwheel --output-dir dist
 

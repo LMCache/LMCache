@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import Iterable, List, Optional, OrderedDict, Tuple, Union
+from typing import Any, Iterable, List, Optional, OrderedDict, Tuple, Union
 import abc
 
 # Third Party
@@ -15,14 +15,7 @@ from lmcache.v1.config import LMCacheEngineConfig
 
 logger = init_logger(__name__)
 
-# NOTE: For centralized cache sharing, ensure PYTHONHASHSEED is
-# set consistently across all processes (e.g., export PYTHONHASHSEED=0).
-try:
-    # Third Party
-    from vllm.v1.core.kv_cache_utils import NONE_HASH
-except ImportError:
-    # Fallback to a default value if vllm is not available
-    NONE_HASH = 0
+NONE_HASH: int
 
 
 class TokenDatabase(metaclass=abc.ABCMeta):
@@ -42,6 +35,8 @@ class TokenDatabase(metaclass=abc.ABCMeta):
         config: Optional[LMCacheEngineConfig] = None,
         metadata: Optional[LMCacheEngineMetadata] = None,
     ):
+        global NONE_HASH
+
         vllm_is_available = True
         try:
             # Third Party
@@ -64,6 +59,17 @@ class TokenDatabase(metaclass=abc.ABCMeta):
             if hash_algorithm == "sha256" and vllm_is_available
             else hash
         )
+
+        # NOTE: For centralized cache sharing, ensure PYTHONHASHSEED is
+        # set consistently across all processes (e.g., export PYTHONHASHSEED=0).
+        try:
+            # Third Party
+            from vllm.v1.core import kv_cache_utils
+
+            kv_cache_utils.init_none_hash(self.hash_func)
+            NONE_HASH = kv_cache_utils.NONE_HASH
+        except (ImportError, AttributeError):
+            NONE_HASH = 0
 
         self.metadata = metadata
 
@@ -111,7 +117,10 @@ class TokenDatabase(metaclass=abc.ABCMeta):
         )
 
     def _hash_tokens(
-        self, tokens: Union[torch.Tensor, List[int]], prefix_hash: Optional[int] = None
+        self,
+        tokens: Union[torch.Tensor, List[int]],
+        prefix_hash: Optional[int] = None,
+        extra_keys: Optional[list[Any]] = None,
     ) -> int:
         if isinstance(tokens, torch.Tensor):
             tokens_tuple = tuple(tokens.cpu().tolist())
@@ -120,9 +129,10 @@ class TokenDatabase(metaclass=abc.ABCMeta):
         else:
             raise ValueError(f"Unsupported tokens type: {type(tokens)}")
 
-        if prefix_hash is not None:
-            return self.hash_func((prefix_hash, tokens_tuple))
-        return self.hash_func(tokens_tuple)
+        # Ignore extra keys for now
+        # Extra keys are for multi-modal inputs and
+        # request specific metadata (e.g., LoRA ID).
+        return self.hash_func((prefix_hash, tokens_tuple, extra_keys))
 
 
 class ChunkedTokenDatabase(TokenDatabase):

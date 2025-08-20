@@ -65,7 +65,7 @@ pip install lmcache
 
 Works on Linux NVIDIA GPU platform.
 
-More [detailed installation instructions](https://docs.lmcache.ai/getting_started/installation) are available in the docs.
+More [detailed installation instructions](https://docs.lmcache.ai/getting_started/installation) are available in the docs, particularly if you are not using the latest stable version of vllm or using another serving engine with different dependencies. Any "undefined symbol" or torch mismatch versions can be resolved in the documentation. 
 
 ## Getting started
 
