@@ -17,6 +17,8 @@ class LMCacheEngineConfig:
     # value even if local_cpu is disabled
     local_disk: Optional[str]
     max_local_disk_size: float  # in GB
+    remote_disk: Optional[str]
+    max_remote_disk_size: float  # in GB
 
     remote_url: Optional[str]
     remote_serde: Optional[str]  # Can be "naive" or "cachegen"
@@ -41,6 +43,8 @@ class LMCacheEngineConfig:
         max_local_cpu_size: float = 5.0,
         local_disk: Optional[str] = None,
         max_local_disk_size: int = 0,
+        remote_disk: Optional[str] = None,
+        max_remote_disk_size: int = 0,
         remote_url: Optional[str] = "lm://localhost:65432",
         remote_serde: Optional[str] = "naive",
         save_decode_cache: bool = False,
@@ -55,69 +59,7 @@ class LMCacheEngineConfig:
         method_output_csv: str = "blablabla",
     ) -> "LMCacheEngineConfig":
         return LMCacheEngineConfig(chunk_size, local_cpu, max_local_cpu_size,
-                                   local_disk, max_local_disk_size, remote_url,
-                                   remote_serde, save_decode_cache,
-                                   enable_blending, blend_recompute_ratio,
-                                   blend_min_tokens, alpha, policy, rate, compression, dataset_csv, method_output_csv)
-
-    @staticmethod
-    def from_legacy(
-        chunk_size: int = 256,
-        backend: str = "cpu",
-        remote_url: Optional[str] = "lm://localhost:65432",
-        remote_serde: str = "naive",
-        save_decode_cache: bool = False,
-        enable_blending: bool = False,
-        blend_recompute_ratio: float = 0.15,
-        blend_min_tokens: int = 256,
-        max_local_disk_size: float = 0.0,
-        alpha: float = 1.0,
-        policy: str = "ours",
-        rate: float = 1.0,
-        compression: str = "kivi",
-        dataset_csv: str = "blablabla",
-        method_output_csv: str = "blablabla",
-    ) -> "LMCacheEngineConfig":
-        if backend == "cpu":
-            local_cpu = True
-            max_local_cpu_size = 5
-            local_disk = None
-            max_local_disk_size = 0
-            remote_url = None
-        elif backend == "local_disk":
-            local_cpu = False
-            max_local_cpu_size = 5
-            local_disk = "/local/disk_test/local_disk/"
-            max_local_disk_size = 5
-            remote_url = None
-        elif backend == "local_cpu_disk":
-            local_cpu = True
-            max_local_cpu_size = 5
-            local_disk = "/local/disk_test/local_disk/"
-            max_local_disk_size = 5
-            remote_url = None
-        elif backend == "remote":
-            local_cpu = False
-            max_local_cpu_size = 5
-            local_disk = None
-        elif backend == "local_cpu_remote":
-            local_cpu = True
-            max_local_cpu_size = 5
-            local_disk = None
-        elif backend == "local_disk_remote":
-            local_cpu = False
-            max_local_cpu_size = 5
-            local_disk = "/local/disk_test/local_disk/"
-            max_local_disk_size = 5
-        elif backend == "local_cpu_disk_remote":
-            local_cpu = True
-            max_local_cpu_size = 5
-            local_disk = "/local/disk_test/local_disk/"
-            max_local_disk_size = 5
-        else:
-            raise ValueError(f"Invalid backend: {backend}")
-        return LMCacheEngineConfig(chunk_size, local_cpu, max_local_cpu_size,
-                                   local_disk, max_local_disk_size, remote_url,
+                                   local_disk, max_local_disk_size, remote_disk, max_remote_disk_size, remote_url,
                                    remote_serde, save_decode_cache,
                                    enable_blending, blend_recompute_ratio,
                                    blend_min_tokens, alpha, policy, rate, compression, dataset_csv, method_output_csv)
@@ -137,6 +79,9 @@ class LMCacheEngineConfig:
 
         local_disk = config.get("local_disk", None)
         max_local_disk_size = config.get("max_local_disk_size", 5)
+
+        remote_disk = config.get("remote_disk", None)
+        max_remote_disk_size = config.get("max_remote_disk_size", 5)
 
         remote_url = config.get("remote_url", None)
         remote_serde = config.get("remote_serde", "naive")
@@ -160,6 +105,13 @@ class LMCacheEngineConfig:
                                   path):  # local disk directory
                 local_disk_path = path[7:]
 
+        match remote_disk:
+            case None:
+                remote_disk_path = None
+            case path if re.match(r"file://(.*)/",
+                                  path):  # remote disk directory
+                remote_disk_path = path[7:]
+
         match remote_url:
             case None:
                 pass
@@ -174,6 +126,8 @@ class LMCacheEngineConfig:
             max_local_cpu_size,
             local_disk_path,
             max_local_disk_size,
+            remote_disk_path,
+            max_remote_disk_size,
             remote_url,
             remote_serde,
             save_decode_cache,
@@ -236,6 +190,11 @@ class LMCacheEngineConfig:
         config.max_local_disk_size = to_float(
             parse_env(get_env_name("max_local_disk_size"),
                       config.max_local_disk_size))
+        config.remote_disk = parse_env(get_env_name("remote_disk"),
+                                       config.remote_disk)
+        config.max_remote_disk_size = to_float(
+            parse_env(get_env_name("max_remote_disk_size"),
+                      config.max_remote_disk_size))
         config.remote_url = parse_env(get_env_name("remote_url"),
                                       config.remote_url)
         config.remote_serde = parse_env(get_env_name("remote_serde"),

@@ -20,7 +20,7 @@ from lmcache.utils import (CacheEngineKey, DiskCacheMetadata,
 logger = init_logger(__name__)
 
 
-class LocalDiskBackend(StorageBackendInterface):
+class RemoteDiskBackend(StorageBackendInterface):
 
     def __init__(self,
                  config: LMCacheEngineConfig,
@@ -32,14 +32,14 @@ class LocalDiskBackend(StorageBackendInterface):
         self.dst_device = dst_device
 
         self.disk_lock = threading.Lock()
-        assert config.local_disk is not None
-        self.path: str = config.local_disk
+        assert config.remote_disk is not None
+        self.path: str = config.remote_disk
         if not os.path.exists(self.path):
             os.makedirs(self.path)
-            logger.info(f"Created local disk cache directory: {self.path}")
+            logger.info(f"Created remote disk cache directory: {self.path}")
 
         # Initialize the evictor
-        self.evictor = LRUEvictor(max_cache_size=config.max_local_disk_size)
+        self.evictor = LRUEvictor(max_cache_size=config.max_remote_disk_size)
 
         self.loop = loop
         self.put_tasks: List[CacheEngineKey] = []
@@ -163,8 +163,9 @@ class LocalDiskBackend(StorageBackendInterface):
             old_key.metadata.score_table.append(key.metadata.score_table[0])
             old_key.metadata.disk_score_table.append(key.metadata.disk_score_table[0])
         # Record request pattern
-        old_key.metadata.emerge_id.append(emerge_id)
-        self.dict[old_key] = self.dict.pop(key)
+        if emerge_id:
+            old_key.metadata.emerge_id.append(emerge_id)
+            self.dict[old_key] = self.dict.pop(key)
 
         path = self.dict[old_key].path
         dtype = self.dict[old_key].dtype
@@ -218,7 +219,7 @@ class LocalDiskBackend(StorageBackendInterface):
         memory_obj = self.memory_allocator.allocate(shape, dtype, fmt=MemoryFormat.KV_BLOB2)
         if memory_obj is None:
             raise RuntimeError(
-                "Failed to allocate memory for the async disk-retrieved KV cache.\n"
+                "Failed to allocate memory for the async remote-retrieved KV cache.\n"
                 "The KV cache will not be stored."
             )
         buffer = memory_obj.byte_array
@@ -252,23 +253,12 @@ class LocalDiskBackend(StorageBackendInterface):
             memory_obj = self.memory_allocator.allocate(shape, dtype, MemoryFormat.KV_BLOB2)
             if memory_obj is None:
                 raise RuntimeError(
-                    "Failed to allocate memory for the sync disk-retrieved KV cache.\n"
+                    "Failed to allocate memory for the sync remote-retrieved KV cache.\n"
                     "The KV cache will not be stored."
                 )
             
-            ##### 1
-            # buffer = memory_obj.byte_array
-            # start = time.perf_counter()
-            # with open(path, 'rb') as f:
-            #     f.readinto(buffer)
-            # duration = time.perf_counter() - start
-            # logger.info(
-            #     "Async disk load: read %d bytes into buffer in %.3f seconds",
-            #     len(buffer), duration
-            # )
-
             ##### 3
-            TARGET_RATE = 4 * 1024**3  # 4 GiB/s
+            TARGET_RATE = 0.5 * 1024**3  # 0.5 GiB/s
 
             fd = os.open(path, os.O_RDONLY | os.O_DIRECT)
             f  = os.fdopen(fd, 'rb', buffering=0)

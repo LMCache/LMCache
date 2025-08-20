@@ -245,6 +245,11 @@ class KIVISerializer(Serializer):
         }
 
         allocated_obj = self.memory_allocator.allocate(saved_tensor.shape, saved_tensor.dtype, fmt=MemoryFormat.KV_BLOB2)
+        if allocated_obj is None:
+            raise RuntimeError(
+                "Failed to allocate memory for the KIVI-se KV cache.\n"
+                "The KV cache will not be stored."
+            )
         allocated_obj.tensor.copy_(saved_tensor)
         return allocated_obj, metadata, entry_offsets, split_metadata, quant_metadata, quant_entry_offsets
 

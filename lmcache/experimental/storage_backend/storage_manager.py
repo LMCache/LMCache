@@ -274,7 +274,6 @@ class KVCacheManager:
         else:
             return KVDecision("cpu", "kivi", 0), {}
 
-# TODO: extend this class to implement caching policies and eviction policies
 class StorageManager:
     """
     The StorageManager is responsible for managing the storage backends.
@@ -283,33 +282,30 @@ class StorageManager:
     def __init__(self, config: LMCacheEngineConfig,
                  metadata: LMCacheEngineMetadata,
                  allocator: MemoryAllocatorInterface):
+        
         self.memory_allocator = allocator
-        self.kivi_de = KIVIDeserializer(self.memory_allocator)
-        self.hot_cache: OrderedDict[CacheEngineKey, MemoryObj] = OrderedDict()
-        self.kivi_cache = OrderedDict()
-        self.use_hot = config.local_cpu
-        self.kivi_ser = KIVISerializer(self.memory_allocator)
+        self.manager_lock = threading.Lock()
+        self.stream = torch.cuda.Stream()
 
+        # KIVI compression
+        self.kivi_ser = KIVISerializer(self.memory_allocator)
+        self.kivi_de = KIVIDeserializer(self.memory_allocator)
+        self.kivi_cache = OrderedDict()
+        
+        # Storage Backends
+        self.use_hot = config.local_cpu
+        self.hot_cache: OrderedDict[CacheEngineKey, MemoryObj] = OrderedDict()
+        dst_device = "cuda"
         self.loop = asyncio.new_event_loop()
         self.thread = threading.Thread(target=self.loop.run_forever)
         self.thread.start()
-
-        #TODO: remove hardcode
-        dst_device = "cuda"
         self.storage_backends: OrderedDict[str, StorageBackendInterface] =\
             CreateStorageBackends(
                 config, metadata, self.loop, allocator, dst_device)
+
         self.prefetch_tasks: Dict[CacheEngineKey, Future] = {}
-        self.put_tasks: Dict[str, Dict[CacheEngineKey, Tuple[Future,
-                                                             MemoryObj]]] = {}
-
-        for backend_name in self.storage_backends.keys():
-            self.put_tasks[backend_name] = {}
-
-        self.manager_lock = threading.Lock()
-
-        self.stream = torch.cuda.Stream()
-
+        
+        # Policy Manager
         self.manager = KVCacheManager(self.hot_cache, config.policy, config.rate)
         self.policy = config.policy
         self.update_queue: OrderedDict[CacheEngineKey, MemoryObj] = OrderedDict()
@@ -330,33 +326,35 @@ class StorageManager:
         if not eviction or memory_obj is not None:
             self.manager_lock.release()
             return memory_obj
+        else:
+            raise RuntimeError(f"Failed to allocate memory object in LocalCPUBackend.")
 
-        assert isinstance(self.memory_allocator, MixedMemoryAllocator)
-        evict_keys = []
+        # assert isinstance(self.memory_allocator, MixedMemoryAllocator)
+        # evict_keys = []
 
-        for evict_key in self.hot_cache:
+        # for evict_key in self.hot_cache:
 
-            # If the ref_count > 1, we cannot evict it as the hot cache
-            # might be used as buffers by other storage backends
-            if self.memory_allocator.get_ref_count(
-                    self.hot_cache[evict_key]) > 1:
-                continue
-            evict_keys.append(evict_key)
-            self.memory_allocator.ref_count_down(self.hot_cache[evict_key])
-            memory_obj = self.memory_allocator.allocate(shape, dtype)
-            logger.debug("Evicting 1 chunk from hot cache")
-            if memory_obj is not None:
-                break
-            # TODO(Jiayi): move this before the loop
-            # In this way, we don't need to do eviction for big objects
-            # TODO(Jiayi): the following code is hacky, please refactor
-            if self.memory_allocator.pin_allocator.num_active_allocations == 0:
-                break
-        for evict_key in evict_keys:
-            self.hot_cache.pop(evict_key)
+        #     # If the ref_count > 1, we cannot evict it as the hot cache
+        #     # might be used as buffers by other storage backends
+        #     if self.memory_allocator.get_ref_count(
+        #             self.hot_cache[evict_key]) > 1:
+        #         continue
+        #     evict_keys.append(evict_key)
+        #     self.memory_allocator.ref_count_down(self.hot_cache[evict_key])
+        #     memory_obj = self.memory_allocator.allocate(shape, dtype)
+        #     logger.debug("Evicting 1 chunk from hot cache")
+        #     if memory_obj is not None:
+        #         break
+        #     # TODO(Jiayi): move this before the loop
+        #     # In this way, we don't need to do eviction for big objects
+        #     # TODO(Jiayi): the following code is hacky, please refactor
+        #     if self.memory_allocator.pin_allocator.num_active_allocations == 0:
+        #         break
+        # for evict_key in evict_keys:
+        #     self.hot_cache.pop(evict_key)
 
-        self.manager_lock.release()
-        return memory_obj
+        # self.manager_lock.release()
+        # return memory_obj
     
     def put_in_queue(
         self,
@@ -367,6 +365,7 @@ class StorageManager:
         Put the memory object into the queue.
         """
         self.update_queue[key] = memory_obj
+        self.storage_backends["RemoteDiskBackend"].submit_put_task(key, memory_obj)
 
     def update(self) -> None:  
         """
@@ -418,17 +417,10 @@ class StorageManager:
                 elif update_rate == 0.371428571:
                     BITS = 2
 
-                # Need to deserialize first
-                if update_key.metadata.rate != 1 and update_key.metadata.rate != update_rate:
-                    # KIVI mapping defined here
-                    if update_key.metadata.rate == 0.728571429:
-                        DE_BITS = 8
-                    elif update_key.metadata.rate == 0.485714286:
-                        DE_BITS = 4
-                    elif update_key.metadata.rate == 0.371428571:
-                        DE_BITS = 2
-                    update_memory_kv_cache = self.kivi_de.deserialize(update_memory_obj, DE_BITS, self.kivi_cache[update_key][0], self.kivi_cache[update_key][1], self.kivi_cache[update_key][2], self.kivi_cache[update_key][3], self.kivi_cache[update_key][4])
-                    update_memory_obj = update_memory_kv_cache
+                # Already compressed in LocalCPUBackend, needs recompression
+                if update_key.metadata.rate != 1 and update_key.metadata.rate != update_rate: 
+                    self.memory_allocator.ref_count_down(update_memory_obj)
+                    update_memory_obj = self.storage_backends["RemoteDiskBackend"].get_blocking(update_key, None)
             
                 # Need to serialize
                 if update_key.metadata.rate != update_rate:
@@ -458,10 +450,7 @@ class StorageManager:
             elif update_device == "disk":
                 # Move to disk
                 self.manager_lock.release()
-                for backend_name, backend in self.storage_backends.items():
-                    put_task = backend.submit_put_task(update_key, update_memory_obj)
-                    if put_task is None:
-                        continue
+                self.storage_backends["LocalDiskBackend"].submit_put_task(update_key, update_memory_obj)
                 self.manager_lock.acquire()
                 self.memory_allocator.ref_count_down(update_memory_obj)
 
@@ -495,14 +484,6 @@ class StorageManager:
                 pass
 
             if self.use_hot and current_kv_decision.device == "cpu" and current_kv_decision.compression_rate != 0:
-                # During overwrite, we need to free the old memory object
-                # to avoid memory leak.
-                # NOTE(Jiayi): overwrite should not happen, at least for
-                # prefix caching
-                if key in self.hot_cache:
-                    old_memory_obj = self.hot_cache.pop(key)
-                    self.memory_allocator.ref_count_down(old_memory_obj)
-
                 # Move memory obj from tmp buffer to real location
                 self.manager_lock.release()
                 blank_memory_obj = self.allocate(
@@ -529,10 +510,7 @@ class StorageManager:
             # TODO(Shaoting): add third tier storage (remote ssd)
             if current_kv_decision.device == "disk" and current_kv_decision.compression_rate != 0:
                 self.manager_lock.release()
-                for backend_name, backend in self.storage_backends.items():
-                    put_task = backend.submit_put_task(key, memory_obj)
-                    if put_task is None:
-                        continue
+                self.storage_backends["LocalDiskBackend"].submit_put_task(key, memory_obj)
                 self.manager_lock.acquire()
             
             self.memory_allocator.ref_count_down(memory_obj)
@@ -558,9 +536,8 @@ class StorageManager:
                 fmt=memory_obj.get_memory_format())
 
             if cpu_memory_obj is None:
-                logger.warning(
+                raise RuntimeError(
                     "Memory allocation failed in cachegen deserializer")
-                return None
 
             # Copy the tensor to the cpu memory object
             assert cpu_memory_obj.tensor is not None
@@ -715,8 +692,7 @@ class StorageManager:
         kv_dtype = kv_chunk.dtype
         memory_obj = self.memory_allocator.allocate(kv_shape, kv_dtype)
         if memory_obj is None:
-            logger.warning("Memory allocation failed in prefetch_callback")
-            return
+            raise RuntimeError("Memory allocation failed in prefetch_callback")
 
         assert memory_obj.tensor is not None, "Encounter invalid tensor"
 

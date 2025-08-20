@@ -2,7 +2,7 @@
 
 # Default values
 PORT=8000
-CONFIG_FILE=../config/qmsum.yaml
+CONFIG_FILE=../config/dummy.yaml
 LOG_FILE=10.log
 
 # Parse -p|--port, -c|--config and -l|--log arguments

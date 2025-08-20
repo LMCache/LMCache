@@ -28,7 +28,7 @@ class MemoryFormat(Enum):
     KV_BLOB2 = 4
 
     def token_dim(self) -> int:
-        if self == MemoryFormat.KV_BLOB:
+        if self == MemoryFormat.KV_BLOB or self == MemoryFormat.KV_BLOB2:
             return 2
         elif self == MemoryFormat.BINARY:
             return 0
@@ -344,6 +344,8 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
 
         self.stats_monitor = LMCStatsMonitor.GetOrCreate()
 
+        self.memory_obj_list = []
+
     @staticmethod
     def _Compute_raw_size(shape: torch.Size, dtype: torch.dtype) -> int:
         return shape.numel() * dtype.itemsize
@@ -427,14 +429,15 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         self.stats_monitor.update_local_cache_usage(self.total_allocated_size)
 
         # Allocate the block
-        return TensorMemoryObj(
+        memory_obj = TensorMemoryObj(
             raw_data=self.buffer[block.start:block.start + raw_size],
             metadata=MemoryObjMetadata(shape, dtype, block.start, aligned_size,
                                        1, fmt))
+        self.memory_obj_list.append(memory_obj)
+        return memory_obj
 
     def free(self, memory_obj: MemoryObj):
-        # if not memory_obj.is_valid():
-        #     return
+        self.memory_obj_list.remove(memory_obj)
 
         new_free_block = FreeBlock(start=memory_obj.metadata.address,
                                    size=memory_obj.metadata.phy_size)
@@ -534,93 +537,6 @@ class BufferAllocator(MemoryAllocatorInterface):
         return True
 
 
-class HostMemoryAllocator(MemoryAllocatorInterface):
-    """Allocates memory in the pre-allocated Host memory.
-    """
-
-    def __init__(self, size: int):
-        """
-        :param int size: The size of the pinned memory in bytes.
-        """
-        buffer = torch.empty(size, dtype=torch.uint8, device="cpu")
-        self.allocator = TensorMemoryAllocator(buffer)
-
-        self.host_mem_lock = threading.Lock()
-
-    def allocate(
-        self,
-        shape: Union[torch.Size, Tuple[int, ...]],
-        dtype: Optional[torch.dtype],
-        fmt: MemoryFormat = MemoryFormat.KV_BLOB,
-    ) -> Optional[MemoryObj]:
-        with self.host_mem_lock:
-            return self.allocator.allocate(shape, dtype, fmt)
-
-    def free(self, memory_obj: MemoryObj):
-        with self.host_mem_lock:
-            self.allocator.free(memory_obj)
-
-    def memcheck(self):
-        with self.host_mem_lock:
-            return self.allocator.memcheck()
-
-    def ref_count_up(self, memory_obj: MemoryObj):
-        with self.host_mem_lock:
-            self.allocator.ref_count_up(memory_obj)
-
-    def ref_count_down(self, memory_obj: MemoryObj):
-        with self.host_mem_lock:
-            self.allocator.ref_count_down(memory_obj)
-
-    def get_ref_count(self, memory_obj: MemoryObj):
-        with self.host_mem_lock:
-            return self.allocator.get_ref_count(memory_obj)
-
-
-class PinMemoryAllocator(MemoryAllocatorInterface):
-    """Allocates memory in the pre-allocated pinned memory.
-    """
-
-    def __init__(self, size: int):
-        """
-        :param int size: The size of the pinned memory in bytes.
-        """
-        buffer = torch.empty(size, dtype=torch.uint8, pin_memory=True)
-
-        self.allocator = TensorMemoryAllocator(buffer)
-
-        self.host_mem_lock = threading.Lock()
-
-    def allocate(
-        self,
-        shape: Union[torch.Size, Tuple[int, ...]],
-        dtype: Optional[torch.dtype],
-        fmt: MemoryFormat = MemoryFormat.KV_BLOB,
-    ) -> Optional[MemoryObj]:
-        with self.host_mem_lock:
-            return self.allocator.allocate(shape, dtype, fmt)
-
-    def free(self, memory_obj: MemoryObj):
-        with self.host_mem_lock:
-            self.allocator.free(memory_obj)
-
-    def ref_count_up(self, memory_obj: MemoryObj):
-        with self.host_mem_lock:
-            self.allocator.ref_count_up(memory_obj)
-
-    def ref_count_down(self, memory_obj: MemoryObj):
-        with self.host_mem_lock:
-            self.allocator.ref_count_down(memory_obj)
-
-    def get_ref_count(self, memory_obj: MemoryObj):
-        with self.host_mem_lock:
-            return self.allocator.get_ref_count(memory_obj)
-
-    def memcheck(self):
-        with self.host_mem_lock:
-            return self.allocator.memcheck()
-
-
 class MixedMemoryAllocator(MemoryAllocatorInterface):
     """
     Allocates (1) memory in the pre-allocated pinned memory.
@@ -632,11 +548,8 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
         :param int size: The size of the pinned memory in bytes.
         """
         buffer = torch.empty(size, dtype=torch.uint8, pin_memory=True)
-        # NOTE(Shaoting): The size of the buffer is 10GB.
-        buffer2 = torch.empty(5368709120*2, dtype=torch.uint8, pin_memory=True)
 
         self.pin_allocator = TensorMemoryAllocator(buffer)
-        self.pin_allocator2 = TensorMemoryAllocator(buffer2)
         self.buffer_allocator = BufferAllocator("cpu")
 
         self.host_mem_lock = threading.Lock()
@@ -654,7 +567,7 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
                 return self.pin_allocator.allocate(shape, dtype, fmt)
         elif fmt == MemoryFormat.KV_BLOB2:
             with self.host_mem_lock:
-                return self.pin_allocator2.allocate(shape, dtype, fmt)
+                return self.pin_allocator.allocate(shape, dtype, fmt)
         else:
             raise ValueError(f"Unsupported memory format: {fmt}")
 
@@ -667,7 +580,7 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
                 self.pin_allocator.free(memory_obj)
         elif fmt == MemoryFormat.KV_BLOB2:
             with self.host_mem_lock:
-                self.pin_allocator2.free(memory_obj)
+                self.pin_allocator.free(memory_obj)
         else:
             raise ValueError(f"Unsupported memory format: {fmt}")
 
@@ -680,7 +593,7 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
                 self.pin_allocator.ref_count_up(memory_obj)
         elif fmt == MemoryFormat.KV_BLOB2:
             with self.host_mem_lock:
-                self.pin_allocator2.ref_count_up(memory_obj)
+                self.pin_allocator.ref_count_up(memory_obj)
         else:
             raise ValueError(f"Unsupported memory format: {fmt}")
 
@@ -693,7 +606,7 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
                 self.pin_allocator.ref_count_down(memory_obj)
         elif fmt == MemoryFormat.KV_BLOB2:
             with self.host_mem_lock:
-                self.pin_allocator2.ref_count_down(memory_obj)
+                self.pin_allocator.ref_count_down(memory_obj)
         else:
             raise ValueError(f"Unsupported memory format: {fmt}")
 
@@ -706,45 +619,10 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
                 return self.pin_allocator.get_ref_count(memory_obj)
         elif fmt == MemoryFormat.KV_BLOB2:
             with self.host_mem_lock:
-                return self.pin_allocator2.get_ref_count(memory_obj)
+                return self.pin_allocator.get_ref_count(memory_obj)
         else:
             raise ValueError(f"Unsupported memory format: {fmt}")
 
     def memcheck(self):
         with self.host_mem_lock:
             return self.pin_allocator.memcheck()
-
-
-class GPUMemoryAllocator(MemoryAllocatorInterface):
-    """Allocates memory in the pre-allocated Host memory.
-    """
-
-    def __init__(self, size: int, device="cuda"):
-        """
-        :param int size: The size of the pinned memory in bytes.
-        """
-        buffer = torch.empty(size, dtype=torch.uint8, device=device)
-        self.allocator = TensorMemoryAllocator(buffer)
-
-    def allocate(
-        self,
-        shape: Union[torch.Size, Tuple[int, ...]],
-        dtype: Optional[torch.dtype],
-        fmt: MemoryFormat = MemoryFormat.KV_BLOB,
-    ) -> Optional[MemoryObj]:
-        return self.allocator.allocate(shape, dtype, fmt)
-
-    def free(self, memory_obj: MemoryObj):
-        self.allocator.free(memory_obj)
-
-    def ref_count_up(self, memory_obj: MemoryObj):
-        self.allocator.ref_count_up(memory_obj)
-
-    def ref_count_down(self, memory_obj: MemoryObj):
-        self.allocator.ref_count_down(memory_obj)
-
-    def get_ref_count(self, memory_obj: MemoryObj):
-        return self.allocator.get_ref_count(memory_obj)
-
-    def memcheck(self):
-        return self.allocator.memcheck()

@@ -1,8 +1,13 @@
 chunk_size: 1024
-local_disk: "file:///home/ubuntu/kvcache/"
-max_local_disk_size: 400
+
 local_cpu: True
-max_local_cpu_size: 120 # actually 100, set to 120 to avoid bubble
+max_local_cpu_size: 40
+
+local_disk: "file:///home/ubuntu/kvcache/"
+max_local_disk_size: 120
+remote_disk: "file:///home/ubuntu/kvcache_remote/"
+max_remote_disk_size: 240
+
 alpha: 1
 policy: "baseline_KIVI"
 rate: 0.371428571

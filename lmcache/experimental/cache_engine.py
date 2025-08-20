@@ -103,14 +103,10 @@ class LMCacheEngine:
             kv_dtype = self.metadata.kv_dtype
             memory_obj = self.storage_manager.memory_allocator.allocate(kv_shape, kv_dtype, MemoryFormat.KV_BLOB2)
             if memory_obj is None:
-                logger.warning("Failed to allocate memory for the KV cache.\n"
-                               "The KV cache will not be stored.")
-                break
-
-            # Put the memory object to the storage backend
-            # Disabling put_queue for now, as it's not necessary
-            # and bringing big overhead
-            # self.put_queue.put((key, memory_obj, start, end, kwargs))
+                raise RuntimeError(
+                    "Failed to allocate memory for the new-coming KV cache.\n"
+                    "The KV cache will not be stored."
+                )
 
             self.gpu_connector.from_gpu(memory_obj, start, end, **kwargs)
             key.metadata.emerge_id.append(self.emerge_id)
