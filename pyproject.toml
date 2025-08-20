@@ -132,7 +132,6 @@ follow_imports = "silent"
 
 [tool.cibuildwheel]
 build = "cp3*-manylinux_x86_64"
-skip = "pp*"
 
 # see https://developer.nvidia.com/cuda-gpus for compute capabilities
 # "CUDA-Enabled Datacenter Products"
