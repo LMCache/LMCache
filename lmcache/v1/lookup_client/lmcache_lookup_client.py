@@ -11,6 +11,7 @@ import zmq
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.utils import mla_enabled
 from lmcache.v1.cache_engine import LMCacheEngine
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.lookup_client.abstract_client import LookupClientInterface
@@ -39,11 +40,7 @@ class LMCacheLookupClient(LookupClientInterface):
             "lmcache_rpc_port", 0
         )
         self.tensor_parallel_size = vllm_config.parallel_config.tensor_parallel_size
-        use_mla = (
-            hasattr(vllm_config.model_config, "use_mla")
-            and isinstance(vllm_config.model_config.use_mla, bool)
-            and vllm_config.model_config.use_mla
-        )
+        use_mla = mla_enabled(vllm_config.model_config)
         self.create_lookup_server_only_on_worker_0_for_mla = (
             config.extra_config.get(
                 "create_lookup_server_only_on_worker_0_for_mla", use_mla

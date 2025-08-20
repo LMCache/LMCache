@@ -12,6 +12,7 @@ import torch
 # First Party
 from lmcache.config import LMCacheEngineConfig as Config  # type: ignore[assignment]
 from lmcache.logging import init_logger
+from lmcache.utils import mla_enabled
 from lmcache.v1.config import (
     LMCacheEngineConfig as V1Config,  # type: ignore[assignment]
 )
@@ -126,13 +127,7 @@ def create_lmcache_metadata(
     kv_dtype = get_kv_cache_torch_dtype(cache_cfg.cache_dtype, model_cfg.dtype)
 
     # Check if MLA is enabled
-    use_mla = False
-    if (
-        hasattr(model_cfg, "use_mla")
-        and isinstance(model_cfg.use_mla, bool)
-        and model_cfg.use_mla
-    ):
-        use_mla = True
+    use_mla = mla_enabled(model_cfg)
 
     # Construct KV shape (for memory pool)
     num_layer = model_cfg.get_num_layers(parallel_cfg)

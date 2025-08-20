@@ -12,6 +12,7 @@ import traceback
 
 # Third Party
 from nvtx import annotate  # type: ignore
+from vllm.config import ModelConfig
 import torch
 
 # First Party
@@ -330,3 +331,12 @@ def start_loop_in_thread_with_exceptions(loop: asyncio.AbstractEventLoop):
 
     loop.set_exception_handler(loop_excepthook)
     loop.run_forever()
+
+
+def mla_enabled(model_config: "ModelConfig") -> bool:
+    return (
+        hasattr(model_config, "use_mla")
+        and isinstance(model_config.use_mla, bool)
+        and model_config.use_mla
+    )
+

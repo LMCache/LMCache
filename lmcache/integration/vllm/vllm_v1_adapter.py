@@ -31,7 +31,7 @@ from lmcache.integration.vllm.utils import (
     lmcache_get_config,
 )
 from lmcache.logging import init_logger
-from lmcache.utils import _lmcache_nvtx_annotate
+from lmcache.utils import _lmcache_nvtx_annotate, mla_enabled
 from lmcache.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
 from lmcache.v1.compute.blend import LMCBlenderBuilder
 from lmcache.v1.config import LMCacheEngineConfig
@@ -418,14 +418,7 @@ def _init_lmcache_engine(
 
     kv_dtype = get_kv_cache_torch_dtype(cache_config.cache_dtype, model_config.dtype)
 
-    use_mla = False
-    if (
-        hasattr(model_config, "use_mla")
-        and isinstance(model_config.use_mla, bool)
-        and model_config.use_mla
-    ):
-        use_mla = True
-
+    use_mla = mla_enabled(model_config)
     if use_mla and (
         lmcache_config.remote_serde != "naive"
         and lmcache_config.remote_serde is not None
