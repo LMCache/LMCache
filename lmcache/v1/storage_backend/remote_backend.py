@@ -63,9 +63,7 @@ class RemoteBackend(StorageBackendInterface):
         # the default value is related to use_mla, if use_mla, default value
         # is True, else False
         remote_enable_mla_worker_id_as0 = (
-            config.extra_config.get(
-                "remote_enable_mla_worker_id_as0", metadata.use_mla
-            )
+            config.extra_config.get("remote_enable_mla_worker_id_as0", metadata.use_mla)
             if config.extra_config
             else metadata.use_mla
         )

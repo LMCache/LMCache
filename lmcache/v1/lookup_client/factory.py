@@ -74,7 +74,7 @@ class LookupClientFactory:
         create_lookup_server_only_on_worker_0_for_mla = (
             config.extra_config.get(
                 "create_lookup_server_only_on_worker_0_for_mla",
-                lmcache_engine.metadata.use_mla
+                lmcache_engine.metadata.use_mla,
             )
             if config.extra_config
             else lmcache_engine.metadata.use_mla

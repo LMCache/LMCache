@@ -101,9 +101,7 @@ class LMCacheEngine:
         # is related to use_mla, if use_mla, default value is True, else False,
         # and save_only_first_rank only works when use mla
         self.save_only_first_rank = (
-            self.config.extra_config.get(
-                "save_only_first_rank", metadata.use_mla
-            )
+            self.config.extra_config.get("save_only_first_rank", metadata.use_mla)
             if self.config.extra_config
             else metadata.use_mla
         ) and metadata.use_mla
@@ -1195,9 +1193,7 @@ class LMCacheEngineBuilder:
         # is related to use_mla, if use_mla, default value is True, else False,
         # and save_only_first_rank only works when use mla
         save_only_first_rank = (
-            config.extra_config.get(
-                "save_only_first_rank", metadata.use_mla
-            )
+            config.extra_config.get("save_only_first_rank", metadata.use_mla)
             if config.extra_config
             else metadata.use_mla
         ) and metadata.use_mla
