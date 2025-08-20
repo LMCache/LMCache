@@ -32,8 +32,11 @@ class LMCacheLookupClient(LookupClientInterface):
     ZMQ-based lookup client that communicates with a lookup server.
 
     Related extra_config:
-    - create_lookup_server_only_on_worker_0_for_mla:
-        is a flag to control whether to create lookup server only on worker 0.
+    - create_lookup_server_only_on_one_worker_for_mla:
+        is a flag to control whether to create lookup server only on one worker.
+    - lookup_server_rank:
+        if create_lookup_server_only_on_one_worker_for_mla is True, start lookup
+        server on lookup_server_rank, default is 0.
     """
 
     def __init__(
@@ -50,14 +53,14 @@ class LMCacheLookupClient(LookupClientInterface):
         )
         self.tensor_parallel_size = vllm_config.parallel_config.tensor_parallel_size
         use_mla = mla_enabled(vllm_config.model_config)
-        self.create_lookup_server_only_on_worker_0_for_mla = (
+        self.create_lookup_server_only_on_one_worker_for_mla = (
             config.get_extra_config_value(
-                "create_lookup_server_only_on_worker_0_for_mla", use_mla
+                "create_lookup_server_only_on_one_worker_for_mla", use_mla
             )
         )
         ranks = self.tensor_parallel_size
         self.sockets = []
-        if self.create_lookup_server_only_on_worker_0_for_mla:
+        if self.create_lookup_server_only_on_one_worker_for_mla:
             ranks = 1
 
         # Set timeout values from config
@@ -71,6 +74,8 @@ class LMCacheLookupClient(LookupClientInterface):
         self.reqs_status: dict[str, int] = {}
 
         for tp_rank in range(ranks):
+            if self.create_lookup_server_only_on_one_worker_for_mla:
+                tp_rank = config.get_extra_config_value("lookup_server_rank", 0)
             socket_path = get_zmq_rpc_path_lmcache(
                 vllm_config, "lookup", rpc_port, tp_rank
             )
@@ -122,7 +127,7 @@ class LMCacheLookupClient(LookupClientInterface):
             request_configs_str = json.dumps(request_configs)
         request_configs_buf = request_configs_str.encode("utf-8")
         ranks = self.tensor_parallel_size
-        if self.create_lookup_server_only_on_worker_0_for_mla:
+        if self.create_lookup_server_only_on_one_worker_for_mla:
             ranks = 1
 
         # NOTE(Jiayi): We cannot only send hashes when blending enabled
