@@ -612,6 +612,8 @@ class LMCacheConnectorV1Impl:
 
         self.force_skip_save = bool(os.environ.get("LMCACHE_FORCE_SKIP_SAVE", False))
 
+        # Start internal API server if enabled
+        # The enabled check is in the InternalAPIServer constructor
         self.api_server = InternalAPIServer(self)
         self.api_server.start()
 
