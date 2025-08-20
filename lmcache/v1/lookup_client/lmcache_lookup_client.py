@@ -39,11 +39,15 @@ class LMCacheLookupClient(LookupClientInterface):
             "lmcache_rpc_port", 0
         )
         self.tensor_parallel_size = vllm_config.parallel_config.tensor_parallel_size
+        use_mla = (hasattr(vllm_config.model_config, "use_mla")
+                   and isinstance(vllm_config.model_config.use_mla, bool)
+                   and vllm_config.model_config.use_mla)
         self.create_lookup_server_only_on_worker_0_for_mla = (
-            config.extra_config
-            and config.extra_config.get(
-                "create_lookup_server_only_on_worker_0_for_mla", False
+            config.extra_config.get(
+                "create_lookup_server_only_on_worker_0_for_mla", use_mla
             )
+            if config.extra_config
+            else use_mla
         )
         ranks = self.tensor_parallel_size
         self.sockets = []
@@ -53,6 +57,8 @@ class LMCacheLookupClient(LookupClientInterface):
             socket_path = get_zmq_rpc_path_lmcache(
                 vllm_config, "lookup", rpc_port, tp_rank
             )
+            logger.info(f"lmcache lookup client connect to tp_rank {tp_rank} "
+                        f"with socket path {socket_path}")
             socket = self.socket = make_zmq_socket(
                 self.ctx,
                 socket_path,
@@ -157,6 +163,7 @@ class LMCacheLookupServer:
                 #    break
                 # continue
 
+        logger.info(f"lmcache lookup server start on {socket_path}")
         self.thread = threading.Thread(target=process_request, daemon=True)
         self.thread.start()
 
