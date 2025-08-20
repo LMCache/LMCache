@@ -27,8 +27,8 @@ First, we need a yaml file ``example.yaml`` to properly configure the lmcache in
     enable_controller: True
     lmcache_instance_id: "lmcache_default_instance"
     controller_url: "localhost:9001"
-    lmcache_worker_port: 8001
     distributed_url: "localhost:8002"
+    lmcache_worker_port: 8001
 
 Second, we need to start the vllm/lmcache instance at port 8000:
 
@@ -85,6 +85,6 @@ We should be able to see the response like this:
 
 .. code-block:: text
 
-    {"event_id": "xxx", "lmcache_default_instance": ("LocalCPUBackend", 12)}
+    {"lmcache_default_instance_id": ["LocalCPUBackend",12]}
 
 The field ``lmcache_default_instance`` shows the instance ID, followed by a tuple of ``(location, matched_prefix_length)`` indicating the cache location within that instance and matched prefix length. ``event_id`` is an identifier of the controller operation and can typically be ignored.
