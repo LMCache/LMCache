@@ -21,7 +21,7 @@ class NUMAMapping:
 
 class NUMADetector:
     @staticmethod
-    def get_numa_mapping(self, config: LMCacheEngineConfig) -> Optional[NUMAMapping]:
+    def get_numa_mapping(config: LMCacheEngineConfig) -> Optional[NUMAMapping]:
         """
         Get NUMA mapping.
         """
@@ -32,13 +32,14 @@ class NUMADetector:
 
         numa_mapping: Optional[NUMAMapping] = None
         if config.numa_mode == "manual":
-            numa_mapping = self._read_from_config(config)
+            numa_mapping = NUMADetector._read_from_config(config)
         elif config.numa_mode == "auto":
-            numa_mapping = self._read_from_sys()
+            numa_mapping = NUMADetector._read_from_sys()
 
         return numa_mapping
 
-    def _read_from_config(self, config) -> NUMAMapping:
+    @staticmethod
+    def _read_from_config(config) -> NUMAMapping:
         """
         Read NUMA mapping from the LMCache configuration.
         """
@@ -48,8 +49,8 @@ class NUMADetector:
             "Please ensure the configuration is properly set."
         )
 
-        assert config.extra_config is not None, (
-            "NUMA mode is set but extra_config is None. "
+        assert "gpu_to_numa_mapping" in config.extra_config, (
+            "NUMA mode is set to `manual` but gpu_to_numa_mapping is None. "
             "Please ensure the configuration is properly set."
         )
 
@@ -57,6 +58,7 @@ class NUMADetector:
 
         return NUMAMapping(gpu_to_numa_mapping)
 
+    @staticmethod
     def _read_from_sys(self) -> Optional[NUMAMapping]:
         """
         Read NUMA mapping from system configuration.
