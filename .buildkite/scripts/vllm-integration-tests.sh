@@ -206,7 +206,7 @@ run_long_doc_qa() {
     local max_inflight="$7"
     local sleep_after="$8"
     local expected_ttft_gain="$9"
-    local expected_latency_gain="$10"
+    local expected_latency_gain="${10}"
 
     echo "→ Running long-doc-qa:"
     echo "   num_docs=${num_docs}, doc_len=${doc_len}, out_len=${out_len}"
