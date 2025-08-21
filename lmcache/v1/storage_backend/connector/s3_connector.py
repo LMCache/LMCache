@@ -196,10 +196,11 @@ class S3Connector(RemoteConnector):
         """
         flat_key_str = key_str.replace("/", "_")
         if self.s3_prefix:
-            flat_key_str = f"/{self.s3_prefix}/{flat_key_str}"
+            path = f"/{self.s3_prefix}/{flat_key_str}"
         else:
-            flat_key_str = f"/{flat_key_str}"
-        return url_quote(flat_key_str, safe="")
+            path = f"/{flat_key_str}"
+        # Keep slashes as they are path separators in S3.
+        return url_quote(path, safe="/")
 
     # TODO(Jiayi): optimize this with async
     def _get_object_size(self, key_str: str) -> int:
