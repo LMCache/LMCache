@@ -39,6 +39,7 @@ class WorkerInfo:
     registration_time: float
     last_heartbeat_time: float
 
+
 class RegistrationController:
     def __init__(self):
         # Mapping from `instance_id` -> `worker_ids`

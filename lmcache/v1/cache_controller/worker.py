@@ -179,7 +179,7 @@ class LMCacheWorker:
         if enable_heartbeat:
             logger.info(
                 f"Start heartbeat in {self.lmcache_instance_id} : {self.worker_id}, "
-                f"start delay time: {self.config.lmcache_worker_heartbeat_delay_time}s, "
+                f"delay time: {self.config.lmcache_worker_heartbeat_delay_time}s, "
                 f"heartbeat time: {self.config.lmcache_worker_heartbeat_time}s"
             )
             await asyncio.sleep(self.config.lmcache_worker_heartbeat_delay_time)
