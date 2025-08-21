@@ -235,11 +235,11 @@ class NixlPipe:
         # allocator (should be initialized after self._buffer)
         self._allocator = NixlBufferAllocator(self)
 
+        # Handle None backends by setting default to ["UCX"]
+        backends = nixl_config.backends if nixl_config.backends is not None else ["UCX"]
         self._agent = nixl_agent(
             str(nixl_config.role) + str(nixl_config.buffer_device),
-            nixl_agent_config(backends=nixl_config.backends)
-            if nixl_config.backends
-            else None,
+            nixl_agent_config(backends=backends),
         )
         self._reg_descs = self._agent.register_memory(self._transfer_buffers)
         self._local_xfer_descs = self._reg_descs.trim()
