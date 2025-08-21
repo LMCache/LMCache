@@ -40,6 +40,7 @@ class S3ConnectorAdapter(ConnectorAdapter):
             self.s3_enable_s3express = config.extra_config.get(
                 "s3_enable_s3express", True
             )
+            self.s3_file_prefix = config.extra_config.get("s3_file_prefix", None)
 
         logger.info(f"Creating S3 connector for URL: {context.url}")
 
@@ -50,6 +51,7 @@ class S3ConnectorAdapter(ConnectorAdapter):
             loop=context.loop,
             local_cpu_backend=context.local_cpu_backend,
             s3_part_size=self.s3_part_size,
+            s3_file_prefix=self.s3_file_prefix,
             s3_max_io_concurrency=self.s3_max_io_concurrency,
             s3_max_inflight_reqs=self.s3_max_inflight_reqs,
             s3_prefer_http2=self.s3_prefer_http2,
