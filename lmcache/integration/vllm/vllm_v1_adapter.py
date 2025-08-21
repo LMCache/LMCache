@@ -21,6 +21,7 @@ from vllm.distributed.parallel_state import (
 from vllm.sampling_params import SamplingParams
 from vllm.utils import cdiv, get_kv_cache_torch_dtype
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.request import RequestStatus
 import torch
 
 # First Party
@@ -118,8 +119,7 @@ class RequestTracker:
 
     # The block ids that has been allocated so far
     # NOTE: allocated blocks could be more than the number of tokens
-    # FIXME: need to check whether the block ids will be changed after
-    #        preemption
+    # NOTE: the block ids will change after preemption
     allocated_block_ids: list[int]
 
     # The number of tokens that has been saved
@@ -156,7 +156,7 @@ class RequestTracker:
 
         """
         # vLLM 0.9.0 update: request.block_ids changed from list[int] to
-        # list[list[int]]
+        # tuple[list[int]]
         # Need to check the type of request.block_ids
 
         unfolded_block_ids = []
@@ -195,6 +195,8 @@ class RequestTracker:
         self,
         new_token_ids: list[int],
         new_block_ids: Union[tuple[list[int], ...], list[int]],
+        is_preempted: bool = False,
+        lmcache_cached_tokens: int = 0,
     ) -> None:
         """Update the request tracker when a running request is
         scheduled again
@@ -210,7 +212,14 @@ class RequestTracker:
             pass
         else:
             raise ValueError(f"Unsupported new_block_ids type {type(new_block_ids)}")
-        self.allocated_block_ids.extend(new_block_ids)
+
+        if is_preempted:
+            # the block ids will change after preemption
+            self.allocated_block_ids = new_block_ids
+            # reset the number of saved tokens
+            self.num_saved_tokens = lmcache_cached_tokens
+        else:
+            self.allocated_block_ids.extend(new_block_ids)
 
         # When a request is scheduled again, and the number of new tokens
         # is 1 (excluding chunked prefill), the request is in decode phase.
@@ -269,7 +278,9 @@ class ReqMeta:
         input_token_len = len(input_token_ids)
 
         is_last_prefill = False
-        if input_token_len == tracker.prompt_len:
+        # greater than covers the preemption case, where a preempted request reentering
+        # functionally does prefill again with all of its previously accumulated tokens
+        if input_token_len >= tracker.prompt_len:
             is_last_prefill = True
 
         # For save operation: do not save if the following condition is met
@@ -994,7 +1005,16 @@ class LMCacheConnectorV1Impl:
         ):
             return 0
 
-        token_ids = torch.tensor(request.prompt_token_ids)
+        if request.status == RequestStatus.PREEMPTED and self._save_decode_cache:
+            # if lmcache is saving decode cache,
+            # use all of the token ids accumulated from before preemption
+            # because vllm treats preempted requests as new requests
+            # i.e. essentially a prefill
+            token_ids = torch.tensor(
+                self._request_trackers[request.request_id].token_ids
+            )
+        else:
+            token_ids = torch.tensor(request.prompt_token_ids)
 
         # If the request has multimodal hashes, apply them to the token ids
         if request.mm_hashes:
@@ -1198,6 +1218,11 @@ class LMCacheConnectorV1Impl:
             request_tracker = self._request_trackers[req_id]
             num_new_tokens = scheduler_output.num_scheduled_tokens[req_id]
             if request := self._unfinished_requests.get(req_id):
+                load_spec = self.load_specs.pop(req_id, None)
+                lmcache_cached_tokens = 0
+                if load_spec is not None:
+                    lmcache_cached_tokens = load_spec.lmcache_cached_tokens
+
                 num_current_tokens = len(request_tracker.token_ids)
                 new_token_ids = request.all_token_ids[
                     num_current_tokens : num_current_tokens + num_new_tokens
@@ -1209,17 +1234,23 @@ class LMCacheConnectorV1Impl:
                 )
             new_block_ids = cached_reqs.new_block_ids[i]
 
-            request_tracker.update(new_token_ids, new_block_ids)
+            request_tracker.update(
+                new_token_ids,
+                new_block_ids,
+                is_preempted=cached_reqs.resumed_from_preemption[i],
+                lmcache_cached_tokens=lmcache_cached_tokens,
+            )
 
             req_meta = ReqMeta.from_request_tracker(
                 request_tracker,
                 self._block_size,
                 self._lmcache_chunk_size,
-                load_spec=None,
+                load_spec=load_spec,
                 skip_save=force_skip_save,
                 discard_partial_chunks=self._discard_partial_chunks,
                 save_decode_cache=self._save_decode_cache,
             )
+
             if req_meta is not None:
                 meta.add_request(req_meta)
 
