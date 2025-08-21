@@ -48,6 +48,7 @@ from lmcache.v1.memory_management import (  # noqa: E501
     TensorMemoryObj,
 )
 from lmcache.v1.storage_backend.storage_manager import StorageManager
+from lmcache.v1.system_detection import NUMADetector, NUMAMapping
 from lmcache.v1.token_database import (
     ChunkedTokenDatabase,
     SegmentTokenDatabase,
@@ -1164,6 +1165,7 @@ class LMCacheEngineBuilder:
     def _Create_memory_allocator(
         config: LMCacheEngineConfig,
         metadata: LMCacheEngineMetadata,
+        numa_mapping: Optional[NUMAMapping] = None,
     ) -> MemoryAllocatorInterface:
         if config.enable_nixl:
             assert config.nixl_buffer_device is not None
@@ -1180,6 +1182,8 @@ class LMCacheEngineBuilder:
                 )
                 logger.info(f"Setting cuda device to {corrected_device} ")
                 torch.cuda.set_device(corrected_device)
+
+                # TODO(Jiayi): add numa affinity to nixl_cpu backend too.
                 buffer = torch.empty(
                     config.nixl_buffer_size,
                     dtype=torch.uint8,
@@ -1220,8 +1224,14 @@ class LMCacheEngineBuilder:
                 if config.extra_config
                 else max_local_cpu_size
             )
-            return MixedMemoryAllocator(int(first_rank_max_local_cpu_size * 1024**3))
-        return MixedMemoryAllocator(int(max_local_cpu_size * 1024**3))
+            return MixedMemoryAllocator(
+                int(first_rank_max_local_cpu_size * 1024**3),
+                numa_mapping=numa_mapping,
+            )
+        return MixedMemoryAllocator(
+            int(max_local_cpu_size * 1024**3),
+            numa_mapping=numa_mapping,
+        )
 
     @staticmethod
     def _Create_token_database(
@@ -1251,7 +1261,11 @@ class LMCacheEngineBuilder:
         """
         logger.info(f"Creating LMCacheEngine instance {instance_id}")
         if instance_id not in cls._instances:
-            memory_allocator = cls._Create_memory_allocator(config, metadata)
+            numa_mapping = NUMADetector.get_numa_mapping(config)
+            logger.info(f"NUMA mapping for instance {instance_id}: {numa_mapping}")
+            memory_allocator = cls._Create_memory_allocator(
+                config, metadata, numa_mapping
+            )
             token_database = cls._Create_token_database(config, metadata)
             stat_logger = LMCacheStatsLogger(metadata, log_interval=10)
 
