@@ -8,7 +8,6 @@ from typing import (
     Generator,
     List,
     Optional,
-    OrderedDict,
     Tuple,
     Union,
 )
@@ -239,16 +238,16 @@ class LMCacheEngine:
         tot_token_num = 0
         t = time.perf_counter()
 
-        tags = kwargs.get("tags")
-        if tags is not None and len(tags) != 0:
-            assert isinstance(tags, OrderedDict)
+        request_configs = kwargs.get("request_configs")
+        if request_configs is not None and len(request_configs) != 0:
+            assert isinstance(request_configs, dict)
 
         for start, end, key in self.token_database.process_tokens(
             tokens,
             hashes,
             offsets,
             mask,
-            tags=tags,
+            request_configs=request_configs,
         ):
             assert isinstance(key, CacheEngineKey)
             # Allocate the memory object
@@ -344,12 +343,12 @@ class LMCacheEngine:
         memory_objs = []
         tot_token_num = 0
         kv_dtype = self.metadata.kv_dtype
-        tags = kwargs.get("tags")
-        if tags is not None and len(tags) != 0:
-            assert isinstance(tags, OrderedDict)
+        request_configs = kwargs.get("request_configs")
+        if request_configs is not None and len(request_configs) != 0:
+            assert isinstance(request_configs, dict)
 
         for start, end, key in self.token_database.process_tokens(
-            tokens=tokens, mask=mask, tags=tags
+            tokens=tokens, mask=mask, request_configs=request_configs
         ):
             assert isinstance(key, CacheEngineKey)
 
@@ -551,13 +550,13 @@ class LMCacheEngine:
         ends = []
         keys = []
 
-        tags = kwargs.get("tags")
-        if tags is not None and len(tags) != 0:
-            assert isinstance(tags, OrderedDict)
+        request_configs = kwargs.get("request_configs")
+        if request_configs is not None and len(request_configs) != 0:
+            assert isinstance(request_configs, dict)
         for start, end, key in self.token_database.process_tokens(
             tokens=tokens,
             mask=mask,
-            tags=tags,
+            request_configs=request_configs,
         ):
             assert isinstance(key, CacheEngineKey)
 
@@ -629,7 +628,7 @@ class LMCacheEngine:
         self,
         tokens: Union[torch.Tensor, List[int]],
         mask: Optional[torch.Tensor] = None,
-        tags: OrderedDict = None,
+        request_configs: Optional[dict] = None,
     ) -> None:
         """Launch the prefetching process in the storage manager to load the
         KV to the local CPU memory
@@ -637,7 +636,7 @@ class LMCacheEngine:
         if self._is_passive():
             return
         for start, end, key in self.token_database.process_tokens(
-            tokens=tokens, mask=mask, tags=tags
+            tokens=tokens, mask=mask, request_configs=request_configs
         ):
             assert isinstance(key, CacheEngineKey)
             self.storage_manager.prefetch(key)
@@ -649,7 +648,7 @@ class LMCacheEngine:
         search_range: Optional[List[str]] = None,
         lookup_id: Optional[str] = None,
         pin: bool = False,
-        tags: OrderedDict = None,
+        request_configs: Optional[dict] = None,
     ) -> int:
         """
         Checks the existence of KV cache of the tokens from the cache engine.
@@ -665,6 +664,8 @@ class LMCacheEngine:
         associate with the lookup
 
         :param bool pin: If True, pin the KV cache in the storage.
+
+        :param Optional[dict] request_configs: the configs of the request.
 
         :return: An int indicating how many prefix tokens are cached.
         """
@@ -682,7 +683,7 @@ class LMCacheEngine:
             )
 
             for start, end, key in self.token_database.process_tokens(
-                tokens=tokens, tags=tags
+                tokens=tokens, request_configs=request_configs
             ):
                 assert isinstance(key, CacheEngineKey)
 
@@ -906,23 +907,24 @@ class LMCacheEngine:
         self,
         tokens: Optional[Union[torch.Tensor, List[int]]] = None,
         locations: Optional[List[str]] = None,
-        tags: OrderedDict = None,  # TODO: need to clean by tags
+        request_configs: Optional[dict] = None,
     ) -> int:
+        # TODO: need to clear by request_configs
         if self.save_only_first_rank:
             if self.metadata.is_first_rank():
-                num_removed = self._clear(tokens, locations)
+                num_removed = self._clear(tokens, locations, request_configs)
                 self.broadcast_object_fn(num_removed, self.metadata.first_rank)
                 return num_removed
             else:
                 num_removed = self.broadcast_object_fn(None, self.metadata.first_rank)
                 return int(num_removed)
-        return self._clear(tokens, locations)
+        return self._clear(tokens, locations, request_configs)
 
     def _clear(
         self,
         tokens: Optional[Union[torch.Tensor, List[int]]] = None,
         locations: Optional[List[str]] = None,
-        tags: OrderedDict = None,  # TODO: need to clean by tags
+        request_configs: Optional[dict] = None,
     ) -> int:
         assert isinstance(self.storage_manager, StorageManager)
         # Clear all caches if tokens is None
@@ -933,7 +935,7 @@ class LMCacheEngine:
         num_removed = 0
         # Only remove the caches for the given tokens
         for start, end, key in self.token_database.process_tokens(
-            tokens=tokens, tags=tags
+            tokens=tokens, request_configs=request_configs
         ):
             assert isinstance(key, CacheEngineKey)
             removed = self.storage_manager.remove(key, locations)
@@ -991,13 +993,13 @@ class LMCacheEngine:
         # [(CacheEngineKey, MemoryObj, start, end)]
         reordered_chunks: List[Tuple[CacheEngineKey, MemoryObj, int, int]] = []
 
-        tags = kwargs.get("tags")
-        if tags is not None and len(tags) != 0:
-            assert isinstance(tags, OrderedDict)
+        request_configs = kwargs.get("request_configs")
+        if request_configs is not None and len(request_configs) != 0:
+            assert isinstance(request_configs, dict)
         for start, end, key in self.token_database.process_tokens(
             tokens=tokens,
             mask=mask,
-            tags=tags,
+            request_configs=request_configs,
         ):
             assert isinstance(key, CacheEngineKey)
 
