@@ -84,11 +84,8 @@ ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
 ARG vllm_fa_cmake_gpu_arches='80-real;90-real'
 ENV VLLM_FA_CMAKE_GPU_ARCHES=${vllm_fa_cmake_gpu_arches}
 
-#################### vLLM IMAGE & LMCache (Build) #######################
-# Integrate vLLM nightly build and LMCache build and
-# expose vLLM OpenAI API
-
-# Will trigger from `.github/workflows/nightly_build.yml`
+#################### vLLM IMAGE & LMCache (Build) ##########################
+# Integrate vLLM nightly build and LMCache build, and expose vLLM OpenAI API
 
 FROM base AS image-build
 
@@ -112,10 +109,11 @@ ARG LMCACHE_COMMIT_ID=1
 COPY . /workspace/LMCache
 WORKDIR /workspace/LMCache
 
-# Build LMCache
-# since we are installing vllm before lmcache, we will implicitly use
-# the same torch version as the vllm nightly when running setup.py bdist_wheel
-# fall back to stable vllm if nightly is not available
+# Build LMCache.
+# As we are installing vLLM before LMCache, we will implicitly use
+# the same torch version as the vLLM nightly build when running the LMCache build.
+# This means that LMCache is in sync with the vLLM torch version.
+# Stable vLLM release will be used if nightly build is not available.
 RUN --mount=type=cache,target=/root/.cache/ccache,id=ccache \
     --mount=type=cache,target=/root/.cache/uv,id=uv-cache,sharing=locked \
     . /opt/venv/bin/activate && \
@@ -130,17 +128,13 @@ WORKDIR /workspace
 ENTRYPOINT ["/opt/venv/bin/vllm", "serve"]
 
 #################### vLLM IMAGE & LMCache (Release) #######################
-# Integrate vLLM and LMCache stable releases and expose vLLM
-# OpenAI API
-
-# Will trigger from `.github/workflows/publish.yml`
+# Integrate vLLM and LMCache stable releases, and expose vLLM OpenAI API
 
 FROM base AS image-release
 
-# Install LMCache and vLLM stable releases
-# this happens right after we build and publish lmcache wheels in the release pipeline
-# this means that we should publish lmcache wheels that use the same torch version 
-# as vllm when building the wheels
+# Install LMCache and vLLM stable releases.
+# It is imperative that LMCache uses the same torch version as the 
+# vLLM stable release.
 RUN . /opt/venv/bin/activate && \
     uv pip install --prerelease=allow vllm[runai,tensorizer] && \
     uv pip install lmcache --verbose
