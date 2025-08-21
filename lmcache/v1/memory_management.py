@@ -1435,12 +1435,12 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
 
         if self.numa_mapping:
             current_device_id = torch.cuda.current_device()
-            gpu_numa_mapping = self.numa_mapping.gpu_numa_mapping
-            assert current_device_id in gpu_numa_mapping, (
+            gpu_to_numa_mapping = self.numa_mapping.gpu_to_numa_mapping
+            assert current_device_id in gpu_to_numa_mapping, (
                 f"Current device {current_device_id} is not in the GPU NUMA mapping."
             )
-            numa_id = gpu_numa_mapping[current_device_id]
-            lmc_ops.alloc_pinned_numa_ptr(size, numa_id)
+            numa_id = gpu_to_numa_mapping[current_device_id]
+            ptr = lmc_ops.alloc_pinned_numa_ptr(size, numa_id)
         else:
             ptr = lmc_ops.alloc_pinned_ptr(size, 0)
         array_type = ctypes.c_uint8 * size

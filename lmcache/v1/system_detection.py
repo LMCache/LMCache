@@ -59,7 +59,7 @@ class NUMADetector:
         return NUMAMapping(gpu_to_numa_mapping)
 
     @staticmethod
-    def _read_from_sys(self) -> Optional[NUMAMapping]:
+    def _read_from_sys() -> Optional[NUMAMapping]:
         """
         Read NUMA mapping from system configuration.
         """
