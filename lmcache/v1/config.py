@@ -283,6 +283,11 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "default": None,
         "env_converter": _to_int_list,
     },
+    "internal_api_server_socket_path_prefix": {
+        "type": Optional[str],
+        "default": None,
+        "env_converter": str,
+    },
     "plugin_locations": {
         "type": Optional[list[str]],
         "default": None,
