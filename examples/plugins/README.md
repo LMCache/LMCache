@@ -11,7 +11,7 @@ Plugins are configured through the following methods:
    - `LMCACHE_PLUGIN_CONFIG`: JSON string containing the plugin configuration
 
 2. **Configuration File**:
-   Plugins can be specified in the `lmcahce.yaml` file under the `plugin_locs` field:
+   Plugins can be specified in the `lmcache.yaml` file under the `plugin_locs` field:
    ```yaml
    plugin_locs: ["/path/to/plugins"]
    ```
