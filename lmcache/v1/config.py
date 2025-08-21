@@ -245,6 +245,11 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "default": "LRU",
         "env_converter": str,
     },
+    "numa_mode": {
+        "type": Optional[str],
+        "default": None,
+        "env_converter": str,
+    },
     "internal_api_server_enabled": {
         "type": bool,
         "default": False,
