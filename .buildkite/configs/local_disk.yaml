@@ -23,3 +23,4 @@ vllm:
   args:
     - "--load-format"
     - "dummy"
+    - "--no-enable-prefix-caching"
