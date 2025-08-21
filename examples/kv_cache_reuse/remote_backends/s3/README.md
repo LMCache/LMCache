@@ -2,7 +2,7 @@
 
 Amazon Simple Storage Service (Amazon S3) is an object storage service offering industry-leading scalability, data availability, security, and performance.
 
-To maximize S3 performance, it's recommended to use [Amazon S3 Express One Zone storage class](https://aws.amazon.com/s3/storage-classes/express-one-zone/) and coloate your S3 bucket and [Amazon EC2 compute instance](https://aws.amazon.com/ec2/) in the same availability zone. 
+To maximize S3 performance, it's recommended to use [Amazon S3 Express One Zone storage class](https://aws.amazon.com/s3/storage-classes/express-one-zone/) and colocate your S3 bucket and [Amazon EC2 compute instance](https://aws.amazon.com/ec2/) in the same availability zone. 
 
 ## Step 1: Configure your S3 bucket and (optional) EC2 compute instance
 
