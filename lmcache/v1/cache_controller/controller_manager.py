@@ -92,7 +92,9 @@ class LMCacheControllerManager:
         # asyncio.run_coroutine_threadsafe(self.start_all(), self.loop)
 
     async def handle_worker_message(self, msg: WorkerMsg) -> None:
-        if isinstance(msg, RegisterMsg):
+        if isinstance(msg, HeartbeatMsg):
+            await self.reg_controller.heartbeat(msg)
+        elif isinstance(msg, RegisterMsg):
             await self.reg_controller.register(msg)
         elif isinstance(msg, DeRegisterMsg):
             await self.reg_controller.deregister(msg)
@@ -100,8 +102,6 @@ class LMCacheControllerManager:
             await self.kv_controller.admit(msg)
         elif isinstance(msg, KVEvictMsg):
             await self.kv_controller.evict(msg)
-        elif isinstance(msg, HeartbeatMsg):
-            await self.reg_controller.heartbeat(msg)
         else:
             logger.error(f"Unknown worker message type: {msg}")
 
