@@ -137,7 +137,7 @@ class TokenDatabase(metaclass=abc.ABCMeta):
             raise ValueError(f"Unsupported tokens type: {type(tokens)}")
         
         # NOTE: Using the builtin hash to calculate the None object will give different results each time
-        prefix_hash = prefix_hash or 0
+        prefix_hash = () if prefix_hash is None else prefix_hash
         extra_keys_tuple = tuple(extra_keys or [])
 
         # Ignore extra keys for now
