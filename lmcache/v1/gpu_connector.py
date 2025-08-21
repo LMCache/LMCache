@@ -1260,6 +1260,9 @@ class SGLangLayerwiseGPUConnector(GPUConnectorInterface):
             ):
                 assert memory_obj.metadata.fmt == MemoryFormat.KV_T2D
                 if self.use_gpu:
+                    if offset != 0:
+                        print(f"start: {start}, end: {end}, offset: {offset}")
+                        print(f"memory_obj.tensor.shape: {memory_obj.tensor.shape}")
                     tmp_gpu_buffer_obj.tensor[start - offset : end - offset].copy_(
                         memory_obj.tensor, non_blocking=True
                     )

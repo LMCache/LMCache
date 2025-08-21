@@ -214,10 +214,17 @@ class LMCacheLayerwiseConnector(LMCacheConnector):
         self._lmcache_chunk_size = self.lmcache_engine.config.chunk_size
         self.layerwise_retrievers = []
 
-    def load_kv_layerwise(self) -> None:
+    def load_kv_layerwise(self, layer_id: int) -> None:
+        if len(self.layerwise_retrievers) == 0:
+            return
+
+        if layer_id < self.current_layer - 1:
+            return
+
         for layerwise_retriever in self.layerwise_retrievers:
             next(layerwise_retriever)
-            self.current_layer += 1
+            
+        self.current_layer += 1
 
         if self.current_layer == self.sgl_config.num_hidden_layers:
             self.current_layer = 0
