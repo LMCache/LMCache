@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING, Union
 import os
 
 if TYPE_CHECKING:
+    from vllm.config import ModelConfig
     from vllm.multimodal.inputs import PlaceholderRange
 
 # Third Party
@@ -12,7 +13,6 @@ import torch
 # First Party
 from lmcache.config import LMCacheEngineConfig as Config  # type: ignore[assignment]
 from lmcache.logging import init_logger
-from lmcache.utils import mla_enabled
 from lmcache.v1.config import (
     LMCacheEngineConfig as V1Config,  # type: ignore[assignment]
 )
@@ -85,6 +85,14 @@ def apply_mm_hashes_to_token_ids(
         end = min(start + length, n)
         token_ids[start:end] = hex_hash_to_int16(hash_str)
     return token_ids
+
+
+def mla_enabled(model_config: "ModelConfig") -> bool:
+    return (
+        hasattr(model_config, "use_mla")
+        and isinstance(model_config.use_mla, bool)
+        and model_config.use_mla
+    )
 
 
 def create_lmcache_metadata(

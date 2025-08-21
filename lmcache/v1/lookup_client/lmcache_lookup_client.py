@@ -10,8 +10,8 @@ import torch
 import zmq
 
 # First Party
+from lmcache.integration.vllm.utils import mla_enabled
 from lmcache.logging import init_logger
-from lmcache.utils import mla_enabled
 from lmcache.v1.cache_engine import LMCacheEngine
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.lookup_client.abstract_client import LookupClientInterface
