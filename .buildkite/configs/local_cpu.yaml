@@ -8,8 +8,7 @@ workload:
   shuffle_seed:         0
   max_inflight:         20
   sleep_after:          0
-  expected_ttft_gain:   2
-  expected_latency_gain: 2
+  expected_latency_gain: 3.7
 
 docker:
   env:

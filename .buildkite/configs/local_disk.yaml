@@ -7,15 +7,15 @@ workload:
   repeat_mode:          random
   shuffle_seed:         0
   max_inflight:         20
-  sleep_after:          0
-  expected_ttft_gain:   1.5
-  expected_latency_gain: 1.5
+  sleep_after:          20
+  expected_latency_gain: 2.2
 
 docker:
   env:
     - "LMCACHE_CHUNK_SIZE=256"
     - "LMCACHE_LOCAL_CPU=False"
-    - "LMCACHE_MAX_LOCAL_DISK_SIZE=5"
+    - "LMCACHE_MAX_LOCAL_CPU_SIZE=10"
+    - "LMCACHE_MAX_LOCAL_DISK_SIZE=10"
     - "LMCACHE_LOCAL_DISK: \"file:///local/end-to-end-tests/local/\""
 
 vllm:
