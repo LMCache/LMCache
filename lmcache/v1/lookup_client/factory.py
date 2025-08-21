@@ -71,12 +71,11 @@ class LookupClientFactory:
 
         # Only create the KV lookup API server on worker rank 0
         # when there are multiple workers and when not using external lookup client
-        create_lookup_server_only_on_worker_0_for_mla = (
-            config.extra_config
-            and config.extra_config.get(
-                "create_lookup_server_only_on_worker_0_for_mla", False
-            )
+        create_lookup_server_only_on_worker_0_for_mla = config.get_extra_config_value(
+            "create_lookup_server_only_on_worker_0_for_mla",
+            lmcache_engine.metadata.use_mla,
         )
+
         if config.external_lookup_client is None and (
             not create_lookup_server_only_on_worker_0_for_mla
             or lmcache_engine.metadata.worker_id == 0

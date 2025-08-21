@@ -96,15 +96,11 @@ class LMCacheEngine:
         self.gpu_connector = gpu_connector
         self.broadcast_fn = broadcast_fn
         self.broadcast_object_fn = broadcast_object_fn
-        save_only_first_rank_default = True if metadata.use_mla else False
+        # save_only_first_rank only works when use mla
         self.save_only_first_rank = (
-            self.config.extra_config.get(
-                "save_only_first_rank", save_only_first_rank_default
-            )
-            if self.config.extra_config
-            else save_only_first_rank_default
+            self.config.get_extra_config_value("save_only_first_rank", metadata.use_mla)
+            and metadata.use_mla
         )
-
         self.enable_p2p = config.enable_p2p
 
         self.enable_controller = config.enable_controller
@@ -1209,13 +1205,10 @@ class LMCacheEngineBuilder:
             return CuFileMemoryAllocator(config.cufile_buffer_size * 1024**2)
 
         max_local_cpu_size = config.max_local_cpu_size
-        save_only_first_rank_default = True if metadata.use_mla else False
+        # save_only_first_rank only works when use mla
         save_only_first_rank = (
-            config.extra_config.get(
-                "save_only_first_rank", save_only_first_rank_default
-            )
-            if config.extra_config
-            else save_only_first_rank_default
+            config.get_extra_config_value("save_only_first_rank", metadata.use_mla)
+            and metadata.use_mla
         )
         if save_only_first_rank and metadata.is_first_rank():
             # Only the first rank will save the cache,

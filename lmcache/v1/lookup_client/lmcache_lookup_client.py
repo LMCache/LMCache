@@ -10,6 +10,7 @@ import torch
 import zmq
 
 # First Party
+from lmcache.integration.vllm.utils import mla_enabled
 from lmcache.logging import init_logger
 from lmcache.v1.cache_engine import LMCacheEngine
 from lmcache.v1.config import LMCacheEngineConfig
@@ -39,10 +40,10 @@ class LMCacheLookupClient(LookupClientInterface):
             "lmcache_rpc_port", 0
         )
         self.tensor_parallel_size = vllm_config.parallel_config.tensor_parallel_size
+        use_mla = mla_enabled(vllm_config.model_config)
         self.create_lookup_server_only_on_worker_0_for_mla = (
-            config.extra_config
-            and config.extra_config.get(
-                "create_lookup_server_only_on_worker_0_for_mla", False
+            config.get_extra_config_value(
+                "create_lookup_server_only_on_worker_0_for_mla", use_mla
             )
         )
         ranks = self.tensor_parallel_size
@@ -52,6 +53,10 @@ class LMCacheLookupClient(LookupClientInterface):
         for tp_rank in range(ranks):
             socket_path = get_zmq_rpc_path_lmcache(
                 vllm_config, "lookup", rpc_port, tp_rank
+            )
+            logger.info(
+                f"lmcache lookup client connect to tp_rank {tp_rank} "
+                f"with socket path {socket_path}"
             )
             socket = self.socket = make_zmq_socket(
                 self.ctx,
@@ -159,6 +164,7 @@ class LMCacheLookupServer:
                 #    break
                 # continue
 
+        logger.info(f"lmcache lookup server start on {socket_path}")
         self.thread = threading.Thread(target=process_request, daemon=True)
         self.thread.start()
 

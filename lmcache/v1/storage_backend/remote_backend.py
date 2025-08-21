@@ -61,8 +61,9 @@ class RemoteBackend(StorageBackendInterface):
 
         # Precompute MLA mode status
         self._mla_worker_id_as0_mode = (
-            config.extra_config is not None
-            and config.extra_config.get("remote_enable_mla_worker_id_as0", False)
+            config.get_extra_config_value(
+                "remote_enable_mla_worker_id_as0", metadata.use_mla
+            )
             and metadata.use_mla
             and metadata.world_size > 1
             and metadata.worker_id != 0
