@@ -319,6 +319,9 @@ def _create_config_class():
             "from_legacy": classmethod(_from_legacy),
             "from_file": classmethod(_from_file),
             "from_env": classmethod(_from_env),
+            "__str__": lambda self: str(
+                {name: getattr(self, name) for name in _CONFIG_DEFINITIONS}
+            ),
         },
     )
     return cls
