@@ -446,6 +446,9 @@ class LMCacheEngine:
         :raises: ValueError if the number of Falses in the mask is not a
             multiple of the chunk size.
         """
+        tot_kv_size = 0
+        t = time.perf_counter()
+
         if mask is not None:
             num_required_tokens = torch.sum(mask).item()
         else:
@@ -456,7 +459,7 @@ class LMCacheEngine:
 
         reordered_chunks: List[Tuple[CacheEngineKey, MemoryObj, int, int]] = []
         if not self._is_passive():
-            reordered_chunks = self._process_tokens_internal(
+            reordered_chunks, tot_kv_size = self._process_tokens_internal(
                 tokens,
                 mask,
                 ret_mask,
@@ -484,12 +487,24 @@ class LMCacheEngine:
                 self.storage_manager.remove(key)
             memory_obj.ref_count_down()
 
+        onload_time = time.perf_counter() - t
+
         retrieved_tokens = torch.sum(ret_mask)
         self.stats_monitor.on_retrieve_finished(monitor_req_id, retrieved_tokens)
         logger.info(
             f"Retrieved {retrieved_tokens} "
             f"out of {num_required_tokens} "
             f"out of total {len(tokens)} tokens"
+        )
+        logger.debug(
+            "Retrieved %d out of total %d out of total %d tokens. size: %.4f gb,"
+            " cost %.4f ms, throughput: %.4f GB/s;",
+            retrieved_tokens,
+            num_required_tokens,
+            len(tokens),
+            tot_kv_size / 1024**3,
+            onload_time * 1000,
+            tot_kv_size / onload_time / 1024**3,
         )
         return ret_mask
 
@@ -956,7 +971,7 @@ class LMCacheEngine:
         mask,
         ret_mask,
         **kwargs,
-    ) -> List[Tuple[CacheEngineKey, MemoryObj, int, int]]:
+    ) -> Tuple[List[Tuple[CacheEngineKey, MemoryObj, int, int]], int]:
         """Process tokens and populate the reordered lists.
 
         This function is used to process tokens and populate the reordered lists.
@@ -967,6 +982,8 @@ class LMCacheEngine:
             ret_mask: Output mask updated with cache hit positions
             **kwargs: Additional keyword arguments
         """
+
+        tot_kv_size = 0
         # location -> [(CacheEngineKey, start, end)]
         block_mapping: Dict[str, List[Tuple[CacheEngineKey, int, int]]] = defaultdict(
             list
@@ -1031,7 +1048,7 @@ class LMCacheEngine:
             )
             for (key, start, end), memory_obj in zip(blocks, memory_objs, strict=False):
                 if memory_obj is None:
-                    logger.warn(
+                    logger.warning(
                         "The cache block is in the storage, but it can't be retrieved"
                     )
                     if (
@@ -1041,6 +1058,7 @@ class LMCacheEngine:
                         last_failed_block_start = start
                     break
                 reordered_chunks.append((key, memory_obj, start, end))
+                tot_kv_size += memory_obj.get_size()
 
         if last_failed_block_start is not None:
             ret_mask[last_failed_block_start:] = False
@@ -1050,7 +1068,7 @@ class LMCacheEngine:
                 for key, memory_obj, start, end in reordered_chunks
                 if end < last_failed_block_start
             ]
-        return reordered_chunks
+        return reordered_chunks, tot_kv_size
 
     def _broadcast_or_receive_memory_objs(
         self,
