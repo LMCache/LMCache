@@ -15,3 +15,4 @@ extra_config:
   s3_region: "{REGION}"
   s3_enable_s3express: True
   save_chunk_meta: False
+  s3_file_prefix: "{FILE_PREFIX}"  # Optional prefix for S3 file paths
