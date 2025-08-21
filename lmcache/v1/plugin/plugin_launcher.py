@@ -47,34 +47,34 @@ class PluginLauncher:
         for file in files:
             self._launch_plugin(file)
 
+    def _should_skip_plugin(self, file: Path, parts: list[str]) -> bool:
+        """Determine if plugin should be skipped based on role/worker ID"""
+        if len(parts) < 2:
+            return False
+
+        # Check role match
+        plugin_role = parts[0].upper()
+        if plugin_role != "ALL" and plugin_role != self.role.name:
+            logger.info(f"Skipping {file}: requires role {plugin_role}")
+            return True
+
+        # Check worker ID match
+        if len(parts) > 2 and parts[1].isdigit():
+            plugin_worker_id = int(parts[1])
+            if plugin_worker_id != self.worker_id:
+                logger.info(f"Skipping {file}: requires worker ID {plugin_worker_id}")
+                return True
+
+        return False
+
     def _launch_plugin(self, file: Path):
         """Launch a plugin"""
         try:
-            # Parse role and worker ID from filename
             filename = file.stem.lower()
             parts = filename.split("_")
 
-            # Skip if role is specified and does not match
-            if len(parts) > 1 and parts[0] != "":
-                plugin_role = parts[0].upper()
-                if plugin_role == "ALL" or plugin_role == self.role.name == "SCHEDULER":
-                    pass
-                elif plugin_role != self.role.name:
-                    logger.info(
-                        f"Skipping plugin {file}: role mismatch "
-                        f"(expected {plugin_role}, current {self.role})"
-                    )
-                    return
-
-                # Skip if worker ID is specified and does not match
-                if len(parts) > 2 and parts[1].isdigit():
-                    plugin_worker_id = int(parts[1])
-                    if plugin_worker_id != self.worker_id:
-                        logger.info(
-                            f"Skipping plugin {file}: worker ID mismatch "
-                            f"(expected {plugin_worker_id}, current {self.worker_id})"
-                        )
-                        return
+            if self._should_skip_plugin(file, parts):
+                return
 
             # Get interpreter from first line (shebang)
             interpreter = self._get_interpreter(file)
@@ -105,7 +105,7 @@ class PluginLauncher:
     def _get_interpreter(self, file: Path) -> str:
         """Get interpreter from first line comment"""
         try:
-            with open(file, "r") as f:
+            with open(file, "r", encoding="utf-8") as f:
                 first_line = f.readline().strip()
                 if first_line.startswith("#!"):
                     # Extract interpreter path from shebang

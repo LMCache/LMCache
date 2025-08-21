@@ -312,23 +312,6 @@ def _create_config_class():
     def _post_init(self):
         self.validate()
 
-    def _to_dict(self):
-        """Convert the configuration object into a dictionary."""
-        return {name: getattr(self, name) for name in _CONFIG_DEFINITIONS}
-
-    def _to_json(self):
-        """Serialize the configuration object to a JSON string."""
-        return json.dumps(self.to_dict(), indent=2)
-
-    def _from_json(cls, json_str: str):
-        """Deserialize a JSON string into a configuration object."""
-        try:
-            config_dict = json.loads(json_str)
-            return cls.from_dict(config_dict)
-        except json.JSONDecodeError as e:
-            logger.error(f"Invalid JSON input: {e}")
-            raise
-
     cls = make_dataclass(
         "LMCacheEngineConfig",
         [(name, type_, default) for name, (type_, default) in fields_dict.items()],
@@ -560,6 +543,26 @@ def _from_dict(cls, config_dict: dict):
         config_values[name] = value
     instance = cls(**config_values)
     return instance.log_config()
+
+
+def _to_dict(self):
+    """Convert the configuration object into a dictionary."""
+    return {name: getattr(self, name) for name in _CONFIG_DEFINITIONS}
+
+
+def _to_json(self):
+    """Serialize the configuration object to a JSON string."""
+    return json.dumps(self.to_dict(), indent=2)
+
+
+def _from_json(cls, json_str: str):
+    """Deserialize a JSON string into a configuration object."""
+    try:
+        config_dict = json.loads(json_str)
+        return cls.from_dict(config_dict)
+    except json.JSONDecodeError as e:
+        logger.error(f"Invalid JSON input: {e}")
+        raise
 
 
 # Create configuration class
