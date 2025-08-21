@@ -1199,16 +1199,27 @@ class LMCacheConnectorV1Impl:
         # changed from list to object `CachedRequestData`
         if isinstance(cached_reqs, list):
             for i, req in enumerate(cached_reqs):
+                load_spec = self.load_specs.pop(req.req_id, None)
+                lmcache_cached_tokens = 0
+                if load_spec is not None:
+                    lmcache_cached_tokens = load_spec.lmcache_cached_tokens
+
                 request_tracker = self._request_trackers[req.req_id]
-                request_tracker.update(req.new_token_ids, req.new_block_ids)
+                request_tracker.update(
+                    req.new_token_ids,
+                    req.new_block_ids,
+                    is_preempted=req.resumed_from_preemption,
+                    lmcache_cached_tokens=lmcache_cached_tokens,
+                )
 
                 req_meta = ReqMeta.from_request_tracker(
                     request_tracker,
                     self._block_size,
                     self._lmcache_chunk_size,
-                    load_spec=None,
+                    load_spec=load_spec,
                     skip_save=force_skip_save,
                     discard_partial_chunks=self._discard_partial_chunks,
+                    save_decode_cache=self._save_decode_cache,
                 )
                 if req_meta is not None:
                     meta.add_request(req_meta)
