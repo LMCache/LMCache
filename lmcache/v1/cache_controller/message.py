@@ -92,10 +92,7 @@ class HeartbeatMsg(RegisterMsg):
     # TODO: add more heartbeat info
 
     def describe(self) -> str:
-        return (
-            f"Heartbeat from instance {self.instance_id}, "
-            f"worker {self.worker_id}"
-        )
+        return f"Heartbeat from instance {self.instance_id}, worker {self.worker_id}"
 
 
 """Control Message from Controller to LMCache"""
