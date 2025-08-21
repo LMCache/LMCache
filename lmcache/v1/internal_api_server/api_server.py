@@ -66,10 +66,8 @@ class InternalAPIServer:
         }
 
         if self.socket_path:
-            logger.info(
-                f"Init internal API server on socket {self.socket_path} "
-                f"or port {self.port}"
-            )
+            self.server_log_info = f"socket {self.socket_path}"
+            logger.info(f"Init internal API server on {self.server_log_info}")
             uvicorn_config["uds"] = self.socket_path
             # Ensure socket directory exists
             os.makedirs(os.path.dirname(self.socket_path), exist_ok=True)
@@ -77,27 +75,22 @@ class InternalAPIServer:
             if os.path.exists(self.socket_path):
                 os.unlink(self.socket_path)
         else:
-            logger.info(f"Init internal API server on port {self.port}")
+            self.server_log_info = f"port {self.port}"
+            logger.info(f"Init internal API server on {self.server_log_info}")
             uvicorn_config["port"] = self.port
 
         self.server = uvicorn.Server(uvicorn.Config(**uvicorn_config))
         app.state.lmcache_adapter = lmcache_adapter
 
     async def run(self):
-        logger.info(
-            f"Running LMCache internal API server on port {self.port} "
-            f"or socket {self.socket_path}"
-        )
+        logger.info(f"Running LMCache internal API server on {self.server_log_info}")
         if self.server:
             await self.server.serve()
 
     def start(self):
         if not self.enable:
             return
-        logger.info(
-            f"Starting LMCache internal API server on port {self.port} "
-            f"or socket {self.socket_path}"
-        )
+        logger.info(f"Starting LMCache internal API server on {self.server_log_info}")
         threading.Thread(target=asyncio.run, args=(self.run(),), daemon=True).start()
 
     def stop(self):
