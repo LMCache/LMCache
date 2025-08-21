@@ -13,9 +13,10 @@ logger = init_logger(__name__)
 
 
 class PluginLauncher:
-    def __init__(self, config, role, worker_id):
+    def __init__(self, config, role, worker_count, worker_id):
         self.config = config
         self.role = role
+        self.worker_count = worker_count
         self.worker_id = worker_id
         self.plugin_processes = []
         # Register cleanup handler
@@ -83,6 +84,7 @@ class PluginLauncher:
             env = os.environ.copy()
             env["LMCACHE_PLUGIN_ROLE"] = str(self.role)
             env["LMCACHE_PLUGIN_CONFIG"] = self.config.to_json()
+            env["LMCACHE_PLUGIN_WORKER_COUNT"] = str(self.worker_count)
             env["LMCACHE_PLUGIN_WORKER_ID"] = str(self.worker_id)
 
             proc = subprocess.Popen(

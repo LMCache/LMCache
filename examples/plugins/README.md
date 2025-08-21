@@ -1,7 +1,15 @@
 # LMCache Plugin System Documentation
 
 ## Overview
+
 The LMCache plugin system allows users to extend functionality by running custom scripts or programs during cache operations. Plugins can be written in any language (Python, Bash, etc.) and are managed by the `PluginLauncher` class.
+
+Base on this, hope developer of our community can contribute more plugins, e.g.
+- Start metric reporter to centralized metric system.
+- Start log reporter to centralized log collect and query system.
+- Report customized process level metrics to the alert system.
+- Heartbeat to a health monitor system or a service discover system.
+- ...
 
 ## Configuration
 Plugins are configured through the following methods:
@@ -9,12 +17,16 @@ Plugins are configured through the following methods:
 1. **Environment Variables**:
    - `LMCACHE_PLUGIN_ROLE`: The role of the current process (e.g., `SCHEDULER`, `WORKER`)
    - `LMCACHE_PLUGIN_CONFIG`: JSON string containing the plugin configuration
+   - `LMCACHE_PLUGIN_WORKER_ID`: The worker id of current process
+   - `LMCACHE_PLUGIN_WORKER_COUNT`: The total worker count of this cluster
 
 2. **Configuration File**:
    Plugins can be specified in the `lmcache.yaml` file under the `plugin_locs` field:
    ```yaml
    plugin_locs: ["/path/to/plugins"]
    ```
+3. **Pass more parameters via lmcache extra_config**
+   You can Pass more parameters via specify extra_config within `lmcache.yaml`.
 
 ## Plugin Naming Rules
 Plugin filenames determine which roles/worker_id they run on:

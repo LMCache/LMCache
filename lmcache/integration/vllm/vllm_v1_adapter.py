@@ -539,7 +539,7 @@ class LMCacheConnectorV1Impl:
     ):
         self._parent = parent
         self.kv_role = vllm_config.kv_transfer_config.kv_role
-
+        self.worker_count = vllm_config.parallel_config.tensor_parallel_size
         config = lmcache_get_config()
         self.config = config
         self.layerwise_retrievers = []
@@ -622,6 +622,7 @@ class LMCacheConnectorV1Impl:
         self.plugin_launcher = PluginLauncher(
             self.config,
             role,
+            self.worker_count,
             -1
             if role == KVConnectorRole.SCHEDULER
             else self.lmcache_engine.metadata.worker_id,
