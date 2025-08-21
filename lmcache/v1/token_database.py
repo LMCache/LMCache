@@ -135,11 +135,15 @@ class TokenDatabase(metaclass=abc.ABCMeta):
             tokens_tuple = tuple(tokens)
         else:
             raise ValueError(f"Unsupported tokens type: {type(tokens)}")
+        
+        # NOTE: Using the builtin hash to calculate the None object will give different results each time
+        prefix_hash = 0 if prefix_hash is None else prefix_hash
+        extra_keys_tuple = tuple(extra_keys) if extra_keys is not None else ()  
 
         # Ignore extra keys for now
         # Extra keys are for multi-modal inputs and
         # request specific metadata (e.g., LoRA ID).
-        return self.hash_func((prefix_hash, tokens_tuple, extra_keys))
+        return self.hash_func((prefix_hash, tokens_tuple, extra_keys_tuple))
 
 
 class ChunkedTokenDatabase(TokenDatabase):
