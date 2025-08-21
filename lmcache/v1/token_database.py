@@ -138,7 +138,7 @@ class TokenDatabase(metaclass=abc.ABCMeta):
         
         # NOTE: Using the builtin hash to calculate the None object will give different results each time
         prefix_hash = 0 if prefix_hash is None else prefix_hash
-        extra_keys_tuple = tuple(extra_keys) if extra_keys is not None else ()  
+        extra_keys_tuple = tuple(extra_keys or [])
 
         # Ignore extra keys for now
         # Extra keys are for multi-modal inputs and
