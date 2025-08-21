@@ -2,11 +2,11 @@
 #include <stdexcept>
 #include <string>
 #include <sys/mman.h>
-#include <numaif.h>
 #include <sys/syscall.h>
 #include <unistd.h>
 #include <errno.h>
-#include <cstring>  // for strerror
+#include <cstring>            // for strerror
+#include <linux/mempolicy.h>  // for MPOL_BIND, MPOL_MF_MOVE, MPOL_MF_STRICT
 #include "mem_alloc.h"
 
 uintptr_t alloc_pinned_ptr(size_t size, unsigned int flags) {
