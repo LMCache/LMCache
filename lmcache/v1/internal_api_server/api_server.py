@@ -35,9 +35,7 @@ class InternalAPIServer:
         # 0 for scheduler, 1 for worker 0, 2 for worker 1, ...
         port_offset = 0 if not lmcache_engine else 1 + lmcache_engine.metadata.worker_id
         self.port = config.internal_api_server_port_start + port_offset
-        self.socket_path_prefix = getattr(
-            config, "internal_api_server_socket_path_prefix", None
-        )
+        self.socket_path_prefix = config.internal_api_server_socket_path_prefix
         self.socket_path = (
             f"{self.socket_path_prefix}_{self.port}"
             if self.socket_path_prefix
@@ -60,7 +58,7 @@ class InternalAPIServer:
 
         uvicorn_config = {
             "app": app,
-            "host": "0.0.0.0",
+            "host": config.internal_api_server_host,
             "loop": "uvloop",
             "http": "httptools",
         }

@@ -227,6 +227,11 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "default": None,
         "env_converter": str,
     },
+    "internal_api_server_host": {
+        "type": str,
+        "default": "0.0.0.0",
+        "env_converter": str,
+    },
     "extra_config": {
         "type": Optional[dict],
         "default": None,
