@@ -439,18 +439,17 @@ class LMCacheEngine:
                     elapsed = time.time() - start_time
                     remaining = max(0, timeout - elapsed)
                     if elapsed >= timeout:
-                        raise asyncio.TimeoutError("Timeout waiting for store operations to complete")
+                        raise concurrent.futures.TimeoutError("Timeout waiting for store operations to complete")
                     future.result(timeout=remaining)
                 else:
                     future.result()
             logger.debug("Finished all store operations, Used {:.3f}ms".format((time.time() - start_time)*1000))
-        except asyncio.TimeoutError:
+        except concurrent.futures.TimeoutError:
             logger.error("Timeout waiting for store operations to complete")
         except Exception as e:
             logger.error(f"Error waiting for store: {e}")
         finally:
             self.store_futures.clear()
-        return
 
     @_lmcache_nvtx_annotate
     @torch.inference_mode()
