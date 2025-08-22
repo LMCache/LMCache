@@ -1,5 +1,8 @@
-# Cache by tags
-This is an example to cache by tags, use the `kv_transfer_params.user` field to pass the `user` tag, which is enable for user-isolated caching.
+# Cache with configs
+This is an example to cache with configs, includes tags and the other configs.
+- tags will be used to generate the key
+- configs will be used to interact with the backends, such as set the ttl
+
 ## Prerequisites
 Your server should have at least 1 GPU.
 
@@ -22,7 +25,7 @@ vllm serve /disc/f/models/opt-125m/ \
            --trust-remote-code
 ```
 
-3. Send a request to vllm engine with `kv_transfer_params: {user: example_user_1}`:
+2. Send a request to vllm engine with tags and configs by `kv_transfer_params: {}`:
 ```bash
 curl -X POST http://localhost:8000/v1/completions \
   -H "Content-Type: application/json" \
@@ -31,14 +34,10 @@ curl -X POST http://localhost:8000/v1/completions \
     "prompt": "Explain the significance of KV cache in language models." * 100,
     "max_tokens": 10,
 	"kv_transfer_params": {
-	  "user": "example_user_1"
+	  "lmcache.tag.user": "example_user_1",
+	  "lmcache.ttl": 60
 	}
   }'
 ```
-
-You should be able to see logs `Retrieved xxx out of xxx out of total xxx tokens` at the second time use the same input,
-but if you change the `user` field, the first time will not hit the cache.
-
-```plaintext
-LMCache INFO: Retrieved 512 out of 512 out of total 512 tokens
-```
+- set tags: use `lmcache.tag.xxx`
+- set configs: use `lmcache.xxx`

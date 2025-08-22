@@ -61,8 +61,9 @@ class RemoteBackend(StorageBackendInterface):
 
         # Precompute MLA mode status
         self._mla_worker_id_as0_mode = (
-            config.extra_config is not None
-            and config.extra_config.get("remote_enable_mla_worker_id_as0", False)
+            config.get_extra_config_value(
+                "remote_enable_mla_worker_id_as0", metadata.use_mla
+            )
             and metadata.use_mla
             and metadata.world_size > 1
             and metadata.worker_id != 0
@@ -128,7 +129,12 @@ class RemoteBackend(StorageBackendInterface):
         # For MLA worker id as 0 mode, use worker_id 0
         if self._mla_worker_id_as0_mode:
             key = CacheEngineKey(
-                key.fmt, key.model_name, key.world_size, 0, key.chunk_hash, key.tags
+                key.fmt,
+                key.model_name,
+                key.world_size,
+                0,
+                key.chunk_hash,
+                key.request_configs,
             )
 
         try:
@@ -225,7 +231,12 @@ class RemoteBackend(StorageBackendInterface):
         # For MLA worker id as 0 mode, use worker_id 0
         if self._mla_worker_id_as0_mode:
             key = CacheEngineKey(
-                key.fmt, key.model_name, key.world_size, 0, key.chunk_hash, key.tags
+                key.fmt,
+                key.model_name,
+                key.world_size,
+                0,
+                key.chunk_hash,
+                key.request_configs,
             )
         t1 = time.perf_counter()
         future = asyncio.run_coroutine_threadsafe(self.connection.get(key), self.loop)
@@ -270,7 +281,12 @@ class RemoteBackend(StorageBackendInterface):
         if self._mla_worker_id_as0_mode:
             new_keys = [
                 CacheEngineKey(
-                    key.fmt, key.model_name, key.world_size, 0, key.chunk_hash
+                    key.fmt,
+                    key.model_name,
+                    key.world_size,
+                    0,
+                    key.chunk_hash,
+                    key.request_configs,
                 )
                 for key in keys
             ]

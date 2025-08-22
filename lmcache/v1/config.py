@@ -245,6 +245,11 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "default": "LRU",
         "env_converter": str,
     },
+    "numa_mode": {
+        "type": Optional[str],
+        "default": None,
+        "env_converter": str,
+    },
     "internal_api_server_enabled": {
         "type": bool,
         "default": False,
@@ -315,10 +320,14 @@ def _create_config_class():
             "validate": _validate_config,
             "log_config": _log_config,
             "to_original_config": _to_original_config,
+            "get_extra_config_value": _get_extra_config_value,
             "from_defaults": classmethod(_from_defaults),
             "from_legacy": classmethod(_from_legacy),
             "from_file": classmethod(_from_file),
             "from_env": classmethod(_from_env),
+            "__str__": lambda self: str(
+                {name: getattr(self, name) for name in _CONFIG_DEFINITIONS}
+            ),
         },
     )
     return cls
@@ -373,6 +382,13 @@ def _to_original_config(self):
         blend_separator="[BLEND_SEP]",
         blend_add_special_in_precomp=False,
     )
+
+
+def _get_extra_config_value(self, key, default_value=None):
+    if hasattr(self, "extra_config") and self.extra_config is not None:
+        return self.extra_config.get(key, default_value)
+    else:
+        return default_value
 
 
 def _from_defaults(cls, **kwargs):
