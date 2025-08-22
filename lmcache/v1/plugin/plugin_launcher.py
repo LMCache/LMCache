@@ -63,7 +63,10 @@ class PluginLauncher:
         if len(parts) > 2 and parts[1].isdigit():
             plugin_worker_id = int(parts[1])
             if plugin_worker_id != self.worker_id:
-                logger.info(f"Skipping {file}: requires worker ID {plugin_worker_id}")
+                logger.info(
+                    f"worker {self.worker_id} is skipping plugin {file}, "
+                    f"which is only for worker ID {plugin_worker_id}"
+                )
                 return True
 
         return False
