@@ -136,19 +136,23 @@ class StorageManager:
         key: CacheEngineKey,
         memory_obj: MemoryObj,
         location: Optional[str] = None,
-    ) -> None:
+    ) -> List[Future]:
         """
         Non-blocking function to put the memory object into the storages.
         Do not store if the same object is being stored (handled here by
         storage manager) or has been stored (handled by storage backend).
         """
-
+        put_futures: List[Future] = []
         for backend_name, backend in self.storage_backends.items():
             if location and backend_name != location:
                 continue
-            backend.submit_put_task(key, memory_obj)
+            future = backend.submit_put_task(key, memory_obj)
+            if future is not None:
+                put_futures.append(future)
 
         memory_obj.ref_count_down()
+
+        return put_futures
 
     # TODO(Jiayi): location and transfer_spec might be redundant
     def batched_put(
@@ -157,14 +161,14 @@ class StorageManager:
         memory_objs: List[MemoryObj],
         transfer_spec=None,  # TODO(Jiayi): add type check
         location: Optional[str] = None,
-    ) -> None:
+    ) -> List[Future]:
         """
         Non-blocking function to batched put the memory objects into the
         storage backends.
         Do not store if the same object is being stored (handled here by
         storage manager) or has been stored (handled by storage backend).
         """
-
+        put_futures: List[Future] = []
         if self.enable_nixl or (location and location == "NixlBackend"):
             self.allocator_backend.batched_submit_put_task(
                 keys, memory_objs, transfer_spec=transfer_spec
@@ -206,10 +210,14 @@ class StorageManager:
                 continue
             # NOTE: the handling of exists_in_put_tasks
             # is done in the backend
-            backend.batched_submit_put_task(keys, memory_objs)
+            futures = backend.batched_submit_put_task(keys, memory_objs)
+            if futures is not None:
+                put_futures.extend(futures)
 
         for memory_obj in memory_objs:
             memory_obj.ref_count_down()
+        
+        return put_futures
 
     def get(
         self,

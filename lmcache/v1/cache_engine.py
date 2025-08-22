@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from collections import defaultdict
+from concurrent.futures import Future
 from typing import (
     Any,
     Callable,
@@ -102,6 +103,9 @@ class LMCacheEngine:
             self.config.get_extra_config_value("save_only_first_rank", metadata.use_mla)
             and metadata.use_mla
         )
+
+        self.store_futures: List[Future] = []
+
         self.enable_p2p = config.enable_p2p
 
         self.enable_controller = config.enable_controller
@@ -277,7 +281,10 @@ class LMCacheEngine:
         t = time.perf_counter()
 
         transfer_spec = kwargs.get("transfer_spec", None)
-        self.storage_manager.batched_put(keys, memory_objs, transfer_spec=transfer_spec)
+
+        futures = self.storage_manager.batched_put(keys, memory_objs, transfer_spec=transfer_spec)
+        self.store_futures.extend(futures)
+
         put_time += time.perf_counter() - t
 
         tot_time = offload_time + put_time
@@ -402,7 +409,9 @@ class LMCacheEngine:
             for layer_id in range(self.num_layers):
                 yield
                 next(mem_obj_generator)
-                self.storage_manager.batched_put(keys[layer_id], memory_objs[layer_id])
+                futures = self.storage_manager.batched_put(keys[layer_id], memory_objs[layer_id])
+                self.store_futures.extend(futures)
+
         else:
             # If no cache are found, we still need to yield to avoid
             # `StopIteration`
@@ -412,6 +421,36 @@ class LMCacheEngine:
         self.stats_monitor.on_store_finished(monitor_req_id, tot_token_num)
         logger.debug(f"Stored {tot_token_num} out of total {len(tokens)} tokens")
         yield
+
+    @_lmcache_nvtx_annotate
+    @torch.inference_mode()
+    def wait_for_store(
+        self, 
+        timeout: Optional[int] = 20
+    ) -> None:
+        """
+        Block until all asynchronous store operations are completed
+        """
+        try:
+            logger.debug("Waiting for store operations to complete")
+            start_time = time.time()
+            for future in self.store_futures:
+                if timeout is not None:
+                    elapsed = time.time() - start_time
+                    remaining = max(0, timeout - elapsed)
+                    if elapsed >= timeout:
+                        raise asyncio.TimeoutError("Timeout waiting for store operations to complete")
+                    future.result(timeout=remaining)
+                else:
+                    future.result()
+            logger.debug("Finished all store operations, Used {:.3f}ms".format((time.time() - start_time)*1000))
+        except asyncio.TimeoutError:
+            logger.error("Timeout waiting for store operations to complete")
+        except Exception as e:
+            logger.error(f"Error waiting for store: {e}")
+        finally:
+            self.store_futures.clear()
+        return
 
     @_lmcache_nvtx_annotate
     @torch.inference_mode()

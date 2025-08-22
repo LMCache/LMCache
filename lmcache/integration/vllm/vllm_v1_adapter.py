@@ -861,6 +861,7 @@ class LMCacheConnectorV1Impl:
 
         connector_metadata = self._parent._get_connector_metadata()
         assert isinstance(connector_metadata, LMCacheConnectorMetadata)
+        assert self.lmcache_engine is not None
 
         self.lmcache_engine.lookup_unpin(connector_metadata.lookup_requests_in_step)
 
@@ -871,12 +872,12 @@ class LMCacheConnectorV1Impl:
         if self.use_layerwise:
             for layerwise_storer in self.layerwise_storers:
                 next(layerwise_storer)
+            self.lmcache_engine.wait_for_store(timeout=None)
             return
 
         assert len(self.kv_caches) > 0
         kvcaches = list(self.kv_caches.values())
 
-        assert self.lmcache_engine is not None
 
         for request in connector_metadata.requests:
             save_spec = request.save_spec
@@ -945,6 +946,7 @@ class LMCacheConnectorV1Impl:
                 transfer_spec=request.disagg_spec,
                 request_configs=request.request_configs,
             )
+            self.lmcache_engine.wait_for_store(timeout=None)
 
             # NOTE(Jiayi): We assume all tokens are saved
             save_spec.skip_leading_tokens = len(token_ids)
