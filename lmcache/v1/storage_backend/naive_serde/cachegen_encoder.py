@@ -10,7 +10,6 @@ from lmcache.utils import _lmcache_nvtx_annotate
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import (
     BytesBufferMemoryObj,
-    MemoryFormat,
     MemoryObj,
     MemoryObjMetadata,
 )
@@ -93,6 +92,6 @@ class CacheGenSerializer(Serializer):
             ref_count=1,
             pin_count=0,
             num_tokens=memory_obj.get_num_tokens(),
-            fmt=MemoryFormat.BINARY_BUFFER,
+            fmt=memory_obj.metadata.fmt,
         )
         return BytesBufferMemoryObj(output_dict.to_bytes(), metadata=meta)
