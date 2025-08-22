@@ -107,7 +107,7 @@ class LMCFlashAttnBackend(AttentionInterface):
     def init_attn_metadata(
         input_ids: torch.tensor,
         **kwargs,
-    ):
+    ) -> LMCFlashAttnMetadata:
         return LMCFlashAttnMetadata(
             query_start_loc=torch.tensor(
                 [0, input_ids.shape[0]], dtype=torch.int32, device=hidden_states.device

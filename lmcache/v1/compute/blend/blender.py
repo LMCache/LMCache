@@ -99,7 +99,7 @@ class LMCBlender:
             self.metadata.positions = self.metadata.positions[top_indices]
             attn_output = attn_output[:topk_num]
 
-            attn_metadata.update_from_topk(topk_num)
+            attn_metadata.update_from_top_indices(top_indices)
 
         if self.metadata.imp_indices is not None:
             old_k[self.metadata.imp_indices] = k

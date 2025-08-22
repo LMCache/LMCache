@@ -7,8 +7,8 @@ import torch
 from lmcache.v1.compute.attention.flash_attn import LMCFlashAttnBackend
 from lmcache.v1.compute.positional_encoding import get_fused_rope
 
-# FIXME(Jiayi): A few things need to be tested/supported:
-# PP, Multimodal
+# TODO(Jiayi): A few things need to be tested/supported:
+# TP, PP, Multimodal
 
 
 class LMCLlamaModel(nn.Module):
@@ -27,6 +27,9 @@ class LMCLlamaModel(nn.Module):
         for i in range(self.num_layers):
             vllm_attn = vllm_model.model.layers[i].self_attn.attn
             self.vllm_attn_layers.append(vllm_attn)
+            
+            #FIXME
+            import pdb; pdb.set_trace()
             self.lmc_attn_layers.append(LMCFlashAttnBackend(vllm_attn))
 
         # NOTE(Jiayi): better not to pass the blender in init
