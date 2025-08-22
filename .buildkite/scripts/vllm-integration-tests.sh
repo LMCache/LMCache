@@ -203,13 +203,16 @@ run_long_doc_qa() {
     printf '%s\n' "$workload_config"
 
     local workload_args=()
-    mapfile -t workload_args < <(
-        jq -r 'to_entries[] 
-               | select(.value != null and .value != "") 
-               | "--\(.key)" + (if (.value|type)=="string" 
-                                then " \(.value|@sh)" 
-                                else " \(.value|tojson)" 
-                                end)' <<<"$workload_config"
+    mapfile -d '' -t workload_args < <(
+    jq -j '
+        to_entries[]
+        | select(.value != null and (.value|tostring) != "")
+        | "--\(.key)", "\u0000",
+        (if (.value|type) == "string"
+        then .value
+        else (.value|tostring)
+        end), "\u0000"
+    ' <<<"$workload_yaml"
     )
 
     if [ ! -d ".venv" ]; then
