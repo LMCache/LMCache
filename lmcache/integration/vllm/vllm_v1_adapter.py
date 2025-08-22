@@ -467,22 +467,16 @@ class LMCacheConnectorV1Impl:
         assert len(self.kv_caches) > 0
         kvcaches = list(self.kv_caches.values())
 
-        attn_metadata = forward_context.attn_metadata
-        if attn_metadata is None:
-            logger.warning("In connector.start_load_kv, but the attn_metadata is None")
-            return
+        # attn_metadata = forward_context.attn_metadata
+        # if attn_metadata is None:
+        #     logger.warning("In connector.start_load_kv, but the attn_metadata is None")
+        #     return
 
         assert self.lmcache_engine is not None
 
         self.lmcache_engine.post_init(kvcaches=kvcaches)
 
         self.layerwise_retrievers = []
-
-        for idx, request in enumerate(metadata.requests):
-            if request.load_spec is None:
-                continue
-            last_idx = idx
-
         for idx, request in enumerate(metadata.requests):
             if request.load_spec is None:
                 continue

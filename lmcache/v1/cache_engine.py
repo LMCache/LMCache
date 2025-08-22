@@ -679,7 +679,8 @@ class LMCacheEngine:
             search_p2p = self.enable_p2p and (
                 search_range is None or "p2p" in search_range
             )
-
+            # FIXME: This search process is not efficient, and 
+            # may ignore the success same tokens when head not same.
             for start, end, key in self.token_database.process_tokens(tokens=tokens):
                 assert isinstance(key, CacheEngineKey)
 
@@ -689,10 +690,12 @@ class LMCacheEngine:
                     key_all_layers = key.split_layers(self.num_layers)
 
                     found = False
+                    # FIXME: I think only first layer needs to be checked
                     for key_single_layer in key_all_layers:
                         if self.storage_manager.contains(
                             key_single_layer, search_range, pin
                         ):
+                            
                             found = True
                         if search_p2p:
                             assert self.lookup_server is not None
