@@ -36,6 +36,8 @@ class RemoteBackend(StorageBackendInterface):
         self.put_tasks: List[CacheEngineKey] = []
         self.lock = threading.Lock()
 
+        super().__init__(dst_device)
+
         assert config.remote_url is not None
 
         self.remote_url = config.remote_url

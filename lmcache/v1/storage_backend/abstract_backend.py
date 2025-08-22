@@ -44,7 +44,7 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
         """
         Evict keys from the storage backend.
         """
-        if hasattr(self, "_listener") and self._listener is not None:
+        if self._listener is not None:
             self._listener.on_evict(self, keys)
 
     @abc.abstractmethod

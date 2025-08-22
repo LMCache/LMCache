@@ -42,11 +42,14 @@ class LocalCPUBackend(StorageBackendInterface):
         self,
         config: LMCacheEngineConfig,
         memory_allocator: MemoryAllocatorInterface,
+        dst_device: str = "cuda",
         lookup_server: Optional[LookupServerInterface] = None,
         lmcache_worker: Optional["LMCacheWorker"] = None,
     ):
         self.cache_policy = get_cache_policy(config.cache_policy)
         self.hot_cache = self.cache_policy.init_mutable_mapping()
+
+        super().__init__(dst_device)
 
         self.use_hot = config.local_cpu
         self.lookup_server = lookup_server

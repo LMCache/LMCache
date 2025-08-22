@@ -68,6 +68,7 @@ def CreateStorageBackends(
         local_cpu_backend = LocalCPUBackend(
             config,
             memory_allocator,
+            dst_device,
             lookup_server,
             lmcache_worker,
         )
