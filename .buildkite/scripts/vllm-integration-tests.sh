@@ -220,7 +220,6 @@ run_long_doc_qa() {
     python3 "$ORIG_DIR/benchmarks/long-doc-qa/long-doc-qa.py" \
         "${workload_args[@]}" \
         --port="$PORT" \
-        --model="meta-llama/Llama-3.2-1B-Instruct" \
         --output="response.txt"
 }
 
