@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from dataclasses import dataclass
 from typing import Optional
 import time
 
@@ -19,6 +18,7 @@ from lmcache.v1.cache_controller.message import (
     QueryInstRetMsg,
     RegisterMsg,
 )
+from lmcache.v1.cache_controller.utils import WorkerInfo
 from lmcache.v1.rpc_utils import (
     close_zmq_socket,
     get_zmq_context,
@@ -26,18 +26,6 @@ from lmcache.v1.rpc_utils import (
 )
 
 logger = init_logger(__name__)
-
-
-@dataclass
-class WorkerInfo:
-    # TODO(chunxiaozheng): add more worker info in heartbeat
-    instance_id: str
-    worker_id: int
-    ip: str
-    port: int
-    distributed_url: str
-    registration_time: float
-    last_heartbeat_time: float
 
 
 class RegistrationController:
@@ -182,6 +170,7 @@ class RegistrationController:
             msg,
         )
 
+    # TODO: add more worker info in heartbeat
     async def heartbeat(self, msg: HeartbeatMsg) -> None:
         """
         Heartbeat from lmcache worker.
