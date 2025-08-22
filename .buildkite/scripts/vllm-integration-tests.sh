@@ -106,7 +106,6 @@ run_lmcache_vllmopenai_container() {
         --runtime nvidia
         --network host
         --gpus "device=${best_gpu}"
-        --volume "${ORIG_DIR}/.buildkite/lmcache_configs:/configs:ro"
         --volume ~/.cache/huggingface:/root/.cache/huggingface
         --env VLLM_USE_FLASHINFER_SAMPLER=0
         --env HF_TOKEN="$HF_TOKEN"

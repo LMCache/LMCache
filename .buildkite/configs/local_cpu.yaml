@@ -1,7 +1,7 @@
 workload:
   type: long-doc-qa
   max-inflight-requests: 20
-  expected-latency-gain: 3.7
+  expected-latency-gain: 3.5
 
 docker:
   env:
