@@ -314,20 +314,19 @@ for cfg_name in "${CONFIG_NAMES[@]}"; do
     if [ "$test_mode" = "dummy" ]; then
         test_vllmopenai_server_with_lmcache_integrated
     elif [ "$test_mode" = "long-doc-qa" ]; then
-        num_docs="$(yq -r '.workload.num_docs' "$cfg_file")"
-        doc_len="$(yq -r '.workload.doc_len' "$cfg_file")"
-        out_len="$(yq -r '.workload.out_len' "$cfg_file")"
-        repeat_count="$(yq -r '.workload.repeat_count' "$cfg_file")"
-        repeat_mode="$(yq -r '.workload.repeat_mode' "$cfg_file")"
-        shuffle_seed="$(yq -r '.workload.shuffle_seed' "$cfg_file")"
-        max_inflight="$(yq -r '.workload.max_inflight' "$cfg_file")"
-        sleep_after="$(yq -r '.workload.sleep_after' "$cfg_file")"
-        expected_ttft_gain="$(yq -r '.workload.expected_ttft_gain' "$cfg_file")"
-        expected_latency_gain="$(yq -r '.workload.expected_latency_gain' "$cfg_file")"
-        run_long_doc_qa "$num_docs" "$doc_len" "$out_len" \
-            "$repeat_count" "$repeat_mode" "$shuffle_seed" \
-            "$max_inflight" "$sleep_after" \
-            "$expected_ttft_gain" "$expected_latency_gain"
+        mapfile -t params < <(yq -r '.workload | [
+            .num_docs,
+            .doc_len,
+            .out_len,
+            .repeat_count,
+            .repeat_mode,
+            .shuffle_seed,
+            .max_inflight,
+            .sleep_after,
+            .expected_ttft_gain,
+            .expected_latency_gain
+        ] | .[]' "$cfg_file")
+        run_long_doc_qa "${params[@]}"
     fi
 
     cleanup 0
