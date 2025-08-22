@@ -197,22 +197,20 @@ test_vllmopenai_server_with_lmcache_integrated() {
 }
 
 run_long_doc_qa() {
-    local num_docs="$1"
-    local doc_len="$2"
-    local out_len="$3"
-    local repeat_count="$4"
-    local repeat_mode="$5"
-    local shuffle_seed="$6"
-    local max_inflight="$7"
-    local sleep_after="$8"
-    local expected_ttft_gain="$9"
-    local expected_latency_gain="${10}"
+    local workload_config="$1"
 
-    echo "→ Running long-doc-qa:"
-    echo "   num_docs=${num_docs}, doc_len=${doc_len}, out_len=${out_len}"
-    echo "   repeat=${repeat_mode}×${repeat_count}, seed=${shuffle_seed}"
-    echo "   inflight=${max_inflight}, sleep_after=${sleep_after}s"
-    echo "   expected_ttft_gain=${expected_ttft_gain}, expected_latency_gain=${expected_latency_gain}"
+    echo "→ Running long-doc-qa with customed workload config:"
+    printf '%s\n' "$workload_config"
+
+    local workload_args=()
+    mapfile -t workload_args < <(
+        jq -r 'to_entries[] 
+               | select(.value != null and .value != "") 
+               | "--\(.key)" + (if (.value|type)=="string" 
+                                then " \(.value|@sh)" 
+                                else " \(.value|tojson)" 
+                                end)' <<<"$workload_config"
+    )
 
     if [ ! -d ".venv" ]; then
         UV_PYTHON=python3 uv -q venv
@@ -220,19 +218,10 @@ run_long_doc_qa() {
     source .venv/bin/activate
     uv -q pip install openai
     python3 "$ORIG_DIR/benchmarks/long-doc-qa/long-doc-qa.py" \
-        --num-documents="$num_docs" \
-        --document-length="$doc_len" \
-        --output-len="$out_len" \
-        --repeat-count="$repeat_count" \
-        --repeat-mode="$repeat_mode" \
-        --shuffle-seed="$shuffle_seed" \
-        --max-inflight-requests="$max_inflight" \
-        --sleep-time-after-warmup="$sleep_after" \
+        "${workload_args[@]}" \
         --port="$PORT" \
         --model="meta-llama/Llama-3.2-1B-Instruct" \
-        --output="response.txt" \
-        --expected-ttft-gain="$expected_ttft_gain" \
-        --expected-latency-gain="$expected_latency_gain"
+        --output="response.txt"
 }
 
 #########
@@ -314,19 +303,8 @@ for cfg_name in "${CONFIG_NAMES[@]}"; do
     if [ "$test_mode" = "dummy" ]; then
         test_vllmopenai_server_with_lmcache_integrated
     elif [ "$test_mode" = "long-doc-qa" ]; then
-        mapfile -t params < <(yq -r '.workload | [
-            .num_docs,
-            .doc_len,
-            .out_len,
-            .repeat_count,
-            .repeat_mode,
-            .shuffle_seed,
-            .max_inflight,
-            .sleep_after,
-            .expected_ttft_gain,
-            .expected_latency_gain
-        ] | .[]' "$cfg_file")
-        run_long_doc_qa "${params[@]}"
+        workload_yaml="$(yq '(.workload * {"model": .vllm.model}) | del(.type)' "$cfg_file")"
+        run_long_doc_qa "$workload_yaml"
     fi
 
     cleanup 0
