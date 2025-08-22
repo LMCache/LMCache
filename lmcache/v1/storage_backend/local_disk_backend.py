@@ -158,10 +158,10 @@ class LocalDiskBackend(StorageBackendInterface):
         lmcache_worker: Optional["LMCacheWorker"] = None,
         lookup_server: Optional[LookupServerInterface] = None,
     ):
+        super().__init__(dst_device)
         self.cache_policy = get_cache_policy(config.cache_policy)
         self.dict = self.cache_policy.init_mutable_mapping()
 
-        super().__init__(dst_device)
         self.dst_device = dst_device
 
         self.local_cpu_backend = local_cpu_backend

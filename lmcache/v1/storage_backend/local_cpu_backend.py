@@ -46,10 +46,9 @@ class LocalCPUBackend(StorageBackendInterface):
         lookup_server: Optional[LookupServerInterface] = None,
         lmcache_worker: Optional["LMCacheWorker"] = None,
     ):
+        super().__init__(dst_device)
         self.cache_policy = get_cache_policy(config.cache_policy)
         self.hot_cache = self.cache_policy.init_mutable_mapping()
-
-        super().__init__(dst_device)
 
         self.use_hot = config.local_cpu
         self.lookup_server = lookup_server
