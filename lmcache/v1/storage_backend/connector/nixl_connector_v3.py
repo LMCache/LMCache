@@ -499,6 +499,7 @@ class NixlReceiver:
             buffer_size=self.memory_allocator.nixl_allocator.buffer_size,
             page_size=self.memory_allocator.nixl_allocator.align_bytes,
             tp_rank=tp_rank,
+            backends=nixl_config.backends,
         )
 
         self._nixl_agent = self._receiver_nixl_wrapper.agent
@@ -789,6 +790,7 @@ class NixlAgentWrapper:
         buffer_size: int,
         page_size: int,
         tp_rank: int,
+        backends: Optional[list[str]] = None,
     ):
         """
         Initialize the NIXL agent.
@@ -809,11 +811,19 @@ class NixlAgentWrapper:
         try:
             # Third Party
             from nixl._api import nixl_agent as NixlAgent
+            from nixl._api import nixl_agent_config
         except ImportError as err:
             raise RuntimeError("NIXL is not available") from err
 
+        # Handle None backends by setting default to ["UCX"]
+        if backends is None:
+            backends = ["UCX"]
+
         # Create a NIXL agent
-        nixl_agent = NixlAgent(str(uuid.uuid4()))
+        nixl_agent = NixlAgent(
+            str(uuid.uuid4()),
+            nixl_agent_config(backends=backends),
+        )
 
         # Register the memory
         memory_desc = [(buffer_ptr, buffer_size, tp_rank, "")]

@@ -132,17 +132,17 @@ follow_imports = "silent"
 
 [tool.cibuildwheel]
 build = "cp3*-manylinux_x86_64"
-skip = "pp*"
 
 # see https://developer.nvidia.com/cuda-gpus for compute capabilities
 # "CUDA-Enabled Datacenter Products"
-# 7.0: V100
-# 7.5: T4
-# 8.0: A100, A30
-# 8.6: A40, A10, A16, A2
-# 8.9: L4, L40, L40S
-# 9.0: H100
-environment = {TORCH_CUDA_ARCH_LIST = "7.0;7.5;8.0;8.6;8.9;9.0", ENABLE_CXX11_ABI = "1"}
+# 7.0:  V100
+# 7.5:  T4
+# 8.0:  A100, A30
+# 8.6:  A40, A10, A16, A2
+# 8.9:  L4, L40, L40S
+# 9.0:  GH200, H200, H100
+# 10.0: GB200, B200
+environment = {TORCH_CUDA_ARCH_LIST = "7.0;7.5;8.0;8.6;8.9;9.0;10.0", ENABLE_CXX11_ABI = "1"}
 
 # Use the PyTorch manylinux image version '2_28' that contains CUDA 12.8
 # and torch 2.7 supports (https://pypi.org/project/torch/2.7.0/#files)

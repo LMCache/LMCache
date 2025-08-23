@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Optional, OrderedDict, Union
+from typing import TYPE_CHECKING, Any, Optional, Union
 import os
 import uuid
 
@@ -29,6 +29,7 @@ from lmcache.integration.vllm.utils import (
     ENGINE_NAME,
     apply_mm_hashes_to_token_ids,
     lmcache_get_config,
+    mla_enabled,
 )
 from lmcache.logging import init_logger
 from lmcache.utils import _lmcache_nvtx_annotate
@@ -88,21 +89,16 @@ class DisaggSpec:
 tmp_disagg_tracker: dict[str, DisaggSpec] = {}
 
 
-def extract_tags(
-    config: LMCacheEngineConfig, sampling_params: SamplingParams
-) -> OrderedDict:
-    tags = None
-    tag_keys = None
-    if config.extra_config is not None and isinstance(config.extra_config, dict):
-        tag_keys = config.extra_config.get("tag_keys")
-    if sampling_params.extra_args is not None and tag_keys is not None:
+def extract_request_configs(sampling_params: SamplingParams) -> Optional[dict]:
+    request_configs = None
+    if sampling_params.extra_args is not None:
         if kv_transfer_params := sampling_params.extra_args.get("kv_transfer_params"):
-            for k in tag_keys:
-                if v := kv_transfer_params.get(k):
-                    if tags is None:
-                        tags = OrderedDict()
-                    tags[k] = v
-    return tags
+            for k, v in kv_transfer_params.items():
+                if k.startswith("lmcache."):
+                    if request_configs is None:
+                        request_configs = {}
+                    request_configs[k] = v
+    return request_configs
 
 
 @dataclass
@@ -131,8 +127,9 @@ class RequestTracker:
     # Multimodal hashes and positions
     mm_hashes: Optional[list[str]] = None
     mm_positions: Optional[list["PlaceholderRange"]] = None
-    # The request tags
-    tags: Optional[OrderedDict] = None
+
+    # The configs of the request, includes tags and other configs
+    request_configs: Optional[dict] = None
 
     # Whether the request is in decode phase
     is_decode_phase = False
@@ -186,11 +183,11 @@ class RequestTracker:
         # NOTE: Initialized in `update_state_after_alloc`
         disagg_spec = tmp_disagg_tracker.pop(new_request.req_id, None)
 
-        tags = extract_tags(lmcache_config, new_request.sampling_params)
         skip_save = force_skip_save or (
             lmcache_config.priority_limit is not None
             and request_priority > lmcache_config.priority_limit
         )
+        request_configs = extract_request_configs(new_request.sampling_params)
 
         return RequestTracker(
             req_id=new_request.req_id,
@@ -201,8 +198,8 @@ class RequestTracker:
             disagg_spec=disagg_spec,
             mm_hashes=new_request.mm_hashes.copy(),
             mm_positions=new_request.mm_positions.copy(),
-            tags=tags,
             skip_save=skip_save,
+            request_configs=request_configs,
         )
 
     def update(
@@ -251,8 +248,8 @@ class ReqMeta:
     load_spec: Optional[LoadSpec] = None
     # disagg spec
     disagg_spec: Optional[DisaggSpec] = None
-    # tags
-    tags: Optional[OrderedDict] = None
+    # the configs of the request
+    request_configs: Optional[dict] = None
 
     @staticmethod
     def from_request_tracker(
@@ -376,7 +373,7 @@ class ReqMeta:
             save_spec=save_spec,
             load_spec=load_spec,
             disagg_spec=tracker.disagg_spec,
-            tags=tracker.tags,
+            request_configs=tracker.request_configs,
         )
 
 
@@ -430,14 +427,7 @@ def _init_lmcache_engine(
 
     kv_dtype = get_kv_cache_torch_dtype(cache_config.cache_dtype, model_config.dtype)
 
-    use_mla = False
-    if (
-        hasattr(model_config, "use_mla")
-        and isinstance(model_config.use_mla, bool)
-        and model_config.use_mla
-    ):
-        use_mla = True
-
+    use_mla = mla_enabled(model_config)
     if use_mla and (
         lmcache_config.remote_serde != "naive"
         and lmcache_config.remote_serde is not None
@@ -738,7 +728,7 @@ class LMCacheConnectorV1Impl:
                     token_mask[:lmcache_cached_tokens],
                     kvcaches=kvcaches,
                     slot_mapping=slot_mapping[:lmcache_cached_tokens],
-                    tags=request.tags,
+                    request_configs=request.request_configs,
                 )
 
                 # Check the result
@@ -967,7 +957,7 @@ class LMCacheConnectorV1Impl:
                 slot_mapping=slot_mapping,
                 offset=skip_leading_tokens,
                 transfer_spec=request.disagg_spec,
-                tags=request.tags,
+                request_configs=request.request_configs,
             )
 
             # NOTE(Jiayi): We assume all tokens are saved
@@ -1021,18 +1011,18 @@ class LMCacheConnectorV1Impl:
         lookup_id = str(uuid.uuid4())
         self._lookup_requests_in_step.append(lookup_id)
 
-        tags = extract_tags(self.config, request.sampling_params)
+        request_configs = extract_request_configs(request.sampling_params)
         if self.skip_last_n_tokens > 0:
             num_external_hit_tokens = self.lookup_client.lookup(
                 token_ids[: -self.skip_last_n_tokens],
                 lookup_id=lookup_id,
-                tags=tags,
+                request_configs=request_configs,
             )
         else:
             num_external_hit_tokens = self.lookup_client.lookup(
                 token_ids,
                 lookup_id=lookup_id,
-                tags=tags,
+                request_configs=request_configs,
             )
 
         # When prompt length is divisible by the block size and all

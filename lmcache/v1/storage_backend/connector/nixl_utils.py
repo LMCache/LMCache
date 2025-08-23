@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from dataclasses import dataclass
-from typing import Union
+from typing import Optional, Union
 import enum
 
 # First Party
@@ -45,6 +45,7 @@ class NixlConfig:
     buffer_size: int
     buffer_device: str
     enable_gc: bool
+    backends: Optional[list[str]]
 
     @staticmethod
     def from_cache_engine_config(
@@ -84,6 +85,7 @@ class NixlConfig:
             buffer_size=config.nixl_buffer_size,
             buffer_device=corrected_device,
             enable_gc=config.nixl_enable_gc,
+            backends=config.nixl_backends,
         )
 
 
@@ -100,6 +102,8 @@ class NixlConfigXpYd:
 
     buffer_size: int
     buffer_device: str
+
+    backends: Optional[list[str]]
 
     @staticmethod
     def from_cache_engine_config(
@@ -146,5 +150,6 @@ class NixlConfigXpYd:
             proxy_host=config.nixl_proxy_host,
             proxy_port=config.nixl_proxy_port,
             buffer_size=config.nixl_buffer_size,
+            backends=config.nixl_backends,
             buffer_device=corrected_device,
         )
