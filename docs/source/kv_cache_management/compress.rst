@@ -8,10 +8,10 @@ The ``compress`` interface is defined as the following:
 .. code-block:: python
 
     compress(instance_id: str, method: str, location: str, tokens: list[int]) -> num_tokens: int
+    decompress(instance_id: str, method: str, location: str, tokens: list[int]) -> num_tokens: int
 
-The function compresses the KV cache chunks specified by ``tokens`` using the
-given ``method`` in the storage ``location``. The controller returns an
-``event_id`` and the number of tokens scheduled for compression.
+These 2 functions compresses/decompresses the KV cache chunks specified by ``tokens`` using the
+given ``method`` in the storage ``location``. The controller returns an ``event_id`` and the number of tokens scheduled for compression or decompression.
 
 Example usage:
 ---------------------------------------
@@ -92,3 +92,25 @@ The controller responds with a message similar to:
     {"event_id": "xxx", "num_tokens": 12}
 
 This indicates that 12 tokens are being compressed. The ``event_id`` can be used to query the status of the operation.
+
+Once the kv cache is compressed, we can use cachegen to decompress 
+
+.. code-block:: bash
+
+    curl -X POST http://localhost:9000/decompress \
+      -H "Content-Type: application/json" \
+      -d '{
+          "instance_id": "lmcache_default_instance",
+          "method": "cachegen",
+          "location": "LocalCPUBackend",
+          "tokens": [128000, 849, 21435, 279, 26431, 315, 85748, 6636, 304, 4221, 4211, 13]
+      }'
+
+The controller responds with a message similar to:
+
+.. code-block:: text
+
+    {"event_id": "xxx", "num_tokens": 12}
+
+This indicates that 12 tokens are being decompressed. The ``event_id`` can be used to query the status of the operation.
+
