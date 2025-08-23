@@ -137,6 +137,9 @@ class RequestTracker:
     # Whether the request is in decode phase
     is_decode_phase = False
 
+    # Whether the request cache should be saved
+    skip_save = False
+
     @_lmcache_nvtx_annotate
     @staticmethod
     def from_new_request(
@@ -144,6 +147,8 @@ class RequestTracker:
         new_request: "NewRequestData",
         num_tokens_to_compute: int,
         lmcache_cached_tokens: int,
+        request_priority: int,
+        force_skip_save: bool,
     ) -> "RequestTracker":
         """Create the request tracker from a new request.
 
@@ -153,7 +158,11 @@ class RequestTracker:
             num_tokens_to_compute (int): the number of tokens that will
                 be 'computed', including the `num_computed_tokens` (vLLM's
                 local cache hit) and new tokens that will be scheduled.
-
+            lmcache_cached_tokens (int): the number of tokens that are
+                cached in LMCache.
+            request_priority (int): the priority of the request
+            force_skip_save (bool): whether it is forced to skip saving cache
+                of the request
         """
         # vLLM 0.9.0 update: request.block_ids changed from list[int] to
         # list[list[int]]
@@ -178,6 +187,10 @@ class RequestTracker:
         disagg_spec = tmp_disagg_tracker.pop(new_request.req_id, None)
 
         tags = extract_tags(lmcache_config, new_request.sampling_params)
+        skip_save = force_skip_save or (
+            lmcache_config.priority_limit is not None
+            and request_priority > lmcache_config.priority_limit
+        )
 
         return RequestTracker(
             req_id=new_request.req_id,
@@ -189,6 +202,7 @@ class RequestTracker:
             mm_hashes=new_request.mm_hashes.copy(),
             mm_positions=new_request.mm_positions.copy(),
             tags=tags,
+            skip_save=skip_save,
         )
 
     def update(
@@ -246,7 +260,6 @@ class ReqMeta:
         block_size: int,
         lmcache_chunk_size: int = 256,
         load_spec: Optional[LoadSpec] = None,
-        skip_save: bool = False,
         discard_partial_chunks: bool = True,
         save_decode_cache: bool = False,
     ) -> Optional["ReqMeta"]:
@@ -257,7 +270,6 @@ class ReqMeta:
             block_size (int): the block size in vLLM.
             lmcache_chunk_size (int): the chunk size for LMCache.
             load_spec (Optional[LoadSpec]): the load spec for KV cache loading.
-            skip_save (bool): whether to skip the save operation.
             discard_partial_chunks (bool): whether to discard partial chunks.
             save_decode_cache (bool): whether to save the cache in decode phase.
 
@@ -284,7 +296,7 @@ class ReqMeta:
 
         # NOTE(vladnosiv): for disagg, you cannot skip saving, as saving is a transfer
         skip_save = tracker.disagg_spec is None and (
-            skip_save
+            tracker.skip_save
             or (tracker.num_saved_tokens > 0 and input_token_len < chunk_boundary)
             or (tracker.is_decode_phase and not save_decode_cache)
         )
@@ -612,15 +624,12 @@ class LMCacheConnectorV1Impl:
 
         self.force_skip_save = bool(os.environ.get("LMCACHE_FORCE_SKIP_SAVE", False))
 
-
-        self._skip_save_reqs: dict[str, bool] = {}
-        self._priority_limit = config.priority_limit
+        self._requests_priority: dict[str, int] = {}
 
         # Start internal API server if enabled
         # The enabled check is in the InternalAPIServer constructor
         self.api_server = InternalAPIServer(self)
         self.api_server.start()
-
 
     @_lmcache_nvtx_annotate
     def _init_kv_caches_from_forward_context(self, forward_context: "ForwardContext"):
@@ -999,14 +1008,7 @@ class LMCacheConnectorV1Impl:
         ):
             return 0
 
-        if self._priority_limit is not None and request.priority > self._priority_limit:
-            logger.info(
-                "Low priority request, qid: %s, bypass the lmache store",
-                request.request_id,
-            )
-            self._skip_save_reqs[request.request_id] = True
-        else:
-            self._skip_save_reqs[request.request_id] = False
+        self._requests_priority[request.request_id] = request.priority
 
         token_ids = torch.tensor(request.prompt_token_ids)
 
@@ -1155,7 +1157,6 @@ class LMCacheConnectorV1Impl:
         for finished_req_id in scheduler_output.finished_req_ids:
             self._request_trackers.pop(finished_req_id, None)
             self._unfinished_requests.pop(finished_req_id, None)
-            self._skip_save_reqs.pop(finished_req_id, None)  # clean up
 
         for request in scheduler_output.scheduled_new_reqs:
             # Right now, we only load KV for new requests
@@ -1167,26 +1168,22 @@ class LMCacheConnectorV1Impl:
             lmcache_cached_tokens = 0
             if load_spec is not None:
                 lmcache_cached_tokens = load_spec.lmcache_cached_tokens
+            request_priority = self._requests_priority.pop(request.req_id, 0)
             request_tracker = RequestTracker.from_new_request(
                 self.config,
                 request,
                 num_tokens_to_compute,
                 lmcache_cached_tokens,
+                request_priority,
+                force_skip_save,
             )
             self._request_trackers[request.req_id] = request_tracker
-
-            req_skip_save = (
-                force_skip_save
-                if force_skip_save
-                else self._skip_save_reqs.get(request.req_id, False)
-            )
 
             req_meta = ReqMeta.from_request_tracker(
                 request_tracker,
                 self._block_size,
                 self._lmcache_chunk_size,
                 load_spec=load_spec,
-                skip_save=req_skip_save,
                 discard_partial_chunks=self._discard_partial_chunks,
                 save_decode_cache=self._save_decode_cache,
             )
@@ -1203,18 +1200,11 @@ class LMCacheConnectorV1Impl:
                 request_tracker = self._request_trackers[req.req_id]
                 request_tracker.update(req.new_token_ids, req.new_block_ids)
 
-                req_skip_save = (
-                    force_skip_save
-                    if force_skip_save
-                    else self._skip_save_reqs.get(req.req_id, False)
-                )
-
                 req_meta = ReqMeta.from_request_tracker(
                     request_tracker,
                     self._block_size,
                     self._lmcache_chunk_size,
                     load_spec=None,
-                    skip_save=req_skip_save,
                     discard_partial_chunks=self._discard_partial_chunks,
                 )
                 if req_meta is not None:
@@ -1238,18 +1228,11 @@ class LMCacheConnectorV1Impl:
 
             request_tracker.update(new_token_ids, new_block_ids)
 
-            req_skip_save = (
-                force_skip_save
-                if force_skip_save
-                else self._skip_save_reqs.get(req_id, False)
-            )
-
             req_meta = ReqMeta.from_request_tracker(
                 request_tracker,
                 self._block_size,
                 self._lmcache_chunk_size,
                 load_spec=None,
-                skip_save=req_skip_save,
                 discard_partial_chunks=self._discard_partial_chunks,
                 save_decode_cache=self._save_decode_cache,
             )

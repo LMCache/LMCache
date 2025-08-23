@@ -266,7 +266,6 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "type": Optional[list[int]],
         "default": None,
         "env_converter": _to_int_list,
-
     },
 }
 
