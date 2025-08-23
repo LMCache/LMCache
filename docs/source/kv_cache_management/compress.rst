@@ -1,7 +1,7 @@
 .. _compress:
 
-Compress the KV cache
-=====================
+Compress and Decompress the KV cache
+=====================================
 
 The ``compress`` interface is defined as the following:
 
