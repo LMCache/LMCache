@@ -135,7 +135,7 @@ class RequestTracker:
     is_decode_phase = False
 
     # Whether the request cache should be saved
-    skip_save = False
+    skip_save: bool = False
 
     @_lmcache_nvtx_annotate
     @staticmethod
