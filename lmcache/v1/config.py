@@ -39,6 +39,17 @@ def _to_int_list(
     return [int(p) for p in parts]
 
 
+def _to_str_list(
+    value: Optional[Union[str, list[str]]],
+) -> Optional[list[str]]:
+    if value is None:
+        return None
+    if isinstance(value, list):
+        return value
+    parts = [p.strip() for p in value.split(",") if p.strip()]
+    return [p for p in parts]
+
+
 # Configuration aliases and deprecated mappings
 _CONFIG_ALIASES = {
     # Maps deprecated names to current names
@@ -173,6 +184,11 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "env_converter": lambda x: x
         if isinstance(x, bool)
         else str(x).lower() in ["true", "1"],
+    },
+    "nixl_backends": {
+        "type": Optional[list[str]],
+        "default": None,
+        "env_converter": _to_str_list,
     },
     # Experimental Nixl configurations
     "enable_xpyd": {
