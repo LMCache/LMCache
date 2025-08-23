@@ -85,6 +85,6 @@ We should be able to see the response like this:
 
 .. code-block:: text
 
-    {"lmcache_default_instance_id": ["LocalCPUBackend",12]}
+    {"event_id": "xxx", "lmcache_default_instance": ("LocalCPUBackend", 12)}
 
 The field ``lmcache_default_instance`` shows the instance ID, followed by a tuple of ``(location, matched_prefix_length)`` indicating the cache location within that instance and matched prefix length. ``event_id`` is an identifier of the controller operation and can typically be ignored.
