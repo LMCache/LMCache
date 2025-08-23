@@ -106,7 +106,6 @@ run_lmcache_vllmopenai_container() {
         --runtime nvidia
         --network host
         --gpus "device=${best_gpu}"
-        --volume "${ORIG_DIR}/.buildkite/lmcache_configs:/configs:ro"
         --volume ~/.cache/huggingface:/root/.cache/huggingface
         --env VLLM_USE_FLASHINFER_SAMPLER=0
         --env HF_TOKEN="$HF_TOKEN"
@@ -197,22 +196,23 @@ test_vllmopenai_server_with_lmcache_integrated() {
 }
 
 run_long_doc_qa() {
-    local num_docs="$1"
-    local doc_len="$2"
-    local out_len="$3"
-    local repeat_count="$4"
-    local repeat_mode="$5"
-    local shuffle_seed="$6"
-    local max_inflight="$7"
-    local sleep_after="$8"
-    local expected_ttft_gain="$9"
-    local expected_latency_gain="${10}"
+    local workload_config="$1"
 
-    echo "→ Running long-doc-qa:"
-    echo "   num_docs=${num_docs}, doc_len=${doc_len}, out_len=${out_len}"
-    echo "   repeat=${repeat_mode}×${repeat_count}, seed=${shuffle_seed}"
-    echo "   inflight=${max_inflight}, sleep_after=${sleep_after}s"
-    echo "   expected_ttft_gain=${expected_ttft_gain}, expected_latency_gain=${expected_latency_gain}"
+    echo "→ Running long-doc-qa with customed workload config:"
+    printf '%s\n' "$workload_config"
+
+    local workload_args=()
+    mapfile -d '' -t workload_args < <(
+    jq -j '
+        to_entries[]
+        | select(.value != null and (.value|tostring) != "")
+        | "--\(.key)", "\u0000",
+        (if (.value|type) == "string"
+        then .value
+        else (.value|tostring)
+        end), "\u0000"
+    ' <<<"$workload_yaml"
+    )
 
     if [ ! -d ".venv" ]; then
         UV_PYTHON=python3 uv -q venv
@@ -220,19 +220,9 @@ run_long_doc_qa() {
     source .venv/bin/activate
     uv -q pip install openai
     python3 "$ORIG_DIR/benchmarks/long-doc-qa/long-doc-qa.py" \
-        --num-documents="$num_docs" \
-        --document-length="$doc_len" \
-        --output-len="$out_len" \
-        --repeat-count="$repeat_count" \
-        --repeat-mode="$repeat_mode" \
-        --shuffle-seed="$shuffle_seed" \
-        --max-inflight-requests="$max_inflight" \
-        --sleep-time-after-warmup="$sleep_after" \
+        "${workload_args[@]}" \
         --port="$PORT" \
-        --model="meta-llama/Llama-3.2-1B-Instruct" \
-        --output="response.txt" \
-        --expected-ttft-gain="$expected_ttft_gain" \
-        --expected-latency-gain="$expected_latency_gain"
+        --output="response.txt"
 }
 
 #########
@@ -314,20 +304,8 @@ for cfg_name in "${CONFIG_NAMES[@]}"; do
     if [ "$test_mode" = "dummy" ]; then
         test_vllmopenai_server_with_lmcache_integrated
     elif [ "$test_mode" = "long-doc-qa" ]; then
-        num_docs="$(yq -r '.workload.num_docs' "$cfg_file")"
-        doc_len="$(yq -r '.workload.doc_len' "$cfg_file")"
-        out_len="$(yq -r '.workload.out_len' "$cfg_file")"
-        repeat_count="$(yq -r '.workload.repeat_count' "$cfg_file")"
-        repeat_mode="$(yq -r '.workload.repeat_mode' "$cfg_file")"
-        shuffle_seed="$(yq -r '.workload.shuffle_seed' "$cfg_file")"
-        max_inflight="$(yq -r '.workload.max_inflight' "$cfg_file")"
-        sleep_after="$(yq -r '.workload.sleep_after' "$cfg_file")"
-        expected_ttft_gain="$(yq -r '.workload.expected_ttft_gain' "$cfg_file")"
-        expected_latency_gain="$(yq -r '.workload.expected_latency_gain' "$cfg_file")"
-        run_long_doc_qa "$num_docs" "$doc_len" "$out_len" \
-            "$repeat_count" "$repeat_mode" "$shuffle_seed" \
-            "$max_inflight" "$sleep_after" \
-            "$expected_ttft_gain" "$expected_latency_gain"
+        workload_yaml="$(yq '(.workload * {"model": .vllm.model}) | del(.type)' "$cfg_file")"
+        run_long_doc_qa "$workload_yaml"
     fi
 
     cleanup 0

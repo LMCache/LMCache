@@ -1,15 +1,7 @@
 workload:
   type: long-doc-qa
-  num_docs:             8
-  doc_len:              20000
-  out_len:              100
-  repeat_count:         2
-  repeat_mode:          random
-  shuffle_seed:         0
-  max_inflight:         20
-  sleep_after:          0
-  expected_ttft_gain:   2
-  expected_latency_gain: 2
+  max-inflight-requests: 20
+  expected-latency-gain: 3.5
 
 docker:
   env:
@@ -22,3 +14,4 @@ vllm:
   args:
     - "--load-format"
     - "dummy"
+    - "--no-enable-prefix-caching"
