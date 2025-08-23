@@ -7,8 +7,7 @@ The ``pin`` interface is defined as the following:
 
 .. code-block:: python
 
-    pin(instance_id: str, location: str, tokens: List[int])
-        -> event_id: str, num_tokens: int
+    pin(instance_id: str, location: str, tokens: List[int]) -> event_id: str, num_tokens: int
 
 The function pins (persists) the KV cache chunks specified by ``tokens`` in the
 given ``location`` of the ``instance_id``. The controller returns an ``event_id``
