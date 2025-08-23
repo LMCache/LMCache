@@ -11,4 +11,5 @@ Currently, the controller provides the following APIs:
 - :ref:`Move <move>`: Move the KV cache to a different location.
 - :ref:`Health <health>`: Check the health status of cache workers.
 - :ref:`Compress <compress>`: Compress the KV cache.
+- :ref:`Health <health>`: Check the health status of cache workers.
 - :ref:`CheckFinish <check_finish>`: Check whether a (non-blocking) control event has finished or not.
