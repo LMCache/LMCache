@@ -7,8 +7,8 @@ The ``compress`` interface is defined as the following:
 
 .. code-block:: python
 
-    compress(instance_id: str, method: str, location: str, tokens: list[int]) -> num_tokens: int
-    decompress(instance_id: str, method: str, location: str, tokens: list[int]) -> num_tokens: int
+    compress(instance_id: str, method: str, location: str, tokens: list[int]) -> event_id: str, num_tokens: int
+    decompress(instance_id: str, method: str, location: str, tokens: list[int]) -> event_id: str, num_tokens: int
 
 These 2 functions compresses/decompresses the KV cache chunks specified by ``tokens`` using the
 given ``method`` in the storage ``location``. The controller returns an ``event_id`` and the number of tokens scheduled for compression or decompression.
