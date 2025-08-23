@@ -8,8 +8,7 @@ The ``move`` interface is defined as the following:
 .. code-block:: python
 
     move(old_position: Tuple[str, str], new_position: Tuple[str, str],
-         tokens: Optional[List[int]] = [], copy: Optional[bool] = False)
-         -> event_id: str, num_tokens: int
+         tokens: Optional[List[int]] = [], copy: Optional[bool] = False) -> event_id: str, num_tokens: int
 
 The function moves the KV cache chunks identified by ``tokens`` from
 ``old_position`` to ``new_position``. Each position is a tuple of
