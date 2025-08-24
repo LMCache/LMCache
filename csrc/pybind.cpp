@@ -28,4 +28,10 @@ PYBIND11_MODULE(c_ops, m) {
   m.def("alloc_pinned_numa_ptr", &alloc_pinned_numa_ptr);
   m.def("free_pinned_numa_ptr", &free_pinned_numa_ptr);
   m.def("get_gpu_pci_bus_id", &get_gpu_pci_bus_id);
+  
+  // CPU NUMA functions
+  m.def("set_cpu_affinity", &set_cpu_affinity);
+  m.def("set_memory_policy", &set_memory_policy);
+  m.def("get_numa_node_count", &get_numa_node_count);
+  m.def("get_cpu_count", &get_cpu_count);
 }
