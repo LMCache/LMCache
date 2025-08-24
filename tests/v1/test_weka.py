@@ -60,11 +60,15 @@ def test_weka_backend_sanity():
         memory_obj = weka_backend.memory_allocator.allocate(
             [2048, 2048], dtype=torch.uint8
         )
-        future = weka_backend.submit_put_task(TEST_KEY, memory_obj)
-        assert future is not None
+        result = weka_backend.submit_put_task(TEST_KEY, memory_obj)
+        assert result is not None
         assert weka_backend.exists_in_put_tasks(TEST_KEY)
         assert not weka_backend.contains(TEST_KEY, False)
-        future.result()
+        # Wait a moment for the async put task to complete
+        # Standard
+        import time
+
+        time.sleep(0.1)
         assert weka_backend.contains(TEST_KEY, False)
         assert not weka_backend.exists_in_put_tasks(TEST_KEY)
 

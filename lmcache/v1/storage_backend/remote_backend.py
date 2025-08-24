@@ -10,7 +10,7 @@ import time
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
 from lmcache.observability import LMCStatsMonitor
-from lmcache.utils import CacheEngineKey, _lmcache_nvtx_annotate
+from lmcache.utils import CacheEngineKey, _lmcache_nvtx_annotate, performance_monitor
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.lookup_server import LookupServerInterface
 from lmcache.v1.memory_management import MemoryObj
@@ -164,11 +164,14 @@ class RemoteBackend(StorageBackendInterface):
         with self.lock:
             self.put_tasks.discard(key)
 
+    @performance_monitor(
+        backend_name="REMOTE_BACKEND", operation_type="submit_put_task"
+    )
     def submit_put_task(
         self,
         key: CacheEngineKey,
         memory_obj: MemoryObj,
-    ) -> Future:
+    ) -> Optional[MemoryObj]:
         def create_immediate_empty_future() -> Future:
             f: Future = Future()
             f.set_result(None)
@@ -176,14 +179,14 @@ class RemoteBackend(StorageBackendInterface):
 
         if self.connection is None:
             logger.warning("Connection is None in submit_put_task, returning None")
-            return create_immediate_empty_future()
+            return None
 
         # If MLA worker id as 0 mode is enabled, skip put tasks
         if self._mla_worker_id_as0_mode:
-            return create_immediate_empty_future()
+            return None
 
         if self.exists_in_put_tasks(key):
-            return create_immediate_empty_future()
+            return None
 
         memory_obj.ref_count_up()
 
@@ -200,7 +203,7 @@ class RemoteBackend(StorageBackendInterface):
         )
         lambda_callback = lambda f: self.put_callback(f, key)
         future.add_done_callback(lambda_callback)
-        return future
+        return memory_obj
 
     def batched_put_callback(self, future: Future, keys: List[CacheEngineKey]):
         """
@@ -252,6 +255,7 @@ class RemoteBackend(StorageBackendInterface):
     ) -> bool:
         raise NotImplementedError
 
+    @performance_monitor(backend_name="REMOTE_BACKEND", operation_type="get_blocking")
     @_lmcache_nvtx_annotate
     def get_blocking(
         self,

@@ -134,18 +134,12 @@ def test_remote_mla_worker_id_as0(mock_stream):
 
     # Test submit_put_task
     memory_obj = local_cpu_backend.allocate(torch.Size([10, 10]), torch.float32)
-    future = backend.submit_put_task(key, memory_obj)
-    # Wait for put task to complete
-    if future is not None:
-        future.result()
+    _ = backend.submit_put_task(key, memory_obj)
 
     # Test not contains after adding data since worker_id 2 skipped put
     assert not backend.contains(key)
 
-    future = backend0.submit_put_task(key0, memory_obj)
-    # Wait for put task to complete
-    if future is not None:
-        future.result()
+    _ = backend0.submit_put_task(key0, memory_obj)
 
     # Test contains after adding data since worker_id 0 should put
     assert backend0.contains(key0)

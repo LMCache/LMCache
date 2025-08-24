@@ -11,7 +11,7 @@ import torch
 # First Party
 from lmcache.logging import init_logger
 from lmcache.observability import LMCStatsMonitor, PrometheusLogger
-from lmcache.utils import CacheEngineKey, _lmcache_nvtx_annotate
+from lmcache.utils import CacheEngineKey, _lmcache_nvtx_annotate, performance_monitor
 from lmcache.v1.cache_controller.message import KVAdmitMsg, KVEvictMsg
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.lookup_server import LookupServerInterface
@@ -105,9 +105,12 @@ class LocalCPUBackend(AllocatorBackendInterface):
         """
         return False
 
+    @performance_monitor(
+        backend_name="LOCAL_CPU_BACKEND", operation_type="submit_put_task"
+    )
     def submit_put_task(
         self, key: CacheEngineKey, memory_obj: MemoryObj
-    ) -> Optional[Future]:
+    ) -> Optional[MemoryObj]:
         """
         Synchronously put the MemoryObj into the local cpu backend.
         """
@@ -129,7 +132,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
                         self.instance_id, key.worker_id, key.chunk_hash, str(self)
                     )
                 )
-        return None
+        return memory_obj
 
     def batched_submit_put_task(
         self,
@@ -155,6 +158,9 @@ class LocalCPUBackend(AllocatorBackendInterface):
     ) -> bool:
         return False
 
+    @performance_monitor(
+        backend_name="LOCAL_CPU_BACKEND", operation_type="get_blocking"
+    )
     def get_blocking(
         self,
         key: CacheEngineKey,

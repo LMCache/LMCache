@@ -6,8 +6,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, List, Optional, Tuple
 import asyncio
+import functools
 import hashlib
 import threading
+import time
 import traceback
 
 # Third Party
@@ -356,3 +358,63 @@ def mock_up_broadcast_fn(t: torch.Tensor, i: int) -> None:
 
 def mock_up_broadcast_object_fn(a: Any, i: int) -> None:
     raise NotImplementedError("Calling invalid broadcast object function")
+
+
+def performance_monitor(
+    backend_name: Optional[str] = None, operation_type: Optional[str] = None
+):
+    """
+    Performance monitoring decorator for synchronous backend operations.
+    :param backend_name: Backend name, e.g., GDS_BACKEND
+    :param operation_type: Operation type, e.g., put/get
+    """
+
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(self, *args, **kwargs):
+            op_name = operation_type or func.__name__
+            # the first arg is `CacheEngineKey`
+            # for both `submit_put_task()` and `get_blocking()`
+            key = args[0] if args else None
+            start_time = time.perf_counter()
+            try:
+                result = func(self, *args, **kwargs)
+                return result
+            finally:
+                if hasattr(self, "_log_operation_complete") and key is not None:
+                    self._log_operation_complete(
+                        f"[{backend_name}] {op_name}", key, start_time, result=result
+                    )
+
+        return wrapper
+
+    return decorator
+
+
+async def performance_monitor_async(
+    operation_func,
+    backend_instance,
+    backend_name: Optional[str] = None,
+    operation_type: Optional[str] = None,
+    key=None,
+    *args,
+    **kwargs,
+):
+    """
+    Performance monitoring for asynchronous backend operations.
+    :param operation_func: Async function to monitor
+    :param backend_instance: Backend instance
+    :param backend_name: Backend name
+    :param operation_type: Operation type
+    :param key: CacheEngineKey
+    """
+    op_name = operation_type or getattr(operation_func, "__name__", "async_op")
+    start_time = time.perf_counter()
+    try:
+        result = await operation_func(*args, **kwargs)
+        return result
+    finally:
+        if hasattr(backend_instance, "_log_operation_complete") and key is not None:
+            backend_instance._log_operation_complete(
+                f"[{backend_name}] {op_name}", key, start_time, result=result
+            )

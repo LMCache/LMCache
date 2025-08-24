@@ -3,13 +3,17 @@
 from concurrent.futures import Future
 from typing import List, Optional, Sequence
 import abc
+import time
 
 # Third Party
 import torch
 
 # First Party
+from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
+
+logger = init_logger(__name__)
 
 
 class StorageBackendInterface(metaclass=abc.ABCMeta):
@@ -31,6 +35,7 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
             raise
 
         self.dst_device = dst_device
+        self.closed = False
 
     @abc.abstractmethod
     def contains(self, key: CacheEngineKey, pin: bool = False) -> bool:
@@ -53,6 +58,26 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
         Check whether key is in the ongoing put tasks.
         """
         raise NotImplementedError
+
+    """ nixl_backend_v3.py uses `batched_submit_put_task()`
+    @abc.abstractmethod
+    def submit_put_task(
+        self,
+        key: CacheEngineKey,
+        memory_obj: MemoryObj,
+        transfer_spec=None,
+    ) -> Optional[Future]:
+        ###
+        An async function to put a single MemoryObj into the storage backend.
+
+        :param CacheEngineKey key: The key of the MemoryObj.
+        :param MemoryObj memory_obj: The MemoryObj to be stored.
+        :param transfer_spec: Transfer specification for the operation.
+
+        :return: a future object
+        ###
+        raise NotImplementedError
+    """
 
     # NOTE (Jiayi): Using batched interface allows the underlying implementation
     # have more flexibility to do optimizations.
@@ -270,3 +295,35 @@ class AllocatorBackendInterface(StorageBackendInterface):
         :rtype: Optional[MemoryObj]
         """
         raise NotImplementedError
+
+    def _log_operation_complete(
+        self,
+        operation: str,
+        key: CacheEngineKey,
+        start_time: float,
+        result=None,
+    ) -> None:
+        size_bytes = None
+        throughput_info = ""
+        elapsed_time = time.perf_counter() - start_time
+        if result is not None:
+            if hasattr(result, "get_size"):
+                size_bytes = result.get_size()
+            elif isinstance(result, dict) and "size_bytes" in result:
+                size_bytes = result["size_bytes"]
+        if size_bytes is not None and elapsed_time > 0:
+            throughput_size = size_bytes / (1024**3)
+            throughput_gbps = throughput_size / elapsed_time
+            throughput_info = (
+                f",(size={throughput_size:.2f} GB),"
+                f"throughput={throughput_gbps:.2f} GB/s"
+            )
+
+        logger.debug(
+            f"{operation} completed for key {key.to_string()} "
+            f"in {elapsed_time * 1000:.2f}ms"
+            f"{throughput_info}"
+        )
+
+    def _get_memory_obj_size(self, memory_obj: MemoryObj) -> int:
+        return memory_obj.get_size()

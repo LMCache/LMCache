@@ -15,7 +15,12 @@ import torch
 # First Party
 from lmcache.logging import init_logger
 from lmcache.observability import LMCStatsMonitor
-from lmcache.utils import CacheEngineKey, DiskCacheMetadata, _lmcache_nvtx_annotate
+from lmcache.utils import (
+    CacheEngineKey,
+    DiskCacheMetadata,
+    _lmcache_nvtx_annotate,
+    performance_monitor,
+)
 from lmcache.v1.cache_controller.message import KVAdmitMsg, KVEvictMsg
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.lookup_server import LookupServerInterface
@@ -419,6 +424,9 @@ class LocalDiskBackend(StorageBackendInterface):
 
         return True
 
+    @performance_monitor(
+        backend_name="LOCAL_DISK_BACKEND", operation_type="get_blocking"
+    )
     def get_blocking(
         self,
         key: CacheEngineKey,
@@ -486,25 +494,36 @@ class LocalDiskBackend(StorageBackendInterface):
         """
         Convert KV to bytes and async store bytes to disk.
         """
-        kv_chunk = memory_obj.tensor
-        assert kv_chunk is not None
-        buffer = memory_obj.byte_array
-        path = self._key_to_path(key)
 
-        size = len(buffer)
-        self.usage += size
-        self.stats_monitor.update_local_storage_usage(self.usage)
+        start_time = time.perf_counter()
+        try:
+            kv_chunk = memory_obj.tensor
+            assert kv_chunk is not None
+            buffer = memory_obj.byte_array
+            path = self._key_to_path(key)
 
-        # FIXME(Jiayi): need to add ref count in disk memory object
-        self.write_file(buffer, path)
+            size = len(buffer)
+            self.usage += size
+            self.stats_monitor.update_local_storage_usage(self.usage)
 
-        self.insert_key(key, memory_obj)
+            # FIXME(Jiayi): need to add ref count in disk memory object
+            self.write_file(buffer, path)
 
-        # ref count down here because there's a ref_count_up in
-        # `submit_put_task` above
-        memory_obj.ref_count_down()
+            self.insert_key(key, memory_obj)
 
-        self.disk_worker.remove_put_task(key)
+            # ref count down here because there's a ref_count_up in
+            # `submit_put_task` above
+            memory_obj.ref_count_down()
+
+            self.disk_worker.remove_put_task(key)
+
+        finally:
+            op_name = "async_save_bytes_to_disk"
+            backend_name = "LOCAL_DISK_BACKEND"
+            if hasattr(self, "_log_operation_complete") and key is not None:
+                self._log_operation_complete(
+                    f"[{backend_name}] {op_name}", key, start_time, result=memory_obj
+                )
 
     # TODO(Jiayi): use `bytes_read = await f.readinto(buffer)`
     # for better performance (i.e., fewer copy)

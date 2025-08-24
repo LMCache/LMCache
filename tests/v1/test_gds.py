@@ -88,11 +88,15 @@ def test_gds_backend_sanity():
         memory_obj = gds_backend.memory_allocator.allocate(
             [2048, 2048], dtype=torch.uint8
         )
-        future = gds_backend.submit_put_task(TEST_KEY, memory_obj)
-        assert future is not None
+        result = gds_backend.submit_put_task(TEST_KEY, memory_obj)
+        assert result is not None
         assert gds_backend.exists_in_put_tasks(TEST_KEY)
         assert not gds_backend.contains(TEST_KEY, False)
-        future.result()
+        # Wait a moment for the async put task to complete
+        # Standard
+        import time
+
+        time.sleep(0.1)
         assert gds_backend.contains(TEST_KEY, False)
         assert not gds_backend.exists_in_put_tasks(TEST_KEY)
 

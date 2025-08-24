@@ -168,10 +168,10 @@ class TestLocalCPUBackend:
         key = create_test_key("test_key")
         memory_obj = create_test_memory_obj()
 
-        future = local_cpu_backend.submit_put_task(key, memory_obj)
+        result = local_cpu_backend.submit_put_task(key, memory_obj)
 
         # LocalCPUBackend returns None for submit_put_task
-        assert future is None
+        assert result is not None
         assert key in local_cpu_backend.hot_cache
         assert local_cpu_backend.hot_cache[key] == memory_obj
         assert (

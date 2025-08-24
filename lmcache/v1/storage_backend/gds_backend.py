@@ -21,7 +21,13 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.utils import CacheEngineKey, DiskCacheMetadata, _lmcache_nvtx_annotate
+from lmcache.utils import (
+    CacheEngineKey,
+    DiskCacheMetadata,
+    _lmcache_nvtx_annotate,
+    performance_monitor,
+    performance_monitor_async,
+)
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import MemoryAllocatorInterface, MemoryObj
 from lmcache.v1.storage_backend.abstract_backend import StorageBackendInterface
@@ -385,6 +391,8 @@ class GdsBackend(StorageBackendInterface):
         with self.put_lock:
             return key in self.put_tasks
 
+    # will not use decorate `performance_monitor()` since this is an async put
+    # use `performance_monitor_async()` instead
     def submit_put_task(self, key: CacheEngineKey, memory_obj: MemoryObj) -> Future:
         assert memory_obj.tensor is not None
         memory_obj.ref_count_up()
@@ -393,7 +401,15 @@ class GdsBackend(StorageBackendInterface):
             self.put_tasks.add(key)
 
         future = asyncio.run_coroutine_threadsafe(
-            self._async_save_bytes_to_disk(key, memory_obj), self.loop
+            performance_monitor_async(
+                self._async_save_bytes_to_disk,
+                self,
+                backend_name="GDS_BACKEND",
+                operation_type="submit_put_task",
+                key=key,
+                memory_obj=memory_obj,
+            ),
+            self.loop,
         )
         return future
 
@@ -484,6 +500,7 @@ class GdsBackend(StorageBackendInterface):
     ) -> Optional[MemoryObj]:
         return self._load_bytes_from_disk(key, path, dtype, shape)
 
+    @performance_monitor(backend_name="GDS_BACKEND", operation_type="get_blocking")
     def get_blocking(
         self,
         key: CacheEngineKey,

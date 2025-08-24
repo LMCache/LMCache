@@ -132,11 +132,14 @@ class TestGdsBackend:
     async def test_submit_put_task_and_get_blocking(self, gds_backend):
         key = create_test_key(0)
         memory_obj = create_test_memory_obj(device="cpu")
-        # submit_put_task returns a Future
-        future = gds_backend.submit_put_task(key, memory_obj)
-        assert future is not None
+        # submit_put_task returns a MemoryObj
+        result = gds_backend.submit_put_task(key, memory_obj)
+        assert result is not None
         # Wait for the async save to complete
-        future.result(timeout=5)
+        # Standard
+        import time
+
+        time.sleep(0.1)
         # Now the key should be in hot_cache
         assert gds_backend.contains(key)
         # get_blocking should return a MemoryObj (may be None if not CUDA)
