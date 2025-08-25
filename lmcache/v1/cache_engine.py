@@ -256,7 +256,8 @@ class LMCacheEngine:
             memory_obj = self.storage_manager.allocate(kv_shape, kv_dtype)
             if memory_obj is None:
                 logger.warning(
-                    "Failed to allocate memory for the KV cache.\n"
+                    "Failed to allocate memory for the KV cache due to "
+                    "allocation failure\n"
                     "The KV cache will not be stored."
                 )
                 break
@@ -368,7 +369,8 @@ class LMCacheEngine:
 
             if memory_objs_multi_layer is None:
                 logger.warning(
-                    "Failed to allocate memory for the KV cache.\n"
+                    "Failed to allocate memory for the KV cache since "
+                    "memory_objs_multi_layer is None.\n"
                     "The KV cache will not be stored."
                 )
                 break
