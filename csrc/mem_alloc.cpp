@@ -54,15 +54,17 @@ uintptr_t alloc_pinned_numa_ptr(size_t size, int node) {
   int max_numa_nodes = get_numa_node_count();
   if (node >= max_numa_nodes) {
     munmap(ptr, size);
-    throw std::runtime_error(std::string("Invalid NUMA node: ") + std::to_string(node) + 
-                           ", max nodes: " + std::to_string(max_numa_nodes));
+    throw std::runtime_error(std::string("Invalid NUMA node: ") +
+                             std::to_string(node) +
+                             ", max nodes: " + std::to_string(max_numa_nodes));
   }
 
   // Check if node ID is too large for unsigned long mask (64 bits)
   if (node >= (sizeof(unsigned long) * 8)) {
     munmap(ptr, size);
-    throw std::runtime_error(std::string("Node ID ") + std::to_string(node) + 
-                           " is too large. This build only supports up to 64 NUMA nodes.");
+    throw std::runtime_error(
+        std::string("Node ID ") + std::to_string(node) +
+        " is too large. This build only supports up to 64 NUMA nodes.");
   }
 
   unsigned long mask = 1UL << node;
@@ -92,7 +94,8 @@ void free_pinned_numa_ptr(uintptr_t ptr, size_t size) {
   cudaError_t st = cudaHostUnregister(p);
   if (st != cudaSuccess) {
     munmap(p, size);
-    throw std::runtime_error(std::string("cudaHostUnregister failed: ") + cudaGetErrorString(st));
+    throw std::runtime_error(std::string("cudaHostUnregister failed: ") +
+                             cudaGetErrorString(st));
   }
   if (munmap(p, size) != 0) {
     throw std::runtime_error(std::string("munmap failed: ") + strerror(errno));
@@ -107,16 +110,16 @@ int set_cpu_affinity(const int* cpu_list, int cpu_count) {
 
   cpu_set_t cpuset;
   CPU_ZERO(&cpuset);
-  
+
   for (int i = 0; i < cpu_count; i++) {
     if (cpu_list[i] >= 0) {
       CPU_SET(cpu_list[i], &cpuset);
     }
   }
-  
+
   pid_t pid = getpid();
   int result = sched_setaffinity(pid, sizeof(cpu_set_t), &cpuset);
-  
+
   return (result == 0) ? 0 : -errno;
 }
 
@@ -128,16 +131,16 @@ int set_memory_policy(int policy, const int* nodes, int node_count) {
   // Convert policy string to numeric value
   int policy_value;
   switch (policy) {
-    case 0: // local
+    case 0:  // local
       policy_value = MPOL_LOCAL;
       break;
-    case 1: // preferred
+    case 1:  // preferred
       policy_value = MPOL_PREFERRED;
       break;
-    case 2: // bind
+    case 2:  // bind
       policy_value = MPOL_BIND;
       break;
-    case 3: // interleave
+    case 3:  // interleave
       policy_value = MPOL_INTERLEAVE;
       break;
     default:
@@ -146,13 +149,13 @@ int set_memory_policy(int policy, const int* nodes, int node_count) {
 
   // Get actual NUMA node count dynamically
   int max_numa_nodes = get_numa_node_count();
-  
+
   // Create nodemask
   unsigned long nodemask = 0;
   for (int i = 0; i < node_count; i++) {
     // Check if node ID is too large for unsigned long mask (64 bits)
     if (nodes[i] >= (sizeof(unsigned long) * 8)) {
-      return -1; // Node ID too large for nodemask
+      return -1;  // Node ID too large for nodemask
     }
     if (nodes[i] >= 0 && nodes[i] < max_numa_nodes) {
       nodemask |= (1UL << nodes[i]);
@@ -162,8 +165,9 @@ int set_memory_policy(int policy, const int* nodes, int node_count) {
   }
 
   // Set memory policy for current process using syscall
-  long result = syscall(SYS_set_mempolicy, policy_value, &nodemask, max_numa_nodes);
-  
+  long result =
+      syscall(SYS_set_mempolicy, policy_value, &nodemask, max_numa_nodes);
+
   return (result == 0) ? 0 : -errno;
 }
 
