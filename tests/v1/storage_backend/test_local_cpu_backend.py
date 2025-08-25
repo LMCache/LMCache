@@ -65,10 +65,28 @@ def create_test_memory_obj(shape=(2, 16, 8, 128), dtype=torch.bfloat16) -> Memor
     return memory_obj
 
 
-@pytest.fixture
+@pytest.fixture(scope="session")
 def memory_allocator():
-    """Create a memory allocator for testing."""
-    return MixedMemoryAllocator(1024 * 1024 * 1024)  # 1GB
+    """One MixedMemoryAllocator (1GB) for the whole test session;
+    .close() is a no-op per-test."""
+    _real = MixedMemoryAllocator(1024 * 1024 * 1024)  # 1GB
+
+    class _NoCloseWrapper:
+        def __init__(self, real):
+            self._real = real
+
+        def __getattr__(self, name):
+            return getattr(self._real, name)
+
+        def close(self):
+            # No-op so per-test close() calls don't shut down the shared allocator
+            pass
+
+    try:
+        yield _NoCloseWrapper(_real)
+    finally:
+        # Actually close once when the session ends
+        _real.close()
 
 
 @pytest.fixture
