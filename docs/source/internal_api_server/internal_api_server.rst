@@ -68,7 +68,7 @@ You can test the server by querying the relevant endpoints.
     curl -X POST http://localhost:7000/run_script \
       -F "script=@/Users/msy/scratch.py"
 
-    {'is_first_rank': True, 'model_version': (27, 1, 64, 1, 576), 'LocalCPUBackend.use_hot': False}%
+    {'is_first_rank': True, 'model_version': (27, 1, 64, 1, 576), 'LocalCPUBackend.use_hot': False}
 
 `scratch.py`
 .. code-block:: python
