@@ -8,13 +8,6 @@ import torch
 # First Party
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
-from lmcache.storage_backend.serde.cachegen_basics import (
-    CacheGenGPUEncoderOutput,
-)
-from lmcache.storage_backend.serde.cachegen_decoder import (
-    decode_function_gpu,
-    do_dequantize,
-)
 from lmcache.utils import _lmcache_nvtx_annotate
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import (
@@ -24,7 +17,12 @@ from lmcache.v1.memory_management import (
     MemoryObjMetadata,
     TensorMemoryObj,
 )
-from lmcache.v1.storage_backend.naive_serde.cachegen_basics import CacheGenConfig
+from lmcache.v1.storage_backend.naive_serde.cachegen_basics import (
+    CacheGenConfig,
+    CacheGenGPUEncoderOutput,
+    decode_function_gpu,
+    do_dequantize,
+)
 from lmcache.v1.storage_backend.naive_serde.serde import Deserializer
 
 logger = init_logger(__name__)
