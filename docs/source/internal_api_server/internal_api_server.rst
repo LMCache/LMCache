@@ -1,0 +1,95 @@
+.. _internal_api_server:
+
+Configuring the Internal API Server
+==================================
+
+The ``internal_api_server`` provides APIs for managing the LMCache engine. Below are the configuration options and usage examples.
+
+Configuration Parameters
+---------------------------------------
+
+The following parameters can be configured in the YAML file:
+
+.. code-block:: yaml
+
+    # Enable/disable the internal API server
+    internal_api_server_enabled: True
+    # Base port for the API server
+    internal_api_server_port_start: 9000
+    # List of scheduler/worker 0 stand for scheduler, 1 stand for worker0, 2 stand for worker1,...
+    internal_api_server_include_index_list: [0, 1]
+    # Socket path prefix for the API server, if configured, will not start the server by listen port
+    internal_api_server_socket_path_prefix: "/tmp/lmcache_internal_api_server/socket"
+
+Testing the Server
+---------------------------------------
+
+You can test the server by querying the relevant endpoints.
+
+`/metrics` endpoint for metrics:
+
+.. code-block:: bash
+
+    curl http://localhost:7000/metrics
+
+`/conf` endpoint for configuration:
+
+.. code-block:: bash
+
+    curl http://localhost:7000/conf
+
+`/meta` endpoint for metadata:
+
+.. code-block:: bash
+
+    curl http://localhost:7000/meta
+
+`/threads` endpoint for threads:
+
+.. code-block:: bash
+
+    curl http://localhost:7000/threads
+
+`/loglevel` endpoint for log level:
+
+`` code-block:: bash
+
+    # Get all loggers info
+    curl http://localhost:7000/loglevel
+    # Get specified logger level
+    curl http://localhost:7000/loglevel?logger_name=lmcache.v1.cache_engine
+    # Set specified logger level
+    curl http://localhost:7000/loglevel?logger_name=lmcache.v1.cache_engine&level=DEBUG
+
+`/run_script` endpoint for running script:
+
+.. code-block:: bash
+
+    curl -X POST http://localhost:7000/run_script \
+      -F "script=@/Users/msy/scratch.py"
+
+    {'is_first_rank': True, 'model_version': (27, 1, 64, 1, 576), 'LocalCPUBackend.use_hot': False}%
+
+`scratch.py`
+.. code-block:: python
+    # Get cache_engine from app.state
+    lmcache_engine = app.state.lmcache_adapter.lmcache_engine
+
+    # Print the worker ID and model name
+    print(f"Worker ID: {lmcache_engine.metadata.worker_id}")
+    print(f"Model name: {lmcache_engine.metadata.model_name}")
+
+    # Set LocalCPUBackend.use_hot to False or True
+    lmcache_engine.storage_manager.storage_backends["LocalCPUBackend"].use_hot = False
+    # return the output contents
+    result = {
+        "is_first_rank": lmcache_engine.metadata.is_first_rank(),
+        "model_version": lmcache_engine.metadata.kv_shape,
+        "LocalCPUBackend.use_hot": lmcache_engine.storage_manager.storage_backends["LocalCPUBackend"].use_hot
+    }
+
+How to extend the Internal API Server
+=======================================
+
+You can extend the ``internal_api_server`` by adding new endpoints to the `lmcache/v1/internal_api_server/xxx_api.py` directory,
+and make sure your new file end of `_api.py`, besides, you need to define a `router = APIRouter()`, and add your endpoints to the router.
