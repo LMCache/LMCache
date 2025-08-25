@@ -1,11 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from typing import TYPE_CHECKING
 import abc
 
 # Third Party
 import torch
 
-# First Party
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.compute.attention.metadata import LMCAttnMetadata
 
 
 class AttentionInterface(metaclass=abc.ABCMeta):
