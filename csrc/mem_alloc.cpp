@@ -200,7 +200,7 @@ int get_numa_node_count() {
     }
     fclose(file);
   }
-  
+
   // Fallback: try to count nodes in /sys/devices/system/node/
   // Use a more reasonable upper limit based on system architecture
   int max_possible_nodes = 1024;  // Increased from 256 for modern systems
@@ -214,10 +214,8 @@ int get_numa_node_count() {
       break;
     }
   }
-  
+
   return (node_count > 0) ? node_count : 1;  // Default to 1 if all else fails
 }
 
-int get_cpu_count() {
-  return sysconf(_SC_NPROCESSORS_ONLN);
-}
+int get_cpu_count() { return sysconf(_SC_NPROCESSORS_ONLN); }
