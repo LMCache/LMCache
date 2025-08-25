@@ -16,7 +16,6 @@ from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import (
     MemoryFormat,
     MemoryObj,
-    MixedMemoryAllocator,
 )
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.v1.storage_backend.local_disk_backend import LocalDiskBackend
@@ -87,36 +86,13 @@ def async_loop():
     loop.close()
 
 
-# ---- ADDED: shared session-scoped allocator (close() is a no-op per-test) ----
-@pytest.fixture(scope="session")
-def shared_allocator():
-    _real = MixedMemoryAllocator(1024 * 1024 * 1024)  # 1GB
-
-    class _NoCloseWrapper:
-        def __init__(self, real):
-            self._real = real
-
-        def __getattr__(self, name):
-            return getattr(self._real, name)
-
-        def close(self):
-            # no-op during individual tests
-            pass
-
-    try:
-        yield _NoCloseWrapper(_real)
-    finally:
-        _real.close()
-
-
 # ----------------------------------------------------------------------------
 
 
 @pytest.fixture
-def local_cpu_backend(shared_allocator):
+def local_cpu_backend(memory_allocator):
     """Create a LocalCPUBackend for testing."""
     config = LMCacheEngineConfig.from_legacy(chunk_size=256)
-    memory_allocator = shared_allocator  # was: MixedMemoryAllocator(1GB)
     return LocalCPUBackend(config, memory_allocator)
 
 
