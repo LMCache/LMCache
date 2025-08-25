@@ -555,6 +555,7 @@ class LMCacheConnectorV1Impl:
                     ENGINE_NAME,
                     self.lmcache_engine,
                     self.lmcache_engine.gpu_connector,
+                    config,
                 )
 
             # Create lookup server using factory

@@ -1,4 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
+# Standard
+from typing import TYPE_CHECKING
+
 # Third Party
 from vllm.attention import Attention
 from vllm.v1.attention.backends.flash_attn import FlashAttentionImpl
@@ -8,6 +11,10 @@ import torch
 # First Party
 from lmcache.v1.compute.attention.abstract import AttentionInterface
 from lmcache.v1.compute.attention.metadata import LMCFlashAttnMetadata
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.compute.attention.metadata import LMCAttnMetadata
 
 
 class LMCFlashAttnBackend(AttentionInterface):
@@ -27,16 +34,19 @@ class LMCFlashAttnBackend(AttentionInterface):
         # TODO(Jiayi): remove this hardcode
         self.aot_schedule = False
 
+        idx = torch.cuda.current_device()
+        self.device = torch.device(f"cuda:{idx}")
+
     def forward_contiguous(
         self,
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
         output: torch.Tensor,
-        attn_metadata: LMCFlashAttnMetadata,
+        attn_metadata: "LMCAttnMetadata",
         **kwargs,
     ) -> torch.Tensor:
-        # num_actual_tokens = query.shape[0]
+        assert isinstance(attn_metadata, LMCFlashAttnMetadata)
 
         cu_seqlens_q = attn_metadata.query_start_loc
         seqused_k = attn_metadata.seq_lens
@@ -46,6 +56,7 @@ class LMCFlashAttnBackend(AttentionInterface):
 
         descale_shape = (cu_seqlens_q.shape[0] - 1, key.shape[1])
 
+        # TODO(Jiayi): Figure out how to use aot_schedule.
         scheduler_metadata = self._schedule(
             batch_size=1,  # NOTE(Jiayi): Assuming batch size is 1,
             # since we are processing request by request.
@@ -99,3 +110,20 @@ class LMCFlashAttnBackend(AttentionInterface):
                 window_size=self.vllm_attn_impl.aot_sliding_window,
             )
         return None
+
+    def init_attn_metadata(
+        self,
+        input_ids: torch.tensor,
+        **kwargs,
+    ) -> LMCFlashAttnMetadata:
+        seq_len = input_ids.shape[0]
+        device = input_ids.device
+        return LMCFlashAttnMetadata(
+            query_start_loc=torch.tensor(
+                [0, seq_len], dtype=torch.int32, device=device
+            ),
+            seq_lens=torch.tensor([seq_len], device=device),
+            cu_seqlens_k=torch.tensor([0, seq_len], dtype=torch.int32, device=device),
+            max_query_len=seq_len,
+            max_seq_len=seq_len,
+        )
