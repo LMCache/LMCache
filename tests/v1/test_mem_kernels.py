@@ -440,8 +440,7 @@ def test_single_layer_kernel(num_tokens, token_major):
     for layer_id in range(num_layers):
         lmc_ops.single_layer_kv_transfer(
             tmp_gpu_buffer,
-            kv_cache[layer_id][0],
-            kv_cache[layer_id][1],
+            kv_cache[layer_id],
             slot_mapping,
             True,
             token_major,
@@ -449,8 +448,7 @@ def test_single_layer_kernel(num_tokens, token_major):
         )
         lmc_ops.single_layer_kv_transfer(
             tmp_gpu_buffer,
-            kv_cache_new[layer_id][0],
-            kv_cache_new[layer_id][1],
+            kv_cache_new[layer_id],
             slot_mapping,
             False,
             token_major,
