@@ -16,7 +16,7 @@ The following parameters can be configured in the YAML file:
     internal_api_server_enabled: True
     # Base port for the API server
     internal_api_server_port_start: 9000
-    # List of scheduler/worker 0 stand for scheduler, 1 stand for worker0, 2 stand for worker1,...
+    # List of scheduler/worker indices: 0 for scheduler, 1 for worker 0, 2 for worker 1, etc.
     internal_api_server_include_index_list: [0, 1]
     # Socket path prefix for the API server, if configured, will not start the server by listen port
     internal_api_server_socket_path_prefix: "/tmp/lmcache_internal_api_server/socket"
