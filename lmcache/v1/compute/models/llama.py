@@ -4,7 +4,7 @@ from torch import nn
 import torch
 
 # First Party
-from lmcache.v1.compute.attention.flash_attn import LMCFlashAttnBackend
+from lmcache.v1.compute.attention.utils import infer_attn_backend_from_vllm
 from lmcache.v1.compute.positional_encoding import get_fused_rope
 
 # TODO(Jiayi): A few things need to be tested/supported:
@@ -16,6 +16,7 @@ class LMCLlamaModel(nn.Module):
         self,
         vllm_model,
         blender,
+        enable_sparse: bool = False,
     ):
         super().__init__()
         self.vllm_model = vllm_model
@@ -27,10 +28,10 @@ class LMCLlamaModel(nn.Module):
         for i in range(self.num_layers):
             vllm_attn = vllm_model.model.layers[i].self_attn.attn
             self.vllm_attn_layers.append(vllm_attn)
-            
-            #FIXME
-            import pdb; pdb.set_trace()
-            self.lmc_attn_layers.append(LMCFlashAttnBackend(vllm_attn))
+
+            self.lmc_attn_layers.append(
+                infer_attn_backend_from_vllm(vllm_attn, enable_sparse)
+            )
 
         # NOTE(Jiayi): better not to pass the blender in init
         # if we want to make this LMCModel more general.
@@ -59,7 +60,8 @@ class LMCLlamaModel(nn.Module):
         self,
         input_ids: torch.Tensor,
     ):
-        hidden_states = self.vllm_model.get_input_embeddings(input_ids.cuda())
+        input_ids = input_ids.cuda()
+        hidden_states = self.vllm_model.get_input_embeddings(input_ids)
         residual = None
 
         attn_output = None

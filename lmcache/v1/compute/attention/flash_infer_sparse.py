@@ -1,12 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
+# Standard
+from typing import Optional, Tuple, Union
+import math
+
 # Third Party
 from flashinfer import VariableBlockSparseAttentionWrapper
-import flashinfer
-import math
-from typing import Optional, Tuple, Union
-
-import torch
-
 from flashinfer.page import block_sparse_indices_to_vector_sparse_offsets
 from flashinfer.utils import (
     TensorLayout,
@@ -14,6 +12,10 @@ from flashinfer.utils import (
     _check_shape_dtype_device,
     device_support_pdl,
 )
+from vllm.attention import Attention
+from vllm.v1.attention.backends.flashinfer import FlashInferImpl
+import flashinfer
+import torch
 
 # First Party
 from lmcache.v1.compute.attention.abstract import AttentionInterface
@@ -21,7 +23,6 @@ from lmcache.v1.compute.attention.metadata import LMCFlashInferSparseMetadata
 
 
 class HackBSAWrapper(VariableBlockSparseAttentionWrapper):
-
     def run(
         self,
         q: torch.Tensor,
@@ -48,7 +49,8 @@ class HackBSAWrapper(VariableBlockSparseAttentionWrapper):
         out : Optional[torch.Tensor]
             The output tensor, if not provided, will be allocated internally.
         lse : Optional[torch.Tensor]
-            The log-sum-exp of attention logits, if not provided, will be allocated internally.
+            The log-sum-exp of attention logits, if not provided, will be
+            allocated internally.
         return_lse : bool
             Whether to return the log-sum-exp of attention logits
         enable_pdl : bool
@@ -58,7 +60,8 @@ class HackBSAWrapper(VariableBlockSparseAttentionWrapper):
         Returns
         -------
         Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]
-            If :attr:`return_lse` is ``False``, the attention output, shape: ``[M, num_qo_heads, head_dim]``.
+            If :attr:`return_lse` is ``False``, the attention output, shape:
+            ``[M, num_qo_heads, head_dim]``.
             If :attr:`return_lse` is ``True``, a tuple of two tensors:
 
             * The attention output, shape: ``[M, num_qo_heads, head_dim]``.
@@ -82,12 +85,10 @@ class HackBSAWrapper(VariableBlockSparseAttentionWrapper):
             rope_scale = 1.0
         if rope_theta is None:
             rope_theta = 1e4
-        
+
         # 1 denotes page size
         k = k.reshape(-1, 1, *k.shape[-2:])
         v = v.reshape(-1, 1, *v.shape[-2:])
-
-
 
         stride_block = k.stride(0)
         stride_n = k.stride(1)
@@ -113,7 +114,8 @@ class HackBSAWrapper(VariableBlockSparseAttentionWrapper):
                 <= self._paged_kv_indices_buf.numel()
             ):
                 raise ValueError(
-                    "_vector_sparse_indices_buffer is not large enough. Please increase the buffer size."
+                    "_vector_sparse_indices_buffer is not large enough. "
+                    "Please increase the buffer size."
                 )
 
             sparse_indices = block_sparse_indices_to_vector_sparse_offsets(
@@ -130,7 +132,6 @@ class HackBSAWrapper(VariableBlockSparseAttentionWrapper):
         else:
             sparse_indices = self._paged_kv_indices_buf
             sparse_indptr = self._paged_kv_indptr_buf
-
 
         self._cached_module.paged_run(
             self._float_workspace_buffer,
@@ -169,6 +170,7 @@ class HackBSAWrapper(VariableBlockSparseAttentionWrapper):
 
         return (out, lse) if return_lse else out
 
+
 class LMCFlashInferSparseBackend(AttentionInterface):
     """
     FlashAttention backend for LMCache.
@@ -190,7 +192,6 @@ class LMCFlashInferSparseBackend(AttentionInterface):
             128 * 1024 * 1024, dtype=torch.uint8, device="cuda:0"
         )
 
-        # FIXME
         self.num_qo_heads = self.vllm_attn_impl.num_heads
         self.num_kv_heads = self.vllm_attn_impl.num_kv_heads
         self.head_dim = self.vllm_attn_impl.head_size
@@ -199,8 +200,8 @@ class LMCFlashInferSparseBackend(AttentionInterface):
         self.window_left = self.vllm_attn_impl.window_left
         self.logits_soft_cap = self.vllm_attn_impl.logits_soft_cap
 
-        self.k_scale = 0#layer._k_scale_float
-        self.v_scale = 0#layer._v_scale_floa,
+        self.k_scale = vllm_attn._k_scale_float
+        self.v_scale = vllm_attn._v_scale_float
 
     def forward_contiguous(
         self,
@@ -211,34 +212,32 @@ class LMCFlashInferSparseBackend(AttentionInterface):
         attn_metadata: LMCFlashInferSparseMetadata,
         **kwargs,
     ) -> torch.Tensor:
-
         is_causal = attn_metadata.is_causal
         if is_causal:
             output = flashinfer.prefill.single_prefill_with_kv_cache(
                 q=query,
-                k=key, 
+                k=key,
                 v=value,
                 scale_q=None,
                 scale_k=self.k_scale,
                 scale_v=self.v_scale,
                 o_dtype=query.dtype,
-                custom_mask=None, 
-                packed_custom_mask=None, 
-                causal=True, 
+                custom_mask=None,
+                packed_custom_mask=None,
+                causal=True,
                 kv_layout="NHD",
-                pos_encoding_mode="None",
+                pos_encoding_mode="NONE",
                 use_fp16_qk_reduction=False,
                 sm_scale=self.sm_scale,
                 window_left=self.window_left,
                 logits_soft_cap=self.logits_soft_cap,
-                rope_scale=None, 
-                rope_theta=None, 
-                backend="auto", 
-                return_lse=False
+                rope_scale=None,
+                rope_theta=None,
+                backend="auto",
+                return_lse=False,
             )
         else:
-            output = wrapper.run(query, key, value, output)
-
+            output = attn_metadata.wrapper.run(query, key, value, output)
         return output
 
     def init_attn_metadata(
@@ -259,9 +258,10 @@ class LMCFlashInferSparseBackend(AttentionInterface):
 
         num_block_col = seq_len // sparse_blk_col_size
         last_col_len = seq_len % sparse_blk_col_size
-        block_col_sizes = torch.tensor([sparse_blk_col_size] * num_block_col, device=device)
-        block_col_sizes[-1] = last_col_len + sparse_blk_col_size
-
+        block_col_sizes = torch.tensor(
+            [sparse_blk_col_size] * num_block_col, device=self.device
+        )
+        block_col_sizes[-1] += last_col_len
         return LMCFlashInferSparseMetadata(
             wrapper,
             seq_len,

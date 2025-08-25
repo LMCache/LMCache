@@ -10,6 +10,7 @@ from lmcache.logging import init_logger
 from lmcache.v1.compute.attention.metadata import LMCAttnMetadata
 from lmcache.v1.compute.blend.metadata import LMCBlendCommonMetadata, LMCBlendMetadata
 from lmcache.v1.compute.models.utils import infer_model_from_vllm
+from lmcache.v1.config import LMCacheEngineConfig
 
 logger = init_logger(__name__)
 
@@ -25,11 +26,16 @@ class LMCBlender:
         cache_engine,
         gpu_connector,
         vllm_model,
+        config: LMCacheEngineConfig,
     ):
         self.cache_engine = cache_engine
         self.gpu_connector = gpu_connector
 
-        self.layerwise_model = infer_model_from_vllm(vllm_model, self)
+        enable_sparse = False
+        if config.extra_config is not None:
+            enable_sparse = config.extra_config.get("enable_sparse", False)
+
+        self.layerwise_model = infer_model_from_vllm(vllm_model, self, enable_sparse)
 
         # TODO: remove this hardcode
         self.num_layers = len(vllm_model.model.layers)
@@ -82,6 +88,8 @@ class LMCBlender:
                 (k.to(torch.float32) - old_k.to(torch.float32)) ** 2, dim=[1]
             )
             total_len = diff_k.shape[0]
+
+            assert self.common_metadata.recomp_ratios is not None
 
             # TODO(Jiayi): remove `[0]` hardcode
             topk_num = int(total_len * self.common_metadata.recomp_ratios[0])
