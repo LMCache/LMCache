@@ -52,7 +52,7 @@ You can test the server by querying the relevant endpoints.
 
 `/loglevel` endpoint for log level:
 
-`` code-block:: bash
+.. code-block:: bash
 
     # Get all loggers info
     curl http://localhost:7000/loglevel
