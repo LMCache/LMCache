@@ -3,12 +3,13 @@
 from typing import Dict, List
 
 
-def get_all_server_infos(config) -> List[Dict[str, str]]:
+def get_all_server_infos(config, worker_count) -> List[Dict[str, str]]:
     """
     Generate a list of server information (scheduler and workers) based on the config.
 
     Args:
         config: The configuration object containing server details.
+        worker_count: The number of worker servers.
 
     Returns:
         List[Dict[str, str]]: A JSON list with server information.
@@ -28,7 +29,7 @@ def get_all_server_infos(config) -> List[Dict[str, str]]:
         servers.append(server_info)
 
     # Add workers info (index 1 to worker_count)
-    for worker_id in range(config.worker_count):
+    for worker_id in range(worker_count):
         port_offset = 1 + worker_id
         if include_index_list is None or port_offset in include_index_list:
             port = config.internal_api_server_port_start + port_offset
