@@ -338,7 +338,8 @@ class LocalCPUBackend(StorageBackendInterface):
         while True:
             wait_other_requests = True
             if self.use_hot:
-                # TODO: make num_candidates configurable
+                # TODO(Jiayi): optimize `num_candidates` with estimation.
+                # Accurate estimation is hard due to fragmentation
                 num_candidates = 1
                 with self.cpu_lock:
                     evict_keys = self.cache_policy.get_evict_candidates(
