@@ -283,6 +283,11 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "default": None,
         "env_converter": _to_int_list,
     },
+    "plugin_locations": {
+        "type": Optional[list[str]],
+        "default": None,
+        "env_converter": lambda x: x if isinstance(x, list) else [x] if x else [],
+    },
 }
 
 
@@ -344,6 +349,10 @@ def _create_config_class():
             "__str__": lambda self: str(
                 {name: getattr(self, name) for name in _CONFIG_DEFINITIONS}
             ),
+            "from_dict": classmethod(_from_dict),
+            "to_dict": _to_dict,
+            "to_json": _to_json,
+            "from_json": classmethod(_from_json),
         },
     )
     return cls
@@ -550,6 +559,39 @@ def _from_env(cls):
 
     instance = cls(**config_values)
     return instance.log_config()
+
+
+def _from_dict(cls, config_dict: dict):
+    """Create configuration from a dictionary."""
+    resolved_config = _resolve_config_aliases(config_dict, "dictionary input")
+    config_values = {}
+    for name, config in _CONFIG_DEFINITIONS.items():
+        value = resolved_config.get(name, config["default"])
+        if value is not None:
+            value = config["env_converter"](value)
+        config_values[name] = value
+    instance = cls(**config_values)
+    return instance.log_config()
+
+
+def _to_dict(self):
+    """Convert the configuration object into a dictionary."""
+    return {name: getattr(self, name) for name in _CONFIG_DEFINITIONS}
+
+
+def _to_json(self):
+    """Serialize the configuration object to a JSON string."""
+    return json.dumps(self.to_dict(), indent=2)
+
+
+def _from_json(cls, json_str: str):
+    """Deserialize a JSON string into a configuration object."""
+    try:
+        config_dict = json.loads(json_str)
+        return cls.from_dict(config_dict)
+    except json.JSONDecodeError as e:
+        logger.error(f"Invalid JSON input: {e}")
+        raise
 
 
 # Create configuration class
