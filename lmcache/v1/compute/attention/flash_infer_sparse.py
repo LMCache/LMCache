@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import Optional, Tuple, Union
+from typing import TYPE_CHECKING, Optional, Tuple, Union
 import math
 
 # Third Party
@@ -20,6 +20,10 @@ import torch
 # First Party
 from lmcache.v1.compute.attention.abstract import AttentionInterface
 from lmcache.v1.compute.attention.metadata import LMCFlashInferSparseMetadata
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.compute.attention.metadata import LMCAttnMetadata
 
 
 class HackBSAWrapper(VariableBlockSparseAttentionWrapper):
@@ -209,9 +213,10 @@ class LMCFlashInferSparseBackend(AttentionInterface):
         key: torch.Tensor,
         value: torch.Tensor,
         output: torch.Tensor,
-        attn_metadata: LMCFlashInferSparseMetadata,
+        attn_metadata: "LMCAttnMetadata",
         **kwargs,
     ) -> torch.Tensor:
+        assert isinstance(attn_metadata, LMCFlashInferSparseMetadata)
         is_causal = attn_metadata.is_causal
         if is_causal:
             output = flashinfer.prefill.single_prefill_with_kv_cache(

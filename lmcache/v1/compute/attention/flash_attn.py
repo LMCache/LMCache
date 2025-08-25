@@ -1,4 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
+# Standard
+from typing import TYPE_CHECKING
+
 # Third Party
 from vllm.attention import Attention
 from vllm.v1.attention.backends.flash_attn import FlashAttentionImpl
@@ -8,6 +11,10 @@ import torch
 # First Party
 from lmcache.v1.compute.attention.abstract import AttentionInterface
 from lmcache.v1.compute.attention.metadata import LMCFlashAttnMetadata
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.compute.attention.metadata import LMCAttnMetadata
 
 
 class LMCFlashAttnBackend(AttentionInterface):
@@ -36,10 +43,10 @@ class LMCFlashAttnBackend(AttentionInterface):
         key: torch.Tensor,
         value: torch.Tensor,
         output: torch.Tensor,
-        attn_metadata: LMCFlashAttnMetadata,
+        attn_metadata: "LMCAttnMetadata",
         **kwargs,
     ) -> torch.Tensor:
-        # num_actual_tokens = query.shape[0]
+        assert isinstance(attn_metadata, LMCFlashAttnMetadata)
 
         cu_seqlens_q = attn_metadata.query_start_loc
         seqused_k = attn_metadata.seq_lens
