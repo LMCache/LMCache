@@ -445,6 +445,7 @@ def test_single_layer_kernel(num_tokens, token_major):
             slot_mapping,
             True,
             token_major,
+            True,
         )
         lmc_ops.single_layer_kv_transfer(
             tmp_gpu_buffer,
@@ -453,6 +454,7 @@ def test_single_layer_kernel(num_tokens, token_major):
             slot_mapping,
             False,
             token_major,
+            True,
         )
 
     check_paged_kv_cache_equal(
