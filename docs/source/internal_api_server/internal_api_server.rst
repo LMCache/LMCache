@@ -91,5 +91,5 @@ You can test the server by querying the relevant endpoints.
 How to extend the Internal API Server
 =======================================
 
-You can extend the ``internal_api_server`` by adding new endpoints to the `lmcache/v1/internal_api_server/xxx_api.py` directory,
-and make sure your new file end of `_api.py`, besides, you need to define a `router = APIRouter()`, and add your endpoints to the router.
+You can extend the ``internal_api_server`` by adding new endpoint files to the `lmcache/v1/internal_api_server/` directory.
+Ensure your new file name ends with `_api.py`. Additionally, you need to define a `router = APIRouter()` in your file and add your endpoints to it.
