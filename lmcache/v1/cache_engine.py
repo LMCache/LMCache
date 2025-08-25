@@ -253,7 +253,9 @@ class LMCacheEngine:
             kv_dtype = self.metadata.kv_dtype
 
             # TODO (Jiayi): should be batched in the future
-            memory_obj = self.storage_manager.allocate(kv_shape, kv_dtype)
+            memory_obj = self.storage_manager.allocate(
+                kv_shape, kv_dtype, is_store=True
+            )
             if memory_obj is None:
                 logger.warning(
                     "Failed to allocate memory for the KV cache.\n"
@@ -364,6 +366,7 @@ class LMCacheEngine:
                 kv_dtype,
                 batch_size=self.num_layers,
                 fmt=self.fmt,
+                is_store=True,
             )
 
             if memory_objs_multi_layer is None:

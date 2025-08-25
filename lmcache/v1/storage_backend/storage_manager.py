@@ -103,6 +103,7 @@ class StorageManager:
         dtype: torch.dtype,
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
         eviction=True,
+        is_store=False,
     ) -> Optional[MemoryObj]:
         """
         Allocate memory object with memory allocator.
@@ -110,7 +111,9 @@ class StorageManager:
         """
         # TODO (Jiayi): We might need to pre-allocate and management
         # disk in a similar way as CPU.
-        return self.allocator_backend.allocate(shape, dtype, fmt, eviction=eviction)
+        return self.allocator_backend.allocate(
+            shape, dtype, fmt, eviction=eviction, is_store=is_store
+        )
 
     @_lmcache_nvtx_annotate
     def batched_allocate(

@@ -234,6 +234,7 @@ class LocalCPUBackend(StorageBackendInterface):
         dtype: torch.dtype,
         fmt: Optional[MemoryFormat] = None,
         eviction: bool = True,
+        is_store: bool = False,
     ) -> Optional[MemoryObj]:
         """
         Allocate a memory object of shape and dtype
@@ -277,9 +278,18 @@ class LocalCPUBackend(StorageBackendInterface):
                     logger.debug(f"Evicting {len(evict_keys)} chunks from cpu memory")
                     self.batched_remove(evict_keys, force=False)
                     evict_keys_count += len(evict_keys)
+                else:
+                    self.stats_monitor.update_local_cpu_evict_failed_count(
+                        num_candidates
+                    )
+                    if is_store:
+                        logger.info(
+                            "Not allocating if we are not",
+                            "immediately able to evict for store",
+                        )
+                        break
 
             if wait_other_requests:
-                self.stats_monitor.update_local_cpu_evict_failed_count(num_candidates)
                 # TODO: make time_to_wait a config
                 time_to_wait = 0.1
                 logger.warning(
@@ -306,6 +316,7 @@ class LocalCPUBackend(StorageBackendInterface):
         batch_size: int,
         fmt: Optional[MemoryFormat] = None,
         eviction: bool = True,
+        is_store: bool = False,
     ) -> Optional[List[MemoryObj]]:
         """
         Batched allocate `batch_size` memory objects of shape and dtype
@@ -346,36 +357,45 @@ class LocalCPUBackend(StorageBackendInterface):
                         self.hot_cache, num_candidates=num_candidates
                     )
 
-                # HACK: We assume batch_size=num_layers here.
-                # FIXME: We also assume if the one layer's ref_count > 1 or pinned,
-                # then the other layers are also ref_count > 1 or
-                # pinned in the cpu memory. This might not be true.
-                if evict_keys:
-                    evict_keys_count += len(evict_keys)
-                    wait_other_requests = False
-                    for evict_key in evict_keys:
-                        evict_key_all_layer = evict_key.split_layers(batch_size)
+                    # HACK: We assume batch_size=num_layers here.
+                    # FIXME: We also assume if the one layer's ref_count > 1 or pinned,
+                    # then the other layers are also ref_count > 1 or
+                    # pinned in the cpu memory. This might not be true.
+                    if evict_keys:
+                        evict_keys_count += len(evict_keys)
+                        wait_other_requests = False
+                        for evict_key in evict_keys:
+                            evict_key_all_layer = evict_key.split_layers(batch_size)
 
-                        # TODO(Jiayi): batched allocate is not supported through
-                        # `batched_remove`. Therefore, features like usage tracking
-                        # is not supported.
-                        old_mem_objs = []
-                        for key in evict_key_all_layer:
-                            old_mem_objs.append(self.hot_cache[key])
-                            self.cache_policy.update_on_force_evict(key)
-                            self.hot_cache.pop(key, None)
+                            # TODO(Jiayi): batched allocate is not supported through
+                            # `batched_remove`. Therefore, features like usage tracking
+                            # is not supported.
+                            old_mem_objs = []
+                            for key in evict_key_all_layer:
+                                old_mem_objs.append(self.hot_cache[key])
+                                self.cache_policy.update_on_force_evict(key)
+                                self.hot_cache.pop(key, None)
 
-                        self.memory_allocator.batched_free(old_mem_objs)
+                            self.memory_allocator.batched_free(old_mem_objs)
 
-                        if self.lookup_server is not None:
-                            self.lookup_server.batched_remove(evict_key_all_layer)
+                            if self.lookup_server is not None:
+                                self.lookup_server.batched_remove(evict_key_all_layer)
 
-                        logger.debug(
-                            f"Evicting {len(old_mem_objs)} chunks from cpu memory"
+                            logger.debug(
+                                f"Evicting {len(old_mem_objs)} chunks from cpu memory"
+                            )
+                    else:
+                        self.stats_monitor.update_local_cpu_evict_failed_count(
+                            num_candidates
                         )
+                        if is_store:
+                            logger.info(
+                                "Not allocating if we are not",
+                                "immediately able to evict for store",
+                            )
+                            break
 
             if wait_other_requests:
-                self.stats_monitor.update_local_cpu_evict_failed_count(num_candidates)
                 # TODO: make time_to_wait a config
                 time_to_wait = 0.1
                 logger.warning(
