@@ -24,10 +24,10 @@ class PluginLauncher:
 
     def launch_plugins(self):
         """Launch all configured plugins"""
-        if not self.config.plugin_locs:
+        if not self.config.plugin_locations:
             return
 
-        for loc in self.config.plugin_locs:
+        for loc in self.config.plugin_locations:
             self._launch_plugins(loc)
 
     def _launch_plugins(self, loc: str):

@@ -262,7 +262,7 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "default": None,
         "env_converter": _to_int_list,
     },
-    "plugin_locs": {
+    "plugin_locations": {
         "type": Optional[list[str]],
         "default": None,
         "env_converter": lambda x: x if isinstance(x, list) else [x] if x else [],

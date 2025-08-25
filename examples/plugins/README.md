@@ -21,9 +21,9 @@ Plugins are configured through the following methods:
    - `LMCACHE_PLUGIN_WORKER_COUNT`: The total worker count of this cluster
 
 2. **Configuration File**:
-   Plugins can be specified in the `lmcache.yaml` file under the `plugin_locs` field:
+   Plugins can be specified in the `lmcache.yaml` file under the `plugin_locations` field:
    ```yaml
-   plugin_locs: ["/path/to/plugins"]
+   plugin_locations: ["/path/to/plugins"]
    ```
 3. **Pass more parameters via lmcache extra_config**
    You can Pass more parameters via specify extra_config within `lmcache.yaml`.
