@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from collections import defaultdict
 from typing import List, Optional, Tuple, Union
 import abc
 
@@ -660,13 +661,30 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
         )
         assert "dtype" in kwargs, "dtype should be provided to create a GPU buffer."
         assert "device" in kwargs, "device should be provided to create a GPU buffer."
-        assert "layer_id_to_kv_cache_group_id" in kwargs, "layer_id_to_kv_cache_group_id should be provided to create a GPU buffer."
-        assert "layer_name_to_kv_cache_group_id" in kwargs, "layer_name_to_kv_cache_group_id should be provided to create a GPU buffer."
+
+        if "layer_id_to_kv_cache_group_id" not in kwargs:
+            logger.warning(
+                "layer_id_to_kv_cache_group_id is not provided, "
+                "cannot support hybrid kv cache allocator. Fall "
+                "back to the default logic when hybrid kv cache "
+                "allocator is disabled."
+            )
+        if "layer_name_to_kv_cache_group_id" not in kwargs:
+            logger.warning(
+                "layer_name_to_kv_cache_group_id is not provided, "
+                "cannot support hybrid kv cache allocator. Fall "
+                "back to the default logic when hybrid kv cache "
+                "allocator is disabled."
+            )
 
         self.dtype = kwargs["dtype"]
         self.device = kwargs["device"]
-        self.layer_id_to_kv_cache_group_id = kwargs["layer_id_to_kv_cache_group_id"]
-        self.layer_name_to_kv_cache_group_id = kwargs["layer_name_to_kv_cache_group_id"]
+        self.layer_id_to_kv_cache_group_id = kwargs.get(
+            "layer_id_to_kv_cache_group_id", defaultdict(lambda: 0)
+        )
+        self.layer_name_to_kv_cache_group_id = kwargs.get(
+            "layer_name_to_kv_cache_group_id", defaultdict(lambda: 0)
+        )
 
         self.kvcaches: Optional[List[torch.Tensor]] = None
 
@@ -758,7 +776,7 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
             slot_mapping_full = torch.cat(slot_mapping_chunks, dim=0)
 
             slot_mappings_full[kv_cache_group_id] = slot_mapping_full
-            
+
         num_tokens = len(slot_mappings_full[0])
 
         if self.use_gpu:
@@ -796,7 +814,9 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
                             memory_obj.tensor,
                             self.kvcaches[layer_id][0],
                             self.kvcaches[layer_id][1],
-                            slot_mappings_full[self.layer_id_to_kv_cache_group_id[layer_id]],
+                            slot_mappings_full[
+                                self.layer_id_to_kv_cache_group_id[layer_id]
+                            ],
                             False,
                             True,
                         )
@@ -806,7 +826,9 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
                         tmp_gpu_buffer_obj.tensor,
                         self.kvcaches[layer_id][0],
                         self.kvcaches[layer_id][1],
-                        slot_mappings_full[self.layer_id_to_kv_cache_group_id[layer_id]],
+                        slot_mappings_full[
+                            self.layer_id_to_kv_cache_group_id[layer_id]
+                        ],
                         False,
                         True,
                     )
@@ -883,7 +905,7 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
             slot_mapping_full = torch.cat(slot_mapping_chunks, dim=0)
 
             slot_mappings_full[kv_cache_group_id] = slot_mapping_full
-            
+
         num_tokens = len(slot_mappings_full[0])
 
         if self.use_gpu:
@@ -909,7 +931,9 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
                         tmp_gpu_buffer_obj.tensor,
                         self.kvcaches[layer_id][0],
                         self.kvcaches[layer_id][1],
-                        slot_mappings_full[self.layer_id_to_kv_cache_group_id[layer_id]],
+                        slot_mappings_full[
+                            self.layer_id_to_kv_cache_group_id[layer_id]
+                        ],
                         True,
                         True,
                     )
@@ -927,7 +951,9 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
                             memory_obj.tensor,
                             self.kvcaches[layer_id][0],
                             self.kvcaches[layer_id][1],
-                            slot_mappings[self.layer_id_to_kv_cache_group_id[layer_id]][start:end],
+                            slot_mappings[self.layer_id_to_kv_cache_group_id[layer_id]][
+                                start:end
+                            ],
                             True,
                             True,
                         )

@@ -155,24 +155,6 @@ class RequestTracker:
                 local cache hit) and new tokens that will be scheduled.
 
         """
-        # # vLLM 0.9.0 update: request.block_ids changed from list[int] to
-        # # list[list[int]]
-        # # Need to check the type of request.block_ids
-
-        # unfolded_block_ids = []
-
-        # if not isinstance(new_request.block_ids[0], list):
-        #     unfolded_block_ids = new_request.block_ids.copy()
-        # else:
-        #     # According to the vLLM code
-        #     # (https://github.com/vllm-project/vllm/blob/main/vllm/v1/core/
-        #     # sched/scheduler.py#L943),
-        #     # only one KVCacheGroup is supported in connector for now.
-
-        #     # TODO: Please support multiple KVCacheGroup in connector.
-        #     # NOTE: Also, `update` method in RequestTracker should be
-        #     # updated accordingly.
-        #     unfolded_block_ids = new_request.block_ids[0].copy()
 
         # NOTE: Initialized in `update_state_after_alloc`
         disagg_spec = tmp_disagg_tracker.pop(new_request.req_id, None)
@@ -202,12 +184,13 @@ class RequestTracker:
     def update(
         self,
         new_token_ids: list[int],
-        new_block_ids: tuple[list[int], ...],
+        new_block_ids: Optional[tuple[list[int], ...]],
     ) -> None:
         """Update the request tracker when a running request is
         scheduled again
         """
-
+        if new_block_ids is None:
+            new_block_ids = ()
         assert isinstance(new_block_ids, tuple), (
             "new_block_ids is not a tuple, this indicates that the vLLM version "
             "is not 0.9.0 or higher, please update vLLM to 0.9.0 or higher."
@@ -326,12 +309,10 @@ class ReqMeta:
                 token_ids, tracker.mm_hashes, tracker.mm_positions
             )
 
-
         # NOTE(Kuntai): enumerate across different kv cache groups and construct
         # the slot mapping for each kv cache group.
         slot_mappings = {}
         for kv_cache_group_id, block_ids in tracker.allocated_block_ids.items():
-
             num_blocks = len(block_ids)
 
             block_ids = torch.tensor(block_ids, dtype=torch.long)
@@ -457,9 +438,12 @@ def _init_lmcache_engine(
     kv_cache_groups = vllm_config.kv_cache_config.kv_cache_groups
     layer_name_to_kv_cache_group_id = {}
     layer_id_to_kv_cache_group_id = {}
+
     # a small helper function to get layer id from name
     def extract_layer_index(name: str) -> int | None:
+        # Standard
         import re
+
         """
         Extract the numeric index from a string like
         'language_model.model.layers.18.self_attn.attn'.
@@ -472,6 +456,7 @@ def _init_lmcache_engine(
         """
         match = re.search(r"layers\.(\d+)\.", name)
         return int(match.group(1)) if match else None
+
     # construct the mapping from layer id to kv cache group id
     for idx, group in enumerate(kv_cache_groups):
         for layer_name in group.layer_names:
@@ -731,7 +716,9 @@ class LMCacheConnectorV1Impl:
             # TODO: have a pre-allocated buffer to hold the slot_mappings
             slot_mappings = request.slot_mappings
             for kv_cache_group_id in slot_mappings:
-                slot_mappings[kv_cache_group_id] = slot_mappings[kv_cache_group_id].cuda()
+                slot_mappings[kv_cache_group_id] = slot_mappings[
+                    kv_cache_group_id
+                ].cuda()
                 assert len(tokens) == len(slot_mappings[kv_cache_group_id])
 
             token_mask = torch.ones_like(tokens, dtype=torch.bool)
@@ -764,7 +751,9 @@ class LMCacheConnectorV1Impl:
                         token_mask[:lmcache_cached_tokens],
                         kvcaches=kvcaches,
                         slot_mappings={
-                            kv_cache_group_id: slot_mappings[kv_cache_group_id][:lmcache_cached_tokens] 
+                            kv_cache_group_id: slot_mappings[kv_cache_group_id][
+                                :lmcache_cached_tokens
+                            ]
                             for kv_cache_group_id in slot_mappings.keys()
                         },
                         sync=sync,
@@ -876,7 +865,9 @@ class LMCacheConnectorV1Impl:
 
                 # TODO: have a pre-allocated buffer to hold the slot_mappings
                 for kv_cache_group_id in slot_mappings:
-                    slot_mappings[kv_cache_group_id] = slot_mappings[kv_cache_group_id].cuda()
+                    slot_mappings[kv_cache_group_id] = slot_mappings[
+                        kv_cache_group_id
+                    ].cuda()
 
                 if self.kv_role == "kv_producer":
                     skip_leading_tokens = 0
