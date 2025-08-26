@@ -2,6 +2,7 @@
 # Standard
 from typing import List, Optional, Any
 from dataclasses import dataclass
+import uuid
 
 # Third Party
 import torch
@@ -297,6 +298,9 @@ class LMCacheLayerwiseConnector(LMCacheConnector):
         token_ids = torch.tensor(store_metadata.token_ids, dtype=torch.int64).cuda()
         store_mask = torch.ones_like(token_ids, dtype=torch.bool)
 
+        lookup_id = str(uuid.uuid4())
+        self.lmcache_engine.lookup(token_ids, lookup_id=lookup_id, pin=True)
+
         layerwise_storer = self.lmcache_engine.store_layer(
             token_ids,
             mask=store_mask,
@@ -309,5 +313,4 @@ class LMCacheLayerwiseConnector(LMCacheConnector):
         for _ in range(self.sgl_config.num_hidden_layers):
             next(layerwise_storer)
 
-        
-        
+        self.lmcache_engine.lookup_unpin([lookup_id])

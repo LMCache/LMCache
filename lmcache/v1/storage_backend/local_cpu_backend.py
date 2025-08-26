@@ -352,10 +352,6 @@ class LocalCPUBackend(StorageBackendInterface):
                     # `batched_remove`. Therefore, features like usage tracking
                     # is not supported.
                     old_mem_objs = []
-                    # print("evicting...")
-                    # for key, memory_obj in self.hot_cache.items():
-                    #     if key.layer_id == 0:
-                    #         print("key", key)
                     for key in evict_key_all_layer:
                         old_mem_objs.append(self.hot_cache[key])
                         self.cache_policy.update_on_force_evict(key)

@@ -1260,12 +1260,19 @@ class SGLangLayerwiseGPUConnector(GPUConnectorInterface):
             ):
                 assert memory_obj.metadata.fmt == MemoryFormat.KV_T2D
                 if self.use_gpu:
-                    if offset != 0:
+                    try:
+                        tmp_gpu_buffer_obj.tensor[start - offset : end - offset].copy_(
+                            memory_obj.tensor, non_blocking=True
+                        )
+                    except Exception as e:
+                        print(f"Error copying tensor: {e}")
                         print(f"start: {start}, end: {end}, offset: {offset}")
                         print(f"memory_obj.tensor.shape: {memory_obj.tensor.shape}")
-                    tmp_gpu_buffer_obj.tensor[start - offset : end - offset].copy_(
-                        memory_obj.tensor, non_blocking=True
-                    )
+                        print(f"tmp_gpu_buffer_obj.tensor.shape: {tmp_gpu_buffer_obj.tensor.shape}")
+                        print(f"slot_mapping length: {len(slot_mapping)}")
+                        print(f"slot_mapping full length: {len(slot_mapping_full)}")
+                        print(f"num of slot mapping chunks: {len(slot_mapping_chunks)}")
+                        raise e
                 else:
                     lmc_ops.single_layer_kv_transfer(
                         memory_obj.tensor,
@@ -1286,7 +1293,6 @@ class SGLangLayerwiseGPUConnector(GPUConnectorInterface):
                     False,
                     True,
                 )
-        yield
 
         # free the buffer memory
         tmp_gpu_buffer_obj.ref_count_down()
@@ -1338,7 +1344,6 @@ class SGLangLayerwiseGPUConnector(GPUConnectorInterface):
             raise ValueError("'sync' should be provided in kwargs.")
 
         slot_mapping: torch.Tensor = kwargs["slot_mapping"]
-        sync: bool = kwargs["sync"]
 
         self._lazy_initialize_buffer(self.kvcaches)
 
@@ -1355,6 +1360,11 @@ class SGLangLayerwiseGPUConnector(GPUConnectorInterface):
             tmp_gpu_buffer_obj = self.gpu_buffer_allocator.allocate(
                 buffer_shape, self.dtype, MemoryFormat.KV_T2D
             )
+            if tmp_gpu_buffer_obj is None:
+                logger.info("GPU buffer is None")
+                logger.info(f"buffer_shape: {buffer_shape}")
+                logger.info(f"dtype: {self.dtype}")
+                logger.info(f"MemoryFormat.KV_T2D: {MemoryFormat.KV_T2D}")
             assert tmp_gpu_buffer_obj is not None, (
                 "Failed to allocate GPU buffer in GPUConnector"
             )
@@ -1375,15 +1385,33 @@ class SGLangLayerwiseGPUConnector(GPUConnectorInterface):
                     True,
                     True,
                 )
+
+            start_idx = 0
+            if len(memory_objs_layer) != 0:
+                chunk_size = memory_objs_layer[0].tensor.shape[0]
+
             for start, end, memory_obj in zip(
                 starts, ends, memory_objs_layer, strict=False
             ):
                 assert memory_obj.tensor is not None
                 if self.use_gpu:
-                    memory_obj.tensor.copy_(
-                        tmp_gpu_buffer_obj.tensor[start - offset : end - offset],
-                        non_blocking=True,
-                    )
+                    try:
+                        memory_obj.tensor.copy_(
+                            tmp_gpu_buffer_obj.tensor[start_idx:start_idx + chunk_size],
+                            non_blocking=True,
+                        )
+                        start_idx += chunk_size
+                    except Exception as e:
+                        print(f"Error copying tensor: {e}")
+                        print(f"start: {start}, end: {end}, offset: {offset}")
+                        print(f"memory_obj.tensor.shape: {memory_obj.tensor.shape}")
+                        print(f"tmp_gpu_buffer_obj.tensor.shape: {tmp_gpu_buffer_obj.tensor.shape}")
+                        print(f"slot_mapping length: {len(slot_mapping)}")
+                        print(f"slot_mapping full length: {len(slot_mapping_full)}")
+                        print(f"num of slot mapping chunks: {len(slot_mapping_chunks)}")
+                        print(f"starts: {starts}")
+                        print(f"ends: {ends}")
+                        raise e
                 else:
                     lmc_ops.single_layer_kv_transfer(
                         memory_obj.tensor,
