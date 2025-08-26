@@ -16,7 +16,6 @@ from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import (
     MemoryFormat,
     MemoryObj,
-    MixedMemoryAllocator,
 )
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.v1.storage_backend.local_disk_backend import LocalDiskBackend
@@ -87,11 +86,13 @@ def async_loop():
     loop.close()
 
 
+# ----------------------------------------------------------------------------
+
+
 @pytest.fixture
-def local_cpu_backend():
+def local_cpu_backend(memory_allocator):
     """Create a LocalCPUBackend for testing."""
     config = LMCacheEngineConfig.from_legacy(chunk_size=256)
-    memory_allocator = MixedMemoryAllocator(1024 * 1024 * 1024)  # 1GB
     return LocalCPUBackend(config, memory_allocator)
 
 
