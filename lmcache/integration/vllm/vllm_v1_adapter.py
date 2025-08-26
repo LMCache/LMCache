@@ -117,7 +117,9 @@ class RequestTracker:
     # NOTE: allocated blocks could be more than the number of tokens
     # FIXME: need to check whether the block ids will be changed after
     #        preemption
-    allocated_block_ids: list[int]
+    # NOTE(Kuntai): the type is changed to a dict from kv cache group id
+    # to block ids.
+    allocated_block_ids: dict[int, list[int]]
 
     # The number of tokens that has been saved
     num_saved_tokens: int = 0
@@ -153,35 +155,43 @@ class RequestTracker:
                 local cache hit) and new tokens that will be scheduled.
 
         """
-        # vLLM 0.9.0 update: request.block_ids changed from list[int] to
-        # list[list[int]]
-        # Need to check the type of request.block_ids
+        # # vLLM 0.9.0 update: request.block_ids changed from list[int] to
+        # # list[list[int]]
+        # # Need to check the type of request.block_ids
 
-        unfolded_block_ids = []
+        # unfolded_block_ids = []
 
-        if not isinstance(new_request.block_ids[0], list):
-            unfolded_block_ids = new_request.block_ids.copy()
-        else:
-            # According to the vLLM code
-            # (https://github.com/vllm-project/vllm/blob/main/vllm/v1/core/
-            # sched/scheduler.py#L943),
-            # only one KVCacheGroup is supported in connector for now.
+        # if not isinstance(new_request.block_ids[0], list):
+        #     unfolded_block_ids = new_request.block_ids.copy()
+        # else:
+        #     # According to the vLLM code
+        #     # (https://github.com/vllm-project/vllm/blob/main/vllm/v1/core/
+        #     # sched/scheduler.py#L943),
+        #     # only one KVCacheGroup is supported in connector for now.
 
-            # TODO: Please support multiple KVCacheGroup in connector.
-            # NOTE: Also, `update` method in RequestTracker should be
-            # updated accordingly.
-            unfolded_block_ids = new_request.block_ids[0].copy()
+        #     # TODO: Please support multiple KVCacheGroup in connector.
+        #     # NOTE: Also, `update` method in RequestTracker should be
+        #     # updated accordingly.
+        #     unfolded_block_ids = new_request.block_ids[0].copy()
 
         # NOTE: Initialized in `update_state_after_alloc`
         disagg_spec = tmp_disagg_tracker.pop(new_request.req_id, None)
 
         request_configs = extract_request_configs(new_request.sampling_params)
 
+        assert isinstance(new_request.block_ids, tuple), (
+            "block_ids is not a tuple, this indicates that the vLLM version "
+            "is not 0.9.0 or higher, please update vLLM to 0.9.0 or higher."
+        )
+
         return RequestTracker(
             req_id=new_request.req_id,
             prompt_len=len(new_request.prompt_token_ids),
             token_ids=new_request.prompt_token_ids[:num_tokens_to_compute].copy(),
-            allocated_block_ids=unfolded_block_ids,
+            allocated_block_ids={
+                kv_cache_group_id: block_ids.copy()
+                for kv_cache_group_id, block_ids in enumerate(new_request.block_ids)
+            },
             num_saved_tokens=lmcache_cached_tokens,
             disagg_spec=disagg_spec,
             mm_hashes=new_request.mm_hashes.copy(),
@@ -192,23 +202,21 @@ class RequestTracker:
     def update(
         self,
         new_token_ids: list[int],
-        new_block_ids: Union[tuple[list[int], ...], list[int]],
+        new_block_ids: tuple[list[int], ...],
     ) -> None:
         """Update the request tracker when a running request is
         scheduled again
         """
 
+        assert isinstance(new_block_ids, tuple), (
+            "new_block_ids is not a tuple, this indicates that the vLLM version "
+            "is not 0.9.0 or higher, please update vLLM to 0.9.0 or higher."
+        )
+
         self.token_ids.extend(new_token_ids)
 
-        if len(new_block_ids) == 0:
-            new_block_ids = []
-        elif isinstance(new_block_ids, tuple):
-            new_block_ids = new_block_ids[0]
-        elif isinstance(new_block_ids, list):
-            pass
-        else:
-            raise ValueError(f"Unsupported new_block_ids type {type(new_block_ids)}")
-        self.allocated_block_ids.extend(new_block_ids)
+        for kv_cache_group_id, block_ids in enumerate(new_block_ids):
+            self.allocated_block_ids[kv_cache_group_id].extend(block_ids)
 
         # When a request is scheduled again, and the number of new tokens
         # is 1 (excluding chunked prefill), the request is in decode phase.
@@ -224,7 +232,7 @@ class ReqMeta:
     # Request tokens
     token_ids: torch.Tensor
     # Slot mapping
-    slot_mapping: torch.Tensor
+    slot_mappings: dict[int, torch.Tensor]
 
     # Whether is last prefill or not
     is_last_prefill: bool = False
@@ -318,30 +326,39 @@ class ReqMeta:
                 token_ids, tracker.mm_hashes, tracker.mm_positions
             )
 
-        num_blocks = len(tracker.allocated_block_ids)
 
-        block_ids = torch.tensor(tracker.allocated_block_ids, dtype=torch.long)
+        # NOTE(Kuntai): enumerate across different kv cache groups and construct
+        # the slot mapping for each kv cache group.
+        slot_mappings = {}
+        for kv_cache_group_id, block_ids in tracker.allocated_block_ids.items():
 
-        if len(token_ids) > num_blocks * block_size:
-            logger.error(
-                "The number of tokens is more than the number of blocks."
-                "Something might be wrong in scheduling logic!"
+            num_blocks = len(block_ids)
+
+            block_ids = torch.tensor(block_ids, dtype=torch.long)
+
+            if len(token_ids) > num_blocks * block_size:
+                logger.error(
+                    "In kv_cache_group_id: %d, "
+                    "the number of tokens is more than the number of blocks."
+                    "Something might be wrong in scheduling logic!",
+                    kv_cache_group_id,
+                )
+                logger.error(
+                    "Num tokens: %d, num blocks: %d, block size: %d",
+                    len(token_ids),
+                    num_blocks,
+                    block_size,
+                )
+
+            block_offsets = torch.arange(0, block_size, dtype=torch.long)
+            slot_mapping = (
+                block_offsets.reshape((1, block_size))
+                + block_ids.reshape((num_blocks, 1)) * block_size
             )
-            logger.error(
-                "Num tokens: %d, num blocks: %d, block size: %d",
-                len(token_ids),
-                num_blocks,
-                block_size,
-            )
 
-        block_offsets = torch.arange(0, block_size, dtype=torch.long)
-        slot_mapping = (
-            block_offsets.reshape((1, block_size))
-            + block_ids.reshape((num_blocks, 1)) * block_size
-        )
-
-        slot_mapping = slot_mapping.flatten()[: len(token_ids)]
-        assert slot_mapping.dtype == torch.long  # TODO: this could be removed
+            slot_mapping = slot_mapping.flatten()[: len(token_ids)]
+            assert slot_mapping.dtype == torch.long  # TODO: this could be removed
+            slot_mappings[kv_cache_group_id] = slot_mapping
 
         # For load operation: check whether the request is scheduled to load
         if load_spec is not None and load_spec.can_load:
@@ -357,7 +374,7 @@ class ReqMeta:
         return ReqMeta(
             req_id=tracker.req_id,
             token_ids=token_ids,
-            slot_mapping=slot_mapping,
+            slot_mappings=slot_mappings,
             is_last_prefill=is_last_prefill,
             save_spec=save_spec,
             load_spec=load_spec,
@@ -435,6 +452,34 @@ def _init_lmcache_engine(
         f"use mla: {use_mla}, kv shape: {kv_shape}, num_mtp_layers:{num_mtp_layers}"
     )
 
+    # NOTE(Kuntai): for hybrid memory allocator, we need to map from layer id
+    # or layer name to kv cache group id.
+    kv_cache_groups = vllm_config.kv_cache_config.kv_cache_groups
+    layer_name_to_kv_cache_group_id = {}
+    layer_id_to_kv_cache_group_id = {}
+    # a small helper function to get layer id from name
+    def extract_layer_index(name: str) -> int | None:
+        import re
+        """
+        Extract the numeric index from a string like
+        'language_model.model.layers.18.self_attn.attn'.
+
+        Args:
+            name (str): The input string.
+
+        Returns:
+            int | None: The layer index if found, otherwise None.
+        """
+        match = re.search(r"layers\.(\d+)\.", name)
+        return int(match.group(1)) if match else None
+    # construct the mapping from layer id to kv cache group id
+    for idx, group in enumerate(kv_cache_groups):
+        for layer_name in group.layer_names:
+            layer_name_to_kv_cache_group_id[layer_name] = idx
+            layer_id_to_kv_cache_group_id[extract_layer_index(layer_name)] = idx
+    for idx, name in enumerate(sorted(layer_name_to_kv_cache_group_id.keys())):
+        layer_id_to_kv_cache_group_id[idx] = layer_name_to_kv_cache_group_id[name]
+
     # Change current device.
     num_gpus = torch.cuda.device_count()
     local_rank = parallel_config.rank % num_gpus
@@ -448,6 +493,8 @@ def _init_lmcache_engine(
         kv_dtype,
         kv_shape,
         use_mla,
+        layer_id_to_kv_cache_group_id=layer_id_to_kv_cache_group_id,
+        layer_name_to_kv_cache_group_id=layer_name_to_kv_cache_group_id,
     )
 
     use_gpu = need_gpu_interm_buffer(lmcache_config)
@@ -682,8 +729,10 @@ class LMCacheConnectorV1Impl:
 
             tokens = request.token_ids
             # TODO: have a pre-allocated buffer to hold the slot_mappings
-            slot_mapping = request.slot_mapping.cuda()
-            assert len(tokens) == len(slot_mapping)
+            slot_mappings = request.slot_mappings
+            for kv_cache_group_id in slot_mappings:
+                slot_mappings[kv_cache_group_id] = slot_mappings[kv_cache_group_id].cuda()
+                assert len(tokens) == len(slot_mappings[kv_cache_group_id])
 
             token_mask = torch.ones_like(tokens, dtype=torch.bool)
             masked_token_count = (
@@ -706,14 +755,18 @@ class LMCacheConnectorV1Impl:
                         tokens[:lmcache_cached_tokens],
                         token_mask[:lmcache_cached_tokens],
                         kvcaches=kvcaches,
-                        slot_mapping=slot_mapping[:lmcache_cached_tokens],
+                        # FIXME(Kuntai): need to support multiple kv cache groups
+                        slot_mapping=slot_mappings[0][:lmcache_cached_tokens],
                     )
                 else:
                     layerwise_retriever = self.lmcache_engine.retrieve_layer(
                         tokens[:lmcache_cached_tokens],
                         token_mask[:lmcache_cached_tokens],
                         kvcaches=kvcaches,
-                        slot_mapping=slot_mapping[:lmcache_cached_tokens],
+                        slot_mappings={
+                            kv_cache_group_id: slot_mappings[kv_cache_group_id][:lmcache_cached_tokens] 
+                            for kv_cache_group_id in slot_mappings.keys()
+                        },
                         sync=sync,
                     )
                     # NOTE: retrieve for two layers at the first layer
@@ -725,7 +778,8 @@ class LMCacheConnectorV1Impl:
                     tokens[:lmcache_cached_tokens],
                     token_mask[:lmcache_cached_tokens],
                     kvcaches=kvcaches,
-                    slot_mapping=slot_mapping[:lmcache_cached_tokens],
+                    # FIXME(Kuntai): need to support multiple kv cache groups
+                    slot_mapping=slot_mappings[0][:lmcache_cached_tokens],
                     request_configs=request.request_configs,
                 )
 
@@ -815,12 +869,14 @@ class LMCacheConnectorV1Impl:
                 assert isinstance(token_ids, torch.Tensor)
                 assert token_ids.is_cpu
 
-                slot_mapping = request.slot_mapping
-                assert isinstance(slot_mapping, torch.Tensor)
-                assert len(slot_mapping) == len(token_ids)
+                slot_mappings = request.slot_mappings
+                for kv_cache_group_id in slot_mappings:
+                    assert isinstance(slot_mappings[kv_cache_group_id], torch.Tensor)
+                    assert len(slot_mappings[kv_cache_group_id]) == len(token_ids)
 
                 # TODO: have a pre-allocated buffer to hold the slot_mappings
-                slot_mapping = slot_mapping.cuda()
+                for kv_cache_group_id in slot_mappings:
+                    slot_mappings[kv_cache_group_id] = slot_mappings[kv_cache_group_id].cuda()
 
                 if self.kv_role == "kv_producer":
                     skip_leading_tokens = 0
@@ -854,7 +910,7 @@ class LMCacheConnectorV1Impl:
                     token_ids,
                     mask=store_mask,
                     kvcaches=kvcaches,
-                    slot_mapping=slot_mapping,
+                    slot_mappings=slot_mappings,
                     offset=skip_leading_tokens,
                     sync=is_first,
                 )
@@ -901,7 +957,8 @@ class LMCacheConnectorV1Impl:
             assert isinstance(token_ids, torch.Tensor)
             assert token_ids.is_cpu
 
-            slot_mapping = request.slot_mapping
+            # FIXME(Kuntai): need to support multiple kv cache groups
+            slot_mapping = request.slot_mappings[0]
             assert isinstance(slot_mapping, torch.Tensor)
             assert len(slot_mapping) == len(token_ids)
 
