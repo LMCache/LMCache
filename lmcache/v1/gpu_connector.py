@@ -802,7 +802,6 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
                         )
 
                 if self.use_gpu:
-                    print(layer_id, (tmp_gpu_buffer_obj.tensor).abs().mean())
                     lmc_ops.single_layer_kv_transfer(
                         tmp_gpu_buffer_obj.tensor,
                         self.kvcaches[layer_id][0],
