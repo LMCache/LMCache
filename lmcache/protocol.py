@@ -15,6 +15,7 @@ class ClientCommands(IntEnum):
 
 
 class ServerReturnCodes(IntEnum):
+    # keep the same as HTTP status codes
     SUCCESS = 200
     FAIL = 400
 
