@@ -192,7 +192,7 @@ class RequestTracker:
     def update(
         self,
         new_token_ids: list[int],
-        new_block_ids: Union[tuple[list[int], ...], list[int]],
+        new_block_ids: Union[Optional[tuple[list[int], ...]], list[int]],
     ) -> None:
         """Update the request tracker when a running request is
         scheduled again
