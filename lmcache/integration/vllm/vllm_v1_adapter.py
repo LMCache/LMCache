@@ -455,7 +455,10 @@ def _init_lmcache_engine(
             int | None: The layer index if found, otherwise None.
         """
         match = re.search(r"layers\.(\d+)\.", name)
-        return int(match.group(1)) if match else None
+        if match:
+            return int(match.group(1))
+        else:
+            raise ValueError(f"Failed to extract layer index from {name}")
 
     # construct the mapping from layer id to kv cache group id
     for idx, group in enumerate(kv_cache_groups):
