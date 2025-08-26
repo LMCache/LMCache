@@ -137,7 +137,7 @@ class LMCacheConnector:
     # Worker side APIs
     ####################
 
-    def load_kv(self, load_metadata: LoadMetadata) -> None:
+    def load_kv(self, load_metadata: LoadMetadata) -> int:
         token_ids = torch.tensor(load_metadata.token_ids, dtype=torch.int64).cuda()
         slot_mapping = load_metadata.slot_mapping.cuda()
         offset = load_metadata.offset
@@ -261,7 +261,7 @@ class LMCacheLayerwiseConnector(LMCacheConnector):
 
         return retrieved_token_num
 
-    def load_kv(self, load_metadata: LoadMetadata) -> None:
+    def load_kv(self, load_metadata: LoadMetadata) -> int:
         token_ids = torch.tensor(load_metadata.token_ids, dtype=torch.int64).cuda()
         slot_mapping = load_metadata.slot_mapping.cuda()
         offset = load_metadata.offset
@@ -310,5 +310,3 @@ class LMCacheLayerwiseConnector(LMCacheConnector):
         next(layerwise_storer)
         for _ in range(self.sgl_config.num_hidden_layers):
             next(layerwise_storer)
-
-        self.lmcache_engine.lookup_unpin([lookup_id])
