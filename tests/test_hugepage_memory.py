@@ -58,7 +58,7 @@ class TestHugepageSupport:
         test_size = 1024 * 1024  # 1MB
 
         try:
-            ptr = lmc_ops.alloc_pinned_hugepage_ptr(test_size, 0)
+            ptr = lmc_ops.alloc_pinned_hugepage_ptr(test_size)
             assert ptr != 0
 
             # Test memory access
@@ -68,7 +68,7 @@ class TestHugepageSupport:
             assert buf[0] == 42
 
             # Clean up
-            lmc_ops.free_pinned_hugepage_ptr(ptr)
+            lmc_ops.free_pinned_hugepage_ptr(ptr, test_size)
         except Exception as e:
             pytest.fail(f"Hugepage allocation failed: {e}")
 
@@ -101,13 +101,13 @@ class TestHugepageSupport:
         if not lmc_ops.is_hugepage_available():
             pytest.skip("Hugepages not available on this system")
 
-        test_size = 1024 * 1024  # 1MB
+        test_size = 40000  # 100 * 100 * 4 (float32)
 
         try:
             allocator = HugepageMemoryAllocator(
                 test_size,
                 use_paging=True,
-                shape=(100, 100),
+                shape=torch.Size((100, 100)),
                 dtype=torch.float32,
                 fmt="kv_2ltd",
             )
