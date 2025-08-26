@@ -9,12 +9,12 @@ import subprocess
 import time
 
 # Third Party
+from _pytest.monkeypatch import MonkeyPatch
 import pytest
 
 # First Party
 from lmcache.v1.cache_engine import LMCacheEngineBuilder
 from lmcache.v1.memory_management import MixedMemoryAllocator
-from _pytest.monkeypatch import MonkeyPatch
 
 # This is to mock the constructor and destructor of
 # MixedMemoryAllocator and PinMemoryAllocator to
@@ -385,6 +385,7 @@ def memory_allocator():
     finally:
         # Actually close once when the session ends
         _real.close()
+
 
 @pytest.fixture(autouse=True)  # function-scoped by default
 def use_shared_allocator(request, memory_allocator):
