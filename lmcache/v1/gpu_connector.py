@@ -692,14 +692,24 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
         assert "dtype" in kwargs, "dtype should be provided to create a GPU buffer."
         assert "device" in kwargs, "device should be provided to create a GPU buffer."
 
-        if "layer_id_to_kv_cache_group_id" not in kwargs:
+        if any(
+            [
+                "layer_id_to_kv_cache_group_id" not in kwargs,
+                kwargs["layer_id_to_kv_cache_group_id"] is None,
+            ]
+        ):
             logger.warning(
                 "layer_id_to_kv_cache_group_id is not provided, "
                 "cannot support hybrid kv cache allocator. Fall "
                 "back to the default logic when hybrid kv cache "
                 "allocator is disabled."
             )
-        if "layer_name_to_kv_cache_group_id" not in kwargs:
+        if any(
+            [
+                "layer_name_to_kv_cache_group_id" not in kwargs,
+                kwargs["layer_name_to_kv_cache_group_id"] is None,
+            ]
+        ):
             logger.warning(
                 "layer_name_to_kv_cache_group_id is not provided, "
                 "cannot support hybrid kv cache allocator. Fall "
