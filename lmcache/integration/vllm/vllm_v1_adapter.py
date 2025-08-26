@@ -214,8 +214,10 @@ class ReqMeta:
     req_id: str
     # Request tokens
     token_ids: torch.Tensor
-    # Slot mapping
+    # Slot mappings for each kv cache group
     slot_mappings: dict[int, torch.Tensor]
+    # Slot mapping for backward compatibility
+    slot_mapping: torch.Tensor
 
     # Whether is last prefill or not
     is_last_prefill: bool = False
@@ -356,6 +358,7 @@ class ReqMeta:
             req_id=tracker.req_id,
             token_ids=token_ids,
             slot_mappings=slot_mappings,
+            slot_mapping=slot_mappings[0],
             is_last_prefill=is_last_prefill,
             save_spec=save_spec,
             load_spec=load_spec,
