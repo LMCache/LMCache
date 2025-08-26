@@ -200,7 +200,12 @@ class RequestTracker:
 
         self.token_ids.extend(new_token_ids)
 
-        if len(new_block_ids) == 0:
+        if new_block_ids is None:
+            # https://github.com/vllm-project/vllm/commit/
+            # b029de9902aa3ac58806c8c17776c7074175b6db#
+            # diff-cafd89ce8a698a56acb24ada62831cbc7a980782f78a52d1742ba238031f296cL94
+            new_block_ids = []
+        elif len(new_block_ids) == 0:
             new_block_ids = []
         elif isinstance(new_block_ids, tuple):
             new_block_ids = new_block_ids[0]
