@@ -234,7 +234,7 @@ class LocalCPUBackend(StorageBackendInterface):
         dtype: torch.dtype,
         fmt: Optional[MemoryFormat] = None,
         eviction: bool = True,
-        is_store: bool = False,
+        busy_loop: bool = True,
     ) -> Optional[MemoryObj]:
         """
         Allocate a memory object of shape and dtype
@@ -242,6 +242,9 @@ class LocalCPUBackend(StorageBackendInterface):
         local_cpu_backend.allocate() to get memory objects
         regardless of whether local_cpu is True or False
         """
+        logger.debug(
+            f"Allocating memory in local cpu backend with busy loop: {busy_loop}"
+        )
         if fmt is None:
             if self.layerwise:
                 if self.enable_blending:
@@ -251,6 +254,7 @@ class LocalCPUBackend(StorageBackendInterface):
             else:
                 fmt = MemoryFormat.KV_2LTD
 
+        self.memory_allocator.memcheck()
         memory_obj = self.memory_allocator.allocate(shape, dtype, fmt)
         if memory_obj is not None or not eviction:
             return memory_obj
@@ -260,7 +264,13 @@ class LocalCPUBackend(StorageBackendInterface):
         )
 
         evict_keys_count = 0
+        num_attempts = 0
         while True:
+            num_attempts += 1
+            logger.debug(
+                f"Unable to allocate memory object after {num_attempts}"
+                " attempts of local cpu backend allocate()"
+            )
             # whether or not this request needs to wait or other requests
             wait_other_requests = True
             if self.use_hot:
@@ -271,25 +281,27 @@ class LocalCPUBackend(StorageBackendInterface):
                     evict_keys = self.cache_policy.get_evict_candidates(
                         self.hot_cache, num_candidates=num_candidates
                     )
-                if evict_keys:
-                    # we can continue trying to evict from the hot_cache
-                    # and don't need to wait for other requests yet
-                    wait_other_requests = False
-                    logger.debug(f"Evicting {len(evict_keys)} chunks from cpu memory")
-                    self.batched_remove(evict_keys, force=False)
-                    evict_keys_count += len(evict_keys)
-                else:
-                    self.stats_monitor.update_local_cpu_evict_failed_count(
-                        num_candidates
-                    )
-                    if is_store:
-                        logger.info(
-                            "Not allocating if we are not",
-                            "immediately able to evict for store",
+                    if evict_keys:
+                        # we can continue trying to evict from the hot_cache
+                        # and don't need to wait for other requests yet
+                        wait_other_requests = False
+                        logger.debug(
+                            f"Evicting {len(evict_keys)} chunks from cpu memory"
                         )
-                        break
+                        # remove
+                        self.batched_remove(evict_keys, force=False)
+                        evict_keys_count += len(evict_keys)
+                    else:
+                        self.stats_monitor.update_local_cpu_evict_failed_count(
+                            num_candidates
+                        )
 
             if wait_other_requests:
+                if not busy_loop:
+                    logger.debug(
+                        "Not busy looping becausewe are not immediately able to evict"
+                    )
+                    break
                 # TODO: make time_to_wait a config
                 time_to_wait = 0.1
                 logger.warning(
@@ -297,7 +309,7 @@ class LocalCPUBackend(StorageBackendInterface):
                     "Local cpu memory is under pressure. "
                     f"Waiting for {time_to_wait} seconds before retrying."
                 )
-                # self.memory_allocator.memcheck()
+                self.memory_allocator.memcheck()
                 # do not hold the lock during sleep
                 time.sleep(time_to_wait)
 
@@ -316,7 +328,7 @@ class LocalCPUBackend(StorageBackendInterface):
         batch_size: int,
         fmt: Optional[MemoryFormat] = None,
         eviction: bool = True,
-        is_store: bool = False,
+        busy_loop: bool = True,
     ) -> Optional[List[MemoryObj]]:
         """
         Batched allocate `batch_size` memory objects of shape and dtype
@@ -324,6 +336,10 @@ class LocalCPUBackend(StorageBackendInterface):
         local_cpu_backend.allocate() to get memory objects
         regardless of whether local_cpu is True or False
         """
+        logger.debug(
+            f"Batched allocating memory in local cpu backend"
+            f" with busy loop: {busy_loop}"
+        )
         if fmt is None:
             if self.layerwise:
                 if self.enable_blending:
@@ -345,8 +361,13 @@ class LocalCPUBackend(StorageBackendInterface):
         )
 
         evict_keys_count = 0
-
+        num_attempts = 0
         while True:
+            num_attempts += 1
+            logger.debug(
+                f"Unable to allocate memory object after {num_attempts}"
+                " attempts of local cpu backend batched_allocate()"
+            )
             wait_other_requests = True
             if self.use_hot:
                 # TODO(Jiayi): optimize `num_candidates` with estimation.
@@ -388,14 +409,13 @@ class LocalCPUBackend(StorageBackendInterface):
                         self.stats_monitor.update_local_cpu_evict_failed_count(
                             num_candidates
                         )
-                        if is_store:
-                            logger.info(
-                                "Not allocating if we are not",
-                                "immediately able to evict for store",
-                            )
-                            break
 
             if wait_other_requests:
+                if not busy_loop:
+                    logger.debug(
+                        "Not busy looping becausewe are not immediately able to evict"
+                    )
+                    break
                 # TODO: make time_to_wait a config
                 time_to_wait = 0.1
                 logger.warning(
@@ -403,7 +423,7 @@ class LocalCPUBackend(StorageBackendInterface):
                     "Local cpu memory is under pressure. "
                     f"Waiting for {time_to_wait} seconds before retrying."
                 )
-                # self.memory_allocator.memcheck()
+                self.memory_allocator.memcheck()
                 # do not hold the lock during sleep
                 time.sleep(time_to_wait)
 

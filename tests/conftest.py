@@ -126,6 +126,37 @@ def patch_pin_allocator():
 """
 
 
+class MockRedisPipeline:
+    def __init__(self, store):
+        self.store = store
+        self.commands = []
+
+    def set(self, key, value):
+        self.commands.append(("set", key, value))
+        return self
+
+    def get(self, key):
+        self.commands.append(("get", key))
+        return self
+
+    async def execute(self):
+        results = []
+        for cmd in self.commands:
+            if cmd[0] == "set":
+                self.store[cmd[1]] = cmd[2]
+                results.append(True)
+            elif cmd[0] == "get":
+                results.append(self.store.get(cmd[1], None))
+        self.commands.clear()
+        return results
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        pass
+
+
 class MockRedis:
     def __init__(
         self, host=None, port=None, url=None, decode_responses=False, **kwargs
@@ -136,19 +167,25 @@ class MockRedis:
         self.url = url
         self.decode_responses = decode_responses
 
-    def set(self, key, value):
+    async def set(self, key, value):
         self.store[key] = value
         return True
 
-    def get(self, key):
+    async def get(self, key):
         return self.store.get(key, None)
 
-    def exists(self, key):
+    async def exists(self, key):
         return key in self.store
+
+    def pipeline(self, transaction=False):
+        return MockRedisPipeline(self.store)
 
     def scan(self, cursor=0, match=None):
         keys = [s.encode("utf-8") for s in self.store.keys()]
         return (0, keys)
+
+    async def aclose(self):
+        pass
 
     def close(self):
         pass
@@ -187,13 +224,20 @@ def mock_redis():
     with (
         patch("redis.Redis", MockRedis) as mock_redis_class,
         patch("redis.from_url", MockRedis.from_url),
+        patch("redis.asyncio.from_url", MockRedis.from_url),
+        patch("redis.asyncio.Redis", MockRedis),
+        patch("redis.asyncio.client.Redis", MockRedis),
     ):
         yield mock_redis_class
 
 
 @pytest.fixture(scope="function", autouse=True)
 def mock_redis_sentinel():
-    with patch("redis.Sentinel", MockRedisSentinel) as mock:
+    with (
+        patch("redis.Sentinel", MockRedisSentinel) as mock,
+        patch("redis.asyncio.sentinel.Sentinel", MockRedisSentinel),
+        patch("redis.asyncio.Sentinel", MockRedisSentinel),
+    ):
         yield mock
 
 
