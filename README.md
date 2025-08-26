@@ -53,7 +53,7 @@ By combining LMCache with vLLM, developers achieve 3-10x delay savings and GPU c
   * CPU
   * Disk
   * [NIXL](https://github.com/ai-dynamo/nixl)
-- [x] **NEW: Hugepage Memory Support** - Linux hugepage allocation for improved performance and reduced TLB pressure
+
 - [x] Installation support through pip and latest vLLM
 
 ## Installation
