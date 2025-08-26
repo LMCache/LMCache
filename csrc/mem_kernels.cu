@@ -3,6 +3,7 @@
 #include <torch/all.h>
 #include <c10/cuda/CUDAGuard.h>
 #include "mem_kernels.cuh"
+#include "utils.h"
 #include <ATen/ATen.h>
 #include <ATen/cuda/CUDAContext.h>
 #ifdef USE_ROCM
@@ -348,17 +349,15 @@ void multi_layer_kv_transfer(
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
   if (not direction) {
-    lmc::load_and_reshape_multi_layer_kernel<int64_t, false>
-        <<<grid, block, 0, stream>>>(key_value_ptr, page_buffer_ptrs,
-                                     slot_mapping_ptr, num_qwords, num_tokens,
-                                     num_layers, page_buffer_size);
-    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    LAUNCH_KERNEL_WITH_CHECK(
+        (lmc::load_and_reshape_multi_layer_kernel<int64_t, false>), grid, block,
+        0, stream, key_value_ptr, page_buffer_ptrs, slot_mapping_ptr,
+        num_qwords, num_tokens, num_layers, page_buffer_size);
   } else {
-    lmc::load_and_reshape_multi_layer_kernel<int64_t, true>
-        <<<grid, block, 0, stream>>>(key_value_ptr, page_buffer_ptrs,
-                                     slot_mapping_ptr, num_qwords, num_tokens,
-                                     num_layers, page_buffer_size);
-    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    LAUNCH_KERNEL_WITH_CHECK(
+        (lmc::load_and_reshape_multi_layer_kernel<int64_t, true>), grid, block,
+        0, stream, key_value_ptr, page_buffer_ptrs, slot_mapping_ptr,
+        num_qwords, num_tokens, num_layers, page_buffer_size);
   }
 }
 
@@ -424,17 +423,15 @@ void multi_layer_kv_transfer_unilateral(
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
   if (not direction) {
-    lmc::load_and_reshape_multi_layer_kernel_unilateral<int64_t, false>
-        <<<grid, block, 0, stream>>>(key_value_ptr, page_buffer_ptrs,
-                                     slot_mapping_ptr, num_qwords, num_tokens,
-                                     num_layers, page_buffer_size);
-    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    LAUNCH_KERNEL_WITH_CHECK(
+        (lmc::load_and_reshape_multi_layer_kernel_unilateral<int64_t, false>),
+        grid, block, 0, stream, key_value_ptr, page_buffer_ptrs,
+        slot_mapping_ptr, num_qwords, num_tokens, num_layers, page_buffer_size);
   } else {
-    lmc::load_and_reshape_multi_layer_kernel_unilateral<int64_t, true>
-        <<<grid, block, 0, stream>>>(key_value_ptr, page_buffer_ptrs,
-                                     slot_mapping_ptr, num_qwords, num_tokens,
-                                     num_layers, page_buffer_size);
-    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    LAUNCH_KERNEL_WITH_CHECK(
+        (lmc::load_and_reshape_multi_layer_kernel_unilateral<int64_t, true>),
+        grid, block, 0, stream, key_value_ptr, page_buffer_ptrs,
+        slot_mapping_ptr, num_qwords, num_tokens, num_layers, page_buffer_size);
   }
 }
 
@@ -524,7 +521,8 @@ void single_layer_kv_transfer(
       device_of(vllm_key_value_cache));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
-  lmc::single_layer_kv_transfer_kernel<int64_t><<<grid, block, 0, stream>>>(
+  LAUNCH_KERNEL_WITH_CHECK(
+      (lmc::single_layer_kv_transfer_kernel<int64_t>), grid, block, 0, stream,
       lmc_key_value_cache_ptr, vllm_key_value_cache_ptr, slot_mapping_ptr,
       vllm_block_key_stride_in_64bit, vllm_value_offset, lmc_stride,
       lmc_value_offset, num_heads, head_size_in_64bit, block_size, direction);
@@ -573,7 +571,8 @@ void load_and_reshape_flash(
   const at::cuda::OptionalCUDAGuard device_guard(device_of(key_cache));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
-  lmc::load_and_reshape_flash_kernel<int64_t><<<grid, block, 0, stream>>>(
+  LAUNCH_KERNEL_WITH_CHECK(
+      (lmc::load_and_reshape_flash_kernel<int64_t>), grid, block, 0, stream,
       key_value_ptr, key_cache_ptr, value_cache_ptr, slot_mapping_ptr,
       block_stride_in_64bit, key_value_stride, num_heads, head_size_in_64bit,
       block_size, key_layer_offset, value_layer_offset);
@@ -622,8 +621,9 @@ void reshape_and_cache_back_flash(
   const at::cuda::OptionalCUDAGuard device_guard(device_of(key_cache));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
-  lmc::reshape_and_cache_back_flash_kernel<int64_t><<<grid, block, 0, stream>>>(
-      key_value_ptr, key_cache_ptr, value_cache_ptr, slot_mapping_ptr,
+  LAUNCH_KERNEL_WITH_CHECK(
+      (lmc::reshape_and_cache_back_flash_kernel<int64_t>), grid, block, 0,
+      stream, key_value_ptr, key_cache_ptr, value_cache_ptr, slot_mapping_ptr,
       block_stride_in_64bit, key_value_stride, num_heads, head_size_in_64bit,
       block_size, key_layer_offset, value_layer_offset);
 }
