@@ -159,23 +159,22 @@ uintptr_t alloc_pinned_hugepage_ptr(size_t size, unsigned int flags) {
   return reinterpret_cast<uintptr_t>(ptr);
 }
 
-void free_pinned_hugepage_ptr(uintptr_t ptr) {
+void free_pinned_hugepage_ptr(uintptr_t ptr, size_t size) {
   void* p = reinterpret_cast<void*>(ptr);
   
-  // Get the size from the memory mapping
-  // Note: This is a limitation - we need to track size separately
-  // For now, we'll use a default approach
-  size_t size = 2 * 1024 * 1024;  // Default to 2MB, should be tracked properly
+  // Round up size to hugepage boundary
+  int hugepage_size = get_hugepage_size();
+  size_t aligned_size = (size + hugepage_size - 1) & ~(hugepage_size - 1);
   
   // Unpin first, then unmap
   cudaError_t st = cudaHostUnregister(p);
   if (st != cudaSuccess) {
-    munmap(p, size);
+    munmap(p, aligned_size);
     throw std::runtime_error(std::string("cudaHostUnregister failed: ") +
                              cudaGetErrorString(st));
   }
   
-  if (munmap(p, size) != 0) {
+  if (munmap(p, aligned_size) != 0) {
     throw std::runtime_error(std::string("munmap failed: ") + strerror(errno));
   }
 }

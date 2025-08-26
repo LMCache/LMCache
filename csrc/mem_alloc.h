@@ -11,7 +11,7 @@ void free_pinned_numa_ptr(uintptr_t ptr, size_t size);
 // Hugepage support functions
 uintptr_t alloc_pinned_hugepage_ptr(size_t size, unsigned int flags);
 
-void free_pinned_hugepage_ptr(uintptr_t ptr);
+void free_pinned_hugepage_ptr(uintptr_t ptr, size_t size);
 
 uintptr_t alloc_pinned_numa_hugepage_ptr(size_t size, int node);
 

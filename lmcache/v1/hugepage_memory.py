@@ -124,7 +124,7 @@ class HugepageMemoryAllocator(MemoryAllocatorInterface):
     def close(self):
         if not self._unregistered:
             torch.cuda.synchronize()
-            lmc_ops.free_pinned_hugepage_ptr(self._ptr)
+            lmc_ops.free_pinned_hugepage_ptr(self._ptr, self._size)
             self._unregistered = True
     
     def get_hugepage_info(self):
