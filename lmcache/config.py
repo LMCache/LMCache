@@ -41,7 +41,6 @@ class LMCacheEngineMetadata:
     layer_id_to_kv_cache_group_id: Optional[dict[int, int]] = None
     """ Hybrid allocator: the mapping from layer name to kv cache group id """
     layer_name_to_kv_cache_group_id: Optional[dict[str, int]] = None
-    
 
     def is_first_rank(self) -> bool:
         """Check if the current worker is the first rank"""
