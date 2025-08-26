@@ -92,8 +92,11 @@ wait_for_openai_api_server() {
 }
 
 run_lmcache_vllmopenai_container() {
-    local cfg_name="$1"
+    local docker="$1"
+    local vllm="$2"
+    local cfg_name="$3"
     LOGFILE="/tmp/build_${BUILD_ID}_${cfg_name}.log"
+
     # Pick the GPU with the largest free memory
     source "$ORIG_DIR/.buildkite/scripts/pick-free-gpu.sh" $PORT
     best_gpu="${CUDA_VISIBLE_DEVICES}"
@@ -103,31 +106,32 @@ run_lmcache_vllmopenai_container() {
         --runtime nvidia
         --network host
         --gpus "device=${best_gpu}"
-        --volume "${ORIG_DIR}/.buildkite/lmcache_configs:/configs:ro"
         --volume ~/.cache/huggingface:/root/.cache/huggingface
         --env VLLM_USE_FLASHINFER_SAMPLER=0
         --env HF_TOKEN="$HF_TOKEN"
-        --env LMCACHE_CONFIG_FILE="/configs/${cfg_name}"
     )
+    while IFS= read -r line; do
+        key="${line%%:*}" 
+        val="${line#*:}"
+        docker_args+=(--"$key" "$val")
+    done < <(yq -r 'to_entries[] | .key as $k | .value[] | "\($k):\(. )"' <<<"$docker")
 
     # vllm args
+    vllm_model="$(yq -r '.model' <<<"$vllm_args")"
+    mapfile -t vllm_cli_args < <(yq -r '.args // [] | .[]' <<<"$vllm_args")
     cmd_args=(
         lmcache/vllm-openai:build-latest
-        meta-llama/Llama-3.2-1B-Instruct
+        "$vllm_model"
         --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}'
         --port "$PORT"
     )
-    if [ "$test_mode" = "dummy" ]; then
-        cmd_args=("${cmd_args[@]}" --max-model-len 1024 --gpu-memory-utilization '0.35' --enforce-eager)
-    fi
+    cmd_args+=("${vllm_cli_args[@]}")
 
     CID=$(
         docker run -d \
             "${docker_args[@]}" \
             "${cmd_args[@]}"
     )
-
-    buildkite-agent meta-data set "docker-CID" "$CID"
 
     wait_for_openai_api_server
 
@@ -192,22 +196,23 @@ test_vllmopenai_server_with_lmcache_integrated() {
 }
 
 run_long_doc_qa() {
-    local num_docs="${NUM_DOCUMENTS:-8}"
-    local doc_len="${DOCUMENT_LENGTH:-20000}"
-    local out_len="${OUTPUT_LEN:-100}"
-    local repeat_count="${REPEAT_COUNT:-2}"
-    local repeat_mode="${REPEAT_MODE:-random}"
-    local shuffle_seed="${SHUFFLE_SEED:-0}"
-    local max_inflight="${MAX_INFLIGHT_REQUESTS:-20}"
-    local sleep_after="${SLEEP_TIME_AFTER_WARMUP:-0.0}"
-    local expected_ttft_gain="${EXPECTED_TTFT_GAIN:-2.3}"
-    local expected_latency_gain="${EXPECTED_LATENCY_GAIN:-3.5}"
+    local workload_config="$1"
 
-    echo "→ Running long-doc-qa:"
-    echo "   num_docs=${num_docs}, doc_len=${doc_len}, out_len=${out_len}"
-    echo "   repeat=${repeat_mode}×${repeat_count}, seed=${shuffle_seed}"
-    echo "   inflight=${max_inflight}, sleep_after=${sleep_after}s"
-    echo "   expected_ttft_gain=${expected_ttft_gain}, expected_latency_gain=${expected_latency_gain}"
+    echo "→ Running long-doc-qa with customed workload config:"
+    printf '%s\n' "$workload_config"
+
+    local workload_args=()
+    mapfile -d '' -t workload_args < <(
+    jq -j '
+        to_entries[]
+        | select(.value != null and (.value|tostring) != "")
+        | "--\(.key)", "\u0000",
+        (if (.value|type) == "string"
+        then .value
+        else (.value|tostring)
+        end), "\u0000"
+    ' <<<"$workload_yaml"
+    )
 
     if [ ! -d ".venv" ]; then
         UV_PYTHON=python3 uv -q venv
@@ -215,19 +220,9 @@ run_long_doc_qa() {
     source .venv/bin/activate
     uv -q pip install openai
     python3 "$ORIG_DIR/benchmarks/long-doc-qa/long-doc-qa.py" \
-        --num-documents="$num_docs" \
-        --document-length="$doc_len" \
-        --output-len="$out_len" \
-        --repeat-count="$repeat_count" \
-        --repeat-mode="$repeat_mode" \
-        --shuffle-seed="$shuffle_seed" \
-        --max-inflight-requests="$max_inflight" \
-        --sleep-time-after-warmup="$sleep_after" \
+        "${workload_args[@]}" \
         --port="$PORT" \
-        --model="meta-llama/Llama-3.2-1B-Instruct" \
-        --output="response.txt" \
-        --expected-ttft-gain="$expected_ttft_gain" \
-        --expected-latency-gain="$expected_latency_gain"
+        --output="response.txt"
 }
 
 #########
@@ -239,10 +234,6 @@ while [ $# -gt 0 ]; do
     --configs* | -c*)
         if [[ "$1" != *=* ]]; then shift; fi
         configs_arg="${1#*=}"
-        ;;
-    --tests* | -t*)
-        if [[ "$1" != *=* ]]; then shift; fi
-        test_mode="${1#*=}"
         ;;
     --hf-token* | -hft*)
         if [[ "$1" != *=* ]]; then shift; fi
@@ -270,7 +261,7 @@ while [ $# -gt 0 ]; do
 done
 
 ORIG_DIR="$PWD"
-WORKLOAD_DIR="${ORIG_DIR}/.buildkite/workload_configs"
+CONFIG_DIR="${ORIG_DIR}/.buildkite/configs"
 
 # Read the configs argument (always a file with one config per line)
 if [[ ! -f "$configs_arg" ]]; then
@@ -278,7 +269,7 @@ if [[ ! -f "$configs_arg" ]]; then
     exit 1
 fi
 mapfile -t CONFIG_NAMES < <(
-  sed 's/[[:space:]]\+$//' "$configs_arg"
+    sed 's/[[:space:]]\+$//' "$configs_arg"
 )
 
 # Find an available port starting from 8000
@@ -301,32 +292,20 @@ build_lmcache_vllmopenai_image
 
 for cfg_name in "${CONFIG_NAMES[@]}"; do
     echo -e "\033[1;33m===== Testing LMCache with ${cfg_name} =====\033[0m"
+    cfg_file="${CONFIG_DIR}/${cfg_name}"
 
+    # Start server
+    docker_args="$(yq '.docker' "$cfg_file")"
+    vllm_args="$(yq '.vllm' "$cfg_file")"
+    run_lmcache_vllmopenai_container "$docker_args" "$vllm_args" "$cfg_name"
+
+    # Send request
+    test_mode="$(yq -r '.workload.type' "$cfg_file")"
     if [ "$test_mode" = "dummy" ]; then
-        run_lmcache_vllmopenai_container "$cfg_name" "$test_mode"
         test_vllmopenai_server_with_lmcache_integrated
     elif [ "$test_mode" = "long-doc-qa" ]; then
-        # load workload override from YAML if present
-        workload_file="${WORKLOAD_DIR}/${cfg_name}"
-        if [[ -f "$workload_file" ]]; then
-            echo "→ Loading workload parameters from ${workload_file}"
-            NUM_DOCUMENTS="$(yq e '.num_docs' "$workload_file")"
-            DOCUMENT_LENGTH="$(yq e '.doc_len' "$workload_file")"
-            OUTPUT_LEN="$(yq e '.out_len' "$workload_file")"
-            REPEAT_COUNT="$(yq e '.repeat_count' "$workload_file")"
-            REPEAT_MODE="$(yq e '.repeat_mode' "$workload_file")"
-            SHUFFLE_SEED="$(yq e '.shuffle_seed' "$workload_file")"
-            MAX_INFLIGHT_REQUESTS="$(yq e '.max_inflight' "$workload_file")"
-            SLEEP_TIME_AFTER_WARMUP="$(yq e '.sleep_after' "$workload_file")"
-            EXPECTED_TTFT_GAIN="$(yq e '.expected_ttft_gain' "$workload_file")"
-            EXPECTED_LATENCY_GAIN="$(yq e '.expected_latency_gain' "$workload_file")"
-        else
-            echo "❌ Error: workload YAML for ${cfg_name} not found at ${workload_file}" >&2
-            exit 1
-        fi
-
-        run_lmcache_vllmopenai_container "$cfg_name" "$test_mode"
-        run_long_doc_qa
+        workload_yaml="$(yq '(.workload * {"model": .vllm.model}) | del(.type)' "$cfg_file")"
+        run_long_doc_qa "$workload_yaml"
     fi
 
     cleanup 0

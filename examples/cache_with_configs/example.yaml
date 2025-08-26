@@ -2,6 +2,3 @@ chunk_size: 256
 local_device: "cpu"
 local_cpu: True
 max_local_cpu_size: 10
-extra_config:
-  tag_keys: ["user"]
-

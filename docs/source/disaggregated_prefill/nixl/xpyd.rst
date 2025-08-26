@@ -135,6 +135,7 @@ The decoder(s) are configured via ``configs/lmcache-decoder-x-config.yaml``:
    nixl_peer_alloc_port: 740x
    nixl_buffer_size: 2147483648 # 2GB
    nixl_buffer_device: "cuda"
+   nixl_backends: [UCX]
 
 Key settings:
 
