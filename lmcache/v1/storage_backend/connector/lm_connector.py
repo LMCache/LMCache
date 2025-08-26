@@ -12,10 +12,10 @@ from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey, _lmcache_nvtx_annotate
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
 from lmcache.v1.protocol import (
-    ClientCommands,
+    ClientCommand,
     ClientMetaMessage,
     ServerMetaMessage,
-    ServerReturnCodes,
+    ServerReturnCode,
 )
 from lmcache.v1.storage_backend.connector.base_connector import RemoteConnector
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
@@ -83,7 +83,7 @@ class LMCServerConnector(RemoteConnector):
         async with self.async_socket_lock:
             self.client_socket.sendall(
                 ClientMetaMessage(
-                    ClientCommands.EXIST,
+                    ClientCommand.EXIST,
                     key,
                     0,
                     MemoryFormat(1),
@@ -94,7 +94,7 @@ class LMCServerConnector(RemoteConnector):
 
             response = self.client_socket.recv(ServerMetaMessage.packlength())
 
-        return ServerMetaMessage.deserialize(response).code == ServerReturnCodes.SUCCESS
+        return ServerMetaMessage.deserialize(response).code == ServerReturnCode.SUCCESS
 
     def exists_sync(self, key: CacheEngineKey) -> bool:
         future = asyncio.run_coroutine_threadsafe(self.exists(key), self.loop)
@@ -121,7 +121,7 @@ class LMCServerConnector(RemoteConnector):
             await self.loop.sock_sendall(
                 self.client_socket,
                 ClientMetaMessage(
-                    ClientCommands.PUT,
+                    ClientCommand.PUT,
                     key,
                     len(kv_bytes),
                     memory_format,
@@ -142,7 +142,7 @@ class LMCServerConnector(RemoteConnector):
         async with self.async_socket_lock:
             self.client_socket.sendall(
                 ClientMetaMessage(
-                    ClientCommands.GET,
+                    ClientCommand.GET,
                     key,
                     0,
                     MemoryFormat(1),
@@ -154,7 +154,7 @@ class LMCServerConnector(RemoteConnector):
             data = self.client_socket.recv(ServerMetaMessage.packlength())
 
         meta = ServerMetaMessage.deserialize(data)
-        if meta.code != ServerReturnCodes.SUCCESS:
+        if meta.code != ServerReturnCode.SUCCESS:
             return None
 
         async with self.async_socket_lock:

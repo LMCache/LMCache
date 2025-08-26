@@ -7,14 +7,14 @@ import struct
 MAX_KEY_LENGTH = 150
 
 
-class ClientCommands(IntEnum):
+class ClientCommand(IntEnum):
     PUT = auto()
     GET = auto()
     EXIST = auto()
     LIST = auto()
 
 
-class ServerReturnCodes(IntEnum):
+class ServerReturnCode(IntEnum):
     # keep the same as HTTP status codes
     SUCCESS = 200
     FAIL = 400
@@ -26,7 +26,7 @@ class ClientMetaMessage:
     Control message from LMCServerConnector to LMCacheServer
     """
 
-    command: ClientCommands
+    command: ClientCommand
     key: str
     length: int
 
@@ -36,7 +36,7 @@ class ClientMetaMessage:
         )
         packed_bytes = struct.pack(
             f"ii{MAX_KEY_LENGTH}s",
-            self.command,
+            self.command.value,
             self.length,
             self.key.encode().ljust(MAX_KEY_LENGTH),
         )
@@ -45,7 +45,7 @@ class ClientMetaMessage:
     @staticmethod
     def deserialize(s: bytes) -> "ClientMetaMessage":
         command, length, key = struct.unpack(f"ii{MAX_KEY_LENGTH}s", s)
-        return ClientMetaMessage(ClientCommands(command), key.decode().strip(), length)
+        return ClientMetaMessage(ClientCommand(command), key.decode().strip(), length)
 
     @staticmethod
     def packlength() -> int:
@@ -58,11 +58,11 @@ class ServerMetaMessage:
     Control message from LMCacheServer to LMCServerConnector
     """
 
-    code: ServerReturnCodes
+    code: ServerReturnCode
     length: int
 
     def serialize(self) -> bytes:
-        packed_bytes = struct.pack("ii", self.code, self.length)
+        packed_bytes = struct.pack("ii", self.code.value, self.length)
         return packed_bytes
 
     @staticmethod
@@ -72,4 +72,4 @@ class ServerMetaMessage:
     @staticmethod
     def deserialize(s: bytes) -> "ServerMetaMessage":
         code, length = struct.unpack("ii", s)
-        return ServerMetaMessage(ServerReturnCodes(code), length)
+        return ServerMetaMessage(ServerReturnCode(code), length)
