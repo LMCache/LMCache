@@ -9,7 +9,6 @@ import subprocess
 import time
 
 # Third Party
-from _pytest.monkeypatch import MonkeyPatch
 import pytest
 
 # First Party
@@ -388,24 +387,19 @@ def memory_allocator():
 
 
 @pytest.fixture(autouse=True)  # function-scoped by default
-def use_shared_allocator(request, memory_allocator):
+def use_shared_allocator(request, monkeypatch, memory_allocator):
     """Default: patch. Opt out with @pytest.mark.no_shared_allocator."""
     if request.node.get_closest_marker("no_shared_allocator"):
         # do NOT patch for this test
         yield
         return
 
-    mp = MonkeyPatch()
-
-    def _create_shared_allocator(cls, config, metadata, numa_mapping):
+    def _create_shared_allocator(config, metadata, numa_mapping):
         return memory_allocator
 
-    mp.setattr(
+    monkeypatch.setattr(
         LMCacheEngineBuilder,
         "_Create_memory_allocator",
-        classmethod(_create_shared_allocator),
+        _create_shared_allocator,
     )
-    try:
-        yield
-    finally:
-        mp.undo()
+    yield
