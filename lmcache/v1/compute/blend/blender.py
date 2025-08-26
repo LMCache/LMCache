@@ -7,8 +7,10 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.compute.attention.metadata import LMCAttnMetadata
 from lmcache.v1.compute.blend.metadata import LMCBlendCommonMetadata, LMCBlendMetadata
 from lmcache.v1.compute.models.utils import infer_model_from_vllm
+from lmcache.v1.config import LMCacheEngineConfig
 
 logger = init_logger(__name__)
 
@@ -24,11 +26,16 @@ class LMCBlender:
         cache_engine,
         gpu_connector,
         vllm_model,
+        config: LMCacheEngineConfig,
     ):
         self.cache_engine = cache_engine
         self.gpu_connector = gpu_connector
 
-        self.layerwise_model = infer_model_from_vllm(vllm_model, self)
+        enable_sparse = False
+        if config.extra_config is not None:
+            enable_sparse = config.extra_config.get("enable_sparse", False)
+
+        self.layerwise_model = infer_model_from_vllm(vllm_model, self, enable_sparse)
 
         # TODO: remove this hardcode
         self.num_layers = len(vllm_model.model.layers)
@@ -55,7 +62,7 @@ class LMCBlender:
         residual: torch.Tensor,
         layer_id: int,
         attn_output: Optional[torch.Tensor],
-        attn_metadata,
+        attn_metadata: LMCAttnMetadata,
     ):
         logger.debug(f"Blender is processing KV for layer {layer_id}")
         old_k, old_v = self.gpu_connector.get_kv(layer_id)
@@ -82,6 +89,8 @@ class LMCBlender:
             )
             total_len = diff_k.shape[0]
 
+            assert self.common_metadata.recomp_ratios is not None
+
             # TODO(Jiayi): remove `[0]` hardcode
             topk_num = int(total_len * self.common_metadata.recomp_ratios[0])
 
@@ -93,14 +102,12 @@ class LMCBlender:
             residual = residual[top_indices]
 
             logger.debug(f"Number of indices picked: {len(top_indices)}")
+
             self.metadata.imp_indices = top_indices
             self.metadata.positions = self.metadata.positions[top_indices]
             attn_output = attn_output[:topk_num]
 
-            attn_metadata.max_query_len = topk_num
-            attn_metadata.query_start_loc = torch.tensor(
-                [0, topk_num], dtype=torch.int32, device=q.device
-            )
+            attn_metadata.update_from_top_indices(top_indices)
 
         if self.metadata.imp_indices is not None:
             old_k[self.metadata.imp_indices] = k

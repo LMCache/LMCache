@@ -452,8 +452,6 @@ class S3Connector(RemoteConnector):
 
             done_event.set()
 
-        await self.inflight_sema.acquire()
-
         s3.S3Request(
             client=self.s3_client,
             type=s3.S3RequestType.PUT_OBJECT,
