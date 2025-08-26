@@ -23,6 +23,8 @@ from .memory_management import (
     MemoryAllocatorInterface,
     MemoryFormat,
     MemoryObj,
+    PagedTensorMemoryAllocator,
+    TensorMemoryAllocator,
     _lmcache_nvtx_annotate,
 )
 
@@ -59,7 +61,7 @@ class HugepageMemoryAllocator(MemoryAllocatorInterface):
             )
 
         # Allocate memory using hugepages
-        ptr = lmc_ops.alloc_pinned_hugepage_ptr(size, 0)
+        ptr = lmc_ops.alloc_pinned_hugepage_ptr(size)
         array_type = ctypes.c_uint8 * size
         buf = array_type.from_address(ptr)
         self.buffer = torch.frombuffer(buf, dtype=torch.uint8)
@@ -76,8 +78,6 @@ class HugepageMemoryAllocator(MemoryAllocatorInterface):
                 "dtype must be specified for paged memory allocator"
             )
             assert "fmt" in kwargs, "fmt must be specified for paged memory allocator"
-            # Local
-            from .memory_management import PagedTensorMemoryAllocator
 
             self.allocator = PagedTensorMemoryAllocator(
                 tensor=self.buffer,
@@ -86,9 +86,6 @@ class HugepageMemoryAllocator(MemoryAllocatorInterface):
                 fmt=kwargs["fmt"],
             )
         else:
-            # Local
-            from .memory_management import TensorMemoryAllocator
-
             self.allocator = TensorMemoryAllocator(self.buffer)
 
         self.host_mem_lock = threading.Lock() if not use_paging else nullcontext()
@@ -212,8 +209,6 @@ class NumaHugepageMemoryAllocator(MemoryAllocatorInterface):
                 "dtype must be specified for paged memory allocator"
             )
             assert "fmt" in kwargs, "fmt must be specified for paged memory allocator"
-            # Local
-            from .memory_management import PagedTensorMemoryAllocator
 
             self.allocator = PagedTensorMemoryAllocator(
                 tensor=self.buffer,
@@ -222,9 +217,6 @@ class NumaHugepageMemoryAllocator(MemoryAllocatorInterface):
                 fmt=kwargs["fmt"],
             )
         else:
-            # Local
-            from .memory_management import TensorMemoryAllocator
-
             self.allocator = TensorMemoryAllocator(self.buffer)
 
         self.host_mem_lock = threading.Lock() if not use_paging else nullcontext()

@@ -87,24 +87,27 @@ void free_pinned_numa_ptr(uintptr_t ptr, size_t size) {
 // Hugepage support implementation
 
 static int get_hugepage_size_from_sysfs() {
-  std::ifstream file("/sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages");
-  if (file.good()) {
-    return 2 * 1024 * 1024;  // 2MB
+  {
+    std::ifstream file(
+        "/sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages");
+    if (file.good()) {
+      return 2 * 1024 * 1024;  // 2MB
+    }
   }
 
-  file.open("/sys/kernel/mm/hugepages/hugepages-1048576kB/nr_hugepages");
-  if (file.good()) {
-    return 1024 * 1024 * 1024;  // 1GB
+  {
+    std::ifstream file(
+        "/sys/kernel/mm/hugepages/hugepages-1048576kB/nr_hugepages");
+    if (file.good()) {
+      return 1024 * 1024 * 1024;  // 1GB
+    }
   }
 
   return 0;  // No hugepages available
 }
 
 int get_hugepage_size() {
-  static int hugepage_size = -1;
-  if (hugepage_size == -1) {
-    hugepage_size = get_hugepage_size_from_sysfs();
-  }
+  static int hugepage_size = get_hugepage_size_from_sysfs();
   return hugepage_size;
 }
 
@@ -128,10 +131,13 @@ int get_available_hugepage_count() {
 
   int count;
   file >> count;
+  if (file.fail()) {
+    return 0;
+  }
   return count;
 }
 
-uintptr_t alloc_pinned_hugepage_ptr(size_t size, unsigned int flags) {
+uintptr_t alloc_pinned_hugepage_ptr(size_t size) {
   int hugepage_size = get_hugepage_size();
   if (hugepage_size == 0) {
     throw std::runtime_error("Hugepages are not available on this system");
