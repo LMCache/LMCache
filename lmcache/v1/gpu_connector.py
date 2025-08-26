@@ -320,24 +320,8 @@ class VLLMBufferLayerwiseGPUConnector(GPUConnectorInterface):
         assert "dtype" in kwargs, "dtype should be provided to create a GPU buffer."
         assert "device" in kwargs, "device should be provided to create a GPU buffer."
 
-        max_tokens = kwargs.get("max_tokens", 32000)
-        logger.info(
-            f"Using max_tokens={max_tokens} for VLLMBufferLayerwiseGPUConnector"
-        )
-        shape = self.get_shape(max_tokens)
         self.dtype = kwargs["dtype"]
         self.device = kwargs["device"]
-
-        num_elements = shape.numel()
-
-        # All sizes are in bytes
-        element_size = torch.tensor([], dtype=self.dtype).element_size()
-        # We need to `2 *` here because we need two buffers:
-        # one for storing/loading and the other for compute
-        gpu_buffer_size = 2 * num_elements * element_size
-        self.gpu_buffer_allocator = GPUMemoryAllocator(
-            gpu_buffer_size, device=self.device
-        )
 
         self.load_stream = torch.cuda.Stream()
         self.store_stream = torch.cuda.Stream()
@@ -346,6 +330,48 @@ class VLLMBufferLayerwiseGPUConnector(GPUConnectorInterface):
 
         # track gap positions between blended chunks
         self.current_gap_positions = None
+
+        self.use_gpu = use_gpu
+        self.gpu_buffer_allocator = None
+        self.element_size = torch.tensor([], dtype=self.dtype).element_size()
+
+    def _lazy_initialize_buffer(self, kv_caches):
+        """
+        Lazily initialize the GPU buffer allocator if it is not initialized yet.
+        Currently, we use the `kv_caches` (kv cache pointer) to determine
+        the gpu buffer size in gpu connector.
+        Also, the first request might be a bit slower due to buffer creation.
+        """
+        if self.use_gpu and self.gpu_buffer_allocator is None:
+            logger.info("Lazily initializing GPU buffer.")
+            # NOTE (Jiayi): We use the first layer to determine the gpu buffer size.
+            # NOTE (Jiayi): Using the exact number of tokens in the first layer
+            # is okay since fragmentation shouldn't exist in the `gpu_buffer_allocator`
+            # in layerwise mode.
+
+            # flash attention: [num_layers, 2, num_blocks, block_size,
+            # num_heads, head_size]
+            # flash infer: [num_layers, num_blocks, 2, block_size, num_heads, head_size]
+            assert kv_caches[0].shape[0] == 2 or kv_caches[0].shape[1] == 2, (
+                "The kv_caches should have shape [num_layers, 2, num_blocks, "
+                "block_size, num_heads, head_size] or "
+                "[num_layers, num_blocks, 2, block_size, num_heads, head_size]"
+            )
+
+            self.vllm_two_major = kv_caches[0].shape[0] == 2
+
+            if self.vllm_two_major:
+                k_cache_shape_per_layer = kv_caches[0][0].shape
+            else:
+                k_cache_shape_per_layer = kv_caches[0][:, 0].shape
+            max_tokens = k_cache_shape_per_layer[0] * k_cache_shape_per_layer[1]
+
+            logger.info(f"Lazily initializing GPU buffer (max tokens={max_tokens}).")
+            num_elements = k_cache_shape_per_layer.numel() * 2
+            gpu_buffer_size = num_elements * self.element_size
+            self.gpu_buffer_allocator = GPUMemoryAllocator(
+                gpu_buffer_size, device=self.device
+            )
 
     def get_kv(self, layer_id: int) -> Tuple[torch.Tensor, torch.Tensor]:
         """
@@ -400,6 +426,8 @@ class VLLMBufferLayerwiseGPUConnector(GPUConnectorInterface):
 
         slot_mapping: torch.Tensor = kwargs["slot_mapping"]
 
+        self._lazy_initialize_buffer(self.kvcaches)
+
         num_all_tokens = ends[-1] - starts[0]
         slot_mapping_full = slot_mapping[starts[0] : ends[-1]]
 
@@ -446,11 +474,11 @@ class VLLMBufferLayerwiseGPUConnector(GPUConnectorInterface):
             if layer_id > 1:
                 lmc_ops.single_layer_kv_transfer(
                     self.buffer_mapping[layer_id - 2].tensor,
-                    self.kvcaches[layer_id - 2][0],
-                    self.kvcaches[layer_id - 2][1],
+                    self.kvcaches[layer_id - 2],
                     slot_mapping_full,
                     False,
                     False,  # shape is [2, num_tokens, hidden_dim]
+                    self.vllm_two_major,
                 )
                 del self.buffer_mapping[layer_id - 2]
 
@@ -566,6 +594,8 @@ class VLLMBufferLayerwiseGPUConnector(GPUConnectorInterface):
 
         slot_mapping: torch.Tensor = kwargs["slot_mapping"]
 
+        self._lazy_initialize_buffer(self.kvcaches)
+
         buf_start = 0
         slot_mapping_chunks = []
         buf_starts_ends = []
@@ -603,11 +633,11 @@ class VLLMBufferLayerwiseGPUConnector(GPUConnectorInterface):
                 self.store_stream.wait_stream(current_stream)
                 lmc_ops.single_layer_kv_transfer(
                     tmp_gpu_buffer_obj.tensor,
-                    self.kvcaches[layer_id][0],
-                    self.kvcaches[layer_id][1],
+                    self.kvcaches[layer_id],
                     slot_mapping_full,
                     True,
                     False,  # shape is [2, num_tokens, hidden_dim]
+                    self.vllm_two_major,
                 )
                 for (buf_start, buf_end), memory_obj, old_positions in zip(
                     buf_starts_ends,
@@ -685,8 +715,24 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
             # NOTE (Jiayi): Using the exact number of tokens in the first layer
             # is okay since fragmentation shouldn't exist in the `gpu_buffer_allocator`
             # in layerwise mode.
-            k_cache_shape_per_layer = kv_caches[0][0].shape
+
+            # flash attention: [num_layers, 2, num_blocks, block_size,
+            # num_heads, head_size]
+            # flash infer: [num_layers, num_blocks, 2, block_size, num_heads, head_size]
+            assert kv_caches[0].shape[0] == 2 or kv_caches[0].shape[1] == 2, (
+                "The kv_caches should have shape [num_layers, 2, num_blocks, "
+                "block_size, num_heads, head_size] or "
+                "[num_layers, num_blocks, 2, block_size, num_heads, head_size]"
+            )
+
+            self.vllm_two_major = kv_caches[0].shape[0] == 2
+
+            if self.vllm_two_major:
+                k_cache_shape_per_layer = kv_caches[0][0].shape
+            else:
+                k_cache_shape_per_layer = kv_caches[0][:, 0].shape
             max_tokens = k_cache_shape_per_layer[0] * k_cache_shape_per_layer[1]
+
             logger.info(f"Lazily initializing GPU buffer (max tokens={max_tokens}).")
             num_elements = k_cache_shape_per_layer.numel() * 2
             gpu_buffer_size = num_elements * self.element_size
@@ -783,21 +829,21 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
                     else:
                         lmc_ops.single_layer_kv_transfer(
                             memory_obj.tensor,
-                            self.kvcaches[layer_id][0],
-                            self.kvcaches[layer_id][1],
+                            self.kvcaches[layer_id],
                             slot_mapping_full,
                             False,
                             True,
+                            self.vllm_two_major,
                         )
 
                 if self.use_gpu:
                     lmc_ops.single_layer_kv_transfer(
                         tmp_gpu_buffer_obj.tensor,
-                        self.kvcaches[layer_id][0],
-                        self.kvcaches[layer_id][1],
+                        self.kvcaches[layer_id],
                         slot_mapping_full,
                         False,
                         True,
+                        self.vllm_two_major,
                     )
         yield
 
@@ -888,11 +934,11 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
                 if self.use_gpu:
                     lmc_ops.single_layer_kv_transfer(
                         tmp_gpu_buffer_obj.tensor,
-                        self.kvcaches[layer_id][0],
-                        self.kvcaches[layer_id][1],
+                        self.kvcaches[layer_id],
                         slot_mapping_full,
                         True,
                         True,
+                        self.vllm_two_major,
                     )
                 for start, end, memory_obj in zip(
                     starts, ends, memory_objs_layer, strict=False
@@ -906,11 +952,11 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
                     else:
                         lmc_ops.single_layer_kv_transfer(
                             memory_obj.tensor,
-                            self.kvcaches[layer_id][0],
-                            self.kvcaches[layer_id][1],
+                            self.kvcaches[layer_id],
                             slot_mapping[start:end],
                             True,
                             True,
+                            self.vllm_two_major,
                         )
 
             yield

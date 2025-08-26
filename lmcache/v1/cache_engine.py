@@ -253,11 +253,13 @@ class LMCacheEngine:
             kv_dtype = self.metadata.kv_dtype
 
             # TODO (Jiayi): should be batched in the future
-            memory_obj = self.storage_manager.allocate(kv_shape, kv_dtype)
+            memory_obj = self.storage_manager.allocate(
+                kv_shape, kv_dtype, busy_loop=False
+            )
             if memory_obj is None:
                 logger.warning(
-                    "Failed to allocate memory for the KV cache.\n"
-                    "The KV cache will not be stored."
+                    "Local cpu memory under pressure so"
+                    " choosing to not store the KV cache."
                 )
                 break
 
@@ -364,12 +366,13 @@ class LMCacheEngine:
                 kv_dtype,
                 batch_size=self.num_layers,
                 fmt=self.fmt,
+                busy_loop=False,
             )
 
             if memory_objs_multi_layer is None:
                 logger.warning(
-                    "Failed to allocate memory for the KV cache.\n"
-                    "The KV cache will not be stored."
+                    "Local cpu memory under pressure so"
+                    " choosing to not store the KV cache."
                 )
                 break
 

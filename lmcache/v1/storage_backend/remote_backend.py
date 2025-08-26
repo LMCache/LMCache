@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from concurrent.futures import Future, TimeoutError
-from typing import List, Optional
+from typing import List, Optional, Set
 import asyncio
 import threading
 import time
@@ -33,7 +33,7 @@ class RemoteBackend(StorageBackendInterface):
         dst_device: str = "cuda",
         lookup_server: Optional[LookupServerInterface] = None,
     ):
-        self.put_tasks: List[CacheEngineKey] = []
+        self.put_tasks: Set[CacheEngineKey] = set()
         self.lock = threading.Lock()
 
         assert config.remote_url is not None
@@ -161,9 +161,8 @@ class RemoteBackend(StorageBackendInterface):
         """
         Callback function for put tasks.
         """
-        self.lock.acquire()
-        self.put_tasks.remove(key)
-        self.lock.release()
+        with self.lock:
+            self.put_tasks.discard(key)
 
     def submit_put_task(
         self,
@@ -183,9 +182,8 @@ class RemoteBackend(StorageBackendInterface):
 
         memory_obj.ref_count_up()
 
-        self.lock.acquire()
-        self.put_tasks.append(key)
-        self.lock.release()
+        with self.lock:
+            self.put_tasks.add(key)
 
         compressed_memory_obj = self.serializer.serialize(memory_obj)
         memory_obj.ref_count_down()
@@ -199,16 +197,46 @@ class RemoteBackend(StorageBackendInterface):
         future.add_done_callback(lambda_callback)
         return future
 
+    def batched_put_callback(self, future: Future, keys: List[CacheEngineKey]):
+        """
+        Callback function for batched put tasks.
+        """
+        with self.lock:
+            self.put_tasks.difference_update(keys)
+
     def batched_submit_put_task(
         self,
         keys: List[CacheEngineKey],
         memory_objs: List[MemoryObj],
         transfer_spec=None,
     ) -> Optional[List[Future]]:
-        return [
-            self.submit_put_task(key, memory_obj)
-            for key, memory_obj in zip(keys, memory_objs, strict=False)
-        ]
+        if self.connection.support_batched_put():
+            if self.connection is None:
+                logger.warning(
+                    "Connection is None in batched_submit_put_task, returning None"
+                )
+                return None
+            if self._mla_worker_id_as0_mode:
+                return None
+
+            compressed_memory_objs = []
+
+            for memory_obj in memory_objs:
+                memory_obj.ref_count_up()
+                compressed_memory_objs.append(self.serializer.serialize(memory_obj))
+                memory_obj.ref_count_down()
+
+            future = asyncio.run_coroutine_threadsafe(
+                self.connection.batched_put(keys, compressed_memory_objs), self.loop
+            )
+            lambda_callback = lambda f: self.batched_put_callback(f, keys)
+            future.add_done_callback(lambda_callback)
+            return future
+        else:
+            return [
+                self.submit_put_task(key, memory_obj)
+                for key, memory_obj in zip(keys, memory_objs, strict=False)
+            ]
 
     def submit_prefetch_task(
         self,

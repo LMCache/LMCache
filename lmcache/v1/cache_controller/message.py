@@ -103,7 +103,7 @@ class ClearWorkerMsg(ControlMsg):
     location: str
 
     def describe(self) -> str:
-        return f"Clear tokens {self.tokens} in location {self.location}"
+        return f"Clear tokens in location {self.location}"
 
 
 class PinWorkerMsg(ControlMsg):

@@ -44,6 +44,7 @@ from lmcache.v1.gpu_connector import (
 from lmcache.v1.internal_api_server.api_server import InternalAPIServer
 from lmcache.v1.lookup_client import LookupClientFactory
 from lmcache.v1.offload_server.zmq_server import ZMQOffloadServer
+from lmcache.v1.plugin.plugin_launcher import PluginLauncher
 from lmcache.v1.storage_backend.connector.nixl_connector_v3 import (
     NixlReceiverInfo,
 )
@@ -191,7 +192,7 @@ class RequestTracker:
     def update(
         self,
         new_token_ids: list[int],
-        new_block_ids: Union[tuple[list[int], ...], list[int]],
+        new_block_ids: Union[Optional[tuple[list[int], ...]], list[int]],
     ) -> None:
         """Update the request tracker when a running request is
         scheduled again
@@ -199,7 +200,12 @@ class RequestTracker:
 
         self.token_ids.extend(new_token_ids)
 
-        if len(new_block_ids) == 0:
+        if new_block_ids is None:
+            # https://github.com/vllm-project/vllm/commit/
+            # b029de9902aa3ac58806c8c17776c7074175b6db#
+            # diff-cafd89ce8a698a56acb24ada62831cbc7a980782f78a52d1742ba238031f296cL94
+            new_block_ids = []
+        elif len(new_block_ids) == 0:
             new_block_ids = []
         elif isinstance(new_block_ids, tuple):
             new_block_ids = new_block_ids[0]
@@ -528,7 +534,7 @@ class LMCacheConnectorV1Impl:
     ):
         self._parent = parent
         self.kv_role = vllm_config.kv_transfer_config.kv_role
-
+        self.worker_count = vllm_config.parallel_config.tensor_parallel_size
         config = lmcache_get_config()
         self.config = config
         self.layerwise_retrievers = []
@@ -554,6 +560,7 @@ class LMCacheConnectorV1Impl:
                     ENGINE_NAME,
                     self.lmcache_engine,
                     self.lmcache_engine.gpu_connector,
+                    config,
                 )
 
             # Create lookup server using factory
@@ -606,6 +613,17 @@ class LMCacheConnectorV1Impl:
         # The enabled check is in the InternalAPIServer constructor
         self.api_server = InternalAPIServer(self)
         self.api_server.start()
+
+        # Launch plugins
+        self.plugin_launcher = PluginLauncher(
+            self.config,
+            role,
+            self.worker_count,
+            -1
+            if role == KVConnectorRole.SCHEDULER
+            else self.lmcache_engine.metadata.worker_id,
+        )
+        self.plugin_launcher.launch_plugins()
 
     @_lmcache_nvtx_annotate
     def _init_kv_caches_from_forward_context(self, forward_context: "ForwardContext"):
