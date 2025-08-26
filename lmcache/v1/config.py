@@ -385,6 +385,11 @@ def _validate_config(self):
         )
         assert self.enable_p2p is False, "Nixl only supports enable_p2p=False"
 
+    if self.weka_path is not None or self.gds_path is not None:
+        assert self.cufile_buffer_size is not None, (
+            "cufile_buffer_size must be set when using weka_path or gds_path"
+        )
+
     return self
 
 

@@ -19,7 +19,10 @@ from lmcache.v1.storage_backend.gds_backend import GdsBackend
 
 def create_test_config(gds_path: str):
     config = LMCacheEngineConfig.from_defaults(
-        chunk_size=256, gds_path=gds_path, lmcache_instance_id="test_instance"
+        chunk_size=256,
+        gds_path=gds_path,
+        lmcache_instance_id="test_instance",
+        cufile_buffer_size=32,
     )
     return config
 
