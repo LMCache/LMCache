@@ -919,7 +919,8 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
         :param ends: The ending indices of the KV cache in the corresponding
             token sequence.
 
-        :raises ValueError: If 'slot_mapping' is not provided in kwargs.
+        :raises ValueError: If 'slot_mappings' and 'slot_mapping' are not
+            provided in kwargs.
         """
 
         self.initialize_kvcaches_ptr(**kwargs)
@@ -927,13 +928,23 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
             "kvcaches should be provided in kwargs or initialized beforehand."
         )
 
+        slot_mappings: dict[int, torch.Tensor] = {}
+
         if "slot_mappings" not in kwargs:
-            raise ValueError("'slot_mapping' should be provided in kwargs.")
+            # NOTE(Kuntai): support `slot_mapping` for test compatibility.
+            if "slot_mapping" in kwargs:
+                slot_mappings = {0: kwargs["slot_mapping"]}
+            else:
+                raise ValueError(
+                    "Both 'slot_mappings' and 'slot_mapping' "
+                    "are not provided in kwargs."
+                )
+        else:
+            slot_mappings = kwargs["slot_mappings"]
 
         if "sync" not in kwargs:
             raise ValueError("'sync' should be provided in kwargs.")
 
-        slot_mappings: dict[int, torch.Tensor] = kwargs["slot_mappings"]
         sync: bool = kwargs["sync"]
 
         self._lazy_initialize_buffer(self.kvcaches)
