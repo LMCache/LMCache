@@ -254,7 +254,6 @@ class LocalCPUBackend(StorageBackendInterface):
             else:
                 fmt = MemoryFormat.KV_2LTD
 
-        self.memory_allocator.memcheck()
         memory_obj = self.memory_allocator.allocate(shape, dtype, fmt)
         if memory_obj is not None or not eviction:
             return memory_obj
@@ -309,7 +308,7 @@ class LocalCPUBackend(StorageBackendInterface):
                     "Local cpu memory is under pressure. "
                     f"Waiting for {time_to_wait} seconds before retrying."
                 )
-                self.memory_allocator.memcheck()
+                # self.memory_allocator.memcheck()
                 # do not hold the lock during sleep
                 time.sleep(time_to_wait)
 
@@ -423,7 +422,7 @@ class LocalCPUBackend(StorageBackendInterface):
                     "Local cpu memory is under pressure. "
                     f"Waiting for {time_to_wait} seconds before retrying."
                 )
-                self.memory_allocator.memcheck()
+                # self.memory_allocator.memcheck()
                 # do not hold the lock during sleep
                 time.sleep(time_to_wait)
 
