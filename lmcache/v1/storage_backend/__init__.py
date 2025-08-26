@@ -43,7 +43,7 @@ def create_dynamic_backends(
     Looks for backend configurations in config.extra_config and instantiates
     them using the specified module and class names.
     """
-    if not config.extra_config or "backends" not in config.extra_config:
+    if not config.extra_config:
         return
 
     # Get the list of allowed external backends if configured
