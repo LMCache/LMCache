@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import List, Optional, Any
 from dataclasses import dataclass
+from typing import Any, List, Optional
 import uuid
 
 # Third Party
+from sglang.srt.configs.model_config import ModelConfig
 import torch
 
 # First Party
@@ -18,9 +19,6 @@ from lmcache.v1.gpu_connector import (
     SGLangLayerwiseGPUConnector,
 )
 
-from sglang.srt.configs.model_config import ModelConfig
-
-
 logger = init_logger(__name__)
 
 
@@ -29,7 +27,8 @@ def need_gpu_interm_buffer(lmcache_config: LMCacheEngineConfig):
         return False
     else:
         return True
-    
+
+
 @dataclass
 class StoreMetadata:
     last_node: Any
@@ -37,11 +36,13 @@ class StoreMetadata:
     kv_indices: torch.Tensor
     offset: int
 
+
 @dataclass
 class LoadMetadata:
     token_ids: List[int]
     slot_mapping: torch.Tensor
     offset: int
+
 
 def init_lmcache_engine(
     model_config: ModelConfig,
@@ -136,9 +137,7 @@ class LMCacheConnector:
     # Worker side APIs
     ####################
 
-    def load_kv(
-        self, load_metadata: LoadMetadata
-    ) -> None:
+    def load_kv(self, load_metadata: LoadMetadata) -> None:
         token_ids = torch.tensor(load_metadata.token_ids, dtype=torch.int64).cuda()
         slot_mapping = load_metadata.slot_mapping.cuda()
         offset = load_metadata.offset
@@ -163,9 +162,7 @@ class LMCacheConnector:
 
         return num_retrieved_tokens
 
-    def store_kv(
-        self, store_metadata: StoreMetadata
-    ) -> None:
+    def store_kv(self, store_metadata: StoreMetadata) -> None:
         token_ids = torch.tensor(store_metadata.token_ids, dtype=torch.int64).cuda()
         slot_mapping = store_metadata.kv_indices.to(torch.int64).cuda()
         offset = store_metadata.offset
@@ -201,6 +198,7 @@ class LMCacheConnector:
     def close(self):
         self.lmcache_engine.close()
 
+
 class LMCacheLayerwiseConnector(LMCacheConnector):
     def __init__(
         self,
@@ -224,7 +222,7 @@ class LMCacheLayerwiseConnector(LMCacheConnector):
 
         for layerwise_retriever in self.layerwise_retrievers:
             next(layerwise_retriever)
-            
+
         self.current_layer += 1
 
         if self.current_layer == self.sgl_config.num_hidden_layers:
@@ -243,7 +241,7 @@ class LMCacheLayerwiseConnector(LMCacheConnector):
 
         load_mask = torch.ones_like(token_ids, dtype=torch.bool)
         load_mask[:offset] = False
-        
+
         layerwise_retriever = self.lmcache_engine.retrieve_layer(
             token_ids,
             mask=load_mask,
@@ -273,7 +271,7 @@ class LMCacheLayerwiseConnector(LMCacheConnector):
 
         load_mask = torch.ones_like(token_ids, dtype=torch.bool)
         load_mask[:offset] = False
-        
+
         layerwise_retriever = self.lmcache_engine.retrieve_layer(
             token_ids,
             mask=load_mask,

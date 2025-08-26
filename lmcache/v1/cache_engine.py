@@ -32,9 +32,9 @@ from lmcache.v1.distributed_server import (
 )
 from lmcache.v1.gpu_connector import (
     GPUConnectorInterface,
+    SGLangLayerwiseGPUConnector,
     VLLMBufferLayerwiseGPUConnector,
     VLLMPagedMemLayerwiseGPUConnector,
-    SGLangLayerwiseGPUConnector,
 )
 from lmcache.v1.lookup_server import LookupServerInterface, RedisLookupServer
 from lmcache.v1.memory_management import CuFileMemoryAllocator  # noqa: E501
@@ -390,7 +390,11 @@ class LMCacheEngine:
 
             assert isinstance(
                 self.gpu_connector,
-                (VLLMPagedMemLayerwiseGPUConnector, VLLMBufferLayerwiseGPUConnector, SGLangLayerwiseGPUConnector),
+                (
+                    VLLMPagedMemLayerwiseGPUConnector,
+                    VLLMBufferLayerwiseGPUConnector,
+                    SGLangLayerwiseGPUConnector,
+                ),
             )
 
             mem_obj_generator = self.gpu_connector.batched_from_gpu(
