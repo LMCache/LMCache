@@ -19,7 +19,7 @@ Add the following to your ``lmcache.yaml``:
 
 Implementation Example
 ----------------------
-A sample backend implementation (e.g., https://github.com/opendataio/lmc_external_log_backend):
+A sample backend implementation (e.g., https://github.com/opendataio/lmc_external_log_backend/ ):
 
 Key Requirements
 ----------------
