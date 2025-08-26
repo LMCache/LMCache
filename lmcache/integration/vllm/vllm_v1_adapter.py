@@ -477,8 +477,6 @@ def _init_lmcache_engine(
         for layer_name in group.layer_names:
             layer_name_to_kv_cache_group_id[layer_name] = idx
             layer_id_to_kv_cache_group_id[extract_layer_index(layer_name)] = idx
-    for idx, name in enumerate(sorted(layer_name_to_kv_cache_group_id.keys())):
-        layer_id_to_kv_cache_group_id[idx] = layer_name_to_kv_cache_group_id[name]
 
     # Change current device.
     num_gpus = torch.cuda.device_count()
@@ -528,6 +526,8 @@ def _init_lmcache_engine(
                 chunk_size=chunk_size,
                 dtype=kv_dtype,
                 device=device,
+                layer_id_to_kv_cache_group_id=layer_id_to_kv_cache_group_id,
+                layer_name_to_kv_cache_group_id=layer_name_to_kv_cache_group_id,
             )
     else:
         vllm_gpu_connector = VLLMPagedMemGPUConnectorV2(

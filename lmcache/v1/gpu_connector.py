@@ -660,9 +660,13 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
         )
         assert "dtype" in kwargs, "dtype should be provided to create a GPU buffer."
         assert "device" in kwargs, "device should be provided to create a GPU buffer."
+        assert "layer_id_to_kv_cache_group_id" in kwargs, "layer_id_to_kv_cache_group_id should be provided to create a GPU buffer."
+        assert "layer_name_to_kv_cache_group_id" in kwargs, "layer_name_to_kv_cache_group_id should be provided to create a GPU buffer."
 
         self.dtype = kwargs["dtype"]
         self.device = kwargs["device"]
+        self.layer_id_to_kv_cache_group_id = kwargs["layer_id_to_kv_cache_group_id"]
+        self.layer_name_to_kv_cache_group_id = kwargs["layer_name_to_kv_cache_group_id"]
 
         self.kvcaches: Optional[List[torch.Tensor]] = None
 
@@ -736,10 +740,12 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
         if "sync" not in kwargs:
             raise ValueError("'sync' should be provided in kwargs.")
 
-        slot_mappings: dict[int, torch.Tensor] = kwargs["slot_mapping"]
+        slot_mappings: dict[int, torch.Tensor] = kwargs["slot_mappings"]
         sync: bool = kwargs["sync"]
 
         self._lazy_initialize_buffer(self.kvcaches)
+
+        slot_mappings_full = {}
 
         for kv_cache_group_id in slot_mappings:
             slot_mapping = slot_mappings[kv_cache_group_id]
@@ -751,9 +757,9 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
             # TODO(Jiayi): Optimize away this `cat`
             slot_mapping_full = torch.cat(slot_mapping_chunks, dim=0)
 
+            slot_mappings_full[kv_cache_group_id] = slot_mapping_full
             
-
-        num_tokens = len(slot_mapping_full)
+        num_tokens = len(slot_mappings_full[0])
 
         if self.use_gpu:
             buffer_shape = self.get_shape(num_tokens)
@@ -790,17 +796,18 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
                             memory_obj.tensor,
                             self.kvcaches[layer_id][0],
                             self.kvcaches[layer_id][1],
-                            slot_mapping_full,
+                            slot_mappings_full[self.layer_id_to_kv_cache_group_id[layer_id]],
                             False,
                             True,
                         )
 
                 if self.use_gpu:
+                    print(layer_id, (tmp_gpu_buffer_obj.tensor).abs().mean())
                     lmc_ops.single_layer_kv_transfer(
                         tmp_gpu_buffer_obj.tensor,
                         self.kvcaches[layer_id][0],
                         self.kvcaches[layer_id][1],
-                        slot_mapping_full,
+                        slot_mappings_full[self.layer_id_to_kv_cache_group_id[layer_id]],
                         False,
                         True,
                     )
@@ -853,24 +860,32 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
             "kvcaches should be provided in kwargs or initialized beforehand."
         )
 
-        if "slot_mapping" not in kwargs:
+        if "slot_mappings" not in kwargs:
             raise ValueError("'slot_mapping' should be provided in kwargs.")
 
         if "sync" not in kwargs:
             raise ValueError("'sync' should be provided in kwargs.")
 
-        slot_mapping: torch.Tensor = kwargs["slot_mapping"]
+        slot_mappings: dict[int, torch.Tensor] = kwargs["slot_mappings"]
         sync: bool = kwargs["sync"]
 
         self._lazy_initialize_buffer(self.kvcaches)
 
-        slot_mapping_chunks = []
-        for start, end in zip(starts, ends, strict=False):
-            slot_mapping_chunks.append(slot_mapping[start:end])
+        slot_mappings_full = {}
 
-        slot_mapping_full = torch.cat(slot_mapping_chunks, dim=0)
+        for kv_cache_group_id in slot_mappings:
+            slot_mapping = slot_mappings[kv_cache_group_id]
 
-        num_tokens = len(slot_mapping_full)
+            slot_mapping_chunks = []
+            for start, end in zip(starts, ends, strict=False):
+                slot_mapping_chunks.append(slot_mapping[start:end])
+
+            # TODO(Jiayi): Optimize away this `cat`
+            slot_mapping_full = torch.cat(slot_mapping_chunks, dim=0)
+
+            slot_mappings_full[kv_cache_group_id] = slot_mapping_full
+            
+        num_tokens = len(slot_mappings_full[0])
 
         if self.use_gpu:
             buffer_shape = self.get_shape(num_tokens)
@@ -895,7 +910,7 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
                         tmp_gpu_buffer_obj.tensor,
                         self.kvcaches[layer_id][0],
                         self.kvcaches[layer_id][1],
-                        slot_mapping_full,
+                        slot_mappings_full[self.layer_id_to_kv_cache_group_id[layer_id]],
                         True,
                         True,
                     )
@@ -913,7 +928,7 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
                             memory_obj.tensor,
                             self.kvcaches[layer_id][0],
                             self.kvcaches[layer_id][1],
-                            slot_mapping[start:end],
+                            slot_mappings[self.layer_id_to_kv_cache_group_id[layer_id]][start:end],
                             True,
                             True,
                         )
