@@ -1263,7 +1263,7 @@ class SGLangLayerwiseGPUConnector(GPUConnectorInterface):
                         memory_obj.tensor,
                         self.kvcaches[0][layer_id],
                         self.kvcaches[1][layer_id],
-                        slot_mapping_full,
+                        slot_mapping[start:end],
                         False,
                         True,
                     )
@@ -1280,7 +1280,8 @@ class SGLangLayerwiseGPUConnector(GPUConnectorInterface):
                 )
 
         # free the buffer memory
-        tmp_gpu_buffer_obj.ref_count_down()
+        if self.use_gpu:
+            tmp_gpu_buffer_obj.ref_count_down()
 
         logger.debug(f"Finished loading layer {layer_id}")
         yield
@@ -1391,7 +1392,8 @@ class SGLangLayerwiseGPUConnector(GPUConnectorInterface):
             logger.debug(f"Finished offloading layer {layer_id}")
 
         # free the buffer memory
-        tmp_gpu_buffer_obj.ref_count_down()
+        if self.use_gpu:
+            tmp_gpu_buffer_obj.ref_count_down()
         yield
 
     def get_shape(self, num_tokens: int) -> torch.Size:
