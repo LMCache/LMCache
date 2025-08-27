@@ -70,6 +70,9 @@ class HugepageMemoryAllocator(MemoryAllocatorInterface):
         self._ptr = ptr
         self._size = size
 
+        # Type annotation for allocator
+        self.allocator: Union[PagedTensorMemoryAllocator, TensorMemoryAllocator]
+
         if use_paging:
             assert "shape" in kwargs, (
                 "shape must be specified for paged memory allocator"
@@ -200,6 +203,9 @@ class NumaHugepageMemoryAllocator(MemoryAllocatorInterface):
         self._ptr = ptr
         self._size = size
         self._numa_id = numa_id
+
+        # Type annotation for allocator
+        self.allocator: Union[PagedTensorMemoryAllocator, TensorMemoryAllocator]
 
         if use_paging:
             assert "shape" in kwargs, (

@@ -37,5 +37,9 @@ PYBIND11_MODULE(c_ops, m) {
   m.def("is_hugepage_available", &is_hugepage_available);
   m.def("get_available_hugepage_count", &get_available_hugepage_count);
 
+  // Lazy GPU registration for hugepage memory
+  m.def("register_hugepage_with_gpu", &register_hugepage_with_gpu);
+  m.def("unregister_hugepage_from_gpu", &unregister_hugepage_from_gpu);
+
   m.def("get_gpu_pci_bus_id", &get_gpu_pci_bus_id);
 }

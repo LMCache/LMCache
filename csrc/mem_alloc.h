@@ -17,6 +17,11 @@ uintptr_t alloc_pinned_numa_hugepage_ptr(size_t size, int node);
 
 void free_pinned_numa_hugepage_ptr(uintptr_t ptr, size_t size);
 
+// Lazy GPU registration for hugepage memory
+int register_hugepage_with_gpu(uintptr_t ptr, size_t size);
+
+void unregister_hugepage_from_gpu(uintptr_t ptr, size_t size);
+
 // Hugepage configuration functions
 int get_hugepage_size();
 bool is_hugepage_available();

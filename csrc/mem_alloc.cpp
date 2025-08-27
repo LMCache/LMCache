@@ -153,14 +153,8 @@ uintptr_t alloc_pinned_hugepage_ptr(size_t size) {
                              strerror(errno));
   }
 
-  // Register with CUDA for pinned memory
-  cudaError_t st = cudaHostRegister(ptr, aligned_size, 0);
-  if (st != cudaSuccess) {
-    munmap(ptr, aligned_size);
-    throw std::runtime_error(std::string("cudaHostRegister failed: ") +
-                             cudaGetErrorString(st));
-  }
-
+  // Lazy GPU registration - don't register immediately
+  // cudaHostRegister will be called when needed
   return reinterpret_cast<uintptr_t>(ptr);
 }
 
@@ -171,14 +165,8 @@ void free_pinned_hugepage_ptr(uintptr_t ptr, size_t size) {
   int hugepage_size = get_hugepage_size();
   size_t aligned_size = (size + hugepage_size - 1) & ~(hugepage_size - 1);
 
-  // Unpin first, then unmap
-  cudaError_t st = cudaHostUnregister(p);
-  if (st != cudaSuccess) {
-    munmap(p, aligned_size);
-    throw std::runtime_error(std::string("cudaHostUnregister failed: ") +
-                             cudaGetErrorString(st));
-  }
-
+  // Only unpin if it was registered
+  // For now, just unmap since we're not registering immediately
   if (munmap(p, aligned_size) != 0) {
     throw std::runtime_error(std::string("munmap failed: ") + strerror(errno));
   }
@@ -213,14 +201,7 @@ uintptr_t alloc_pinned_numa_hugepage_ptr(size_t size, int node) {
   // First touch to ensure memory is allocated on the correct node
   first_touch(ptr, aligned_size);
 
-  // Register with CUDA for pinned memory
-  cudaError_t st = cudaHostRegister(ptr, aligned_size, 0);
-  if (st != cudaSuccess) {
-    munmap(ptr, aligned_size);
-    throw std::runtime_error(std::string("cudaHostRegister failed: ") +
-                             cudaGetErrorString(st));
-  }
-
+  // Lazy GPU registration - don't register immediately
   return reinterpret_cast<uintptr_t>(ptr);
 }
 
@@ -231,15 +212,39 @@ void free_pinned_numa_hugepage_ptr(uintptr_t ptr, size_t size) {
   int hugepage_size = get_hugepage_size();
   size_t aligned_size = (size + hugepage_size - 1) & ~(hugepage_size - 1);
 
-  // Unpin first, then unmap
-  cudaError_t st = cudaHostUnregister(p);
-  if (st != cudaSuccess) {
-    munmap(p, aligned_size);
-    throw std::runtime_error(std::string("cudaHostUnregister failed: ") +
-                             cudaGetErrorString(st));
-  }
-
+  // Only unpin if it was registered
+  // For now, just unmap since we're not registering immediately
   if (munmap(p, aligned_size) != 0) {
     throw std::runtime_error(std::string("munmap failed: ") + strerror(errno));
+  }
+}
+
+// Lazy GPU registration functions
+int register_hugepage_with_gpu(uintptr_t ptr, size_t size) {
+  void* p = reinterpret_cast<void*>(ptr);
+
+  // Round up size to hugepage boundary
+  int hugepage_size = get_hugepage_size();
+  size_t aligned_size = (size + hugepage_size - 1) & ~(hugepage_size - 1);
+
+  cudaError_t st = cudaHostRegister(p, aligned_size, 0);
+  if (st != cudaSuccess) {
+    return -1;  // Registration failed
+  }
+  return 0;  // Success
+}
+
+void unregister_hugepage_from_gpu(uintptr_t ptr, size_t size) {
+  void* p = reinterpret_cast<void*>(ptr);
+
+  // Round up size to hugepage boundary
+  int hugepage_size = get_hugepage_size();
+  size_t aligned_size = (size + hugepage_size - 1) & ~(hugepage_size - 1);
+
+  cudaError_t st = cudaHostUnregister(p);
+  if (st != cudaSuccess) {
+    // Log error but don't throw - this is cleanup
+    // fprintf(stderr, "cudaHostUnregister failed: %s\n",
+    // cudaGetErrorString(st));
   }
 }
