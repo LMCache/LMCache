@@ -104,7 +104,7 @@ class ConnectorContext:
 class ConnectorAdapter(ABC):
     """Base class for connector adapters."""
 
-    def __init__(self, schema: str):
+    def __init__(self, schema: Optional[str] = None):
         self.schema = schema
 
     @abstractmethod

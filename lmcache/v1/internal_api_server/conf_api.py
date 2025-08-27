@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 import json
 
 # Third Party
@@ -16,7 +16,7 @@ router = APIRouter()
 
 
 def _get_config_dict(
-    config: LMCacheEngineConfig, keys: Optional[List[str]] = None
+    config: LMCacheEngineConfig, keys: Optional[dict[str, dict[str, Any]]] = None
 ) -> Dict[str, Any]:
     """Get the config dict filtered by keys"""
     if keys is None:

@@ -44,8 +44,8 @@ class NixlConfig:
     receiver_port: int
     buffer_size: int
     buffer_device: str
-    enable_gc: bool
-    backends: Optional[list[str]]
+    enable_gc: bool = True
+    backends: Optional[list[str]] = None
 
     @staticmethod
     def from_cache_engine_config(
