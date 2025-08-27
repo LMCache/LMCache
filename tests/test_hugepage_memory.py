@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """
-Tests for hugepage memory support functionality.
+Tests for integrated hugepage memory support in HostMemoryAllocator.
 """
 
 # Standard
@@ -11,29 +11,25 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.hugepage_memory import (
-    HugepageMemoryAllocator,
-    NumaHugepageMemoryAllocator,
-    create_hugepage_allocator,
-    get_hugepage_info,
-)
+from lmcache.v1.memory_management import HostMemoryAllocator
 import lmcache.c_ops as lmc_ops
 
 
-class TestHugepageSupport:
-    """Test hugepage support functionality."""
+class TestIntegratedHugepageSupport:
+    """Test integrated hugepage support functionality in HostMemoryAllocator."""
 
     def test_hugepage_availability_check(self):
         """Test if hugepage availability check works."""
-        info = get_hugepage_info()
-        assert isinstance(info, dict)
-        assert "available" in info
+        if lmc_ops.is_hugepage_available():
+            size = lmc_ops.get_hugepage_size()
+            count = lmc_ops.get_available_hugepage_count()
 
-        if info["available"]:
-            assert "hugepage_size" in info
-            assert "available_count" in info
-            assert info["hugepage_size"] > 0
-            assert info["available_count"] >= 0
+            assert size > 0
+            assert count >= 0
+            # Should be either 2MB or 1GB
+            assert size in [2 * 1024 * 1024, 1024 * 1024 * 1024]
+        else:
+            pytest.skip("Hugepages not available on this system")
 
     def test_hugepage_size_query(self):
         """Test hugepage size query functions."""
@@ -50,7 +46,7 @@ class TestHugepageSupport:
             assert count >= 0
 
     def test_basic_hugepage_allocation(self):
-        """Test basic hugepage memory allocation."""
+        """Test basic hugepage memory allocation using C functions."""
         if not lmc_ops.is_hugepage_available():
             pytest.skip("Hugepages not available on this system")
 
@@ -72,138 +68,167 @@ class TestHugepageSupport:
         except Exception as e:
             pytest.fail(f"Hugepage allocation failed: {e}")
 
-    def test_hugepage_memory_allocator(self):
-        """Test HugepageMemoryAllocator class."""
+    def test_host_memory_allocator_with_hugepage(self):
+        """Test HostMemoryAllocator with hugepage support."""
         if not lmc_ops.is_hugepage_available():
             pytest.skip("Hugepages not available on this system")
 
         test_size = 1024 * 1024  # 1MB
 
         try:
-            allocator = HugepageMemoryAllocator(test_size)
+            # Test regular memory allocation
+            regular_allocator = HostMemoryAllocator(test_size, use_hugepage=False)
+            regular_memory = regular_allocator.allocate((100, 100), torch.float32)
+            assert regular_memory is not None
+            regular_allocator.close()
 
-            # Check hugepage info
-            info = allocator.get_hugepage_info()
-            assert info["hugepage_size"] > 0
-            assert info["allocated_size"] == test_size
+            # Test hugepage memory allocation
+            hugepage_allocator = HostMemoryAllocator(test_size, use_hugepage=True)
+            hugepage_memory = hugepage_allocator.allocate((100, 100), torch.float32)
+            assert hugepage_memory is not None
+            hugepage_allocator.close()
 
-            # Test memory allocation
-            memory_obj = allocator.allocate((100, 100), torch.float32)
-            assert memory_obj is not None
-
-            # Clean up
-            allocator.close()
         except Exception as e:
-            pytest.fail(f"HugepageMemoryAllocator test failed: {e}")
+            pytest.fail(f"HostMemoryAllocator hugepage test failed: {e}")
 
-    def test_hugepage_memory_allocator_with_paging(self):
-        """Test HugepageMemoryAllocator with paging enabled."""
+    def test_host_memory_allocator_with_hugepage_and_paging(self):
+        """Test HostMemoryAllocator with both hugepage and paging enabled."""
         if not lmc_ops.is_hugepage_available():
             pytest.skip("Hugepages not available on this system")
 
-        test_size = 40000  # 100 * 100 * 4 (float32)
+        test_size = 40000  # Size that fits in one hugepage
+        test_shape = torch.Size((100, 100))
+        test_dtype = torch.float32
 
         try:
-            allocator = HugepageMemoryAllocator(
+            # Test with paging enabled
+            allocator = HostMemoryAllocator(
                 test_size,
                 use_paging=True,
-                shape=torch.Size((100, 100)),
-                dtype=torch.float32,
-                fmt="kv_2ltd",
+                use_hugepage=True,
+                shape=test_shape,
+                dtype=test_dtype,
+                fmt="KV_2LTD",
             )
 
-            # Test memory allocation
+            memory_obj = allocator.allocate(test_shape, test_dtype)
+            assert memory_obj is not None
+
+            # Test memory check
+            memcheck_result = allocator.memcheck()
+            assert memcheck_result is not None
+
+            allocator.close()
+
+        except Exception as e:
+            pytest.fail(f"HostMemoryAllocator hugepage+paging test failed: {e}")
+
+    def test_memory_cleanup(self):
+        """Test that hugepage memory is properly cleaned up."""
+        if not lmc_ops.is_hugepage_available():
+            pytest.skip("Hugepages not available on this system")
+
+        test_size = 1024 * 1024  # 1MB
+
+        try:
+            # Get initial hugepage count
+            initial_count = lmc_ops.get_available_hugepage_count()
+
+            # Create and destroy allocator
+            allocator = HostMemoryAllocator(test_size, use_hugepage=True)
             memory_obj = allocator.allocate((100, 100), torch.float32)
             assert memory_obj is not None
 
             # Clean up
             allocator.close()
-        except Exception as e:
-            pytest.fail(f"HugepageMemoryAllocator with paging test failed: {e}")
 
-    def test_factory_function(self):
-        """Test the factory function for creating hugepage allocators."""
+            # Check that hugepage count is restored
+            final_count = lmc_ops.get_available_hugepage_count()
+            assert final_count >= initial_count
+
+        except Exception as e:
+            pytest.fail(f"Memory cleanup test failed: {e}")
+
+    def test_performance_comparison(self):
+        """Test performance comparison between regular and hugepage memory."""
         if not lmc_ops.is_hugepage_available():
             pytest.skip("Hugepages not available on this system")
 
-        test_size = 1024 * 1024  # 1MB
+        test_size = 64 * 1024 * 1024  # 64MB
+        test_shape = (test_size // 4,)
+        test_dtype = torch.float32
 
         try:
-            # Test without NUMA mapping
-            allocator = create_hugepage_allocator(test_size)
-            assert isinstance(allocator, HugepageMemoryAllocator)
-            allocator.close()
+            # Test regular memory allocation time
+            # Standard
+            import time
 
-            # Test with NUMA mapping (mock)
-            class MockNumaMapping:
-                def __init__(self):
-                    self.gpu_to_numa_mapping = {0: 0}  # GPU 0 -> NUMA 0
+            start_time = time.time()
+            regular_allocator = HostMemoryAllocator(test_size, use_hugepage=False)
+            regular_memory = regular_allocator.allocate(test_shape, test_dtype)
+            regular_time = time.time() - start_time
 
-            numa_mapping = MockNumaMapping()
-            allocator = create_hugepage_allocator(test_size, numa_mapping)
-            assert isinstance(allocator, NumaHugepageMemoryAllocator)
+            regular_allocator.close()
+
+            # Test hugepage memory allocation time
+            start_time = time.time()
+            hugepage_allocator = HostMemoryAllocator(test_size, use_hugepage=True)
+            hugepage_memory = hugepage_allocator.allocate(test_shape, test_dtype)
+            hugepage_time = time.time() - start_time
+
+            hugepage_allocator.close()
+
+            # Both should complete successfully
+            assert regular_memory is not None
+            assert hugepage_memory is not None
+
+            # Performance comparison (hugepage should be similar or better)
+            # Note: Small differences are expected due to system load
+            assert abs(hugepage_time - regular_time) < 1.0  # Within 1 second
+
+        except Exception as e:
+            pytest.fail(f"Performance comparison test failed: {e}")
+
+    def test_large_memory_allocation(self):
+        """Test large memory allocation with hugepages."""
+        if not lmc_ops.is_hugepage_available():
+            pytest.skip("Hugepages not available on this system")
+
+        # Test with size that requires multiple hugepages
+        test_size = 256 * 1024 * 1024  # 256MB
+
+        try:
+            allocator = HostMemoryAllocator(test_size, use_hugepage=True)
+            memory_obj = allocator.allocate((test_size // 4,), torch.float32)
+            assert memory_obj is not None
+
+            # Test memory access
+            assert memory_obj.meta.phy_size >= test_size
+
             allocator.close()
 
         except Exception as e:
-            pytest.fail(f"Factory function test failed: {e}")
+            pytest.fail(f"Large memory allocation test failed: {e}")
 
     def test_error_handling(self):
-        """Test error handling for hugepage operations."""
+        """Test error handling for invalid parameters."""
         if not lmc_ops.is_hugepage_available():
             pytest.skip("Hugepages not available on this system")
 
-        # Test allocation with size larger than available hugepages
-        hugepage_size = lmc_ops.get_hugepage_size()
-        available_count = lmc_ops.get_available_hugepage_count()
-
-        if available_count > 0:
-            oversized = (available_count + 1) * hugepage_size
-
-            with pytest.raises(RuntimeError):
-                HugepageMemoryAllocator(oversized)
-
-    def test_memory_operations(self):
-        """Test various memory operations with hugepage allocator."""
-        if not lmc_ops.is_hugepage_available():
-            pytest.skip("Hugepages not available on this system")
-
-        test_size = 1024 * 1024  # 1MB
-
+        # Test with invalid size
         try:
-            allocator = HugepageMemoryAllocator(test_size)
+            HostMemoryAllocator(0, use_hugepage=True)
+            pytest.fail("Should have failed with size 0")
+        except Exception:
+            # Expected to fail
+            pass
 
-            # Test batch allocation
-            memory_objs = allocator.batched_allocate(
-                (50, 50), torch.float32, batch_size=3
-            )
-            assert len(memory_objs) == 3
-            assert all(obj is not None for obj in memory_objs)
-
-            # Test batch free
-            allocator.batched_free(memory_objs)
-
-            # Test memory check
-            result = allocator.memcheck()
-            assert result is not None
-
-            # Clean up
-            allocator.close()
-        except Exception as e:
-            pytest.fail(f"Memory operations test failed: {e}")
-
-
-if __name__ == "__main__":
-    # Run basic tests
-    print("Testing hugepage support...")
-
-    info = get_hugepage_info()
-    print(f"Hugepage info: {info}")
-
-    if info["available"]:
-        print("Hugepages are available!")
-        print(f"Size: {info['hugepage_size'] / (1024 * 1024):.1f} MB")
-        print(f"Available count: {info['available_count']}")
-    else:
-        print("Hugepages are not available on this system.")
-
-    print("Tests completed.")
+        # Test with very large size (should fail gracefully)
+        try:
+            # Try to allocate more than available hugepages
+            huge_size = 1024 * 1024 * 1024 * 1024  # 1TB
+            HostMemoryAllocator(huge_size, use_hugepage=True)
+            pytest.fail("Should have failed with extremely large size")
+        except Exception:
+            # Expected to fail
+            pass
