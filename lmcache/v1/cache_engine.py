@@ -651,8 +651,8 @@ class LMCacheEngine:
     def lookup(
         self,
         tokens: Union[torch.Tensor, List[int]],
-        lookup_id: Optional[str] = None,
         search_range: Optional[List[str]] = None,
+        lookup_id: Optional[str] = None,
         pin: bool = False,
         request_configs: Optional[dict] = None,
     ) -> int:
