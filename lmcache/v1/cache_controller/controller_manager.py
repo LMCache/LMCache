@@ -124,7 +124,7 @@ class LMCacheControllerManager:
             # shouldn't be implemented in kv_controller.
             return await self.kv_controller.check_finish(msg)
         else:
-            logger.error(f"Unknown ochestration message type: {msg}")
+            logger.error(f"Unknown orchestration message type: {msg}")
             raise RuntimeError(f"Unknown orchestration message type: {msg}")
 
     async def handle_batched_request(self, socket) -> Optional[MsgBase]:
