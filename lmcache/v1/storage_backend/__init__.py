@@ -14,6 +14,7 @@ from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.lookup_server import LookupServerInterface
 from lmcache.v1.memory_management import (
     MemoryAllocatorInterface,
+    NixlCPUMemoryAllocator,
     PagedTensorMemoryAllocator,
 )
 from lmcache.v1.storage_backend.abstract_backend import StorageBackendInterface
@@ -57,6 +58,7 @@ def CreateStorageBackends(
                 NixlBackend as NixlBackendV3,
             )
 
+            assert isinstance(memory_allocator, NixlCPUMemoryAllocator)
             storage_backends["NixlBackend"] = NixlBackendV3.CreateNixlBackend(
                 config, metadata, memory_allocator
             )
@@ -140,7 +142,7 @@ def CreateStorageBackends(
         from lmcache.v1.storage_backend.audit_backend import AuditBackend
 
         # Conditionally wrap backends with audit logging if enabled in config
-        audited_backends: dict[str, AuditBackend | LocalCPUBackend] = OrderedDict()
+        audited_backends: OrderedDict[str, StorageBackendInterface] = OrderedDict()
         for name, backend in storage_backends.items():
             # Wrap each normal backend with AuditBackend
             if not isinstance(backend, LocalCPUBackend):

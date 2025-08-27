@@ -17,7 +17,6 @@ from lmcache.v1.memory_management import (
     MemoryObj,
     NixlCPUMemoryAllocator,
 )
-from lmcache.v1.storage_backend.abstract_backend import StorageBackendInterface
 from lmcache.v1.storage_backend.connector.nixl_connector_v3 import (
     NixlChannel,
 )
@@ -26,7 +25,7 @@ from lmcache.v1.storage_backend.connector.nixl_utils import NixlConfigXpYd, Nixl
 logger = init_logger(__name__)
 
 
-class NixlBackend(StorageBackendInterface):
+class NixlBackend(AllocatorBackendInterface):
     """
     Implementation of the StorageBackendInterface for Nixl.
 
@@ -107,8 +106,8 @@ class NixlBackend(StorageBackendInterface):
         shape: torch.Size,
         dtype: Optional[torch.dtype],
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
-        eviction: bool = False,
-        busy_loop: bool = False,
+        eviction: bool = True,
+        busy_loop: bool = True,
     ) -> Optional[MemoryObj]:
         """
         Allocate a zero-copy write object for the given shape and dtype.
@@ -116,19 +115,32 @@ class NixlBackend(StorageBackendInterface):
         This will be seen as "adding a new payload" to the backend.
         """
 
-        # NOTE: no eviction in PD
+        # NOTE: no eviction and busy_loop in PD
         mem_obj = self.memory_allocator.allocate(
             shape=shape, dtype=dtype, fmt=fmt, allocator_type="nixl"
         )
 
         return mem_obj
 
+    def batched_allocate(
+        self,
+        shape: torch.Size,
+        dtype: Optional[torch.dtype],
+        batch_size: int,
+        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
+        eviction: bool = True,
+        busy_loop: bool = True,
+    ):
+        return self.memory_allocator.batched_allocate(
+            shape, dtype, batch_size, fmt, allocator_type="nixl"
+        )
+
     def batched_submit_put_task(
         self,
         keys: List[CacheEngineKey],
         memory_objs: List[MemoryObj],
         transfer_spec=None,
-    ) -> Optional[List[Future]]:
+    ) -> None:
         for mem_obj in memory_objs:
             mem_obj.ref_count_up()
         for key in keys:
@@ -139,7 +151,6 @@ class NixlBackend(StorageBackendInterface):
             mem_objs=memory_objs,
             transfer_spec=transfer_spec,
         )
-        return None
 
     def submit_prefetch_task(self, key: CacheEngineKey) -> bool:
         """

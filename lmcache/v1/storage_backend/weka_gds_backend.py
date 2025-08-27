@@ -302,11 +302,9 @@ class WekaGdsBackend(StorageBackendInterface):
         keys: List[CacheEngineKey],
         memory_objs: List[MemoryObj],
         transfer_spec=None,
-    ) -> Optional[List[Future]]:
-        return [
+    ) -> None:
+        for key, memory_obj in zip(keys, memory_objs, strict=False):
             self.submit_put_task(key, memory_obj)
-            for key, memory_obj in zip(keys, memory_objs, strict=False)
-        ]
 
     async def _async_save_bytes_to_disk(
         self,

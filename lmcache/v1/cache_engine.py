@@ -779,12 +779,17 @@ class LMCacheEngine:
 
         future = asyncio.run_coroutine_threadsafe(
             self.distributed_server.batched_issue_put(
-                keys, memory_objs, new_position[0], new_position[1]
+                keys,
+                memory_objs,  # type: ignore
+                new_position[0],
+                new_position[1],
             ),
             self.distributed_loop,
         )
 
-        future.add_done_callback(lambda f: [m.unpin() for m in memory_objs])
+        future.add_done_callback(
+            lambda f: [m.unpin() for m in memory_objs]  # type: ignore
+        )
 
         if not do_copy:
             remove_callback = lambda f: self.storage_manager.batched_remove(
@@ -843,6 +848,7 @@ class LMCacheEngine:
 
         compressed_memory_objs = []
         for memory_obj in memory_objs:
+            assert memory_obj is not None
             compressed_memory_obj = serializer.serialize(memory_obj)
             memory_obj.unpin()
             compressed_memory_objs.append(compressed_memory_obj)
@@ -899,6 +905,7 @@ class LMCacheEngine:
 
         memory_objs = []
         for compressed_memory_obj in compressed_memory_objs:
+            assert compressed_memory_obj is not None
             memory_obj = deserializer.deserialize(compressed_memory_obj)
             compressed_memory_obj.unpin()
             memory_objs.append(memory_obj)

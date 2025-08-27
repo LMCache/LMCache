@@ -354,16 +354,12 @@ class NixlStorageBackend(StorageBackendInterface):
         keys: List[CacheEngineKey],
         memory_objs: List[MemoryObj],
         transfer_spec=None,
-    ) -> Optional[List[Future]]:
+    ) -> None:
         with self.progress_lock:
             for key in keys:
                 self.progress_set.add(key.chunk_hash)
 
-        future = asyncio.run_coroutine_threadsafe(
-            self.gpu_to_file(keys, memory_objs), self.loop
-        )
-
-        return [future for key in keys]
+        asyncio.run_coroutine_threadsafe(self.gpu_to_file(keys, memory_objs), self.loop)
 
     def submit_prefetch_task(self, key: CacheEngineKey) -> bool:
         """

@@ -337,11 +337,10 @@ class NixlBackend(StorageBackendInterface):
         keys: List[CacheEngineKey],
         memory_objs: List[MemoryObj],
         transfer_spec=None,
-    ) -> Optional[List[Future]]:
+    ) -> None:
         memory_objs_metadatas = [memory_obj.meta for memory_obj in memory_objs]
         self.register_put_tasks(keys, memory_objs_metadatas)
         self.flush_put_tasks()
-        return None
 
     def submit_prefetch_task(self, key: CacheEngineKey) -> bool:
         """

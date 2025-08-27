@@ -120,6 +120,7 @@ class FSConnector(RemoteConnector):
                         )
                 else:
                     # reshape and check
+                    assert num_read is not None
                     memory_obj = self.reshape_partial_chunk(memory_obj, num_read)
 
             return memory_obj
