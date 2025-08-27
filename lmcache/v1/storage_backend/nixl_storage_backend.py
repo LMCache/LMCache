@@ -54,7 +54,7 @@ class NixlStorageConfig:
     file_pool_size: int
     buffer_device: str
     path: str
-    backends: list[str]
+    backend: str
 
     @staticmethod
     def validate_nixl_backend(backend: str, device: str):
@@ -92,7 +92,7 @@ class NixlStorageConfig:
             file_pool_size=extra_config.get("nixl_file_pool_size"),
             buffer_device=corrected_device,
             path=extra_config.get("nixl_path"),
-            backends=[extra_config.get("nixl_backend")],
+            backend=extra_config.get("nixl_backend"),
         )
 
 
@@ -143,14 +143,14 @@ class NixlStorageAgent:
         allocator: PagedTensorMemoryAllocator,
         file_pool: NixlFilePool,
         device: str,
-        backends: list[str],
+        backend: str,
     ):
         buffer_ptr = allocator.buffer_ptr
         buffer_size = allocator.buffer_size
         page_size = allocator.align_bytes
 
         self.agent_name = "NixlAgent_" + str(uuid.uuid4())
-        nixl_conf = NixlAgentConfig(backends=backends)
+        nixl_conf = NixlAgentConfig(backends=[backend])
         self.nixl_agent = NixlAgent(self.agent_name, nixl_conf)
 
         device_id = torch.cuda.current_device()
@@ -257,11 +257,12 @@ class NixlStorageBackend(StorageBackendInterface):
         self.memory_allocator = memory_allocator
 
         self.file_pool = NixlFilePool(nixl_config.path, nixl_config.file_pool_size)
+
         self.agent = NixlStorageAgent(
             memory_allocator,
             self.file_pool,
             nixl_config.buffer_device,
-            nixl_config.backends,
+            nixl_config.backend,
         )
 
     def contains(self, key: CacheEngineKey, pin: bool = False) -> bool:
@@ -337,7 +338,7 @@ class NixlStorageBackend(StorageBackendInterface):
         assert shape is not None
         assert fmt is not None
 
-        obj = self.memory_allocator.allocate(shape, dtype, fmt, allocator_type="nixl")
+        obj = self.memory_allocator.allocate(shape, dtype, fmt)
         if obj is None:
             return None
 
