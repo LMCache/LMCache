@@ -15,6 +15,7 @@ from lmcache.logging import init_logger
 from lmcache.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.gpu_connector import (
+    GPUConnectorInterface,
     SGLangGPUConnector,
     SGLangLayerwiseGPUConnector,
 )
@@ -85,8 +86,10 @@ def init_lmcache_engine(
 
     hidden_dim_size = num_kv_head * head_dim
 
+    gpu_connector: GPUConnectorInterface = None
+
     if config.use_layerwise:
-        sglang_gpu_connector = SGLangLayerwiseGPUConnector(
+        gpu_connector = SGLangLayerwiseGPUConnector(
             hidden_dim_size,
             num_layer,
             use_gpu=use_gpu,
@@ -95,7 +98,7 @@ def init_lmcache_engine(
             device=device,
         )
     else:
-        sglang_gpu_connector = SGLangGPUConnector(
+        gpu_connector = SGLangGPUConnector(
             hidden_dim_size,
             num_layer,
             use_gpu=use_gpu,
@@ -104,7 +107,7 @@ def init_lmcache_engine(
             device=device,
         )
     engine = LMCacheEngineBuilder.get_or_create(
-        ENGINE_NAME, config, metadata, sglang_gpu_connector
+        ENGINE_NAME, config, metadata, gpu_connector
     )
 
     return engine
