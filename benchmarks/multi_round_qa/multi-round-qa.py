@@ -58,7 +58,7 @@ class UserConfig:
     answer_len: int
 
     # Gap between two requests
-    gap_between_requests: int
+    gap_between_requests: float
 
     # Num rounds
     num_rounds: int
@@ -120,7 +120,6 @@ class RequestExecutor:
         self.client = openai.AsyncOpenAI(api_key=api_key, base_url=base_url)
         self.model = model
         self.loop = AsyncLoopWrapper.GetOrStartLoop()
-        self.request_history = []
 
     async def _async_launch_request(self, messages, max_tokens, extra_headers=None):
         start_time = time.time()
@@ -194,12 +193,12 @@ class UserSession:
         self.has_unfinished_request = False
         self.last_unfinished_log = 0.0
 
-        self.prompt_lengths = []
-        self.generation_lengths = []
-        self.ttfts = []
-        self.generation_times = []
-        self.launch_times = []
-        self.finish_times = []
+        self.prompt_lengths: list[int] = []
+        self.generation_lengths: list[int] = []
+        self.ttfts: list[float | None] = []
+        self.generation_times: list[float | None] = []
+        self.launch_times: list[float | None] = []
+        self.finish_times: list[float | None] = []
 
         self.finished = False
 
@@ -349,7 +348,7 @@ class UserSessionManager:
         use_sharegpt=False,
     ):
         self.workload_config = workload_config
-        self.sessions = []
+        self.sessions: list[UserSession] = []
 
         gap_between_requests_per_user = workload_config.num_users / workload_config.qps
         session_alive_time = gap_between_requests_per_user * (
@@ -366,7 +365,7 @@ class UserSessionManager:
 
         self.user_id = init_user_id
         self.last_user_join = 0.0
-        self.session_summaries = []
+        self.session_summaries: list[pd.DataFrame] = []
         self.start_time: float | None = None
 
         self.need_ramp_up = True
@@ -550,7 +549,7 @@ def warmup_engine(executor):
     AsyncLoopWrapper.WaitLoop()
 
 
-def parse_arguments() -> WorkloadConfig:
+def parse_arguments():
     parser = argparse.ArgumentParser(description="Parse benchmark configurations.")
 
     parser.add_argument(

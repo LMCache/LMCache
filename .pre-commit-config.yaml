@@ -38,3 +38,6 @@ repos:
     additional_dependencies:
       - tokenize-rt==6.1.0 # For better dynamic analysis performance
       - msgspec[mypy]
+      - types-requests
+      - types-PyYAML
+      - types-aiofiles
