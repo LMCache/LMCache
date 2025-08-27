@@ -1267,11 +1267,28 @@ class BufferAllocator(MemoryAllocatorInterface):
 class HostMemoryAllocator(MemoryAllocatorInterface):
     """Allocates memory in the pre-allocated Host memory."""
 
-    def __init__(self, size: int, use_paging: bool = False, **kwargs):
+    def __init__(
+        self, size: int, use_paging: bool = False, use_hugepage: bool = False, **kwargs
+    ):
         """
         :param int size: The size of the pinned memory in bytes.
+        :param bool use_paging: Whether to use paged memory allocation.
+        :param bool use_hugepage: Whether to use hugepage memory allocation.
         """
-        buffer = torch.empty(size, dtype=torch.uint8, device="cpu")
+
+        if use_hugepage:
+            # Use hugepage allocation
+            ptr = lmc_ops.alloc_pinned_hugepage_ptr(size)
+            array_type = ctypes.c_uint8 * size
+            buf = array_type.from_address(ptr)
+            self.buffer = torch.frombuffer(buf, dtype=torch.uint8)
+            self._use_hugepage = True
+            self._hugepage_ptr = ptr
+            self._hugepage_size = size
+        else:
+            # Use regular host memory allocation
+            self.buffer = torch.empty(size, dtype=torch.uint8, device="cpu")
+            self._use_hugepage = False
 
         if use_paging:
             assert "shape" in kwargs, (
@@ -1282,13 +1299,13 @@ class HostMemoryAllocator(MemoryAllocatorInterface):
             )
             assert "fmt" in kwargs, "fmt must be specified for paged memory allocator"
             self.allocator = PagedTensorMemoryAllocator(
-                tensor=buffer,
+                tensor=self.buffer,
                 shape=kwargs["shape"],
                 dtype=kwargs["dtype"],
                 fmt=kwargs["fmt"],
             )
         else:
-            self.allocator = TensorMemoryAllocator(buffer)
+            self.allocator = TensorMemoryAllocator(self.buffer)
 
         self.host_mem_lock = threading.Lock() if not use_paging else nullcontext()
 
@@ -1333,6 +1350,13 @@ class HostMemoryAllocator(MemoryAllocatorInterface):
     def memcheck(self):
         with self.host_mem_lock:
             return self.allocator.memcheck()
+
+    def close(self):
+        """Close the allocator and free hugepage memory if used."""
+        if hasattr(self, "_use_hugepage") and self._use_hugepage:
+            # Free hugepage memory
+            lmc_ops.free_pinned_hugepage_ptr(self._hugepage_ptr, self._hugepage_size)
+        # Regular host memory is automatically freed by Python GC
 
 
 class PinMemoryAllocator(MemoryAllocatorInterface):
