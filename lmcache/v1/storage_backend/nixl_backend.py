@@ -212,7 +212,9 @@ class BasicNixlObserver(NixlObserverInterface):
             if is_view:
                 # self.obj_pool.add(key, value)
                 st = time.perf_counter()
-                copied_obj = TensorMemoryObj(value.tensor.clone(), value.metadata)
+                copied_obj = TensorMemoryObj(
+                    value.tensor.clone(), value.metadata, parent_allocator=None
+                )
                 ed = time.perf_counter()
                 self.obj_pool.add(key, copied_obj)
                 ed2 = time.perf_counter()

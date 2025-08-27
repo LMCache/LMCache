@@ -171,7 +171,9 @@ if __name__ == "__main__":
                 nobj_before = len(received_objs)
                 for idx, obj in enumerate(new_objs):
                     cloned_tensor = obj.tensor.detach().clone()
-                    received_objs.append(TensorMemoryObj(cloned_tensor, obj.metadata))
+                    received_objs.append(
+                        TensorMemoryObj(cloned_tensor, obj.metadata, None)
+                    )
 
                     # Simulate some work: 20ms per 10 objects
                     if args.simulate_work and len(received_objs) % 10 == 0:

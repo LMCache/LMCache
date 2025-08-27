@@ -133,6 +133,7 @@ class CacheGenDeserializer(Deserializer):
                 ref_count=-1,  # HACK: avoid mis-free
                 fmt=MemoryFormat.KV_2LTD,
             ),
+            parent_allocator=None,
         )
 
         return memory_obj

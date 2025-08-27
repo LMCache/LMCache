@@ -300,7 +300,7 @@ class TensorMemoryObj(MemoryObj):
         self,
         raw_data: torch.Tensor,
         metadata: MemoryObjMetadata,
-        parent_allocator: Optional["MemoryAllocatorInterface"] = None,
+        parent_allocator: Optional["MemoryAllocatorInterface"],
     ):
         assert metadata.dtype is not None, "dtype must be specified for TensorMemoryObj"
         self.raw_data = raw_data
@@ -716,7 +716,6 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         shape: Union[torch.Size, Tuple[int, ...]],
         dtype: Optional[torch.dtype],
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
-        parent_allocator: Optional["MemoryAllocatorInterface"] = None,
         allocator_type: Optional[str] = None,
     ) -> Optional[TensorMemoryObj]:
         if not isinstance(shape, torch.Size):
@@ -768,7 +767,7 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
             metadata=MemoryObjMetadata(
                 shape, dtype, block.start, aligned_size, 1, False, fmt
             ),
-            parent_allocator=parent_allocator,
+            parent_allocator=self,
         )
 
     @_lmcache_nvtx_annotate
@@ -778,7 +777,6 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         dtype: Optional[torch.dtype],
         batch_size: int,
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
-        parent_allocator: Optional["MemoryAllocatorInterface"] = None,
         allocator_type: Optional[str] = None,
     ) -> Optional[List[TensorMemoryObj]]:
         """
@@ -844,7 +842,7 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
                     metadata=MemoryObjMetadata(
                         shape, dtype, temp_start, unit_aligned_size, 1, False, fmt
                     ),
-                    parent_allocator=parent_allocator,
+                    parent_allocator=self,
                 )
             )
             temp_start += unit_aligned_size
@@ -999,7 +997,6 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
         self.shape = shape
         self.dtype = dtype
         self.fmt = fmt
-        self.parent_allocator = self
 
         num_elements = shape.numel()
         self.bytes_per_element = torch.tensor([], dtype=dtype).element_size()
@@ -1034,7 +1031,7 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
             mem_obj = TensorMemoryObj(
                 raw_data=buf,
                 metadata=metadata,
-                parent_allocator=self.parent_allocator,
+                parent_allocator=self,
             )
             self.free_blocks.append(mem_obj)
 
@@ -1055,7 +1052,6 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
         shape: Union[torch.Size, Tuple[int, ...]],
         dtype: Optional[torch.dtype],
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
-        parent_allocator: Optional["MemoryAllocatorInterface"] = None,
         allocator_type: Optional[str] = None,
     ) -> Optional[TensorMemoryObj]:
         if not isinstance(shape, torch.Size):
@@ -1101,7 +1097,6 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
         dtype: Optional[torch.dtype],
         batch_size: int,
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
-        parent_allocator: Optional["MemoryAllocatorInterface"] = None,
         allocator_type: Optional[str] = None,
     ) -> Optional[List[TensorMemoryObj]]:
         """

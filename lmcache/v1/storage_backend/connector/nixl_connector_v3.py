@@ -27,11 +27,13 @@ from lmcache.v1.memory_management import (
     MemoryObj,
 )
 from lmcache.v1.storage_backend.connector.nixl_utils import NixlConfigXpYd, NixlRole
-from lmcache.v1.storage_backend.nixl_backend_v3 import NixlBackend
 
 if TYPE_CHECKING:
     # Third Party
     from nixl._api import NixlAgent
+
+    # First Party
+    from lmcache.v1.storage_backend.nixl_backend_v3 import NixlBackend
 
 logger = init_logger(__name__)
 
@@ -165,7 +167,7 @@ class NixlSender:
         self,
         nixl_config: NixlConfigXpYd,
         config: LMCacheEngineConfig,
-        backend: NixlBackend,
+        backend: "NixlBackend",
         tp_rank: int,
     ):
         assert nixl_config.role == NixlRole.SENDER, (
@@ -488,7 +490,7 @@ class NixlReceiver:
         self,
         nixl_config: NixlConfigXpYd,
         config: LMCacheEngineConfig,
-        backend: NixlBackend,
+        backend: "NixlBackend",
         tp_rank: int,
     ):
         assert nixl_config.role == NixlRole.RECEIVER, (
@@ -712,7 +714,7 @@ class NixlChannel:
         self,
         nixl_config: NixlConfigXpYd,
         config: LMCacheEngineConfig,
-        backend: NixlBackend,
+        backend: "NixlBackend",
     ):
         self.nixl_config = nixl_config
         self.role = nixl_config.role
