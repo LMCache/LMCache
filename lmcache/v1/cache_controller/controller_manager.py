@@ -102,7 +102,7 @@ class LMCacheControllerManager:
         else:
             logger.error(f"Unknown worker message type: {msg}")
 
-    async def handle_orchestration_message(self, msg: OrchMsg) -> Optional[OrchRetMsg]:
+    async def handle_orchestration_message(self, msg: OrchMsg) -> OrchRetMsg:
         if isinstance(msg, LookupMsg):
             return await self.kv_controller.lookup(msg)
         elif isinstance(msg, HealthMsg):
@@ -125,7 +125,7 @@ class LMCacheControllerManager:
             return await self.kv_controller.check_finish(msg)
         else:
             logger.error(f"Unknown ochestration message type: {msg}")
-            return None
+            raise RuntimeError(f"Unknown orchestration message type: {msg}")
 
     async def handle_batched_request(self, socket) -> Optional[MsgBase]:
         while True:

@@ -135,7 +135,7 @@ def receive_and_verify_data(
         # Verify the received data
         for i, key in enumerate(keys):
             received_obj = backend.get_blocking(key)
-            if received_obj is None:
+            if received_obj is None or received_obj.tensor is None:
                 logger.error(f"Failed to retrieve object for key {key}")
                 passed_check = False
                 break

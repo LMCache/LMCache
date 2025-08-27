@@ -114,8 +114,8 @@ modules = ["lmcache", "tests", "benchmarks"]
 
 # TODO: tighten MyPy checks by enabling these checks over time.
 disable_error_code = [
-    "annotation-unchecked",
-    "union-attr",
+    #"annotation-unchecked",
+    #"union-attr",
     "var-annotated",
     "arg-type",
     # "call-arg",

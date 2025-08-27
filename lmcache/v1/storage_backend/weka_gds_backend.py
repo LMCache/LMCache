@@ -416,7 +416,7 @@ class WekaGdsBackend(StorageBackendInterface):
         Returns:
             The memory object with loaded data, or None if loading failed
         """
-        if memory_obj is None:
+        if memory_obj is None or memory_obj.tensor is None:
             return None
         assert memory_obj.tensor.is_cuda
         assert torch.device(self.dst_device) == torch.device(memory_obj.tensor.device)

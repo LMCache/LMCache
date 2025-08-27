@@ -588,7 +588,7 @@ class GdsBackend(StorageBackendInterface):
                     f.write(
                         addr, kv_chunk.nbytes, file_offset=offset, dev_offset=dev_offset
                     )
-            else:
+            elif self.cudart:
                 # mmap the file
                 fd = os.open(tmp_path, os.O_RDWR)
                 nbytes = kv_chunk.nbytes
@@ -638,7 +638,7 @@ class GdsBackend(StorageBackendInterface):
                     file_offset=file_offset,
                     dev_offset=dev_offset,
                 )
-        else:
+        elif self.cudart:
             fd = os.open(gds_path, os.O_RDONLY)
             file_size = os.fstat(fd).st_size
             mm = mmap.mmap(
@@ -664,6 +664,10 @@ class GdsBackend(StorageBackendInterface):
             del arr
             mm.close()
             return size_in_bytes
+        else:
+            raise RuntimeError(
+                "Both cufile and cudart are None, this should not happen"
+            )
 
     def pin(self, key: CacheEngineKey) -> bool:
         # NOTE (ApostaC): Since gds doesn't have eviction now, we don't need

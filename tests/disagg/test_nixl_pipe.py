@@ -160,6 +160,8 @@ if __name__ == "__main__":
 
             # Check if the received objects are the same as the original objects
             for received_obj, original_obj in zip(received_objs, objs, strict=False):
+                assert received_obj.tensor is not None
+                assert original_obj.tensor is not None
                 assert torch.allclose(received_obj.tensor, original_obj.tensor), (
                     f"Data mismatch: received {received_obj.tensor.mean()}"
                     f" but expected {original_obj.tensor.mean()}"

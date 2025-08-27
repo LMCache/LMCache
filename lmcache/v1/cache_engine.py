@@ -746,6 +746,9 @@ class LMCacheEngine:
         """
         Perform cross-node move of the KV cache.
         """
+        assert self.distributed_server is not None, (
+            "Distributed server should be initialized for move operation"
+        )
 
         num_tokens = self.lookup(
             tokens,
@@ -764,6 +767,7 @@ class LMCacheEngine:
             keys=keys,
             location=old_position,
         )
+        assert memory_objs is not None, "Failed to get memory objects to move"
         logger.debug(
             f"Trying to send {len(memory_objs)} memory objects to {new_position}"
         )
@@ -828,6 +832,9 @@ class LMCacheEngine:
             keys=keys,
             location=location,
         )
+        assert memory_objs is not None, (
+            "LMCacheEngine.compress: Failed to get memory objects to compress"
+        )
 
         compressed_memory_objs = []
         for memory_obj in memory_objs:
@@ -878,6 +885,11 @@ class LMCacheEngine:
         compressed_memory_objs = self.storage_manager.batched_get(
             keys=keys,
             location=location,
+        )
+
+        assert compressed_memory_objs is not None, (
+            "LMCacheEngine.compress: Failed to get compressed "
+            "memory objects to decompress"
         )
 
         memory_objs = []
@@ -956,7 +968,7 @@ class LMCacheEngine:
     def close(self) -> None:
         """Close the cache engine and free all the resources"""
 
-        if self.enable_p2p:
+        if self.enable_p2p and self.distributed_server:
             self.distributed_server.close()
 
         if self.lmcache_worker is not None:
@@ -1015,7 +1027,7 @@ class LMCacheEngine:
                 if location is None:
                     # TODO(Jiayi): Need to refactor P2P as a storage backend to
                     # clean up the following code.
-                    if self.enable_p2p:
+                    if self.enable_p2p and self.distributed_server:
                         future_memory_obj = asyncio.run_coroutine_threadsafe(
                             self.distributed_server.issue_get(key),
                             self.distributed_loop,

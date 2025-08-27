@@ -182,8 +182,8 @@ class StorageManager:
                     if self.local_cpu_backend.contains(key):
                         continue
                     cpu_memory_obj = self.local_cpu_backend.allocate(
-                        shape=memory_obj.tensor.shape,
-                        dtype=memory_obj.tensor.dtype,
+                        shape=memory_obj.get_shape(),
+                        dtype=memory_obj.get_dtype(),
                         fmt=memory_obj.meta.fmt,
                         eviction=True,
                         busy_loop=False,

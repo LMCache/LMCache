@@ -80,7 +80,7 @@ class MemoryObjMetadata:
     shape: torch.Size
 
     # The 'logical' dtype of the tensor
-    dtype: Optional[torch.dtype]
+    dtype: torch.dtype
 
     # The 'physical address' of the tensor
     address: int
@@ -373,7 +373,13 @@ class TensorMemoryObj(MemoryObj):
                 TensorMemoryObj.monitor.update_pinned_memory_objs_count(-1)
 
             if self.meta.pin_count <= 0 and self.meta.ref_count <= 0:
-                self.parent_allocator.free(self)
+                if self.parent_allocator is None:
+                    logger.error(
+                        "Parent allocator is None when trying to free MemoryObj."
+                        "This could cause memory leak"
+                    )
+                else:
+                    self.parent_allocator.free(self)
 
             if self.meta.pin_count < 0:
                 logger.warning(

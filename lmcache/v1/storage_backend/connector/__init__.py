@@ -31,9 +31,9 @@ class ParsedRemoteURL:
 
     host: str
     port: int
+    path: str
     username: Optional[str] = None
     password: Optional[str] = None
-    path: Optional[str] = None
     query_params: Dict[str, List[str]] = field(default_factory=dict)
 
 
@@ -202,7 +202,7 @@ def CreateConnector(
     local_cpu_backend: LocalCPUBackend,
     config: Optional[LMCacheEngineConfig] = None,
     metadata: Optional[LMCacheEngineMetadata] = None,
-) -> Optional[InstrumentedRemoteConnector]:
+) -> InstrumentedRemoteConnector:
     """
     Create a remote connector from the given URL.
 

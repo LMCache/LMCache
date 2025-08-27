@@ -70,7 +70,7 @@ class LMCacheLookupClient(LookupClientInterface):
     def lookup(
         self,
         token_ids: torch.Tensor,
-        lookup_id: Optional[str] = None,
+        lookup_id: str,
         request_configs: Optional[dict] = None,
     ) -> int:
         token_bufs = self.encoder.encode(token_ids)

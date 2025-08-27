@@ -139,9 +139,9 @@ if __name__ == "__main__":
                 # Use the new allocate_for_write method
                 transfer_start = time.time()
                 new_obj = pipe.allocate_for_write(
-                    obj.tensor.shape, obj.tensor.dtype, obj.metadata.fmt
+                    obj.get_shape(), obj.get_dtype(), obj.metadata.fmt
                 )
-                if new_obj is not None:
+                if new_obj is not None and new_obj.tensor is not None:
                     # Copy data from original object to the new one
                     new_obj.tensor.copy_(obj.tensor)
                     total_size += new_obj.get_size()
@@ -197,6 +197,8 @@ if __name__ == "__main__":
             for i, (received_obj, original_obj) in enumerate(
                 zip(received_objs, objs, strict=False)
             ):
+                assert received_obj.tensor is not None
+                assert original_obj.tensor is not None
                 assert torch.allclose(received_obj.tensor, original_obj.tensor), (
                     f"Data mismatch at index {i}: received "
                     f"{received_obj.tensor.mean()} "

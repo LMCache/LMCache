@@ -210,6 +210,11 @@ class RemoteBackend(StorageBackendInterface):
         memory_objs: List[MemoryObj],
         transfer_spec=None,
     ) -> Optional[List[Future]]:
+        if self.connection is None:
+            logger.warning(
+                "Connection is None in batched_submit_put_task, returning None"
+            )
+            return None
         if self.connection.support_batched_put():
             if self.connection is None:
                 logger.warning(

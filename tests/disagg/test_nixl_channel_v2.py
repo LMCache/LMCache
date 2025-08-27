@@ -325,6 +325,7 @@ def test_allocate_for_send(
     for i in range(3):
         obj = channel.allocate_for_send(shape, dtype)
         assert obj is not None, "Failed to allocate memory for send"
+        assert obj.tensor is not None
         obj.tensor.fill_(i + 10)  # Fill with test data
 
     # Finish send

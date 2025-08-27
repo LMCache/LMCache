@@ -32,12 +32,12 @@ def init_lmcache_engine(
     rank: int,
     world_size: int,
     kv_dtype: torch.dtype,
-) -> Optional[LMCacheEngine]:
+) -> LMCacheEngine:
     """
     TODO: ADD COMMENTS
     """
-    if LMCacheEngineBuilder.get(ENGINE_NAME) is not None:
-        return None
+    if curr_engine := LMCacheEngineBuilder.get(ENGINE_NAME):
+        return curr_engine
 
     config = lmcache_get_config()
     assert isinstance(config, LMCacheEngineConfig), (

@@ -393,7 +393,7 @@ def _calculate_mtp_layers(vllm_config, model_config):
 def _init_lmcache_engine(
     lmcache_config: LMCacheEngineConfig,
     vllm_config: "VllmConfig",
-) -> Optional[LMCacheEngine]:
+) -> LMCacheEngine:
     """Initialize the LMCache engine by the given model config and parallel
     config. This function will check the environment variable
     `LMCACHE_CONFIG_FILE` to load the configuration file. If that environment
@@ -404,12 +404,11 @@ def _init_lmcache_engine(
     :param vllm_config: The vLLM configuration.
     :type vllm_config: VllmConfig
 
-    :return: The initialized LMCache engine or None (if the environment variable
-        `LMCACHE_CONFIG_FILE` is not set).
-    :rtype: Optional[LMCacheEngine]
+    :return: The initialized LMCache engine
+    :rtype: LMCacheEngine
     """
-    if LMCacheEngineBuilder.get(ENGINE_NAME) is not None:
-        return None
+    if curr_engine := LMCacheEngineBuilder.get(ENGINE_NAME):
+        return curr_engine
 
     model_config = vllm_config.model_config
     parallel_config = vllm_config.parallel_config
@@ -536,6 +535,9 @@ class LMCacheConnectorV1Impl:
         self.kv_role = vllm_config.kv_transfer_config.kv_role
         self.worker_count = vllm_config.parallel_config.tensor_parallel_size
         config = lmcache_get_config()
+        assert isinstance(config, LMCacheEngineConfig), (
+            "LMCache v1 configuration is should be passed for vLLM v1."
+        )
         self.config = config
         self.layerwise_retrievers = []
         if role == KVConnectorRole.SCHEDULER:
@@ -620,7 +622,7 @@ class LMCacheConnectorV1Impl:
             role,
             self.worker_count,
             -1
-            if role == KVConnectorRole.SCHEDULER
+            if self.lmcache_engine is None  # scheduler side
             else self.lmcache_engine.metadata.worker_id,
         )
         self.plugin_launcher.launch_plugins()
@@ -793,6 +795,7 @@ class LMCacheConnectorV1Impl:
             attn_metadata (AttentionMetadata): the attention metadata.
             **kwargs: additional arguments for the save operation.
         """
+        assert self.lmcache_engine is not None
 
         if not self.use_layerwise:
             return
