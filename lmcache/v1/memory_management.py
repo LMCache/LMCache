@@ -80,7 +80,7 @@ class MemoryObjMetadata:
     shape: torch.Size
 
     # The 'logical' dtype of the tensor
-    dtype: torch.dtype
+    dtype: Optional[torch.dtype]
 
     # The 'physical address' of the tensor
     address: int
@@ -293,6 +293,7 @@ class TensorMemoryObj(MemoryObj):
         metadata: MemoryObjMetadata,
         parent_allocator: Optional["MemoryAllocatorInterface"] = None,
     ):
+        assert metadata.dtype is not None, "dtype must be specified for TensorMemoryObj"
         self.raw_data = raw_data
         self.meta = metadata
         self.valid = True
@@ -307,7 +308,7 @@ class TensorMemoryObj(MemoryObj):
 
     def get_size(self) -> int:
         num_elements = math.prod(self.meta.shape)
-        element_size = self.meta.dtype.itemsize
+        element_size = self.meta.dtype.itemsize  # type: ignore
         size_in_bytes = num_elements * element_size
         return size_in_bytes
 
