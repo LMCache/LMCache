@@ -13,9 +13,9 @@ from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import (
-    MemoryAllocatorInterface,
     MemoryFormat,
     MemoryObj,
+    NixlCPUMemoryAllocator,
 )
 from lmcache.v1.storage_backend.abstract_backend import StorageBackendInterface
 from lmcache.v1.storage_backend.connector.nixl_connector_v3 import (
@@ -41,7 +41,7 @@ class NixlBackend(StorageBackendInterface):
         self,
         nixl_config: NixlConfigXpYd,
         config: LMCacheEngineConfig,
-        memory_allocator: MemoryAllocatorInterface,
+        memory_allocator: NixlCPUMemoryAllocator,
     ):
         """
         Initialize the Nixl storage backend.
@@ -109,7 +109,7 @@ class NixlBackend(StorageBackendInterface):
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
         eviction: bool = False,
         busy_loop: bool = False,
-    ) -> MemoryObj:
+    ) -> Optional[MemoryObj]:
         """
         Allocate a zero-copy write object for the given shape and dtype.
 
@@ -220,7 +220,7 @@ class NixlBackend(StorageBackendInterface):
     def CreateNixlBackend(
         config: LMCacheEngineConfig,
         metadata: LMCacheEngineMetadata,
-        memory_allocator: MemoryAllocatorInterface,
+        memory_allocator: NixlCPUMemoryAllocator,
     ) -> "NixlBackend":
         """
         Create a Nixl backend with the given configuration.

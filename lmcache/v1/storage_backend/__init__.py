@@ -12,7 +12,10 @@ from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.lookup_server import LookupServerInterface
-from lmcache.v1.memory_management import MemoryAllocatorInterface
+from lmcache.v1.memory_management import (
+    MemoryAllocatorInterface,
+    PagedTensorMemoryAllocator,
+)
 from lmcache.v1.storage_backend.abstract_backend import StorageBackendInterface
 from lmcache.v1.storage_backend.gds_backend import GdsBackend
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
@@ -87,6 +90,12 @@ def CreateStorageBackends(
         from lmcache.v1.storage_backend.nixl_storage_backend import (
             NixlStorageBackend,
         )
+
+        if not isinstance(memory_allocator, PagedTensorMemoryAllocator):
+            raise TypeError(
+                f"Expected PagedTensorMemoryAllocator,"
+                f" but got {type(memory_allocator).__name__}"
+            )
 
         storage_backends["NixlStorageBackend"] = (
             NixlStorageBackend.CreateNixlStorageBackend(

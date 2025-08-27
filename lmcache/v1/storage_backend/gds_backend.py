@@ -385,9 +385,7 @@ class GdsBackend(StorageBackendInterface):
         with self.put_lock:
             return key in self.put_tasks
 
-    def submit_put_task(
-        self, key: CacheEngineKey, memory_obj: MemoryObj
-    ) -> Optional[Future]:
+    def submit_put_task(self, key: CacheEngineKey, memory_obj: MemoryObj) -> Future:
         assert memory_obj.tensor is not None
         memory_obj.ref_count_up()
 
@@ -404,7 +402,7 @@ class GdsBackend(StorageBackendInterface):
         keys: List[CacheEngineKey],
         memory_objs: List[MemoryObj],
         transfer_spec=None,
-    ) -> Optional[List[Future]]:
+    ) -> List[Future]:
         return [
             self.submit_put_task(key, memory_obj)
             for key, memory_obj in zip(keys, memory_objs, strict=False)
@@ -555,7 +553,9 @@ class GdsBackend(StorageBackendInterface):
         key: CacheEngineKey,
     ) -> Optional[Future]:
         # TODO: Using a dummy wrapper around prefetch for now.
-        return self.submit_prefetch_task(key)
+        if not self.submit_prefetch_task(key):
+            return None
+        return Future()
 
     @_lmcache_nvtx_annotate
     @torch.inference_mode()
@@ -602,6 +602,7 @@ class GdsBackend(StorageBackendInterface):
                 arr = np.frombuffer(mm, dtype=np.uint8)
                 buf_addr = arr.__array_interface__["data"][0]
 
+                assert addr.value is not None
                 res = self.cudart.cudaMemcpy(
                     ctypes.c_void_p(buf_addr + offset),
                     ctypes.c_void_p(int(addr.value) + device_offset),
@@ -652,6 +653,7 @@ class GdsBackend(StorageBackendInterface):
             arr = np.frombuffer(mm, dtype=np.uint8)
             addr = arr.__array_interface__["data"][0]
 
+            assert gpu_pointer.value is not None
             res = self.cudart.cudaMemcpy(
                 ctypes.c_void_p(int(gpu_pointer.value) + dev_offset),
                 ctypes.c_void_p(addr + file_offset),
@@ -672,12 +674,12 @@ class GdsBackend(StorageBackendInterface):
     def pin(self, key: CacheEngineKey) -> bool:
         # NOTE (ApostaC): Since gds doesn't have eviction now, we don't need
         # to implement pin and unpin
-        return
+        return False
 
     def unpin(self, key: CacheEngineKey) -> bool:
         # NOTE (ApostaC): Since gds doesn't have eviction now, we don't need
         # to implement pin and unpin
-        return
+        return False
 
     def remove(self, key: CacheEngineKey, force: bool = True):
         raise NotImplementedError("Remote backend does not support remove now.")

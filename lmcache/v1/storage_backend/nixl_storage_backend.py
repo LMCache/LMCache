@@ -38,9 +38,9 @@ from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import (
-    MemoryAllocatorInterface,
     MemoryObj,
     MemoryObjMetadata,
+    PagedTensorMemoryAllocator,
 )
 from lmcache.v1.storage_backend.abstract_backend import StorageBackendInterface
 from lmcache.v1.storage_backend.connector.nixl_utils import get_correct_nixl_device
@@ -140,7 +140,7 @@ class NixlStorageAgent:
 
     def __init__(
         self,
-        allocator: MemoryAllocatorInterface,
+        allocator: PagedTensorMemoryAllocator,
         file_pool: NixlFilePool,
         device: str,
         backends: list[str],
@@ -237,7 +237,7 @@ class NixlStorageBackend(StorageBackendInterface):
         self,
         nixl_config: NixlStorageConfig,
         loop: asyncio.AbstractEventLoop,
-        memory_allocator: MemoryAllocatorInterface,
+        memory_allocator: PagedTensorMemoryAllocator,
     ):
         """
         Initialize the Nixl storage backend.
@@ -431,7 +431,7 @@ class NixlStorageBackend(StorageBackendInterface):
         config: LMCacheEngineConfig,
         loop: asyncio.AbstractEventLoop,
         metadata: LMCacheEngineMetadata,
-        memory_allocator: MemoryAllocatorInterface,
+        memory_allocator: PagedTensorMemoryAllocator,
     ):
         """
         Create a Nixl backend with the given configuration.

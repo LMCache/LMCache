@@ -116,15 +116,15 @@ modules = ["lmcache", "tests", "benchmarks"]
 disable_error_code = [
     #"annotation-unchecked",
     #"union-attr",
-    "var-annotated",
-    "arg-type",
+    #"var-annotated",
+    #"arg-type",
     # "call-arg",
-    "import-untyped",
-    "attr-defined",
-    "return-value",
+    #"import-untyped",
+    #"attr-defined",
+    #"return-value",
     # "assignment",
     # "call-overload",
-    "misc",
+    #"misc",
 ]
 
 ignore_missing_imports = true
