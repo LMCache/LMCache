@@ -33,10 +33,10 @@ def create_dynamic_backends(
     metadata: LMCacheEngineMetadata,
     loop: asyncio.AbstractEventLoop,
     memory_allocator: MemoryAllocatorInterface,
+    local_cpu_backend: LocalCPUBackend,
     dst_device: str,
     lookup_server: Optional[LookupServerInterface],
     storage_backends: OrderedDict[str, StorageBackendInterface],
-    local_cpu_backend: LocalCPUBackend,
 ) -> None:
     """
     Dynamically create backends based on configuration.
@@ -78,9 +78,9 @@ def create_dynamic_backends(
                 metadata,
                 loop,
                 memory_allocator,
+                local_cpu_backend,
                 dst_device,
                 lookup_server,
-                local_cpu_backend,
             )
 
             # Add to storage backends
@@ -173,10 +173,10 @@ def CreateStorageBackends(
         metadata,
         loop,
         memory_allocator,
+        local_cpu_backend,
         dst_device,
         lookup_server,
         storage_backends,
-        local_cpu_backend=local_cpu_backend,
     )
 
     # Only wrap if audit is enabled in config
