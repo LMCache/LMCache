@@ -651,7 +651,7 @@ class LMCacheEngine:
     def lookup(
         self,
         tokens: Union[torch.Tensor, List[int]],
-        lookup_id: str,
+        lookup_id: Optional[str] = None,
         search_range: Optional[List[str]] = None,
         pin: bool = False,
         request_configs: Optional[dict] = None,
@@ -666,8 +666,9 @@ class LMCacheEngine:
         ["LocalCPUBackend", "LocalDiskBackend"] for now.
         If None, search in all backends.
 
-        :param str lookup_id: The lookup ID to
-        associate with the lookup
+        :param Optional[str] lookup_id: The lookup ID to
+            associate with the lookup. When pin is true, this argument is
+            required to be not None.
 
         :param bool pin: If True, pin the KV cache in the storage.
 
@@ -710,7 +711,9 @@ class LMCacheEngine:
                                 found = True
                     if found:
                         if pin:
-                            self.lookup_pins[lookup_id].extend(key_all_layers)
+                            self.lookup_pins[lookup_id].extend(  # type: ignore
+                                key_all_layers
+                            )
                         prev_end = end
                         continue
                     end = prev_end
@@ -718,7 +721,9 @@ class LMCacheEngine:
                 else:
                     if self.storage_manager.contains(key, search_range, pin):
                         if pin:
-                            self.lookup_pins[lookup_id].append(key)
+                            self.lookup_pins[lookup_id].append(  # type: ignore
+                                key
+                            )
                         prev_end = end
                         continue
 
