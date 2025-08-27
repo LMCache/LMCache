@@ -28,6 +28,9 @@ from .memory_management import (
     _lmcache_nvtx_annotate,
 )
 
+# Type alias for allocator to avoid mypy confusion
+AllocatorType = Union[PagedTensorMemoryAllocator, TensorMemoryAllocator]
+
 
 class HugepageMemoryAllocator(MemoryAllocatorInterface):
     """
@@ -71,7 +74,7 @@ class HugepageMemoryAllocator(MemoryAllocatorInterface):
         self._size = size
 
         # Type annotation for allocator
-        self.allocator: Union[PagedTensorMemoryAllocator, TensorMemoryAllocator]
+        self.allocator: AllocatorType
 
         if use_paging:
             assert "shape" in kwargs, (
@@ -205,7 +208,7 @@ class NumaHugepageMemoryAllocator(MemoryAllocatorInterface):
         self._numa_id = numa_id
 
         # Type annotation for allocator
-        self.allocator: Union[PagedTensorMemoryAllocator, TensorMemoryAllocator]
+        self.allocator: AllocatorType
 
         if use_paging:
             assert "shape" in kwargs, (
