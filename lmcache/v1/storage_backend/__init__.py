@@ -3,6 +3,7 @@
 from collections import OrderedDict
 from typing import TYPE_CHECKING, Optional
 import asyncio
+import importlib  # Added for dynamic import
 
 # Third Party
 import torch
@@ -25,6 +26,69 @@ if TYPE_CHECKING:
     from lmcache.v1.cache_controller.worker import LMCacheWorker
 
 logger = init_logger(__name__)
+
+
+def create_dynamic_backends(
+    config: LMCacheEngineConfig,
+    metadata: LMCacheEngineMetadata,
+    loop: asyncio.AbstractEventLoop,
+    memory_allocator: MemoryAllocatorInterface,
+    local_cpu_backend: LocalCPUBackend,
+    dst_device: str,
+    lookup_server: Optional[LookupServerInterface],
+    storage_backends: OrderedDict[str, StorageBackendInterface],
+) -> None:
+    """
+    Dynamically create backends based on configuration.
+
+    Looks for backend configurations in config.extra_config and instantiates
+    them using the specified module and class names.
+    """
+    if not config.extra_config:
+        return
+
+    # Get the list of allowed external backends if configured
+    allowed_backends = (
+        set(config.external_backends) if config.external_backends else None
+    )
+
+    for backend_name in allowed_backends:
+        try:
+            module_path = config.extra_config.get(
+                f"external_backend.{backend_name}.module_path"
+            )
+            class_name = config.extra_config.get(
+                f"external_backend.{backend_name}.class_name"
+            )
+
+            if not module_path or not class_name:
+                logger.warning(
+                    f"Backend {backend_name} missing module_path or class_name"
+                )
+                continue
+
+            # Dynamically import the module
+            module = importlib.import_module(module_path)
+            # Get the class from the module
+            backend_class = getattr(module, class_name)
+
+            # Create the backend instance
+            backend_instance = backend_class(
+                config,
+                metadata,
+                loop,
+                memory_allocator,
+                local_cpu_backend,
+                dst_device,
+                lookup_server,
+            )
+
+            # Add to storage backends
+            storage_backends[backend_name] = backend_instance
+            logger.info(f"Created dynamic backend: {backend_name}")
+
+        except Exception as e:
+            logger.error(f"Failed to create backend {backend_name}: {str(e)}")
 
 
 def CreateStorageBackends(
@@ -122,6 +186,18 @@ def CreateStorageBackends(
         )
         backend_name = str(remote_backend)
         storage_backends[backend_name] = remote_backend
+
+    # Create dynamic backends from configuration
+    create_dynamic_backends(
+        config,
+        metadata,
+        loop,
+        memory_allocator,
+        local_cpu_backend,
+        dst_device,
+        lookup_server,
+        storage_backends,
+    )
 
     # Only wrap if audit is enabled in config
     if config.extra_config is not None and config.extra_config.get(
