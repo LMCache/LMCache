@@ -794,6 +794,7 @@ def test_paged_prefetch_retrieve(backend, prefetch_from, autorelease_v1):
         "local_cpu_disk_remote",
     ],
 )
+@pytest.mark.no_shared_allocator
 @pytest.mark.parametrize("lmserver_v1_process", ["cpu"], indirect=True)
 def test_paged_mem_leak(fmt, chunk_size, backend, lmserver_v1_process, autorelease_v1):
     url = None
