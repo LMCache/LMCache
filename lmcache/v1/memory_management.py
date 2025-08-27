@@ -4,7 +4,7 @@ from collections import deque
 from contextlib import nullcontext
 from dataclasses import dataclass
 from enum import Enum
-from typing import List, Optional, Tuple, Union
+from typing import Any, List, Optional, Tuple, Union
 import abc
 import ctypes
 import math
@@ -140,9 +140,11 @@ class MemoryObj(metaclass=abc.ABCMeta):
     MemoryObj interface.
     """
 
+    # subclasses should expose raw_data differently
+    raw_data: Any
+
     def __init__(self, metadata: MemoryObjMetadata):
         self.meta = metadata
-        self.raw_data = None
 
     @abc.abstractmethod
     def invalidate(self):

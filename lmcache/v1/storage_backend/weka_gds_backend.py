@@ -285,9 +285,7 @@ class WekaGdsBackend(StorageBackendInterface):
         with self.put_lock:
             return key in self.put_tasks
 
-    def submit_put_task(
-        self, key: CacheEngineKey, memory_obj: MemoryObj
-    ) -> Optional[Future]:
+    def submit_put_task(self, key: CacheEngineKey, memory_obj: MemoryObj) -> Future:
         assert memory_obj.tensor is not None
         memory_obj.ref_count_up()
 
@@ -480,7 +478,9 @@ class WekaGdsBackend(StorageBackendInterface):
         self,
         keys: List[CacheEngineKey],
     ) -> list[MemoryObj | None]:
-        paths, dtypes, shapes = [], [], []
+        paths: list[str | None] = []
+        dtypes: list[torch.dtype | None] = []
+        shapes: list[torch.Size | None] = []
         with self.hot_lock:
             for key in keys:
                 entry = self.hot_cache.get(key)
@@ -494,7 +494,7 @@ class WekaGdsBackend(StorageBackendInterface):
                 dtypes.append(entry.dtype)
                 shapes.append(entry.shape)
 
-        memory_objs = []
+        memory_objs: list[MemoryObj | None] = []
         gds_reads, gds_read_bytes = 0, 0
         for dtype, shape, path in zip(dtypes, shapes, paths, strict=True):
             if path is None:

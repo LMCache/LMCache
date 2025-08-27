@@ -6,6 +6,7 @@ import abc
 # First Party
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.memory_management import MemoryObj
+from lmcache.v1.protocol import ClientMetaMessage
 
 
 class DistributedServerInterface(metaclass=abc.ABCMeta):

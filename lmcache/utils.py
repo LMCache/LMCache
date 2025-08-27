@@ -4,7 +4,7 @@ from __future__ import annotations
 
 # Standard
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, List, Optional, Tuple
 import asyncio
 import hashlib
 import threading

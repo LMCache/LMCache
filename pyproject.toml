@@ -117,7 +117,7 @@ disable_error_code = [
     #"var-annotated",
     #"arg-type",
     # "call-arg",
-    "import-untyped",
+    #"import-untyped",
     #"attr-defined",
     #"return-value",
     #"assignment",
