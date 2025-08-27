@@ -18,37 +18,40 @@ import lmcache.c_ops as lmc_ops
 class TestIntegratedHugepageSupport:
     """Test integrated hugepage support functionality in HostMemoryAllocator."""
 
+    @classmethod
+    def setup_class(cls):
+        """Check hugepage availability before running any tests."""
+        if not lmc_ops.is_hugepage_available():
+            pytest.skip("Hugepages not available on this system - skipping all tests")
+
     def test_hugepage_availability_check(self):
         """Test if hugepage availability check works."""
-        if lmc_ops.is_hugepage_available():
-            size = lmc_ops.get_hugepage_size()
-            count = lmc_ops.get_available_hugepage_count()
+        # This test will only run if hugepages are available due to setup_class
+        size = lmc_ops.get_hugepage_size()
+        count = lmc_ops.get_available_hugepage_count()
 
-            assert size > 0
-            assert count >= 0
-            # Should be either 2MB or 1GB
-            assert size in [2 * 1024 * 1024, 1024 * 1024 * 1024]
-        else:
-            pytest.skip("Hugepages not available on this system")
+        assert size > 0
+        assert count >= 0
+        # Should be either 2MB or 1GB
+        assert size in [2 * 1024 * 1024, 1024 * 1024 * 1024]
 
     def test_hugepage_size_query(self):
         """Test hugepage size query functions."""
-        if lmc_ops.is_hugepage_available():
-            size = lmc_ops.get_hugepage_size()
-            assert size > 0
-            # Should be either 2MB or 1GB
-            assert size in [2 * 1024 * 1024, 1024 * 1024 * 1024]
+        # This test will only run if hugepages are available due to setup_class
+        size = lmc_ops.get_hugepage_size()
+        assert size > 0
+        # Should be either 2MB or 1GB
+        assert size in [2 * 1024 * 1024, 1024 * 1024 * 1024]
 
     def test_hugepage_count_query(self):
         """Test available hugepage count query."""
-        if lmc_ops.is_hugepage_available():
-            count = lmc_ops.get_available_hugepage_count()
-            assert count >= 0
+        # This test will only run if hugepages are available due to setup_class
+        count = lmc_ops.get_available_hugepage_count()
+        assert count >= 0
 
     def test_basic_hugepage_allocation(self):
         """Test basic hugepage memory allocation using C functions."""
-        if not lmc_ops.is_hugepage_available():
-            pytest.skip("Hugepages not available on this system")
+        # This test will only run if hugepages are available due to setup_class
 
         # Test with small size that fits in one hugepage
         test_size = 1024 * 1024  # 1MB
@@ -70,8 +73,7 @@ class TestIntegratedHugepageSupport:
 
     def test_host_memory_allocator_with_hugepage(self):
         """Test HostMemoryAllocator with hugepage support."""
-        if not lmc_ops.is_hugepage_available():
-            pytest.skip("Hugepages not available on this system")
+        # This test will only run if hugepages are available due to setup_class
 
         test_size = 1024 * 1024  # 1MB
 
@@ -93,8 +95,7 @@ class TestIntegratedHugepageSupport:
 
     def test_host_memory_allocator_with_hugepage_and_paging(self):
         """Test HostMemoryAllocator with both hugepage and paging enabled."""
-        if not lmc_ops.is_hugepage_available():
-            pytest.skip("Hugepages not available on this system")
+        # This test will only run if hugepages are available due to setup_class
 
         test_size = 40000  # Size that fits in one hugepage
         test_shape = torch.Size((100, 100))
@@ -125,8 +126,7 @@ class TestIntegratedHugepageSupport:
 
     def test_memory_cleanup(self):
         """Test that hugepage memory is properly cleaned up."""
-        if not lmc_ops.is_hugepage_available():
-            pytest.skip("Hugepages not available on this system")
+        # This test will only run if hugepages are available due to setup_class
 
         test_size = 1024 * 1024  # 1MB
 
@@ -151,8 +151,7 @@ class TestIntegratedHugepageSupport:
 
     def test_performance_comparison(self):
         """Test performance comparison between regular and hugepage memory."""
-        if not lmc_ops.is_hugepage_available():
-            pytest.skip("Hugepages not available on this system")
+        # This test will only run if hugepages are available due to setup_class
 
         test_size = 64 * 1024 * 1024  # 64MB
         test_shape = (test_size // 4,)
@@ -191,8 +190,7 @@ class TestIntegratedHugepageSupport:
 
     def test_large_memory_allocation(self):
         """Test large memory allocation with hugepages."""
-        if not lmc_ops.is_hugepage_available():
-            pytest.skip("Hugepages not available on this system")
+        # This test will only run if hugepages are available due to setup_class
 
         # Test with size that requires multiple hugepages
         test_size = 256 * 1024 * 1024  # 256MB
@@ -212,8 +210,7 @@ class TestIntegratedHugepageSupport:
 
     def test_error_handling(self):
         """Test error handling for invalid parameters."""
-        if not lmc_ops.is_hugepage_available():
-            pytest.skip("Hugepages not available on this system")
+        # This test will only run if hugepages are available due to setup_class
 
         # Test with invalid size
         try:
