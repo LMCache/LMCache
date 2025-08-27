@@ -129,8 +129,7 @@ class LMCacheConnector:
         self.sgl_config = sgl_config
         self.tp_size = tp_size
         self.rank = rank
-        self.kvcaches = [k_pool, v_pool]
-        # self.kvcaches = k_pool + v_pool
+        self.kvcaches = [k_pool + v_pool]
         self.num_layer = sgl_config.num_hidden_layers
 
     ####################
@@ -212,6 +211,7 @@ class LMCacheLayerwiseConnector(LMCacheConnector):
         self.current_layer = 0
         self._lmcache_chunk_size = self.lmcache_engine.config.chunk_size
         self.layerwise_retrievers = []
+        self.kvcaches = [k_pool, v_pool]
 
     def load_kv_layerwise(self, layer_id: int) -> None:
         if len(self.layerwise_retrievers) == 0:
@@ -310,3 +310,5 @@ class LMCacheLayerwiseConnector(LMCacheConnector):
         next(layerwise_storer)
         for _ in range(self.sgl_config.num_hidden_layers):
             next(layerwise_storer)
+
+        self.lmcache_engine.lookup_unpin([lookup_id])
