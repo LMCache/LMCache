@@ -374,6 +374,9 @@ def _validate_config(self):
         assert self.lookup_url is not None
         assert self.distributed_url is not None
 
+    enable_nixl_storage = self.extra_config is not None and self.extra_config.get(
+        "enable_nixl_storage"
+    )
     if self.enable_nixl:
         assert self.nixl_role is not None
         assert self.nixl_buffer_size is not None
@@ -389,6 +392,12 @@ def _validate_config(self):
         assert self.cufile_buffer_size is not None, (
             "cufile_buffer_size must be set when using weka_path or gds_path"
         )
+    if enable_nixl_storage:
+        assert self.extra_config.get("nixl_backend") is not None
+        assert self.extra_config.get("nixl_path") is not None
+        assert self.extra_config.get("nixl_file_pool_size") is not None
+        assert self.nixl_buffer_size is not None
+        assert self.nixl_buffer_device is not None
 
     return self
 

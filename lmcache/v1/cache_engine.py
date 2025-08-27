@@ -45,6 +45,7 @@ from lmcache.v1.memory_management import (  # noqa: E501
     MemoryObjMetadata,
     MixedMemoryAllocator,
     NixlCPUMemoryAllocator,
+    PagedTensorMemoryAllocator,
     TensorMemoryObj,
 )
 from lmcache.v1.storage_backend.storage_manager import StorageManager
@@ -253,11 +254,13 @@ class LMCacheEngine:
             kv_dtype = self.metadata.kv_dtype
 
             # TODO (Jiayi): should be batched in the future
-            memory_obj = self.storage_manager.allocate(kv_shape, kv_dtype)
+            memory_obj = self.storage_manager.allocate(
+                kv_shape, kv_dtype, busy_loop=False
+            )
             if memory_obj is None:
                 logger.warning(
-                    "Failed to allocate memory for the KV cache.\n"
-                    "The KV cache will not be stored."
+                    "Local cpu memory under pressure so"
+                    " choosing to not store the KV cache."
                 )
                 break
 
@@ -364,12 +367,13 @@ class LMCacheEngine:
                 kv_dtype,
                 batch_size=self.num_layers,
                 fmt=self.fmt,
+                busy_loop=False,
             )
 
             if memory_objs_multi_layer is None:
                 logger.warning(
-                    "Failed to allocate memory for the KV cache.\n"
-                    "The KV cache will not be stored."
+                    "Local cpu memory under pressure so"
+                    " choosing to not store the KV cache."
                 )
                 break
 
@@ -1167,7 +1171,11 @@ class LMCacheEngineBuilder:
         metadata: LMCacheEngineMetadata,
         numa_mapping: Optional[NUMAMapping] = None,
     ) -> MemoryAllocatorInterface:
-        if config.enable_nixl:
+        extra_config = config.extra_config
+        enable_nixl_storage = extra_config is not None and extra_config.get(
+            "enable_nixl_storage"
+        )
+        if config.enable_nixl and not enable_nixl_storage:
             assert config.nixl_buffer_device is not None
             # TODO (Jiayi): make this less hacky
             if config.enable_xpyd:
@@ -1203,6 +1211,38 @@ class LMCacheEngineBuilder:
                     )
                 return nixl_cpu_mem_allocator
             return AdHocMemoryAllocator(config.nixl_buffer_device)
+
+        if enable_nixl_storage:
+            # First Party
+            from lmcache.v1.storage_backend.connector.nixl_utils import (
+                get_correct_nixl_device,
+            )
+
+            corrected_device = get_correct_nixl_device(
+                config.nixl_buffer_device,
+                metadata.worker_id,
+            )
+
+            buffer = torch.empty(
+                config.nixl_buffer_size,
+                dtype=torch.uint8,
+                device=corrected_device,
+            )
+
+            if corrected_device == "cpu":
+                torch.cuda.cudart().cudaHostRegister(
+                    buffer.data_ptr(), config.nixl_buffer_size, 0
+                )
+            else:
+                logger.info(f"Setting cuda device to {corrected_device} ")
+                torch.cuda.set_device(corrected_device)
+
+            return PagedTensorMemoryAllocator(
+                buffer,
+                torch.Size(metadata.kv_shape),
+                metadata.kv_dtype,
+                MemoryFormat.KV_2LTD,
+            )
 
         if config.weka_path is not None or config.gds_path is not None:
             assert config.cufile_buffer_size is not None

@@ -108,6 +108,7 @@ class NixlBackend(StorageBackendInterface):
         dtype: Optional[torch.dtype],
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
         eviction: bool = False,
+        busy_loop: bool = False,
     ) -> MemoryObj:
         """
         Allocate a zero-copy write object for the given shape and dtype.
