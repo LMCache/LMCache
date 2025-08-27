@@ -36,6 +36,7 @@ def create_dynamic_backends(
     dst_device: str,
     lookup_server: Optional[LookupServerInterface],
     storage_backends: OrderedDict[str, StorageBackendInterface],
+    local_cpu_backend: LocalCPUBackend,
 ) -> None:
     """
     Dynamically create backends based on configuration.
@@ -73,7 +74,13 @@ def create_dynamic_backends(
 
             # Create the backend instance
             backend_instance = backend_class(
-                config, metadata, loop, memory_allocator, dst_device, lookup_server
+                config,
+                metadata,
+                loop,
+                memory_allocator,
+                dst_device,
+                lookup_server,
+                local_cpu_backend,
             )
 
             # Add to storage backends
@@ -169,6 +176,7 @@ def CreateStorageBackends(
         dst_device,
         lookup_server,
         storage_backends,
+        local_cpu_backend=local_cpu_backend,
     )
 
     # Only wrap if audit is enabled in config
