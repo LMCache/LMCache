@@ -2,7 +2,7 @@
 
 # Standard
 from concurrent.futures import Future
-from typing import List, Optional
+from typing import List, Optional, Sequence
 import time
 
 # First Party
@@ -121,7 +121,7 @@ class AuditBackend(StorageBackendInterface):
 
     def batched_submit_put_task(
         self,
-        keys: List[CacheEngineKey],
+        keys: Sequence[CacheEngineKey],
         memory_objs: List[MemoryObj],
         transfer_spec=None,
     ) -> None:

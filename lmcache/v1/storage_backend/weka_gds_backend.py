@@ -2,7 +2,7 @@
 # Standard
 from collections import OrderedDict
 from concurrent.futures import Future, ThreadPoolExecutor
-from typing import List, Optional, Tuple
+from typing import List, Optional, Sequence, Tuple
 import asyncio
 import ctypes
 import os
@@ -299,7 +299,7 @@ class WekaGdsBackend(StorageBackendInterface):
 
     def batched_submit_put_task(
         self,
-        keys: List[CacheEngineKey],
+        keys: Sequence[CacheEngineKey],
         memory_objs: List[MemoryObj],
         transfer_spec=None,
     ) -> None:
@@ -524,7 +524,10 @@ class WekaGdsBackend(StorageBackendInterface):
         key: CacheEngineKey,
     ) -> Optional[Future]:
         # TODO(Serapheim): Using a dummy wrapper around prefetch for now.
-        return self.submit_prefetch_task(key)
+        self.submit_prefetch_task(key)
+        f: Future = Future()
+        f.set_result(None)
+        return f
 
     @_lmcache_nvtx_annotate
     @torch.inference_mode()

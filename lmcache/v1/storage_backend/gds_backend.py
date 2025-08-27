@@ -2,7 +2,7 @@
 # Standard
 from collections import OrderedDict
 from concurrent.futures import Future
-from typing import List, Optional, Tuple
+from typing import List, Optional, Sequence, Tuple
 import asyncio
 import ctypes
 import json
@@ -399,7 +399,7 @@ class GdsBackend(StorageBackendInterface):
 
     def batched_submit_put_task(
         self,
-        keys: List[CacheEngineKey],
+        keys: Sequence[CacheEngineKey],
         memory_objs: List[MemoryObj],
         transfer_spec=None,
     ) -> None:

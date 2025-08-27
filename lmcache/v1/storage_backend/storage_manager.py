@@ -2,7 +2,7 @@
 # Standard
 from collections import OrderedDict
 from concurrent.futures import Future
-from typing import TYPE_CHECKING, Generator, List, Optional
+from typing import TYPE_CHECKING, Generator, List, Optional, Sequence
 import asyncio
 import threading
 
@@ -163,7 +163,7 @@ class StorageManager:
     # TODO(Jiayi): location and transfer_spec might be redundant
     def batched_put(
         self,
-        keys: List[CacheEngineKey],
+        keys: Sequence[CacheEngineKey],
         memory_objs: List[MemoryObj],
         transfer_spec=None,  # TODO(Jiayi): add type check
         location: Optional[str] = None,
@@ -256,6 +256,7 @@ class StorageManager:
         """
         Non-blocking function to get the memory object from the storages.
         """
+        logger.warning("Calling an unstable interface: get_non_blocking")
         # TODO (Jiayi): incorporate prefetching here
 
         # Search all backends for non-blocking get

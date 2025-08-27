@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from concurrent.futures import Future, TimeoutError
-from typing import List, Optional, Set
+from typing import List, Optional, Sequence, Set
 import asyncio
 import threading
 import time
@@ -170,7 +170,7 @@ class RemoteBackend(StorageBackendInterface):
         memory_obj: MemoryObj,
     ) -> Future:
         def create_immediate_empty_future() -> Future:
-            f = Future()
+            f: Future = Future()
             f.set_result(None)
             return f
 
@@ -211,7 +211,7 @@ class RemoteBackend(StorageBackendInterface):
 
     def batched_submit_put_task(
         self,
-        keys: List[CacheEngineKey],
+        keys: Sequence[CacheEngineKey],
         memory_objs: List[MemoryObj],
         transfer_spec=None,
     ) -> None:
@@ -237,9 +237,10 @@ class RemoteBackend(StorageBackendInterface):
                 memory_obj.ref_count_down()
 
             future = asyncio.run_coroutine_threadsafe(
-                self.connection.batched_put(keys, compressed_memory_objs), self.loop
+                self.connection.batched_put(keys, compressed_memory_objs),  # type: ignore
+                self.loop,
             )
-            lambda_callback = lambda f: self.batched_put_callback(f, keys)
+            lambda_callback = lambda f: self.batched_put_callback(f, keys)  # type: ignore
             future.add_done_callback(lambda_callback)
         else:
             for key, memory_obj in zip(keys, memory_objs, strict=False):

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from concurrent.futures import Future
-from typing import List, Optional
+from typing import List, Optional, Sequence
 import threading
 import time
 
@@ -334,12 +334,12 @@ class NixlBackend(StorageBackendInterface):
 
     def batched_submit_put_task(
         self,
-        keys: List[CacheEngineKey],
+        keys: Sequence[CacheEngineKey],
         memory_objs: List[MemoryObj],
         transfer_spec=None,
     ) -> None:
         memory_objs_metadatas = [memory_obj.meta for memory_obj in memory_objs]
-        self.register_put_tasks(keys, memory_objs_metadatas)
+        self.register_put_tasks(keys, memory_objs_metadatas)  # type: ignore
         self.flush_put_tasks()
 
     def submit_prefetch_task(self, key: CacheEngineKey) -> bool:

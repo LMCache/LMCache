@@ -16,7 +16,7 @@
 # Standard
 from concurrent.futures import Future
 from dataclasses import dataclass
-from typing import List, Optional, Set
+from typing import List, Optional, Sequence, Set
 import asyncio
 import os
 import threading
@@ -306,7 +306,7 @@ class NixlStorageBackend(StorageBackendInterface):
             )
 
     async def gpu_to_file(
-        self, keys: List[CacheEngineKey], mem_objs: List[MemoryObj]
+        self, keys: Sequence[CacheEngineKey], mem_objs: List[MemoryObj]
     ) -> None:
         mem_indices = [mem_obj.meta.address for mem_obj in mem_objs]
 
@@ -351,7 +351,7 @@ class NixlStorageBackend(StorageBackendInterface):
 
     def batched_submit_put_task(
         self,
-        keys: List[CacheEngineKey],
+        keys: Sequence[CacheEngineKey],
         memory_objs: List[MemoryObj],
         transfer_spec=None,
     ) -> None:

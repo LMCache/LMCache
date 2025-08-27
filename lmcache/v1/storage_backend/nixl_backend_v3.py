@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from concurrent.futures import Future
-from typing import List, Optional
+from typing import List, Optional, Sequence
 import threading
 
 # Third Party
@@ -17,6 +17,7 @@ from lmcache.v1.memory_management import (
     MemoryObj,
     NixlCPUMemoryAllocator,
 )
+from lmcache.v1.storage_backend.abstract_backend import AllocatorBackendInterface
 from lmcache.v1.storage_backend.connector.nixl_connector_v3 import (
     NixlChannel,
 )
@@ -137,7 +138,7 @@ class NixlBackend(AllocatorBackendInterface):
 
     def batched_submit_put_task(
         self,
-        keys: List[CacheEngineKey],
+        keys: Sequence[CacheEngineKey],
         memory_objs: List[MemoryObj],
         transfer_spec=None,
     ) -> None:
@@ -147,7 +148,7 @@ class NixlBackend(AllocatorBackendInterface):
             assert isinstance(key, CacheEngineKey)
 
         self._nixl_channel.prepare_send(
-            keys=keys,
+            keys=keys,  # type: ignore
             mem_objs=memory_objs,
             transfer_spec=transfer_spec,
         )

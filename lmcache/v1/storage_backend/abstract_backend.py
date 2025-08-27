@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from concurrent.futures import Future
-from typing import List, Optional
+from typing import List, Optional, Sequence
 import abc
 
 # Third Party
@@ -9,7 +9,7 @@ import torch
 
 # First Party
 from lmcache.utils import CacheEngineKey
-from lmcache.v1.memory_management import MemoryObj
+from lmcache.v1.memory_management import MemoryFormat, MemoryObj
 
 
 class StorageBackendInterface(metaclass=abc.ABCMeta):
@@ -59,7 +59,7 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
     @abc.abstractmethod
     def batched_submit_put_task(
         self,
-        keys: List[CacheEngineKey],
+        keys: Sequence[CacheEngineKey],
         objs: List[MemoryObj],
         transfer_spec=None,
     ) -> None:
