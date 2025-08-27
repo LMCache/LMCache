@@ -347,3 +347,12 @@ def start_loop_in_thread_with_exceptions(loop: asyncio.AbstractEventLoop):
 
     loop.set_exception_handler(loop_excepthook)
     loop.run_forever()
+
+
+#### Placeholder for dpsk broadcast functionality ####
+def mock_up_broadcast_fn(t: torch.Tensor, i: int) -> None:
+    raise NotImplementedError("Calling invalid broadcast function")
+
+
+def mock_up_broadcast_object_fn(a: Any, i: int) -> None:
+    raise NotImplementedError("Calling invalid broadcast object function")

@@ -145,7 +145,7 @@ class S3Connector(RemoteConnector):
         # TODO(Jiayi): We need to handle cache consistency issues in a systematic way
         # across all connectors.
         # We assume S3 cache is never evicted and read-only for now.
-        self.object_size_cache = {}
+        self.object_size_cache: dict[str, int] = {}
 
         self.inflight_sema = asyncio.Semaphore(s3_max_inflight_reqs)
 
@@ -241,7 +241,7 @@ class S3Connector(RemoteConnector):
         if got["err"] or got["status"] != 200:
             logger.warning("Encountering error in S3 HEAD request")
             return 0
-        return got["len"]
+        return got["len"] if got["len"] is not None else 0
 
     # TODO(Jiayi): implement real async
     async def exists(self, key: CacheEngineKey) -> bool:
@@ -351,8 +351,8 @@ class S3Connector(RemoteConnector):
         self, keys: List[CacheEngineKey]
     ) -> List[Optional[MemoryObj]]:
         done_events = []
-        shms = []
-        memory_objs = []
+        shms: list[Optional[int]] = []
+        memory_objs: list[Optional[MemoryObj]] = []
         obj_sizes = []
 
         # TODO(Jiayi): Need to resolve this
@@ -372,7 +372,6 @@ class S3Connector(RemoteConnector):
                 if obj_size <= 0:
                     obj_sizes.append(0)
                     memory_objs.append(None)
-                    return None
                 self.object_size_cache[key_str] = obj_size
 
             # TODO(Jiayi): A caveat of acquire this semaphore
@@ -416,7 +415,7 @@ class S3Connector(RemoteConnector):
         for obj_size, memory_obj, shm in zip(
             obj_sizes, memory_objs, shms, strict=False
         ):
-            if memory_obj is None:
+            if memory_obj is None or shm is None:
                 continue
 
             dst_ptr = memory_obj.data_ptr

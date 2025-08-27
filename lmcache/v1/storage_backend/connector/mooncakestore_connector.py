@@ -329,7 +329,7 @@ class MooncakestoreConnector(RemoteConnector):
 
                 try:
                     results[i] = self.reshape_partial_chunk(
-                        memory_objs[i],
+                        memory_objs[i],  # type: ignore
                         n_read,
                     )
                 except Exception as exc:
@@ -360,7 +360,7 @@ class MooncakestoreConnector(RemoteConnector):
             logger.error(f"batch_get_buffer failed: {str(e)}")
             return [None] * len(keys)
 
-        results = []
+        results: list[Optional[MemoryObj]] = []
         for i, buffer in enumerate(buffers):
             if buffer is None:
                 logger.warning(f"Buffer {i} is None for key {key_strs[i]}")

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Optional, Union
+from typing import TYPE_CHECKING, Any, Generator, Optional, Union
 import os
 import uuid
 
@@ -319,6 +319,9 @@ class ReqMeta:
 
         # If the request has multimodal hashes, apply them to the token ids
         if tracker.mm_hashes:
+            assert tracker.mm_positions is not None, (
+                "tracker got mm_hashes but no mm_positions"
+            )
             apply_mm_hashes_to_token_ids(
                 token_ids, tracker.mm_hashes, tracker.mm_positions
             )
@@ -539,7 +542,9 @@ class LMCacheConnectorV1Impl:
             "LMCache v1 configuration is should be passed for vLLM v1."
         )
         self.config = config
-        self.layerwise_retrievers = []
+        self.layerwise_retrievers: list[
+            Generator[Optional[torch.Tensor], None, None]
+        ] = []
         if role == KVConnectorRole.SCHEDULER:
             # Create lookup client using factory
             self.lookup_client = LookupClientFactory.create_lookup_client(
@@ -1256,4 +1261,4 @@ class LMCacheConnectorV1Impl:
                 "first_tok": request._output_token_ids[0],
             }
 
-        return 0, return_params
+        return False, return_params

@@ -157,9 +157,11 @@ class LMCacheEngine:
             else:
                 self.fmt = MemoryFormat.KV_T2D
 
-        self.lookup_cache = {}
+        # NOTE(ApostaC): we haven't support lookup-cache yet
+        self.lookup_cache: dict[CacheEngineKey, Any] = {}
+
         # lookup_id -> [pinned keys]
-        self.lookup_pins = defaultdict(list)
+        self.lookup_pins: dict[str, list] = defaultdict(list)
 
         InitializeUsageContext(config.to_original_config(), metadata)
         self.stats_monitor = LMCStatsMonitor.GetOrCreate()
@@ -214,6 +216,9 @@ class LMCacheEngine:
         elif tokens is not None:
             num_to_store_tokens = len(tokens)
         elif hashes is not None:
+            assert offsets is not None, (
+                "Offsets should be set when hashes are provided during store"
+            )
             num_to_store_tokens = sum(offsets)
             kwargs["slot_mapping"] = torch.tensor(
                 kwargs["slot_mapping"], dtype=torch.long, device="cuda"
@@ -646,8 +651,8 @@ class LMCacheEngine:
     def lookup(
         self,
         tokens: Union[torch.Tensor, List[int]],
+        lookup_id: str,
         search_range: Optional[List[str]] = None,
-        lookup_id: Optional[str] = None,
         pin: bool = False,
         request_configs: Optional[dict] = None,
     ) -> int:
@@ -1061,6 +1066,10 @@ class LMCacheEngine:
                 keys=keys,
                 location=location,
             )
+            assert memory_objs is not None, (
+                "Failed to get memory objects from storage backend"
+            )
+
             for (key, start, end), memory_obj in zip(blocks, memory_objs, strict=False):
                 if memory_obj is None:
                     logger.warning(
@@ -1301,8 +1310,8 @@ class LMCacheEngineBuilder:
         config: LMCacheEngineConfig,
         metadata: LMCacheEngineMetadata,
         gpu_connector: GPUConnectorInterface,
-        broadcast_fn: Optional[Callable[[torch.Tensor, int], None]] = None,
-        broadcast_object_fn: Optional[Callable[[Any, int], Any]] = None,
+        broadcast_fn: Callable[[torch.Tensor, int], None],
+        broadcast_object_fn: Callable[[Any, int], Any],
     ) -> LMCacheEngine:
         """
         Builds a new LMCacheEngine instance if it doesn't already exist for the

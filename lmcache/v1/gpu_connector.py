@@ -74,6 +74,27 @@ class GPUConnectorInterface(metaclass=abc.ABCMeta):
         raise NotImplementedError
 
     @abc.abstractmethod
+    def batched_to_gpu(
+        self,
+        memory_objs: Union[List[List[MemoryObj]], List[MemoryObj]],
+        starts: List[int],
+        ends: List[int],
+        **kwargs,
+    ):
+        """
+        Batched store the data from the memory objects to GPU kv cache.
+        Sub-classes should define the format of the kwargs.
+
+        :param Union[List[List[MemoryObj]], List[MemoryObj]] memory_obj:
+            The memory objects to store the data to GPU.
+        :param List[int] starts: The starting indices of the data in the corresponding
+            token sequence.
+        :param List[int] ends: The ending indices of the data in the corresponding
+            token sequence.
+        """
+        raise NotImplementedError
+
+    @abc.abstractmethod
     def get_shape(self, num_tokens: int) -> torch.Size:
         """Get the shape of the data given the number of tokens."""
         raise NotImplementedError

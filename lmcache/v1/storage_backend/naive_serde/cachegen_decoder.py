@@ -64,9 +64,7 @@ class CacheGenDeserializer(Deserializer):
 
     # TODO(Jiayi): A lot of memory copies can be avoided in this function.
     @_lmcache_nvtx_annotate
-    def deserialize(
-        self, buffer_memory_obj: BytesBufferMemoryObj
-    ) -> Optional[MemoryObj]:
+    def deserialize(self, buffer_memory_obj: BytesBufferMemoryObj) -> MemoryObj:
         encoder_output = CacheGenGPUEncoderOutput.from_bytes(
             buffer_memory_obj.byte_array
         )
