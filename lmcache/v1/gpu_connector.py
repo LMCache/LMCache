@@ -695,7 +695,8 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
         if any(
             [
                 "layer_id_to_kv_cache_group_id" not in kwargs,
-                kwargs["layer_id_to_kv_cache_group_id"] is None,
+                "layer_id_to_kv_cache_group_id" in kwargs
+                and kwargs["layer_id_to_kv_cache_group_id"] is None,
             ]
         ):
             logger.warning(
@@ -707,7 +708,8 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
         if any(
             [
                 "layer_name_to_kv_cache_group_id" not in kwargs,
-                kwargs["layer_name_to_kv_cache_group_id"] is None,
+                "layer_id_to_kv_cache_group_id" in kwargs
+                and kwargs["layer_name_to_kv_cache_group_id"] is None,
             ]
         ):
             logger.warning(
