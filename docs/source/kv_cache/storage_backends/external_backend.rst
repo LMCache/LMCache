@@ -25,7 +25,7 @@ Key Requirements
 ----------------
 1. Inherit from ``StorageBackendInterface``
 2. Implement all abstract methods
-3. Provide parameterless constructor
+3. Provide the constructor as this example
 4. Package as installable Python module
 
 Usage Notes
