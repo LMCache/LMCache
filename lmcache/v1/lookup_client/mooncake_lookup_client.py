@@ -49,12 +49,12 @@ class MooncakeLookupClient(LookupClientInterface):
         )
 
         # First Party
-        from lmcache.v1.token_database import SegmentTokenDatabase
+        from lmcache.v1.token_database import ChunkedTokenDatabase
 
         assert not config.enable_blending, (
             "LMCache v1 blending is not supported in MooncakeLookupClient yet."
         )
-        self.token_database = SegmentTokenDatabase(config, metadata)
+        self.token_database = ChunkedTokenDatabase(config, metadata)
 
     def lookup(
         self,
