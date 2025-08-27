@@ -86,7 +86,7 @@ def init_lmcache_engine(
 
     hidden_dim_size = num_kv_head * head_dim
 
-    gpu_connector: GPUConnectorInterface = None
+    gpu_connector: Optional[GPUConnectorInterface] = None
 
     if config.use_layerwise:
         gpu_connector = SGLangLayerwiseGPUConnector(
