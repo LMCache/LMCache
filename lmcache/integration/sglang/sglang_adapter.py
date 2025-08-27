@@ -208,26 +208,26 @@ class LMCacheLayerwiseConnector(LMCacheConnector):
         v_pool: List[torch.Tensor],
     ):
         super().__init__(sgl_config, tp_size, rank, k_pool, v_pool)
-        self.current_layer = 0
         self._lmcache_chunk_size = self.lmcache_engine.config.chunk_size
         self.layerwise_retrievers = []
+        self.layer_load_layer = []
         self.kvcaches = [k_pool, v_pool]
 
     def load_kv_layerwise(self, layer_id: int) -> None:
         if len(self.layerwise_retrievers) == 0:
             return
 
-        if layer_id < self.current_layer - 1:
-            return
+        indices_to_remove = []
+        for i in range(len(self.layerwise_retrievers)):
+            if self.layer_load_layer[i] == layer_id + 1:
+                next(self.layerwise_retrievers[i])
+                self.layer_load_layer[i] += 1
+                if self.layer_load_layer[i] == self.sgl_config.num_hidden_layers:
+                    indices_to_remove.append(i)
 
-        for layerwise_retriever in self.layerwise_retrievers:
-            next(layerwise_retriever)
-
-        self.current_layer += 1
-
-        if self.current_layer == self.sgl_config.num_hidden_layers:
-            self.current_layer = 0
-            self.layerwise_retrievers = []
+        for i in sorted(indices_to_remove, reverse=True):
+            del self.layerwise_retrievers[i]
+            del self.layer_load_layer[i]
 
         return
 
@@ -235,7 +235,6 @@ class LMCacheLayerwiseConnector(LMCacheConnector):
         token_ids = torch.tensor(load_metadata.token_ids, dtype=torch.int64).cuda()
         slot_mapping = load_metadata.slot_mapping.cuda()
         offset = load_metadata.offset
-        self.current_layer = 0
 
         assert self.lmcache_engine is not None
 
@@ -252,12 +251,12 @@ class LMCacheLayerwiseConnector(LMCacheConnector):
 
         retrieve_token_num = next(layerwise_retriever)
         next(layerwise_retriever)
-        self.current_layer = 1
         if retrieve_token_num is None:
             return 0
 
         retrieved_token_num = retrieve_token_num.item()
         self.layerwise_retrievers.append(layerwise_retriever)
+        self.layer_load_layer.append(1)
 
         return retrieved_token_num
 
@@ -265,7 +264,6 @@ class LMCacheLayerwiseConnector(LMCacheConnector):
         token_ids = torch.tensor(load_metadata.token_ids, dtype=torch.int64).cuda()
         slot_mapping = load_metadata.slot_mapping.cuda()
         offset = load_metadata.offset
-        self.current_layer = 0
 
         assert self.lmcache_engine is not None
 
