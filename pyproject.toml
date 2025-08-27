@@ -103,7 +103,9 @@ from-first = true
 # import-heading-localfolder=Local
 
 [tool.mypy]
-modules = ["lmcache", "tests"]
+
+modules = ["lmcache", "tests", "benchmarks"]
+
 
 # TODO: tighten MyPy checks by enabling these checks over time.
 disable_error_code = [
@@ -111,12 +113,12 @@ disable_error_code = [
     "union-attr",
     "var-annotated",
     "arg-type",
-    "call-arg",
+    # "call-arg",
     "import-untyped",
     "attr-defined",
     "return-value",
-    "assignment",
-    "call-overload",
+    # "assignment",
+    # "call-overload",
     "misc",
 ]
 

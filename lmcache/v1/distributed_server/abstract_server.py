@@ -42,7 +42,7 @@ class DistributedServerInterface(metaclass=abc.ABCMeta):
     @abc.abstractmethod
     async def batched_issue_put(
         self,
-        keys: CacheEngineKey,
+        keys: list[CacheEngineKey],
         memory_objs: list[MemoryObj],
         dst_url: str,
         dst_location: Optional[str] = None,

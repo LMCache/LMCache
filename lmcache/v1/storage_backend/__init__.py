@@ -50,9 +50,11 @@ def CreateStorageBackends(
     if config.enable_nixl:
         if config.enable_xpyd:
             # First Party
-            from lmcache.v1.storage_backend.nixl_backend_v3 import NixlBackend
+            from lmcache.v1.storage_backend.nixl_backend_v3 import (
+                NixlBackend as NixlBackendV3,
+            )
 
-            storage_backends["NixlBackend"] = NixlBackend.CreateNixlBackend(
+            storage_backends["NixlBackend"] = NixlBackendV3.CreateNixlBackend(
                 config, metadata, memory_allocator
             )
         else:
@@ -129,7 +131,7 @@ def CreateStorageBackends(
         from lmcache.v1.storage_backend.audit_backend import AuditBackend
 
         # Conditionally wrap backends with audit logging if enabled in config
-        audited_backends = OrderedDict()
+        audited_backends: dict[str, AuditBackend | LocalCPUBackend] = OrderedDict()
         for name, backend in storage_backends.items():
             # Wrap each normal backend with AuditBackend
             if not isinstance(backend, LocalCPUBackend):

@@ -349,17 +349,17 @@ class RemoteBackend(StorageBackendInterface):
             ]
             memory_objs = []
             failed = False
-            for future in futures:
+            for fut in futures:
                 if not failed:
                     try:
-                        memory_obj = future.result(self.blocking_timeout_secs)
+                        memory_obj = fut.result(self.blocking_timeout_secs)
                     except Exception as e:
                         failed = True
                         if isinstance(e, TimeoutError):
                             logger.warning(
                                 "get blocking timeout, trigger cancel the future task"
                             )
-                            future.cancel()
+                            fut.cancel()
                         with self.lock:
                             self.connection = None
                             self.failure_time = time.time()
@@ -370,7 +370,7 @@ class RemoteBackend(StorageBackendInterface):
                     memory_objs.append(memory_obj)
                 else:
                     memory_objs.append(None)
-                    future.cancel()
+                    fut.cancel()
 
         t2 = time.perf_counter()
         self.stats_monitor.update_interval_remote_time_to_get_sync((t2 - t1) * 1000)
