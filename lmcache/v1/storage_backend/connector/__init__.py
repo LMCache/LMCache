@@ -64,6 +64,8 @@ def parse_remote_url(url: str) -> ParsedRemoteURL:
     path = parsed.path if parsed.path else ""
     query = parse_qs(parsed.query) if parsed.query else {}
 
+    assert host is not None, f"Invalid URL {url}: missing host"
+    assert port is not None, f"Invalid URL {url}: missing port"
     return ParsedRemoteURL(
         host=host,
         port=port,
@@ -104,7 +106,7 @@ class ConnectorContext:
 class ConnectorAdapter(ABC):
     """Base class for connector adapters."""
 
-    def __init__(self, schema: str = None):
+    def __init__(self, schema: str = "") -> None:
         self.schema = schema
 
     @abstractmethod

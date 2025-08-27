@@ -44,13 +44,13 @@ class LMCacheEngine:
         InitializeUsageContext(config, metadata)
         self.stats_monitor = LMCStatsMonitor.GetOrCreate()
 
-    def _make_key(self, chunk_hash: str, fmt: str) -> CacheEngineKey:
+    def _make_key(self, chunk_hash: int, fmt: str) -> CacheEngineKey:
         return CacheEngineKey(
             fmt,
             self.metadata.model_name,
             self.metadata.world_size,
             self.metadata.worker_id,
-            int(chunk_hash),
+            chunk_hash,
         )
 
     def _num_tokens_in_kv(
@@ -95,7 +95,7 @@ class LMCacheEngine:
         self,
         token_chunks: Iterable[torch.Tensor],
         num_skip_chunk: Optional[int] = 0,
-    ) -> List[str]:
+    ) -> List[int]:
         prefix_hash = self._get_init_hash()
         prefix_hashes = []
         for token_chunk in token_chunks:
@@ -197,7 +197,7 @@ class LMCacheEngine:
         kv_tensors: torch.Tensor,
         fmt: str,
         num_skip_prefix_chunk=0,
-    ) -> Iterable[Tuple[str, torch.Tensor]]:
+    ) -> Iterable[Tuple[int, torch.Tensor]]:
         """
         Skip the existing chunks and return the rest of the chunks
         """
@@ -231,7 +231,7 @@ class LMCacheEngine:
         fmt: str,
         num_skip_prefix_chunk=0,
         skip_existing=True,
-    ) -> Iterable[Tuple[str, torch.Tensor]]:
+    ) -> Iterable[Tuple[int, torch.Tensor]]:
         """
         Returns a generator of zipped (chunk_hash, chunk_kv) tuples
         """
