@@ -180,7 +180,7 @@ class RequestExecutor:
 class UserSession:
     def __init__(self, user_config: UserConfig, use_sharegpt=False, sharegpt_data=None):
         self.user_config = user_config
-        self.last_request_time = None
+        self.last_request_time: float | None = None
         self.chat_history = ChatHistory()
         self.question_id = 0
         self.use_sharegpt = use_sharegpt
@@ -192,7 +192,7 @@ class UserSession:
                 self.start_with_gpt = True
 
         self.has_unfinished_request = False
-        self.last_unfinished_log = 0
+        self.last_unfinished_log = 0.0
 
         self.prompt_lengths = []
         self.generation_lengths = []
@@ -365,9 +365,9 @@ class UserSessionManager:
         )
 
         self.user_id = init_user_id
-        self.last_user_join = 0
+        self.last_user_join = 0.0
         self.session_summaries = []
-        self.start_time = None
+        self.start_time: float | None = None
 
         self.need_ramp_up = True
 
@@ -446,7 +446,7 @@ class UserSessionManager:
         start_time: Optional[float] = None,
         end_time: Optional[float] = None,
         pending_queries: int = 0,
-        config_qps: Optional[int] = None,
+        config_qps: Optional[float] = None,
     ):
         if start_time and end_time:
             launched_queries = len(
@@ -527,6 +527,7 @@ class UserSessionManager:
             [s for s in self.session_summaries] + [s.summary() for s in self.sessions]
         )
         pending_queries = len([s for s in self.sessions if s.has_unfinished_request])
+        assert self.start_time is not None
         start_time = max(self.start_time, start_time)
         end_time = min(end_time, df["finish_time"].max())
         qps = self.workload_config.qps

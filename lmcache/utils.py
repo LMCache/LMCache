@@ -33,7 +33,7 @@ class DiskCacheMetadata:
     size: int  # in bytes
     shape: Optional[torch.Size] = None
     dtype: Optional[torch.dtype] = None
-    fmt: MemoryFormat = None
+    fmt: Optional[MemoryFormat] = None
     pin_count: int = 0
 
     def pin(self) -> bool:

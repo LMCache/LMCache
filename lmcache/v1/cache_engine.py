@@ -1289,8 +1289,8 @@ class LMCacheEngineBuilder:
         config: LMCacheEngineConfig,
         metadata: LMCacheEngineMetadata,
         gpu_connector: GPUConnectorInterface,
-        broadcast_fn: Callable[[torch.Tensor, int], None] = None,
-        broadcast_object_fn: Callable[[Any, int], Any] = None,
+        broadcast_fn: Optional[Callable[[torch.Tensor, int], None]] = None,
+        broadcast_object_fn: Optional[Callable[[Any, int], Any]] = None,
     ) -> LMCacheEngine:
         """
         Builds a new LMCacheEngine instance if it doesn't already exist for the

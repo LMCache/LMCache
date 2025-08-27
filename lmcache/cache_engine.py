@@ -70,7 +70,7 @@ class LMCacheEngine:
         self,
         tokens: torch.Tensor,
         prefix_hash: int,
-    ) -> str:
+    ) -> int:
         return hash((prefix_hash, tuple(tokens.tolist())))
 
     def _chunk_tokens(
