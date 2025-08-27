@@ -453,6 +453,8 @@ class LMCacheEngine:
 
         ret_mask = torch.zeros_like(tokens, dtype=torch.bool, device="cpu")
 
+        print(f"stage 1: {(time.perf_counter() - t)*1000}ms")
+
         reordered_chunks: List[Tuple[CacheEngineKey, MemoryObj, int, int]] = []
         if not self._is_passive():
             reordered_chunks, tot_kv_size = self._process_tokens_internal(
@@ -466,6 +468,8 @@ class LMCacheEngine:
                 reordered_chunks,
                 ret_mask,
             )
+        
+        print(f"stage 2: {(time.perf_counter() - t)*1000}ms")
 
         # NOTE(Jiayi): memory_obj doesn't have to be a pinned
         # cpu tensor for the sake of performance.
@@ -484,15 +488,11 @@ class LMCacheEngine:
             memory_obj.ref_count_down()
 
         onload_time = time.perf_counter() - t
+        print(f"stage 3: {onload_time*1000}ms")
 
         retrieved_tokens = torch.sum(ret_mask)
         self.stats_monitor.on_retrieve_finished(monitor_req_id, retrieved_tokens)
         logger.info(
-            f"Retrieved {retrieved_tokens} "
-            f"out of {num_required_tokens} "
-            f"out of total {len(tokens)} tokens"
-        )
-        logger.debug(
             "Retrieved %d out of total %d out of total %d tokens. size: %.4f gb,"
             " cost %.4f ms, throughput: %.4f GB/s;",
             retrieved_tokens,
