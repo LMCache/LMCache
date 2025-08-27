@@ -253,7 +253,7 @@ class NaiveDistributedServer(DistributedServerInterface):
 
     async def batched_issue_put(
         self,
-        keys: CacheEngineKey,
+        keys: list[CacheEngineKey],
         memory_objs: list[MemoryObj],
         dst_url: str,
         dst_location: Optional[str] = None,
@@ -263,8 +263,8 @@ class NaiveDistributedServer(DistributedServerInterface):
         This function can be blocking for now.
         """
         # `dst_url` has the format host:port
-        host, port = dst_url.split(":")
-        port = int(port)
+        host, port_str = dst_url.split(":")
+        port = int(port_str)
 
         logger.debug(f"Trying to connect to peer {host}:{port}")
 

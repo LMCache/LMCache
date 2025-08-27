@@ -5,12 +5,14 @@
 # to stay flexible for the torch version with `--no-build-isolation`. Thus, these packages
 # should be installed before `pip install -e . --no-build-isolation`. 
 # However, build isolation is still used for the cibuildwheel releases
+# Thus, we will still lock a torch version here because we can choose to release wheels
+# in sync with vllm and update our torch version accordingly
 requires = [
     "ninja",
     "packaging>=24.2",
     "setuptools>=77.0.3,<81.0.0",
     "setuptools_scm>=8",
-    "torch",
+    "torch==2.7.1",
     "wheel",
 ]
 build-backend = "setuptools.build_meta"
@@ -101,7 +103,9 @@ from-first = true
 # import-heading-localfolder=Local
 
 [tool.mypy]
-modules = ["lmcache", "tests"]
+
+modules = ["lmcache", "tests", "benchmarks"]
+
 
 # TODO: tighten MyPy checks by enabling these checks over time.
 disable_error_code = [
@@ -109,12 +113,12 @@ disable_error_code = [
     "union-attr",
     "var-annotated",
     "arg-type",
-    "call-arg",
+    # "call-arg",
     "import-untyped",
     "attr-defined",
     "return-value",
-    "assignment",
-    "call-overload",
+    # "assignment",
+    # "call-overload",
     "misc",
 ]
 

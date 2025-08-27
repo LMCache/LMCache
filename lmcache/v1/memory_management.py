@@ -1273,6 +1273,7 @@ class HostMemoryAllocator(MemoryAllocatorInterface):
         """
         buffer = torch.empty(size, dtype=torch.uint8, device="cpu")
 
+        self.allocator: MemoryAllocatorInterface
         if use_paging:
             assert "shape" in kwargs, (
                 "shape must be specified for paged memory allocator"
@@ -1350,6 +1351,7 @@ class PinMemoryAllocator(MemoryAllocatorInterface):
 
         self._unregistered = False
 
+        self.allocator: MemoryAllocatorInterface
         if use_paging:
             assert "shape" in kwargs, (
                 "shape must be specified for paged memory allocator"
@@ -1448,6 +1450,7 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
         self.buffer = torch.frombuffer(buf, dtype=torch.uint8)
         self._unregistered = False
 
+        self.pin_allocator: MemoryAllocatorInterface
         if use_paging:
             assert "shape" in kwargs, (
                 "shape must be specified for paged memory allocator"
@@ -1583,6 +1586,7 @@ class GPUMemoryAllocator(MemoryAllocatorInterface):
         """
         self.tensor = torch.empty(size, dtype=torch.uint8, device=device)
 
+        self.allocator: MemoryAllocatorInterface
         if use_paging:
             assert "shape" in kwargs, (
                 "shape must be specified for paged memory allocator"

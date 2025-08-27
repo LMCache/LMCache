@@ -223,5 +223,24 @@ class RemoteConnector(metaclass=abc.ABCMeta):
         """
         raise NotImplementedError
 
+    def support_batched_put(self) -> bool:
+        """
+        Check if the connector supports batched put
+        Returns:
+            True if batched put is supported, False otherwise
+        """
+        return False
+
+    async def batched_put(
+        self, keys: List[CacheEngineKey], memory_objs: List[MemoryObj]
+    ):
+        """
+        Batched put the memory_objs with the corresponding keys
+        Input:
+            keys: the keys of the corresponding objects
+            memory_objs: the memory_objs of the corresponding keys
+        """
+        raise NotImplementedError
+
     def __repr__(self) -> str:
         return f"<{self.__class__.__name__}>"

@@ -58,8 +58,8 @@ def init_logger(name: str, log_level=logging.DEBUG) -> Logger:
 
 
 class AsyncLoopWrapper:
-    _loop: asyncio.AbstractEventLoop = None
-    _thread: threading.Thread = None
+    _loop: asyncio.AbstractEventLoop | None = None
+    _thread: threading.Thread | None = None
     _logger = init_logger("AsyncLoopWrapper")
 
     @classmethod
