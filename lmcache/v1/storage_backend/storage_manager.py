@@ -123,6 +123,7 @@ class StorageManager:
         batch_size: int,
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
         eviction=True,
+        busy_loop=False,
     ) -> Optional[MemoryObj]:
         """
         Batched allocate memory object with memory allocator.
@@ -131,7 +132,12 @@ class StorageManager:
         # TODO (Jiayi): We might need to pre-allocate and management
         # disk in a similar way as CPU.
         return self.allocator_backend.batched_allocate(
-            shape, dtype, batch_size, fmt, eviction=eviction
+            shape,
+            dtype,
+            batch_size,
+            fmt,
+            eviction=eviction,
+            busy_loop=busy_loop,
         )
 
     def put(
