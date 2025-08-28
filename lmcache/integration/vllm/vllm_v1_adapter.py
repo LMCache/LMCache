@@ -721,9 +721,12 @@ class LMCacheConnectorV1Impl:
                 continue
 
             tokens = request.token_ids
+            # TODO: have a pre-allocated buffer to hold the slot_mappings
             slot_mapping = request.slot_mapping.cuda()
+            assert len(tokens) == len(slot_mapping)
             slot_mappings = request.slot_mappings
             for kv_cache_group_id in slot_mappings:
+                # Move to cuda
                 slot_mappings[kv_cache_group_id] = slot_mappings[
                     kv_cache_group_id
                 ].cuda()
