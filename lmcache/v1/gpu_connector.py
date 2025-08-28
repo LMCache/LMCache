@@ -1130,13 +1130,15 @@ class VLLMPagedMemLayerwiseGPUConnectorForHybridAlloc(GPUConnectorInterface):
             "kvcaches should be provided in kwargs or initialized beforehand."
         )
 
-        slot_mappings: dict[int, torch.Tensor] = {}
-
         assert "slot_mappings" in kwargs, (
             "slot_mappings should be provided in kwargs for "
             "VLLMPagedMemLayerwiseGPUConnectorForHybridAlloc."
         )
-        slot_mappings = kwargs["slot_mappings"]
+        assert isinstance(kwargs["slot_mappings"], torch.Tensor), (
+            "slot_mappings should be a tensor for "
+            "VLLMPagedMemLayerwiseGPUConnectorForHybridAlloc."
+        )
+        slot_mappings: torch.Tensor = kwargs["slot_mappings"]
 
         if "sync" not in kwargs:
             raise ValueError("'sync' should be provided in kwargs.")
@@ -1145,19 +1147,10 @@ class VLLMPagedMemLayerwiseGPUConnectorForHybridAlloc(GPUConnectorInterface):
 
         self._lazy_initialize_buffer(self.kvcaches)
 
-        slot_mappings_full = {}
-
-        for kv_cache_group_id in slot_mappings:
-            slot_mapping = slot_mappings[kv_cache_group_id]
-
-            slot_mapping_chunks = []
-            for start, end in zip(starts, ends, strict=False):
-                slot_mapping_chunks.append(slot_mapping[start:end])
-
-            # TODO(Jiayi): Optimize away this `cat`
-            slot_mapping_full = torch.cat(slot_mapping_chunks, dim=0)
-
-            slot_mappings_full[kv_cache_group_id] = slot_mapping_full
+        slot_mappings_full_list = []
+        for start, end in zip(starts, ends, strict=False):
+            slot_mappings_full_list.append(slot_mappings[:, start:end])
+        slot_mappings_full = torch.cat(slot_mappings_full_list, dim=1)
 
         num_tokens = len(slot_mappings_full[0])
 
@@ -1272,13 +1265,15 @@ class VLLMPagedMemLayerwiseGPUConnectorForHybridAlloc(GPUConnectorInterface):
             "kvcaches should be provided in kwargs or initialized beforehand."
         )
 
-        slot_mappings: dict[int, torch.Tensor] = {}
-
         assert "slot_mappings" in kwargs, (
             "slot_mappings should be provided in kwargs for "
             "VLLMPagedMemLayerwiseGPUConnectorForHybridAlloc."
         )
-        slot_mappings = kwargs["slot_mappings"]
+        assert isinstance(kwargs["slot_mappings"], torch.Tensor), (
+            "slot_mappings should be a tensor for "
+            "VLLMPagedMemLayerwiseGPUConnectorForHybridAlloc."
+        )
+        slot_mappings: torch.Tensor = kwargs["slot_mappings"]
 
         if "sync" not in kwargs:
             raise ValueError("'sync' should be provided in kwargs.")
@@ -1287,19 +1282,10 @@ class VLLMPagedMemLayerwiseGPUConnectorForHybridAlloc(GPUConnectorInterface):
 
         self._lazy_initialize_buffer(self.kvcaches)
 
-        slot_mappings_full = {}
-
-        for kv_cache_group_id in slot_mappings:
-            slot_mapping = slot_mappings[kv_cache_group_id]
-
-            slot_mapping_chunks = []
-            for start, end in zip(starts, ends, strict=False):
-                slot_mapping_chunks.append(slot_mapping[start:end])
-
-            # TODO(Jiayi): Optimize away this `cat`
-            slot_mapping_full = torch.cat(slot_mapping_chunks, dim=0)
-
-            slot_mappings_full[kv_cache_group_id] = slot_mapping_full
+        slot_mappings_full_list: list[torch.Tensor] = []
+        for start, end in zip(starts, ends, strict=False):
+            slot_mappings_full_list.append(slot_mappings[:, start:end])
+        slot_mappings_full = torch.cat(slot_mappings_full_list, dim=1)
 
         tmp_gpu_buffer_obj: Optional[MemoryObj] = None
 

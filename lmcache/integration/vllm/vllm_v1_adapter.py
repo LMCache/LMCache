@@ -216,7 +216,8 @@ class ReqMeta:
     # Request tokens
     token_ids: torch.Tensor
     # Slot mappings for each kv cache group
-    slot_mappings: dict[int, torch.Tensor]
+    # Shape: (num_kv_cache_groups, num_tokens)
+    slot_mappings: torch.Tensor
     # Slot mapping for backward compatibility
     slot_mapping: torch.Tensor
 
@@ -317,8 +318,8 @@ class ReqMeta:
 
         # NOTE(Kuntai): enumerate across different kv cache groups and construct
         # the slot mapping for each kv cache group.
-        # TODO(Kuntai): make slot_mappings a tensor.
-        slot_mappings = {}
+        # Then, we concat them into `slot_mappings` tensor.
+        slot_mappings_list = []
         for kv_cache_group_id, block_ids in tracker.allocated_block_ids.items():
             num_blocks = len(block_ids)
 
@@ -346,7 +347,9 @@ class ReqMeta:
 
             slot_mapping = slot_mapping.flatten()[: len(token_ids)]
             assert slot_mapping.dtype == torch.long  # TODO: this could be removed
-            slot_mappings[kv_cache_group_id] = slot_mapping
+            slot_mappings_list.append(slot_mapping)
+
+        slot_mappings = torch.stack(slot_mappings_list, dim=0)
 
         # For load operation: check whether the request is scheduled to load
         if load_spec is not None and load_spec.can_load:
@@ -724,13 +727,8 @@ class LMCacheConnectorV1Impl:
             # TODO: have a pre-allocated buffer to hold the slot_mappings
             slot_mapping = request.slot_mapping.cuda()
             assert len(tokens) == len(slot_mapping)
-            slot_mappings = request.slot_mappings
-            for kv_cache_group_id in slot_mappings:
-                # Move to cuda
-                slot_mappings[kv_cache_group_id] = slot_mappings[
-                    kv_cache_group_id
-                ].cuda()
-                assert len(tokens) == len(slot_mappings[kv_cache_group_id])
+            slot_mappings = request.slot_mappings.cuda()
+            assert len(tokens) == slot_mappings.shape[1]
 
             token_mask = torch.ones_like(tokens, dtype=torch.bool)
             masked_token_count = (
@@ -875,13 +873,8 @@ class LMCacheConnectorV1Impl:
                 slot_mapping = slot_mapping.cuda()
 
                 slot_mappings = request.slot_mappings
-                for kv_cache_group_id in slot_mappings:
-                    assert isinstance(slot_mappings[kv_cache_group_id], torch.Tensor)
-                    assert len(slot_mappings[kv_cache_group_id]) == len(token_ids)
-                for kv_cache_group_id in slot_mappings:
-                    slot_mappings[kv_cache_group_id] = slot_mappings[
-                        kv_cache_group_id
-                    ].cuda()
+                assert isinstance(slot_mappings, torch.Tensor)
+                assert len(token_ids) == slot_mappings.shape[1]
 
                 if self.kv_role == "kv_producer":
                     skip_leading_tokens = 0
