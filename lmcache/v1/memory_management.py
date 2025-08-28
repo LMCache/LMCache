@@ -308,6 +308,7 @@ class TensorMemoryObj(MemoryObj):
         self.valid = True
         self.lock = threading.Lock()
         self.parent_allocator = parent_allocator
+        self.size_in_bytes = -1
 
     def invalidate(self):
         self.valid = False
@@ -316,10 +317,11 @@ class TensorMemoryObj(MemoryObj):
         return self.valid
 
     def get_size(self) -> int:
-        num_elements = math.prod(self.meta.shape)
-        element_size = self.meta.dtype.itemsize  # type: ignore
-        size_in_bytes = num_elements * element_size
-        return size_in_bytes
+        if self.size_in_bytes == -1:
+            num_elements = math.prod(self.meta.shape)
+            element_size = self.meta.dtype.itemsize  # type: ignore
+            self.size_in_bytes = num_elements * element_size
+        return self.size_in_bytes
 
     def get_shape(self) -> torch.Size:
         return self.meta.shape
@@ -412,7 +414,6 @@ class TensorMemoryObj(MemoryObj):
             logger.warning("Trying to access an invalidated MemoryObj")
             return None
         assert self.meta.dtype is not None
-        # TODO(Jiayi): consider caching the `get_size()`
         return (
             self.raw_data[: self.get_size()].view(self.meta.dtype).view(self.meta.shape)
         )
