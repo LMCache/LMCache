@@ -759,12 +759,7 @@ class LMCacheConnectorV1Impl:
                         token_mask[:lmcache_cached_tokens],
                         kvcaches=kvcaches,
                         slot_mapping=slot_mapping[:lmcache_cached_tokens],
-                        slot_mappings={
-                            kv_cache_group_id: slot_mappings[kv_cache_group_id][
-                                :lmcache_cached_tokens
-                            ]
-                            for kv_cache_group_id in slot_mappings.keys()
-                        },
+                        slot_mappings=slot_mappings[:, :lmcache_cached_tokens],
                         sync=sync,
                     )
                     # NOTE: retrieve for two layers at the first layer
@@ -875,6 +870,7 @@ class LMCacheConnectorV1Impl:
                 slot_mappings = request.slot_mappings
                 assert isinstance(slot_mappings, torch.Tensor)
                 assert len(token_ids) == slot_mappings.shape[1]
+                slot_mappings = slot_mappings.cuda()
 
                 if self.kv_role == "kv_producer":
                     skip_leading_tokens = 0
