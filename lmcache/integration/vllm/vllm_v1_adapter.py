@@ -40,6 +40,7 @@ from lmcache.v1.gpu_connector import (
     VLLMBufferLayerwiseGPUConnector,
     VLLMPagedMemGPUConnectorV2,
     VLLMPagedMemLayerwiseGPUConnector,
+    VLLMPagedMemLayerwiseGPUConnectorForHybridAlloc,
 )
 from lmcache.v1.internal_api_server.api_server import InternalAPIServer
 from lmcache.v1.lookup_client import LookupClientFactory
@@ -475,6 +476,7 @@ def _init_lmcache_engine(
         VLLMBufferLayerwiseGPUConnector,
         VLLMPagedMemGPUConnectorV2,
         VLLMPagedMemLayerwiseGPUConnector,
+        VLLMPagedMemLayerwiseGPUConnectorForHybridAlloc,
     ]
 
     if use_mla and lmcache_config.use_layerwise:
@@ -493,8 +495,8 @@ def _init_lmcache_engine(
                 dtype=kv_dtype,
                 device=device,
             )
-        else:
-            vllm_gpu_connector = VLLMPagedMemLayerwiseGPUConnector(
+        elif hasattr(vllm_config, "kv_cache_config"):
+            vllm_gpu_connector = VLLMPagedMemLayerwiseGPUConnectorForHybridAlloc(
                 hidden_dim_size,
                 num_layer,
                 use_gpu=use_gpu,
@@ -503,6 +505,15 @@ def _init_lmcache_engine(
                 device=device,
                 layer_id_to_kv_cache_group_id=layer_id_to_kv_cache_group_id,
                 layer_name_to_kv_cache_group_id=layer_name_to_kv_cache_group_id,
+            )
+        else:
+            vllm_gpu_connector = VLLMPagedMemLayerwiseGPUConnector(
+                hidden_dim_size,
+                num_layer,
+                use_gpu=use_gpu,
+                chunk_size=chunk_size,
+                dtype=kv_dtype,
+                device=device,
             )
     else:
         vllm_gpu_connector = VLLMPagedMemGPUConnectorV2(
