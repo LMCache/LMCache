@@ -53,7 +53,7 @@ def create_dynamic_backends(
 
     # Get the list of allowed external backends if configured
     allowed_backends = (
-        set(config.external_backends) if config.external_backends else None
+        set(config.external_backends) if config.external_backends else set()
     )
 
     for backend_name in allowed_backends:
