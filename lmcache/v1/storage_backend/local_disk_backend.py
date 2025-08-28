@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from concurrent.futures import Future, ThreadPoolExecutor
-from typing import TYPE_CHECKING, Callable, List, Optional
+from typing import TYPE_CHECKING, Any, Callable, List, Optional, Sequence
 import asyncio
 import itertools
 import os
@@ -32,8 +32,10 @@ logger = init_logger(__name__)
 
 
 class LocalDiskWorker:
-    def __init__(self):
-        self.pq = queue.PriorityQueue()
+    def __init__(self) -> None:
+        self.pq: queue.PriorityQueue[tuple[int, int, str, Callable, dict[str, Any]]] = (
+            queue.PriorityQueue()
+        )
 
         # TODO(Jiayi): remove this hard code.
         num_workers = 1
@@ -355,7 +357,7 @@ class LocalDiskBackend(StorageBackendInterface):
 
     def batched_submit_put_task(
         self,
-        keys: List[CacheEngineKey],
+        keys: Sequence[CacheEngineKey],
         memory_objs: List[MemoryObj],
         transfer_spec=None,
     ) -> None:

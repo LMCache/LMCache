@@ -118,4 +118,5 @@ class AsyncLoopWrapper:
     def GetOrStartLoop(cls) -> asyncio.AbstractEventLoop:
         if cls._loop is None:
             cls.StartLoop()
+        assert cls._loop is not None, "Loop is not started"
         return cls._loop

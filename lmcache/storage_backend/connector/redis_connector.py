@@ -38,7 +38,7 @@ class RedisConnector(RemoteBytesConnector):
     def set(self, key: str, obj: bytes) -> None:  # type: ignore[override]
         self.connection.set(key, obj)
 
-    def list(self):
+    def list(self) -> List[str]:
         cursor = 0
         all_keys: List[bytes] = []
 

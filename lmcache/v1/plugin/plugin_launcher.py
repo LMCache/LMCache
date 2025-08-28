@@ -129,6 +129,7 @@ class PluginLauncher:
     def _capture_plugin_output(self, proc: subprocess.Popen, plugin_name: str):
         """Continuously capture and log plugin output"""
         try:
+            assert proc.stdout is not None, "The plugin subprocess does not have stdout"
             while True:
                 line = proc.stdout.readline()
                 if not line:

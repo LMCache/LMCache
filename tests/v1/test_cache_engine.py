@@ -18,6 +18,7 @@ import pytest
 import torch
 
 # First Party
+from lmcache.utils import mock_up_broadcast_fn, mock_up_broadcast_object_fn
 from lmcache.v1.cache_engine import LMCacheEngineBuilder
 from lmcache.v1.config import LMCacheEngineConfig
 
@@ -58,7 +59,12 @@ def test_paged_same_retrieve_store(autorelease_v1):
 
     engine = autorelease_v1(
         LMCacheEngineBuilder.get_or_create(
-            "test", cfg, dumb_metadata(fmt, kv_shape), connector
+            "test",
+            cfg,
+            dumb_metadata(fmt, kv_shape),
+            connector,
+            mock_up_broadcast_fn,
+            mock_up_broadcast_object_fn,
         )
     )
     """ test retrieve empty """
@@ -138,7 +144,12 @@ def test_paged_retrieve_prefix(
 
     engine = autorelease_v1(
         LMCacheEngineBuilder.get_or_create(
-            "test", cfg, dumb_metadata(fmt, kv_shape), connector
+            "test",
+            cfg,
+            dumb_metadata(fmt, kv_shape),
+            connector,
+            mock_up_broadcast_fn,
+            mock_up_broadcast_object_fn,
         )
     )
     """ test store """
@@ -229,7 +240,12 @@ def test_paged_store_offset(
 
     engine = autorelease_v1(
         LMCacheEngineBuilder.get_or_create(
-            "test", cfg, dumb_metadata(fmt, kv_shape), connector
+            "test",
+            cfg,
+            dumb_metadata(fmt, kv_shape),
+            connector,
+            mock_up_broadcast_fn,
+            mock_up_broadcast_object_fn,
         )
     )
     """ test store """
@@ -324,7 +340,12 @@ def test_paged_mixed_retrieve(fmt, chunk_size, backend, autorelease_v1):
 
     engine = autorelease_v1(
         LMCacheEngineBuilder.get_or_create(
-            "test", cfg, dumb_metadata(fmt, kv_shape), connector
+            "test",
+            cfg,
+            dumb_metadata(fmt, kv_shape),
+            connector,
+            mock_up_broadcast_fn,
+            mock_up_broadcast_object_fn,
         )
     )
     """ test store """
@@ -446,7 +467,12 @@ def test_paged_store_kv_tensors_mask(fmt, autorelease_v1):
 
     engine = autorelease_v1(
         LMCacheEngineBuilder.get_or_create(
-            "test", cfg, dumb_metadata(fmt, kv_shape), connector
+            "test",
+            cfg,
+            dumb_metadata(fmt, kv_shape),
+            connector,
+            mock_up_broadcast_fn,
+            mock_up_broadcast_object_fn,
         )
     )
     """ Store some tokens with mask """
@@ -601,7 +627,12 @@ def test_paged_hierarchy_retrieve(
 
     engine = autorelease_v1(
         LMCacheEngineBuilder.get_or_create(
-            "test", cfg, dumb_metadata(fmt, kv_shape), connector
+            "test",
+            cfg,
+            dumb_metadata(fmt, kv_shape),
+            connector,
+            mock_up_broadcast_fn,
+            mock_up_broadcast_object_fn,
         )
     )
     """ test store """
@@ -718,7 +749,12 @@ def test_paged_prefetch_retrieve(backend, prefetch_from, autorelease_v1):
 
     engine = autorelease_v1(
         LMCacheEngineBuilder.get_or_create(
-            "test", cfg, dumb_metadata(fmt, kv_shape), connector
+            "test",
+            cfg,
+            dumb_metadata(fmt, kv_shape),
+            connector,
+            mock_up_broadcast_fn,
+            mock_up_broadcast_object_fn,
         )
     )
     """ test store """
@@ -822,7 +858,12 @@ def test_paged_mem_leak(fmt, chunk_size, backend, lmserver_v1_process, autorelea
 
     engine = autorelease_v1(
         LMCacheEngineBuilder.get_or_create(
-            "test", cfg, dumb_metadata(fmt, kv_shape), connector
+            "test",
+            cfg,
+            dumb_metadata(fmt, kv_shape),
+            connector,
+            mock_up_broadcast_fn,
+            mock_up_broadcast_object_fn,
         )
     )
 
@@ -872,11 +913,23 @@ def test_builder(autorelease_v1):
     assert should_be_none is None
 
     _engine = autorelease_v1(
-        LMCacheEngineBuilder.get_or_create(instance_id, cfg, dumb_metadata(), connector)
+        LMCacheEngineBuilder.get_or_create(
+            instance_id,
+            cfg,
+            dumb_metadata(),
+            connector,
+            mock_up_broadcast_fn,
+            mock_up_broadcast_object_fn,
+        )
     )
     _engine2 = autorelease_v1(LMCacheEngineBuilder.get(instance_id))  # noqa
 
     with pytest.raises(ValueError):
         LMCacheEngineBuilder.get_or_create(
-            instance_id, cfg2, dumb_metadata(), connector
+            instance_id,
+            cfg2,
+            dumb_metadata(),
+            connector,
+            mock_up_broadcast_fn,
+            mock_up_broadcast_object_fn,
         )

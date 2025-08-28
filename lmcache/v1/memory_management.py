@@ -4,7 +4,7 @@ from collections import deque
 from contextlib import nullcontext
 from dataclasses import dataclass
 from enum import Enum
-from typing import List, Optional, Tuple, Union
+from typing import Any, List, Optional, Tuple, Union
 import abc
 import ctypes
 import math
@@ -128,11 +128,20 @@ class MemoryObjMetadata:
             fmt=MemoryFormat(d["fmt"]),
         )
 
+    def get_size(self) -> int:
+        num_elements = math.prod(self.shape)
+        element_size = self.dtype.itemsize  # type: ignore
+        size_in_bytes = num_elements * element_size
+        return size_in_bytes
+
 
 class MemoryObj(metaclass=abc.ABCMeta):
     """
     MemoryObj interface.
     """
+
+    # subclasses should expose raw_data differently
+    raw_data: Any
 
     def __init__(self, metadata: MemoryObjMetadata):
         self.meta = metadata
@@ -291,8 +300,9 @@ class TensorMemoryObj(MemoryObj):
         self,
         raw_data: torch.Tensor,
         metadata: MemoryObjMetadata,
-        parent_allocator: Optional["MemoryAllocatorInterface"] = None,
+        parent_allocator: Optional["MemoryAllocatorInterface"],
     ):
+        assert metadata.dtype is not None, "dtype must be specified for TensorMemoryObj"
         self.raw_data = raw_data
         self.meta = metadata
         self.valid = True
@@ -307,7 +317,7 @@ class TensorMemoryObj(MemoryObj):
 
     def get_size(self) -> int:
         num_elements = math.prod(self.meta.shape)
-        element_size = self.meta.dtype.itemsize
+        element_size = self.meta.dtype.itemsize  # type: ignore
         size_in_bytes = num_elements * element_size
         return size_in_bytes
 
@@ -373,7 +383,13 @@ class TensorMemoryObj(MemoryObj):
                 TensorMemoryObj.monitor.update_pinned_memory_objs_count(-1)
 
             if self.meta.pin_count <= 0 and self.meta.ref_count <= 0:
-                self.parent_allocator.free(self)
+                if self.parent_allocator is None:
+                    logger.error(
+                        "Parent allocator is None when trying to free MemoryObj."
+                        "This could cause memory leak"
+                    )
+                else:
+                    self.parent_allocator.free(self)
 
             if self.meta.pin_count < 0:
                 logger.warning(
@@ -700,7 +716,6 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         shape: Union[torch.Size, Tuple[int, ...]],
         dtype: Optional[torch.dtype],
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
-        parent_allocator: Optional["MemoryAllocatorInterface"] = None,
         allocator_type: Optional[str] = None,
     ) -> Optional[TensorMemoryObj]:
         if not isinstance(shape, torch.Size):
@@ -752,7 +767,7 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
             metadata=MemoryObjMetadata(
                 shape, dtype, block.start, aligned_size, 1, False, fmt
             ),
-            parent_allocator=parent_allocator,
+            parent_allocator=self,
         )
 
     @_lmcache_nvtx_annotate
@@ -762,7 +777,6 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         dtype: Optional[torch.dtype],
         batch_size: int,
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
-        parent_allocator: Optional["MemoryAllocatorInterface"] = None,
         allocator_type: Optional[str] = None,
     ) -> Optional[List[TensorMemoryObj]]:
         """
@@ -828,7 +842,7 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
                     metadata=MemoryObjMetadata(
                         shape, dtype, temp_start, unit_aligned_size, 1, False, fmt
                     ),
-                    parent_allocator=parent_allocator,
+                    parent_allocator=self,
                 )
             )
             temp_start += unit_aligned_size
@@ -903,7 +917,9 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
                     start=memory_obj.meta.address, size=memory_obj.meta.phy_size
                 )
                 curr_start = memory_obj.meta.address + memory_obj.meta.phy_size
-        new_free_blocks.append(new_free_block)
+
+        if new_free_block is not None:
+            new_free_blocks.append(new_free_block)
 
         for new_free_block in new_free_blocks:
             index = self.explicit_list.bisect_right(new_free_block)
@@ -958,6 +974,9 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
                 clear = False
         return clear
 
+    def __str__(self):
+        return "TensorMemoryAllocator"
+
 
 class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
     """
@@ -978,7 +997,6 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
         self.shape = shape
         self.dtype = dtype
         self.fmt = fmt
-        self.parent_allocator = self
 
         num_elements = shape.numel()
         self.bytes_per_element = torch.tensor([], dtype=dtype).element_size()
@@ -995,7 +1013,7 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
         # NOTE: deque is used since thread-safety is not a concern here as
         # is implemented in C under the hood (in CPython), and operations
         # on deque are atomic.
-        self.free_blocks = deque()
+        self.free_blocks: deque[TensorMemoryObj] = deque()
 
         for idx, buf in enumerate(self.paged_buffers):
             # NOTE: idx is the paged index
@@ -1013,7 +1031,7 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
             mem_obj = TensorMemoryObj(
                 raw_data=buf,
                 metadata=metadata,
-                parent_allocator=self.parent_allocator,
+                parent_allocator=self,
             )
             self.free_blocks.append(mem_obj)
 
@@ -1034,7 +1052,6 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
         shape: Union[torch.Size, Tuple[int, ...]],
         dtype: Optional[torch.dtype],
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
-        parent_allocator: Optional["MemoryAllocatorInterface"] = None,
         allocator_type: Optional[str] = None,
     ) -> Optional[TensorMemoryObj]:
         if not isinstance(shape, torch.Size):
@@ -1080,7 +1097,6 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
         dtype: Optional[torch.dtype],
         batch_size: int,
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
-        parent_allocator: Optional["MemoryAllocatorInterface"] = None,
         allocator_type: Optional[str] = None,
     ) -> Optional[List[TensorMemoryObj]]:
         """
@@ -1091,7 +1107,7 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
 
         assert dtype is not None, "dtype must be specified"
 
-        allocated_blocks = []
+        allocated_blocks: list[TensorMemoryObj] = []
         for i in range(batch_size):
             try:
                 free_block = self.free_blocks.popleft()
@@ -1129,7 +1145,7 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
         return allocated_blocks
 
     @_lmcache_nvtx_annotate
-    def free(self, memory_obj: MemoryObj, allocator_type: Optional[str] = None):
+    def free(self, memory_obj: TensorMemoryObj, allocator_type: Optional[str] = None):
         if not memory_obj.is_valid():
             return
         if memory_obj.meta.shape != self.shape:
@@ -1152,7 +1168,7 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
     @_lmcache_nvtx_annotate
     def batched_free(
         self,
-        memory_objs: List[MemoryObj],
+        memory_objs: List[TensorMemoryObj],
         allocator_type: Optional[str] = None,
         update_stats: bool = True,
     ):
@@ -1209,6 +1225,9 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
 
         return True
 
+    def __str__(self):
+        return "PagedTensorMemoryAllocator"
+
     def __del__(self):
         # FIXME: NIXL-related memory leak should be handled somewhere (else).
         del self.buffer
@@ -1260,6 +1279,9 @@ class BufferAllocator(MemoryAllocatorInterface):
     ):
         return
 
+    def __str__(self):
+        return "BufferAllocator"
+
     def memcheck(self):
         return True
 
@@ -1302,7 +1324,7 @@ class HostMemoryAllocator(MemoryAllocatorInterface):
         allocator_type: Optional[str] = None,
     ) -> Optional[MemoryObj]:
         with self.host_mem_lock:
-            return self.allocator.allocate(shape, dtype, fmt, self)
+            return self.allocator.allocate(shape, dtype, fmt, str(self))
 
     @_lmcache_nvtx_annotate
     def batched_allocate(
@@ -1314,7 +1336,9 @@ class HostMemoryAllocator(MemoryAllocatorInterface):
         allocator_type: Optional[str] = None,
     ) -> Optional[List[MemoryObj]]:
         with self.host_mem_lock:
-            return self.allocator.batched_allocate(shape, dtype, batch_size, fmt, self)
+            return self.allocator.batched_allocate(
+                shape, dtype, batch_size, fmt, str(self)
+            )
 
     @_lmcache_nvtx_annotate
     def free(self, memory_obj: MemoryObj, allocator_type: Optional[str] = None):
@@ -1334,6 +1358,9 @@ class HostMemoryAllocator(MemoryAllocatorInterface):
     def memcheck(self):
         with self.host_mem_lock:
             return self.allocator.memcheck()
+
+    def __str__(self):
+        return "HostMemoryAllocator"
 
 
 class PinMemoryAllocator(MemoryAllocatorInterface):
@@ -1380,7 +1407,7 @@ class PinMemoryAllocator(MemoryAllocatorInterface):
         allocator_type: Optional[str] = None,
     ) -> Optional[MemoryObj]:
         with self.host_mem_lock:
-            return self.allocator.allocate(shape, dtype, fmt, self)
+            return self.allocator.allocate(shape, dtype, fmt, str(self))
 
     @_lmcache_nvtx_annotate
     def batched_allocate(
@@ -1392,7 +1419,9 @@ class PinMemoryAllocator(MemoryAllocatorInterface):
         allocator_type: Optional[str] = None,
     ) -> Optional[List[MemoryObj]]:
         with self.host_mem_lock:
-            return self.allocator.batched_allocate(shape, dtype, batch_size, fmt, self)
+            return self.allocator.batched_allocate(
+                shape, dtype, batch_size, fmt, str(self)
+            )
 
     @_lmcache_nvtx_annotate
     def free(self, memory_obj: MemoryObj, allocator_type: Optional[str] = None):
@@ -1418,6 +1447,9 @@ class PinMemoryAllocator(MemoryAllocatorInterface):
             torch.cuda.synchronize()
             lmc_ops.free_pinned_ptr(self.buffer.data_ptr())
             self._unregistered = True
+
+    def __str__(self):
+        return "PinMemoryAllocator"
 
 
 class MixedMemoryAllocator(MemoryAllocatorInterface):
@@ -1489,7 +1521,7 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
             MemoryFormat.KV_MLA_FMT,
         ]:
             with self.host_mem_lock:
-                return self.pin_allocator.allocate(shape, dtype, fmt, self)
+                return self.pin_allocator.allocate(shape, dtype, fmt, str(self))
         else:
             raise ValueError(f"Unsupported memory format: {fmt}")
 
@@ -1512,7 +1544,7 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
         ]:
             with self.host_mem_lock:
                 return self.pin_allocator.batched_allocate(
-                    shape, dtype, batch_size, fmt, self
+                    shape, dtype, batch_size, fmt, str(self)
                 )
         else:
             raise ValueError(f"Unsupported memory format: {fmt}")
@@ -1568,6 +1600,9 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
                 lmc_ops.free_pinned_ptr(self.buffer.data_ptr())
             self._unregistered = True
 
+    def __str__(self):
+        return "MixedMemoryAllocator"
+
 
 class GPUMemoryAllocator(MemoryAllocatorInterface):
     """Allocates memory in the pre-allocated GPU memory."""
@@ -1618,7 +1653,7 @@ class GPUMemoryAllocator(MemoryAllocatorInterface):
         allocator_type: Optional[str] = None,
     ) -> Optional[MemoryObj]:
         with self.device_mem_lock:
-            return self.allocator.allocate(shape, dtype, fmt, self)
+            return self.allocator.allocate(shape, dtype, fmt, str(self))
 
     @_lmcache_nvtx_annotate
     def batched_allocate(
@@ -1630,7 +1665,9 @@ class GPUMemoryAllocator(MemoryAllocatorInterface):
         allocator_type: Optional[str] = None,
     ) -> Optional[List[MemoryObj]]:
         with self.device_mem_lock:
-            return self.allocator.batched_allocate(shape, dtype, batch_size, fmt, self)
+            return self.allocator.batched_allocate(
+                shape, dtype, batch_size, fmt, str(self)
+            )
 
     def free(self, memory_obj: MemoryObj, allocator_type: Optional[str] = None):
         with self.device_mem_lock:
@@ -1648,6 +1685,9 @@ class GPUMemoryAllocator(MemoryAllocatorInterface):
     def memcheck(self):
         with self.device_mem_lock:
             return self.allocator.memcheck()
+
+    def __str__(self):
+        return "GPUMemoryAllocator"
 
 
 class AdHocMemoryAllocator(MemoryAllocatorInterface):
@@ -1729,6 +1769,9 @@ class AdHocMemoryAllocator(MemoryAllocatorInterface):
     def memcheck(self):
         return True
 
+    def __str__(self):
+        return "AdHocMemoryAllocator"
+
 
 class CuFileMemoryAllocator(GPUMemoryAllocator):
     def __init__(self, size: int, device=None):
@@ -1748,6 +1791,9 @@ class CuFileMemoryAllocator(GPUMemoryAllocator):
 
     def __del__(self):
         self.cuFileBufDeregister(ctypes.c_void_p(self.base_pointer))
+
+    def __str__(self):
+        return "CuFileMemoryAllocator"
 
 
 class NixlCPUMemoryAllocator(MemoryAllocatorInterface):
@@ -1828,3 +1874,6 @@ class NixlCPUMemoryAllocator(MemoryAllocatorInterface):
             self.cpu_allocator.batched_free(memory_objs, update_stats=update_stats)
         else:
             raise ValueError(f"Unsupported allocator type: {allocator_type}")
+
+    def __str__(self):
+        return "NixlCPUMemoryAllocator"

@@ -16,7 +16,7 @@
 # Standard
 from concurrent.futures import Future
 from dataclasses import dataclass
-from typing import List, Optional, Set
+from typing import List, Optional, Sequence, Set
 import asyncio
 import os
 import threading
@@ -38,9 +38,9 @@ from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import (
-    MemoryAllocatorInterface,
     MemoryObj,
     MemoryObjMetadata,
+    PagedTensorMemoryAllocator,
 )
 from lmcache.v1.storage_backend.abstract_backend import StorageBackendInterface
 from lmcache.v1.storage_backend.connector.nixl_utils import get_correct_nixl_device
@@ -140,7 +140,7 @@ class NixlStorageAgent:
 
     def __init__(
         self,
-        allocator: MemoryAllocatorInterface,
+        allocator: PagedTensorMemoryAllocator,
         file_pool: NixlFilePool,
         device: str,
         backends: list[str],
@@ -237,7 +237,7 @@ class NixlStorageBackend(StorageBackendInterface):
         self,
         nixl_config: NixlStorageConfig,
         loop: asyncio.AbstractEventLoop,
-        memory_allocator: MemoryAllocatorInterface,
+        memory_allocator: PagedTensorMemoryAllocator,
     ):
         """
         Initialize the Nixl storage backend.
@@ -306,7 +306,7 @@ class NixlStorageBackend(StorageBackendInterface):
             )
 
     async def gpu_to_file(
-        self, keys: List[CacheEngineKey], mem_objs: List[MemoryObj]
+        self, keys: Sequence[CacheEngineKey], mem_objs: List[MemoryObj]
     ) -> None:
         mem_indices = [mem_obj.meta.address for mem_obj in mem_objs]
 
@@ -351,19 +351,15 @@ class NixlStorageBackend(StorageBackendInterface):
 
     def batched_submit_put_task(
         self,
-        keys: List[CacheEngineKey],
+        keys: Sequence[CacheEngineKey],
         memory_objs: List[MemoryObj],
         transfer_spec=None,
-    ) -> Optional[List[Future]]:
+    ) -> None:
         with self.progress_lock:
             for key in keys:
                 self.progress_set.add(key.chunk_hash)
 
-        future = asyncio.run_coroutine_threadsafe(
-            self.gpu_to_file(keys, memory_objs), self.loop
-        )
-
-        return [future for key in keys]
+        asyncio.run_coroutine_threadsafe(self.gpu_to_file(keys, memory_objs), self.loop)
 
     def submit_prefetch_task(self, key: CacheEngineKey) -> bool:
         """
@@ -431,7 +427,7 @@ class NixlStorageBackend(StorageBackendInterface):
         config: LMCacheEngineConfig,
         loop: asyncio.AbstractEventLoop,
         metadata: LMCacheEngineMetadata,
-        memory_allocator: MemoryAllocatorInterface,
+        memory_allocator: PagedTensorMemoryAllocator,
     ):
         """
         Create a Nixl backend with the given configuration.

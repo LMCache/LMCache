@@ -111,20 +111,18 @@ from-first = true
 
 modules = ["lmcache", "tests", "benchmarks"]
 
-
-# TODO: tighten MyPy checks by enabling these checks over time.
 disable_error_code = [
-    "annotation-unchecked",
-    "union-attr",
-    "var-annotated",
-    "arg-type",
+    #"annotation-unchecked",
+    #"union-attr",
+    #"var-annotated",
+    #"arg-type",
     # "call-arg",
-    "import-untyped",
-    "attr-defined",
-    "return-value",
-    # "assignment",
-    # "call-overload",
-    "misc",
+    #"import-untyped",
+    #"attr-defined",
+    #"return-value",
+    #"assignment",
+    #"call-overload",
+    #"misc",
 ]
 
 ignore_missing_imports = true

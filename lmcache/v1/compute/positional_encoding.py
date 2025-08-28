@@ -83,7 +83,7 @@ def validate_rope_params(
     head_size: int,
     rotary_dim: int,
     max_position: int,
-    base: int,
+    base: float,
     is_neox_style: bool = True,
     rope_scaling: Optional[Dict[str, Any]] = None,
     dtype: Optional[torch.dtype] = None,
