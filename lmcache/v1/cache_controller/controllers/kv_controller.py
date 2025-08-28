@@ -41,7 +41,7 @@ class KVChunkMetadata:
 
 
 class KVController:
-    def __init__(self):
+    def __init__(self) -> None:
         # NOTE (Jiayi): Even if we offload kv_pool to
         # redis. We might need a local cache for handling
         # messages like `check_finish`. Or everything should be

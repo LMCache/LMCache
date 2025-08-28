@@ -74,6 +74,27 @@ class GPUConnectorInterface(metaclass=abc.ABCMeta):
         raise NotImplementedError
 
     @abc.abstractmethod
+    def batched_to_gpu(
+        self,
+        memory_objs: Union[List[List[MemoryObj]], List[MemoryObj]],
+        starts: List[int],
+        ends: List[int],
+        **kwargs,
+    ):
+        """
+        Batched store the data from the memory objects to GPU kv cache.
+        Sub-classes should define the format of the kwargs.
+
+        :param Union[List[List[MemoryObj]], List[MemoryObj]] memory_obj:
+            The memory objects to store the data to GPU.
+        :param List[int] starts: The starting indices of the data in the corresponding
+            token sequence.
+        :param List[int] ends: The ending indices of the data in the corresponding
+            token sequence.
+        """
+        raise NotImplementedError
+
+    @abc.abstractmethod
     def get_shape(self, num_tokens: int) -> torch.Size:
         """Get the shape of the data given the number of tokens."""
         raise NotImplementedError
@@ -326,7 +347,7 @@ class VLLMBufferLayerwiseGPUConnector(GPUConnectorInterface):
         self.load_stream = torch.cuda.Stream()
         self.store_stream = torch.cuda.Stream()
 
-        self.buffer_mapping = {}
+        self.buffer_mapping: dict[int, MemoryObj] = {}
 
         # track gap positions between blended chunks
         self.current_gap_positions = None
@@ -382,6 +403,7 @@ class VLLMBufferLayerwiseGPUConnector(GPUConnectorInterface):
             raise ValueError(f"Layer {layer_id} is not loaded into GPU buffer.")
 
         gpu_buffer = self.buffer_mapping[layer_id].tensor
+        assert gpu_buffer is not None
         return gpu_buffer[0], gpu_buffer[1]
 
     def to_gpu(self, memory_obj: MemoryObj, start: int, end: int, **kwargs):
@@ -449,6 +471,7 @@ class VLLMBufferLayerwiseGPUConnector(GPUConnectorInterface):
             )
 
         buffer_shape = self.get_shape(num_all_tokens)
+        assert self.gpu_buffer_allocator is not None
         compute_gpu_buffer_obj = self.gpu_buffer_allocator.allocate(
             buffer_shape, self.dtype, MemoryFormat.KV_2TD
         )
@@ -616,6 +639,7 @@ class VLLMBufferLayerwiseGPUConnector(GPUConnectorInterface):
 
         num_tokens = len(slot_mapping_full)
         buffer_shape = self.get_shape(num_tokens)
+        assert self.gpu_buffer_allocator is not None
         tmp_gpu_buffer_obj = self.gpu_buffer_allocator.allocate(
             buffer_shape, self.dtype, MemoryFormat.KV_2TD
         )
@@ -798,8 +822,11 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
 
         if self.use_gpu:
             buffer_shape = self.get_shape(num_tokens)
-            tmp_gpu_buffer_obj = self.gpu_buffer_allocator.allocate(
-                buffer_shape, self.dtype, MemoryFormat.KV_T2D
+            assert self.gpu_buffer_allocator is not None
+            tmp_gpu_buffer_obj: Optional[MemoryObj] = (
+                self.gpu_buffer_allocator.allocate(
+                    buffer_shape, self.dtype, MemoryFormat.KV_T2D
+                )
             )
             assert tmp_gpu_buffer_obj is not None, (
                 "Failed to allocate GPU buffer in GPUConnector"
@@ -852,6 +879,7 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
             current_stream.wait_stream(self.load_stream)
 
         # free the buffer memory
+        assert tmp_gpu_buffer_obj is not None
         tmp_gpu_buffer_obj.ref_count_down()
 
         logger.debug(f"Finished loading layer {layer_id}")
@@ -860,7 +888,7 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
     @_lmcache_nvtx_annotate
     def batched_from_gpu(
         self,
-        memory_objs: Union[List[List[MemoryObj]], List[MemoryObj]],
+        memory_objs: Union[List[List[MemoryObj]]],
         starts: List[int],
         ends: List[int],
         **kwargs,
@@ -915,8 +943,11 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
 
         if self.use_gpu:
             buffer_shape = self.get_shape(num_tokens)
-            tmp_gpu_buffer_obj = self.gpu_buffer_allocator.allocate(
-                buffer_shape, self.dtype, MemoryFormat.KV_T2D
+            assert self.gpu_buffer_allocator is not None
+            tmp_gpu_buffer_obj: Optional[MemoryObj] = (
+                self.gpu_buffer_allocator.allocate(
+                    buffer_shape, self.dtype, MemoryFormat.KV_T2D
+                )
             )
             assert tmp_gpu_buffer_obj is not None, (
                 "Failed to allocate GPU buffer in GPUConnector"
@@ -965,6 +996,7 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
             logger.debug(f"Finished offloading layer {layer_id}")
 
         # free the buffer memory
+        assert tmp_gpu_buffer_obj is not None
         tmp_gpu_buffer_obj.ref_count_down()
         yield
 
@@ -1144,7 +1176,9 @@ class VLLMPagedMemLayerwiseGPUConnectorForHybridAlloc(GPUConnectorInterface):
 
         num_tokens = len(slot_mappings_full[0])
 
-        if self.use_gpu:
+        tmp_gpu_buffer_obj: Optional[MemoryObj] = None
+
+        if self.use_gpu and self.gpu_buffer_allocator is not None:
             buffer_shape = self.get_shape(num_tokens)
             tmp_gpu_buffer_obj = self.gpu_buffer_allocator.allocate(
                 buffer_shape, self.dtype, MemoryFormat.KV_T2D
@@ -1171,6 +1205,8 @@ class VLLMPagedMemLayerwiseGPUConnectorForHybridAlloc(GPUConnectorInterface):
                 ):
                     assert memory_obj.metadata.fmt == MemoryFormat.KV_T2D
                     if self.use_gpu:
+                        assert tmp_gpu_buffer_obj is not None
+                        assert tmp_gpu_buffer_obj.tensor is not None
                         tmp_gpu_buffer_obj.tensor[start - offset : end - offset].copy_(
                             memory_obj.tensor, non_blocking=True
                         )
@@ -1187,6 +1223,8 @@ class VLLMPagedMemLayerwiseGPUConnectorForHybridAlloc(GPUConnectorInterface):
                         )
 
                 if self.use_gpu:
+                    assert tmp_gpu_buffer_obj is not None
+                    assert tmp_gpu_buffer_obj.tensor is not None
                     lmc_ops.single_layer_kv_transfer(
                         tmp_gpu_buffer_obj.tensor,
                         self.kvcaches[layer_id],
@@ -1203,8 +1241,10 @@ class VLLMPagedMemLayerwiseGPUConnectorForHybridAlloc(GPUConnectorInterface):
         if sync:
             current_stream.wait_stream(self.load_stream)
 
-        # free the buffer memory
-        tmp_gpu_buffer_obj.ref_count_down()
+        if self.use_gpu and self.gpu_buffer_allocator is not None:
+            assert tmp_gpu_buffer_obj is not None
+            # free the buffer memory
+            tmp_gpu_buffer_obj.ref_count_down()
 
         logger.debug(f"Finished loading layer {layer_id}")
         yield
@@ -1282,9 +1322,11 @@ class VLLMPagedMemLayerwiseGPUConnectorForHybridAlloc(GPUConnectorInterface):
 
             slot_mappings_full[kv_cache_group_id] = slot_mapping_full
 
+        tmp_gpu_buffer_obj: Optional[MemoryObj] = None
+
         num_tokens = len(slot_mappings_full[0])
 
-        if self.use_gpu:
+        if self.use_gpu and self.gpu_buffer_allocator is not None:
             buffer_shape = self.get_shape(num_tokens)
             tmp_gpu_buffer_obj = self.gpu_buffer_allocator.allocate(
                 buffer_shape, self.dtype, MemoryFormat.KV_T2D
@@ -1303,6 +1345,8 @@ class VLLMPagedMemLayerwiseGPUConnectorForHybridAlloc(GPUConnectorInterface):
             with torch.cuda.stream(self.store_stream):
                 self.store_stream.wait_stream(current_stream)
                 if self.use_gpu:
+                    assert tmp_gpu_buffer_obj is not None
+                    assert tmp_gpu_buffer_obj.tensor is not None
                     lmc_ops.single_layer_kv_transfer(
                         tmp_gpu_buffer_obj.tensor,
                         self.kvcaches[layer_id],
@@ -1313,11 +1357,15 @@ class VLLMPagedMemLayerwiseGPUConnectorForHybridAlloc(GPUConnectorInterface):
                         True,
                         self.vllm_two_major,
                     )
+                assert isinstance(memory_objs_layer, list)
                 for start, end, memory_obj in zip(
                     starts, ends, memory_objs_layer, strict=False
                 ):
+                    assert memory_obj is not None
                     assert memory_obj.tensor is not None
                     if self.use_gpu:
+                        assert tmp_gpu_buffer_obj is not None
+                        assert tmp_gpu_buffer_obj.tensor is not None
                         memory_obj.tensor.copy_(
                             tmp_gpu_buffer_obj.tensor[start - offset : end - offset],
                             non_blocking=True,
@@ -1340,7 +1388,9 @@ class VLLMPagedMemLayerwiseGPUConnectorForHybridAlloc(GPUConnectorInterface):
             logger.debug(f"Finished offloading layer {layer_id}")
 
         # free the buffer memory
-        tmp_gpu_buffer_obj.ref_count_down()
+        if self.use_gpu and self.gpu_buffer_allocator is not None:
+            assert tmp_gpu_buffer_obj is not None
+            tmp_gpu_buffer_obj.ref_count_down()
         yield
 
     def get_shape(self, num_tokens: int) -> torch.Size:

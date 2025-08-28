@@ -2,7 +2,7 @@
 # Standard
 from collections import OrderedDict
 from concurrent.futures import Future, ThreadPoolExecutor
-from typing import List, Optional, Tuple
+from typing import List, Optional, Sequence, Tuple
 import asyncio
 import ctypes
 import os
@@ -285,9 +285,7 @@ class WekaGdsBackend(StorageBackendInterface):
         with self.put_lock:
             return key in self.put_tasks
 
-    def submit_put_task(
-        self, key: CacheEngineKey, memory_obj: MemoryObj
-    ) -> Optional[Future]:
+    def submit_put_task(self, key: CacheEngineKey, memory_obj: MemoryObj) -> Future:
         assert memory_obj.tensor is not None
         memory_obj.ref_count_up()
 
@@ -301,14 +299,12 @@ class WekaGdsBackend(StorageBackendInterface):
 
     def batched_submit_put_task(
         self,
-        keys: List[CacheEngineKey],
+        keys: Sequence[CacheEngineKey],
         memory_objs: List[MemoryObj],
         transfer_spec=None,
-    ) -> Optional[List[Future]]:
-        return [
+    ) -> None:
+        for key, memory_obj in zip(keys, memory_objs, strict=False):
             self.submit_put_task(key, memory_obj)
-            for key, memory_obj in zip(keys, memory_objs, strict=False)
-        ]
 
     async def _async_save_bytes_to_disk(
         self,
@@ -416,7 +412,7 @@ class WekaGdsBackend(StorageBackendInterface):
         Returns:
             The memory object with loaded data, or None if loading failed
         """
-        if memory_obj is None:
+        if memory_obj is None or memory_obj.tensor is None:
             return None
         assert memory_obj.tensor.is_cuda
         assert torch.device(self.dst_device) == torch.device(memory_obj.tensor.device)
@@ -480,7 +476,9 @@ class WekaGdsBackend(StorageBackendInterface):
         self,
         keys: List[CacheEngineKey],
     ) -> list[MemoryObj | None]:
-        paths, dtypes, shapes = [], [], []
+        paths: list[str | None] = []
+        dtypes: list[torch.dtype | None] = []
+        shapes: list[torch.Size | None] = []
         with self.hot_lock:
             for key in keys:
                 entry = self.hot_cache.get(key)
@@ -494,7 +492,7 @@ class WekaGdsBackend(StorageBackendInterface):
                 dtypes.append(entry.dtype)
                 shapes.append(entry.shape)
 
-        memory_objs = []
+        memory_objs: list[MemoryObj | None] = []
         gds_reads, gds_read_bytes = 0, 0
         for dtype, shape, path in zip(dtypes, shapes, paths, strict=True):
             if path is None:
@@ -526,7 +524,10 @@ class WekaGdsBackend(StorageBackendInterface):
         key: CacheEngineKey,
     ) -> Optional[Future]:
         # TODO(Serapheim): Using a dummy wrapper around prefetch for now.
-        return self.submit_prefetch_task(key)
+        self.submit_prefetch_task(key)
+        f: Future = Future()
+        f.set_result(None)
+        return f
 
     @_lmcache_nvtx_annotate
     @torch.inference_mode()

@@ -152,6 +152,7 @@ class NixlPipe:
             obj = TensorMemoryObj(
                 self._buffer[offset : offset + obj_size],
                 metadata,
+                parent_allocator=None,
             )
             ret.append(obj)
             offset += obj_size

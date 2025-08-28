@@ -1,5 +1,5 @@
 workload:
-  type: long-doc-qa
+  type: long_doc_qa
   max-inflight-requests: 20
   expected-latency-gain: 3.5
 

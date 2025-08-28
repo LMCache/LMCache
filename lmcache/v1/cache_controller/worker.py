@@ -22,6 +22,7 @@ from lmcache.v1.cache_controller.message import (
     ErrorMsg,
     HealthWorkerMsg,
     HealthWorkerRetMsg,
+    HeartbeatMsg,
     MoveWorkerMsg,
     MoveWorkerRetMsg,
     Msg,
@@ -61,6 +62,7 @@ class LMCacheWorker:
     ):
         # TODO (Jiayi): "instance_id" might not be needed anymore.
         # Please consider removing it.
+        self.config = config
         self.lmcache_instance_id = config.lmcache_instance_id
         assert self.lmcache_instance_id is not None
         self.lmcache_engine = lmcache_engine
@@ -168,6 +170,30 @@ class LMCacheWorker:
             except asyncio.QueueEmpty:
                 break
         return batch
+
+    async def heartbeat(self):
+        enable_heartbeat = (
+            self.config.lmcache_worker_heartbeat_time is not None
+            and self.config.lmcache_worker_heartbeat_time > 0
+        )
+        if enable_heartbeat:
+            logger.info(
+                f"Start heartbeat in {self.lmcache_instance_id} : {self.worker_id}, "
+                f"delay time: {self.config.lmcache_worker_heartbeat_delay_time}s, "
+                f"heartbeat time: {self.config.lmcache_worker_heartbeat_time}s"
+            )
+            await asyncio.sleep(self.config.lmcache_worker_heartbeat_delay_time)
+            while True:
+                self.put_msg(
+                    HeartbeatMsg(
+                        instance_id=self.lmcache_instance_id,
+                        worker_id=self.worker_id,
+                        ip=self.lmcache_worker_ip,
+                        port=self.lmcache_worker_port,
+                        distributed_url=self.distributed_url,
+                    )
+                )
+                await asyncio.sleep(self.config.lmcache_worker_heartbeat_time)
 
     async def push(self):
         while True:
@@ -291,6 +317,7 @@ class LMCacheWorker:
             await asyncio.gather(
                 self.push(),
                 self.handle_request(),
+                self.heartbeat(),
             )
         except Exception as e:
             logger.error(

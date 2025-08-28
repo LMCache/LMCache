@@ -18,7 +18,7 @@ class LookupClientInterface(metaclass=abc.ABCMeta):
     def lookup(
         self,
         token_ids: torch.Tensor,
-        lookup_id: Optional[str] = None,
+        lookup_id: str,
         request_configs: Optional[dict] = None,
     ) -> int:
         """

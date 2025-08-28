@@ -243,12 +243,12 @@ class RAGManager:
         self._prompts = []
         self._answers = []
         self._build_method = workload_config.prompt_build_method
-        self._generated_text = []
-        self._generation_time = []
-        self._prefill_tok_cnt = []
-        self._generation_tok_cnt = []
-        self._ttft = []
-        self._tpot = []
+        self._generated_text: list[str | None] = []
+        self._generation_time: list[float | None] = []
+        self._prefill_tok_cnt: list[int | None] = []
+        self._generation_tok_cnt: list[int | None] = []
+        self._ttft: list[float | None] = []
+        self._tpot: list[float | None] = []
         for ex in eval_dataset:
             prompt, _ = build_rag_prompt(
                 workload_config.system_prompt,
@@ -301,8 +301,8 @@ class RAGManager:
     def summary(self, start_time: float, end_time: float) -> pd.DataFrame:
         cnt = len(self._ttft)
         assert cnt > 0
-        avg_ttft = sum(self._ttft) / cnt
-        avg_tpot = sum(self._tpot) / cnt
+        avg_ttft = sum(ttft for ttft in self._ttft if ttft is not None) / cnt
+        avg_tpot = sum(tpot for tpot in self._tpot if tpot is not None) / cnt
         # Create a dataframe
         quality = []
         for i in range(cnt):
