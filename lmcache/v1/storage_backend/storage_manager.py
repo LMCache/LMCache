@@ -256,7 +256,6 @@ class StorageManager:
         """
         Non-blocking function to get the memory object from the storages.
         """
-        logger.warning("Calling an unstable interface: get_non_blocking")
         # TODO (Jiayi): incorporate prefetching here
 
         # Search all backends for non-blocking get
