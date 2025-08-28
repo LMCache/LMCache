@@ -363,6 +363,8 @@ class ReqMeta:
             req_id=tracker.req_id,
             token_ids=token_ids,
             slot_mappings=slot_mappings,
+            # NOTE(Kuntai): for test compatibility and backward compatibility,
+            # we still support `slot_mapping`.
             slot_mapping=slot_mappings[0],
             is_last_prefill=is_last_prefill,
             save_spec=save_spec,
@@ -719,7 +721,7 @@ class LMCacheConnectorV1Impl:
                 continue
 
             tokens = request.token_ids
-            # TODO: have a pre-allocated buffer to hold the slot_mappings
+            slot_mapping = request.slot_mapping.cuda()
             slot_mappings = request.slot_mappings
             for kv_cache_group_id in slot_mappings:
                 slot_mappings[kv_cache_group_id] = slot_mappings[
@@ -748,14 +750,14 @@ class LMCacheConnectorV1Impl:
                         tokens[:lmcache_cached_tokens],
                         token_mask[:lmcache_cached_tokens],
                         kvcaches=kvcaches,
-                        # FIXME(Kuntai): need to support multiple kv cache groups
-                        slot_mapping=slot_mappings[0][:lmcache_cached_tokens],
+                        slot_mapping=slot_mapping[:lmcache_cached_tokens],
                     )
                 else:
                     layerwise_retriever = self.lmcache_engine.retrieve_layer(
                         tokens[:lmcache_cached_tokens],
                         token_mask[:lmcache_cached_tokens],
                         kvcaches=kvcaches,
+                        slot_mapping=slot_mapping[:lmcache_cached_tokens],
                         slot_mappings={
                             kv_cache_group_id: slot_mappings[kv_cache_group_id][
                                 :lmcache_cached_tokens
@@ -773,8 +775,7 @@ class LMCacheConnectorV1Impl:
                     tokens[:lmcache_cached_tokens],
                     token_mask[:lmcache_cached_tokens],
                     kvcaches=kvcaches,
-                    # FIXME(Kuntai): need to support multiple kv cache groups
-                    slot_mapping=slot_mappings[0][:lmcache_cached_tokens],
+                    slot_mapping=slot_mapping[:lmcache_cached_tokens],
                     request_configs=request.request_configs,
                 )
 
@@ -865,12 +866,15 @@ class LMCacheConnectorV1Impl:
                 assert isinstance(token_ids, torch.Tensor)
                 assert token_ids.is_cpu
 
+                slot_mapping = request.slot_mapping
+                assert isinstance(slot_mapping, torch.Tensor)
+                assert len(slot_mapping) == len(token_ids)
+                slot_mapping = slot_mapping.cuda()
+
                 slot_mappings = request.slot_mappings
                 for kv_cache_group_id in slot_mappings:
                     assert isinstance(slot_mappings[kv_cache_group_id], torch.Tensor)
                     assert len(slot_mappings[kv_cache_group_id]) == len(token_ids)
-
-                # TODO: have a pre-allocated buffer to hold the slot_mappings
                 for kv_cache_group_id in slot_mappings:
                     slot_mappings[kv_cache_group_id] = slot_mappings[
                         kv_cache_group_id
@@ -908,6 +912,7 @@ class LMCacheConnectorV1Impl:
                     token_ids,
                     mask=store_mask,
                     kvcaches=kvcaches,
+                    slot_mapping=slot_mapping,
                     slot_mappings=slot_mappings,
                     offset=skip_leading_tokens,
                     sync=is_first,
@@ -955,8 +960,7 @@ class LMCacheConnectorV1Impl:
             assert isinstance(token_ids, torch.Tensor)
             assert token_ids.is_cpu
 
-            # FIXME(Kuntai): need to support multiple kv cache groups
-            slot_mapping = request.slot_mappings[0]
+            slot_mapping = request.slot_mapping
             assert isinstance(slot_mapping, torch.Tensor)
             assert len(slot_mapping) == len(token_ids)
 
