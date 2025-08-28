@@ -24,10 +24,8 @@ def create_test_config(gds_path: str):
     return config
 
 
-def create_test_key(chunk_hash: int = 1234567890) -> CacheEngineKey:
-    # GdsBackend does not allow underscores in the chunk_hash (key_id)!
-    # Use only alphanumeric characters.
-    return CacheEngineKey("vllm", "testmodel", 3, 123, chunk_hash)
+def create_test_key(key_id: int = 0) -> CacheEngineKey:
+    return CacheEngineKey("vllm", "testmodel", 3, 123, key_id)
 
 
 def create_test_memory_obj(
@@ -97,7 +95,7 @@ class TestGdsBackend:
         assert str(gds_backend) == "GdsBackend"
 
     def test_key_to_path_and_insert_key(self, gds_backend):
-        key = create_test_key()
+        key = create_test_key(0)
         memory_obj = create_test_memory_obj()
         gds_backend.insert_key(key, memory_obj)
         # Check that the key is in hot_cache
@@ -107,19 +105,19 @@ class TestGdsBackend:
         assert meta.dtype == memory_obj.metadata.dtype
 
     def test_contains_key_not_exists(self, gds_backend):
-        key = create_test_key(-1)
+        key = create_test_key(1)
         assert not gds_backend.contains(key)
         assert not gds_backend.contains(key, pin=True)
 
     def test_contains_key_exists(self, gds_backend):
-        key = create_test_key()
+        key = create_test_key(0)
         memory_obj = create_test_memory_obj()
         gds_backend.insert_key(key, memory_obj)
         assert gds_backend.contains(key)
         assert gds_backend.contains(key, pin=True)
 
     def test_exists_in_put_tasks(self, gds_backend):
-        key = create_test_key()
+        key = create_test_key(0)
         assert not gds_backend.exists_in_put_tasks(key)
         # Simulate adding to put_tasks
         with gds_backend.put_lock:
@@ -132,7 +130,7 @@ class TestGdsBackend:
         reason="Requires CUDA for GdsBackend get_blocking",
     )
     async def test_submit_put_task_and_get_blocking(self, gds_backend):
-        key = create_test_key()
+        key = create_test_key(0)
         memory_obj = create_test_memory_obj(device="cpu")
         # submit_put_task returns a Future
         future = gds_backend.submit_put_task(key, memory_obj)
@@ -149,7 +147,7 @@ class TestGdsBackend:
 
     @pytest.mark.asyncio
     async def test_batched_submit_put_task(self, gds_backend):
-        keys = [create_test_key(i) for i in range(3)]
+        keys = [create_test_key(i) for i in range(2, 5)]
         memory_objs = [create_test_memory_obj(device="cpu") for _ in range(3)]
         futures = gds_backend.batched_submit_put_task(keys, memory_objs)
         assert futures is not None
@@ -161,12 +159,12 @@ class TestGdsBackend:
             assert gds_backend.contains(key)
 
     def test_submit_prefetch_task_key_not_exists(self, gds_backend):
-        key = create_test_key(-1)
+        key = create_test_key(1)
         future = gds_backend.submit_prefetch_task(key)
         assert future is None
 
     def test_submit_prefetch_task_key_exists(self, gds_backend):
-        key = create_test_key()
+        key = create_test_key(0)
         memory_obj = create_test_memory_obj()
         gds_backend.insert_key(key, memory_obj)
         future = gds_backend.submit_prefetch_task(key)
@@ -174,12 +172,12 @@ class TestGdsBackend:
         assert future is None or hasattr(future, "result")
 
     def test_get_blocking_key_not_exists(self, gds_backend):
-        key = create_test_key(-1)
+        key = create_test_key(1)
         result = gds_backend.get_blocking(key)
         assert result is None
 
     def test_get_non_blocking(self, gds_backend):
-        key = create_test_key()
+        key = create_test_key(0)
         memory_obj = create_test_memory_obj()
         gds_backend.insert_key(key, memory_obj)
         future = gds_backend.get_non_blocking(key)
@@ -190,7 +188,7 @@ class TestGdsBackend:
         gds_backend.close()
 
     def test_pin_unpin_not_implemented(self, gds_backend):
-        key = create_test_key()
+        key = create_test_key(0)
         with pytest.raises(NotImplementedError):
             gds_backend.pin(key)
         with pytest.raises(NotImplementedError):

@@ -39,6 +39,17 @@ def _to_int_list(
     return [int(p) for p in parts]
 
 
+def _to_str_list(
+    value: Optional[Union[str, list[str]]],
+) -> Optional[list[str]]:
+    if value is None:
+        return None
+    if isinstance(value, list):
+        return value
+    parts = [p.strip() for p in value.split(",") if p.strip()]
+    return [p for p in parts]
+
+
 # Configuration aliases and deprecated mappings
 _CONFIG_ALIASES = {
     # Maps deprecated names to current names
@@ -174,6 +185,11 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         if isinstance(x, bool)
         else str(x).lower() in ["true", "1"],
     },
+    "nixl_backends": {
+        "type": Optional[list[str]],
+        "default": None,
+        "env_converter": _to_str_list,
+    },
     # Experimental Nixl configurations
     "enable_xpyd": {
         "type": bool,
@@ -211,6 +227,11 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "default": None,
         "env_converter": str,
     },
+    "internal_api_server_host": {
+        "type": str,
+        "default": "0.0.0.0",
+        "env_converter": str,
+    },
     "extra_config": {
         "type": Optional[dict],
         "default": None,
@@ -245,6 +266,11 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "default": "LRU",
         "env_converter": str,
     },
+    "numa_mode": {
+        "type": Optional[str],
+        "default": None,
+        "env_converter": str,
+    },
     "internal_api_server_enabled": {
         "type": bool,
         "default": False,
@@ -261,6 +287,21 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "type": Optional[list[int]],
         "default": None,
         "env_converter": _to_int_list,
+    },
+    "internal_api_server_socket_path_prefix": {
+        "type": Optional[str],
+        "default": None,
+        "env_converter": str,
+    },
+    "plugin_locations": {
+        "type": Optional[list[str]],
+        "default": None,
+        "env_converter": lambda x: x if isinstance(x, list) else [x] if x else [],
+    },
+    "external_backends": {
+        "type": Optional[list[str]],
+        "default": None,
+        "env_converter": _to_str_list,
     },
 }
 
@@ -315,10 +356,18 @@ def _create_config_class():
             "validate": _validate_config,
             "log_config": _log_config,
             "to_original_config": _to_original_config,
+            "get_extra_config_value": _get_extra_config_value,
             "from_defaults": classmethod(_from_defaults),
             "from_legacy": classmethod(_from_legacy),
             "from_file": classmethod(_from_file),
             "from_env": classmethod(_from_env),
+            "__str__": lambda self: str(
+                {name: getattr(self, name) for name in _CONFIG_DEFINITIONS}
+            ),
+            "from_dict": classmethod(_from_dict),
+            "to_dict": _to_dict,
+            "to_json": _to_json,
+            "from_json": classmethod(_from_json),
         },
     )
     return cls
@@ -330,6 +379,9 @@ def _validate_config(self):
         assert self.lookup_url is not None
         assert self.distributed_url is not None
 
+    enable_nixl_storage = self.extra_config is not None and self.extra_config.get(
+        "enable_nixl_storage"
+    )
     if self.enable_nixl:
         assert self.nixl_role is not None
         assert self.nixl_buffer_size is not None
@@ -340,6 +392,13 @@ def _validate_config(self):
             "Nixl only supports save_decode_cache=False"
         )
         assert self.enable_p2p is False, "Nixl only supports enable_p2p=False"
+
+    if enable_nixl_storage:
+        assert self.extra_config.get("nixl_backend") is not None
+        assert self.extra_config.get("nixl_path") is not None
+        assert self.extra_config.get("nixl_file_pool_size") is not None
+        assert self.nixl_buffer_size is not None
+        assert self.nixl_buffer_device is not None
 
     return self
 
@@ -373,6 +432,13 @@ def _to_original_config(self):
         blend_separator="[BLEND_SEP]",
         blend_add_special_in_precomp=False,
     )
+
+
+def _get_extra_config_value(self, key, default_value=None):
+    if hasattr(self, "extra_config") and self.extra_config is not None:
+        return self.extra_config.get(key, default_value)
+    else:
+        return default_value
 
 
 def _from_defaults(cls, **kwargs):
@@ -518,6 +584,39 @@ def _from_env(cls):
 
     instance = cls(**config_values)
     return instance.log_config()
+
+
+def _from_dict(cls, config_dict: dict):
+    """Create configuration from a dictionary."""
+    resolved_config = _resolve_config_aliases(config_dict, "dictionary input")
+    config_values = {}
+    for name, config in _CONFIG_DEFINITIONS.items():
+        value = resolved_config.get(name, config["default"])
+        if value is not None:
+            value = config["env_converter"](value)
+        config_values[name] = value
+    instance = cls(**config_values)
+    return instance.log_config()
+
+
+def _to_dict(self):
+    """Convert the configuration object into a dictionary."""
+    return {name: getattr(self, name) for name in _CONFIG_DEFINITIONS}
+
+
+def _to_json(self):
+    """Serialize the configuration object to a JSON string."""
+    return json.dumps(self.to_dict(), indent=2)
+
+
+def _from_json(cls, json_str: str):
+    """Deserialize a JSON string into a configuration object."""
+    try:
+        config_dict = json.loads(json_str)
+        return cls.from_dict(config_dict)
+    except json.JSONDecodeError as e:
+        logger.error(f"Invalid JSON input: {e}")
+        raise
 
 
 # Create configuration class

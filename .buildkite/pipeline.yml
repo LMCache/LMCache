@@ -13,7 +13,7 @@ steps:
       uv pip install --upgrade pip setuptools wheel
       uv pip install -r requirements/common.txt
       uv pip install -r requirements/test.txt
-      uv pip install -e .
+      uv pip install -e . --no-build-isolation
       uv pip freeze
 
       source .buildkite/scripts/pick-free-gpu.sh 18000

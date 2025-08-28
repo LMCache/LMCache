@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import TYPE_CHECKING, Optional, OrderedDict
+from typing import TYPE_CHECKING, Optional
 
 # Third Party
 import torch
@@ -49,18 +49,18 @@ class MooncakeLookupClient(LookupClientInterface):
         )
 
         # First Party
-        from lmcache.v1.token_database import ChunkedTokenDatabase, SegmentTokenDatabase
+        from lmcache.v1.token_database import ChunkedTokenDatabase
 
-        if config.enable_blending:
-            self.token_database = SegmentTokenDatabase(config, metadata)
-        else:
-            self.token_database = ChunkedTokenDatabase(config, metadata)
+        assert not config.enable_blending, (
+            "LMCache v1 blending is not supported in MooncakeLookupClient yet."
+        )
+        self.token_database = ChunkedTokenDatabase(config, metadata)
 
     def lookup(
         self,
         token_ids: torch.Tensor,
         lookup_id: Optional[str] = None,
-        tags: OrderedDict = None,
+        request_configs: Optional[dict] = None,
     ) -> int:
         # process token_ids to cacheengine keys
         keys = []

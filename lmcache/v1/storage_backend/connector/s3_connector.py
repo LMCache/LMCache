@@ -88,6 +88,7 @@ class S3Connector(RemoteConnector):
         loop: asyncio.AbstractEventLoop,
         local_cpu_backend: LocalCPUBackend,
         s3_part_size: Optional[int],
+        s3_file_prefix: Optional[str],
         s3_max_io_concurrency: int,
         s3_max_inflight_reqs: int,
         s3_prefer_http2: bool,
@@ -98,6 +99,7 @@ class S3Connector(RemoteConnector):
             raise ValueError("S3 url must start with 's3://'")
 
         self.s3_endpoint = s3_endpoint.removeprefix("s3://")
+        self.s3_prefix = s3_file_prefix
         self.loop = loop
         self.local_cpu_backend = local_cpu_backend
 
@@ -143,7 +145,7 @@ class S3Connector(RemoteConnector):
         # TODO(Jiayi): We need to handle cache consistency issues in a systematic way
         # across all connectors.
         # We assume S3 cache is never evicted and read-only for now.
-        self.object_size_cache = {}
+        self.object_size_cache: dict[str, int] = {}
 
         self.inflight_sema = asyncio.Semaphore(s3_max_inflight_reqs)
 
@@ -193,13 +195,18 @@ class S3Connector(RemoteConnector):
         that need to be URL-encoded.
         """
         flat_key_str = key_str.replace("/", "_")
-        return url_quote(flat_key_str, safe="")
+        if self.s3_prefix:
+            path = f"/{self.s3_prefix}/{flat_key_str}"
+        else:
+            path = f"/{flat_key_str}"
+        # Keep slashes as they are path separators in S3.
+        return url_quote(path, safe="/")
 
     # TODO(Jiayi): optimize this with async
     def _get_object_size(self, key_str: str) -> int:
         headers = HttpHeaders()
         headers.add("Host", self.s3_endpoint)
-        req = HttpRequest("HEAD", f"/{self._format_safe_path(key_str)}", headers)
+        req = HttpRequest("HEAD", self._format_safe_path(key_str), headers)
 
         got = {"len": None, "status": None, "err": None}
 
@@ -234,7 +241,7 @@ class S3Connector(RemoteConnector):
         if got["err"] or got["status"] != 200:
             logger.warning("Encountering error in S3 HEAD request")
             return 0
-        return got["len"]
+        return got["len"] if got["len"] is not None else 0
 
     # TODO(Jiayi): implement real async
     async def exists(self, key: CacheEngineKey) -> bool:
@@ -253,8 +260,6 @@ class S3Connector(RemoteConnector):
     def _s3_download(
         self,
         key_str: str,
-        obj_size: int,
-        memory_obj: MemoryObj,
         recv_path: str,
         done_event: threading.Event,
     ):
@@ -268,7 +273,7 @@ class S3Connector(RemoteConnector):
         # range_header = f"bytes={start_byte}-{end_byte}"
         # headers.add("Range", range_header)
 
-        req = HttpRequest("GET", f"/{self._format_safe_path(key_str)}", headers)
+        req = HttpRequest("GET", self._format_safe_path(key_str), headers)
 
         # NOTE(Jiayi): Run in crt threads (not this thread) with GIL
         # See https://github.com/awslabs/aws-crt-python/blob/4250709624119de1af3ca86816e1a154fcac7cc8/source/common.c#L51
@@ -326,8 +331,6 @@ class S3Connector(RemoteConnector):
 
         self._s3_download(
             key_str=key_str,
-            obj_size=obj_size,
-            memory_obj=memory_obj,
             recv_path=recv_path,
             done_event=done_event,
         )
@@ -348,8 +351,8 @@ class S3Connector(RemoteConnector):
         self, keys: List[CacheEngineKey]
     ) -> List[Optional[MemoryObj]]:
         done_events = []
-        shms = []
-        memory_objs = []
+        shms: list[Optional[int]] = []
+        memory_objs: list[Optional[MemoryObj]] = []
         obj_sizes = []
 
         # TODO(Jiayi): Need to resolve this
@@ -369,7 +372,6 @@ class S3Connector(RemoteConnector):
                 if obj_size <= 0:
                     obj_sizes.append(0)
                     memory_objs.append(None)
-                    return None
                 self.object_size_cache[key_str] = obj_size
 
             # TODO(Jiayi): A caveat of acquire this semaphore
@@ -402,8 +404,6 @@ class S3Connector(RemoteConnector):
             recv_path, shm = self.adhoc_shm_manager.allocate()
             self._s3_download(
                 key_str=key_str,
-                obj_size=obj_size,
-                memory_obj=memory_obj,
                 recv_path=recv_path,
                 done_event=done_event,
             )
@@ -415,7 +415,7 @@ class S3Connector(RemoteConnector):
         for obj_size, memory_obj, shm in zip(
             obj_sizes, memory_objs, shms, strict=False
         ):
-            if memory_obj is None:
+            if memory_obj is None or shm is None:
                 continue
 
             dst_ptr = memory_obj.data_ptr
@@ -438,7 +438,7 @@ class S3Connector(RemoteConnector):
         headers = HttpHeaders()
         headers.add("Host", self.s3_endpoint)
 
-        req = HttpRequest("PUT", f"/{self._format_safe_path(key_str)}", headers)
+        req = HttpRequest("PUT", self._format_safe_path(key_str), headers)
 
         done = {"err": None, "status": None}
 
@@ -450,8 +450,6 @@ class S3Connector(RemoteConnector):
                 raise RuntimeError(f"Upload failed in S3Connector: {done}")
 
             done_event.set()
-
-        await self.inflight_sema.acquire()
 
         s3.S3Request(
             client=self.s3_client,
@@ -470,8 +468,6 @@ class S3Connector(RemoteConnector):
         """
 
         key_str = key.to_string()
-
-        logger.debug(f"Uploading {key_str} to S3")
 
         # TODO(Jiayi): Please support this
         assert memory_obj.get_physical_size() == self.s3_part_size, (

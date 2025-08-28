@@ -25,7 +25,7 @@ class LMSLocalBackend(LMSBackendInterface):
 
     def __init__(
         self,
-    ):
+    ) -> None:
         """
         Throws:
             RuntimeError if the loaded configuration does not match the current

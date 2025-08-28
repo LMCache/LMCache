@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import TYPE_CHECKING, Optional, OrderedDict
+from typing import TYPE_CHECKING, Optional
 import threading
 
 # Third Party
@@ -10,6 +10,7 @@ import torch
 import zmq
 
 # First Party
+from lmcache.integration.vllm.utils import mla_enabled
 from lmcache.logging import init_logger
 from lmcache.v1.cache_engine import LMCacheEngine
 from lmcache.v1.config import LMCacheEngineConfig
@@ -39,10 +40,10 @@ class LMCacheLookupClient(LookupClientInterface):
             "lmcache_rpc_port", 0
         )
         self.tensor_parallel_size = vllm_config.parallel_config.tensor_parallel_size
+        use_mla = mla_enabled(vllm_config.model_config)
         self.create_lookup_server_only_on_worker_0_for_mla = (
-            config.extra_config
-            and config.extra_config.get(
-                "create_lookup_server_only_on_worker_0_for_mla", False
+            config.get_extra_config_value(
+                "create_lookup_server_only_on_worker_0_for_mla", use_mla
             )
         )
         ranks = self.tensor_parallel_size
@@ -52,6 +53,10 @@ class LMCacheLookupClient(LookupClientInterface):
         for tp_rank in range(ranks):
             socket_path = get_zmq_rpc_path_lmcache(
                 vllm_config, "lookup", rpc_port, tp_rank
+            )
+            logger.info(
+                f"lmcache lookup client connect to tp_rank {tp_rank} "
+                f"with socket path {socket_path}"
             )
             socket = self.socket = make_zmq_socket(
                 self.ctx,
@@ -65,20 +70,22 @@ class LMCacheLookupClient(LookupClientInterface):
     def lookup(
         self,
         token_ids: torch.Tensor,
-        lookup_id: Optional[str] = None,
-        tags: OrderedDict = None,
+        lookup_id: str,
+        request_configs: Optional[dict] = None,
     ) -> int:
         token_bufs = self.encoder.encode(token_ids)
         lookup_id_buf = lookup_id.encode("utf-8")
-        tags_str = ""
-        if tags is not None and len(tags) != 0:
-            tags_str = "@".join([f"{k}%{v}" for k, v in tags.items()])
-        tags_buf = tags_str.encode("utf-8")
+        request_configs_str = ""
+        if request_configs is not None and len(request_configs) != 0:
+            request_configs_str = "@".join(
+                [f"{k}%{v}" for k, v in request_configs.items()]
+            )
+        request_configs_buf = request_configs_str.encode("utf-8")
         ranks = self.tensor_parallel_size
         if self.create_lookup_server_only_on_worker_0_for_mla:
             ranks = 1
         results = []
-        msg_buf = token_bufs + [lookup_id_buf, tags_buf]
+        msg_buf = token_bufs + [lookup_id_buf, request_configs_buf]
         for i in range(ranks):
             self.sockets[i].send_multipart(msg_buf, copy=False)
 
@@ -132,23 +139,23 @@ class LMCacheLookupServer:
                 frames = self.socket.recv_multipart(copy=False)
                 token_frames = frames[:-2]
                 lookup_id = frames[-2].bytes.decode("utf-8")
-                tags_str = frames[-1].bytes.decode("utf-8")
-                tags = None
-                if tags_str != "":
-                    tags = OrderedDict()
-                    tags_list = tags_str.split("@")
-                    for kv in tags_list:
+                request_configs_str = frames[-1].bytes.decode("utf-8")
+                request_configs = None
+                if request_configs_str != "":
+                    request_configs = {}
+                    request_configs_list = request_configs_str.split("@")
+                    for kv in request_configs_list:
                         kvs = kv.split("%", 1)
                         if len(kvs) != 2:
                             raise ValueError("Unexpected tags_str: {tags_str}")
-                        tags[kvs[0]] = kvs[1]
+                        request_configs[kvs[0]] = kvs[1]
 
                 token_ids = self.decoder.decode(token_frames)
                 result = self.lmcache_engine.lookup(
                     token_ids,
                     lookup_id=lookup_id,
                     pin=True,
-                    tags=tags,
+                    request_configs=request_configs,
                 )
                 response = result.to_bytes(4, "big")
                 self.socket.send(response)
@@ -157,6 +164,7 @@ class LMCacheLookupServer:
                 #    break
                 # continue
 
+        logger.info(f"lmcache lookup server start on {socket_path}")
         self.thread = threading.Thread(target=process_request, daemon=True)
         self.thread.start()
 

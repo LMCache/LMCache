@@ -17,7 +17,6 @@ from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import (
     MemoryFormat,
     MemoryObj,
-    MixedMemoryAllocator,
 )
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.v1.storage_backend.local_disk_backend import LocalDiskBackend
@@ -69,7 +68,7 @@ def create_test_metadata():
 
 def create_test_key(chunk_hash: int = 1234567890) -> CacheEngineKey:
     """Create a test CacheEngineKey."""
-    return CacheEngineKey("vllm", "test_model", 3, 123, chunk_hash)
+    return CacheEngineKey("vllm", "test_model", 3, 123, hash(key_id))
 
 
 def create_test_memory_obj(shape=(2, 16, 8, 128), dtype=torch.bfloat16) -> MemoryObj:
@@ -101,11 +100,13 @@ def async_loop():
     loop.close()
 
 
+# ----------------------------------------------------------------------------
+
+
 @pytest.fixture
-def local_cpu_backend():
+def local_cpu_backend(memory_allocator):
     """Create a LocalCPUBackend for testing."""
     config = LMCacheEngineConfig.from_legacy(chunk_size=256)
-    memory_allocator = MixedMemoryAllocator(1024 * 1024 * 1024)  # 1GB
     return LocalCPUBackend(config, memory_allocator)
 
 
@@ -151,7 +152,6 @@ class TestLocalDiskBackend:
     ):
         """Test LocalDiskBackend initialization with lookup server and worker."""
         config = create_test_config(temp_disk_path)
-        lookup_server = MockLookupServer()
         lmcache_worker = MockLMCacheWorker()
 
         backend = LocalDiskBackend(
@@ -159,11 +159,9 @@ class TestLocalDiskBackend:
             loop=async_loop,
             local_cpu_backend=local_cpu_backend,
             dst_device="cuda",
-            lookup_server=lookup_server,
             lmcache_worker=lmcache_worker,
         )
 
-        assert backend.lookup_server == lookup_server
         assert backend.lmcache_worker == lmcache_worker
 
         local_cpu_backend.memory_allocator.close()

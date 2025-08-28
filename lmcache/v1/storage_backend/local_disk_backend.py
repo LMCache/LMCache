@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from concurrent.futures import Future, ThreadPoolExecutor
-from typing import TYPE_CHECKING, Callable, List, Optional
+from typing import TYPE_CHECKING, Any, Callable, List, Optional, Sequence
 import asyncio
 import itertools
 import os
@@ -32,8 +32,10 @@ logger = init_logger(__name__)
 
 
 class LocalDiskWorker:
-    def __init__(self):
-        self.pq = queue.PriorityQueue()
+    def __init__(self) -> None:
+        self.pq: queue.PriorityQueue[tuple[int, int, str, Callable, dict[str, Any]]] = (
+            queue.PriorityQueue()
+        )
 
         # TODO(Jiayi): remove this hard code.
         num_workers = 1
@@ -156,7 +158,6 @@ class LocalDiskBackend(StorageBackendInterface):
         local_cpu_backend: LocalCPUBackend,
         dst_device: str = "cuda",
         lmcache_worker: Optional["LMCacheWorker"] = None,
-        lookup_server: Optional[LookupServerInterface] = None,
     ):
         super().__init__(dst_device)
         self.cache_policy = get_cache_policy(config.cache_policy)
@@ -173,8 +174,6 @@ class LocalDiskBackend(StorageBackendInterface):
         if not os.path.exists(self.path):
             os.makedirs(self.path)
             logger.info(f"Created local disk cache directory: {self.path}")
-
-        self.lookup_server = lookup_server
 
         self.loop = loop
 
@@ -357,7 +356,7 @@ class LocalDiskBackend(StorageBackendInterface):
 
     def batched_submit_put_task(
         self,
-        keys: List[CacheEngineKey],
+        keys: Sequence[CacheEngineKey],
         memory_objs: List[MemoryObj],
         transfer_spec=None,
     ) -> None:
@@ -605,4 +604,5 @@ class LocalDiskBackend(StorageBackendInterface):
     def close(self) -> None:
         with self.disk_lock:
             keys = list(self.dict.keys())
-        super()._on_evict(keys)
+        if keys:
+            super()._on_evict(keys)
