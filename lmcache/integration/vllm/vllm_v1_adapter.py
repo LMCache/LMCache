@@ -317,6 +317,7 @@ class ReqMeta:
 
         # NOTE(Kuntai): enumerate across different kv cache groups and construct
         # the slot mapping for each kv cache group.
+        # TODO(Kuntai): make slot_mappings a tensor.
         slot_mappings = {}
         for kv_cache_group_id, block_ids in tracker.allocated_block_ids.items():
             num_blocks = len(block_ids)

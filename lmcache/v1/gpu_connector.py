@@ -1028,29 +1028,20 @@ class VLLMPagedMemLayerwiseGPUConnectorForHybridAlloc(GPUConnectorInterface):
         assert "dtype" in kwargs, "dtype should be provided to create a GPU buffer."
         assert "device" in kwargs, "device should be provided to create a GPU buffer."
 
-        if any(
-            [
-                "layer_id_to_kv_cache_group_id" not in kwargs,
-                "layer_id_to_kv_cache_group_id" in kwargs
-                and kwargs["layer_id_to_kv_cache_group_id"] is None,
-            ]
-        ):
-            raise ValueError(
-                f"layer_id_to_kv_cache_group_id is not provided in kwargs, "
-                f"cannot support hybrid kv cache allocator."
-                f"Provided args in kwargs: {kwargs}."
-            )
-        if any(
-            [
-                "layer_name_to_kv_cache_group_id" not in kwargs,
-                "layer_id_to_kv_cache_group_id" in kwargs
-                and kwargs["layer_name_to_kv_cache_group_id"] is None,
-            ]
-        ):
-            raise ValueError(
-                "layer_name_to_kv_cache_group_id is not provided, "
-                "cannot support hybrid kv cache allocator."
-            )
+        assert (
+            "layer_id_to_kv_cache_group_id" in kwargs
+            and kwargs["layer_id_to_kv_cache_group_id"] is not None
+        ), (
+            "layer_id_to_kv_cache_group_id should be provided for "
+            "VLLMPagedMemLayerwiseGPUConnectorForHybridAlloc."
+        )
+        assert (
+            "layer_name_to_kv_cache_group_id" in kwargs
+            and kwargs["layer_name_to_kv_cache_group_id"] is not None
+        ), (
+            "layer_name_to_kv_cache_group_id should be provided for "
+            "VLLMPagedMemLayerwiseGPUConnectorForHybridAlloc."
+        )
 
         self.dtype = kwargs["dtype"]
         self.device = kwargs["device"]
@@ -1141,17 +1132,11 @@ class VLLMPagedMemLayerwiseGPUConnectorForHybridAlloc(GPUConnectorInterface):
 
         slot_mappings: dict[int, torch.Tensor] = {}
 
-        if "slot_mappings" not in kwargs:
-            # NOTE(Kuntai): support `slot_mapping` for test compatibility.
-            if "slot_mapping" in kwargs:
-                slot_mappings = {0: kwargs["slot_mapping"]}
-            else:
-                raise ValueError(
-                    "Both 'slot_mappings' and 'slot_mapping' "
-                    "are not provided in kwargs."
-                )
-        else:
-            slot_mappings = kwargs["slot_mappings"]
+        assert "slot_mappings" in kwargs, (
+            "slot_mappings should be provided in kwargs for "
+            "VLLMPagedMemLayerwiseGPUConnectorForHybridAlloc."
+        )
+        slot_mappings = kwargs["slot_mappings"]
 
         if "sync" not in kwargs:
             raise ValueError("'sync' should be provided in kwargs.")
@@ -1289,17 +1274,11 @@ class VLLMPagedMemLayerwiseGPUConnectorForHybridAlloc(GPUConnectorInterface):
 
         slot_mappings: dict[int, torch.Tensor] = {}
 
-        if "slot_mappings" not in kwargs:
-            # NOTE(Kuntai): support `slot_mapping` for test compatibility.
-            if "slot_mapping" in kwargs:
-                slot_mappings = {0: kwargs["slot_mapping"]}
-            else:
-                raise ValueError(
-                    "Both 'slot_mappings' and 'slot_mapping' "
-                    "are not provided in kwargs."
-                )
-        else:
-            slot_mappings = kwargs["slot_mappings"]
+        assert "slot_mappings" in kwargs, (
+            "slot_mappings should be provided in kwargs for "
+            "VLLMPagedMemLayerwiseGPUConnectorForHybridAlloc."
+        )
+        slot_mappings = kwargs["slot_mappings"]
 
         if "sync" not in kwargs:
             raise ValueError("'sync' should be provided in kwargs.")
