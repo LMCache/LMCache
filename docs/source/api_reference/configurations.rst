@@ -74,7 +74,7 @@ Basic cache settings that control the core functionality of LMCache.
      - LMCACHE_EXTERNAL_LOOKUP_CLIENT
      - External KV lookup service URI (e.g., "mooncakestore://address"). If null, defaults to LMCache's internal lookup client. Default: null
    * - extra_config
-     - LMCACHE_EXTRA_CONFIG={"key": value, ...}
+     - LMCACHE_EXTRA_CONFIG='{"key": "value", ...}'
      - Additional configuration as JSON dict. Default: null
      
 Cache Blending Configurations
