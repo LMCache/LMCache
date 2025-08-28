@@ -69,13 +69,13 @@ Basic cache settings that control the core functionality of LMCache.
      - Cache eviction policy (e.g. "LRU", "LFU", "FIFO"). Default: "LRU"
    * - numa_mode
      - LMCACHE_NUMA_MODE
-     - NUMA mode configuration.
+     - NUMA-aware memory allocation mode. Values: "auto" (detect from system), "manual" (use extra_config mapping), null (disabled). When enabled, allocates pinned memory on specific NUMA nodes for better GPU-CPU memory bandwidth. Default: null
    * - external_lookup_client
      - LMCACHE_EXTERNAL_LOOKUP_CLIENT
      - External KV lookup service URI (e.g., "mooncakestore://address"). If null, defaults to LMCache's internal lookup client. Default: null
    * - extra_config
      - LMCACHE_EXTRA_CONFIG={"key": value, ...}
-     - Additional configuration as JSON dict. Default: {}
+     - Additional configuration as JSON dict. For NUMA manual mode, include "gpu_to_numa_mapping": {gpu_id: numa_node, ...}. Default: {}
      
 Cache Blending Configurations
 -----------------------------
