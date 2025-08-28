@@ -440,11 +440,11 @@ def _init_lmcache_engine(
 
     # NOTE(Kuntai): for hybrid memory allocator, we need to map from layer id
     # or layer name to kv cache group id.
-    layer_name_to_kv_cache_group_id = None
-    layer_id_to_kv_cache_group_id = None
+    layer_name_to_kv_cache_group_id: Optional[dict[str, int]] = None
+    layer_id_to_kv_cache_group_id: Optional[dict[int, int]] = None
 
     if hasattr(vllm_config, "kv_cache_config"):
-        # Hybrid allocator + connector is enabled.
+        # Calculate mapping from layer id / layer name to kv cache group id.
 
         # Third Party
         from vllm.v1.core.kv_cache_utils import get_layer_to_kv_cache_group_id_mapping
