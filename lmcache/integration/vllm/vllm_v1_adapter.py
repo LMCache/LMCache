@@ -445,37 +445,13 @@ def _init_lmcache_engine(
 
     if hasattr(vllm_config, "kv_cache_config"):
         # Hybrid allocator + connector is enabled.
-        kv_cache_groups = vllm_config.kv_cache_config.kv_cache_groups
 
-        layer_name_to_kv_cache_group_id = {}
-        layer_id_to_kv_cache_group_id = {}
+        # Third Party
+        from vllm.v1.core.kv_cache_utils import get_layer_to_kv_cache_group_id_mapping
 
-        # a small helper function to get layer id from name
-        def extract_layer_index(name: str) -> int:
-            # Standard
-            import re
-
-            """
-            Extract the numeric index from a string like
-            'language_model.model.layers.18.self_attn.attn'.
-
-            Args:
-                name (str): The input string.
-
-            Returns:
-                int | None: The layer index if found, otherwise None.
-            """
-            match = re.search(r"layers\.(\d+)\.", name)
-            if match:
-                return int(match.group(1))
-            else:
-                raise ValueError(f"Failed to extract layer index from {name}")
-
-        # construct the mapping from layer id to kv cache group id
-        for idx, group in enumerate(kv_cache_groups):
-            for layer_name in group.layer_names:
-                layer_name_to_kv_cache_group_id[layer_name] = idx
-                layer_id_to_kv_cache_group_id[extract_layer_index(layer_name)] = idx
+        layer_name_to_kv_cache_group_id, layer_id_to_kv_cache_group_id = (
+            get_layer_to_kv_cache_group_id_mapping(vllm_config.kv_cache_config)
+        )
 
     # Change current device.
     num_gpus = torch.cuda.device_count()
