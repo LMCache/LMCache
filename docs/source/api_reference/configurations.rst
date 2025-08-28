@@ -208,7 +208,7 @@ Settings for Nixl-based disaggregated prefill functionality. The latest/default 
      - Host for proxy server. Required for senders to connect to inform the proxy when transfer to decoder has been completed
    * - nixl_proxy_port
      - LMCACHE_NIXL_PROXY_PORT
-     - Port for proxy server. Required for senders to connect to to inform the proxy when transfer to decoder has been completed
+     - Port for proxy server. Required for senders to connect to inform the proxy when transfer to decoder has been completed
 
 Nixl (as a storage backend) Configurations
 ------------------------------------------
