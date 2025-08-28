@@ -205,7 +205,7 @@ Settings for Nixl-based disaggregated prefill functionality. The latest/default 
      - Allocation port for peer connections. Required for receivers to bind to
    * - nixl_proxy_host
      - LMCACHE_NIXL_PROXY_HOST
-     - Host for proxy server. Required for senders to connect to to inform the proxy when transfer to decoder has been completed
+     - Host for proxy server. Required for senders to connect to inform the proxy when transfer to decoder has been completed
    * - nixl_proxy_port
      - LMCACHE_NIXL_PROXY_PORT
      - Port for proxy server. Required for senders to connect to to inform the proxy when transfer to decoder has been completed
