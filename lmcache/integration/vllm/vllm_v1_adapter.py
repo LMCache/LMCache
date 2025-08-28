@@ -468,8 +468,6 @@ def _init_lmcache_engine(
         kv_dtype,
         kv_shape,
         use_mla,
-        layer_id_to_kv_cache_group_id=layer_id_to_kv_cache_group_id,
-        layer_name_to_kv_cache_group_id=layer_name_to_kv_cache_group_id,
     )
 
     use_gpu = need_gpu_interm_buffer(lmcache_config)
