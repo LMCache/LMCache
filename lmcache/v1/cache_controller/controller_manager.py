@@ -24,6 +24,7 @@ from lmcache.v1.cache_controller.message import (  # isort: skip
     DecompressMsg,
     DeRegisterMsg,
     HealthMsg,
+    HeartbeatMsg,
     KVAdmitMsg,
     KVEvictMsg,
     LookupMsg,
@@ -91,7 +92,9 @@ class LMCacheControllerManager:
         # asyncio.run_coroutine_threadsafe(self.start_all(), self.loop)
 
     async def handle_worker_message(self, msg: WorkerMsg) -> None:
-        if isinstance(msg, RegisterMsg):
+        if isinstance(msg, HeartbeatMsg):
+            await self.reg_controller.heartbeat(msg)
+        elif isinstance(msg, RegisterMsg):
             await self.reg_controller.register(msg)
         elif isinstance(msg, DeRegisterMsg):
             await self.reg_controller.deregister(msg)

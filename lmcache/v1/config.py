@@ -153,6 +153,21 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "default": None,
         "env_converter": int,
     },
+    # LMCache Worker heartbeat
+    # the lmcache_worker_heartbeat_delay_time means that delay a period of time
+    # before starting, ensures that the heartbeat starts working only after the
+    # service is fully ready(such as, waiting register).
+    "lmcache_worker_heartbeat_delay_time": {
+        "type": int,
+        "default": 10,
+        "env_converter": int,
+    },
+    # the lmcache_worker_heartbeat_time means that sending heartbeat periodically.
+    "lmcache_worker_heartbeat_time": {
+        "type": Optional[int],
+        "default": None,
+        "env_converter": int,
+    },
     # Nixl configurations
     "enable_nixl": {
         "type": bool,
