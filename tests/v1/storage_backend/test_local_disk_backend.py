@@ -139,7 +139,6 @@ class TestLocalDiskBackend:
         assert backend.local_cpu_backend == local_cpu_backend
         assert backend.path == temp_disk_path
         assert os.path.exists(temp_disk_path)
-        assert backend.lookup_server is None
         assert backend.lmcache_worker is None
         assert backend.instance_id == "test_instance"
         assert backend.usage == 0

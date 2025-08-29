@@ -323,26 +323,33 @@ class LocalDiskBackend(StorageBackendInterface):
 
         # TODO(Jiayi): Fragmentation is not considered here.
         required_size = memory_obj.get_physical_size()
-        while self.current_cache_size + required_size > self.max_cache_size:
-            with self.disk_lock:
+        all_evict_keys = []
+        evict_success = True
+        with self.disk_lock:
+            while self.current_cache_size + required_size > self.max_cache_size:
                 evict_keys = self.cache_policy.get_evict_candidates(
                     self.dict, num_candidates=1
                 )
-            if not evict_keys:
-                logger.warning(
-                    "No eviction candidates found.", "Disk space under pressure."
-                )
-                return None
+                if not evict_keys:
+                    logger.warning(
+                        "No eviction candidates found.", "Disk space under pressure."
+                    )
+                    evict_success = False
+                    break
 
-            with self.disk_lock:
                 for evict_key in evict_keys:
                     self.current_cache_size -= self.dict[evict_key].size
 
-            self.batched_remove(evict_keys, force=False)
+                self.batched_remove(evict_keys, force=False)
 
-            super()._on_evict(evict_keys)
+                all_evict_keys.extend(evict_keys)
+            self.current_cache_size += required_size
 
-        self.current_cache_size += required_size
+        if all_evict_keys:
+            self._on_evict(all_evict_keys)
+
+        if not evict_success:
+            return None
 
         self.cache_policy.update_on_put(key)
         memory_obj.ref_count_up()
