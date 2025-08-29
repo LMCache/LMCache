@@ -227,12 +227,8 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
 
         kv_cache_pointers = self._initialize_pointers(self.kvcaches)
 
-        src_tensor = memory_obj.tensor
-
-        # torch.cuda.synchronize()
-
         lmc_ops.multi_layer_kv_transfer(
-            src_tensor,
+            memory_obj.tensor,
             kv_cache_pointers,
             slot_mapping[start:end],
             self.device,
@@ -240,8 +236,6 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
             False,
             self.use_mla,
         )
-
-        # torch.cuda.synchronize()
 
     @_lmcache_nvtx_annotate
     def from_gpu(self, memory_obj: MemoryObj, start: int, end: int, **kwargs):
