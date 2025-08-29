@@ -252,6 +252,23 @@ class LocalCPUBackend(AllocatorBackendInterface):
             else:
                 fmt = MemoryFormat.KV_2LTD
 
+        # Earlier validation when eviction is required: ensure allocator
+        # supports CPU eviction
+        allocator_to_check = getattr(
+            self.memory_allocator, "_real", self.memory_allocator
+        )
+        if eviction and not (
+            isinstance(allocator_to_check, MixedMemoryAllocator)
+            or isinstance(allocator_to_check, NixlCPUMemoryAllocator)
+        ):
+            # For allocators that don't support eviction (like AdHocMemoryAllocator),
+            # automatically disable eviction instead of raising an error
+            logger.warning(
+                f"Allocator {type(allocator_to_check).__name__} does not support "
+                f"eviction. Disabling eviction for this allocation."
+            )
+            eviction = False
+
         memory_obj = self.memory_allocator.allocate(shape, dtype, fmt)
         if memory_obj is not None or not eviction:
             return memory_obj
@@ -338,6 +355,23 @@ class LocalCPUBackend(AllocatorBackendInterface):
             f"Batched allocating memory in local cpu backend"
             f" with busy loop: {busy_loop}"
         )
+        # Earlier validation when eviction is required: ensure allocator
+        # supports CPU eviction
+        allocator_to_check = getattr(
+            self.memory_allocator, "_real", self.memory_allocator
+        )
+        if eviction and not (
+            isinstance(allocator_to_check, MixedMemoryAllocator)
+            or isinstance(allocator_to_check, NixlCPUMemoryAllocator)
+        ):
+            # For allocators that don't support eviction (like AdHocMemoryAllocator),
+            # automatically disable eviction instead of raising an error
+            logger.warning(
+                f"Allocator {type(allocator_to_check).__name__} does not support "
+                f"eviction. Disabling eviction for this allocation."
+            )
+            eviction = False
+
         if fmt is None:
             if self.layerwise:
                 if self.enable_blending:

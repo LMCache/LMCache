@@ -15,6 +15,7 @@ from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.lookup_server import LookupServerInterface
 from lmcache.v1.memory_management import (
     MemoryAllocatorInterface,
+    MixedMemoryAllocator,
     NixlCPUMemoryAllocator,
     PagedTensorMemoryAllocator,
 )
@@ -140,9 +141,35 @@ def CreateStorageBackends(
     # NOTE(Jiayi): The local_cpu backend is always created because
     # other backends might need it as a buffer.
     if not config.enable_nixl or config.local_cpu:
+        pass
+    else:
+        # issue: https://github.com/LMCache/LMCache/issues/1330
+        # If GDS/Weka is enabled while local CPU hot cache is also enabled,
+        # the global allocator is a CuFile allocator (GPU registered buffer).
+        # That allocator doesn't support CPU-eviction semantics.
+        # Create a dedicated CPU MixedMemoryAllocator for LocalCPUBackend in
+        # this case.
+        use_dedicated_local_cpu_allocator = config.local_cpu and (
+            config.weka_path is not None or config.gds_path is not None
+        )
+
+        local_cpu_allocator: MemoryAllocatorInterface
+        if use_dedicated_local_cpu_allocator:
+            # Size in GiB -> bytes
+            local_cpu_allocator = MixedMemoryAllocator(
+                int(config.max_local_cpu_size * 1024**3)
+            )
+            logger.info(
+                "CreateStorageBackends: Using dedicated MixedMemoryAllocator "
+                "for LocalCPUBackend while GDS/Weka is enabled."
+            )
+        else:
+            # Reuse the global allocator when not in GDS/Weka configuration
+            local_cpu_allocator = memory_allocator
+
         local_cpu_backend = LocalCPUBackend(
             config,
-            memory_allocator,
+            local_cpu_allocator,
             lookup_server,
             lmcache_worker,
         )
@@ -196,18 +223,17 @@ def CreateStorageBackends(
         backend_name = str(remote_backend)
         storage_backends[backend_name] = remote_backend
 
-    if not config.enable_nixl or config.local_cpu:
-        # Create dynamic backends from configuration
-        create_dynamic_backends(
-            config,
-            metadata,
-            loop,
-            memory_allocator,
-            local_cpu_backend,
-            dst_device,
-            lookup_server,
-            storage_backends,
-        )
+    # Create dynamic backends from configuration
+    create_dynamic_backends(
+        config,
+        metadata,
+        loop,
+        memory_allocator,
+        local_cpu_backend,
+        dst_device,
+        lookup_server,
+        storage_backends,
+    )
 
     # Only wrap if audit is enabled in config
     if config.extra_config is not None and config.extra_config.get(
