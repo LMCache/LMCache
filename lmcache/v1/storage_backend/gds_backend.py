@@ -30,6 +30,7 @@ logger = init_logger(__name__)
 
 _METADATA_FILE_SUFFIX = ".metadata"
 _DATA_FILE_SUFFIX = ".kvcache.safetensors"
+_FULL_SUFFIX_LENGTH = len(_DATA_FILE_SUFFIX + _METADATA_FILE_SUFFIX)  # 29 characters
 _METADATA_VERSION = 1
 _METADATA_MAX_SIZE = 4096  # reserve 4K for metadata.
 # TODO: It is possible to read this 4KB block without triggering read-ahead by
@@ -303,7 +304,7 @@ class GdsBackend(StorageBackendInterface):
                         if not fentry.name.endswith(target_suffix):
                             continue
                         filename = os.path.basename(fentry.name)
-                        key_str = filename[:-14].replace("_", "/")
+                        key_str = filename[:-_FULL_SUFFIX_LENGTH].replace("_", "/")
                         try:
                             key = CacheEngineKey.from_string(key_str)
                         except ValueError as e:
