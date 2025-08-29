@@ -812,7 +812,9 @@ def test_paged_prefetch_retrieve(backend, prefetch_from, autorelease_v1):
         timeout = 60
         start_time = time.time()
         while (
-            engine.lookup(torch.cat([tokens, new_tokens]), ["LocalCPUBackend"])
+            engine.lookup(
+                torch.cat([tokens, new_tokens]), search_range=["LocalCPUBackend"]
+            )
             < expected_length
         ):
             if time.time() - start_time > timeout:
