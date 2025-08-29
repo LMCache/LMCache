@@ -63,6 +63,7 @@ class RedisSentinelConnectorAdapter(ConnectorAdapter):
 
         # Parse host and port
         hosts_and_ports: List[Tuple[str, int]] = []
+        assert self.schema is not None
         for sub_url in url.split(","):
             if not sub_url.startswith(self.schema):
                 sub_url = self.schema + sub_url

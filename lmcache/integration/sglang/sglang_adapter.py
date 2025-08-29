@@ -12,6 +12,7 @@ import torch
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.integration.sglang.utils import ENGINE_NAME, lmcache_get_config
 from lmcache.logging import init_logger
+from lmcache.utils import mock_up_broadcast_fn, mock_up_broadcast_object_fn
 from lmcache.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.gpu_connector import (
@@ -50,12 +51,12 @@ def init_lmcache_engine(
     tp_size: int,
     rank: int,
     kv_dtype: torch.dtype,
-) -> Optional[LMCacheEngine]:
+) -> LMCacheEngine:
     """
     TODO: ADD COMMENTS
     """
-    if LMCacheEngineBuilder.get(ENGINE_NAME) is not None:
-        return None
+    if curr_engine := LMCacheEngineBuilder.get(ENGINE_NAME):
+        return curr_engine
 
     config = lmcache_get_config()
     assert isinstance(config, LMCacheEngineConfig), (
@@ -107,7 +108,12 @@ def init_lmcache_engine(
             device=device,
         )
     engine = LMCacheEngineBuilder.get_or_create(
-        ENGINE_NAME, config, metadata, gpu_connector
+        ENGINE_NAME,
+        config,
+        metadata,
+        gpu_connector,
+        mock_up_broadcast_fn,
+        mock_up_broadcast_object_fn,
     )
 
     return engine

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Optional, Union
+from typing import TYPE_CHECKING, Any, Generator, Optional, Union
 import os
 import uuid
 
@@ -44,6 +44,7 @@ from lmcache.v1.gpu_connector import (
 from lmcache.v1.internal_api_server.api_server import InternalAPIServer
 from lmcache.v1.lookup_client import LookupClientFactory
 from lmcache.v1.offload_server.zmq_server import ZMQOffloadServer
+from lmcache.v1.plugin.plugin_launcher import PluginLauncher
 from lmcache.v1.storage_backend.connector.nixl_connector_v3 import (
     NixlReceiverInfo,
 )
@@ -191,7 +192,7 @@ class RequestTracker:
     def update(
         self,
         new_token_ids: list[int],
-        new_block_ids: Union[tuple[list[int], ...], list[int]],
+        new_block_ids: Union[Optional[tuple[list[int], ...]], list[int]],
     ) -> None:
         """Update the request tracker when a running request is
         scheduled again
@@ -199,7 +200,12 @@ class RequestTracker:
 
         self.token_ids.extend(new_token_ids)
 
-        if len(new_block_ids) == 0:
+        if new_block_ids is None:
+            # https://github.com/vllm-project/vllm/commit/
+            # b029de9902aa3ac58806c8c17776c7074175b6db#
+            # diff-cafd89ce8a698a56acb24ada62831cbc7a980782f78a52d1742ba238031f296cL94
+            new_block_ids = []
+        elif len(new_block_ids) == 0:
             new_block_ids = []
         elif isinstance(new_block_ids, tuple):
             new_block_ids = new_block_ids[0]
@@ -221,7 +227,7 @@ class ReqMeta:
     # Request id
     req_id: str
     # Request tokens
-    token_ids: torch.Tensor
+    token_ids: list[int]  # torch.Tensor
     # Slot mapping
     slot_mapping: torch.Tensor
 
@@ -307,19 +313,21 @@ class ReqMeta:
         save_spec = SaveSpec(skip_leading_tokens, not skip_save)
 
         # Calculate the token ids and slot mappings for load and save
-        # OPTIMIZATION: pre-allocate the buffer for token ids and block
-        # ids
-        token_ids = torch.tensor(input_token_ids)[:num_tokens_to_save]
+        token_ids = input_token_ids[:num_tokens_to_save]
 
         # If the request has multimodal hashes, apply them to the token ids
         if tracker.mm_hashes:
+            # TODO: Optimize this
+            token_ids = torch.tensor(token_ids)
+            assert tracker.mm_positions is not None, (
+                "tracker got mm_hashes but no mm_positions"
+            )
             apply_mm_hashes_to_token_ids(
                 token_ids, tracker.mm_hashes, tracker.mm_positions
             )
+            token_ids = token_ids.tolist()
 
         num_blocks = len(tracker.allocated_block_ids)
-
-        block_ids = torch.tensor(tracker.allocated_block_ids, dtype=torch.long)
 
         if len(token_ids) > num_blocks * block_size:
             logger.error(
@@ -333,6 +341,7 @@ class ReqMeta:
                 block_size,
             )
 
+        block_ids = torch.tensor(tracker.allocated_block_ids, dtype=torch.long)
         block_offsets = torch.arange(0, block_size, dtype=torch.long)
         slot_mapping = (
             block_offsets.reshape((1, block_size))
@@ -387,7 +396,7 @@ def _calculate_mtp_layers(vllm_config, model_config):
 def _init_lmcache_engine(
     lmcache_config: LMCacheEngineConfig,
     vllm_config: "VllmConfig",
-) -> Optional[LMCacheEngine]:
+) -> LMCacheEngine:
     """Initialize the LMCache engine by the given model config and parallel
     config. This function will check the environment variable
     `LMCACHE_CONFIG_FILE` to load the configuration file. If that environment
@@ -398,12 +407,11 @@ def _init_lmcache_engine(
     :param vllm_config: The vLLM configuration.
     :type vllm_config: VllmConfig
 
-    :return: The initialized LMCache engine or None (if the environment variable
-        `LMCACHE_CONFIG_FILE` is not set).
-    :rtype: Optional[LMCacheEngine]
+    :return: The initialized LMCache engine
+    :rtype: LMCacheEngine
     """
-    if LMCacheEngineBuilder.get(ENGINE_NAME) is not None:
-        return None
+    if curr_engine := LMCacheEngineBuilder.get(ENGINE_NAME):
+        return curr_engine
 
     model_config = vllm_config.model_config
     parallel_config = vllm_config.parallel_config
@@ -528,10 +536,15 @@ class LMCacheConnectorV1Impl:
     ):
         self._parent = parent
         self.kv_role = vllm_config.kv_transfer_config.kv_role
-
+        self.worker_count = vllm_config.parallel_config.tensor_parallel_size
         config = lmcache_get_config()
+        assert isinstance(config, LMCacheEngineConfig), (
+            "LMCache v1 configuration is should be passed for vLLM v1."
+        )
         self.config = config
-        self.layerwise_retrievers = []
+        self.layerwise_retrievers: list[
+            Generator[Optional[torch.Tensor], None, None]
+        ] = []
         if role == KVConnectorRole.SCHEDULER:
             # Create lookup client using factory
             self.lookup_client = LookupClientFactory.create_lookup_client(
@@ -554,6 +567,7 @@ class LMCacheConnectorV1Impl:
                     ENGINE_NAME,
                     self.lmcache_engine,
                     self.lmcache_engine.gpu_connector,
+                    config,
                 )
 
             # Create lookup server using factory
@@ -606,6 +620,17 @@ class LMCacheConnectorV1Impl:
         # The enabled check is in the InternalAPIServer constructor
         self.api_server = InternalAPIServer(self)
         self.api_server.start()
+
+        # Launch plugins
+        self.plugin_launcher = PluginLauncher(
+            self.config,
+            role,
+            self.worker_count,
+            -1
+            if self.lmcache_engine is None  # scheduler side
+            else self.lmcache_engine.metadata.worker_id,
+        )
+        self.plugin_launcher.launch_plugins()
 
     @_lmcache_nvtx_annotate
     def _init_kv_caches_from_forward_context(self, forward_context: "ForwardContext"):
@@ -673,7 +698,7 @@ class LMCacheConnectorV1Impl:
             slot_mapping = request.slot_mapping.cuda()
             assert len(tokens) == len(slot_mapping)
 
-            token_mask = torch.ones_like(tokens, dtype=torch.bool)
+            token_mask = torch.ones(len(tokens), dtype=torch.bool)
             masked_token_count = (
                 request.load_spec.vllm_cached_tokens
                 // self._lmcache_chunk_size
@@ -775,6 +800,7 @@ class LMCacheConnectorV1Impl:
             attn_metadata (AttentionMetadata): the attention metadata.
             **kwargs: additional arguments for the save operation.
         """
+        assert self.lmcache_engine is not None
 
         if not self.use_layerwise:
             return
@@ -886,8 +912,6 @@ class LMCacheConnectorV1Impl:
                 continue
 
             token_ids = request.token_ids
-            assert isinstance(token_ids, torch.Tensor)
-            assert token_ids.is_cpu
 
             slot_mapping = request.slot_mapping
             assert isinstance(slot_mapping, torch.Tensor)
@@ -911,7 +935,7 @@ class LMCacheConnectorV1Impl:
                 * self._lmcache_chunk_size
             )
 
-            store_mask = torch.ones_like(token_ids, dtype=torch.bool)
+            store_mask = torch.ones(len(token_ids), dtype=torch.bool)
             store_mask[:skip_leading_tokens] = False
 
             logger.info(
@@ -984,13 +1008,16 @@ class LMCacheConnectorV1Impl:
         ):
             return 0
 
-        token_ids = torch.tensor(request.prompt_token_ids)
+        token_ids = request.prompt_token_ids
 
         # If the request has multimodal hashes, apply them to the token ids
         if request.mm_hashes:
+            # TODO(Jiayi): Optimize this
+            token_ids = torch.tensor(request.prompt_token_ids)
             apply_mm_hashes_to_token_ids(
                 token_ids, request.mm_hashes, request.mm_positions
             )
+            token_ids = token_ids.tolist()
 
         lookup_id = str(uuid.uuid4())
         self._lookup_requests_in_step.append(lookup_id)
@@ -1235,4 +1262,4 @@ class LMCacheConnectorV1Impl:
                 "first_tok": request._output_token_ids[0],
             }
 
-        return 0, return_params
+        return False, return_params

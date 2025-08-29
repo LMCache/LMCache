@@ -50,7 +50,7 @@ class LookupClientFactory:
                 LMCacheLookupClient,
             )
 
-            return LMCacheLookupClient(vllm_config, config)
+            return LMCacheLookupClient(vllm_config)  # , config)
 
     @staticmethod
     def create_lookup_server(
@@ -68,6 +68,9 @@ class LookupClientFactory:
             A lookup server instance, or None if no server should be created
         """
         config = lmcache_get_config()
+        assert isinstance(config, LMCacheEngineConfig), (
+            "LMCache v1 config is expected for lookup server and client"
+        )
 
         # Only create the KV lookup API server on worker rank 0
         # when there are multiple workers and when not using external lookup client

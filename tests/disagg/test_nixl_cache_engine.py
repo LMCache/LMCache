@@ -12,6 +12,7 @@ import torch
 # First Party
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
+from lmcache.utils import mock_up_broadcast_fn, mock_up_broadcast_object_fn
 from lmcache.v1.cache_engine import LMCacheEngineBuilder
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.gpu_connector import VLLMPagedMemGPUConnectorV2
@@ -196,7 +197,12 @@ if __name__ == "__main__":
 
     # Create the LMCacheEngine (will be reused across rounds)
     engine = LMCacheEngineBuilder.get_or_create(
-        "test_engine", config, metadata, gpu_connector
+        "test_engine",
+        config,
+        metadata,
+        gpu_connector,
+        mock_up_broadcast_fn,
+        mock_up_broadcast_object_fn,
     )
 
     # Generate or create buffers that will be reused across rounds

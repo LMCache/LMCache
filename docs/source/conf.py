@@ -9,6 +9,7 @@
 
 # Standard
 from dataclasses import asdict
+from typing import Any
 import os
 import sys
 
@@ -59,7 +60,7 @@ autodoc.ClassDocumenter = MockedClassDocumenter
 # }
 
 templates_path = ["_templates"]
-exclude_patterns = []
+exclude_patterns: list[Any] = []
 add_module_names = False
 
 # -- Options for HTML output -------------------------------------------------

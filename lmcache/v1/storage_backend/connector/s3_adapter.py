@@ -24,6 +24,7 @@ class S3ConnectorAdapter(ConnectorAdapter):
         from .s3_connector import S3Connector
 
         config = context.config
+        assert config is not None
 
         if config.extra_config is not None:
             # Different parts can be transferred in parallel.

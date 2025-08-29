@@ -14,6 +14,14 @@ from lmcache.utils import CacheEngineKey
 from lmcache.v1.gpu_connector import VLLMPagedMemGPUConnectorV2
 
 
+def recover_engine_states(engine):
+    engine.gpu_connector.kv_cache_pointers_on_gpu = {}
+
+
+def recover_gpu_connector_states(gpu_connector):
+    gpu_connector.kv_cache_pointers_on_gpu = {}
+
+
 def dumb_metadata(fmt="vllm", kv_shape=(32, 2, 256, 8, 128)):
     return LMCacheEngineMetadata("test_model", 3, 123, fmt, torch.bfloat16, kv_shape)
 
