@@ -1244,7 +1244,7 @@ class SGLangLayerwiseGPUConnector(GPUConnectorInterface):
             self.num_kv_cache, dtype=torch.int64, device="cpu"
         )
         self.use_gpu = use_gpu
-        self.gpu_buffer_allocator = None
+        self.gpu_buffer_allocator: GPUMemoryAllocator
 
     def _lazy_initialize_buffer(self, kv_caches):
         """
