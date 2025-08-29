@@ -87,7 +87,7 @@ def init_lmcache_engine(
 
     hidden_dim_size = num_kv_head * head_dim
 
-    gpu_connector: Optional[GPUConnectorInterface] = None
+    gpu_connector: GPUConnectorInterface
 
     if config.use_layerwise:
         gpu_connector = SGLangLayerwiseGPUConnector(
@@ -218,8 +218,8 @@ class LMCacheLayerwiseConnector(LMCacheConnector):
     ):
         super().__init__(sgl_config, tp_size, rank, k_pool, v_pool)
         self._lmcache_chunk_size = self.lmcache_engine.config.chunk_size
-        self.layerwise_retrievers = []
-        self.layer_load_layer = []
+        self.layerwise_retrievers: List[Any] = []
+        self.layer_load_layer: List[int] = []
         self.kvcaches = [k_pool, v_pool]
 
     def load_kv_layerwise(self, layer_id: int) -> None:
