@@ -38,7 +38,7 @@ class LMCacheLookupClient(LookupClientInterface):
     ):
         metadata, config = create_lmcache_metadata(vllm_config)
 
-        self.encoder = msgspec.msgpack.Encoder()  # MsgpackEncoder()
+        self.encoder = msgspec.msgpack.Encoder()
         self.ctx = zmq.Context()  # type: ignore[attr-defined]
         rpc_port = vllm_config.kv_transfer_config.get_from_extra_config(
             "lmcache_rpc_port", 0
@@ -145,7 +145,7 @@ class LMCacheLookupServer:
     """ZMQ-based lookup server that handles lookup requests using LMCacheEngine."""
 
     def __init__(self, lmcache_engine: LMCacheEngine, vllm_config: "VllmConfig"):
-        self.decoder = msgspec.msgpack.Decoder()  # MsgpackDecoder()#torch.Tensor)
+        self.decoder = msgspec.msgpack.Decoder()
         self.ctx = zmq.Context()  # type: ignore[attr-defined]
         rpc_port = vllm_config.kv_transfer_config.get_from_extra_config(
             "lmcache_rpc_port", 0
