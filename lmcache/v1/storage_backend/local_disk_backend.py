@@ -343,7 +343,8 @@ class LocalDiskBackend(StorageBackendInterface):
                 self.batched_remove(evict_keys, force=False)
 
                 all_evict_keys.extend(evict_keys)
-            self.current_cache_size += required_size
+            if evict_success:
+                self.current_cache_size += required_size
 
         if all_evict_keys:
             self._on_evict(all_evict_keys)
