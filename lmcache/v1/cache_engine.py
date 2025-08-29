@@ -679,7 +679,7 @@ class LMCacheEngine:
         :return: An int indicating how many prefix tokens are cached.
         """
 
-        if tokens:
+        if tokens is not None:
             self.stats_monitor.on_lookup_request(len(tokens))
         else:
             assert offsets is not None
