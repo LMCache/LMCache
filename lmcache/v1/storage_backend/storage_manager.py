@@ -53,7 +53,7 @@ class StorageManager:
         lookup_server: Optional[LookupServerInterface] = None,
     ):
         self.loop = asyncio.new_event_loop()
-
+        self.config = config
         self.thread = threading.Thread(
             target=start_loop_in_thread_with_exceptions,
             args=(self.loop,),
@@ -89,6 +89,9 @@ class StorageManager:
         self.worker_id = metadata.worker_id
 
         self.nixl_offload_stream = torch.cuda.Stream()
+
+        # Prefetch from any persistent layers into the local CPU hot cache on start
+        self.prefetch_on_start()
 
     def _get_allocator_backend(
         self, config: LMCacheEngineConfig
@@ -359,6 +362,7 @@ class StorageManager:
                 pin = False
 
             if backend.contains(key, pin):
+                logger.debug(f"Key {key} found in {backend_name}")
                 return backend_name
 
         return None
@@ -471,6 +475,35 @@ class StorageManager:
                     )
 
         return num_cleared_tokens
+    
+    def prefetch_on_start(self): 
+        """Prefetch from disk or remote backend at the start of the engine.
+        Take advantage of the persistence layer."""
+
+        logger.info(f"Prefetching on start with {len(self.storage_backends)} backends.")
+
+        if not self.config.local_cpu: 
+            logger.warning(
+                "Skipping prefetch on start as local CPU backend is not storing KV Caches."
+            )
+            return
+        
+        if not self.config.local_disk and not self.config.remote_url:
+            logger.warning(
+                "Skipping prefetch on start as both local disk and remote backend are not used."
+            )
+            return
+        
+        num_prefetched = 0
+        for backend_name, backend in self.storage_backends.items():
+            if not backend.support_prefetch_on_start(): 
+                logger.info(f"{backend_name} does not support prefetch on start.")
+                continue
+            num_prefetched += backend.prefetch_on_start()
+            logger.info(f"Prefetched {num_prefetched} keys from {backend_name} on start.")
+        
+        logger.info(f"Prefetched {num_prefetched} keys from disk or remote backend on start.")
+        return num_prefetched
 
     def close(self):
         for backend in self.storage_backends.values():

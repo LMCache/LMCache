@@ -241,6 +241,24 @@ class RemoteConnector(metaclass=abc.ABCMeta):
             memory_objs: the memory_objs of the corresponding keys
         """
         raise NotImplementedError
+    
+    def support_prefetch_on_start(self) -> bool: 
+        """
+        Check if the connector supports prefetch on start.
+        The default return is False. Connectors for persistent backends
+        that support this should override with return True
+        """
+        logger.info(f"calling the default support_prefetch_on_start method, which is False")
+        return False
+    
+    async def prefetch_on_start(self) -> int: 
+        """
+        Prefetch from the connector at the start of the engine.
+        """
+        assert self.support_prefetch_on_start(), (
+            "The connector does not support prefetch on start."
+        )
+        raise NotImplementedError
 
     def __repr__(self) -> str:
         return f"<{self.__class__.__name__}>"

@@ -7,6 +7,7 @@ import os
 
 # Third Party
 import redis
+import redis.asyncio
 
 # First Party
 from lmcache.logging import init_logger
@@ -35,19 +36,33 @@ class RedisConnector(RemoteConnector):
         loop: asyncio.AbstractEventLoop,
         local_cpu_backend: LocalCPUBackend,
     ):
+        # Create both sync and async connections
         self.connection = redis.from_url(url=url, decode_responses=False)
+        self.async_connection = redis.asyncio.from_url(url=url, decode_responses=False)
         self.loop = loop
         self.local_cpu_backend = local_cpu_backend
+        
+        # Test the sync connection to ensure Redis is reachable
+        try:
+            self.connection.ping()
+            logger.info(f"Successfully connected to Redis at {url}")
+        except Exception as e:
+            logger.error(f"Failed to connect to Redis at {url}: {e}")
+            raise ConnectionError(f"Redis connection failed: {e}") from e
 
     async def exists(self, key: CacheEngineKey) -> bool:
-        return bool(self.connection.exists(key.to_string() + "metadata"))
+        # temp hack for store only
+        return False
+        return bool(await self.async_connection.exists(key.to_string() + "metadata"))
 
     def exists_sync(self, key: CacheEngineKey) -> bool:
+        # temp hack for store only
+        return False
         return bool(self.connection.exists(key.to_string() + "metadata"))
 
     async def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         key_str = key.to_string()
-        metadata_bytes = self.connection.get(key_str + "metadata")
+        metadata_bytes = await self.async_connection.get(key_str + "metadata")
 
         if metadata_bytes is None:
             return None
@@ -66,7 +81,7 @@ class RedisConnector(RemoteConnector):
             return None
 
         # TODO(Jiayi): Find a way to do `get` inplace
-        kv_bytes = self.connection.get(key_str + "kv_bytes")
+        kv_bytes = await self.async_connection.get(key_str + "kv_bytes")
         assert not inspect.isawaitable(kv_bytes)
 
         if kv_bytes is None:
@@ -78,7 +93,7 @@ class RedisConnector(RemoteConnector):
                 "Key exists but KV cache does not exist."
                 "Might happen when the cache is evicted by redis."
             )
-            self.connection.delete(key_str + "metadata")
+            await self.async_connection.delete(key_str + "metadata")
             return None
 
         if isinstance(memory_obj.byte_array, memoryview):
@@ -112,17 +127,88 @@ class RedisConnector(RemoteConnector):
         ).serialize()
 
         key_str = key.to_string()
-        self.connection.set(key_str + "metadata", metadata_bytes)
-        self.connection.set(key_str + "kv_bytes", kv_bytes)
+        await self.async_connection.set(key_str + "metadata", metadata_bytes)
+        await self.async_connection.set(key_str + "kv_bytes", kv_bytes)
 
     # TODO
     @no_type_check
     async def list(self) -> List[str]:
         pass
 
+    def support_prefetch_on_start(self) -> bool: 
+        # overriding the default False since redis does support prefetch on start
+        logger.info("RedisConnector supports prefetch on start.")
+        return True
+
+    def prefetch_on_start(self) -> int: 
+        # NOTE: we don't call list() nor get() even though they implement the 
+        # functionality we want because they are async. 
+        # https://discuss.python.org/t/calling-coroutines-from-sync-code-2/24093/7
+
+        # NOTE: we are verbose here in logs because this function should only
+        # be called once on startup
+
+        num_prefetched = 0
+        for full_key_bytes in self.connection.scan_iter(): 
+            # Convert bytes to string since decode_responses=False
+            full_key_str = full_key_bytes.decode('utf-8')
+            if full_key_str.endswith("metadata"): 
+                key_str = full_key_str[:-len("metadata")]
+
+                cache_engine_key = CacheEngineKey.from_string(key_str)
+                if self.local_cpu_backend.contains(cache_engine_key): 
+                    continue
+
+                if (metadata_bytes := self.connection.get(key_str + "metadata")) is None: 
+                    logger.info(f"Metadata bytes is None for key {key_str}")
+                    continue
+                
+                metadata = RemoteMetadata.deserialize(metadata_bytes)
+                memory_obj = self.local_cpu_backend.allocate(
+                    metadata.shape,
+                    metadata.dtype,
+                    metadata.fmt,
+                )
+                if memory_obj is None: 
+                    logger.info("Failed to allocate memory during remote receive")
+                    continue
+
+            
+                kv_bytes = self.connection.get(key_str + "kv_bytes")
+                if kv_bytes is None: 
+                    logger.info(f"KV bytes is None for key {key_str}, deleting the metadata as well.")
+                    # handle consistency
+                    self.connection.delete(key_str + "metadata")
+                    continue
+                
+                if isinstance(memory_obj.byte_array, memoryview):
+                    view = memory_obj.byte_array
+                    if view.format == "<B":
+                        view = view.cast("B")
+                else: 
+                    view = memoryview(memory_obj.byte_array)
+                    
+                
+                if isinstance(kv_bytes, (bytes, bytearray)):
+                    view[: metadata.length] = kv_bytes
+                elif isinstance(kv_bytes, str):
+                    converted = kv_bytes.encode("utf-8")
+                    view[: metadata.length] = converted
+                else: 
+                    converted = bytes(kv_bytes)
+                    view[: metadata.length] = converted
+                
+                logger.info(f"Prefetched key {key_str}")
+                self.local_cpu_backend.submit_put_task(cache_engine_key, memory_obj)
+                # Balance the ref_count_up() in submit_put_task
+                memory_obj.ref_count_down()
+                num_prefetched += 1
+        return num_prefetched
+
     async def close(self):
         self.connection.close()
-        logger.info("Closed the redis connection")
+        await self.async_connection.close()
+        logger.info("Closed the redis connections")
 
 
 class RedisSentinelConnector(RemoteConnector):
@@ -180,6 +266,14 @@ class RedisSentinelConnector(RemoteConnector):
         )
 
         self.local_cpu_backend = local_cpu_backend
+        
+        # Test the connection to ensure Redis Sentinel is reachable
+        try:
+            self.master.ping()
+            logger.info(f"Successfully connected to Redis Sentinel with service '{service_name}'")
+        except Exception as e:
+            logger.error(f"Failed to connect to Redis Sentinel with service '{service_name}': {e}")
+            raise ConnectionError(f"Redis Sentinel connection failed: {e}") from e
 
     async def exists(self, key: CacheEngineKey) -> bool:
         return bool(self.slave.exists(key.to_string() + "metadata"))

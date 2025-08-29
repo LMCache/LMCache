@@ -85,5 +85,16 @@ class InstrumentedRemoteConnector(RemoteConnector):
     ) -> List[Optional[MemoryObj]]:
         return await self._connector.batched_get(keys)
 
+    def support_prefetch_on_start(self) -> bool:
+        logger.info(f"the connector is {self._connector}")
+        logger.info(f"InstrumentedRemoteConnector supports prefetch on start: {self._connector.support_prefetch_on_start()}")
+        return self._connector.support_prefetch_on_start()
+
+    def prefetch_on_start(self) -> int:
+        assert self.support_prefetch_on_start(), (
+            "The connector does not support prefetch on start."
+        )
+        return self._connector.prefetch_on_start()
+
     def __repr__(self) -> str:
         return f"InstrumentedRemoteConnector({self._connector})"

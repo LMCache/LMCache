@@ -397,6 +397,19 @@ class RemoteBackend(StorageBackendInterface):
         )
         return decompressed_memory_objs
 
+    def support_prefetch_on_start(self) -> bool: 
+        if self.connection._connector is None: 
+            logger.info("Remote backend connection is not established, skipping prefetch on start.")
+            return False
+        return self.connection.support_prefetch_on_start()
+    
+    def prefetch_on_start(self) -> int: 
+        """Prefetch from remote backend at the start of the engine."""
+        if self.connection._connector is None: 
+            logger.info("Remote backend connection is not established, skipping prefetch on start.")
+            return 0
+        return self.connection.prefetch_on_start()
+    
     def pin(self, key: CacheEngineKey) -> bool:
         logger.debug(
             "Remote backend does not support pin. "

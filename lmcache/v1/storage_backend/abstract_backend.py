@@ -195,6 +195,23 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
         for key in keys:
             num_removed += self.remove(key, force=force)
         return num_removed
+    
+    def support_prefetch_on_start(self) -> bool: 
+        """
+        Check if the storage backend supports prefetch on start.
+        The default return is False. Persistent backends that support
+        this should override with return True
+        """
+        return False
+    
+    def prefetch_on_start(self) -> int: 
+        """
+        Prefetch from the storage backend at the start of the engine.
+        """
+        assert self.support_prefetch_on_start(), (
+            "The storage backend does not support prefetch on start."
+        )
+        raise NotImplementedError
 
     @abc.abstractmethod
     def close(

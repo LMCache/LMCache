@@ -171,7 +171,7 @@ class CacheEngineKey:
             parts[1],
             int(parts[2]),
             int(parts[3]),
-            int(parts[4], 16),
+            int(parts[4]),
             request_configs,
         )
 
@@ -286,7 +286,7 @@ class LayerCacheEngineKey(CacheEngineKey):
             parts[1],
             int(parts[2]),
             int(parts[3]),
-            int(parts[4], 16),
+            int(parts[4]),
             request_configs,
             int(parts[5]),
         )
