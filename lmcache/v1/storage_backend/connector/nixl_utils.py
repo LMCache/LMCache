@@ -108,8 +108,8 @@ class NixlConfigXpYd:
     @staticmethod
     def from_cache_engine_config(
         config: LMCacheEngineConfig, metadata: LMCacheEngineMetadata
-    ) -> "NixlConfig":
-        """Convert the LMCacheEngineConfig to NixlConfig"""
+    ) -> "NixlConfigXpYd":
+        """Convert the LMCacheEngineConfig to NixlConfigXpYd"""
         # TODO (Jiayi): add (heterogeneous) TP support
         # worker_id = metadata.worker_id
         # assert config.enable_nixl is True, (

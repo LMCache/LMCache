@@ -87,7 +87,7 @@ class LMCacheLookupClient(LookupClientInterface):
     def lookup(
         self,
         token_ids: Union[torch.Tensor, list[int]],
-        lookup_id: Optional[str] = None,
+        lookup_id: str,
         request_configs: Optional[dict] = None,
     ) -> int:
         hashes = []

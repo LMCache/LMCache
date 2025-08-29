@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from concurrent.futures import Future
-from typing import TYPE_CHECKING, List, Optional
+from typing import TYPE_CHECKING, List, Optional, Sequence
 import threading
 import time
 
@@ -22,7 +22,7 @@ from lmcache.v1.memory_management import (
     MixedMemoryAllocator,
     NixlCPUMemoryAllocator,
 )
-from lmcache.v1.storage_backend.abstract_backend import StorageBackendInterface
+from lmcache.v1.storage_backend.abstract_backend import AllocatorBackendInterface
 from lmcache.v1.storage_backend.cache_policy import get_cache_policy
 
 if TYPE_CHECKING:
@@ -32,7 +32,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-class LocalCPUBackend(StorageBackendInterface):
+class LocalCPUBackend(AllocatorBackendInterface):
     """
     Even if local_cpu is False (the hot_cache is not used), contains(),
     insert_key(), remove(), get_blocking(), get_keys(), and clear()
@@ -133,21 +133,19 @@ class LocalCPUBackend(StorageBackendInterface):
 
     def batched_submit_put_task(
         self,
-        keys: List[CacheEngineKey],
+        keys: Sequence[CacheEngineKey],
         memory_objs: List[MemoryObj],
         transfer_spec=None,
-    ) -> Optional[List[Future]]:
+    ) -> None:
         """
         Synchronously put the MemoryObjs into the local cpu backend.
         """
         if not self.use_hot:
-            return None
+            return
 
         # TODO(Jiayi): optimize this with batching
         for key, memory_obj in zip(keys, memory_objs, strict=False):
             self.submit_put_task(key, memory_obj)
-
-        return None
 
     # NOTE (Jiayi): prefetch might be deprecated in the future.
     # Should be replaced by `move`.

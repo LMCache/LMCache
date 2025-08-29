@@ -24,6 +24,7 @@ from lmcache.v1.cache_controller.message import (  # isort: skip
     DecompressMsg,
     DeRegisterMsg,
     HealthMsg,
+    HeartbeatMsg,
     KVAdmitMsg,
     KVEvictMsg,
     LookupMsg,
@@ -91,7 +92,9 @@ class LMCacheControllerManager:
         # asyncio.run_coroutine_threadsafe(self.start_all(), self.loop)
 
     async def handle_worker_message(self, msg: WorkerMsg) -> None:
-        if isinstance(msg, RegisterMsg):
+        if isinstance(msg, HeartbeatMsg):
+            await self.reg_controller.heartbeat(msg)
+        elif isinstance(msg, RegisterMsg):
             await self.reg_controller.register(msg)
         elif isinstance(msg, DeRegisterMsg):
             await self.reg_controller.deregister(msg)
@@ -102,7 +105,7 @@ class LMCacheControllerManager:
         else:
             logger.error(f"Unknown worker message type: {msg}")
 
-    async def handle_orchestration_message(self, msg: OrchMsg) -> Optional[OrchRetMsg]:
+    async def handle_orchestration_message(self, msg: OrchMsg) -> OrchRetMsg:
         if isinstance(msg, LookupMsg):
             return await self.kv_controller.lookup(msg)
         elif isinstance(msg, HealthMsg):
@@ -124,8 +127,8 @@ class LMCacheControllerManager:
             # shouldn't be implemented in kv_controller.
             return await self.kv_controller.check_finish(msg)
         else:
-            logger.error(f"Unknown ochestration message type: {msg}")
-            return None
+            logger.error(f"Unknown orchestration message type: {msg}")
+            raise RuntimeError(f"Unknown orchestration message type: {msg}")
 
     async def handle_batched_request(self, socket) -> Optional[MsgBase]:
         while True:

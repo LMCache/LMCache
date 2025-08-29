@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from concurrent.futures import Future, TimeoutError
-from typing import List, Optional, Set
+from typing import List, Optional, Sequence, Set
 import asyncio
 import threading
 import time
@@ -168,17 +168,22 @@ class RemoteBackend(StorageBackendInterface):
         self,
         key: CacheEngineKey,
         memory_obj: MemoryObj,
-    ) -> Optional[Future]:
+    ) -> Future:
+        def create_immediate_empty_future() -> Future:
+            f: Future = Future()
+            f.set_result(None)
+            return f
+
         if self.connection is None:
             logger.warning("Connection is None in submit_put_task, returning None")
-            return None
+            return create_immediate_empty_future()
 
         # If MLA worker id as 0 mode is enabled, skip put tasks
         if self._mla_worker_id_as0_mode:
-            return None
+            return create_immediate_empty_future()
 
         if self.exists_in_put_tasks(key):
-            return None
+            return create_immediate_empty_future()
 
         memory_obj.ref_count_up()
 
@@ -206,18 +211,23 @@ class RemoteBackend(StorageBackendInterface):
 
     def batched_submit_put_task(
         self,
-        keys: List[CacheEngineKey],
+        keys: Sequence[CacheEngineKey],
         memory_objs: List[MemoryObj],
         transfer_spec=None,
-    ) -> Optional[List[Future]]:
+    ) -> None:
+        if self.connection is None:
+            logger.warning(
+                "Connection is None in batched_submit_put_task, returning None"
+            )
+            return
         if self.connection.support_batched_put():
             if self.connection is None:
                 logger.warning(
                     "Connection is None in batched_submit_put_task, returning None"
                 )
-                return None
+                return
             if self._mla_worker_id_as0_mode:
-                return None
+                return
 
             compressed_memory_objs = []
 
@@ -227,16 +237,14 @@ class RemoteBackend(StorageBackendInterface):
                 memory_obj.ref_count_down()
 
             future = asyncio.run_coroutine_threadsafe(
-                self.connection.batched_put(keys, compressed_memory_objs), self.loop
+                self.connection.batched_put(keys, compressed_memory_objs),  # type: ignore
+                self.loop,
             )
-            lambda_callback = lambda f: self.batched_put_callback(f, keys)
+            lambda_callback = lambda f: self.batched_put_callback(f, keys)  # type: ignore
             future.add_done_callback(lambda_callback)
-            return future
         else:
-            return [
+            for key, memory_obj in zip(keys, memory_objs, strict=False):
                 self.submit_put_task(key, memory_obj)
-                for key, memory_obj in zip(keys, memory_objs, strict=False)
-            ]
 
     def submit_prefetch_task(
         self,
@@ -374,7 +382,7 @@ class RemoteBackend(StorageBackendInterface):
 
         t2 = time.perf_counter()
         self.stats_monitor.update_interval_remote_time_to_get_sync((t2 - t1) * 1000)
-        decompressed_memory_objs = []
+        decompressed_memory_objs: list[Optional[MemoryObj]] = []
         for memory_obj in memory_objs:
             if memory_obj is None:
                 decompressed_memory_objs.append(None)

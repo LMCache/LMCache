@@ -32,7 +32,6 @@ Example ``lmcache-config.yaml``:
 .. code-block:: yaml
 
     chunk_size: 256
-    enable_nixl: true
     nixl_buffer_size: 1073741824 # 1GB
     nixl_buffer_device: cpu
     extra_config: {enable_nixl_storage: true, nixl_backend: POSIX, \

@@ -8,7 +8,7 @@ import sys
 
 def load_jsonl_file(filepath: str) -> Dict[str, Dict[str, float]]:
     """Load a JSONL file and return a dictionary of results."""
-    results = {}
+    results: dict[str, dict[str, float]] = {}
 
     if not os.path.exists(filepath):
         print(f"Warning: File {filepath} not found")

@@ -26,12 +26,14 @@ from lmcache.v1.memory_management import (
     MemoryFormat,
     MemoryObj,
 )
-from lmcache.v1.storage_backend.abstract_backend import StorageBackendInterface
 from lmcache.v1.storage_backend.connector.nixl_utils import NixlConfigXpYd, NixlRole
 
 if TYPE_CHECKING:
     # Third Party
     from nixl._api import NixlAgent
+
+    # First Party
+    from lmcache.v1.storage_backend.nixl_backend_v3 import NixlBackend
 
 logger = init_logger(__name__)
 
@@ -165,7 +167,7 @@ class NixlSender:
         self,
         nixl_config: NixlConfigXpYd,
         config: LMCacheEngineConfig,
-        backend: StorageBackendInterface,
+        backend: "NixlBackend",
         tp_rank: int,
     ):
         assert nixl_config.role == NixlRole.SENDER, (
@@ -191,9 +193,11 @@ class NixlSender:
 
         self._mem_alloc_sockets: dict[str, zmq.Socket] = {}
 
-        self.req_queue = Queue()
+        self.req_queue: Queue[NixlSenderTask] = Queue()
 
-        self._remote_xfer_handlers_dict = {}
+        self._remote_xfer_handlers_dict: dict[
+            str, NixlAgent.nixl_prepped_dlist_handle
+        ] = {}
 
         # Start the seder thread
         self._running = True
@@ -486,7 +490,7 @@ class NixlReceiver:
         self,
         nixl_config: NixlConfigXpYd,
         config: LMCacheEngineConfig,
-        backend: StorageBackendInterface,
+        backend: "NixlBackend",
         tp_rank: int,
     ):
         assert nixl_config.role == NixlRole.RECEIVER, (
@@ -710,7 +714,7 @@ class NixlChannel:
         self,
         nixl_config: NixlConfigXpYd,
         config: LMCacheEngineConfig,
-        backend: StorageBackendInterface,
+        backend: "NixlBackend",
     ):
         self.nixl_config = nixl_config
         self.role = nixl_config.role
@@ -852,7 +856,7 @@ class NixlAgentWrapper:
 
         self.agent.release_dlist_handle(self.xfer_handler)
 
-        for remote_xfer_handler in self._remote_xfer_handlers.values():
+        for remote_xfer_handler in self.agent._remote_xfer_handlers_dict.values():
             self.agent.release_dlist_handle(remote_xfer_handler)
 
         if remote_xfer_handlers is not None:

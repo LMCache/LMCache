@@ -198,7 +198,7 @@ test_vllmopenai_server_with_lmcache_integrated() {
 run_long_doc_qa() {
     local workload_config="$1"
 
-    echo "→ Running long-doc-qa with customed workload config:"
+    echo "→ Running long_doc_qa with customed workload config:"
     printf '%s\n' "$workload_config"
 
     local workload_args=()
@@ -219,7 +219,7 @@ run_long_doc_qa() {
     fi
     source .venv/bin/activate
     uv -q pip install openai
-    python3 "$ORIG_DIR/benchmarks/long-doc-qa/long-doc-qa.py" \
+    python3 "$ORIG_DIR/benchmarks/long_doc_qa/long_doc_qa.py" \
         "${workload_args[@]}" \
         --port="$PORT" \
         --output="response.txt"
@@ -303,7 +303,7 @@ for cfg_name in "${CONFIG_NAMES[@]}"; do
     test_mode="$(yq -r '.workload.type' "$cfg_file")"
     if [ "$test_mode" = "dummy" ]; then
         test_vllmopenai_server_with_lmcache_integrated
-    elif [ "$test_mode" = "long-doc-qa" ]; then
+    elif [ "$test_mode" = "long_doc_qa" ]; then
         workload_yaml="$(yq '(.workload * {"model": .vllm.model}) | del(.type)' "$cfg_file")"
         run_long_doc_qa "$workload_yaml"
     fi

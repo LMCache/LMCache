@@ -129,7 +129,7 @@ class NaiveDistributedServer(DistributedServerInterface):
 
     async def handle_put(
         self,
-        meta: ServerMetaMessage,
+        meta: ClientMetaMessage,
         reader,
         writer,
     ) -> bool:
@@ -149,7 +149,7 @@ class NaiveDistributedServer(DistributedServerInterface):
 
     async def receive_mem_obj_stream(
         self,
-        meta: ServerMetaMessage,
+        meta: ClientMetaMessage,
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
     ) -> Optional[MemoryObj]:
