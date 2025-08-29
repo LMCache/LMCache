@@ -1,19 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Optional, Union
 import threading
 
 # Third Party
 from vllm.utils import make_zmq_socket
-from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
+import msgspec
 import torch
 import zmq
 
 # First Party
-from lmcache.integration.vllm.utils import mla_enabled
+from lmcache.integration.vllm.utils import create_lmcache_metadata, mla_enabled
 from lmcache.logging import init_logger
 from lmcache.v1.cache_engine import LMCacheEngine
-from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.lookup_client.abstract_client import LookupClientInterface
 from lmcache.v1.rpc_utils import get_zmq_rpc_path_lmcache
 
@@ -33,8 +32,13 @@ class LMCacheLookupClient(LookupClientInterface):
         is a flag to control whether to create lookup server only on worker 0.
     """
 
-    def __init__(self, vllm_config: "VllmConfig", config: LMCacheEngineConfig):
-        self.encoder = MsgpackEncoder()
+    def __init__(
+        self,
+        vllm_config: "VllmConfig",
+    ):
+        metadata, config = create_lmcache_metadata(vllm_config)
+
+        self.encoder = msgspec.msgpack.Encoder()
         self.ctx = zmq.Context()  # type: ignore[attr-defined]
         rpc_port = vllm_config.kv_transfer_config.get_from_extra_config(
             "lmcache_rpc_port", 0
@@ -67,13 +71,35 @@ class LMCacheLookupClient(LookupClientInterface):
 
             self.sockets.append(socket)
 
+        # First Party
+        from lmcache.v1.token_database import (
+            ChunkedTokenDatabase,
+            SegmentTokenDatabase,
+            TokenDatabase,
+        )
+
+        self.token_database: TokenDatabase
+        if config.enable_blending:
+            self.token_database = SegmentTokenDatabase(config, metadata)
+        else:
+            self.token_database = ChunkedTokenDatabase(config, metadata)
+
     def lookup(
         self,
-        token_ids: torch.Tensor,
+        token_ids: Union[torch.Tensor, list[int]],
         lookup_id: str,
         request_configs: Optional[dict] = None,
     ) -> int:
-        token_bufs = self.encoder.encode(token_ids)
+        hashes = []
+        offsets = []
+        for start, end, key in self.token_database.process_tokens(
+            token_ids, make_key=False
+        ):
+            hashes.append(key)
+            offsets.append(end - start)
+        hash_buf = self.encoder.encode(hashes)
+        offset_buf = self.encoder.encode(offsets)
+
         lookup_id_buf = lookup_id.encode("utf-8")
         request_configs_str = ""
         if request_configs is not None and len(request_configs) != 0:
@@ -85,7 +111,12 @@ class LMCacheLookupClient(LookupClientInterface):
         if self.create_lookup_server_only_on_worker_0_for_mla:
             ranks = 1
         results = []
-        msg_buf = token_bufs + [lookup_id_buf, request_configs_buf]
+        msg_buf = [
+            hash_buf,
+            offset_buf,
+            lookup_id_buf,
+            request_configs_buf,
+        ]  # hash_offset_bufs+ [lookup_id_buf, request_configs_buf]
         for i in range(ranks):
             self.sockets[i].send_multipart(msg_buf, copy=False)
 
@@ -114,7 +145,7 @@ class LMCacheLookupServer:
     """ZMQ-based lookup server that handles lookup requests using LMCacheEngine."""
 
     def __init__(self, lmcache_engine: LMCacheEngine, vllm_config: "VllmConfig"):
-        self.decoder = MsgpackDecoder(torch.Tensor)
+        self.decoder = msgspec.msgpack.Decoder()
         self.ctx = zmq.Context()  # type: ignore[attr-defined]
         rpc_port = vllm_config.kv_transfer_config.get_from_extra_config(
             "lmcache_rpc_port", 0
@@ -134,10 +165,10 @@ class LMCacheLookupServer:
 
         def process_request():
             while self.running:
-                # try:
-                # request = self.socket.recv()
                 frames = self.socket.recv_multipart(copy=False)
-                token_frames = frames[:-2]
+                hash_frames = frames[0]
+                offset_frames = frames[1]
+
                 lookup_id = frames[-2].bytes.decode("utf-8")
                 request_configs_str = frames[-1].bytes.decode("utf-8")
                 request_configs = None
@@ -150,9 +181,11 @@ class LMCacheLookupServer:
                             raise ValueError("Unexpected tags_str: {tags_str}")
                         request_configs[kvs[0]] = kvs[1]
 
-                token_ids = self.decoder.decode(token_frames)
+                hashes = self.decoder.decode(hash_frames)
+                offsets = self.decoder.decode(offset_frames)
                 result = self.lmcache_engine.lookup(
-                    token_ids,
+                    hashes=hashes,
+                    offsets=offsets,
                     lookup_id=lookup_id,
                     pin=True,
                     request_configs=request_configs,

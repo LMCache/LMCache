@@ -227,7 +227,7 @@ class ReqMeta:
     # Request id
     req_id: str
     # Request tokens
-    token_ids: torch.Tensor
+    token_ids: list[int]  # torch.Tensor
     # Slot mapping
     slot_mapping: torch.Tensor
 
@@ -313,22 +313,21 @@ class ReqMeta:
         save_spec = SaveSpec(skip_leading_tokens, not skip_save)
 
         # Calculate the token ids and slot mappings for load and save
-        # OPTIMIZATION: pre-allocate the buffer for token ids and block
-        # ids
-        token_ids = torch.tensor(input_token_ids)[:num_tokens_to_save]
+        token_ids = input_token_ids[:num_tokens_to_save]
 
         # If the request has multimodal hashes, apply them to the token ids
         if tracker.mm_hashes:
+            # TODO: Optimize this
+            token_ids = torch.tensor(token_ids)
             assert tracker.mm_positions is not None, (
                 "tracker got mm_hashes but no mm_positions"
             )
             apply_mm_hashes_to_token_ids(
                 token_ids, tracker.mm_hashes, tracker.mm_positions
             )
+            token_ids = token_ids.tolist()
 
         num_blocks = len(tracker.allocated_block_ids)
-
-        block_ids = torch.tensor(tracker.allocated_block_ids, dtype=torch.long)
 
         if len(token_ids) > num_blocks * block_size:
             logger.error(
@@ -342,6 +341,7 @@ class ReqMeta:
                 block_size,
             )
 
+        block_ids = torch.tensor(tracker.allocated_block_ids, dtype=torch.long)
         block_offsets = torch.arange(0, block_size, dtype=torch.long)
         slot_mapping = (
             block_offsets.reshape((1, block_size))
@@ -698,7 +698,7 @@ class LMCacheConnectorV1Impl:
             slot_mapping = request.slot_mapping.cuda()
             assert len(tokens) == len(slot_mapping)
 
-            token_mask = torch.ones_like(tokens, dtype=torch.bool)
+            token_mask = torch.ones(len(tokens), dtype=torch.bool)
             masked_token_count = (
                 request.load_spec.vllm_cached_tokens
                 // self._lmcache_chunk_size
@@ -912,8 +912,6 @@ class LMCacheConnectorV1Impl:
                 continue
 
             token_ids = request.token_ids
-            assert isinstance(token_ids, torch.Tensor)
-            assert token_ids.is_cpu
 
             slot_mapping = request.slot_mapping
             assert isinstance(slot_mapping, torch.Tensor)
@@ -937,7 +935,7 @@ class LMCacheConnectorV1Impl:
                 * self._lmcache_chunk_size
             )
 
-            store_mask = torch.ones_like(token_ids, dtype=torch.bool)
+            store_mask = torch.ones(len(token_ids), dtype=torch.bool)
             store_mask[:skip_leading_tokens] = False
 
             logger.info(
@@ -1010,13 +1008,16 @@ class LMCacheConnectorV1Impl:
         ):
             return 0
 
-        token_ids = torch.tensor(request.prompt_token_ids)
+        token_ids = request.prompt_token_ids
 
         # If the request has multimodal hashes, apply them to the token ids
         if request.mm_hashes:
+            # TODO(Jiayi): Optimize this
+            token_ids = torch.tensor(request.prompt_token_ids)
             apply_mm_hashes_to_token_ids(
                 token_ids, request.mm_hashes, request.mm_positions
             )
+            token_ids = token_ids.tolist()
 
         lookup_id = str(uuid.uuid4())
         self._lookup_requests_in_step.append(lookup_id)

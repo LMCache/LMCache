@@ -157,16 +157,18 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
             )
 
         self.store_stream = torch.cuda.Stream()
+        self.load_stream = torch.cuda.Stream()
 
     def _initialize_pointers(self, kv_caches: List[torch.Tensor]) -> torch.Tensor:
+        self.device = kv_caches[0].device
+        assert self.device.type == "cuda", "The device should be CUDA."
+        idx = self.device.index
+        if idx in self.kv_cache_pointers_on_gpu:
+            return self.kv_cache_pointers_on_gpu[idx]
         self.kv_cache_pointers.numpy()[:] = [t.data_ptr() for t in kv_caches]
-        device = kv_caches[0].device
-        assert device.type == "cuda", "The device should be CUDA."
-        idx = device.index
-        if idx not in self.kv_cache_pointers_on_gpu:
-            self.kv_cache_pointers_on_gpu[idx] = torch.empty(
-                self.num_layers, dtype=torch.int64, device=device
-            )
+        self.kv_cache_pointers_on_gpu[idx] = torch.empty(
+            self.num_layers, dtype=torch.int64, device=self.device
+        )
         self.kv_cache_pointers_on_gpu[idx].copy_(self.kv_cache_pointers)
         if self.use_mla:
             # kv_caches[0].shape: [num_pages, page_size, head_size]
@@ -229,7 +231,7 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
             memory_obj.tensor,
             kv_cache_pointers,
             slot_mapping[start:end],
-            self.kvcaches[0].device,
+            self.device,
             self.page_buffer_size,
             False,
             self.use_mla,
@@ -305,8 +307,10 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
 
     # TODO(Jiayi): need to optimize to enable real batching
     def batched_to_gpu(self, memory_objs, starts, ends, **kwargs):
-        for memory_obj, start, end in zip(memory_objs, starts, ends, strict=False):
-            self.to_gpu(memory_obj, start, end, **kwargs)
+        with torch.cuda.stream(self.load_stream):
+            for memory_obj, start, end in zip(memory_objs, starts, ends, strict=False):
+                self.to_gpu(memory_obj, start, end, **kwargs)
+        self.load_stream.synchronize()
 
     # TODO(Jiayi): need to optimize to enable real batching
     def batched_from_gpu(self, memory_objs, starts, ends, **kwargs):
