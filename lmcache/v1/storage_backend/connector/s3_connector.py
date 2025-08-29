@@ -352,6 +352,7 @@ class S3Connector(RemoteConnector):
     ) -> List[Optional[MemoryObj]]:
         done_events = []
         shms: list[Optional[int]] = []
+        recv_paths: list[Optional[str]] = []
         memory_objs: list[Optional[MemoryObj]] = []
         obj_sizes = []
 
@@ -402,6 +403,7 @@ class S3Connector(RemoteConnector):
             done_events.append(done_event)
 
             recv_path, shm = self.adhoc_shm_manager.allocate()
+            recv_paths.append(recv_path)
             self._s3_download(
                 key_str=key_str,
                 recv_path=recv_path,
@@ -412,8 +414,8 @@ class S3Connector(RemoteConnector):
         while not all(e.is_set() for e in done_events):
             await asyncio.sleep(0.005)
 
-        for obj_size, memory_obj, shm in zip(
-            obj_sizes, memory_objs, shms, strict=False
+        for obj_size, memory_obj, shm, recv_path in zip(
+            obj_sizes, memory_objs, shms, recv_paths, strict=False
         ):
             if memory_obj is None or shm is None:
                 continue
