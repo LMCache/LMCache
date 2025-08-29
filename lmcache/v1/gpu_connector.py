@@ -5,7 +5,6 @@ import abc
 
 # Third Party
 import torch
-import time
 
 # First Party
 from lmcache.integration.vllm.utils import ENGINE_NAME
@@ -293,16 +292,10 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
 
     # TODO(Jiayi): need to optimize to enable real batching
     def batched_to_gpu(self, memory_objs, starts, ends, **kwargs):
-        #time.sleep(1)
-        #torch.cuda.synchronize()
-        #import pdb; pdb.set_trace()
-        t = time.perf_counter()
         with torch.cuda.stream(self.load_stream):
             for memory_obj, start, end in zip(memory_objs, starts, ends, strict=False):
                 self.to_gpu(memory_obj, start, end, **kwargs)
         self.load_stream.synchronize()
-
-        print(f"gpu connector takes: {(time.perf_counter() - t)*1000}ms")
 
     # TODO(Jiayi): need to optimize to enable real batching
     def batched_from_gpu(self, memory_objs, starts, ends, **kwargs):
