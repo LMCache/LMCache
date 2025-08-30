@@ -139,7 +139,8 @@ def CreateStorageBackends(
     # TODO(Jiayi): The hierarchy is fixed for now
     # NOTE(Jiayi): The local_cpu backend is always created because
     # other backends might need it as a buffer.
-    if config.enable_nixl and not config.local_cpu:
+    nixl_skip_cpu_backend: bool = config.enable_nixl and not config.local_cpu
+    if nixl_skip_cpu_backend:
         pass
     else:
         local_cpu_backend = LocalCPUBackend(
@@ -169,7 +170,11 @@ def CreateStorageBackends(
             )
         )
 
-    if config.local_disk and config.max_local_disk_size > 0:
+    if (
+        config.local_disk
+        and config.max_local_disk_size > 0
+        and not nixl_skip_cpu_backend
+    ):
         local_disk_backend = LocalDiskBackend(
             config,
             loop,
@@ -191,7 +196,7 @@ def CreateStorageBackends(
     if config.gds_path is not None:
         gds_backend = GdsBackend(config, loop, memory_allocator, dst_device)
         storage_backends[str(gds_backend)] = gds_backend
-    if config.remote_url is not None:
+    if config.remote_url is not None and not nixl_skip_cpu_backend:
         remote_backend = RemoteBackend(
             config, metadata, loop, local_cpu_backend, dst_device, lookup_server
         )
@@ -199,16 +204,17 @@ def CreateStorageBackends(
         storage_backends[backend_name] = remote_backend
 
     # Create dynamic backends from configuration
-    create_dynamic_backends(
-        config,
-        metadata,
-        loop,
-        memory_allocator,
-        local_cpu_backend,
-        dst_device,
-        lookup_server,
-        storage_backends,
-    )
+    if not nixl_skip_cpu_backend:
+        create_dynamic_backends(
+            config,
+            metadata,
+            loop,
+            memory_allocator,
+            local_cpu_backend,
+            dst_device,
+            lookup_server,
+            storage_backends,
+        )
 
     # Only wrap if audit is enabled in config
     if config.extra_config is not None and config.extra_config.get(
