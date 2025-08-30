@@ -32,6 +32,7 @@ from lmcache.v1.distributed_server import (
 )
 from lmcache.v1.gpu_connector import (
     GPUConnectorInterface,
+    SGLangLayerwiseGPUConnector,
     VLLMBufferLayerwiseGPUConnector,
     VLLMPagedMemLayerwiseGPUConnector,
 )
@@ -358,7 +359,6 @@ class LMCacheEngine:
             assert isinstance(key, CacheEngineKey)
 
             keys_multi_layer = key.split_layers(self.num_layers)
-
             # Only check the first layer
             if self.storage_manager.contains(keys_multi_layer[0]):
                 continue
@@ -399,7 +399,11 @@ class LMCacheEngine:
 
             assert isinstance(
                 self.gpu_connector,
-                (VLLMPagedMemLayerwiseGPUConnector, VLLMBufferLayerwiseGPUConnector),
+                (
+                    VLLMPagedMemLayerwiseGPUConnector,
+                    VLLMBufferLayerwiseGPUConnector,
+                    SGLangLayerwiseGPUConnector,
+                ),
             )
 
             mem_obj_generator = self.gpu_connector.batched_from_gpu(
@@ -584,6 +588,7 @@ class LMCacheEngine:
                 (
                     VLLMPagedMemLayerwiseGPUConnector,
                     VLLMBufferLayerwiseGPUConnector,
+                    SGLangLayerwiseGPUConnector,
                 ),
             )
             mem_obj_consumer = self.gpu_connector.batched_to_gpu(starts, ends, **kwargs)
@@ -595,7 +600,12 @@ class LMCacheEngine:
 
                 assert None not in tasks
 
-                yield None
+                if layer_id == 0:
+                    # NOTE(Yuwei): For sglang integration we need to provide retrieved
+                    # tokens number in the first layer loading since there is no lookup
+                    yield torch.sum(ret_mask)
+                else:
+                    yield None
 
                 mem_objs_layer = [task.result() for task in tasks]
                 mem_obj_consumer.send(mem_objs_layer)
@@ -616,7 +626,7 @@ class LMCacheEngine:
 
         retrieved_tokens = torch.sum(ret_mask)
         self.stats_monitor.on_retrieve_finished(monitor_req_id, retrieved_tokens)
-        logger.debug(
+        logger.info(
             f"Retrieved {retrieved_tokens} "
             f"out of {num_required_tokens} "
             f"out of total {len(tokens)} tokens"
