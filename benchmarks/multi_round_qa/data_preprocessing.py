@@ -9,12 +9,15 @@ from tqdm import tqdm
 from transformers import AutoTokenizer
 import numpy as np
 
+_tokenizer: AutoTokenizer | None = None
+
 
 def estimate_num_tokens(text: str) -> int:
-    if not hasattr(estimate_num_tokens, "tokenizer"):
+    global _tokenizer
+    if _tokenizer is None:
         os.environ["TOKENIZERS_PARALLELISM"] = "false"
-        estimate_num_tokens.tokenizer = AutoTokenizer.from_pretrained(args.model)
-    return len(estimate_num_tokens.tokenizer.tokenize(text))
+        _tokenizer = AutoTokenizer.from_pretrained(args.model)
+    return len(_tokenizer.tokenize(text))
 
 
 def is_human(human):

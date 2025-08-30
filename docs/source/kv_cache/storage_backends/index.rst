@@ -17,3 +17,4 @@ Supported Backends
    mooncake
    valkey
    weka
+   nixl

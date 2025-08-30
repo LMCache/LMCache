@@ -372,9 +372,9 @@ class SegmentTokenDatabase(TokenDatabase):
 
         """
 
-        assert isinstance(tokens, torch.Tensor), (
-            "Only tokens in tensor format are supported for now."
-        )
+        if not isinstance(tokens, torch.Tensor):
+            tokens = torch.tensor(tokens, dtype=torch.long)
+
         if mask is not None:
             num_falses = mask.numel() - mask.long().sum().item()
         else:

@@ -2,7 +2,7 @@
 
 ## Overview
 
-This repository contains benchmarking tools for evaluating the performance of language models in various scenarios. The initial focus of this benchmark is on the multi-round QA (Question Answering) use case. The script `multi-round-qa.py` simulates multiple users interacting with a language model concurrently, allowing you to analyze the serving engine's throughput and latency.
+This repository contains benchmarking tools for evaluating the performance of language models in various scenarios. The initial focus of this benchmark is on the multi-round QA (Question Answering) use case. The script `multi_round_qa.py` simulates multiple users interacting with a language model concurrently, allowing you to analyze the serving engine's throughput and latency.
 
 ### Current Workloads
 
@@ -21,7 +21,7 @@ This repository contains benchmarking tools for evaluating the performance of la
 To run the multi-round QA benchmark, use the following command:
 
 ```bash
-python3 multi-round-qa.py \
+python3 multi_round_qa.py \
     --num-users 10 \
     --num-rounds 5 \
     --qps 0.5 \
@@ -77,7 +77,7 @@ Upon completion, a summary of key performance metrics (e.g., QPS, average respon
 
 ## Understanding the Benchmark Script
 
-The `multi-round-qa.py` script works by:
+The `multi_round_qa.py` script works by:
 
 - Simulating multiple user sessions (`UserSessionManager`) which make requests (`UserSession`) to a specified language model concurrently.
 - Tracking key metrics such as token throughput, time to first token (TTFT), and generation times.
@@ -113,7 +113,7 @@ The `multi-round-qa.py` script works by:
     Example:
 
     ```bash
-    python3 multi-round-qa.py \
+    python3 multi_round_qa.py \
         --num-users 10 \
         --num-rounds 5 \
         --qps 0.3 \

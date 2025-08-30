@@ -153,6 +153,21 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "default": None,
         "env_converter": int,
     },
+    # LMCache Worker heartbeat
+    # the lmcache_worker_heartbeat_delay_time means that delay a period of time
+    # before starting, ensures that the heartbeat starts working only after the
+    # service is fully ready(such as, waiting register).
+    "lmcache_worker_heartbeat_delay_time": {
+        "type": int,
+        "default": 10,
+        "env_converter": int,
+    },
+    # the lmcache_worker_heartbeat_time means that sending heartbeat periodically.
+    "lmcache_worker_heartbeat_time": {
+        "type": Optional[int],
+        "default": None,
+        "env_converter": int,
+    },
     # Nixl configurations
     "enable_nixl": {
         "type": bool,
@@ -298,6 +313,11 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "default": None,
         "env_converter": lambda x: x if isinstance(x, list) else [x] if x else [],
     },
+    "external_backends": {
+        "type": Optional[list[str]],
+        "default": None,
+        "env_converter": _to_str_list,
+    },
 }
 
 
@@ -374,6 +394,9 @@ def _validate_config(self):
         assert self.lookup_url is not None
         assert self.distributed_url is not None
 
+    enable_nixl_storage = self.extra_config is not None and self.extra_config.get(
+        "enable_nixl_storage"
+    )
     if self.enable_nixl:
         assert self.nixl_role is not None
         assert self.nixl_buffer_size is not None
@@ -384,6 +407,13 @@ def _validate_config(self):
             "Nixl only supports save_decode_cache=False"
         )
         assert self.enable_p2p is False, "Nixl only supports enable_p2p=False"
+
+    if enable_nixl_storage:
+        assert self.extra_config.get("nixl_backend") is not None
+        assert self.extra_config.get("nixl_path") is not None
+        assert self.extra_config.get("nixl_file_pool_size") is not None
+        assert self.nixl_buffer_size is not None
+        assert self.nixl_buffer_device is not None
 
     return self
 
