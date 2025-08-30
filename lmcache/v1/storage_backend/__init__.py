@@ -202,8 +202,8 @@ def CreateStorageBackends(
         backend_name = str(remote_backend)
         storage_backends[backend_name] = remote_backend
 
+    # Create dynamic backends from configuration
     if not config.enable_pd or config.local_cpu:
-        # Create dynamic backends from configuration
         create_dynamic_backends(
             config,
             metadata,
