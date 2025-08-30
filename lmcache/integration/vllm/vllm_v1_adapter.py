@@ -157,6 +157,17 @@ class RequestTracker:
 
         """
 
+        request_block_ids: tuple[list[int], ...] = ()
+
+        if isinstance(new_request.block_ids, list):
+            # NOTE(Kuntai): old version of vLLM. We still support it
+            # for backward compatibility
+            request_block_ids = (new_request.block_ids,)
+        else:
+            # NOTE(Kuntai): new version of vLLM with hybrid allocator
+            # enabled.
+            request_block_ids = new_request.block_ids
+
         # NOTE: Initialized in `update_state_after_alloc`
         disagg_spec = tmp_disagg_tracker.pop(new_request.req_id, None)
 
@@ -173,7 +184,7 @@ class RequestTracker:
             token_ids=new_request.prompt_token_ids[:num_tokens_to_compute].copy(),
             allocated_block_ids={
                 kv_cache_group_id: block_ids.copy()
-                for kv_cache_group_id, block_ids in enumerate(new_request.block_ids)
+                for kv_cache_group_id, block_ids in enumerate(request_block_ids)
             },
             num_saved_tokens=lmcache_cached_tokens,
             disagg_spec=disagg_spec,
@@ -185,21 +196,26 @@ class RequestTracker:
     def update(
         self,
         new_token_ids: list[int],
-        new_block_ids: Optional[tuple[list[int], ...]],
+        new_block_ids: Union[Optional[tuple[list[int], ...]], list[int]],
     ) -> None:
         """Update the request tracker when a running request is
         scheduled again
         """
-        if new_block_ids is None:
-            new_block_ids = ()
-        assert isinstance(new_block_ids, tuple), (
-            "new_block_ids is not a tuple, this indicates that the vLLM version "
-            "is not 0.9.0 or higher, please update vLLM to 0.9.0 or higher."
-        )
+        new_block_ids_tuple: tuple[list[int], ...] = ()
+        if not new_block_ids:
+            # NOTE(Kuntai): the new_block_ids is empty.
+            # Just use `()` as the value for `new_block_ids_tuple`.
+            pass
+        elif isinstance(new_block_ids, list):
+            # NOTE(Kuntai): old version of vLLM. We still support it
+            # for backward compatibility
+            new_block_ids_tuple = (new_block_ids,)
+        else:
+            new_block_ids_tuple = new_block_ids
 
         self.token_ids.extend(new_token_ids)
 
-        for kv_cache_group_id, block_ids in enumerate(new_block_ids):
+        for kv_cache_group_id, block_ids in enumerate(new_block_ids_tuple):
             self.allocated_block_ids[kv_cache_group_id].extend(block_ids)
 
         # When a request is scheduled again, and the number of new tokens
