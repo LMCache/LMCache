@@ -23,14 +23,14 @@ async def get_lmc_version():
 
 
 @router.get("/commit_id")
-def get_commit_id():
+async def get_commit_id():
     return COMMIT_ID
 
 
 @router.get("/version")
 async def get_version():
-    version = get_lmc_version()
-    commit_id = get_commit_id()
+    version = await get_lmc_version()
+    commit_id = await get_commit_id()
     version_display = version if version else "NA"
     commit_id_display = commit_id if commit_id else "NA"
     return f"{version_display}-{commit_id_display}"
