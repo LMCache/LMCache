@@ -35,13 +35,13 @@ Example ``lmcache-config.yaml``:
     nixl_buffer_size: 1073741824 # 1GB
     nixl_buffer_device: cpu
     extra_config: {enable_nixl_storage: true, nixl_backend: POSIX, \
-                   nixl_file_pool_size: 64, nixl_path: /mnt/nixl/cache/}
+                   nixl_pool_size: 64, nixl_path: /mnt/nixl/cache/}
 
 Key settings:
 
 - ``nixl_buffer_size``: buffer size for NIXL transfers.
 
-- ``nixl_file_pool_size``: number of files opened at init time for nixl backend.
+- ``nixl_pool_size``: number of descriptors opened at init time for nixl backend.
 
 - ``nixl_path``: directory under which the storage files will be saved (e.g. /mnt/nixl/). Needed for NIXL backends that store to file.
 
