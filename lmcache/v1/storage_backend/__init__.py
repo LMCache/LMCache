@@ -3,6 +3,7 @@
 from collections import OrderedDict
 from typing import TYPE_CHECKING, Optional
 import asyncio
+import importlib  # Added for dynamic import
 
 # Third Party
 import torch
@@ -12,7 +13,11 @@ from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.lookup_server import LookupServerInterface
-from lmcache.v1.memory_management import MemoryAllocatorInterface
+from lmcache.v1.memory_management import (
+    MemoryAllocatorInterface,
+    NixlCPUMemoryAllocator,
+    PagedTensorMemoryAllocator,
+)
 from lmcache.v1.storage_backend.abstract_backend import StorageBackendInterface
 from lmcache.v1.storage_backend.gds_backend import GdsBackend
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
@@ -25,6 +30,69 @@ if TYPE_CHECKING:
     from lmcache.v1.cache_controller.worker import LMCacheWorker
 
 logger = init_logger(__name__)
+
+
+def create_dynamic_backends(
+    config: LMCacheEngineConfig,
+    metadata: LMCacheEngineMetadata,
+    loop: asyncio.AbstractEventLoop,
+    memory_allocator: MemoryAllocatorInterface,
+    local_cpu_backend: LocalCPUBackend,
+    dst_device: str,
+    lookup_server: Optional[LookupServerInterface],
+    storage_backends: OrderedDict[str, StorageBackendInterface],
+) -> None:
+    """
+    Dynamically create backends based on configuration.
+
+    Looks for backend configurations in config.extra_config and instantiates
+    them using the specified module and class names.
+    """
+    if not config.extra_config:
+        return
+
+    # Get the list of allowed external backends if configured
+    allowed_backends = (
+        set(config.external_backends) if config.external_backends else set()
+    )
+
+    for backend_name in allowed_backends:
+        try:
+            module_path = config.extra_config.get(
+                f"external_backend.{backend_name}.module_path"
+            )
+            class_name = config.extra_config.get(
+                f"external_backend.{backend_name}.class_name"
+            )
+
+            if not module_path or not class_name:
+                logger.warning(
+                    f"Backend {backend_name} missing module_path or class_name"
+                )
+                continue
+
+            # Dynamically import the module
+            module = importlib.import_module(module_path)
+            # Get the class from the module
+            backend_class = getattr(module, class_name)
+
+            # Create the backend instance
+            backend_instance = backend_class(
+                config,
+                metadata,
+                loop,
+                memory_allocator,
+                local_cpu_backend,
+                dst_device,
+                lookup_server,
+            )
+
+            # Add to storage backends
+            storage_backends[backend_name] = backend_instance
+            logger.info(f"Created dynamic backend: {backend_name}")
+
+        except Exception as e:
+            logger.error(f"Failed to create backend {backend_name}: {str(e)}")
 
 
 def CreateStorageBackends(
@@ -42,12 +110,20 @@ def CreateStorageBackends(
 
     storage_backends: OrderedDict[str, StorageBackendInterface] = OrderedDict()
 
+    extra_config = config.extra_config
+    enable_nixl_storage = extra_config is not None and extra_config.get(
+        "enable_nixl_storage"
+    )
+
     if config.enable_nixl:
         if config.enable_xpyd:
             # First Party
-            from lmcache.v1.storage_backend.nixl_backend_v3 import NixlBackend
+            from lmcache.v1.storage_backend.nixl_backend_v3 import (
+                NixlBackend as NixlBackendV3,
+            )
 
-            storage_backends["NixlBackend"] = NixlBackend.CreateNixlBackend(
+            assert isinstance(memory_allocator, NixlCPUMemoryAllocator)
+            storage_backends["NixlBackend"] = NixlBackendV3.CreateNixlBackend(
                 config, metadata, memory_allocator
             )
         else:
@@ -57,7 +133,8 @@ def CreateStorageBackends(
             storage_backends["NixlBackend"] = NixlBackend.CreateNixlBackend(
                 config, metadata
             )
-            assert config.nixl_buffer_device is not None
+
+        assert config.nixl_buffer_device is not None
 
     # TODO(Jiayi): The hierarchy is fixed for now
     # NOTE(Jiayi): The local_cpu backend is always created because
@@ -73,6 +150,24 @@ def CreateStorageBackends(
         )
         backend_name = str(local_cpu_backend)
         storage_backends[backend_name] = local_cpu_backend
+
+    if enable_nixl_storage:
+        # First Party
+        from lmcache.v1.storage_backend.nixl_storage_backend import (
+            NixlStorageBackend,
+        )
+
+        if not isinstance(memory_allocator, PagedTensorMemoryAllocator):
+            raise TypeError(
+                f"Expected PagedTensorMemoryAllocator,"
+                f" but got {type(memory_allocator).__name__}"
+            )
+
+        storage_backends["NixlStorageBackend"] = (
+            NixlStorageBackend.CreateNixlStorageBackend(
+                config, loop, metadata, memory_allocator
+            )
+        )
 
     if config.local_disk and config.max_local_disk_size > 0:
         local_disk_backend = LocalDiskBackend(
@@ -103,6 +198,18 @@ def CreateStorageBackends(
         backend_name = str(remote_backend)
         storage_backends[backend_name] = remote_backend
 
+    # Create dynamic backends from configuration
+    create_dynamic_backends(
+        config,
+        metadata,
+        loop,
+        memory_allocator,
+        local_cpu_backend,
+        dst_device,
+        lookup_server,
+        storage_backends,
+    )
+
     # Only wrap if audit is enabled in config
     if config.extra_config is not None and config.extra_config.get(
         "audit_backend_enabled", False
@@ -111,7 +218,7 @@ def CreateStorageBackends(
         from lmcache.v1.storage_backend.audit_backend import AuditBackend
 
         # Conditionally wrap backends with audit logging if enabled in config
-        audited_backends = OrderedDict()
+        audited_backends: OrderedDict[str, StorageBackendInterface] = OrderedDict()
         for name, backend in storage_backends.items():
             # Wrap each normal backend with AuditBackend
             if not isinstance(backend, LocalCPUBackend):

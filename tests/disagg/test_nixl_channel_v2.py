@@ -38,7 +38,7 @@ def generate_test_data(
                 model_name="test_model",
                 world_size=1,
                 worker_id=0,
-                chunk_hash=f"test_{i}",
+                chunk_hash=i,
             )
         )
         obj = allocator.allocate(shape, dtype, fmt=MemoryFormat.KV_2LTD)
@@ -154,7 +154,7 @@ def send_and_measure_throughput_v2(
         channel.zero_copy_send_with_callback(
             keys=keys,
             metadatas=metadatas,
-            callback=lambda dest_obj, idx=0: dest_obj.tensor.copy_(objs[idx].tensor),
+            callback=lambda dest_obj, idx=0: dest_obj.tensor.copy_(objs[idx].tensor),  # type: ignore
         )
         elapsed_time = time.time() - start_time
     else:
@@ -256,10 +256,9 @@ def receive_and_verify_data(
                     success = False
                     continue
 
-                # Extract the index from the chunk_hash (format is "test_{i}")
                 chunk_hash = key.chunk_hash
                 try:
-                    idx = int(chunk_hash.split("_")[1])
+                    idx = chunk_hash
                     expected_value = (idx + 1) / len(
                         expected_keys
                     )  # Match the value in generate_test_data
@@ -308,7 +307,7 @@ def test_allocate_for_send(
             model_name="test_model",
             world_size=1,
             worker_id=0,
-            chunk_hash=f"test_alloc_{i}",
+            chunk_hash=i,
         )
         for i in range(3)
     ]
@@ -325,6 +324,7 @@ def test_allocate_for_send(
     for i in range(3):
         obj = channel.allocate_for_send(shape, dtype)
         assert obj is not None, "Failed to allocate memory for send"
+        assert obj.tensor is not None
         obj.tensor.fill_(i + 10)  # Fill with test data
 
     # Finish send

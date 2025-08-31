@@ -2,7 +2,7 @@
 # Standard
 from collections import OrderedDict
 from concurrent.futures import Future
-from typing import List, Optional, Tuple
+from typing import List, Optional, Sequence, Tuple
 import asyncio
 import ctypes
 import json
@@ -30,6 +30,7 @@ logger = init_logger(__name__)
 
 _METADATA_FILE_SUFFIX = ".metadata"
 _DATA_FILE_SUFFIX = ".kvcache.safetensors"
+_FULL_SUFFIX_LENGTH = len(_DATA_FILE_SUFFIX + _METADATA_FILE_SUFFIX)  # 29 characters
 _METADATA_VERSION = 1
 _METADATA_MAX_SIZE = 4096  # reserve 4K for metadata.
 # TODO: It is possible to read this 4KB block without triggering read-ahead by
@@ -303,7 +304,7 @@ class GdsBackend(StorageBackendInterface):
                         if not fentry.name.endswith(target_suffix):
                             continue
                         filename = os.path.basename(fentry.name)
-                        key_str = filename[:-14].replace("_", "/")
+                        key_str = filename[:-_FULL_SUFFIX_LENGTH].replace("_", "/")
                         try:
                             key = CacheEngineKey.from_string(key_str)
                         except ValueError as e:
@@ -385,9 +386,7 @@ class GdsBackend(StorageBackendInterface):
         with self.put_lock:
             return key in self.put_tasks
 
-    def submit_put_task(
-        self, key: CacheEngineKey, memory_obj: MemoryObj
-    ) -> Optional[Future]:
+    def submit_put_task(self, key: CacheEngineKey, memory_obj: MemoryObj) -> Future:
         assert memory_obj.tensor is not None
         memory_obj.ref_count_up()
 
@@ -401,14 +400,12 @@ class GdsBackend(StorageBackendInterface):
 
     def batched_submit_put_task(
         self,
-        keys: List[CacheEngineKey],
+        keys: Sequence[CacheEngineKey],
         memory_objs: List[MemoryObj],
         transfer_spec=None,
-    ) -> Optional[List[Future]]:
-        return [
+    ) -> None:
+        for key, memory_obj in zip(keys, memory_objs, strict=False):
             self.submit_put_task(key, memory_obj)
-            for key, memory_obj in zip(keys, memory_objs, strict=False)
-        ]
 
     async def _async_save_bytes_to_disk(
         self,
@@ -555,7 +552,9 @@ class GdsBackend(StorageBackendInterface):
         key: CacheEngineKey,
     ) -> Optional[Future]:
         # TODO: Using a dummy wrapper around prefetch for now.
-        return self.submit_prefetch_task(key)
+        if not self.submit_prefetch_task(key):
+            return None
+        return Future()
 
     @_lmcache_nvtx_annotate
     @torch.inference_mode()
@@ -588,7 +587,7 @@ class GdsBackend(StorageBackendInterface):
                     f.write(
                         addr, kv_chunk.nbytes, file_offset=offset, dev_offset=dev_offset
                     )
-            else:
+            elif self.cudart:
                 # mmap the file
                 fd = os.open(tmp_path, os.O_RDWR)
                 nbytes = kv_chunk.nbytes
@@ -602,6 +601,7 @@ class GdsBackend(StorageBackendInterface):
                 arr = np.frombuffer(mm, dtype=np.uint8)
                 buf_addr = arr.__array_interface__["data"][0]
 
+                assert addr.value is not None
                 res = self.cudart.cudaMemcpy(
                     ctypes.c_void_p(buf_addr + offset),
                     ctypes.c_void_p(int(addr.value) + device_offset),
@@ -638,7 +638,7 @@ class GdsBackend(StorageBackendInterface):
                     file_offset=file_offset,
                     dev_offset=dev_offset,
                 )
-        else:
+        elif self.cudart:
             fd = os.open(gds_path, os.O_RDONLY)
             file_size = os.fstat(fd).st_size
             mm = mmap.mmap(
@@ -652,6 +652,7 @@ class GdsBackend(StorageBackendInterface):
             arr = np.frombuffer(mm, dtype=np.uint8)
             addr = arr.__array_interface__["data"][0]
 
+            assert gpu_pointer.value is not None
             res = self.cudart.cudaMemcpy(
                 ctypes.c_void_p(int(gpu_pointer.value) + dev_offset),
                 ctypes.c_void_p(addr + file_offset),
@@ -664,16 +665,20 @@ class GdsBackend(StorageBackendInterface):
             del arr
             mm.close()
             return size_in_bytes
+        else:
+            raise RuntimeError(
+                "Both cufile and cudart are None, this should not happen"
+            )
 
     def pin(self, key: CacheEngineKey) -> bool:
         # NOTE (ApostaC): Since gds doesn't have eviction now, we don't need
         # to implement pin and unpin
-        return
+        return False
 
     def unpin(self, key: CacheEngineKey) -> bool:
         # NOTE (ApostaC): Since gds doesn't have eviction now, we don't need
         # to implement pin and unpin
-        return
+        return False
 
     def remove(self, key: CacheEngineKey, force: bool = True):
         raise NotImplementedError("Remote backend does not support remove now.")

@@ -145,7 +145,7 @@ class S3Connector(RemoteConnector):
         # TODO(Jiayi): We need to handle cache consistency issues in a systematic way
         # across all connectors.
         # We assume S3 cache is never evicted and read-only for now.
-        self.object_size_cache = {}
+        self.object_size_cache: dict[str, int] = {}
 
         self.inflight_sema = asyncio.Semaphore(s3_max_inflight_reqs)
 
@@ -241,7 +241,7 @@ class S3Connector(RemoteConnector):
         if got["err"] or got["status"] != 200:
             logger.warning("Encountering error in S3 HEAD request")
             return 0
-        return got["len"]
+        return got["len"] if got["len"] is not None else 0
 
     # TODO(Jiayi): implement real async
     async def exists(self, key: CacheEngineKey) -> bool:
@@ -351,8 +351,9 @@ class S3Connector(RemoteConnector):
         self, keys: List[CacheEngineKey]
     ) -> List[Optional[MemoryObj]]:
         done_events = []
-        shms = []
-        memory_objs = []
+        shms: list[Optional[int]] = []
+        recv_paths: list[Optional[str]] = []
+        memory_objs: list[Optional[MemoryObj]] = []
         obj_sizes = []
 
         # TODO(Jiayi): Need to resolve this
@@ -372,7 +373,6 @@ class S3Connector(RemoteConnector):
                 if obj_size <= 0:
                     obj_sizes.append(0)
                     memory_objs.append(None)
-                    return None
                 self.object_size_cache[key_str] = obj_size
 
             # TODO(Jiayi): A caveat of acquire this semaphore
@@ -403,6 +403,7 @@ class S3Connector(RemoteConnector):
             done_events.append(done_event)
 
             recv_path, shm = self.adhoc_shm_manager.allocate()
+            recv_paths.append(recv_path)
             self._s3_download(
                 key_str=key_str,
                 recv_path=recv_path,
@@ -413,10 +414,10 @@ class S3Connector(RemoteConnector):
         while not all(e.is_set() for e in done_events):
             await asyncio.sleep(0.005)
 
-        for obj_size, memory_obj, shm in zip(
-            obj_sizes, memory_objs, shms, strict=False
+        for obj_size, memory_obj, shm, recv_path in zip(
+            obj_sizes, memory_objs, shms, recv_paths, strict=False
         ):
-            if memory_obj is None:
+            if memory_obj is None or shm is None:
                 continue
 
             dst_ptr = memory_obj.data_ptr
@@ -451,8 +452,6 @@ class S3Connector(RemoteConnector):
                 raise RuntimeError(f"Upload failed in S3Connector: {done}")
 
             done_event.set()
-
-        await self.inflight_sema.acquire()
 
         s3.S3Request(
             client=self.s3_client,

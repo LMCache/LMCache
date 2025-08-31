@@ -13,6 +13,7 @@ import pytest
 
 # First Party
 from lmcache.v1.cache_engine import LMCacheEngineBuilder
+from lmcache.v1.memory_management import MixedMemoryAllocator
 
 # This is to mock the constructor and destructor of
 # MixedMemoryAllocator and PinMemoryAllocator to
@@ -359,3 +360,46 @@ def autorelease_v1(request):
     # Cleanup all objects created by the factory
     # for obj in objects:
     #    obj.close()
+
+
+@pytest.fixture(scope="session")
+def memory_allocator():
+    """One MixedMemoryAllocator (5GB) for the whole test session;
+    .close() is a no-op per-test."""
+    _real = MixedMemoryAllocator(5 * 1024 * 1024 * 1024)  # 5GB
+
+    class _NoCloseWrapper:
+        def __init__(self, real):
+            self._real = real
+
+        def __getattr__(self, name):
+            return getattr(self._real, name)
+
+        def close(self):
+            # No-op so per-test close() calls don't shut down the shared allocator
+            pass
+
+    try:
+        yield _NoCloseWrapper(_real)
+    finally:
+        # Actually close once when the session ends
+        _real.close()
+
+
+@pytest.fixture(autouse=True)  # function-scoped by default
+def use_shared_allocator(request, monkeypatch, memory_allocator):
+    """Default: patch. Opt out with @pytest.mark.no_shared_allocator."""
+    if request.node.get_closest_marker("no_shared_allocator"):
+        # do NOT patch for this test
+        yield
+        return
+
+    def _create_shared_allocator(config, metadata, numa_mapping):
+        return memory_allocator
+
+    monkeypatch.setattr(
+        LMCacheEngineBuilder,
+        "_Create_memory_allocator",
+        _create_shared_allocator,
+    )
+    yield

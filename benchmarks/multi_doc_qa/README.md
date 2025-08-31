@@ -26,5 +26,5 @@ LMCACHE_CONFIG_FILE=lmcache_blend.yaml vllm serve mistralai/Mistral-7B-Instruct-
 
 ### Step 2: Send the requests
 ```bash
-python multi-doc-qa.py --num-total-documents 100 --document-length 3000 --output-len 1 --num-requests 100 --num-docs-per-request 5 --model mistralai/Mistral-7B-Instruct-v0.2 --port 8000 --max-inflight-requests 1 
+python multi_doc_qa.py --num-total-documents 100 --document-length 3000 --output-len 1 --num-requests 100 --num-docs-per-request 5 --model mistralai/Mistral-7B-Instruct-v0.2 --port 8000 --max-inflight-requests 1 
 ```

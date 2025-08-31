@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from concurrent.futures import Future
-from typing import TYPE_CHECKING, List, Optional
+from typing import TYPE_CHECKING, List, Optional, Sequence
 import threading
+import time
 
 # Third Party
 import torch
@@ -21,7 +22,7 @@ from lmcache.v1.memory_management import (
     MixedMemoryAllocator,
     NixlCPUMemoryAllocator,
 )
-from lmcache.v1.storage_backend.abstract_backend import StorageBackendInterface
+from lmcache.v1.storage_backend.abstract_backend import AllocatorBackendInterface
 from lmcache.v1.storage_backend.cache_policy import get_cache_policy
 
 if TYPE_CHECKING:
@@ -31,7 +32,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-class LocalCPUBackend(StorageBackendInterface):
+class LocalCPUBackend(AllocatorBackendInterface):
     """
     Even if local_cpu is False (the hot_cache is not used), contains(),
     insert_key(), remove(), get_blocking(), get_keys(), and clear()
@@ -132,21 +133,19 @@ class LocalCPUBackend(StorageBackendInterface):
 
     def batched_submit_put_task(
         self,
-        keys: List[CacheEngineKey],
+        keys: Sequence[CacheEngineKey],
         memory_objs: List[MemoryObj],
         transfer_spec=None,
-    ) -> Optional[List[Future]]:
+    ) -> None:
         """
         Synchronously put the MemoryObjs into the local cpu backend.
         """
         if not self.use_hot:
-            return None
+            return
 
         # TODO(Jiayi): optimize this with batching
         for key, memory_obj in zip(keys, memory_objs, strict=False):
             self.submit_put_task(key, memory_obj)
-
-        return None
 
     # NOTE (Jiayi): prefetch might be deprecated in the future.
     # Should be replaced by `move`.
@@ -233,6 +232,7 @@ class LocalCPUBackend(StorageBackendInterface):
         dtype: torch.dtype,
         fmt: Optional[MemoryFormat] = None,
         eviction: bool = True,
+        busy_loop: bool = True,
     ) -> Optional[MemoryObj]:
         """
         Allocate a memory object of shape and dtype
@@ -240,6 +240,9 @@ class LocalCPUBackend(StorageBackendInterface):
         local_cpu_backend.allocate() to get memory objects
         regardless of whether local_cpu is True or False
         """
+        logger.debug(
+            f"Allocating memory in local cpu backend with busy loop: {busy_loop}"
+        )
         if fmt is None:
             if self.layerwise:
                 if self.enable_blending:
@@ -258,33 +261,59 @@ class LocalCPUBackend(StorageBackendInterface):
         )
 
         evict_keys_count = 0
-        with self.cpu_lock:
-            while True:
-                # TODO(Jiayi): optimize `num_cacndidates` with estimation.
-                # Accurate estimation is hard due to fragmentation.
-                evict_keys = self.cache_policy.get_evict_candidates(
-                    self.hot_cache, num_candidates=1
-                )
+        num_attempts = 0
+        while True:
+            # whether or not this request needs to wait or other requests
+            wait_other_requests = True
+            if self.use_hot:
+                # TODO(Jiayi): optimize `num_candidates` with estimation.
+                # Accurate estimation is hard due to fragmentation
+                num_candidates = 1
+                with self.cpu_lock:
+                    evict_keys = self.cache_policy.get_evict_candidates(
+                        self.hot_cache, num_candidates=num_candidates
+                    )
+                    if evict_keys:
+                        # we can continue trying to evict from the hot_cache
+                        # and don't need to wait for other requests yet
+                        wait_other_requests = False
+                        logger.debug(
+                            f"Evicting {len(evict_keys)} chunks from cpu memory"
+                        )
+                        # remove
+                        self.batched_remove(evict_keys, force=False)
+                        evict_keys_count += len(evict_keys)
+                    else:
+                        self.stats_monitor.update_local_cpu_evict_failed_count(
+                            num_candidates
+                        )
 
-                if not evict_keys:
-                    self.stats_monitor.update_local_cpu_evict_failed_count(1)
-                    logger.warning(
-                        "No eviction candidates found in local cpu backend. "
-                        "Local cpu memory is under pressure."
+            if wait_other_requests:
+                if not busy_loop:
+                    logger.debug(
+                        "Not busy looping becausewe are not immediately able to evict"
                     )
                     break
+                # TODO: make time_to_wait a config
+                time_to_wait = 0.1
+                logger.warning(
+                    "No eviction candidates found in local cpu backend. "
+                    "Local cpu memory is under pressure. "
+                    f"Waiting for {time_to_wait} seconds before retrying."
+                )
+                # self.memory_allocator.memcheck()
+                # do not hold the lock during sleep
+                time.sleep(time_to_wait)
 
-                evict_keys_count += 1
-                self.batched_remove(evict_keys, force=False)
+            memory_obj = self.memory_allocator.allocate(shape, dtype, fmt)
+            if memory_obj is not None:
+                break
 
-                # TODO(Jiayi): Move this inside `batched_remove`
-                if self.lookup_server is not None:
-                    self.lookup_server.batched_remove(evict_keys)
-
-                memory_obj = self.memory_allocator.allocate(shape, dtype, fmt)
-                logger.debug(f"Evicting {len(evict_keys)} chunk from cpu memory")
-                if memory_obj is not None:
-                    break
+            num_attempts += 1
+            logger.debug(
+                f"Unable to allocate memory object after {num_attempts}"
+                " attempts of local cpu backend allocate()"
+            )
 
         self.stats_monitor.update_local_cpu_evict_metrics(evict_keys_count)
         return memory_obj
@@ -297,6 +326,7 @@ class LocalCPUBackend(StorageBackendInterface):
         batch_size: int,
         fmt: Optional[MemoryFormat] = None,
         eviction: bool = True,
+        busy_loop: bool = True,
     ) -> Optional[List[MemoryObj]]:
         """
         Batched allocate `batch_size` memory objects of shape and dtype
@@ -304,6 +334,10 @@ class LocalCPUBackend(StorageBackendInterface):
         local_cpu_backend.allocate() to get memory objects
         regardless of whether local_cpu is True or False
         """
+        logger.debug(
+            f"Batched allocating memory in local cpu backend"
+            f" with busy loop: {busy_loop}"
+        )
         if fmt is None:
             if self.layerwise:
                 if self.enable_blending:
@@ -325,52 +359,78 @@ class LocalCPUBackend(StorageBackendInterface):
         )
 
         evict_keys_count = 0
-        with self.cpu_lock:
-            while True:
-                evict_keys = self.cache_policy.get_evict_candidates(
-                    self.hot_cache, num_candidates=1
-                )
+        num_attempts = 0
+        while True:
+            wait_other_requests = True
+            if self.use_hot:
+                # TODO(Jiayi): optimize `num_candidates` with estimation.
+                # Accurate estimation is hard due to fragmentation
+                num_candidates = 1
+                with self.cpu_lock:
+                    evict_keys = self.cache_policy.get_evict_candidates(
+                        self.hot_cache, num_candidates=num_candidates
+                    )
 
-                # HACK: We assume batch_size=num_layers here.
-                # FIXME: We also assume if the one layer's ref_count > 1 or pinned,
-                # then the other layers are also ref_count > 1 or
-                # pinned in the cpu memory. This might not be true.
+                    # HACK: We assume batch_size=num_layers here.
+                    # FIXME: We also assume if the one layer's ref_count > 1 or pinned,
+                    # then the other layers are also ref_count > 1 or
+                    # pinned in the cpu memory. This might not be true.
+                    if evict_keys:
+                        evict_keys_count += len(evict_keys)
+                        wait_other_requests = False
+                        for evict_key in evict_keys:
+                            evict_key_all_layer = evict_key.split_layers(batch_size)
 
-                if not evict_keys:
-                    self.stats_monitor.update_local_cpu_evict_failed_count(1)
-                    logger.warning(
-                        "No eviction candidates found in local cpu backend. "
-                        "Local cpu memory is under pressure."
+                            # TODO(Jiayi): batched allocate is not supported through
+                            # `batched_remove`. Therefore, features like usage tracking
+                            # is not supported.
+                            old_mem_objs = []
+                            for key in evict_key_all_layer:
+                                old_mem_objs.append(self.hot_cache[key])
+                                self.cache_policy.update_on_force_evict(key)
+                                self.hot_cache.pop(key, None)
+
+                            self.memory_allocator.batched_free(old_mem_objs)
+
+                            if self.lookup_server is not None:
+                                self.lookup_server.batched_remove(evict_key_all_layer)
+
+                            logger.debug(
+                                f"Evicting {len(old_mem_objs)} chunks from cpu memory"
+                            )
+                    else:
+                        self.stats_monitor.update_local_cpu_evict_failed_count(
+                            num_candidates
+                        )
+
+            if wait_other_requests:
+                if not busy_loop:
+                    logger.debug(
+                        "Not busy looping becausewe are not immediately able to evict"
                     )
                     break
-
-                evict_keys_count += 1
-                for evict_key in evict_keys:
-                    evict_key_all_layer = evict_key.split_layers(batch_size)
-
-                    # TODO(Jiayi): batched allocate is not supported through
-                    # `batched_remove`. Therefore, features like usage tracking
-                    # is not supported.
-                    old_mem_objs = []
-                    for key in evict_key_all_layer:
-                        old_mem_objs.append(self.hot_cache[key])
-                        self.cache_policy.update_on_force_evict(key)
-                        self.hot_cache.pop(key, None)
-
-                    self.memory_allocator.batched_free(old_mem_objs)
-
-                    if self.lookup_server is not None:
-                        self.lookup_server.batched_remove(evict_key_all_layer)
-
-                    logger.debug(f"Evicting {len(old_mem_objs)} chunks from cpu memory")
-
-                memory_objs = self.memory_allocator.batched_allocate(
-                    shape, dtype, batch_size, fmt
+                # TODO: make time_to_wait a config
+                time_to_wait = 0.1
+                logger.warning(
+                    "No eviction candidates found in local cpu backend. "
+                    "Local cpu memory is under pressure. "
+                    f"Waiting for {time_to_wait} seconds before retrying."
                 )
+                # self.memory_allocator.memcheck()
+                # do not hold the lock during sleep
+                time.sleep(time_to_wait)
 
-                if memory_objs:
-                    break
+            memory_objs = self.memory_allocator.batched_allocate(
+                shape, dtype, batch_size, fmt
+            )
+            if memory_objs:
+                break
 
+            num_attempts += 1
+            logger.debug(
+                f"Unable to allocate memory object after {num_attempts}"
+                " attempts of local cpu backend batched_allocate()"
+            )
         self.stats_monitor.update_local_cpu_evict_metrics(evict_keys_count)
         return memory_objs
 

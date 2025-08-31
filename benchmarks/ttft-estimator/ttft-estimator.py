@@ -33,7 +33,6 @@ tokenizer = None
 # the number of tokens in 10,000 "hi"s
 hi_multiplier = None
 context_length_ttfts = []
-used_ints = set()
 
 client = OpenAI(api_key="dummy-key", base_url="http://localhost:8000/v1")
 

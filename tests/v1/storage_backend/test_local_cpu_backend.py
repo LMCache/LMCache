@@ -14,7 +14,6 @@ from lmcache.v1.memory_management import (
     AdHocMemoryAllocator,
     MemoryFormat,
     MemoryObj,
-    MixedMemoryAllocator,
 )
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 
@@ -55,7 +54,7 @@ def create_test_config(
 
 def create_test_key(key_id: str = "test_key") -> CacheEngineKey:
     """Create a test CacheEngineKey."""
-    return CacheEngineKey("vllm", "test_model", 3, 123, key_id)
+    return CacheEngineKey("vllm", "test_model", 3, 123, hash(key_id))
 
 
 def create_test_memory_obj(shape=(2, 16, 8, 128), dtype=torch.bfloat16) -> MemoryObj:
@@ -63,12 +62,6 @@ def create_test_memory_obj(shape=(2, 16, 8, 128), dtype=torch.bfloat16) -> Memor
     allocator = AdHocMemoryAllocator(device="cpu")
     memory_obj = allocator.allocate(shape, dtype, fmt=MemoryFormat.KV_T2D)
     return memory_obj
-
-
-@pytest.fixture
-def memory_allocator():
-    """Create a memory allocator for testing."""
-    return MixedMemoryAllocator(1024 * 1024 * 1024)  # 1GB
 
 
 @pytest.fixture

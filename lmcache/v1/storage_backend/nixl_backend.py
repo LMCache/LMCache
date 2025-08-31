@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from concurrent.futures import Future
-from typing import List, Optional
+from typing import List, Optional, Sequence
 import threading
 import time
 
@@ -212,7 +212,9 @@ class BasicNixlObserver(NixlObserverInterface):
             if is_view:
                 # self.obj_pool.add(key, value)
                 st = time.perf_counter()
-                copied_obj = TensorMemoryObj(value.tensor.clone(), value.metadata)
+                copied_obj = TensorMemoryObj(
+                    value.tensor.clone(), value.metadata, parent_allocator=None
+                )
                 ed = time.perf_counter()
                 self.obj_pool.add(key, copied_obj)
                 ed2 = time.perf_counter()
@@ -334,14 +336,13 @@ class NixlBackend(StorageBackendInterface):
 
     def batched_submit_put_task(
         self,
-        keys: List[CacheEngineKey],
+        keys: Sequence[CacheEngineKey],
         memory_objs: List[MemoryObj],
         transfer_spec=None,
-    ) -> Optional[List[Future]]:
+    ) -> None:
         memory_objs_metadatas = [memory_obj.meta for memory_obj in memory_objs]
-        self.register_put_tasks(keys, memory_objs_metadatas)
+        self.register_put_tasks(keys, memory_objs_metadatas)  # type: ignore
         self.flush_put_tasks()
-        return None
 
     def submit_prefetch_task(self, key: CacheEngineKey) -> bool:
         """

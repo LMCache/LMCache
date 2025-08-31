@@ -126,14 +126,6 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
     },
     "lookup_url": {"type": Optional[str], "default": None, "env_converter": str},
     "distributed_url": {"type": Optional[str], "default": None, "env_converter": str},
-    # Error handling
-    "error_handling": {
-        "type": bool,
-        "default": False,
-        "env_converter": lambda x: x
-        if isinstance(x, bool)
-        else str(x).lower() in ["true", "1"],
-    },
     # Controller configurations
     "enable_controller": {
         "type": bool,
@@ -149,6 +141,21 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
     },
     "controller_url": {"type": Optional[str], "default": None, "env_converter": str},
     "lmcache_worker_port": {
+        "type": Optional[int],
+        "default": None,
+        "env_converter": int,
+    },
+    # LMCache Worker heartbeat
+    # the lmcache_worker_heartbeat_delay_time means that delay a period of time
+    # before starting, ensures that the heartbeat starts working only after the
+    # service is fully ready(such as, waiting register).
+    "lmcache_worker_heartbeat_delay_time": {
+        "type": int,
+        "default": 10,
+        "env_converter": int,
+    },
+    # the lmcache_worker_heartbeat_time means that sending heartbeat periodically.
+    "lmcache_worker_heartbeat_time": {
         "type": Optional[int],
         "default": None,
         "env_converter": int,
@@ -227,6 +234,11 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "default": None,
         "env_converter": str,
     },
+    "internal_api_server_host": {
+        "type": str,
+        "default": "0.0.0.0",
+        "env_converter": str,
+    },
     "extra_config": {
         "type": Optional[dict],
         "default": None,
@@ -287,6 +299,21 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "type": Optional[list[int]],
         "default": None,
         "env_converter": _to_int_list,
+    },
+    "internal_api_server_socket_path_prefix": {
+        "type": Optional[str],
+        "default": None,
+        "env_converter": str,
+    },
+    "plugin_locations": {
+        "type": Optional[list[str]],
+        "default": None,
+        "env_converter": lambda x: x if isinstance(x, list) else [x] if x else [],
+    },
+    "external_backends": {
+        "type": Optional[list[str]],
+        "default": None,
+        "env_converter": _to_str_list,
     },
 }
 
@@ -349,6 +376,10 @@ def _create_config_class():
             "__str__": lambda self: str(
                 {name: getattr(self, name) for name in _CONFIG_DEFINITIONS}
             ),
+            "from_dict": classmethod(_from_dict),
+            "to_dict": _to_dict,
+            "to_json": _to_json,
+            "from_json": classmethod(_from_json),
         },
     )
     return cls
@@ -360,6 +391,9 @@ def _validate_config(self):
         assert self.lookup_url is not None
         assert self.distributed_url is not None
 
+    enable_nixl_storage = self.extra_config is not None and self.extra_config.get(
+        "enable_nixl_storage"
+    )
     if self.enable_nixl:
         assert self.nixl_role is not None
         assert self.nixl_buffer_size is not None
@@ -370,6 +404,13 @@ def _validate_config(self):
             "Nixl only supports save_decode_cache=False"
         )
         assert self.enable_p2p is False, "Nixl only supports enable_p2p=False"
+
+    if enable_nixl_storage:
+        assert self.extra_config.get("nixl_backend") is not None
+        assert self.extra_config.get("nixl_path") is not None
+        assert self.extra_config.get("nixl_file_pool_size") is not None
+        assert self.nixl_buffer_size is not None
+        assert self.nixl_buffer_device is not None
 
     return self
 
@@ -555,6 +596,39 @@ def _from_env(cls):
 
     instance = cls(**config_values)
     return instance.log_config()
+
+
+def _from_dict(cls, config_dict: dict):
+    """Create configuration from a dictionary."""
+    resolved_config = _resolve_config_aliases(config_dict, "dictionary input")
+    config_values = {}
+    for name, config in _CONFIG_DEFINITIONS.items():
+        value = resolved_config.get(name, config["default"])
+        if value is not None:
+            value = config["env_converter"](value)
+        config_values[name] = value
+    instance = cls(**config_values)
+    return instance.log_config()
+
+
+def _to_dict(self):
+    """Convert the configuration object into a dictionary."""
+    return {name: getattr(self, name) for name in _CONFIG_DEFINITIONS}
+
+
+def _from_json(cls, json_str: str):
+    """Deserialize a JSON string into a configuration object."""
+    try:
+        config_dict = json.loads(json_str)
+        return cls.from_dict(config_dict)
+    except json.JSONDecodeError as e:
+        logger.error(f"Invalid JSON input: {e}")
+        raise
+
+
+def _to_json(self):
+    """Serialize the configuration object to a JSON string."""
+    return json.dumps(self.to_dict(), indent=2)
 
 
 # Create configuration class

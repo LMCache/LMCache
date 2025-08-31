@@ -2,7 +2,7 @@
 
 # Standard
 from concurrent.futures import Future
-from typing import List, Optional
+from typing import List, Optional, Sequence
 import time
 
 # First Party
@@ -121,20 +121,17 @@ class AuditBackend(StorageBackendInterface):
 
     def batched_submit_put_task(
         self,
-        keys: List[CacheEngineKey],
+        keys: Sequence[CacheEngineKey],
         memory_objs: List[MemoryObj],
         transfer_spec=None,
-    ) -> Optional[List[Future]]:
+    ) -> None:
         sizes = [len(obj.byte_array) for obj in memory_objs]
         start_time = time.perf_counter()
         try:
-            result = self.real_backend.batched_submit_put_task(
-                keys, memory_objs, transfer_spec
-            )
+            self.real_backend.batched_submit_put_task(keys, memory_objs, transfer_spec)
             self._log_operation(
                 "BATCHED_SUBMIT_PUT_TASK", start_time, None, True, size=sum(sizes)
             )
-            return result
         except Exception as e:
             self._log_operation(
                 "BATCHED_SUBMIT_PUT_TASK", start_time, None, False, error=e

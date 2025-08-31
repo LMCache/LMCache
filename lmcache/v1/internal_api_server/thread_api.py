@@ -41,7 +41,8 @@ async def get_threads(
 
         # Get stack trace if available
         try:
-            stack_frames = sys._current_frames().get(t.ident)
+            if t.ident is not None:
+                stack_frames = sys._current_frames().get(t.ident)
             if stack_frames:
                 stack_trace = traceback.format_stack(stack_frames)
                 info += "Stack trace:\n" + "".join(stack_trace)

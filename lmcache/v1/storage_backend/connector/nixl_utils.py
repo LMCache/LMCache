@@ -44,8 +44,8 @@ class NixlConfig:
     receiver_port: int
     buffer_size: int
     buffer_device: str
-    enable_gc: bool
-    backends: Optional[list[str]]
+    enable_gc: bool = True
+    backends: Optional[list[str]] = None
 
     @staticmethod
     def from_cache_engine_config(
@@ -108,8 +108,8 @@ class NixlConfigXpYd:
     @staticmethod
     def from_cache_engine_config(
         config: LMCacheEngineConfig, metadata: LMCacheEngineMetadata
-    ) -> "NixlConfig":
-        """Convert the LMCacheEngineConfig to NixlConfig"""
+    ) -> "NixlConfigXpYd":
+        """Convert the LMCacheEngineConfig to NixlConfigXpYd"""
         # TODO (Jiayi): add (heterogeneous) TP support
         # worker_id = metadata.worker_id
         # assert config.enable_nixl is True, (
