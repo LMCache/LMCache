@@ -103,7 +103,6 @@ class TestLocalCPUBackend:
     def test_init_with_lookup_server_and_worker(self, memory_allocator):
         """Test LocalCPUBackend initialization with lookup server and worker."""
         config = create_test_config()
-        lookup_server = MockLookupServer()
         lmcache_worker = MockLMCacheWorker()
 
         backend = LocalCPUBackend(
