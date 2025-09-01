@@ -127,7 +127,7 @@ class LMCacheLookupClient(LookupClientInterface):
             results.append(result)
 
         if len(set(results)) > 1:
-            logger.error(
+            logger.warning(
                 f"Lookup results (number of hit tokens) differ "
                 f"across tensor parallel ranks: {results}."
             )
