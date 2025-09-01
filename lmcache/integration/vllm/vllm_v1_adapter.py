@@ -32,7 +32,7 @@ from lmcache.integration.vllm.utils import (
     mla_enabled,
 )
 from lmcache.logging import init_logger
-from lmcache.utils import _lmcache_nvtx_annotate
+from lmcache.utils import _lmcache_nvtx_annotate, Platform
 from lmcache.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
 from lmcache.v1.compute.blend import LMCBlenderBuilder
 from lmcache.v1.config import LMCacheEngineConfig
@@ -41,6 +41,7 @@ from lmcache.v1.gpu_connector import (
     VLLMPagedMemGPUConnectorV2,
     VLLMPagedMemLayerwiseGPUConnector,
 )
+from lmcache.v1.xpu_connector import VLLMPagedMemXPUConnectorV2
 from lmcache.v1.internal_api_server.api_server import InternalAPIServer
 from lmcache.v1.lookup_client import LookupClientFactory
 from lmcache.v1.offload_server.zmq_server import ZMQOffloadServer
@@ -443,10 +444,16 @@ def _init_lmcache_engine(
     )
 
     # Change current device.
-    num_gpus = torch.cuda.device_count()
-    local_rank = parallel_config.rank % num_gpus
-    torch.cuda.set_device(local_rank)
-    device = torch.device(f"cuda:{local_rank}")
+    if Platform.is_cuda():
+        num_gpus = torch.cuda.device_count()
+        local_rank = parallel_config.rank % num_gpus
+        torch.cuda.set_device(local_rank)
+        device = torch.device(f"cuda:{local_rank}")
+    elif Platform.is_xpu():
+        num_gpus = torch.xpu.device_count()
+        local_rank = parallel_config.rank % num_gpus
+        torch.xpu.set_device(local_rank)
+        device = torch.device(f"xpu:{local_rank}")
     metadata = LMCacheEngineMetadata(
         model_config.model,
         parallel_config.world_size,
@@ -462,6 +469,7 @@ def _init_lmcache_engine(
         VLLMBufferLayerwiseGPUConnector,
         VLLMPagedMemGPUConnectorV2,
         VLLMPagedMemLayerwiseGPUConnector,
+        VLLMPagedMemXPUConnectorV2,
     ]
 
     if use_mla and lmcache_config.use_layerwise:
@@ -490,15 +498,27 @@ def _init_lmcache_engine(
                 device=device,
             )
     else:
-        vllm_gpu_connector = VLLMPagedMemGPUConnectorV2(
-            hidden_dim_size,
-            num_layer,
-            use_gpu=use_gpu,
-            chunk_size=chunk_size,
-            dtype=kv_dtype,
-            device=device,
-            use_mla=use_mla,
-        )
+        if Platform.is_cuda():
+            vllm_gpu_connector = VLLMPagedMemGPUConnectorV2(
+                hidden_dim_size,
+                num_layer,
+                use_gpu=use_gpu,
+                chunk_size=chunk_size,
+                dtype=kv_dtype,
+                device=device,
+                use_mla=use_mla,
+            )
+        elif Platform.is_xpu():
+            vllm_gpu_connector = VLLMPagedMemXPUConnectorV2(
+                hidden_dim_size,
+                num_layer,
+                use_gpu=use_gpu,
+                chunk_size=chunk_size,
+                dtype=kv_dtype,
+                device=device,
+                use_mla=use_mla,
+            )
+
     tpg = get_tp_group()
     engine = LMCacheEngineBuilder.get_or_create(
         ENGINE_NAME,
@@ -695,7 +715,7 @@ class LMCacheConnectorV1Impl:
 
             tokens = request.token_ids
             # TODO: have a pre-allocated buffer to hold the slot_mappings
-            slot_mapping = request.slot_mapping.cuda()
+            slot_mapping = request.slot_mapping.to(Platform.device_type())
             assert len(tokens) == len(slot_mapping)
 
             token_mask = torch.ones(len(tokens), dtype=torch.bool)
@@ -834,7 +854,7 @@ class LMCacheConnectorV1Impl:
                 assert len(slot_mapping) == len(token_ids)
 
                 # TODO: have a pre-allocated buffer to hold the slot_mappings
-                slot_mapping = slot_mapping.cuda()
+                slot_mapping = slot_mapping.to(Platform.device_type())
 
                 if self.kv_role == "kv_producer":
                     skip_leading_tokens = 0
@@ -918,7 +938,7 @@ class LMCacheConnectorV1Impl:
             assert len(slot_mapping) == len(token_ids)
 
             # TODO: have a pre-allocated buffer to hold the slot_mappings
-            slot_mapping = slot_mapping.cuda()
+            slot_mapping = slot_mapping.to(Platform.device_type())
 
             skip_leading_tokens = save_spec.skip_leading_tokens
             if self.kv_role == "kv_producer":

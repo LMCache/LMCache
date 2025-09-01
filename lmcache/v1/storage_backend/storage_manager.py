@@ -16,6 +16,7 @@ from lmcache.utils import (
     CacheEngineKey,
     _lmcache_nvtx_annotate,
     start_loop_in_thread_with_exceptions,
+    Platform,
 )
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.lookup_server import LookupServerInterface
@@ -61,7 +62,7 @@ class StorageManager:
         )
         self.thread.start()
 
-        dst_device = "cuda"
+        dst_device = Platform.device_type()
         self.storage_backends: OrderedDict[str, StorageBackendInterface] = (
             CreateStorageBackends(
                 config,
@@ -88,7 +89,8 @@ class StorageManager:
         self.instance_id = config.lmcache_instance_id
         self.worker_id = metadata.worker_id
 
-        self.nixl_offload_stream = torch.cuda.Stream()
+        if Platform.is_cuda():
+            self.nixl_offload_stream = torch.cuda.Stream()
 
     def _get_allocator_backend(
         self, config: LMCacheEngineConfig

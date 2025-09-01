@@ -41,7 +41,7 @@ from vllm.utils import cdiv, round_down
 # First Party
 from lmcache.integration.vllm.utils import ENGINE_NAME
 from lmcache.logging import init_logger
-from lmcache.utils import _lmcache_nvtx_annotate
+from lmcache.utils import _lmcache_nvtx_annotate, Platform
 from lmcache.v1.cache_engine import LMCacheEngineBuilder
 
 # FIXME(Jiayi): temporarily comment this out
@@ -49,7 +49,8 @@ from lmcache.v1.cache_engine import LMCacheEngineBuilder
 
 logger = init_logger(__name__)
 
-LMCACHE_CUDA_STREAM = torch.cuda.Stream()
+if Platform.is_cuda():
+    LMCACHE_CUDA_STREAM = torch.cuda.Stream()
 
 SUPPORTED_BACKEND_METADATA = (
     FlashAttentionMetadata,

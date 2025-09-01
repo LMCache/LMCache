@@ -19,7 +19,7 @@ import torch
 from lmcache.config import LMCacheEngineConfig, LMCacheEngineMetadata
 from lmcache.connections import global_http_connection
 from lmcache.logging import init_logger
-
+from lmcache.utils import Platform
 logger = init_logger(__name__)
 
 
@@ -219,11 +219,15 @@ class UsageContext:
         return num_cpu, cpu_type, cpu_family_model_stepping
 
     def _get_gpu_info(self):
-        device_property = torch.cuda.get_device_properties(0)
-        gpu_count = torch.cuda.device_count()
-        gpu_type = device_property.name
-        gpu_memory_per_device = device_property.total_memory
-        return gpu_count, gpu_type, gpu_memory_per_device
+        if Platform.is_cuda():
+            device_property = torch.cuda.get_device_properties(0)
+            gpu_count = torch.cuda.device_count()
+            gpu_type = device_property.name
+            gpu_memory_per_device = device_property.total_memory
+            return gpu_count, gpu_type, gpu_memory_per_device
+        if Platform.is_xpu():
+            return 1, "xpu", 0
+        raise ValueError("Unsupported device type")
 
     def _get_source(self):
         path = "/proc/1/cgroup"

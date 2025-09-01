@@ -17,8 +17,9 @@ import torch
 # First Party
 from lmcache.logging import init_logger
 from lmcache.observability import LMCStatsMonitor
-from lmcache.utils import _lmcache_nvtx_annotate
-import lmcache.c_ops as lmc_ops
+from lmcache.utils import _lmcache_nvtx_annotate, Platform
+if Platform.is_cuda():
+    import lmcache.c_ops as lmc_ops
 
 logger = init_logger(__name__)
 
@@ -1467,19 +1468,20 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
 
         self.size = size
 
-        if self.numa_mapping:
-            current_device_id = torch.cuda.current_device()
-            gpu_to_numa_mapping = self.numa_mapping.gpu_to_numa_mapping
-            assert current_device_id in gpu_to_numa_mapping, (
-                f"Current device {current_device_id} is not in the GPU NUMA mapping."
-            )
-            numa_id = gpu_to_numa_mapping[current_device_id]
-            ptr = lmc_ops.alloc_pinned_numa_ptr(size, numa_id)
-        else:
-            ptr = lmc_ops.alloc_pinned_ptr(size, 0)
-        array_type = ctypes.c_uint8 * size
-        buf = array_type.from_address(ptr)
-        self.buffer = torch.frombuffer(buf, dtype=torch.uint8)
+        # if self.numa_mapping:
+        #     current_device_id = torch.cuda.current_device()
+        #     gpu_to_numa_mapping = self.numa_mapping.gpu_to_numa_mapping
+        #     assert current_device_id in gpu_to_numa_mapping, (
+        #         f"Current device {current_device_id} is not in the GPU NUMA mapping."
+        #     )
+        #     numa_id = gpu_to_numa_mapping[current_device_id]
+        #     ptr = lmc_ops.alloc_pinned_numa_ptr(size, numa_id)
+        # else:
+        #     ptr = lmc_ops.alloc_pinned_ptr(size, 0)
+        # array_type = ctypes.c_uint8 * size
+        # buf = array_type.from_address(ptr)
+        # self.buffer = torch.frombuffer(buf, dtype=torch.uint8)
+        self.buffer = torch.empty(size, dtype=torch.uint8, pin_memory=True)
         self._unregistered = False
 
         self.pin_allocator: MemoryAllocatorInterface

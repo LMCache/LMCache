@@ -9,11 +9,12 @@ import torch
 # First Party
 from lmcache.integration.vllm.utils import ENGINE_NAME
 from lmcache.logging import init_logger
-from lmcache.utils import _lmcache_nvtx_annotate
+from lmcache.utils import _lmcache_nvtx_annotate, Platform
 from lmcache.v1.compute.blend.utils import LMCBlenderBuilder
 from lmcache.v1.memory_management import GPUMemoryAllocator  # noqa: E501
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
-import lmcache.c_ops as lmc_ops
+if Platform.is_cuda():
+    import lmcache.c_ops as lmc_ops
 
 logger = init_logger(__name__)
 

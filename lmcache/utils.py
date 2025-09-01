@@ -356,3 +356,43 @@ def mock_up_broadcast_fn(t: torch.Tensor, i: int) -> None:
 
 def mock_up_broadcast_object_fn(a: Any, i: int) -> None:
     raise NotImplementedError("Calling invalid broadcast object function")
+
+
+class Platform:
+    _device_type: str = None
+    _initialized: bool = False
+
+    @staticmethod
+    def is_hip() -> bool:
+        return torch.version.hip is not None
+
+    @staticmethod
+    def is_cuda() -> bool:
+        return torch.cuda.is_available() and torch.version.cuda
+
+    @staticmethod
+    def is_xpu() -> bool:
+        return hasattr(torch, "xpu") and torch.xpu.is_available()
+
+    @classmethod
+    def device_type(cls) -> str:
+        if not cls._initialized:
+            cls.detect_device_type()
+        return cls._device_type
+
+    @classmethod
+    def detect_device_type(cls):
+        if cls._initialized:
+            return
+        
+        if cls.is_hip():
+            cls._device_type = "hip"
+        elif cls.is_cuda():
+            cls._device_type = "cuda"
+        elif cls.is_xpu():
+            cls._device_type = "xpu"
+        else:
+            cls._device_type = "cpu"
+            
+        cls._initialized = True
+        logger.info(f"Detected device type: {cls._device_type}")

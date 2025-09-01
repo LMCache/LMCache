@@ -8,7 +8,11 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
-import lmcache.c_ops as lmc_ops
+try:
+    # First Party
+    import lmcache.c_ops as lmc_ops
+except (ModuleNotFoundError, ImportError):
+    pass
 
 logger = init_logger(__name__)
 

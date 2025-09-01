@@ -107,6 +107,8 @@ def CreateStorageBackends(
     # Replace 'cuda' with 'cuda:<device id>'
     if dst_device == "cuda":
         dst_device = f"cuda:{torch.cuda.current_device()}"
+    elif dst_device == "xpu":
+        dst_device = f"xpu:{torch.xpu.current_device()}"
 
     storage_backends: OrderedDict[str, StorageBackendInterface] = OrderedDict()
 

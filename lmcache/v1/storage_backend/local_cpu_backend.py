@@ -11,7 +11,7 @@ import torch
 # First Party
 from lmcache.logging import init_logger
 from lmcache.observability import LMCStatsMonitor, PrometheusLogger
-from lmcache.utils import CacheEngineKey, _lmcache_nvtx_annotate
+from lmcache.utils import CacheEngineKey, _lmcache_nvtx_annotate, Platform
 from lmcache.v1.cache_controller.message import KVAdmitMsg, KVEvictMsg
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.lookup_server import LookupServerInterface
@@ -56,7 +56,8 @@ class LocalCPUBackend(AllocatorBackendInterface):
         self.instance_id = config.lmcache_instance_id
         self.cpu_lock = threading.Lock()
 
-        self.stream = torch.cuda.Stream()
+        if Platform.is_cuda():
+            self.stream = torch.cuda.Stream()
 
         self.stats_monitor = LMCStatsMonitor.GetOrCreate()
 
