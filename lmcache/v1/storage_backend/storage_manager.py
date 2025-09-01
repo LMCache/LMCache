@@ -121,9 +121,13 @@ class StorageManager:
 
         self._cpu_disk_listener = self._CPUDiskListener(self)
         if "LocalCPUBackend" in self.storage_backends:
-            self.storage_backends["LocalCPUBackend"].set_listener(self._cpu_disk_listener)
+            self.storage_backends["LocalCPUBackend"].set_listener(
+                self._cpu_disk_listener
+            )
         if "LocalDiskBackend" in self.storage_backends:
-            self.storage_backends["LocalDiskBackend"].set_listener(self._cpu_disk_listener)
+            self.storage_backends["LocalDiskBackend"].set_listener(
+                self._cpu_disk_listener
+            )
 
     def _get_allocator_backend(
         self, config: LMCacheEngineConfig

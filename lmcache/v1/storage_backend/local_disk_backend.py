@@ -18,7 +18,6 @@ from lmcache.observability import LMCStatsMonitor
 from lmcache.utils import CacheEngineKey, DiskCacheMetadata, _lmcache_nvtx_annotate
 from lmcache.v1.cache_controller.message import KVAdmitMsg, KVEvictMsg
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.lookup_server import LookupServerInterface
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
 from lmcache.v1.storage_backend.abstract_backend import StorageBackendInterface
 from lmcache.v1.storage_backend.cache_policy import get_cache_policy

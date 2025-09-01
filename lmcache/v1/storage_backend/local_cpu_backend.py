@@ -14,7 +14,6 @@ from lmcache.observability import LMCStatsMonitor, PrometheusLogger
 from lmcache.utils import CacheEngineKey, _lmcache_nvtx_annotate
 from lmcache.v1.cache_controller.message import KVAdmitMsg, KVEvictMsg
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.lookup_server import LookupServerInterface
 from lmcache.v1.memory_management import (
     MemoryAllocatorInterface,
     MemoryFormat,
