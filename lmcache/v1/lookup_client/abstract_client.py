@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Optional, Union
 import abc
 
 # Third Party
@@ -17,7 +17,7 @@ class LookupClientInterface(metaclass=abc.ABCMeta):
     @abc.abstractmethod
     def lookup(
         self,
-        token_ids: torch.Tensor,
+        token_ids: Union[torch.Tensor, list[int]],
         lookup_id: str,
         request_configs: Optional[dict] = None,
     ) -> int:

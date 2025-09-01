@@ -32,6 +32,7 @@ from lmcache.v1.distributed_server import (
 )
 from lmcache.v1.gpu_connector import (
     GPUConnectorInterface,
+    SGLangLayerwiseGPUConnector,
     VLLMBufferLayerwiseGPUConnector,
     VLLMPagedMemLayerwiseGPUConnector,
 )
@@ -182,7 +183,7 @@ class LMCacheEngine:
     @torch.inference_mode()
     def store(
         self,
-        tokens: Optional[torch.Tensor] = None,
+        tokens: Optional[Union[torch.Tensor, list[int]]] = None,
         hashes: Optional[List[int]] = None,
         offsets: Optional[List[int]] = None,
         mask: Optional[torch.Tensor] = None,
@@ -308,7 +309,7 @@ class LMCacheEngine:
     @torch.inference_mode()
     def store_layer(
         self,
-        tokens: torch.Tensor,
+        tokens: Union[torch.Tensor, list[int]],
         mask: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> Generator[None, None, None]:
@@ -355,7 +356,6 @@ class LMCacheEngine:
             assert isinstance(key, CacheEngineKey)
 
             keys_multi_layer = key.split_layers(self.num_layers)
-
             # Only check the first layer
             if self.storage_manager.contains(keys_multi_layer[0]):
                 continue
@@ -392,7 +392,11 @@ class LMCacheEngine:
 
             assert isinstance(
                 self.gpu_connector,
-                (VLLMPagedMemLayerwiseGPUConnector, VLLMBufferLayerwiseGPUConnector),
+                (
+                    VLLMPagedMemLayerwiseGPUConnector,
+                    VLLMBufferLayerwiseGPUConnector,
+                    SGLangLayerwiseGPUConnector,
+                ),
             )
 
             mem_obj_generator = self.gpu_connector.batched_from_gpu(
@@ -419,7 +423,7 @@ class LMCacheEngine:
     @torch.inference_mode()
     def retrieve(
         self,
-        tokens: torch.Tensor,
+        tokens: Union[torch.Tensor, list[int]],
         mask: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> torch.Tensor:
@@ -453,7 +457,7 @@ class LMCacheEngine:
             num_required_tokens = len(tokens)
         monitor_req_id = self.stats_monitor.on_retrieve_request(num_required_tokens)
 
-        ret_mask = torch.zeros_like(tokens, dtype=torch.bool, device="cpu")
+        ret_mask = torch.zeros(len(tokens), dtype=torch.bool, device="cpu")
 
         reordered_chunks: List[Tuple[CacheEngineKey, MemoryObj, int, int]] = []
         if not self._is_passive():
@@ -490,11 +494,6 @@ class LMCacheEngine:
         retrieved_tokens = torch.sum(ret_mask)
         self.stats_monitor.on_retrieve_finished(monitor_req_id, retrieved_tokens)
         logger.info(
-            f"Retrieved {retrieved_tokens} "
-            f"out of {num_required_tokens} "
-            f"out of total {len(tokens)} tokens"
-        )
-        logger.debug(
             "Retrieved %d out of total %d out of total %d tokens. size: %.4f gb,"
             " cost %.4f ms, throughput: %.4f GB/s;",
             retrieved_tokens,
@@ -510,7 +509,7 @@ class LMCacheEngine:
     @torch.inference_mode()
     def retrieve_layer(
         self,
-        tokens: torch.Tensor,
+        tokens: Union[torch.Tensor, list[int]],
         mask: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> Generator[Optional[torch.Tensor], None, None]:
@@ -543,7 +542,7 @@ class LMCacheEngine:
             num_required_tokens = len(tokens)
         monitor_req_id = self.stats_monitor.on_retrieve_request(num_required_tokens)
 
-        ret_mask = torch.zeros_like(tokens, dtype=torch.bool, device="cpu")
+        ret_mask = torch.zeros(len(tokens), dtype=torch.bool, device="cpu")
 
         starts = []
         ends = []
@@ -582,6 +581,7 @@ class LMCacheEngine:
                 (
                     VLLMPagedMemLayerwiseGPUConnector,
                     VLLMBufferLayerwiseGPUConnector,
+                    SGLangLayerwiseGPUConnector,
                 ),
             )
             mem_obj_consumer = self.gpu_connector.batched_to_gpu(starts, ends, **kwargs)
@@ -593,7 +593,12 @@ class LMCacheEngine:
 
                 assert None not in tasks
 
-                yield None
+                if layer_id == 0:
+                    # NOTE(Yuwei): For sglang integration we need to provide retrieved
+                    # tokens number in the first layer loading since there is no lookup
+                    yield torch.sum(ret_mask)
+                else:
+                    yield None
 
                 mem_objs_layer = [task.result() for task in tasks]
                 mem_obj_consumer.send(mem_objs_layer)
@@ -614,7 +619,7 @@ class LMCacheEngine:
 
         retrieved_tokens = torch.sum(ret_mask)
         self.stats_monitor.on_retrieve_finished(monitor_req_id, retrieved_tokens)
-        logger.debug(
+        logger.info(
             f"Retrieved {retrieved_tokens} "
             f"out of {num_required_tokens} "
             f"out of total {len(tokens)} tokens"
@@ -643,7 +648,9 @@ class LMCacheEngine:
     @_lmcache_nvtx_annotate
     def lookup(
         self,
-        tokens: Union[torch.Tensor, List[int]],
+        tokens: Optional[Union[torch.Tensor, List[int]]] = None,
+        hashes: Optional[List[int]] = None,
+        offsets: Optional[List[int]] = None,
         search_range: Optional[List[str]] = None,
         lookup_id: Optional[str] = None,
         pin: bool = False,
@@ -652,7 +659,12 @@ class LMCacheEngine:
         """
         Checks the existence of KV cache of the tokens from the cache engine.
 
-        :param tokens: the input tokens, with shape [seq_len]
+        :param Optional[Union[torch.Tensor, List[int]]] tokens: the input tokens,
+        with shape [seq_len]
+
+        :param Optional[List[int]] hashes: the input hashes, with length [num_chunks]
+        :param Optional[List[int]] offsets: the offsets of each chunk,
+        with length [num_chunks]
 
         :param Optional[List[str]] search_range: The range of storage backends
         to search in. Should be a subset of
@@ -669,7 +681,14 @@ class LMCacheEngine:
 
         :return: An int indicating how many prefix tokens are cached.
         """
-        self.stats_monitor.on_lookup_request(len(tokens))
+
+        if tokens is not None:
+            self.stats_monitor.on_lookup_request(len(tokens))
+        else:
+            assert offsets is not None
+            assert hashes is not None
+            self.stats_monitor.on_lookup_request(sum(offsets))
+
         try:
             end = 0
             prev_end = 0
@@ -683,7 +702,10 @@ class LMCacheEngine:
             )
 
             for start, end, key in self.token_database.process_tokens(
-                tokens=tokens, request_configs=request_configs
+                tokens=tokens,
+                hashes=hashes,
+                offsets=offsets,
+                request_configs=request_configs,
             ):
                 assert isinstance(key, CacheEngineKey)
 

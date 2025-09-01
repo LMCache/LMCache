@@ -50,7 +50,7 @@ class LookupClientFactory:
                 LMCacheLookupClient,
             )
 
-            return LMCacheLookupClient(vllm_config, config)
+            return LMCacheLookupClient(vllm_config)  # , config)
 
     @staticmethod
     def create_lookup_server(

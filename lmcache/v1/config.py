@@ -126,14 +126,6 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
     },
     "lookup_url": {"type": Optional[str], "default": None, "env_converter": str},
     "distributed_url": {"type": Optional[str], "default": None, "env_converter": str},
-    # Error handling
-    "error_handling": {
-        "type": bool,
-        "default": False,
-        "env_converter": lambda x: x
-        if isinstance(x, bool)
-        else str(x).lower() in ["true", "1"],
-    },
     # Controller configurations
     "enable_controller": {
         "type": bool,
@@ -619,11 +611,6 @@ def _to_dict(self):
     return {name: getattr(self, name) for name in _CONFIG_DEFINITIONS}
 
 
-def _to_json(self):
-    """Serialize the configuration object to a JSON string."""
-    return json.dumps(self.to_dict(), indent=2)
-
-
 def _from_json(cls, json_str: str):
     """Deserialize a JSON string into a configuration object."""
     try:
@@ -632,6 +619,11 @@ def _from_json(cls, json_str: str):
     except json.JSONDecodeError as e:
         logger.error(f"Invalid JSON input: {e}")
         raise
+
+
+def _to_json(self):
+    """Serialize the configuration object to a JSON string."""
+    return json.dumps(self.to_dict(), indent=2)
 
 
 # Create configuration class

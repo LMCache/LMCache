@@ -13,6 +13,7 @@ from utils import (
     dumb_metadata,
     generate_kv_cache_paged_list_tensors,
     generate_tokens,
+    recover_engine_states,
 )
 import pytest
 import torch
@@ -71,11 +72,14 @@ def test_paged_same_retrieve_store(autorelease_v1):
     ret_mask = engine.retrieve(
         tokens, kvcaches=retrieved_cache, slot_mapping=slot_mapping
     )
+    recover_engine_states(engine)
+
     length = torch.sum(ret_mask)
     assert length == 0
     check_paged_kv_cache_equal(retrieved_cache, original_retrieved_cache, slot_mapping)
     """ test store """
     engine.store(tokens=tokens, kvcaches=kv_cache, slot_mapping=slot_mapping)
+    recover_engine_states(engine)
 
     """ Store is async. Need to wait for the store to finish """
     timeout = 1.5
@@ -88,6 +92,8 @@ def test_paged_same_retrieve_store(autorelease_v1):
     ret_mask = engine.retrieve(
         tokens, kvcaches=retrieved_cache, slot_mapping=slot_mapping
     )
+    recover_engine_states(engine)
+
     length = torch.sum(ret_mask)
     assert length == num_tokens
     check_paged_kv_cache_equal(retrieved_cache, kv_cache, slot_mapping)
@@ -155,6 +161,7 @@ def test_paged_retrieve_prefix(
     """ test store """
     t1 = time.perf_counter()
     engine.store(tokens, kvcaches=kv_cache, slot_mapping=slot_mapping)
+    recover_engine_states(engine)
     t2 = time.perf_counter()
     print(f"store {len(tokens)} takes {t2 - t1}")
     """ Compute expected length """
@@ -182,6 +189,7 @@ def test_paged_retrieve_prefix(
         kvcaches=retrieved_cache,
         slot_mapping=torch.cat([slot_mapping, new_slot_mapping]),
     )
+    recover_engine_states(engine)
 
     length = torch.sum(ret_mask)
     t5 = time.perf_counter()
@@ -265,6 +273,8 @@ def test_paged_store_offset(
         mask=mask,
         slot_mapping=slot_mapping[: num_tokens + num_suffix_tokens],
     )
+    recover_engine_states(engine)
+
     """ Compute expected length """
     expected_chunk_cnt = (num_tokens + num_suffix_tokens) // chunk_size
     expected_length = expected_chunk_cnt * chunk_size
@@ -283,6 +293,7 @@ def test_paged_store_offset(
     ret_mask = engine.retrieve(
         tokens, kvcaches=retrieved_cache, slot_mapping=slot_mapping
     )
+    recover_engine_states(engine)
 
     length = torch.sum(ret_mask)
     t5 = time.perf_counter()
@@ -351,6 +362,7 @@ def test_paged_mixed_retrieve(fmt, chunk_size, backend, autorelease_v1):
     """ test store """
     engine.store(tokens, kvcaches=kv_cache, slot_mapping=slot_mapping)
     engine.store(new_tokens, kvcaches=kv_cache, slot_mapping=new_slot_mapping)
+    recover_engine_states(engine)
     """ Store is async. Need to wait for the store to finish """
     expected_chunk_cnt = num_tokens // chunk_size
     expected_length = expected_chunk_cnt * chunk_size
@@ -371,6 +383,7 @@ def test_paged_mixed_retrieve(fmt, chunk_size, backend, autorelease_v1):
         kvcaches=retrieved_cache,
         slot_mapping=torch.cat([slot_mapping, new_slot_mapping]),
     )
+    recover_engine_states(engine)
     length = torch.sum(ret_mask)
     assert length == expected_length
     check_paged_kv_cache_equal(
@@ -390,6 +403,7 @@ def test_paged_mixed_retrieve(fmt, chunk_size, backend, autorelease_v1):
     ret_mask = engine.retrieve(
         new_tokens, kvcaches=retrieved_cache, slot_mapping=new_slot_mapping
     )
+    recover_engine_states(engine)
     length = torch.sum(ret_mask)
     assert length == expected_length
     check_paged_kv_cache_equal(
@@ -403,6 +417,7 @@ def test_paged_mixed_retrieve(fmt, chunk_size, backend, autorelease_v1):
         kvcaches=kv_cache,
         slot_mapping=torch.cat([slot_mapping, new_slot_mapping]),
     )
+    recover_engine_states(engine)
 
     """Wait until store finishes"""
     expected_length = num_tokens + new_num_tokens
@@ -422,6 +437,7 @@ def test_paged_mixed_retrieve(fmt, chunk_size, backend, autorelease_v1):
         kvcaches=retrieved_cache,
         slot_mapping=torch.cat([slot_mapping, new_slot_mapping]),
     )
+    recover_engine_states(engine)
     length = torch.sum(ret_mask)
     assert length == expected_length
 
@@ -477,6 +493,7 @@ def test_paged_store_kv_tensors_mask(fmt, autorelease_v1):
     )
     """ Store some tokens with mask """
     engine.store(tokens, kvcaches=kv_cache, slot_mapping=slot_mapping)
+    recover_engine_states(engine)
     """Wait until store finishes"""
     timeout = 1
     start_time = time.time()
@@ -500,6 +517,7 @@ def test_paged_store_kv_tensors_mask(fmt, autorelease_v1):
         kvcaches=kv_cache,
         slot_mapping=torch.cat([slot_mapping, new_slot_mapping]),
     )
+    recover_engine_states(engine)
     """Wait until store finishes"""
     start_time = time.time()
     while engine.lookup(final_tokens) < num_tokens + new_num_tokens:
@@ -520,6 +538,7 @@ def test_paged_store_kv_tensors_mask(fmt, autorelease_v1):
         kvcaches=retrieved_cache,
         slot_mapping=torch.cat([slot_mapping, new_slot_mapping]),
     )
+    recover_engine_states(engine)
     length = torch.sum(ret_mask)
     expected_length = num_tokens + new_num_tokens
     assert length == expected_length
@@ -543,6 +562,7 @@ def test_paged_store_kv_tensors_mask(fmt, autorelease_v1):
         kvcaches=retrieved_cache,
         slot_mapping=torch.cat([slot_mapping, new_slot_mapping]),
     )
+    recover_engine_states(engine)
     length = torch.sum(ret_mask)
     full_length = num_tokens + new_num_tokens
     expected_length = full_length - num_falses
@@ -568,6 +588,7 @@ def test_paged_store_kv_tensors_mask(fmt, autorelease_v1):
             kvcaches=retrieved_cache,
             slot_mapping=torch.cat([slot_mapping, new_slot_mapping]),
         )
+        recover_engine_states(engine)
 
 
 @pytest.mark.parametrize("fmt", ["vllm"])
@@ -638,6 +659,7 @@ def test_paged_hierarchy_retrieve(
     """ test store """
     t1 = time.perf_counter()
     engine.store(tokens, kvcaches=kv_cache, slot_mapping=slot_mapping)
+    recover_engine_states(engine)
     t2 = time.perf_counter()
     print(f"store {len(tokens)} takes {t2 - t1}")
     """ Compute expected length """
@@ -677,6 +699,7 @@ def test_paged_hierarchy_retrieve(
         kvcaches=retrieved_cache,
         slot_mapping=torch.cat([slot_mapping, new_slot_mapping]),
     )
+    recover_engine_states(engine)
 
     length = torch.sum(ret_mask)
     t5 = time.perf_counter()
@@ -760,6 +783,7 @@ def test_paged_prefetch_retrieve(backend, prefetch_from, autorelease_v1):
     """ test store """
     t1 = time.perf_counter()
     engine.store(tokens, kvcaches=kv_cache, slot_mapping=slot_mapping)
+    recover_engine_states(engine)
     t2 = time.perf_counter()
     print(f"store {len(tokens)} takes {t2 - t1}")
     """ Compute expected length """
@@ -788,7 +812,9 @@ def test_paged_prefetch_retrieve(backend, prefetch_from, autorelease_v1):
         timeout = 60
         start_time = time.time()
         while (
-            engine.lookup(torch.cat([tokens, new_tokens]), ["LocalCPUBackend"])
+            engine.lookup(
+                torch.cat([tokens, new_tokens]), search_range=["LocalCPUBackend"]
+            )
             < expected_length
         ):
             if time.time() - start_time > timeout:
@@ -797,11 +823,14 @@ def test_paged_prefetch_retrieve(backend, prefetch_from, autorelease_v1):
         engine.storage_manager.storage_backends["LocalDiskBackend"].dict.clear()
     """ test retrieve """
     t4 = time.perf_counter()
+    # import pdb;pdb.set_trace()
+    # engine.lookup(torch.cat([tokens, new_tokens]), ["LocalCPUBackend"])
     ret_mask = engine.retrieve(
         torch.cat([tokens, new_tokens]),
         kvcaches=retrieved_cache,
         slot_mapping=torch.cat([slot_mapping, new_slot_mapping]),
     )
+    recover_engine_states(engine)
 
     length = torch.sum(ret_mask)
     t5 = time.perf_counter()
@@ -868,6 +897,7 @@ def test_paged_mem_leak(fmt, chunk_size, backend, lmserver_v1_process, autorelea
     )
 
     engine.store(tokens, kvcaches=kv_cache, slot_mapping=slot_mapping)
+    recover_engine_states(engine)
 
     expected_length = 2000
     timeout = 30

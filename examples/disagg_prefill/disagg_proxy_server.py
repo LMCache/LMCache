@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from collections import defaultdict
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Optional
@@ -152,7 +153,7 @@ app.state.decode_clients = []
 app.state.total_clients = []
 
 # Keep finished reqs
-app.state.finished_reqs = set()
+app.state.finished_reqs = defaultdict(int)
 
 
 zmq_ctx = zmq.asyncio.Context()
@@ -170,7 +171,7 @@ async def zmq_pull_server():
             msg_bytes = await socket.recv()
             msg = msgspec.msgpack.decode(msg_bytes, type=NixlMsg)
             req_id = msg.req_id
-            app.state.finished_reqs.add(req_id)
+            app.state.finished_reqs[req_id] += 1
             logger.debug(f"Prefill of req {req_id} done.")
         except zmq.Again:
             await asyncio.sleep(0.01)  # Avoid busy loop
@@ -214,11 +215,11 @@ def round_robin_pick_client(clients, idx):
     return clients[idx % len(clients)]
 
 
-async def wait_decode_kv_ready(req_id: str):
-    while req_id not in app.state.finished_reqs:
+async def wait_decode_kv_ready(req_id: str, num_tp_rank: int):
+    while app.state.finished_reqs[req_id] < num_tp_rank:
         await asyncio.sleep(0.0001)  # sleep for 0.1 ms
     logger.debug(f"Prefill node signaled kv ready for req {req_id}")
-    app.state.finished_reqs.remove(req_id)
+    app.state.finished_reqs.pop(req_id)
 
 
 @app.post("/v1/completions")
@@ -251,6 +252,7 @@ async def handle_completions(request: Request):
             "receiver_init_port": decode_client.init_port,
             "receiver_alloc_port": decode_client.alloc_port,
         }
+        num_tp_rank = len(decode_client.init_port)
 
         req_data["kv_transfer_params"] = {
             "ret_first_tok": True,
@@ -301,7 +303,7 @@ async def handle_completions(request: Request):
             ).encode()
 
             # Wait until decode node signals that kv is ready
-            await wait_decode_kv_ready(req_id)
+            await wait_decode_kv_ready(req_id, num_tp_rank)
 
             async for chunk in stream_service_response(
                 decode_client.client, "/v1/completions", req_data

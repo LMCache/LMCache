@@ -1,12 +1,12 @@
 .. _internal_api_server:
 
 Configuring the Internal API Server
-==================================
+====================================
 
 The ``internal_api_server`` provides APIs for managing the LMCache engine. Below are the configuration options and usage examples.
 
 Configuration Parameters
----------------------------------------
+------------------------
 
 The following parameters can be configured in the YAML file:
 
@@ -77,8 +77,10 @@ You can test the server by querying the relevant endpoints.
 
     {'is_first_rank': True, 'model_version': (27, 1, 64, 1, 576), 'LocalCPUBackend.use_hot': False}
 
-`scratch.py`
+`scratch.py`:
+
 .. code-block:: python
+    
     # Get cache_engine from app.state
     lmcache_engine = app.state.lmcache_adapter.lmcache_engine
 

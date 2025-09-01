@@ -158,8 +158,8 @@ LMCache with vLLM v0
 Setup using Docker
 ------------------
 
-Prerequisites
-~~~~~~~~~~~~~
+Docker Prerequisites
+~~~~~~~~~~~~~~~~~~~~
 
 - Docker Engine 27.0+
 
