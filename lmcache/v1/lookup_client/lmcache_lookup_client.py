@@ -126,7 +126,7 @@ class LMCacheLookupClient(LookupClientInterface):
             result = int.from_bytes(resp, "big")
             results.append(result)
 
-        if not all(x == results[0] for x in results):
+        if len(set(results)) > 1:
             logger.error(
                 f"Lookup results (number of hit tokens) differ "
                 f"across tensor parallel ranks: {results}."
