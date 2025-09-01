@@ -126,12 +126,15 @@ class LMCacheLookupClient(LookupClientInterface):
             result = int.from_bytes(resp, "big")
             results.append(result)
 
-        if not all(x == results[0] for x in results):
-            raise RuntimeError(
+        if len(set(results)) > 1:
+            logger.warning(
                 f"Lookup results (number of hit tokens) differ "
                 f"across tensor parallel ranks: {results}."
             )
-        return results[0]
+        # NOTE: it is possible that the number of hit tokens is different
+        # across TP ranks, so we can use the minimum value as the
+        # number of hit tokens.
+        return min(results)
 
     def supports_producer_reuse(self) -> bool:
         """Return True as LMCacheLookupClient supports producer kvcache reuse"""
