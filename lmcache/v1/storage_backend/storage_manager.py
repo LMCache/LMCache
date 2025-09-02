@@ -327,6 +327,45 @@ class StorageManager:
             if perform_prefetch:
                 logger.debug(f"Prefetching key {key} in backend {backend_name}")
                 break
+    
+    async def async_lookup_and_prefetch(
+        self,
+        req_id: str,
+        keys: list[CacheEngineKey],
+        search_range: Optional[list[str]] = None,
+        pin: bool = False,
+        **kwargs,
+    ):
+        """
+
+        starts
+        ends
+        potentially other args
+        """
+        for backend_name, backend in self.storage_backends.items():
+            if search_range and backend_name not in search_range:
+                continue
+
+            # NOTE(Jiayi): We do not pin for NixlBackend
+            if backend_name == "NixlBackend":
+                pin = False
+
+            if backend.contains(key, pin):
+                return backend_name
+
+        return None
+
+        # NOTE(Jiayi): Currently, the retrieval pattern is always
+        # prefix-based. That is, we retrieve 0-t1 tokens from backend 1
+        # and retrieve t1-t2 tokens from backend 2, etc.
+        # TODO(Jiayi): We need to change/optimize this for non-prefix
+        # based retrieval patterns or cases where middle chunks are missing.
+        end = 0
+        for backend_name, backend in self.storage_backends.items():
+            if search_range and backend_name not in search_range:
+                continue
+
+
 
     # TODO(Jiayi): Currently, search_range is only used for testing.
     def contains(

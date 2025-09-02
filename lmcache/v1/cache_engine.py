@@ -829,12 +829,56 @@ class LMCacheEngine:
         logger.debug(f"Moving {num_tokens} token from {old_position} to {new_position}")
         return num_tokens
 
+    # TODO(Jiayi): Add p2p + async lookup support.
+    # TODO(Jiayi): Add layerwise support.
+    # FIXME: support pin
+    @_lmcache_nvtx_annotate
+    async def async_lookup_and_prefetch(
+        self,
+        req_id: str,
+        tokens: Optional[Union[torch.Tensor, List[int]]] = None,
+        hashes: Optional[List[int]] = None,
+        offsets: Optional[List[int]] = None,
+        search_range: Optional[List[str]] = None,
+        lookup_id: Optional[str] = None,
+        pin: bool = False,
+        request_configs: Optional[dict] = None,
+    ) -> None:
+        """
+        An async version of lookup + prefetch.
+
+        StorageBackends in StorageManager is expected to manage
+        only the async lookup
+        Also, there are three categories of backends:
+        (1) sync lookup + sync retrieval (e.g., cpu)
+        (2) sync lookup + async retreival (e.g., disk)
+        (3) async lookup + async retrieval (e.g., p2p)
+        """
+
+        starts = []
+        ends = []
+        keys = []
+        
+        # TODO(Jiayi): make token database able to return list.
+        for start, end, key in self.token_database.process_tokens(
+            tokens=tokens,
+            hashes=hashes,
+            offsets=offsets,
+            request_configs=request_configs,
+        ):
+            assert isinstance(key, CacheEngineKey)
+            starts.append(start)
+            ends.append(end)
+            keys.append(key)
+
+        self.storage_manager.async_lookup_and_prefetch(
+            req_id, keys, search_range, pin, starts=starts, ends=ends)
+
+
+
     # TODO(Jiayi): Need to handle the case where `tokens=None`.
     # In this case, we compress all tokens.
     # TODO(Jiayi): support other compression methods.
-    # TODO(Jiayi): support decompression.
-    # TODO(Jiayi): support loading with automatic decompression with
-    # sth like `mem_obj.post_process()`
     @_lmcache_nvtx_annotate
     def compress(
         self,
