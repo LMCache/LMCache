@@ -21,7 +21,7 @@ Install Stable LMCache from PyPI
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 The simplest way to install the latest stable release of LMCache is through PyPI. If you
-require a torch version that lmcache was not built with (symbol undefined error), please
+require a torch version that LMCache was not built with (symbol undefined error), please
 follow the install from source instructions below. 
 
 .. code-block:: bash
@@ -31,25 +31,23 @@ follow the install from source instructions below.
 
 **Compatibility Matrix:** 
 
-This compatibility matrix accounts for dependencies as well as connector API changes. Please raise an issue on github if you encounter any incompatibilities.
+This compatibility matrix accounts for dependencies as well as connector API changes. Please raise an issue on GitHub if you encounter any incompatibilities.
 
-.. table::
+.. csv-table::
+   :header: "", "LMCache 0.3.5 (Aug 28)", "LMCache 0.3.4 (Aug 24)", "LMCache 0.3.3 (Aug 1)", "LMCache 0.3.2 (Jul 14)", "LMCache 0.3.1 (June 25)", "LMCache 0.3.0 (May 28)"
+   :widths: 20, 15, 15, 15, 15, 15, 15
 
-    +---------------+---------------+---------------+---------------+---------------+---------------+---------------+
-    |               | LMCache 0.3.5 | LMCache 0.3.4 | LMCache 0.3.3 | LMCache 0.3.2 | LMCache 0.3.1 | LMCache 0.3.0 |
-    +===============+===============+===============+===============+===============+===============+===============+
-    | vLLM 0.10.1.x | ✅            | ❌            | ✅            | ✅            | ✅            | ❌            |
-    +---------------+---------------+---------------+---------------+---------------+---------------+---------------+
-    | vLLM 0.10.0.x | ✅            | ❌            | ✅            | ✅            | ✅            | ❌            |
-    +---------------+---------------+---------------+---------------+---------------+---------------+---------------+
-    | vLLM 0.9.2.x  | ✅            | ❌            | ✅            | ✅            | ✅            | ❌            |
-    +---------------+---------------+---------------+---------------+---------------+---------------+---------------+
-    | vLLM 0.9.1.x  | ✅            | ❌            | ✅            | ✅            | ❌            | ❌            |
-    +---------------+---------------+---------------+---------------+---------------+---------------+---------------+
-    | vLLM 0.9.0.x  | ✅            | ❌            | ✅            | ✅            | ❌            | ❌            |
-    +---------------+---------------+---------------+---------------+---------------+---------------+---------------+
-    | vLLM 0.8.5.x  | ✅            | ❌            | ✅            | ✅            | ❌            | ✅            |
-    +---------------+---------------+---------------+---------------+---------------+---------------+---------------+
+   "vLLM 0.10.1.x (Aug 19)", "✅", "❌", "✅", "✅", "✅", "❌"
+   "vLLM 0.10.0.x (Jul 24)", "✅", "❌", "✅", "✅", "✅", "❌"
+   "vLLM 0.9.2.x (Jul 3)", "✅", "❌", "✅", "✅", "✅", "❌"
+   "vLLM 0.9.1.x (June 10)", "✅", "❌", "✅", "✅", "❌", "❌"
+   "vLLM 0.9.0.x (May 14)", "✅", "❌", "✅", "✅", "❌", "❌"
+   "vLLM 0.8.5.x (Apr 28)", "✅", "❌", "✅", "✅", "❌", "✅"
+
+
+Notable Change List: 
+
+* June 30: vLLM Cached Req Scheduler Output Changes https://github.com/vllm-project/vllm/pull/20232 and https://github.com/vllm-project/vllm/pull/20291
 
 
 Install Latest LMCache from TestPyPI
@@ -59,8 +57,8 @@ TestPyPI wheels are continually built from the latest LMCache source code (not o
 
 .. code-block:: bash
 
-    # by default, this will port the version of torch of the latest *NIGHTLY* vllm wheel
-    # If you require a torch version that lmcache was not built with (symbol undefined error), please
+    # by default, this will port the version of torch of the latest *NIGHTLY* VLLM wheel
+    # If you require a torch version that LMCache was not built with (symbol undefined error), please
     # follow the install from source instructions below. 
     pip install --index-url https://pypi.org/simple --extra-index-url https://test.pypi.org/simple lmcache==0.3.4.dev61
 
@@ -86,7 +84,7 @@ To install from source, clone the repository and install in editable mode.
 `--no-build-isolation` bypasses `PEP 517 <https://peps.python.org/pep-0517/>`_ / `PEP 518 <https://peps.python.org/pep-0518/>`_
 avoiding a potential issue where LMCache's kernels are compiled with `torch.utils.cuda_extension` or `torch.utils.hipify`
 inside of `setup.py` with one torch version while during runtime, the version of torch differs across major versions 
-(which is possible because lmcache intentionally has an unpinned torch version in `requirements/common.txt`), causing 
+(which is possible because LMCache intentionally has an unpinned torch version in `requirements/common.txt`), causing 
 linker issues that will show up as undefined symbol references.
 
 .. code-block:: bash
@@ -94,7 +92,7 @@ linker issues that will show up as undefined symbol references.
     git clone https://github.com/LMCache/LMCache.git
     cd LMCache
 
-    # install these packages because avoiding build isolation
+    # Need to install these packages manually since in order to avoid build isolation
     pip install -r requirements/build.txt
 
     # Option 1. 
@@ -114,7 +112,7 @@ linker issues that will show up as undefined symbol references.
 Install LMCache with uv
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
-We recommend developers to use `uv` for faster package management:
+We recommend developers to use `uv` for faster package management.
 
 .. code-block:: bash
 
@@ -124,7 +122,7 @@ We recommend developers to use `uv` for faster package management:
     uv venv --python 3.12
     source .venv/bin/activate
 
-    # install these packages because avoiding build isolation
+    # Need to install these packages manually since in order to avoid build isolation
     uv pip install -r requirements/build.txt
 
     # Option 1. 
