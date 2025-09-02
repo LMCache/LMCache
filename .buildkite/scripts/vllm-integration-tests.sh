@@ -148,11 +148,11 @@ run_lmcache_vllmopenai_container() {
     )
     cmd_args+=("${vllm_cli_args[@]}")
     if "$is_prefiller"; then
-        cmd_args+=("--port $PORT1")
+        cmd_args+=("--port" "$PORT1")
     elif "$is_decoder"; then
-        cmd_args+=("--port $PORT2")
+        cmd_args+=("--port" "$PORT2")
     else
-        cmd_args+=("--port $PORT")
+        cmd_args+=("--port" "$PORT")
     fi
 
     # Start docker
