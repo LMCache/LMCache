@@ -135,6 +135,7 @@ Documentation
    developer_guide/contributing
    developer_guide/docker_file
    developer_guide/usage/index
+   developer_guide/plugin_framework
 
 :raw-html:`<br />`
 
