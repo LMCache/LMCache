@@ -300,7 +300,7 @@ class TensorMemoryObj(MemoryObj):
         self,
         raw_data: torch.Tensor,
         metadata: MemoryObjMetadata,
-        parent_allocator: Optional["MemoryAllocatorInterface"],
+        parent_allocator: Optional["MemoryAllocatorInterface"] = None,
     ):
         assert metadata.dtype is not None, "dtype must be specified for TensorMemoryObj"
         self.raw_data = raw_data
