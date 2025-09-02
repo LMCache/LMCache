@@ -322,7 +322,7 @@ for cfg_name in "${CONFIG_NAMES[@]}"; do
             PORT1=$(find_available_port 8100)
             docker_args="$(yq '.docker1' "$cfg_file")"
             vllm_args="$(yq '.vllm1' "$cfg_file")"
-            run_lmcache_vllmopenai_container "$docker_args" "$vllm_args" "$cfg_name"+"_prefiller"
+            run_lmcache_vllmopenai_container "$docker_args" "$vllm_args" "${cfg_name}_prefiller"
 
             # Start decoder
             PORT2=$(find_available_port 8200)
