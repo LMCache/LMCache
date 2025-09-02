@@ -328,7 +328,7 @@ for cfg_name in "${CONFIG_NAMES[@]}"; do
             PORT2=$(find_available_port 8200)
             docker_args="$(yq '.docker2' "$cfg_file")"
             vllm_args="$(yq '.vllm2' "$cfg_file")"
-            run_lmcache_vllmopenai_container "$docker_args" "$vllm_args" "$cfg_name"+"_decoder"
+            run_lmcache_vllmopenai_container "$docker_args" "$vllm_args" "${cfg_name}_decoder"
 
             # Start proxy
             python3 "$ORIG_DIR/examples/disagg_prefill/disagg_proxy_server.py" --port $PORT --prefiller-port $PORT1 --decoder-port $PORT2 --decoder-init-port "$(yq '.docker2.init-port' "$cfg_file")" --decoder-alloc-port "$(yq '.docker2.alloc-port' "$cfg_file")" --proxy-port "$(yq '.docker1.proxy-port' "$cfg_file")" > "/tmp/build_${BUILD_ID}_${cfg_name}_proxy.log" 2>&1 &
