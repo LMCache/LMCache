@@ -1,5 +1,6 @@
 buildkite-test-collector
 pytest>=7.0,<8.5  # avoid some plugins breaking in 8.x
+pytest-asyncio>=0.21.0  # For async test support
 pytest-benchmark
 pytest-benchmark[histogram]
 pytest-cov
