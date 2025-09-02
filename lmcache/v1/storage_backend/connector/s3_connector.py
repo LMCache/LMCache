@@ -497,6 +497,7 @@ class S3Connector(RemoteConnector):
             raise
         finally:
             self.inflight_sema.release()
+            self.adhoc_shm_manager.free(send_path, shm)
             logger.debug(f"Uploaded {key_str} to S3 successfully")
 
     async def list(self) -> List[str]:
