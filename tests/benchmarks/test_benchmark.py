@@ -1,71 +1,215 @@
 # SPDX-License-Identifier: Apache-2.0
+# Standard
+import random
+
 # Third Party
+from utils import (
+    create_gpu_connector,
+    dumb_metadata,
+    generate_kv_cache_paged_list_tensors,
+    generate_tokens,
+)
 import pytest
 import torch
 
 # First Party
-from lmcache.config import LMCacheEngineConfig, LMCacheEngineMetadata
-from lmcache.storage_backend.serde.cachegen_decoder import CacheGenDeserializer
-from lmcache.storage_backend.serde.cachegen_encoder import CacheGenSerializer
+from lmcache.utils import mock_up_broadcast_fn, mock_up_broadcast_object_fn
+from lmcache.v1.cache_engine import LMCacheEngineBuilder
+from lmcache.v1.config import LMCacheEngineConfig
 
 
-def generate_kv_cache(num_tokens, fmt, device):
-    ret = []
-    num_layers = 32
+# helper functions
+def generate_random_slot_mapping(num_blocks, block_size, num_tokens, device):
+    slot_mapping = random.sample(range(0, num_blocks * block_size), num_tokens)
+    return torch.tensor(slot_mapping, device=device)
+
+
+# test store 100GB data
+@pytest.mark.no_shared_allocator
+@pytest.mark.benchmark(group="store")
+def test_store_100GB(benchmark, autorelease_v1):
+    # model-related metadatas
     num_heads = 8
-    head_size = 128
-    shape = (
-        [num_tokens, num_heads, head_size]
-        if fmt == "vllm"
-        else [num_heads, num_tokens, head_size]
+    head_dim = 128
+    num_layers = 32
+    dtype = torch.bfloat16
+
+    # lmcache and vllm configs
+    device = "cuda"
+    fmt = "vllm"
+    num_tokens = 10000
+
+    num_blocks = 12500
+    block_size = 16
+
+    chunk_size = 256
+    kv_shape = (num_layers, 2, chunk_size, num_heads, head_dim)
+
+    # Test configs
+    num_requests = 80
+
+    # Initialize related modules
+    connector = create_gpu_connector(num_heads * head_dim, num_layers)
+    kv_cache = generate_kv_cache_paged_list_tensors(
+        num_blocks, device, block_size, dtype
     )
-    dtype = torch.bfloat16 if fmt == "vllm" else torch.float16
 
-    for i in range(num_layers):
-        k = torch.rand(shape, dtype=dtype, device=device)
-        v = torch.rand(shape, dtype=dtype, device=device)
-        ret.append((k, v))
+    list_tokens = [generate_tokens(num_tokens, device) for _ in range(num_requests)]
 
-    return tuple(ret)
+    list_slot_mappings = [
+        generate_random_slot_mapping(num_blocks, block_size, num_tokens, device)
+        for _ in range(num_requests)
+    ]
 
+    # TODO: Rewrite the config generation to another helper function
+    cfg = LMCacheEngineConfig.from_legacy(chunk_size=chunk_size, backend="cpu")
 
-def to_blob(kv_tuples):
-    return torch.stack(
-        [torch.stack(inner_tuple, dim=0) for inner_tuple in kv_tuples], dim=0
+    engine = autorelease_v1(
+        LMCacheEngineBuilder.get_or_create(
+            "test",
+            cfg,
+            dumb_metadata(fmt, kv_shape),
+            connector,
+            mock_up_broadcast_fn,
+            mock_up_broadcast_object_fn,
+        )
     )
 
+    # Run benchmark
+    def run_func():
+        for t, s in zip(list_tokens, list_slot_mappings):
+            engine.store(t, kvcaches=kv_cache, slot_mapping=s)
 
-# @pytest.mark.parametrize("chunk_size", [64, 256, 768])
-# @pytest.mark.parametrize("fmt", ["vllm", "huggingface"])
-# def test_cachegen_encoder_bench(benchmark, chunk_size, fmt):
-#    fmt = "vllm"
-#    config = LMCacheEngineConfig.from_defaults(chunk_size = chunk_size)
-#    metadata = LMCacheEngineMetadata(
-# model_name = "mistralai/Mistral-7B-Instruct-v0.2",
-# world_size = 1, worker_id = 0, fmt = fmt)
-#    serializer = CacheGenSerializer(config, metadata)
-#
-#    kv = to_blob(generate_kv_cache(chunk_size, fmt, "cuda"))
-#
-#    benchmark(serializer.to_bytes, kv)
+    benchmark.pedantic(run_func, rounds=1, iterations=1)
 
 
-@pytest.mark.parametrize("fmt", ["vllm", "huggingface"])
-@pytest.mark.parametrize("chunk_size", [64, 256, 768])
-def test_cachegen_decoder_bench(benchmark, fmt, chunk_size):
-    config = LMCacheEngineConfig.from_defaults(chunk_size=chunk_size)
-    metadata = LMCacheEngineMetadata(
-        model_name="mistralai/Mistral-7B-Instruct-v0.2",
-        world_size=1,
-        worker_id=0,
-        fmt=fmt,
-        kv_dtype=torch.bfloat16,
-        kv_shape=None,
+# Test retrieve 100GB data (10 rounds, each round 10GB, 100% hit)
+@pytest.mark.no_shared_allocator
+@pytest.mark.benchmark(group="retrieve")
+def test_retrieve_100GB_allhit(benchmark, autorelease_v1):
+    # model-related metadatas
+    num_heads = 8
+    head_dim = 128
+    num_layers = 32
+    dtype = torch.bfloat16
+
+    # lmcache and vllm configs
+    device = "cuda"
+    fmt = "vllm"
+    num_tokens = 10000
+
+    num_blocks = 12500
+    block_size = 16
+
+    chunk_size = 256
+    kv_shape = (num_layers, 2, chunk_size, num_heads, head_dim)
+
+    # Test configs
+    num_requests = 8
+
+    # Initialize related modules
+    connector = create_gpu_connector(num_heads * head_dim, num_layers)
+    kv_cache = generate_kv_cache_paged_list_tensors(
+        num_blocks, device, block_size, dtype
     )
-    serializer = CacheGenSerializer(config, metadata)
-    deserializer = CacheGenDeserializer(config, metadata, torch.bfloat16)
 
-    kv = to_blob(generate_kv_cache(chunk_size, fmt, "cuda"))
-    output = serializer.to_bytes(kv)
+    list_tokens = [generate_tokens(num_tokens, device) for _ in range(num_requests)]
 
-    benchmark(deserializer.from_bytes, output)
+    list_slot_mappings = [
+        generate_random_slot_mapping(num_blocks, block_size, num_tokens, device)
+        for _ in range(num_requests)
+    ]
+
+    # TODO: Rewrite the config generation to another helper function
+    cfg = LMCacheEngineConfig.from_defaults(
+        chunk_size=chunk_size, max_local_cpu_size=12
+    )
+
+    engine = autorelease_v1(
+        LMCacheEngineBuilder.get_or_create(
+            "test",
+            cfg,
+            dumb_metadata(fmt, kv_shape),
+            connector,
+            mock_up_broadcast_fn,
+            mock_up_broadcast_object_fn,
+        )
+    )
+
+    for t, s in zip(list_tokens, list_slot_mappings):
+        engine.store(t, kvcaches=kv_cache, slot_mapping=s)
+
+    # Run benchmark
+    def run_func():
+        # TODO: remove the hard-code here
+        for i in range(10):
+            for t, s in zip(list_tokens, list_slot_mappings):
+                engine.retrieve(t, kvcaches=kv_cache, slot_mapping=s)
+
+    benchmark.pedantic(run_func, rounds=1, iterations=1)
+
+
+# Test lookup 10K * 10 requests, 100% hit
+@pytest.mark.no_shared_allocator
+@pytest.mark.benchmark(group="lookup")
+def test_lookup_10reqs_10Ktokens(benchmark, autorelease_v1):
+    # model-related metadatas
+    num_heads = 8
+    head_dim = 128
+    num_layers = 32
+    dtype = torch.bfloat16
+
+    # lmcache and vllm configs
+    device = "cuda"
+    fmt = "vllm"
+    num_tokens = 10000
+
+    num_blocks = 12500
+    block_size = 16
+
+    chunk_size = 256
+    kv_shape = (num_layers, 2, chunk_size, num_heads, head_dim)
+
+    # Test configs
+    num_requests = 10
+
+    # Initialize related modules
+    connector = create_gpu_connector(num_heads * head_dim, num_layers)
+    kv_cache = generate_kv_cache_paged_list_tensors(
+        num_blocks, device, block_size, dtype
+    )
+
+    list_tokens = [generate_tokens(num_tokens, device) for _ in range(num_requests)]
+
+    list_slot_mappings = [
+        generate_random_slot_mapping(num_blocks, block_size, num_tokens, device)
+        for _ in range(num_requests)
+    ]
+
+    # TODO: Rewrite the config generation to another helper function
+    cfg = LMCacheEngineConfig.from_defaults(
+        chunk_size=chunk_size, max_local_cpu_size=15
+    )
+
+    engine = autorelease_v1(
+        LMCacheEngineBuilder.get_or_create(
+            "test",
+            cfg,
+            dumb_metadata(fmt, kv_shape),
+            connector,
+            mock_up_broadcast_fn,
+            mock_up_broadcast_object_fn,
+        )
+    )
+
+    for t, s in zip(list_tokens, list_slot_mappings):
+        engine.store(t, kvcaches=kv_cache, slot_mapping=s)
+
+    # Run benchmark
+    def run_func():
+        # TODO: remove the hard-code here
+        for t, s in zip(list_tokens, list_slot_mappings):
+            engine.lookup(t)
+
+    # Repeat for 10 iterations
+    benchmark.pedantic(run_func, rounds=10, iterations=1)
