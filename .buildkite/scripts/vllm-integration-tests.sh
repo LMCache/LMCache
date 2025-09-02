@@ -97,9 +97,16 @@ run_lmcache_vllmopenai_container() {
     local cfg_name="$3"
     LOGFILE="/tmp/build_${BUILD_ID}_${cfg_name}.log"
 
-    # Pick the GPU with the largest free memory
-    source "$ORIG_DIR/.buildkite/scripts/pick-free-gpu.sh" $PORT
-    best_gpu="${CUDA_VISIBLE_DEVICES}"
+    # Determine CUDA_VISIBLE_DEVICES
+    if yq -e 'has("proxy-port")' >/dev/null 2>&1 <<<"$docker"; then
+        best_gpu=0
+    elif yq -e 'has("init-port")' >/dev/null 2>&1 <<<"$docker"; then
+        best_gpu=1
+    else
+        # Pick the GPU with the largest free memory
+        source "$ORIG_DIR/.buildkite/scripts/pick-free-gpu.sh"
+        best_gpu="${CUDA_VISIBLE_DEVICES}"
+    fi
 
     # docker args
     docker_args=(
@@ -110,11 +117,18 @@ run_lmcache_vllmopenai_container() {
         --env VLLM_USE_FLASHINFER_SAMPLER=0
         --env HF_TOKEN="$HF_TOKEN"
     )
-    while IFS= read -r line; do
-        key="${line%%:*}" 
-        val="${line#*:}"
-        docker_args+=(--"$key" "$val")
-    done < <(yq -r 'to_entries[] | .key as $k | .value[] | "\($k):\(. )"' <<<"$docker")
+    while IFS= read -r e; do
+        [[ -n $e ]] && docker_args+=(--env "$e")
+    done < <(yq -r '.env[]?' <<<"$docker")
+    if proxy=$(yq -er '."proxy-port"' <<<"$docker" 2>/dev/null); then
+        docker_args+=(--env LMCACHE_NIXL_PROXY_PORT "$proxy")
+    fi
+    if init=$(yq -er '."init-port"' <<<"$docker" 2>/dev/null); then
+        docker_args+=(--env LMCACHE_NIXL_PEER_INIT_PORT "$init")
+    fi
+    if alloc=$(yq -er '."alloc-port"' <<<"$docker" 2>/dev/null); then
+        docker_args+=(--env LMCACHE_NIXL_PEER_ALLOC_PORT "$alloc")
+    fi
 
     # vllm args
     vllm_model="$(yq -r '.model' <<<"$vllm_args")"
@@ -122,23 +136,32 @@ run_lmcache_vllmopenai_container() {
     cmd_args=(
         lmcache/vllm-openai:build-latest
         "$vllm_model"
-        --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}'
-        --port "$PORT"
     )
     cmd_args+=("${vllm_cli_args[@]}")
+    if yq -e 'has("proxy-port")' >/dev/null 2>&1 <<<"$docker"; then
+        cmd_args+=("--port $PORT1")
+    elif yq -e 'has("init-port")' >/dev/null 2>&1 <<<"$docker"; then
+        cmd_args+=("--port $PORT2")
+    else
+        cmd_args+=("--port $PORT")
+    fi
 
+    # Start docker
     CID=$(
         docker run -d \
             "${docker_args[@]}" \
             "${cmd_args[@]}"
     )
 
+    # Health check
     wait_for_openai_api_server
 
+    # Logging
     touch "$LOGFILE"
     docker logs -f "$CID" >>"$LOGFILE" 2>&1 &
     LOG_PID=$!
 
+    # Health check
     end=$((SECONDS + 120))
     while [ $SECONDS -lt $end ]; do
         if grep -qi 'Starting vLLM API server' "$LOGFILE"; then
@@ -147,7 +170,6 @@ run_lmcache_vllmopenai_container() {
         fi
         sleep 1
     done
-
     if [ $SECONDS -ge $end ]; then
         echo "Timeout waiting for startup marker, dumping full log:"
         cat "$LOGFILE"
@@ -294,11 +316,30 @@ for cfg_name in "${CONFIG_NAMES[@]}"; do
     echo -e "\033[1;33m===== Testing LMCache with ${cfg_name} =====\033[0m"
     cfg_file="${CONFIG_DIR}/${cfg_name}"
 
-    # Start server
-    docker_args="$(yq '.docker' "$cfg_file")"
-    vllm_args="$(yq '.vllm' "$cfg_file")"
-    run_lmcache_vllmopenai_container "$docker_args" "$vllm_args" "$cfg_name"
+    if router_type=$(yq -r '.router.type' "$cfg_file"); then
+        if [[ $router_type == pd ]]; then
+            # Start prefiller
+            PORT1=$(find_available_port 8100)
+            docker_args="$(yq '.docker1' "$cfg_file")"
+            vllm_args="$(yq '.vllm1' "$cfg_file")"
+            run_lmcache_vllmopenai_container "$docker_args" "$vllm_args" "$cfg_name"+"_prefiller"
 
+            # Start decoder
+            PORT2=$(find_available_port 8200)
+            docker_args="$(yq '.docker2' "$cfg_file")"
+            vllm_args="$(yq '.vllm2' "$cfg_file")"
+            run_lmcache_vllmopenai_container "$docker_args" "$vllm_args" "$cfg_name"+"_decoder"
+
+            # Start proxy
+            python3 "$ORIG_DIR/examples/disagg_prefill/disagg_proxy_server.py" --port $PORT --prefiller-port $PORT1 --decoder-port $PORT2 --decoder-init-port "$(yq '.docker2.init-port' "$cfg_file")" --decoder-alloc-port "$(yq '.docker2.alloc-port' "$cfg_file")" --proxy-port "$(yq '.docker1.proxy-port' "$cfg_file")" > "/tmp/build_${BUILD_ID}_${cfg_name}_proxy.log" 2>&1 &
+        fi
+    else
+        # Start single server
+        docker_args="$(yq '.docker' "$cfg_file")"
+        vllm_args="$(yq '.vllm' "$cfg_file")"
+        run_lmcache_vllmopenai_container "$docker_args" "$vllm_args" "$cfg_name"
+    fi
+    
     # Send request
     test_mode="$(yq -r '.workload.type' "$cfg_file")"
     if [ "$test_mode" = "dummy" ]; then
