@@ -1195,10 +1195,11 @@ class LMCacheEngine:
 
                 # Create tensor and receive data
                 metadata = MemoryObjMetadata.from_dict(metadata_dict)
+                local_rank = self.metadata.worker_id % torch.cuda.device_count()
                 tensor = torch.empty(
                     metadata.shape,
                     dtype=metadata.dtype,
-                    device=f"cuda:{self.metadata.worker_id}",
+                    device=f"cuda:{local_rank}",
                 )
                 self.broadcast_fn(tensor, self.metadata.first_rank)
 
