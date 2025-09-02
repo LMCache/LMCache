@@ -18,6 +18,9 @@ import time
 
 # Third Party
 import torch
+from vllm.distributed.parallel_state import (
+    get_tp_group,
+)
 
 # First Party
 from lmcache.config import LMCacheEngineMetadata
@@ -1195,11 +1198,11 @@ class LMCacheEngine:
 
                 # Create tensor and receive data
                 metadata = MemoryObjMetadata.from_dict(metadata_dict)
-                local_rank = self.metadata.worker_id % torch.cuda.device_count()
+                tp_group = get_tp_group()
                 tensor = torch.empty(
                     metadata.shape,
                     dtype=metadata.dtype,
-                    device=f"cuda:{local_rank}",
+                    device=f"cuda:{tp_group.local_rank}",
                 )
                 self.broadcast_fn(tensor, self.metadata.first_rank)
 
