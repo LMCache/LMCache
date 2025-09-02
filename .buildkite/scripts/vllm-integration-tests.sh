@@ -97,10 +97,19 @@ run_lmcache_vllmopenai_container() {
     local cfg_name="$3"
     LOGFILE="/tmp/build_${BUILD_ID}_${cfg_name}.log"
 
-    # Determine CUDA_VISIBLE_DEVICES
+    # PD detection
+    is_prefiller=false
+    is_decoder=false
     if yq -e 'has("proxy-port")' >/dev/null 2>&1 <<<"$docker"; then
-        best_gpu=0
+        is_prefiller=true
     elif yq -e 'has("init-port")' >/dev/null 2>&1 <<<"$docker"; then
+        is_decoder=true
+    fi
+
+    # Determine CUDA_VISIBLE_DEVICES
+    if "$is_prefiller"; then
+        best_gpu=0
+    elif "$is_decoder"; then
         best_gpu=1
     else
         # Pick the GPU with the largest free memory
@@ -138,9 +147,9 @@ run_lmcache_vllmopenai_container() {
         "$vllm_model"
     )
     cmd_args+=("${vllm_cli_args[@]}")
-    if yq -e 'has("proxy-port")' >/dev/null 2>&1 <<<"$docker"; then
+    if "$is_prefiller"; then
         cmd_args+=("--port $PORT1")
-    elif yq -e 'has("init-port")' >/dev/null 2>&1 <<<"$docker"; then
+    elif "$is_decoder"; then
         cmd_args+=("--port $PORT2")
     else
         cmd_args+=("--port $PORT")
