@@ -316,25 +316,29 @@ for cfg_name in "${CONFIG_NAMES[@]}"; do
     echo -e "\033[1;33m===== Testing LMCache with ${cfg_name} =====\033[0m"
     cfg_file="${CONFIG_DIR}/${cfg_name}"
 
-    if router_type=$(yq -r '.router.type' "$cfg_file"); then
-        if [[ $router_type == pd ]]; then
-            # Start prefiller
-            PORT1=$(find_available_port 8100)
-            docker_args="$(yq '.docker1' "$cfg_file")"
-            vllm_args="$(yq '.vllm1' "$cfg_file")"
-            run_lmcache_vllmopenai_container "$docker_args" "$vllm_args" "${cfg_name}_prefiller"
+    if yq -e '.router.type == "pd"' "$cfg_file" >/dev/null 2>&1; then
+        # Start prefiller
+        PORT1=$(find_available_port 8100)
+        docker_args="$(yq '.docker1' "$cfg_file")"
+        vllm_args="$(yq '.vllm1' "$cfg_file")"
+        run_lmcache_vllmopenai_container "$docker_args" "$vllm_args" "${cfg_name}_prefiller"
 
-            # Start decoder
-            PORT2=$(find_available_port 8200)
-            docker_args="$(yq '.docker2' "$cfg_file")"
-            vllm_args="$(yq '.vllm2' "$cfg_file")"
-            run_lmcache_vllmopenai_container "$docker_args" "$vllm_args" "${cfg_name}_decoder"
+        # Start decoder
+        PORT2=$(find_available_port 8200)
+        docker_args="$(yq '.docker2' "$cfg_file")"
+        vllm_args="$(yq '.vllm2' "$cfg_file")"
+        run_lmcache_vllmopenai_container "$docker_args" "$vllm_args" "${cfg_name}_decoder"
 
-            # Start proxy
-            python3 "$ORIG_DIR/examples/disagg_prefill/disagg_proxy_server.py" --port $PORT --prefiller-port $PORT1 --decoder-port $PORT2 --decoder-init-port "$(yq '.docker2.init-port' "$cfg_file")" --decoder-alloc-port "$(yq '.docker2.alloc-port' "$cfg_file")" --proxy-port "$(yq '.docker1.proxy-port' "$cfg_file")" > "/tmp/build_${BUILD_ID}_${cfg_name}_proxy.log" 2>&1 &
-        fi
-    else
-        # Start single server
+        # Start proxy
+        python3 "$ORIG_DIR/examples/disagg_prefill/disagg_proxy_server.py" \
+            --port "$PORT" \
+            --prefiller-port "$PORT1" \
+            --decoder-port "$PORT2" \
+            --decoder-init-port "$(yq -r '.docker2.init-port // empty' "$cfg_file")" \
+            --decoder-alloc-port "$(yq -r '.docker2.alloc-port // empty' "$cfg_file")" \
+            --proxy-port "$(yq -r '.docker1.proxy-port // empty' "$cfg_file")" \
+            > "/tmp/build_${BUILD_ID}_${cfg_name}_proxy.log" 2>&1 &
+    elif yq -e '(.router.type // "") == ""' "$cfg_file" >/dev/null 2>&1; then
         docker_args="$(yq '.docker' "$cfg_file")"
         vllm_args="$(yq '.vllm' "$cfg_file")"
         run_lmcache_vllmopenai_container "$docker_args" "$vllm_args" "$cfg_name"
