@@ -121,13 +121,13 @@ run_lmcache_vllmopenai_container() {
         [[ -n $e ]] && docker_args+=(--env "$e")
     done < <(yq -r '.env[]?' <<<"$docker")
     if proxy=$(yq -er '."proxy-port"' <<<"$docker" 2>/dev/null); then
-        docker_args+=(--env LMCACHE_NIXL_PROXY_PORT "$proxy")
+        docker_args+=(--env "LMCACHE_NIXL_PROXY_PORT=$proxy")
     fi
     if init=$(yq -er '."init-port"' <<<"$docker" 2>/dev/null); then
-        docker_args+=(--env LMCACHE_NIXL_PEER_INIT_PORT "$init")
+        docker_args+=(--env "LMCACHE_NIXL_PEER_INIT_PORT=$init")
     fi
     if alloc=$(yq -er '."alloc-port"' <<<"$docker" 2>/dev/null); then
-        docker_args+=(--env LMCACHE_NIXL_PEER_ALLOC_PORT "$alloc")
+        docker_args+=(--env "LMCACHE_NIXL_PEER_ALLOC_PORT=$alloc")
     fi
 
     # vllm args
