@@ -51,7 +51,7 @@ def _to_str_list(
 
 
 def _to_bool(
-    value: Optional[Union[str, bool]],
+    value: Optional[Union[bool, int, str]],
 ) -> bool:
     if isinstance(value, bool):
         return value
