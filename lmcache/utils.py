@@ -15,12 +15,7 @@ try:
     from nvtx import annotate  # type: ignore
     _NVTX_AVAILABLE = True
 except ImportError:
-    # Stub implementation for environments where nvtx is not available.
-    def annotate(message=None, color=None, domain=None):
-        """Stub implementation of nvtx annotate decorator."""
-        def decorator(func):
-            return func
-        return decorator
+    # NVTX not available (e.g., NON-NVIDIA platforms)
     _NVTX_AVAILABLE = False
 
 import torch
@@ -317,13 +312,11 @@ def _get_color_for_nvtx(name):
 
 def _lmcache_nvtx_annotate(func, domain="lmcache"):
     """Decorator for applying nvtx annotations to methods in lmcache.
-    
-    Falls back to no-op decorator when nvtx is not available (e.g., on GCU400).
     """
     if not _NVTX_AVAILABLE:
-        # No-op decorator when nvtx is not available
+        # return original function when nvtx is not available
         return func
-    
+
     return annotate(
         message=func.__qualname__,
         color=_get_color_for_nvtx(func.__qualname__),
