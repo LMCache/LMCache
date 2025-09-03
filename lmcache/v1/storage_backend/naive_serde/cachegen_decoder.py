@@ -130,7 +130,7 @@ class CacheGenDeserializer(Deserializer):
                 dtype=kv_chunk.dtype,
                 address=-1,
                 phy_size=kv_chunk.numel() * kv_chunk.element_size(),
-                ref_count=-1,  # HACK: avoid mis-free
+                ref_count=1,  # HACK: avoid mis-free
                 fmt=MemoryFormat.KV_2LTD,
             ),
             parent_allocator=None,
