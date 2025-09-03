@@ -21,6 +21,7 @@ from lmcache.v1.memory_management import (
     MemoryObj,
     MixedMemoryAllocator,
     NixlCPUMemoryAllocator,
+    PagedTensorMemoryAllocator,
 )
 from lmcache.v1.storage_backend.abstract_backend import AllocatorBackendInterface
 from lmcache.v1.storage_backend.cache_policy import get_cache_policy
@@ -258,7 +259,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
 
         assert isinstance(self.memory_allocator, MixedMemoryAllocator) or isinstance(
             self.memory_allocator, NixlCPUMemoryAllocator
-        )
+        ) or isinstance(self.memory_allocator, PagedTensorMemoryAllocator)
 
         evict_keys_count = 0
         num_attempts = 0
@@ -356,7 +357,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
 
         assert isinstance(self.memory_allocator, MixedMemoryAllocator) or isinstance(
             self.memory_allocator, NixlCPUMemoryAllocator
-        )
+        ) or isinstance(self.memory_allocator, PagedTensorMemoryAllocator)
 
         evict_keys_count = 0
         num_attempts = 0
