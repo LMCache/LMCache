@@ -3,7 +3,7 @@
 LMCache Plugin Framework
 =========================
 
-The LMCache plugin system allows developers to extend functionality by running custom scripts during cache operations. Plugins can be written in any language (Python, Bash, etc.) and are managed by the ``PluginLauncher`` class.
+The LMCache plugin system allows developers to extend functionality by running custom scripts alongside LMCache processes. Plugins can be written in any language (Python, Bash, etc.) and are managed by the ``PluginLauncher`` class.
 
 Key Use Cases
 ------------
