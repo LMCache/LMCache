@@ -311,8 +311,7 @@ def _get_color_for_nvtx(name):
 
 
 def _lmcache_nvtx_annotate(func, domain="lmcache"):
-    """Decorator for applying nvtx annotations to methods in lmcache.
-    """
+    """Decorator for applying nvtx annotations to methods in lmcache."""
     if not _NVTX_AVAILABLE:
         # return original function when nvtx is not available
         return func
