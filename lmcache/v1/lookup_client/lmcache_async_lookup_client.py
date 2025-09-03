@@ -260,7 +260,7 @@ class LMCacheLookupServer:
             
                 # FIXME call cache engine for each request
     
-    def send_responses_to_scheduler(
+    def send_response_to_scheduler(
         self, 
         req_id: str, 
         num_hit_tokens: int

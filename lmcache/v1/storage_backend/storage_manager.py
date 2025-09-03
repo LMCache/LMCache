@@ -30,6 +30,7 @@ from lmcache.v1.storage_backend.abstract_backend import (
     StorageBackendInterface,
 )
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
+from lmcache.v1.event_manager import EventManager, EventType
 
 if TYPE_CHECKING:
     # First Party
@@ -328,45 +329,101 @@ class StorageManager:
                 logger.debug(f"Prefetching key {key} in backend {backend_name}")
                 break
     
+    def prefetch_single_done_callback(
+        self,
+        future: asyncio.Future,
+        keys: list[CacheEngineKey],
+        backend_name: str,
+    ) -> None:
+        # TODO(Jiayi): support write-back policy here
+        pass
+
+    def prefetch_all_done_callback(
+        self,
+        task: asyncio.Future,
+        lookup_id: str,
+        retrieved_length: int,
+    ) -> None:
+        
+        # FIXME: call lookup server
+        self.lookup_server.send_response_to_scheduler(
+            lookup_id, retrieved_length
+        )
+    
+
     async def async_lookup_and_prefetch(
         self,
-        req_id: str,
+        lookup_id: str,
         keys: list[CacheEngineKey],
         search_range: Optional[list[str]] = None,
         pin: bool = False,
         **kwargs,
-    ):
+    ) -> None:
         """
 
         starts
         ends
         potentially other args
         """
-        for backend_name, backend in self.storage_backends.items():
-            if search_range and backend_name not in search_range:
-                continue
 
-            # NOTE(Jiayi): We do not pin for NixlBackend
-            if backend_name == "NixlBackend":
-                pin = False
-
-            if backend.contains(key, pin):
-                return backend_name
-
-        return None
+        # FIXME: add retrieved lengths
 
         # NOTE(Jiayi): Currently, the retrieval pattern is always
         # prefix-based. That is, we retrieve 0-t1 tokens from backend 1
         # and retrieve t1-t2 tokens from backend 2, etc.
         # TODO(Jiayi): We need to change/optimize this for non-prefix
         # based retrieval patterns or cases where middle chunks are missing.
-        end = 0
+
+        num_total_chunks = len(keys)
+        num_total_hit_chunks = 0
+        loading_tasks = []
         for backend_name, backend in self.storage_backends.items():
             if search_range and backend_name not in search_range:
                 continue
+            num_hit_chunks = await self.backend.async_contains(
+                lookup_id, keys, pin)
 
+            if num_hit_chunks == 0:
+                continue
 
+            num_total_hit_chunks += num_hit_chunks
+            
+            loading_task = asyncio.create_task(
+                self.backend.batched_get_non_blocking(lookup_id, keys)
+            )
+            loading_task.add_done_callback(
+                lambda task: self.prefetch_single_done_callback(
+                    task,
+                    lookup_id,
+                    keys,
+                    backend_name,
+                )
+            )
 
+            loading_tasks.append(loading_task)
+
+            if num_total_hit_chunks == num_total_chunks:
+                break
+            keys = keys[num_hit_chunks:]
+        
+        all_done = asyncio.gather(*tasks)
+        all_done.add_done_callback(
+            lambda future: self.prefetch_all_done_callback(
+                future,
+                lookup_id,
+                sum(retrieved_lengths)
+            )
+        )
+        
+        if num_total_hit_chunks > 0:
+            # FIXME: how to get event_manager
+            self.event_manager.add_events(
+                EventType.LOADING,
+                lookup_id,
+                all_done,
+            )
+
+    
     # TODO(Jiayi): Currently, search_range is only used for testing.
     def contains(
         self,

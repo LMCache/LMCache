@@ -835,12 +835,11 @@ class LMCacheEngine:
     @_lmcache_nvtx_annotate
     async def async_lookup_and_prefetch(
         self,
-        req_id: str,
+        lookup_id: str,
         tokens: Optional[Union[torch.Tensor, List[int]]] = None,
         hashes: Optional[List[int]] = None,
         offsets: Optional[List[int]] = None,
         search_range: Optional[List[str]] = None,
-        lookup_id: Optional[str] = None,
         pin: bool = False,
         request_configs: Optional[dict] = None,
     ) -> None:
@@ -867,12 +866,10 @@ class LMCacheEngine:
             request_configs=request_configs,
         ):
             assert isinstance(key, CacheEngineKey)
-            starts.append(start)
-            ends.append(end)
             keys.append(key)
 
         self.storage_manager.async_lookup_and_prefetch(
-            req_id, keys, search_range, pin, starts=starts, ends=ends)
+            lookup_id, keys, search_range, pin)
 
 
 

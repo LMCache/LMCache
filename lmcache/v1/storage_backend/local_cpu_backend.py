@@ -169,21 +169,37 @@ class LocalCPUBackend(AllocatorBackendInterface):
             memory_obj.ref_count_up()
             return memory_obj
 
-    def get_non_blocking(
+    async def batched_get_non_blocking(
         self,
-        key: CacheEngineKey,
-    ) -> Optional[Future]:
-        """
-        Return the dummy future object.
-        """
+        lookup_id: str,
+        keys: list[CacheEngineKey],
+        pin: bool = False,
+    ) -> list[MemoryObj]:
+        mem_objs = []
         with self.cpu_lock:
-            if key not in self.hot_cache:
-                return None
-            memory_obj = self.hot_cache[key]
-            memory_obj.ref_count_up()
-            f: Future = Future()
-            f.set_result(memory_obj)
-            return f
+            mem_obj = self.hot_cache[key]
+            mem_obj.ref_count_up()
+            mem_objs.append(mem_obj)
+        return mem_objs
+    
+    async def batched_async_contains(
+        self,
+        lookup_id: str,
+        keys: List[CacheEngineKey],
+        pin: bool = False,
+    ) -> int:
+        # NOTE(Jiayi): Only prefix chunks are counted.
+        num_hit_chunks = 0
+        with self.cpu_lock:
+            for key in keys:
+                if key not in self.hot_cache:
+                    return num_hit_chunks
+                if pin:
+                    self.hot_cache[key].pin()
+                    # vllm lookup sets pin to True
+                    self.keys_in_request.append(key)
+                num_hit_chunks += 1
+        return num_hit_chunks
 
     def pin(self, key: CacheEngineKey) -> bool:
         with self.cpu_lock:

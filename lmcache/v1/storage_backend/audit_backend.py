@@ -138,14 +138,35 @@ class AuditBackend(StorageBackendInterface):
             )
             raise
 
-    def get_non_blocking(self, key: CacheEngineKey) -> Optional[Future]:
+    async def batched_get_non_blocking(
+        self, 
+        lookup_id: str,
+        keys: list[CacheEngineKey],
+    ) -> Optional[Future]:
         start_time = time.perf_counter()
         try:
-            result = self.real_backend.get_non_blocking(key)
-            self._log_operation("GET_NON_BLOCKING", start_time, key, True)
+            result = self.real_backend.get_non_blocking(lookup_id, keys)
+            self._log_operation("BATCHED_GET_NON_BLOCKING", start_time, None, True)
             return result
         except Exception as e:
-            self._log_operation("GET_NON_BLOCKING", start_time, key, False, error=e)
+            self._log_operation("BATCHED_GET_NON_BLOCKING", start_time, None, False, error=e)
+            raise
+    
+    async def batched_async_contains(
+        self, 
+        lookup_id: str,
+        keys: list[CacheEngineKey],
+        pin: bool = False,
+    ) -> Optional[Future]:
+        start_time = time.perf_counter()
+        try:
+            result = self.real_backend.batched_async_contains(
+                lookup_id, keys, pin)
+            self._log_operation("BATCHED_ASYNC_CONTAINS", start_time, None, True)
+            return result
+        except Exception as e:
+            self._log_operation(
+                "BATCHED_ASYNC_CONTAINS", start_time, None, False, error=e)
             raise
 
     def pin(self, key: CacheEngineKey) -> bool:

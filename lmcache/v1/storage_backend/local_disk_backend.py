@@ -463,18 +463,25 @@ class LocalDiskBackend(StorageBackendInterface):
 
         return memory_obj
 
-    def get_non_blocking(
+    async def batched_get_non_blocking(
         self,
-        key: CacheEngineKey,
-    ) -> Optional[Future]:
-        """
-        Non-blocking get function.
-        Using a dummy wrapper around prefetch for now.
-        """
+        lookup_id: str,
+        keys: list[CacheEngineKey],
+    ) -> list[MemoryObj]:
         # TODO(Jiayi): Need to align prefetch and get_non_blocking
-        raise NotImplementedError(
-            "Non-blocking get is not implemented for LocalDiskBackend. "
-        )
+        mem_objs: list[MemoryObj] = []
+        with self.disk_lock:
+            #FIXME: finish this
+    
+    async def batched_async_contains(
+        self,
+        lookup_id: str,
+        keys: list[CacheEngineKey],
+        pin: bool = False,
+    ) -> int:
+        #FIXME: finish this
+            
+            
 
     @_lmcache_nvtx_annotate
     @torch.inference_mode()

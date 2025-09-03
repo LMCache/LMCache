@@ -106,16 +106,37 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
         raise NotImplementedError
 
     @abc.abstractmethod
-    def get_non_blocking(
+    async def batched_async_contains(
         self,
-        key: CacheEngineKey,
-    ) -> Optional[Future]:
+        lookup_id: str,
+        keys: List[CacheEngineKey],
+        pin: bool = False,
+    ) -> int:
+        """
+        Check whether keys are in the storage backend.
+
+        :param List[CacheEngineKey] keys: The keys of the MemoryObjs.
+
+        :param bool pin: Whether to pin the keys.
+            If True, the corresponding KV caches will be
+            pinned in the storage backend.
+
+        :return: The number of keys that exist in the storage backend.
+        """
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    async def batched_get_non_blocking(
+        self,
+        lookup_id: str,
+        keys: list[CacheEngineKey],
+    ) -> list[MemoryObj]:
         """
         A non-blcocking function to get the kv cache from the storage backend.
 
-        :param CacheEngineKey key: The key of the MemoryObj.
+        :param list[CacheEngineKey] keys: The keys of the list of MemoryObjs.
 
-        :return: a future object. None if the key does not exist.
+        :return: a list of Memoryobjs. 
         """
         raise NotImplementedError
 
