@@ -6,10 +6,6 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from typing import List, Optional
 import asyncio
-import time
-
-# Third Party
-import torch
 
 # First Party
 from lmcache.logging import init_logger
@@ -23,7 +19,6 @@ logger = init_logger(__name__)
 
 @dataclass
 class BenchmarkMemoryObj:
-    tensor: torch.Tensor
     metadata: MemoryObjMetadata
     num_bytes: int
 
@@ -31,7 +26,6 @@ class BenchmarkMemoryObj:
     def from_tensor_memory_obj(tensor_memory_obj: MemoryObj) -> "BenchmarkMemoryObj":
         assert isinstance(tensor_memory_obj, TensorMemoryObj)
         return BenchmarkMemoryObj(
-            tensor=tensor_memory_obj.tensor.detach().clone(),  # type: ignore
             metadata=tensor_memory_obj.metadata,
             num_bytes=len(tensor_memory_obj.byte_array),
         )
@@ -63,6 +57,12 @@ class AsyncLRU:
                 return None
             self.dict.move_to_end(key)
             return self.dict[key]
+
+    async def batched_get(
+        self, keys: List[CacheEngineKey]
+    ) -> List[Optional[BenchmarkMemoryObj]]:
+        async with self.lock:
+            return [self.dict.get(key, None) for key in keys]
 
     async def put(self, key: CacheEngineKey, benchmark_obj: BenchmarkMemoryObj):
         async with self.lock:
@@ -112,10 +112,11 @@ class PressureManager:
         self.read_lock = asyncio.Lock()
         self.write_lock = asyncio.Lock()
 
-    def on_exists(self):
+    async def on_exists(self):
         # exists latency will delay everyone
         logger.debug(f"waiting {self.peeking_latency} seconds to peek")
-        time.sleep(self.peeking_latency)
+        if self.peeking_latency > 0:
+            await asyncio.sleep(self.peeking_latency)
 
     async def on_put(self, benchmark_obj: BenchmarkMemoryObj):
         total_wait_time = self.write_latency_per_byte * benchmark_obj.num_bytes
@@ -130,6 +131,17 @@ class PressureManager:
         logger.debug(
             f"waiting {total_wait_time} seconds to get {benchmark_obj.num_bytes} bytes"
         )
+        async with self.read_lock:
+            await asyncio.sleep(total_wait_time)
+
+    async def on_batched_get(self, benchmark_objs: List[Optional[BenchmarkMemoryObj]]):
+        total_bytes = 0
+        for benchmark_obj in benchmark_objs:
+            if benchmark_obj is None:
+                continue
+            total_bytes += benchmark_obj.num_bytes
+        total_wait_time = self.read_latency_per_byte * total_bytes
+        logger.debug(f"waiting {total_wait_time} seconds to get {total_bytes} bytes")
         async with self.read_lock:
             await asyncio.sleep(total_wait_time)
 
@@ -174,7 +186,7 @@ class BenchmarkConnector(RemoteConnector):
         self.write_throughput = write_throughput
 
     async def exists(self, key: CacheEngineKey) -> bool:
-        self.pressure_manager.on_exists()
+        await self.pressure_manager.on_exists()
         return await self.lru_store.exists(key)
 
     def exists_sync(self, key: CacheEngineKey) -> bool:
@@ -197,7 +209,6 @@ class BenchmarkConnector(RemoteConnector):
         if memory_obj is None:
             logger.warning("Failed to allocate memory during remote receive")
             return None
-        memory_obj.tensor.copy_(benchmark_obj.tensor)
         return memory_obj
 
     async def put(self, key: CacheEngineKey, memory_obj: MemoryObj):
@@ -208,6 +219,39 @@ class BenchmarkConnector(RemoteConnector):
     async def list(self) -> List[str]:
         keys = await self.lru_store.list()
         return [k.to_string() for k in keys]
+
+    def support_batched_get(self) -> bool:
+        return True
+
+    async def batched_get(
+        self, keys: List[CacheEngineKey]
+    ) -> List[Optional[MemoryObj]]:
+        benchmark_objs = await self.lru_store.batched_get(keys)
+        await self.pressure_manager.on_batched_get(benchmark_objs)
+        memory_objs = []
+
+        for i, benchmark_obj in enumerate(benchmark_objs):
+            if benchmark_obj is None:
+                logger.warning(
+                    f"Benchmark object is None on {i}",
+                    " out of {len(benchmark_objs)} objects",
+                )
+                break
+            metadata = benchmark_obj.metadata
+            memory_obj = self.local_cpu_backend.allocate(
+                metadata.shape,
+                metadata.dtype,
+                metadata.fmt,
+            )
+            if memory_obj is None:
+                logger.warning(
+                    "Failed to allocate memory even with",
+                    " busy loop on {i} out of {len(benchmark_objs)} objects",
+                )
+                break
+            memory_objs.append(memory_obj)
+
+        return memory_objs
 
     async def close(self):
         await self.lru_store.close()
