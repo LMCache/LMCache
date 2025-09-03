@@ -1,6 +1,6 @@
-# Fake Remote Connector
+# Mock Remote Connector
 
-LMCache provides a fake remote connector that allows you to manually set the peeking latency, read throughput, and write throughput inside of the remote url. It will create copies of your KV cache in unmanaged local RAM.
+LMCache provides a mock remote connector that allows you to manually set the peeking latency, read throughput, and write throughput inside of the remote url. It will create copies of your KV cache in unmanaged local RAM.
 
 
 Deploy a serving engine with the benchmarking remote backend: 
