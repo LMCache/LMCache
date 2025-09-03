@@ -61,6 +61,7 @@ class InternalAPIServer:
             "host": config.internal_api_server_host,
             "loop": "uvloop",
             "http": "httptools",
+            "access_log": False,
         }
 
         if self.socket_path:
