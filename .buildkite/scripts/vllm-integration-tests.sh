@@ -78,10 +78,13 @@ build_lmcache_vllmopenai_image() {
 }
 
 wait_for_openai_api_server() {
+    local port="$1"
+    local model="$2"
+
     if ! timeout "$SERVER_WAIT_TIMEOUT" bash -c "
         echo \"Curl /v1/models endpoint\"
-        until curl -s 127.0.0.1:${PORT}/v1/models \
-                | grep '\"id\":\"meta-llama/Llama-3.2-1B-Instruct\"'; do
+        until curl -s 127.0.0.1:${port}/v1/models \
+                | grep -Fq \"\\\"id\\\":\\\"${model}\\\"\"; do
             sleep 30
         done
     "; then
@@ -163,7 +166,13 @@ run_lmcache_vllmopenai_container() {
     )
 
     # Health check
-    wait_for_openai_api_server
+    if "$is_prefiller"; then
+        wait_for_openai_api_server "$PORT1" "$vllm_model"
+    elif "$is_decoder"; then
+        wait_for_openai_api_server "$PORT2" "$vllm_model"
+    else
+        wait_for_openai_api_server "$PORT" "$vllm_model"
+    fi
 
     # Logging
     touch "$LOGFILE"
@@ -338,6 +347,11 @@ for cfg_name in "${CONFIG_NAMES[@]}"; do
         vllm_args="$(yq '.vllm2' "$cfg_file")"
         run_lmcache_vllmopenai_container "$docker_args" "$vllm_args" "${cfg_name}_decoder"
 
+        if [ ! -d ".venv" ]; then
+            UV_PYTHON=python3 uv -q venv
+        fi
+        source .venv/bin/activate
+        uv pip install lmcache 
         # Start proxy
         python3 "$ORIG_DIR/examples/disagg_prefill/disagg_proxy_server.py" \
             --port "$PORT" \
