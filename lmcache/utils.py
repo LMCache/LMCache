@@ -13,10 +13,12 @@ import traceback
 # Third Party
 try:
     from nvtx import annotate  # type: ignore
-    _NVTX_AVAILABLE = True
 except ImportError:
-    # NVTX not available (e.g., NON-NVIDIA platforms)
-    _NVTX_AVAILABLE = False
+    def annotate(*args, **kwargs):
+        """Dummy decorator when nvtx is not available."""
+        def decorator(func):
+            return func
+        return decorator
 
 import torch
 
@@ -312,9 +314,6 @@ def _get_color_for_nvtx(name):
 
 def _lmcache_nvtx_annotate(func, domain="lmcache"):
     """Decorator for applying nvtx annotations to methods in lmcache."""
-    if not _NVTX_AVAILABLE:
-        # return original function when nvtx is not available
-        return func
 
     return annotate(
         message=func.__qualname__,
