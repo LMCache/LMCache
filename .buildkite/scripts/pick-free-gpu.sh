@@ -1,7 +1,5 @@
 #!/usr/bin/env bash
 
-set -x
-
 # Usage: source pick-free-gpu.sh <MIN_FREE_MEM_MB>
 MIN_FREE_MEM="${1:-10000}"    # in MiB (default: 10 GB)
 MAX_UTIL=20                   # hardcoded utilization threshold (%)

@@ -116,7 +116,7 @@ run_lmcache_vllmopenai_container() {
         best_gpu=1
     else
         # Pick the GPU with the largest free memory
-        source "$ORIG_DIR/.buildkite/scripts/pick-free-gpu.sh"
+        source "$ORIG_DIR/.buildkite/scripts/pick-free-gpu.sh" ""
         best_gpu="${CUDA_VISIBLE_DEVICES}"
     fi
 
