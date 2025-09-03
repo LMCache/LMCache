@@ -3,7 +3,7 @@
 LMCache Plugin Framework
 =========================
 
-The LMCache plugin system allows developers to extend functionality by running custom scripts alongside LMCache processes. Plugins can be written in any language (Python, Bash, etc.) and are managed by the ``PluginLauncher`` class.
+The LMCache plugin system allows developers to extend functionality by running custom scripts alongside LMCache processes. Plugins can be written in Python and Bash for now, and are managed by the ``PluginLauncher`` class.
 
 Key Use Cases
 ------------
@@ -39,7 +39,7 @@ Role-Specific Plugins:
 - Examples:
   - ``scheduler_foo_plugin.py``: Runs only on ``SCHEDULER``
   - ``worker_0_test.sh``: Runs only on worker ID 0
-  - ``all_run_plugin.sh``: Runs on all nodes
+  - ``all_plugin.sh``: Runs on all workers
 
 Notes:
 - Role names are case-insensitive
@@ -68,8 +68,8 @@ Python Plugin (``scheduler_foo_plugin.py``):
    :language: python
    :linenos:
 
-Bash Plugin (``all_run_plugin.sh``):
-.. literalinclude:: ../../../examples/plugins/all_run_plugin.sh
+Bash Plugin (``all_plugin.sh``):
+.. literalinclude:: ../../../examples/plugins/all_plugin.sh
    :language: bash
    :linenos:
 
