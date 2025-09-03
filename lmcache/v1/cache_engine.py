@@ -172,7 +172,7 @@ class LMCacheEngine:
         # Whether to force store to wait if no CPU buffer is available
         self.force_store_wait = (
             config.extra_config and \
-            config.extra_config.get("force_store_wait", False
+            config.extra_config.get("force_store_wait", False)
         )
 
         gc.collect()
