@@ -20,9 +20,8 @@ Prerequisites
 Install Stable LMCache from PyPI
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The simplest way to install the latest stable release of LMCache is through PyPI. If you
-require a torch version that LMCache was not built with (symbol undefined error), please
-follow the install from source instructions below. 
+The simplest way to install the latest stable release of LMCache is through PyPI.
+If you require a different version of torch for the LMCache instance that you built with (symbol undefined error), please follow the install from source instructions below.
 
 .. code-block:: bash
     
@@ -57,8 +56,8 @@ TestPyPI wheels are continually built from the latest LMCache source code (not o
 
 .. code-block:: bash
 
-    # by default, this will port the version of torch of the latest *NIGHTLY* VLLM wheel
-    # If you require a torch version that LMCache was not built with (symbol undefined error), please
+    # By default, this will adopt the version of torch from the latest *NIGHTLY* vLLM wheel.
+    # If you require a different version of torch for the LMCache instance that you built with (symbol undefined error), please
     # follow the install from source instructions below. 
     pip install --index-url https://pypi.org/simple --extra-index-url https://test.pypi.org/simple lmcache==0.3.4.dev61
 
@@ -92,7 +91,7 @@ linker issues that will show up as undefined symbol references.
     git clone https://github.com/LMCache/LMCache.git
     cd LMCache
 
-    # Need to install these packages manually since in order to avoid build isolation
+    # Need to install these packages manually to avoid build isolation
     pip install -r requirements/build.txt
 
     # Option 1. 
@@ -122,7 +121,7 @@ We recommend developers to use `uv` for faster package management.
     uv venv --python 3.12
     source .venv/bin/activate
 
-    # Need to install these packages manually since in order to avoid build isolation
+    # Need to install these packages manually to avoid build isolation
     uv pip install -r requirements/build.txt
 
     # Option 1. 
