@@ -167,6 +167,12 @@ class BenchmarkConnector(RemoteConnector):
             write_throughput=write_throughput,
         )
 
+        # only for the __repr__ string
+        self.capacity = capacity
+        self.peeking_latency = peeking_latency
+        self.read_throughput = read_throughput
+        self.write_throughput = write_throughput
+
     async def exists(self, key: CacheEngineKey) -> bool:
         self.pressure_manager.on_exists()
         return await self.lru_store.exists(key)
@@ -207,7 +213,9 @@ class BenchmarkConnector(RemoteConnector):
         await self.lru_store.close()
 
     def __repr__(self) -> str:
-        return "BenchmarkConnector(capacity={self.lru_store.size}GB, "
-        f"peeking_latency={self.pressure_manager.peeking_latency}ms, "
-        f"read_throughput={self.pressure_manager.read_throughput}GB/s, "
-        f"write_throughput={self.pressure_manager.write_throughput}GB/s)"
+        return (
+            f"BenchmarkConnector(capacity={self.capacity}GB, "
+            f"peeking_latency={self.peeking_latency}ms, "
+            f"read_throughput={self.read_throughput}GB/s, "
+            f"write_throughput={self.write_throughput}GB/s)"
+        )
