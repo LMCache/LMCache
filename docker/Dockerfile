@@ -50,8 +50,7 @@ RUN git clone https://github.com/ai-dynamo/nixl && \
     cd nixl && \
     git checkout b1c22edd8fe10e2e5221c107ee51200fce6f09a8
 RUN cd /workspace/nixl
-ENV VIRTUAL_ENV=/opt/venv \
-    PATH="/opt/venv/bin:$PATH"
+ENV PATH="/opt/venv/bin:$PATH"
 RUN uv pip install meson
 RUN cd /workspace/nixl && \
     rm -rf build && \
