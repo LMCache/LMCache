@@ -113,8 +113,8 @@ WORKDIR /workspace/LMCache
 RUN --mount=type=cache,target=/root/.cache/ccache,id=ccache \
     --mount=type=cache,target=/root/.cache/uv,id=uv-cache,sharing=locked \
     uv pip install --prerelease=allow 'vllm[runai,tensorizer]' \
-    --extra-index-url https://wheels.vllm.ai/nightly \
-    --index-strategy unsafe-best-match && \
+        --extra-index-url https://wheels.vllm.ai/nightly \
+        --index-strategy unsafe-best-match && \
     python3 -c 'import torch; print("TORCH=", torch.__version__)' && \
     python3 setup.py bdist_wheel --dist-dir=dist_lmcache && \
     uv pip install ./dist_lmcache/*.whl --verbose
