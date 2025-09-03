@@ -3,6 +3,7 @@
 from pathlib import Path
 import atexit
 import os
+import shutil
 import subprocess
 import threading
 
@@ -113,8 +114,16 @@ class PluginLauncher:
             with open(file, "r", encoding="utf-8") as f:
                 first_line = f.readline().strip()
                 if first_line.startswith("#!"):
-                    # Extract interpreter path from shebang
-                    return first_line[2:].strip()
+                    # Extract interpreter paths by comma-separated
+                    interpreters_str = first_line[2:].strip()
+                    # Try each interpreter until we find one that exists
+                    for interp in interpreters_str.split(","):
+                        interp = interp.strip()
+                        resolved_interp = shutil.which(interp)
+                        if resolved_interp:
+                            return resolved_interp
+
+                    # If none found, fall through to the default behavior
         except Exception:
             pass
 
