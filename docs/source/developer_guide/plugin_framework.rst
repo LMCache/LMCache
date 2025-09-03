@@ -44,6 +44,7 @@ Role-Specific Plugins:
 Notes:
 - Role names are case-insensitive
 - Worker ID must be numeric when specified
+- To target a specific worker ID, the filename must have at least three parts separated by underscores (e.g., `worker_<ID>_<DESCRIPTION>.ext`). A file named `worker_<DESCRIPTION>.ext` will run on all workers.
 
 Execution Model
 ---------------
