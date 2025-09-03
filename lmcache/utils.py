@@ -314,7 +314,6 @@ def _get_color_for_nvtx(name):
 
 def _lmcache_nvtx_annotate(func, domain="lmcache"):
     """Decorator for applying nvtx annotations to methods in lmcache."""
-
     return annotate(
         message=func.__qualname__,
         color=_get_color_for_nvtx(func.__qualname__),
