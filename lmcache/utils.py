@@ -116,7 +116,7 @@ class CacheEngineKey:
     def to_string(self):
         s = (
             f"{self.fmt}@{self.model_name}@{self.world_size}"
-            f"@{self.worker_id}@{self.chunk_hash}"
+            f"@{self.worker_id}@{self.chunk_hash:x}"
         )
         if self.tags is not None and len(self.tags) != 0:
             tags = [f"{k}%{v}" for k, v in self.tags.items()]
@@ -171,7 +171,7 @@ class CacheEngineKey:
             parts[1],
             int(parts[2]),
             int(parts[3]),
-            int(parts[4]),
+            int(parts[4], 16),
             request_configs,
         )
 
@@ -244,7 +244,7 @@ class LayerCacheEngineKey(CacheEngineKey):
     def to_string(self):
         s = (
             f"{self.fmt}@{self.model_name}@{self.world_size}"
-            f"@{self.worker_id}@{self.chunk_hash}@{self.layer_id}"
+            f"@{self.worker_id}@{self.chunk_hash:x}@{self.layer_id}"
         )
         if self.tags is not None and len(self.tags) != 0:
             tags = [f"{k}%{v}" for k, v in self.tags.items()]
@@ -286,7 +286,7 @@ class LayerCacheEngineKey(CacheEngineKey):
             parts[1],
             int(parts[2]),
             int(parts[3]),
-            int(parts[4]),
+            int(parts[4], 16),
             request_configs,
             int(parts[5]),
         )
