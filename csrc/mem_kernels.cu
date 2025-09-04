@@ -206,17 +206,17 @@ __global__ void single_layer_kv_transfer_sgl_kernel(
 
     const int head_idx = i / head_size_in_64bit;
     const int head_offset = i % head_size_in_64bit;
-    const int64_t vllm_key_value_idx =
+    const int64_t sgl_key_value_idx =
         block_idx * block_stride_in_64bit +
         block_offset * num_heads * head_size_in_64bit +
         head_idx * head_size_in_64bit + head_offset;
 
     if (direction) {
-      lmc_key_value_cache[lmc_key_idx] = sgl_key_cache[vllm_key_value_idx];
-      lmc_key_value_cache[lmc_value_idx] = sgl_value_cache[vllm_key_value_idx];
+      lmc_key_value_cache[lmc_key_idx] = sgl_key_cache[sgl_key_value_idx];
+      lmc_key_value_cache[lmc_value_idx] = sgl_value_cache[sgl_key_value_idx];
     } else {
-      sgl_key_cache[vllm_key_value_idx] = lmc_key_value_cache[lmc_key_idx];
-      sgl_value_cache[vllm_key_value_idx] = lmc_key_value_cache[lmc_value_idx];
+      sgl_key_cache[sgl_key_value_idx] = lmc_key_value_cache[lmc_key_idx];
+      sgl_value_cache[sgl_key_value_idx] = lmc_key_value_cache[lmc_value_idx];
     }
   }
 }

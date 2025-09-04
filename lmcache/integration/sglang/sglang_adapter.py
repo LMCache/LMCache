@@ -264,16 +264,6 @@ class LMCacheLayerwiseConnector(LMCacheConnector):
         load_mask = torch.ones_like(token_ids, dtype=torch.bool)
         load_mask[:offset] = False
 
-        layerwise_retriever = self.lmcache_engine.retrieve_layer(
-            token_ids,
-            mask=load_mask,
-            kvcaches=self.kvcaches,
-            slot_mapping=slot_mapping,
-            sync=False,
-        )
-
-        retrieve_token_num = next(layerwise_retriever)
-
         lookup_id = str(uuid.uuid4())
         retrieve_token_num = self.lmcache_engine.lookup(
             token_ids,
@@ -300,7 +290,6 @@ class LMCacheLayerwiseConnector(LMCacheConnector):
         if retrieve_token_num is None:
             return 0
 
-        retrieve_token_num = retrieve_token_num.item()
         self.layerwise_retrievers.append(layerwise_retriever)
         self.layer_load_layer.append(1)
 
