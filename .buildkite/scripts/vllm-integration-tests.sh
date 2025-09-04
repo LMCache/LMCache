@@ -375,9 +375,9 @@ for cfg_name in "${CONFIG_NAMES[@]}"; do
     # Send request
     test_mode="$(yq -r '.workload.type' "$cfg_file")"
     if [ "$test_mode" = "dummy" ]; then
-        test_vllmopenai_server_with_lmcache_integrated "$(yq -r '.vllm.model' "$cfg_file")"
+        test_vllmopenai_server_with_lmcache_integrated "$(yq -r '.vllm.model // .vllm1.model // ""' "$cfg_file")"
     elif [ "$test_mode" = "long_doc_qa" ]; then
-        workload_yaml="$(yq '(.workload * {"model": .vllm.model}) | del(.type)' "$cfg_file")"
+        workload_yaml="$(yq '(.workload * {"model": (.vllm.model // .vllm1.model)}) | del(.type)' "$cfg_file")"
         run_long_doc_qa "$workload_yaml"
     fi
 
