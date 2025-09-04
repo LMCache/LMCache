@@ -106,19 +106,6 @@ class AuditBackend(StorageBackendInterface):
             self._log_operation("EXISTS_IN_PUT_TASKS", start_time, key, False, error=e)
             raise
 
-    def submit_prefetch_task(
-        self,
-        key: CacheEngineKey,
-    ) -> bool:
-        start_time = time.perf_counter()
-        try:
-            result = self.real_backend.submit_prefetch_task(key)
-            self._log_operation("SUBMIT_PREFETCH_TASK", start_time, key, True, result)
-            return result
-        except Exception as e:
-            self._log_operation("SUBMIT_PREFETCH_TASK", start_time, key, False, error=e)
-            raise
-
     def batched_submit_put_task(
         self,
         keys: Sequence[CacheEngineKey],
@@ -142,10 +129,10 @@ class AuditBackend(StorageBackendInterface):
         self,
         lookup_id: str,
         keys: list[CacheEngineKey],
-    ) -> Optional[Future]:
+    ) -> Future[list[MemoryObj]]:
         start_time = time.perf_counter()
         try:
-            result = self.real_backend.get_non_blocking(lookup_id, keys)
+            result = await self.real_backend.batched_get_non_blocking(lookup_id, keys)
             self._log_operation("BATCHED_GET_NON_BLOCKING", start_time, None, True)
             return result
         except Exception as e:
@@ -159,10 +146,12 @@ class AuditBackend(StorageBackendInterface):
         lookup_id: str,
         keys: list[CacheEngineKey],
         pin: bool = False,
-    ) -> Optional[Future]:
+    ) -> int:
         start_time = time.perf_counter()
         try:
-            result = self.real_backend.batched_async_contains(lookup_id, keys, pin)
+            result = await self.real_backend.batched_async_contains(
+                lookup_id, keys, pin
+            )
             self._log_operation("BATCHED_ASYNC_CONTAINS", start_time, None, True)
             return result
         except Exception as e:
