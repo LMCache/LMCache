@@ -2,6 +2,7 @@
 # Standard
 from typing import TYPE_CHECKING, Optional, Union
 import threading
+import time
 
 # Third Party
 from vllm.utils import make_zmq_socket
@@ -124,6 +125,11 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
         )
         self.thread.start()
 
+        if config.extra_config is not None:
+            self.lookup_backoff_time = float(
+                config.extra_config.get("lookup_backoff_time", 0.002)
+            )
+
     # TODO(Jiayi): Consider batching here
     def lookup(
         self,
@@ -166,7 +172,7 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
             ranks = 1
         for i in range(ranks):
             self.push_sockets[i].send_multipart(msg_buf, copy=False)
-
+        time.sleep(self.lookup_backoff_time)
         return None
 
     def process_responses_from_workers(self):
