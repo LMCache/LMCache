@@ -833,7 +833,7 @@ class LMCacheEngine:
     # TODO(Jiayi): Add layerwise support.
     # FIXME: support pin
     @_lmcache_nvtx_annotate
-    async def async_lookup_and_prefetch(
+    def async_lookup_and_prefetch(
         self,
         lookup_id: str,
         tokens: Optional[Union[torch.Tensor, List[int]]] = None,
@@ -857,7 +857,7 @@ class LMCacheEngine:
         starts = []
         ends = []
         keys = []
-        
+
         # TODO(Jiayi): make token database able to return list.
         for start, end, key in self.token_database.process_tokens(
             tokens=tokens,
@@ -869,9 +869,8 @@ class LMCacheEngine:
             keys.append(key)
 
         self.storage_manager.async_lookup_and_prefetch(
-            lookup_id, keys, search_range, pin)
-
-
+            lookup_id, keys, search_range, pin
+        )
 
     # TODO(Jiayi): Need to handle the case where `tokens=None`.
     # In this case, we compress all tokens.

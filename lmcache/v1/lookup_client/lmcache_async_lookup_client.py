@@ -54,27 +54,40 @@ class LMCacheLookupAndPrefetchClient(LookupClientInterface):
         )
         ranks = self.tensor_parallel_size
         self.push_sockets = []
-        self.pull_socket = one socket
         if self.create_lookup_server_only_on_worker_0_for_mla:
             ranks = 1
         for tp_rank in range(ranks):
-            socket_path = get_zmq_rpc_path_lmcache(
-                vllm_config, "lookup_and_prefetch", rpc_port, tp_rank
+            worker_socket_path = get_zmq_rpc_path_lmcache(
+                vllm_config, "lookup_worker", rpc_port, tp_rank
             )
             logger.info(
                 f"lmcache lookup client connect to tp_rank {tp_rank} "
-                f"with socket path {socket_path}"
+                f"with worker socket path {worker_socket_path}"
             )
 
-            # FIXME: need push socket and pull socket
-            socket = self.socket = make_zmq_socket(
+            push_socket = make_zmq_socket(
                 self.ctx,
                 socket_path,
                 zmq.REQ,  # type: ignore[attr-defined]
                 bind=False,
             )
 
-            self.sockets.append(socket)
+            self.push_sockets.append(push_socket)
+        
+        scheduler_socket_path = get_zmq_rpc_path_lmcache(
+            vllm_config, "lookup_scheduler", rpc_port, 0
+        )
+        self.pull_socket = make_zmq_socket(
+            self.ctx,
+            scheduler_socket_path,
+            zmq.PULL,  # type: ignore[attr-defined]
+            bind=True,
+        )
+        logger.info(
+            f"lmcache lookup client connect to scheduler "
+            f"with socket path {scheduler_socket_path}"
+        )
+
 
         # First Party
         from lmcache.v1.token_database import (
@@ -102,13 +115,14 @@ class LMCacheLookupAndPrefetchClient(LookupClientInterface):
         # map from req_id to number of hit tokens for each worker
         self.res_for_each_worker: dict[str, list[int]] = {}
 
-        # FIXME: add ore comments
-        # [req_id, num_hit_tokens]
+        # The two parts are [req_id, num_hit_tokens]
         self.num_parts = 2
 
         self.running = True
 
-        # FIXME: start up
+        self.thread = threading.Thread(
+            target=process_responses_from_workers, daemon=True)
+        self.thread.start()
         
 
     # TODO(Jiayi): We might want to differentiate sync and async lookup.
@@ -208,27 +222,36 @@ class LMCacheLookupServer:
         rpc_port = vllm_config.kv_transfer_config.get_from_extra_config(
             "lmcache_rpc_port", 0
         )
-        socket_path = get_zmq_rpc_path_lmcache(
-            vllm_config, "lookup_and_prefetch", rpc_port, vllm_config.parallel_config.rank
+        worker_socket_path = get_zmq_rpc_path_lmcache(
+            vllm_config, "lookup_worker", rpc_port, vllm_config.parallel_config.rank
         )
-        #FIXME
+        scheduler_socket_path = get_zmq_rpc_path_lmcache(
+            vllm_config, "lookup_scheduler", rpc_port, 0
+        )
         self.push_socket = make_zmq_socket(
             self.ctx,
-            socket_path,
-            zmq.REP,  # type: ignore[attr-defined]
+            scheduler_socket_path,
+            zmq.PUSH,  # type: ignore[attr-defined]
+            bind=False,
+        )
+        self.pull_socket = = make_zmq_socket(
+            self.ctx,
+            worker_socket_path,
+            zmq.PULL,  # type: ignore[attr-defined]
             bind=True,
         )
-        self.pull_socket
 
         self.lmcache_engine = lmcache_engine
         self.running = True
 
-        # FIXME: start up
-        logger.info(f"lmcache lookup server start on {socket_path}")
-        self.thread = threading.Thread(target=process_request, daemon=True)
+        logger.info("lmcache lookup server start with"
+                    f" scheduler socket path {scheduler_socket_path}, "
+                    f"worker socket path {worker_socket_path}")
+        self.thread = threading.Thread(
+            target=process_requests_from_scheduler, daemon=True)
         self.thread.start()
 
-        # [hash, offset, req_id, request_configs]
+        # The four parts are [hash, offset, req_id, request_configs]
         self.num_parts = 4
 
     
@@ -258,15 +281,23 @@ class LMCacheLookupServer:
                             raise ValueError(f"Unexpected tags_str: {kvs}")
                         request_configs[kvs[0]] = kvs[1]
             
-                # FIXME call cache engine for each request
+                self.lmcache_engine.lookup_and_prefetch(
+                    lookup_id=req_id,
+                    hashes=hashes, 
+                    offsets=offsets,
+                    pin=True,
+                    request_configs=request_configs,
+                )
     
     def send_response_to_scheduler(
         self, 
         req_id: str, 
         num_hit_tokens: int
     ):
-        # FIXME: finish this
-        pass
+        req_id_buf = req_id.encode("utf-8")
+        num_hit_tokens_buf = num_hit_tokens.to_bytes(4, "big")
+        self.push_socket.send_multipart(
+            [req_id_buf, num_hit_tokens_buf], copy=False)
 
     def close(self):
         self.socket.close(linger=0)

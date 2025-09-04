@@ -18,6 +18,7 @@ from lmcache.utils import (
     start_loop_in_thread_with_exceptions,
 )
 from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.v1.event_manager import EventType
 from lmcache.v1.lookup_server import LookupServerInterface
 from lmcache.v1.memory_management import (
     MemoryAllocatorInterface,
@@ -30,7 +31,6 @@ from lmcache.v1.storage_backend.abstract_backend import (
     StorageBackendInterface,
 )
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
-from lmcache.v1.event_manager import EventManager, EventType
 
 if TYPE_CHECKING:
     # First Party
@@ -328,7 +328,7 @@ class StorageManager:
             if perform_prefetch:
                 logger.debug(f"Prefetching key {key} in backend {backend_name}")
                 break
-    
+
     def prefetch_single_done_callback(
         self,
         future: asyncio.Future,
@@ -344,12 +344,8 @@ class StorageManager:
         lookup_id: str,
         retrieved_length: int,
     ) -> None:
-        
         # FIXME: call lookup server
-        self.lookup_server.send_response_to_scheduler(
-            lookup_id, retrieved_length
-        )
-    
+        self.lookup_server.send_response_to_scheduler(lookup_id, retrieved_length)
 
     async def async_lookup_and_prefetch(
         self,
@@ -380,14 +376,13 @@ class StorageManager:
         for backend_name, backend in self.storage_backends.items():
             if search_range and backend_name not in search_range:
                 continue
-            num_hit_chunks = await self.backend.async_contains(
-                lookup_id, keys, pin)
+            num_hit_chunks = self.backend.async_contains(lookup_id, keys, pin)
 
             if num_hit_chunks == 0:
                 continue
 
             num_total_hit_chunks += num_hit_chunks
-            
+
             loading_task = asyncio.create_task(
                 self.backend.batched_get_non_blocking(lookup_id, keys)
             )
@@ -405,16 +400,14 @@ class StorageManager:
             if num_total_hit_chunks == num_total_chunks:
                 break
             keys = keys[num_hit_chunks:]
-        
+
         all_done = asyncio.gather(*tasks)
         all_done.add_done_callback(
             lambda future: self.prefetch_all_done_callback(
-                future,
-                lookup_id,
-                sum(retrieved_lengths)
+                future, lookup_id, sum(retrieved_lengths)
             )
         )
-        
+
         if num_total_hit_chunks > 0:
             # FIXME: how to get event_manager
             self.event_manager.add_events(
@@ -423,7 +416,6 @@ class StorageManager:
                 all_done,
             )
 
-    
     # TODO(Jiayi): Currently, search_range is only used for testing.
     def contains(
         self,

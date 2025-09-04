@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from concurrent.futures import Future
+from collections.abc import Awaitable
 from typing import TYPE_CHECKING, List, Optional, Sequence
 import threading
 import time
@@ -174,20 +175,20 @@ class LocalCPUBackend(AllocatorBackendInterface):
         lookup_id: str,
         keys: list[CacheEngineKey],
         pin: bool = False,
-    ) -> list[MemoryObj]:
+    ) -> Awaitable[list[MemoryObj]]:
         mem_objs = []
         with self.cpu_lock:
             mem_obj = self.hot_cache[key]
             mem_obj.ref_count_up()
             mem_objs.append(mem_obj)
         return mem_objs
-    
-    async def batched_async_contains(
+
+    async def batched_contains_non_blocking(
         self,
         lookup_id: str,
         keys: List[CacheEngineKey],
         pin: bool = False,
-    ) -> int:
+    ) -> Awaitable[int]:
         # NOTE(Jiayi): Only prefix chunks are counted.
         num_hit_chunks = 0
         with self.cpu_lock:

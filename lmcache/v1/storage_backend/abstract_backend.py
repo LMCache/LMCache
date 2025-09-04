@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from concurrent.futures import Future
 from typing import List, Optional, Sequence
 import abc
 
@@ -136,7 +135,7 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
 
         :param list[CacheEngineKey] keys: The keys of the list of MemoryObjs.
 
-        :return: a list of Memoryobjs. 
+        :return: a list of Memoryobjs.
         """
         raise NotImplementedError
 

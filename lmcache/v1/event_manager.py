@@ -1,5 +1,8 @@
+# SPDX-License-Identifier: Apache-2.0
+# Standard
 from enum import Enum, auto
 import asyncio
+
 
 class EventType(Enum):
     LOADING = auto()
@@ -10,9 +13,9 @@ class EventManager:
         self.events = {}
         for event_type in EventType:
             self.events[event_type] = {}
-        
+
         # TODO(Jiayi): verify thread safety if needed
-    
+
     def add_event(
         self,
         event_type: EventType,
