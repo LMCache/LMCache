@@ -253,3 +253,14 @@ jobs:
               run: |
                 docker push lmcache/vllm-openai:latest
                 docker push lmcache/vllm-openai:${{ env.LATEST_TAG }}
+            
+            - name: Build lmcache/vllm-openai:light
+              run: | 
+                docker build \
+                --tag lmcache/vllm-openai:light --tag lmcache/vllm-openai:${{ env.LATEST_TAG }}-light \
+                --file docker/Dockerfile.light
+            
+            - name: Push lmcache/vllm-openai:light image to DockerHub
+              run: |
+                docker push lmcache/vllm-openai:light
+                docker push lmcache/vllm-openai:${{ env.LATEST_TAG }}-light
