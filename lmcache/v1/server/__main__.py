@@ -10,7 +10,12 @@ import torch
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.memory_management import MemoryFormat
-from lmcache.v1.protocol import ClientMetaMessage, Constants, ServerMetaMessage
+from lmcache.v1.protocol import (
+    ClientCommand,
+    ClientMetaMessage,
+    ServerMetaMessage,
+    ServerReturnCode,
+)
 from lmcache.v1.server.storage_backend import CreateStorageBackend
 
 logger = init_logger(__name__)
@@ -45,7 +50,7 @@ class LMCacheServer:
                 meta = ClientMetaMessage.deserialize(header)
                 logger.debug(f"Received command: {meta.command}")
                 match meta.command:
-                    case Constants.CLIENT_PUT:
+                    case ClientCommand.PUT:
                         t0 = time.perf_counter()
                         s = self.receive_all(client_socket, meta.length)
                         t1 = time.perf_counter()
@@ -56,14 +61,14 @@ class LMCacheServer:
                             f"data: {t2 - t1}"
                         )
 
-                    case Constants.CLIENT_GET:
+                    case ClientCommand.GET:
                         t0 = time.perf_counter()
                         lms_memory_obj = self.data_store.get(meta.key)
                         t1 = time.perf_counter()
                         if lms_memory_obj is not None:
                             client_socket.sendall(
                                 ServerMetaMessage(
-                                    Constants.SERVER_SUCCESS,
+                                    ServerReturnCode.SUCCESS,
                                     lms_memory_obj.length,
                                     lms_memory_obj.fmt,
                                     lms_memory_obj.dtype,
@@ -80,7 +85,7 @@ class LMCacheServer:
                         else:
                             client_socket.sendall(
                                 ServerMetaMessage(
-                                    Constants.SERVER_FAIL,
+                                    ServerReturnCode.FAIL,
                                     0,
                                     MemoryFormat(1),
                                     torch.float16,
@@ -88,11 +93,11 @@ class LMCacheServer:
                                 ).serialize()
                             )
 
-                    case Constants.CLIENT_EXIST:
+                    case ClientCommand.EXIST:
                         code = (
-                            Constants.SERVER_SUCCESS
+                            ServerReturnCode.SUCCESS
                             if self.data_store.contains(meta.key)
-                            else Constants.SERVER_FAIL
+                            else ServerReturnCode.FAIL
                         )
                         logger.debug(f"Key exists: {code}")
                         client_socket.sendall(
@@ -104,10 +109,10 @@ class LMCacheServer:
                                 torch.Size((0, 0, 0, 0)),
                             ).serialize()
                         )
-                    case Constants.CLIENT_HEALTH:
+                    case ClientCommand.HEALTH:
                         client_socket.sendall(
                             ServerMetaMessage(
-                                Constants.SERVER_SUCCESS,
+                                ServerReturnCode.SUCCESS,
                                 0,
                                 MemoryFormat(1),
                                 torch.float16,
@@ -117,11 +122,11 @@ class LMCacheServer:
                         logger.debug("Health check successful")
 
                     # TODO(Jiayi): Implement List
-                    # case Constants.CLIENT_LIST:
+                    # case ClientCommand.LIST:
                     #     keys = list(self.data_store.list_keys())
                     #     data = "\n".join(keys).encode()
                     #     client_socket.sendall(
-                    #         ServerMetaMessage(Constants.SERVER_SUCCESS,
+                    #         ServerMetaMessage(ServerReturnCode.SUCCESS,
                     #                           len(data)).serialize())
                     #     client_socket.sendall(data)
 
