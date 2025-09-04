@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from copy import deepcopy
+import os
 import random
 import shlex
 import subprocess
+import tempfile
 import time
 
 # Third Party
@@ -963,3 +965,68 @@ def test_builder(autorelease_v1):
             mock_up_broadcast_fn,
             mock_up_broadcast_object_fn,
         )
+
+
+@pytest.mark.no_shared_allocator
+def test_force_store_wait(autorelease_v1):
+    device = "cuda"
+    fmt = "vllm"
+    num_tokens = 10000
+    num_blocks = 5000
+    block_size = 16
+    dtype = torch.bfloat16
+
+    chunk_size = 256
+    kv_shape = (32, 2, chunk_size, 8, 128)
+
+    connector = create_gpu_connector(1024, 32)
+
+    kv_cache = generate_kv_cache_paged_list_tensors(
+        num_blocks, device, block_size, dtype
+    )
+
+    num_requests = 8
+
+    def generate_random_slot_mapping(num_blocks, block_size, num_tokens, device):
+        slot_mapping = random.sample(range(0, num_blocks * block_size), num_tokens)
+        return torch.tensor(slot_mapping, device=device)
+
+    list_tokens = [generate_tokens(num_tokens, device) for _ in range(num_requests)]
+    list_slot_mappings = [
+        generate_random_slot_mapping(num_blocks, block_size, num_tokens, device)
+        for _ in range(num_requests)
+    ]
+
+    homedir = os.environ.get("HOME", "/tmp")
+    with tempfile.TemporaryDirectory(
+        dir=homedir, ignore_cleanup_errors=True
+    ) as temp_dir:
+        cfg = LMCacheEngineConfig.from_defaults(
+            local_cpu=False,
+            max_local_cpu_size=2,  # small cpu buffer
+            local_disk=temp_dir,
+            max_local_disk_size=20,
+            extra_config={"force_store_wait": True},
+        )
+
+        engine = autorelease_v1(
+            LMCacheEngineBuilder.get_or_create(
+                "test",
+                cfg,
+                dumb_metadata(fmt, kv_shape),
+                connector,
+                mock_up_broadcast_fn,
+                mock_up_broadcast_object_fn,
+            )
+        )
+
+        # Store kv cache into slow devices
+        for t, s in zip(list_tokens, list_slot_mappings):
+            engine.store(t, kvcaches=kv_cache, slot_mapping=s)
+
+        # Sleep 10 seconds for the last request
+        time.sleep(10)
+
+        # No KV cache should be skipped
+        for t in list_tokens:
+            assert engine.lookup(t) == len(t)
