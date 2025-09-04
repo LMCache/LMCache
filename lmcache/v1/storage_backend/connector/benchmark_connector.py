@@ -234,7 +234,7 @@ class BenchmarkConnector(RemoteConnector):
             if benchmark_obj is None:
                 logger.warning(
                     f"Benchmark object is None on {i}",
-                    " out of {len(benchmark_objs)} objects",
+                    f" out of {len(benchmark_objs)} objects",
                 )
                 break
             metadata = benchmark_obj.metadata
@@ -246,7 +246,7 @@ class BenchmarkConnector(RemoteConnector):
             if memory_obj is None:
                 logger.warning(
                     "Failed to allocate memory even with",
-                    " busy loop on {i} out of {len(benchmark_objs)} objects",
+                    f" busy loop on {i} out of {len(benchmark_objs)} objects",
                 )
                 break
             memory_objs.append(memory_obj)
