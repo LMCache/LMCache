@@ -110,30 +110,34 @@ class PluginLauncher:
 
     def _get_interpreter(self, file: Path) -> str:
         """Get interpreter from first line comment"""
+        interpreters = []
         try:
             with open(file, "r", encoding="utf-8") as f:
                 first_line = f.readline().strip()
                 if first_line.startswith("#!"):
                     # Extract interpreter paths by comma-separated
                     interpreters_str = first_line[2:].strip()
-                    # Try each interpreter until we find one that exists
-                    for interp in interpreters_str.split(","):
-                        interp = interp.strip()
-                        resolved_interp = shutil.which(interp)
-                        if resolved_interp:
-                            return resolved_interp
-
+                    interpreters = interpreters_str.split(",")
                     # If none found, fall through to the default behavior
-        except Exception:
+        except Exception as e:
+            logger.error(f"Error reading plugin file {file}: {e}")
             pass
 
         # Fallback to default interpreters
         if file.suffix == ".py":
-            return "python"
+            interpreters.append("python")
+            interpreters.append("python3")
         elif file.suffix == ".sh":
-            return "bash"
-        else:
-            raise ValueError(f"Unsupported plugin type: {file.suffix}")
+            interpreters.append("bash")
+
+        # Try each interpreter until we find one that exists
+        for interp in interpreters:
+            interp = interp.strip()
+            resolved_interp = shutil.which(interp)
+            if resolved_interp:
+                return resolved_interp
+
+        raise ValueError(f"No valid interpreter found for {file} from {interpreters}")
 
     def _capture_plugin_output(self, proc: subprocess.Popen, plugin_name: str):
         """Continuously capture and log plugin output"""
