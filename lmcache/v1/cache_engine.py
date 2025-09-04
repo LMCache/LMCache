@@ -1211,7 +1211,9 @@ class LMCacheEngine:
                 self.broadcast_fn(tensor, self.metadata.first_rank)
 
                 # Create temporary memory object (key not needed for other ranks)
-                memory_obj = TensorMemoryObj(raw_data=tensor, metadata=metadata)
+                memory_obj = TensorMemoryObj(
+                    raw_data=tensor, metadata=metadata, parent_allocator=None
+                )
                 reordered_chunks.append((None, memory_obj, start, end))
 
     def _is_passive(self):
