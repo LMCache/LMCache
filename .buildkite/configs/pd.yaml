@@ -17,7 +17,6 @@ docker1:
     - "LMCACHE_NIXL_PROXY_HOST=localhost"
     - "LMCACHE_NIXL_BUFFER_SIZE=1073741824" # 1GB
     - "LMCACHE_NIXL_BUFFER_DEVICE=cuda"
-    - "LMCACHE_NIXL_BACKENDS=[UCX]"
     - "PYTHONHASHSEED=0"
   proxy-port: 7500
 
@@ -31,7 +30,6 @@ docker2:
     - "LMCACHE_NIXL_PEER_HOST=localhost"
     - "LMCACHE_NIXL_BUFFER_SIZE=2147483648" # 2GB
     - "LMCACHE_NIXL_BUFFER_DEVICE=cuda"
-    - "LMCACHE_NIXL_BACKENDS=[UCX]"
     - "PYTHONHASHSEED=0"
   init-port: 7300
   alloc-port: 7400
