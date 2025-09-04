@@ -143,8 +143,8 @@ run_lmcache_vllmopenai_container() {
     fi
 
     # vllm args
-    vllm_model="$(yq -r '.model' <<<"$vllm_args")"
-    mapfile -t vllm_cli_args < <(yq -r '.args // [] | .[]' <<<"$vllm_args")
+    vllm_model="$(yq -r '.model' <<<"$vllm")"
+    mapfile -t vllm_cli_args < <(yq -r '.args // [] | .[]' <<<"$vllm")
     cmd_args=(
         lmcache/vllm-openai:build-latest
         "$vllm_model"
