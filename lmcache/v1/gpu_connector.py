@@ -1244,7 +1244,7 @@ class SGLangLayerwiseGPUConnector(GPUConnectorInterface):
             self.num_kv_cache, dtype=torch.int64, device="cpu"
         )
         self.use_gpu = use_gpu
-        self.gpu_buffer_allocator: GPUMemoryAllocator
+        self.gpu_buffer_allocator: Optional[GPUMemoryAllocator] = None
 
     def _lazy_initialize_buffer(self, kv_caches):
         """
@@ -1316,6 +1316,10 @@ class SGLangLayerwiseGPUConnector(GPUConnectorInterface):
 
         if self.use_gpu:
             buffer_shape = self.get_shape(num_tokens)
+
+            assert self.gpu_buffer_allocator is not None, (
+                "GPU buffer allocator should be initialized"
+            )
             tmp_gpu_buffer_obj = self.gpu_buffer_allocator.allocate(
                 buffer_shape, self.dtype, MemoryFormat.KV_T2D
             )
@@ -1341,7 +1345,7 @@ class SGLangLayerwiseGPUConnector(GPUConnectorInterface):
                         memory_obj.tensor, non_blocking=True
                     )
                 else:
-                    lmc_ops.single_layer_kv_transfer(
+                    lmc_ops.single_layer_kv_transfer_sgl(
                         memory_obj.tensor,
                         self.kvcaches[0][layer_id],
                         self.kvcaches[1][layer_id],
@@ -1352,7 +1356,8 @@ class SGLangLayerwiseGPUConnector(GPUConnectorInterface):
 
             if self.use_gpu:
                 t, h, d = self.kvcaches[0][layer_id].shape
-                lmc_ops.single_layer_kv_transfer(
+
+                lmc_ops.single_layer_kv_transfer_sgl(
                     tmp_gpu_buffer_obj.tensor,
                     self.kvcaches[0][layer_id].view(t, 1, h, d),
                     self.kvcaches[1][layer_id].view(t, 1, h, d),
@@ -1425,6 +1430,10 @@ class SGLangLayerwiseGPUConnector(GPUConnectorInterface):
 
         if self.use_gpu:
             buffer_shape = self.get_shape(num_tokens)
+
+            assert self.gpu_buffer_allocator is not None, (
+                "GPU buffer allocator should be initialized"
+            )
             tmp_gpu_buffer_obj = self.gpu_buffer_allocator.allocate(
                 buffer_shape, self.dtype, MemoryFormat.KV_T2D
             )
@@ -1438,7 +1447,7 @@ class SGLangLayerwiseGPUConnector(GPUConnectorInterface):
             # kvcaches -> gpu_buffer -> memobj
             if self.use_gpu:
                 t, h, d = self.kvcaches[0][layer_id].shape
-                lmc_ops.single_layer_kv_transfer(
+                lmc_ops.single_layer_kv_transfer_sgl(
                     tmp_gpu_buffer_obj.tensor,
                     self.kvcaches[0][layer_id].view(t, 1, h, d),
                     self.kvcaches[1][layer_id].view(t, 1, h, d),
@@ -1461,7 +1470,7 @@ class SGLangLayerwiseGPUConnector(GPUConnectorInterface):
                     )
                     start_idx += chunk_len
                 else:
-                    lmc_ops.single_layer_kv_transfer(
+                    lmc_ops.single_layer_kv_transfer_sgl(
                         memory_obj.tensor,
                         self.kvcaches[0][layer_id],
                         self.kvcaches[1][layer_id],
