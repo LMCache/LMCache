@@ -234,7 +234,7 @@ class LMCacheLookupServer:
             zmq.PUSH,  # type: ignore[attr-defined]
             bind=False,
         )
-        self.pull_socket = = make_zmq_socket(
+        self.pull_socket = make_zmq_socket(
             self.ctx,
             worker_socket_path,
             zmq.PULL,  # type: ignore[attr-defined]
