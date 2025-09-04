@@ -82,6 +82,25 @@ def create_config():
 @pytest.mark.benchmark(group="store")
 @pytest.mark.parametrize("backend", ["cpu", "disk", "fsconnector"])
 def test_store_100GB(benchmark, backend, create_config, autorelease_v1):
+    """
+    In this test, it will run engine.store to store 100GB data in total.
+    The configs are carefully tuned to have:
+    - Each request has 10K tokens and 1.25GB KV cache
+    - There will be 80 store requests (storing 100GB data) in total.
+    - The store requests are split into 10 rounds, where each round has
+    10GB data.
+
+    When creating the LMCache engine, it will first create a 15GB buffer, so
+    there will be eviction starting from the second round.
+
+    At the end of each round, we will run `engine.lookup` to ensure that all
+    the data are successfully stored into the LMCache engine. The test will
+    measure the time for each round and calculate the average time across
+    the rounds.
+
+    pytest-benchmark will report the average time. To calculate the store
+    throughput, we can use 10GB / average_round_time.
+    """
     # model-related metadatas
     num_heads = 8
     head_dim = 128
@@ -111,8 +130,6 @@ def test_store_100GB(benchmark, backend, create_config, autorelease_v1):
         num_blocks, device, block_size, dtype
     )
 
-    # TODO: Rewrite the config generation to another helper function
-    # cfg = LMCacheEngineConfig.from_legacy(chunk_size=chunk_size, backend="cpu")
     cache_size = 15  # Allocate 15 GB KV cache buffer
     cfg = create_config(backend, cache_size)
 
@@ -158,7 +175,27 @@ def test_store_100GB(benchmark, backend, create_config, autorelease_v1):
 # Test retrieve 100GB data (10 rounds, each round 10GB, 100% hit)
 @pytest.mark.no_shared_allocator
 @pytest.mark.benchmark(group="retrieve")
-def test_retrieve_100GB_allhit(benchmark, autorelease_v1):
+@pytest.mark.parametrize("backend", ["cpu", "disk", "fsconnector"])
+def test_retrieve_100GB_allhit(benchmark, backend, create_config, autorelease_v1):
+    """
+    In this test, it will run engine.retrieve to retrieve 100GB data in total.
+    The configs are carefully tuned to have:
+    - Each request has 10K tokens and 1.25GB KV cache
+    - There will be 80 retrieve requests (retrieving 100GB data) in total.
+    - The retrieve requests are split into 10 rounds, where each round has
+    10GB data.
+
+    When creating the LMCache engine, it will first create a 15GB buffer, and
+    then store 8 requests (10GB) into the engine.
+    After that, there will be 10 rounds of retrieve, where each round queries
+    the same set of requests (but shuffled) with a 100% hit rate.
+
+    The test will measure the time for each round and calculate the average
+    time across the rounds.
+
+    pytest-benchmark will report the average time. To calculate the retrieve
+    throughput, we can use 10GB / average_round_time.
+    """
     # model-related metadatas
     num_heads = 8
     head_dim = 128
@@ -195,10 +232,8 @@ def test_retrieve_100GB_allhit(benchmark, autorelease_v1):
         for _ in range(num_requests)
     ]
 
-    # TODO: Rewrite the config generation to another helper function
-    cfg = LMCacheEngineConfig.from_defaults(
-        chunk_size=chunk_size, max_local_cpu_size=12
-    )
+    cache_size = 15  # 15 GB KV cache buffer
+    cfg = create_config(backend, cache_size)
 
     engine = autorelease_v1(
         LMCacheEngineBuilder.get_or_create(
@@ -215,19 +250,43 @@ def test_retrieve_100GB_allhit(benchmark, autorelease_v1):
         engine.store(t, kvcaches=kv_cache, slot_mapping=s)
 
     # Run benchmark
-    def run_func():
-        # TODO: remove the hard-code here
-        for i in range(num_repeats):
-            for t, s in zip(list_tokens, list_slot_mappings):
-                engine.retrieve(t, kvcaches=kv_cache, slot_mapping=s)
+    def setup():
+        indexes = list(range(len(list_tokens)))
+        random.shuffle(indexes)
+        return (
+            [list_tokens[i] for i in indexes],
+            [list_slot_mappings[i] for i in indexes],
+        ), {}
 
-    benchmark.pedantic(run_func, rounds=1, iterations=1)
+    def run_func(tokens, slot_mappings):
+        for t, s in zip(tokens, slot_mappings):
+            engine.retrieve(t, kvcaches=kv_cache, slot_mapping=s)
+
+    benchmark.pedantic(run_func, setup=setup, rounds=num_repeats, iterations=1)
 
 
 # Test lookup 10K * 10 requests, 100% hit
 @pytest.mark.no_shared_allocator
 @pytest.mark.benchmark(group="lookup")
-def test_lookup_10reqs_10Ktokens(benchmark, autorelease_v1):
+@pytest.mark.parametrize("backend", ["cpu", "disk", "fsconnector"])
+def test_lookup_10reqs_10Ktokens(benchmark, backend, create_config, autorelease_v1):
+    """
+    In this test, it will run engine.lookup to lookup 1M tokens in total.
+    The configs are carefully tuned to have:
+    - Each request has 10K tokens and 1.25GB KV cache
+    - There will be 100 lookup requests split into 10 rounds.
+    - Each round will shuffle the requests.
+
+    When creating the LMCache engine, it will first create a 15GB buffer, and
+    then store 8 requests (10GB) into the engine.
+    the same set of requests (but shuffled) with a 100% hit rate.
+
+    The test will measure the time for each round and calculate the average
+    time across the rounds.
+
+    pytest-benchmark will report the average time. To calculate the lookup
+    throughput, we can use 100K tokens / average_round_time.
+    """
     # model-related metadatas
     num_heads = 8
     head_dim = 128
@@ -247,7 +306,7 @@ def test_lookup_10reqs_10Ktokens(benchmark, autorelease_v1):
 
     # Test configs
     num_requests = 10
-    num_repeats = 1
+    num_repeats = 10
 
     # Initialize related modules
     connector = create_gpu_connector(num_heads * head_dim, num_layers)
@@ -263,9 +322,8 @@ def test_lookup_10reqs_10Ktokens(benchmark, autorelease_v1):
     ]
 
     # TODO: Rewrite the config generation to another helper function
-    cfg = LMCacheEngineConfig.from_defaults(
-        chunk_size=chunk_size, max_local_cpu_size=15
-    )
+    cache_size = 15  # 15 GB KV cache buffer
+    cfg = create_config(backend, cache_size)
 
     engine = autorelease_v1(
         LMCacheEngineBuilder.get_or_create(
@@ -281,12 +339,29 @@ def test_lookup_10reqs_10Ktokens(benchmark, autorelease_v1):
     for t, s in zip(list_tokens, list_slot_mappings):
         engine.store(t, kvcaches=kv_cache, slot_mapping=s)
 
-    # Run benchmark
-    def run_func():
-        # TODO: remove the hard-code here
-        for i in range(num_repeats):
-            for t, s in zip(list_tokens, list_slot_mappings):
-                engine.lookup(t)
+    # Make sure all the requests are stored
+    timeout = 60
+    start = time.time()
+    ready = False
+    while time.time() - start < timeout:
+        ready = all([engine.lookup(t) == len(t) for t in list_tokens])
+        if ready:
+            break
+        else:
+            time.sleep(0.1)
+    assert ready, "Store is not finished in 60 seconds"
 
-    # Repeat for 10 iterations
-    benchmark.pedantic(run_func, rounds=10, iterations=1)
+    # Run benchmark
+    def setup():
+        indexes = list(range(len(list_tokens)))
+        random.shuffle(indexes)
+        return (
+            [list_tokens[i] for i in indexes],
+            [list_slot_mappings[i] for i in indexes],
+        ), {}
+
+    def run_func(tokens, slot_mappings):
+        for t, s in zip(tokens, slot_mappings):
+            assert engine.lookup(t) == len(t)
+
+    benchmark.pedantic(run_func, setup=setup, rounds=num_repeats, iterations=1)
