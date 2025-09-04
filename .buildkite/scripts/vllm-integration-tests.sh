@@ -362,9 +362,9 @@ for cfg_name in "${CONFIG_NAMES[@]}"; do
             --port "$PORT" \
             --prefiller-port "$PORT1" \
             --decoder-port "$PORT2" \
-            --decoder-init-port "$(yq -r '.docker2.init-port // empty' "$cfg_file")" \
-            --decoder-alloc-port "$(yq -r '.docker2.alloc-port // empty' "$cfg_file")" \
-            --proxy-port "$(yq -r '.docker1.proxy-port // empty' "$cfg_file")" \
+            --decoder-init-port "$(yq -r '.docker2["init-port"] // empty' "$cfg_file")" \
+            --decoder-alloc-port "$(yq -r '.docker2["alloc-port"] // empty' "$cfg_file")" \
+            --proxy-port "$(yq -r '.docker1["proxy-port"] // empty' "$cfg_file")" \
             > "/tmp/build_${BUILD_ID}_${cfg_name}_proxy.log" 2>&1 &
     elif yq -e '(.router.type // "") == ""' "$cfg_file" >/dev/null 2>&1; then
         docker_args="$(yq '.docker' "$cfg_file")"
