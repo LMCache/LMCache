@@ -4,6 +4,7 @@ from collections import OrderedDict
 from concurrent.futures import Future
 from typing import TYPE_CHECKING, Generator, List, Optional, Sequence
 import asyncio
+import functools
 import threading
 
 # Third Party
@@ -18,7 +19,7 @@ from lmcache.utils import (
     start_loop_in_thread_with_exceptions,
 )
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.event_manager import EventType
+from lmcache.v1.event_manager import EventManager, EventType
 from lmcache.v1.lookup_server import LookupServerInterface
 from lmcache.v1.memory_management import (
     MemoryAllocatorInterface,
@@ -35,6 +36,9 @@ from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 if TYPE_CHECKING:
     # First Party
     from lmcache.v1.cache_controller.worker import LMCacheWorker
+    from lmcache.v1.lookup_client.lmcache_async_lookup_client import (
+        LMCacheAsyncLookupServer,
+    )
 
 logger = init_logger(__name__)
 
@@ -50,6 +54,7 @@ class StorageManager:
         config: LMCacheEngineConfig,
         metadata: LMCacheEngineMetadata,
         allocator: MemoryAllocatorInterface,
+        event_manager: EventManager,
         lmcache_worker: Optional["LMCacheWorker"] = None,
         lookup_server: Optional[LookupServerInterface] = None,
     ):
@@ -89,7 +94,15 @@ class StorageManager:
         self.instance_id = config.lmcache_instance_id
         self.worker_id = metadata.worker_id
 
+        self.event_manager = event_manager
+
+        self.async_lookup_server: Optional["LMCacheAsyncLookupServer"] = None
+
         self.nixl_offload_stream = torch.cuda.Stream()
+
+    def post_init(self, **kwargs) -> None:
+        if "async_lookup_server" in kwargs:
+            self.async_lookup_server = kwargs.pop("async_lookup_server")
 
     def _get_allocator_backend(
         self, config: LMCacheEngineConfig
@@ -249,28 +262,6 @@ class StorageManager:
 
         return None
 
-    def get_non_blocking(
-        self,
-        key: CacheEngineKey,
-        location: Optional[str] = None,
-    ) -> Optional[Future]:
-        """
-        Non-blocking function to get the memory object from the storages.
-        """
-        logger.warning("Calling an unstable interface: get_non_blocking")
-        # TODO (Jiayi): incorporate prefetching here
-
-        # Search all backends for non-blocking get
-        for backend_name, backend in self.storage_backends.items():
-            if location and backend_name != location:
-                continue
-            # NOTE(Jiayi): bypass the allocator for now
-            task = backend.get_non_blocking(key)
-            if task:
-                # TODO (Jiayi): add write-back logic here
-                return task
-        return None
-
     def batched_get(
         self,
         keys: List[CacheEngineKey],
@@ -292,7 +283,7 @@ class StorageManager:
         self,
         keys: List[List[CacheEngineKey]],
         location: Optional[str] = None,
-    ) -> Generator[List[Future], None, None]:
+    ) -> Generator[Future, None, None]:
         """
         Non-blocking function to get the memory objects into the storages
         in a layerwise manner.
@@ -303,31 +294,20 @@ class StorageManager:
             dimension corresponds to the number of layers, and the second
             dimension corresponds to the number of chunks.
 
-        :return: A generator that yields a list of futures for each layer.
+        :return: A generator that yields a future for each layer.
         """
+        if location is None:
+            location = "LocalCPUBackend"
+
         for keys_multi_chunk in keys:
             # Retrieve all chunks for one layer
-            tasks = []
-            for key in keys_multi_chunk:
-                task = self.get_non_blocking(key, location)
-                assert task is not None
-                tasks.append(task)
-            yield tasks
-
-    def prefetch(self, key: CacheEngineKey) -> None:
-        """Launch a prefetch request in the storage backend. Non-blocking"""
-
-        for backend_name, backend in self.storage_backends.items():
-            if backend_name == "LocalCPUBackend":
-                if backend.contains(key):
-                    logger.debug("Key already in LocalCPUBackend, skipping prefetch")
-                    return
-                continue
-
-            perform_prefetch = backend.submit_prefetch_task(key)
-            if perform_prefetch:
-                logger.debug(f"Prefetching key {key} in backend {backend_name}")
-                break
+            backend = self.storage_backends[location]
+            # TODO(Jiayi): need to make async loading and layerwise compatible
+            task = asyncio.run_coroutine_threadsafe(
+                backend.batched_get_non_blocking("fake_lookup_id", keys_multi_chunk),
+                self.loop,
+            )
+            yield task
 
     def prefetch_single_done_callback(
         self,
@@ -344,16 +324,16 @@ class StorageManager:
         lookup_id: str,
         retrieved_length: int,
     ) -> None:
-        # FIXME: call lookup server
-        self.lookup_server.send_response_to_scheduler(lookup_id, retrieved_length)
+        assert self.async_lookup_server is not None
+        self.async_lookup_server.send_response_to_scheduler(lookup_id, retrieved_length)
 
     async def async_lookup_and_prefetch(
         self,
         lookup_id: str,
         keys: list[CacheEngineKey],
+        cum_chunk_lengths: list[int],
         search_range: Optional[list[str]] = None,
         pin: bool = False,
-        **kwargs,
     ) -> None:
         """
 
@@ -363,6 +343,8 @@ class StorageManager:
         """
 
         # FIXME: add retrieved lengths
+        # FIXME docstring
+        # FIXME review logic
 
         # NOTE(Jiayi): Currently, the retrieval pattern is always
         # prefix-based. That is, we retrieve 0-t1 tokens from backend 1
@@ -376,7 +358,7 @@ class StorageManager:
         for backend_name, backend in self.storage_backends.items():
             if search_range and backend_name not in search_range:
                 continue
-            num_hit_chunks = self.backend.async_contains(lookup_id, keys, pin)
+            num_hit_chunks = await backend.batched_async_contains(lookup_id, keys, pin)
 
             if num_hit_chunks == 0:
                 continue
@@ -384,14 +366,13 @@ class StorageManager:
             num_total_hit_chunks += num_hit_chunks
 
             loading_task = asyncio.create_task(
-                self.backend.batched_get_non_blocking(lookup_id, keys)
+                backend.batched_get_non_blocking(lookup_id, keys)
             )
             loading_task.add_done_callback(
-                lambda task: self.prefetch_single_done_callback(
-                    task,
-                    lookup_id,
-                    keys,
-                    backend_name,
+                functools.partial(
+                    self.prefetch_single_done_callback,
+                    keys=keys,
+                    backend_name=backend_name,
                 )
             )
 
@@ -401,22 +382,20 @@ class StorageManager:
                 break
             keys = keys[num_hit_chunks:]
 
-        all_done = asyncio.gather(*tasks)
+        all_done = asyncio.gather(*loading_tasks)
         all_done.add_done_callback(
             lambda future: self.prefetch_all_done_callback(
-                future, lookup_id, sum(retrieved_lengths)
+                future, lookup_id, cum_chunk_lengths[num_total_hit_chunks]
             )
         )
 
         if num_total_hit_chunks > 0:
-            # FIXME: how to get event_manager
-            self.event_manager.add_events(
+            self.event_manager.add_event(
                 EventType.LOADING,
                 lookup_id,
                 all_done,
             )
 
-    # TODO(Jiayi): Currently, search_range is only used for testing.
     def contains(
         self,
         key: CacheEngineKey,

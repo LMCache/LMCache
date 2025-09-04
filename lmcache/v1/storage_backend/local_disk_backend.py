@@ -1,14 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Future
 from typing import TYPE_CHECKING, Any, Callable, List, Optional, Sequence
 import asyncio
-import itertools
 import os
 import queue
 import threading
 import time
-from collections.abc import Awaitable
 
 # Third Party
 import torch
@@ -23,8 +21,8 @@ from lmcache.v1.lookup_server import LookupServerInterface
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
 from lmcache.v1.storage_backend.abstract_backend import StorageBackendInterface
 from lmcache.v1.storage_backend.cache_policy import get_cache_policy
-from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.v1.storage_backend.job_executor.pq_thread_pool import PQThreadPoolExecutor
+from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 
 if TYPE_CHECKING:
     # First Party
@@ -56,7 +54,7 @@ class LocalDiskWorker:
     ) -> Future:
         if task_type == "prefetch":
             priority = 0
-            self.insert_prefetch_task(kwargs["key"], None)
+            # self.insert_prefetch_task(kwargs["key"], None)
         elif task_type == "delete":
             priority = 1
         elif task_type == "put":
@@ -71,11 +69,11 @@ class LocalDiskWorker:
             **kwargs,
         )
 
-        #FIXME: For now, keys could be repetitively prefetched.
+        # FIXME: For now, keys could be repetitively prefetched.
         # But i guess it's okay.
         # if task_type == "prefetch":
         #     self.insert_prefetch_task(kwargs["key"], future)
-        
+
         return future
 
     def remove_put_task(self, key: CacheEngineKey):
@@ -93,12 +91,12 @@ class LocalDiskWorker:
         with self.put_lock:
             return key in self.put_tasks
 
-    def remove_prefetch_task(self, key: CacheEngineKey):
-        with self.prefetch_lock:
-            if key in self.prefetch_tasks:
-                self.prefetch_tasks.pop(key)
-            else:
-                logger.warning(f"Key {key} not found in prefetch tasks.")
+    # def remove_prefetch_task(self, key: CacheEngineKey):
+    #     with self.prefetch_lock:
+    #         if key in self.prefetch_tasks:
+    #             self.prefetch_tasks.pop(key)
+    #         else:
+    #             logger.warning(f"Key {key} not found in prefetch tasks.")
 
     # def insert_prefetch_task(
     #     self,
@@ -349,7 +347,6 @@ class LocalDiskBackend(StorageBackendInterface):
         for key, memory_obj in zip(keys, memory_objs, strict=False):
             self.submit_put_task(key, memory_obj)
 
-
     def get_blocking(
         self,
         key: CacheEngineKey,
@@ -399,21 +396,21 @@ class LocalDiskBackend(StorageBackendInterface):
         self,
         lookup_id: str,
         keys: list[CacheEngineKey],
-    ) -> Awaitable[list[MemoryObj]]:
-        mem_objs = []
+    ) -> Future[list[MemoryObj]]:
+        mem_objs: list[MemoryObj] = []
+        paths: list[str] = []
 
         for key in keys:
             self.disk_lock.acquire()
-            assert key in self.dict, (
-                f"Key {key} not found in disk cache after pinning")
+            assert key in self.dict, f"Key {key} not found in disk cache after pinning"
 
             # NOTE(Jiayi): Currently, we consider prefetch as cache hit.
             self.cache_policy.update_on_hit(key, self.dict)
 
-            if self.disk_worker.exists_in_prefetch_tasks(key):
-                logger.debug(f"Prefetch task for {key} is already in progress.")
-                self.disk_lock.release()
-                return False
+            # if self.disk_worker.exists_in_prefetch_tasks(key):
+            #     logger.debug(f"Prefetch task for {key} is already in progress.")
+            #     self.disk_lock.release()
+            #     return False
 
             path = self.dict[key].path
             dtype = self.dict[key].dtype
@@ -424,10 +421,12 @@ class LocalDiskBackend(StorageBackendInterface):
             assert shape is not None
 
             memory_obj = self.local_cpu_backend.allocate(
-                shape, dtype, fmt, busy_loop=True)
-            
+                shape, dtype, fmt, busy_loop=True
+            )
+
             assert memory_obj is not None, (
-                "Memory allocation failed during async disk load.")
+                "Memory allocation failed during async disk load."
+            )
 
             self.dict[key].pin()
 
@@ -437,21 +436,24 @@ class LocalDiskBackend(StorageBackendInterface):
             self.disk_lock.release()
             logger.debug(f"Prefetching {key} from disk.")
 
+            mem_objs.append(memory_obj)
+            paths.append(path)
+
         future = self.disk_worker.submit_task(
             "prefetch",
             self.batched_async_load_bytes_from_disk,
             path=paths,
             key=keys,
-            memory_obj=memory_objs,
+            memory_obj=mem_objs,
         )
         return future
-    
+
     async def batched_async_contains(
         self,
         lookup_id: str,
         keys: list[CacheEngineKey],
         pin: bool = False,
-    ) -> Awaitable[int]:
+    ) -> int:
         num_hit_counts = 0
         with self.disk_lock:
             for key in keys:
@@ -462,8 +464,6 @@ class LocalDiskBackend(StorageBackendInterface):
                     self.keys_in_request.append(key)
                 num_hit_counts += 1
         return num_hit_counts
-
-            
 
     @_lmcache_nvtx_annotate
     @torch.inference_mode()
@@ -495,7 +495,6 @@ class LocalDiskBackend(StorageBackendInterface):
 
         self.disk_worker.remove_put_task(key)
 
-
     def batched_async_load_bytes_from_disk(
         self,
         paths: list[str],
@@ -521,11 +520,9 @@ class LocalDiskBackend(StorageBackendInterface):
             if write_back:
                 self.local_cpu_backend.submit_put_task(key, mem_obj)
 
-            self.disk_worker.remove_prefetch_task(key)
+            # self.disk_worker.remove_prefetch_task(key)
 
         return memory_objs
-
-
 
     def load_bytes_from_disk(
         self,

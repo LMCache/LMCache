@@ -14,7 +14,6 @@
 # limitations under the License.
 
 # Standard
-from concurrent.futures import Future
 from dataclasses import dataclass
 from typing import List, Optional, Sequence, Set
 import asyncio
@@ -361,17 +360,6 @@ class NixlStorageBackend(StorageBackendInterface):
 
         asyncio.run_coroutine_threadsafe(self.gpu_to_file(keys, memory_objs), self.loop)
 
-    def submit_prefetch_task(self, key: CacheEngineKey) -> bool:
-        """
-        An async function to get the MemoryObj from the storage backend.
-
-        :param key: The key of the MemoryObj.
-
-        :return: True if prefetch succeeded, else False.
-        """
-
-        return False
-
     def get_blocking(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         """
         A blocking function to get the kv cache from the storage backend.
@@ -381,17 +369,12 @@ class NixlStorageBackend(StorageBackendInterface):
         :return: MemoryObj. None if the key does not exist.
         """
 
-        future = self.get_non_blocking(key)
+        future = asyncio.run_coroutine_threadsafe(self.file_to_gpu(key), self.loop)
 
         if future is None:
             return None
 
         return future.result()
-
-    def get_non_blocking(self, key: CacheEngineKey) -> Optional[Future]:
-        future = asyncio.run_coroutine_threadsafe(self.file_to_gpu(key), self.loop)
-
-        return future
 
     def remove(self, key: CacheEngineKey, force: bool = True) -> bool:
         """

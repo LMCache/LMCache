@@ -25,7 +25,7 @@ logger = init_logger(__name__)
 
 # NOTE(Jiayi): Prefetch could load extra redundant cache if multiple
 # workers has different hit tokens.
-class LMCacheLookupAndPrefetchClient(LookupClientInterface):
+class LMCacheAsyncLookupClient(LookupClientInterface):
     """
     ZMQ-based lookup client that communicates with a lookup server.
 
@@ -67,7 +67,7 @@ class LMCacheLookupAndPrefetchClient(LookupClientInterface):
 
             push_socket = make_zmq_socket(
                 self.ctx,
-                socket_path,
+                worker_socket_path,
                 zmq.REQ,  # type: ignore[attr-defined]
                 bind=False,
             )
@@ -106,100 +106,91 @@ class LMCacheLookupAndPrefetchClient(LookupClientInterface):
         # (e.g., worker process).
         self.lock = threading.Lock()
 
-        # map from req_id to req's status.
+        # map from lookup_id to req's status.
         # None indicates ongoing.
         # int indicates number of hit tokens.
-        self.reqs_status: dict[str, Optional[int]] = []
+        self.reqs_status: dict[str, Optional[int]] = {}
 
-        # map from req_id to number of hit tokens for each worker
+        # map from lookup_id to number of hit tokens for each worker
         self.res_for_each_worker: dict[str, list[int]] = {}
 
-        # The two parts are [req_id, num_hit_tokens]
+        # The two parts are [lookup_id, num_hit_tokens]
         self.num_parts = 2
 
         self.running = True
 
         self.thread = threading.Thread(
-            target=process_responses_from_workers, daemon=True
+            target=self.process_responses_from_workers, daemon=True
         )
         self.thread.start()
 
-    # TODO(Jiayi): We might want to differentiate sync and async lookup.
-    # For example, we might want sync lookup if for local lookup.
-    def batched_lookup_and_prefetch(
+    # TODO(Jiayi): Consider batching here
+    def lookup(
         self,
-        batched_req_ids: list[str],
-        batched_token_ids: Union[list[torch.Tensor], list[list[int]]],
-        batched_request_configs: list[Optional[dict]],
-    ) -> list[Optional[int]]:
-        batched_res = []
-
-        batched_msg_buf = []
-        for req_id, token_ids, request_configs in zip(
-            batched_req_ids, batched_token_ids, batched_request_configs
+        token_ids: Union[torch.Tensor, list[int]],
+        lookup_id: str,
+        request_configs: Optional[dict] = None,
+    ) -> Optional[int]:
+        with self.lock:
+            req_status = self.reqs_status.get(lookup_id, None)
+            if req_status is not None:
+                return req_status
+            self.reqs_status[lookup_id] = None
+        hashes = []
+        offsets = []
+        for start, end, key in self.token_database.process_tokens(
+            token_ids, make_key=False
         ):
-            with self.lock:
-                req_status = self.reqs_status.get(req_id, -1)
-                if req_id != 1:
-                    batched_res.append(req_status)
-                    if req_status is not None:
-                        self.reqs_status.pop(req_id)
-                    continue
-                requests_status[req_id] = None
+            hashes.append(key)
+            offsets.append(end - start)
+        hash_buf = self.encoder.encode(hashes)
+        offset_buf = self.encoder.encode(offsets)
 
-            for start, end, key in self.token_database.process_tokens(
-                token_ids, make_key=False
-            ):
-                hashes.append(key)
-                offsets.append(end - start)
-            hash_buf = self.encoder.encode(hashes)
-            offset_buf = self.encoder.encode(offsets)
-
-            req_id_buf = req_id.encode("utf-8")
-            request_configs_str = ""
-            if request_configs is not None and len(request_configs) != 0:
-                request_configs_str = "@".join(
-                    [f"{k}%{v}" for k, v in request_configs.items()]
-                )
-            request_configs_buf = request_configs_str.encode("utf-8")
-
-            batched_msg_buf.extend(
-                [
-                    hash_buf,
-                    offset_buf,
-                    req_id_buf,
-                    request_configs_buf,
-                ]
+        lookup_id_buf = lookup_id.encode("utf-8")
+        request_configs_str = ""
+        if request_configs is not None and len(request_configs) != 0:
+            request_configs_str = "@".join(
+                [f"{k}%{v}" for k, v in request_configs.items()]
             )
+        request_configs_buf = request_configs_str.encode("utf-8")
+
+        msg_buf = [
+            hash_buf,
+            offset_buf,
+            lookup_id_buf,
+            request_configs_buf,
+        ]
 
         ranks = self.tensor_parallel_size
         if self.create_lookup_server_only_on_worker_0_for_mla:
             ranks = 1
         for i in range(ranks):
-            self.push_sockets[i].send_multipart(batched_msg_buf, copy=False)
+            self.push_sockets[i].send_multipart(msg_buf, copy=False)
+
+        return None
 
     def process_responses_from_workers(self):
         while self.running:
             frames = self.pull_socket.recv_multipart(copy=False)
             assert len(frames) == self.num_parts
-            req_id = frames[0].bytes.decode("utf-8")
+            lookup_id = frames[0].bytes.decode("utf-8")
             res = int.from_bytes(frames[1], "big")
 
             with self.lock:
-                if req_id not in self.ress_for_each_worker:
-                    self.res_for_each_worker[req_id] = [res]
+                if lookup_id not in self.ress_for_each_worker:
+                    self.res_for_each_worker[lookup_id] = [res]
                 else:
-                    self.res_for_each_worker[req_id].append(res)
-                all_res = self.res_for_each_worker[req_id]
+                    self.res_for_each_worker[lookup_id].append(res)
+                all_res = self.res_for_each_worker[lookup_id]
 
                 if len(all_res) == self.tensor_parallel_size:
-                    self.res_for_each_worker.pop(req_id)
+                    self.res_for_each_worker.pop(lookup_id)
 
                     # NOTE: it is possible that the number of hit
                     # tokens is different across TP ranks, so we
                     # can use the minimum value as the number of
                     # hit tokens.
-                    self.reqs_status[req_id] = min(all_res)
+                    self.reqs_status[lookup_id] = min(all_res)
 
     def supports_producer_reuse(self) -> bool:
         """Return True as LMCacheLookupClient supports producer kvcache reuse"""
@@ -209,8 +200,9 @@ class LMCacheLookupAndPrefetchClient(LookupClientInterface):
         self.socket.close(linger=0)
 
 
-class LMCacheLookupServer:
-    """ZMQ-based lookup server that handles lookup requests using LMCacheEngine."""
+class LMCacheAsyncLookupServer:
+    """ZMQ-based async lookup server that handles lookup and prefetch
+    requests using LMCacheEngine."""
 
     def __init__(self, lmcache_engine: LMCacheEngine, vllm_config: "VllmConfig"):
         self.decoder = msgspec.msgpack.Decoder()
@@ -246,26 +238,26 @@ class LMCacheLookupServer:
             f"worker socket path {worker_socket_path}"
         )
         self.thread = threading.Thread(
-            target=process_requests_from_scheduler, daemon=True
+            target=self.process_requests_from_scheduler, daemon=True
         )
         self.thread.start()
 
-        # The four parts are [hash, offset, req_id, request_configs]
+        # The four parts are [hash, offset, lookup_id, request_configs]
         self.num_parts = 4
 
     def process_requests_from_scheduler(self):
         while self.running:
             frames = self.pull_socket.recv_multipart(copy=False)
-            num_framses = len(frames)
+            num_frames = len(frames)
             assert num_frames % self.num_parts == 0
             for i in range(0, num_frames, self.num_parts):
-                req_id = frames[i].bytes.decode("utf-8")
+                lookup_id = frames[i].bytes.decode("utf-8")
 
                 hash_frame = frames[i + 1]
-                hashes = self.decoder.decode(hash_frames)
+                hashes = self.decoder.decode(hash_frame)
 
                 offset_frame = frames[i + 2]
-                offsets = self.decoder.decode(offset_frames)
+                offsets = self.decoder.decode(offset_frame)
 
                 request_configs_str = frames[i + 3].bytes.decode("utf-8")
                 request_configs = None
@@ -279,17 +271,17 @@ class LMCacheLookupServer:
                         request_configs[kvs[0]] = kvs[1]
 
                 self.lmcache_engine.lookup_and_prefetch(
-                    lookup_id=req_id,
+                    lookup_id=lookup_id,
                     hashes=hashes,
                     offsets=offsets,
                     pin=True,
                     request_configs=request_configs,
                 )
 
-    def send_response_to_scheduler(self, req_id: str, num_hit_tokens: int):
-        req_id_buf = req_id.encode("utf-8")
+    def send_response_to_scheduler(self, lookup_id: str, num_hit_tokens: int):
+        lookup_id_buf = lookup_id.encode("utf-8")
         num_hit_tokens_buf = num_hit_tokens.to_bytes(4, "big")
-        self.push_socket.send_multipart([req_id_buf, num_hit_tokens_buf], copy=False)
+        self.push_socket.send_multipart([lookup_id_buf, num_hit_tokens_buf], copy=False)
 
     def close(self):
         self.socket.close(linger=0)

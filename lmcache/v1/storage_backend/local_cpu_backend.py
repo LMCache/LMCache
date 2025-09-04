@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from concurrent.futures import Future
-from collections.abc import Awaitable
 from typing import TYPE_CHECKING, List, Optional, Sequence
 import threading
 import time
@@ -148,14 +147,6 @@ class LocalCPUBackend(AllocatorBackendInterface):
         for key, memory_obj in zip(keys, memory_objs, strict=False):
             self.submit_put_task(key, memory_obj)
 
-    # NOTE (Jiayi): prefetch might be deprecated in the future.
-    # Should be replaced by `move`.
-    def submit_prefetch_task(
-        self,
-        key: CacheEngineKey,
-    ) -> bool:
-        return False
-
     def get_blocking(
         self,
         key: CacheEngineKey,
@@ -174,21 +165,23 @@ class LocalCPUBackend(AllocatorBackendInterface):
         self,
         lookup_id: str,
         keys: list[CacheEngineKey],
-        pin: bool = False,
-    ) -> Awaitable[list[MemoryObj]]:
+    ) -> Future[list[MemoryObj]]:
         mem_objs = []
         with self.cpu_lock:
-            mem_obj = self.hot_cache[key]
-            mem_obj.ref_count_up()
-            mem_objs.append(mem_obj)
-        return mem_objs
+            for key in keys:
+                mem_obj = self.hot_cache[key]
+                mem_obj.ref_count_up()
+                mem_objs.append(mem_obj)
+        future: Future = Future()
+        future.set_result(mem_objs)
+        return future
 
-    async def batched_contains_non_blocking(
+    async def batched_async_contains(
         self,
         lookup_id: str,
         keys: List[CacheEngineKey],
         pin: bool = False,
-    ) -> Awaitable[int]:
+    ) -> int:
         # NOTE(Jiayi): Only prefix chunks are counted.
         num_hit_chunks = 0
         with self.cpu_lock:

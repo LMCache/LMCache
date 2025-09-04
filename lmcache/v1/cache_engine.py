@@ -2,6 +2,7 @@
 # Standard
 from collections import defaultdict
 from typing import (
+    TYPE_CHECKING,
     Any,
     Callable,
     Dict,
@@ -30,6 +31,7 @@ from lmcache.v1.distributed_server import (
     DistributedServerInterface,
     NaiveDistributedServer,
 )
+from lmcache.v1.event_manager import EventManager, EventType
 from lmcache.v1.gpu_connector import (
     GPUConnectorInterface,
     SGLangLayerwiseGPUConnector,
@@ -57,6 +59,9 @@ from lmcache.v1.token_database import (
     TokenDatabase,
 )
 
+if TYPE_CHECKING:
+    # First Party
+    pass
 logger = init_logger(__name__)
 
 
@@ -123,12 +128,16 @@ class LMCacheEngine:
         if self.enable_controller:
             self.lmcache_worker = LMCacheWorker(config, metadata, self)
 
+        self.async_loading = config.enable_async_loading
+        self.event_manager = EventManager()
+
         self.storage_manager = StorageManager(
             config,
             metadata,
             self.memory_allocator,
-            self.lmcache_worker,
-            self.lookup_server,
+            event_manager=self.event_manager,
+            lmcache_worker=self.lmcache_worker,
+            lookup_server=self.lookup_server,
         )
 
         # HACK: remove this in the future
@@ -179,6 +188,9 @@ class LMCacheEngine:
             gc.disable()
 
     def post_init(self, **kwargs) -> None:
+        if "async_lookup_server" in kwargs:
+            self.async_lookup_server = kwargs.pop("async_lookup_server")
+            self.storage_manager.post_init(async_lookup_server=self.async_lookup_server)
         if not self.post_inited:
             logger.info("Post-initializing LMCacheEngine")
             self.gpu_connector.initialize_kvcaches_ptr(**kwargs)
@@ -475,12 +487,20 @@ class LMCacheEngine:
 
         reordered_chunks: List[Tuple[CacheEngineKey, MemoryObj, int, int]] = []
         if not self._is_passive():
-            reordered_chunks, tot_kv_size = self._process_tokens_internal(
-                tokens,
-                mask,
-                ret_mask,
-                **kwargs,
-            )
+            if self.async_loading:
+                reordered_chunks, tot_kv_size = self._async_process_tokens_internal(  # noqa: E501
+                    tokens,
+                    mask,
+                    ret_mask,
+                    **kwargs,
+                )
+            else:
+                reordered_chunks, tot_kv_size = self._process_tokens_internal(
+                    tokens,
+                    mask,
+                    ret_mask,
+                    **kwargs,
+                )
         if self.save_only_first_rank:
             self._broadcast_or_receive_memory_objs(
                 reordered_chunks,
@@ -603,9 +623,9 @@ class LMCacheEngine:
 
             to_count_down = []
             for layer_id in range(self.num_layers):
-                tasks = next(get_generator)
+                task = next(get_generator)
 
-                assert None not in tasks
+                assert task is not None
 
                 if layer_id == 0:
                     # NOTE(Yuwei): For sglang integration we need to provide retrieved
@@ -614,7 +634,7 @@ class LMCacheEngine:
                 else:
                     yield None
 
-                mem_objs_layer = [task.result() for task in tasks]
+                mem_objs_layer = task.result()
                 mem_obj_consumer.send(mem_objs_layer)
                 to_count_down.extend(mem_objs_layer)
 
@@ -640,24 +660,6 @@ class LMCacheEngine:
         )
 
         yield ret_mask
-
-    @_lmcache_nvtx_annotate
-    def prefetch(
-        self,
-        tokens: Union[torch.Tensor, List[int]],
-        mask: Optional[torch.Tensor] = None,
-        request_configs: Optional[dict] = None,
-    ) -> None:
-        """Launch the prefetching process in the storage manager to load the
-        KV to the local CPU memory
-        """
-        if self._is_passive():
-            return
-        for start, end, key in self.token_database.process_tokens(
-            tokens=tokens, mask=mask, request_configs=request_configs
-        ):
-            assert isinstance(key, CacheEngineKey)
-            self.storage_manager.prefetch(key)
 
     @_lmcache_nvtx_annotate
     def lookup(
@@ -853,17 +855,14 @@ class LMCacheEngine:
         """
         An async version of lookup + prefetch.
 
-        StorageBackends in StorageManager is expected to manage
-        only the async lookup
-        Also, there are three categories of backends:
+        There are three categories of backends:
         (1) sync lookup + sync retrieval (e.g., cpu)
-        (2) sync lookup + async retreival (e.g., disk)
+        (2) sync lookup + async retrieval (e.g., disk)
         (3) async lookup + async retrieval (e.g., p2p)
         """
 
-        starts = []
-        ends = []
-        keys = []
+        keys: list[CacheEngineKey] = []
+        cum_chunk_lengths = [0]
 
         # TODO(Jiayi): make token database able to return list.
         for start, end, key in self.token_database.process_tokens(
@@ -874,9 +873,13 @@ class LMCacheEngine:
         ):
             assert isinstance(key, CacheEngineKey)
             keys.append(key)
+            cum_chunk_lengths.append(end)
 
-        self.storage_manager.async_lookup_and_prefetch(
-            lookup_id, keys, search_range, pin
+        asyncio.run_coroutine_threadsafe(
+            self.storage_manager.async_lookup_and_prefetch(
+                lookup_id, keys, cum_chunk_lengths, search_range, pin
+            ),
+            self.storage_manager.loop,
         )
 
     # TODO(Jiayi): Need to handle the case where `tokens=None`.
@@ -1066,13 +1069,57 @@ class LMCacheEngine:
 
         logger.info("LMCacheEngine closed.")
 
+    def _async_process_tokens_internal(
+        self,
+        tokens,
+        mask,
+        ret_mask,
+        **kwargs,
+    ) -> tuple[list[tuple[CacheEngineKey, MemoryObj, int, int]], int]:
+        """
+        This function is used to get the memory objects from the event manager.
+
+        Args:
+            tokens: Input tokens to process
+            mask: Mask indicating valid token positions
+            ret_mask: Output mask updated with cache hit positions
+            **kwargs: Additional keyword arguments
+        """
+        assert "req_id" in kwargs, "req_id is required for async loading"
+        request_configs = kwargs.get("request_configs")
+        if request_configs is not None and len(request_configs) != 0:
+            assert isinstance(request_configs, dict)
+
+        tot_kv_size = 0
+        chunks: list[tuple[CacheEngineKey, MemoryObj, int, int]] = []
+        future = self.event_manager.pop_event(EventType.LOADING, kwargs["req_id"])
+
+        # TODO (Jiayi): This is a temporary solution to make asyncio working
+        # with threadpool.
+        memory_objs = future.result().result()
+
+        # TODO(Jiayi): hashing inside `process_tokens` can be skipped.
+        for idx, (start, end, key) in enumerate(
+            self.token_database.process_tokens(
+                tokens=tokens,
+                mask=mask,
+                request_configs=request_configs,
+            )
+        ):
+            assert isinstance(key, CacheEngineKey)
+            memory_obj = memory_objs[idx]
+            chunks.append((key, memory_obj, start, end))
+            tot_kv_size += memory_obj.get_size()
+
+        return chunks, tot_kv_size
+
     def _process_tokens_internal(
         self,
         tokens,
         mask,
         ret_mask,
         **kwargs,
-    ) -> Tuple[List[Tuple[CacheEngineKey, MemoryObj, int, int]], int]:
+    ) -> tuple[list[tuple[CacheEngineKey, MemoryObj, int, int]], int]:
         """Process tokens and populate the reordered lists.
 
         This function is used to process tokens and populate the reordered lists.
@@ -1086,15 +1133,16 @@ class LMCacheEngine:
 
         tot_kv_size = 0
         # location -> [(CacheEngineKey, start, end)]
-        block_mapping: Dict[str, List[Tuple[CacheEngineKey, int, int]]] = defaultdict(
+        block_mapping: dict[str, list[tuple[CacheEngineKey, int, int]]] = defaultdict(
             list
         )
-        # [(CacheEngineKey, MemoryObj, start, end)]
-        reordered_chunks: List[Tuple[CacheEngineKey, MemoryObj, int, int]] = []
+
+        reordered_chunks: list[tuple[CacheEngineKey, MemoryObj, int, int]] = []
 
         request_configs = kwargs.get("request_configs")
         if request_configs is not None and len(request_configs) != 0:
             assert isinstance(request_configs, dict)
+
         for start, end, key in self.token_database.process_tokens(
             tokens=tokens,
             mask=mask,
@@ -1138,8 +1186,6 @@ class LMCacheEngine:
 
             block_mapping[location].append((key, start, end))
 
-        # TODO(Jiayi): We can parallelize the retrieval from
-        # different storage backends.
         last_failed_block_start = None
         for location, blocks in block_mapping.items():
             keys = [key for key, _, _ in blocks]

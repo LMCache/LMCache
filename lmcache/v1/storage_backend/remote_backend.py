@@ -246,12 +246,6 @@ class RemoteBackend(StorageBackendInterface):
             for key, memory_obj in zip(keys, memory_objs, strict=False):
                 self.submit_put_task(key, memory_obj)
 
-    def submit_prefetch_task(
-        self,
-        key: CacheEngineKey,
-    ) -> bool:
-        raise NotImplementedError
-
     @_lmcache_nvtx_annotate
     def get_blocking(
         self,
@@ -298,12 +292,6 @@ class RemoteBackend(StorageBackendInterface):
             f"deserialization takes {(t3 - t2) * 1000:.6f} msec"
         )
         return decompressed_memory_obj
-
-    def get_non_blocking(
-        self,
-        key: CacheEngineKey,
-    ) -> Optional[Future]:
-        raise NotImplementedError
 
     def batched_get_blocking(
         self,

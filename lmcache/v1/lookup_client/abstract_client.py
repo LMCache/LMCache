@@ -20,7 +20,7 @@ class LookupClientInterface(metaclass=abc.ABCMeta):
         token_ids: Union[torch.Tensor, list[int]],
         lookup_id: str,
         request_configs: Optional[dict] = None,
-    ) -> int:
+    ) -> Optional[int]:
         """
         Perform lookup for the given token IDs.
 
@@ -33,7 +33,8 @@ class LookupClientInterface(metaclass=abc.ABCMeta):
             includes tags and the other configs
 
         Returns:
-            The number of tokens that can be loaded from cache
+            The number of tokens that can be loaded from cache.
+            None indicates the lookup/prefetch is in progress.
         """
         raise NotImplementedError
 
