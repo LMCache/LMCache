@@ -50,6 +50,14 @@ def _to_str_list(
     return [p for p in parts]
 
 
+def _to_bool(
+    value: Optional[Union[bool, int, str]],
+) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in ["true", "1"]
+
+
 # Configuration aliases and deprecated mappings
 _CONFIG_ALIASES = {
     # Maps deprecated names to current names
@@ -68,9 +76,7 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
     "local_cpu": {
         "type": bool,
         "default": True,
-        "env_converter": lambda x: x
-        if isinstance(x, bool)
-        else str(x).lower() in ["true", "1"],
+        "env_converter": _to_bool,
     },
     "max_local_cpu_size": {"type": float, "default": 5.0, "env_converter": float},
     "local_disk": {
@@ -89,16 +95,12 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
     "use_layerwise": {
         "type": bool,
         "default": False,
-        "env_converter": lambda x: x
-        if isinstance(x, bool)
-        else str(x).lower() in ["true", "1"],
+        "env_converter": _to_bool,
     },
     "save_decode_cache": {
         "type": bool,
         "default": False,
-        "env_converter": lambda x: x
-        if isinstance(x, bool)
-        else str(x).lower() in ["true", "1"],
+        "env_converter": _to_bool,
     },
     "pre_caching_hash_algorithm": {
         "type": str,
@@ -109,9 +111,7 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
     "enable_blending": {
         "type": bool,
         "default": False,
-        "env_converter": lambda x: x
-        if isinstance(x, bool)
-        else str(x).lower() in ["true", "1"],
+        "env_converter": _to_bool,
     },
     "blend_recompute_ratio": {"type": float, "default": 0.15, "env_converter": float},
     "blend_min_tokens": {"type": int, "default": 256, "env_converter": int},
@@ -120,9 +120,7 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
     "enable_p2p": {
         "type": bool,
         "default": False,
-        "env_converter": lambda x: x
-        if isinstance(x, bool)
-        else str(x).lower() in ["true", "1"],
+        "env_converter": _to_bool,
     },
     "lookup_url": {"type": Optional[str], "default": None, "env_converter": str},
     "distributed_url": {"type": Optional[str], "default": None, "env_converter": str},
@@ -130,9 +128,7 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
     "enable_controller": {
         "type": bool,
         "default": False,
-        "env_converter": lambda x: x
-        if isinstance(x, bool)
-        else str(x).lower() in ["true", "1"],
+        "env_converter": _to_bool,
     },
     "lmcache_instance_id": {
         "type": str,
@@ -164,9 +160,7 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
     "enable_nixl": {
         "type": bool,
         "default": False,
-        "env_converter": lambda x: x
-        if isinstance(x, bool)
-        else str(x).lower() in ["true", "1"],
+        "env_converter": _to_bool,
     },
     "nixl_role": {"type": Optional[str], "default": None, "env_converter": str},
     "nixl_receiver_host": {
@@ -188,9 +182,7 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
     "nixl_enable_gc": {
         "type": bool,
         "default": False,
-        "env_converter": lambda x: x
-        if isinstance(x, bool)
-        else str(x).lower() in ["true", "1"],
+        "env_converter": _to_bool,
     },
     "nixl_backends": {
         "type": Optional[list[str]],
@@ -201,9 +193,7 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
     "enable_xpyd": {
         "type": bool,
         "default": False,
-        "env_converter": lambda x: x
-        if isinstance(x, bool)
-        else str(x).lower() in ["true", "1"],
+        "env_converter": _to_bool,
     },
     "nixl_peer_host": {"type": Optional[str], "default": None, "env_converter": str},
     "nixl_peer_init_port": {
@@ -251,9 +241,7 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
     "save_unfull_chunk": {
         "type": bool,
         "default": True,
-        "env_converter": lambda x: x
-        if isinstance(x, bool)
-        else str(x).lower() in ["true", "1"],
+        "env_converter": _to_bool,
     },
     "blocking_timeout_secs": {"type": int, "default": 10, "env_converter": int},
     "external_lookup_client": {
@@ -264,9 +252,7 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
     "py_enable_gc": {
         "type": bool,
         "default": True,
-        "env_converter": lambda x: x
-        if isinstance(x, bool)
-        else str(x).lower() in ["true", "1"],
+        "env_converter": _to_bool,
     },
     "cache_policy": {
         "type": str,
@@ -281,9 +267,7 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
     "internal_api_server_enabled": {
         "type": bool,
         "default": False,
-        "env_converter": lambda x: x
-        if isinstance(x, bool)
-        else str(x).lower() in ["true", "1"],
+        "env_converter": _to_bool,
     },
     "internal_api_server_port_start": {
         "type": int,

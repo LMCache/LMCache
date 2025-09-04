@@ -139,9 +139,7 @@ def CreateStorageBackends(
     # TODO(Jiayi): The hierarchy is fixed for now
     # NOTE(Jiayi): The local_cpu backend is always created because
     # other backends might need it as a buffer.
-    if config.enable_nixl and not config.local_cpu:
-        pass
-    else:
+    if not config.enable_nixl or config.local_cpu:
         local_cpu_backend = LocalCPUBackend(
             config,
             memory_allocator,
@@ -198,17 +196,18 @@ def CreateStorageBackends(
         backend_name = str(remote_backend)
         storage_backends[backend_name] = remote_backend
 
-    # Create dynamic backends from configuration
-    create_dynamic_backends(
-        config,
-        metadata,
-        loop,
-        memory_allocator,
-        local_cpu_backend,
-        dst_device,
-        lookup_server,
-        storage_backends,
-    )
+    if not config.enable_nixl or config.local_cpu:
+        # Create dynamic backends from configuration
+        create_dynamic_backends(
+            config,
+            metadata,
+            loop,
+            memory_allocator,
+            local_cpu_backend,
+            dst_device,
+            lookup_server,
+            storage_backends,
+        )
 
     # Only wrap if audit is enabled in config
     if config.extra_config is not None and config.extra_config.get(
