@@ -109,13 +109,26 @@ run_lmcache_vllmopenai_container() {
         is_decoder=true
     fi
 
+    # Determine CUDA_VISIBLE_DEVICES
+    if "$is_prefiller"; then
+        best_gpu=0
+    elif "$is_decoder"; then
+        best_gpu=1
+    else
+        # Pick the GPU with the largest free memory
+        source "$ORIG_DIR/.buildkite/scripts/pick-free-gpu.sh" ""
+        best_gpu="${CUDA_VISIBLE_DEVICES}"
+    fi
+
     # docker args
     docker_args=(
         --runtime nvidia
         --network host
+        --gpus "device=${best_gpu}"
         --volume ~/.cache/huggingface:/root/.cache/huggingface
         --env VLLM_USE_FLASHINFER_SAMPLER=0
         --env HF_TOKEN="$HF_TOKEN"
+        --env UCX_TLS=cuda_ipc,cuda_copy,tcp
     )
     while IFS= read -r e; do
         [[ -n $e ]] && docker_args+=(--env "$e")
@@ -128,17 +141,6 @@ run_lmcache_vllmopenai_container() {
     fi
     if alloc=$(yq -er '."alloc-port"' <<<"$docker" 2>/dev/null); then
         docker_args+=(--env "LMCACHE_NIXL_PEER_ALLOC_PORT=$alloc")
-    fi
-    if "$is_prefiller"; then
-        docker_args+=(--gpus all)
-        docker_args+=(--env "CUDA_VISIBLE_DEVICES=0")
-    elif "$is_decoder"; then
-        docker_args+=(--gpus all)
-        docker_args+=(--env "CUDA_VISIBLE_DEVICES=1")
-    else
-        source "$ORIG_DIR/.buildkite/scripts/pick-free-gpu.sh" ""
-        best_gpu="${CUDA_VISIBLE_DEVICES}"
-        docker_args+=(--gpus "device=${best_gpu}")
     fi
 
     # vllm args
@@ -211,12 +213,14 @@ usage() {
 #########
 
 test_vllmopenai_server_with_lmcache_integrated() {
+    local model="$1"
+
     http_status_code=$(
         curl --max-time 60 http://localhost:${PORT}/v1/completions \
             -w "%{http_code}" -o response-file.txt \
             -H "Content-Type: application/json" \
             -d '{
-                "model": "meta-llama/Llama-3.2-1B-Instruct",
+                "model": "'"$model"'",
                 "prompt": "<|begin_of_text|><|system|>\nYou are a helpful AI assistant.\n<|user|>\nWhat is the capital of France?\n<|assistant|>",
                 "max_tokens": 100,
                 "temperature": 0.7
@@ -369,7 +373,7 @@ for cfg_name in "${CONFIG_NAMES[@]}"; do
     # Send request
     test_mode="$(yq -r '.workload.type' "$cfg_file")"
     if [ "$test_mode" = "dummy" ]; then
-        test_vllmopenai_server_with_lmcache_integrated
+        test_vllmopenai_server_with_lmcache_integrated "$(yq -r '.vllm.model' "$cfg_file")"
     elif [ "$test_mode" = "long_doc_qa" ]; then
         workload_yaml="$(yq '(.workload * {"model": .vllm.model}) | del(.type)' "$cfg_file")"
         run_long_doc_qa "$workload_yaml"
