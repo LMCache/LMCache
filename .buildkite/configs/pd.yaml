@@ -1,7 +1,7 @@
 workload:
   type: long_doc_qa
   max-inflight-requests: 20
-  repeat-count: 0
+  repeat-count: 1
   expected-latency: 4
 
 router:
