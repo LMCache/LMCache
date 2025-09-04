@@ -109,22 +109,10 @@ run_lmcache_vllmopenai_container() {
         is_decoder=true
     fi
 
-    # Determine CUDA_VISIBLE_DEVICES
-    if "$is_prefiller"; then
-        best_gpu=0
-    elif "$is_decoder"; then
-        best_gpu=1
-    else
-        # Pick the GPU with the largest free memory
-        source "$ORIG_DIR/.buildkite/scripts/pick-free-gpu.sh" ""
-        best_gpu="${CUDA_VISIBLE_DEVICES}"
-    fi
-
     # docker args
     docker_args=(
         --runtime nvidia
         --network host
-        --gpus "device=${best_gpu}"
         --volume ~/.cache/huggingface:/root/.cache/huggingface
         --env VLLM_USE_FLASHINFER_SAMPLER=0
         --env HF_TOKEN="$HF_TOKEN"
@@ -140,6 +128,17 @@ run_lmcache_vllmopenai_container() {
     fi
     if alloc=$(yq -er '."alloc-port"' <<<"$docker" 2>/dev/null); then
         docker_args+=(--env "LMCACHE_NIXL_PEER_ALLOC_PORT=$alloc")
+    fi
+    if "$is_prefiller"; then
+        docker_args+=(--gpus all)
+        docker_args+=(--env "CUDA_VISIBLE_DEVICES=0")
+    elif "$is_decoder"; then
+        docker_args+=(--gpus all)
+        docker_args+=(--env "CUDA_VISIBLE_DEVICES=1")
+    else
+        source "$ORIG_DIR/.buildkite/scripts/pick-free-gpu.sh" ""
+        best_gpu="${CUDA_VISIBLE_DEVICES}"
+        docker_args+=(--gpus "device=${best_gpu}")
     fi
 
     # vllm args
