@@ -73,7 +73,7 @@ class LMCacheLookupAndPrefetchClient(LookupClientInterface):
             )
 
             self.push_sockets.append(push_socket)
-        
+
         scheduler_socket_path = get_zmq_rpc_path_lmcache(
             vllm_config, "lookup_scheduler", rpc_port, 0
         )
@@ -88,7 +88,6 @@ class LMCacheLookupAndPrefetchClient(LookupClientInterface):
             f"with socket path {scheduler_socket_path}"
         )
 
-
         # First Party
         from lmcache.v1.token_database import (
             ChunkedTokenDatabase,
@@ -101,9 +100,9 @@ class LMCacheLookupAndPrefetchClient(LookupClientInterface):
             self.token_database = SegmentTokenDatabase(config, metadata)
         else:
             self.token_database = ChunkedTokenDatabase(config, metadata)
-        
+
         # A lock is needed since we need another thread to pull
-        # responses from the lookup_and_prefetch server 
+        # responses from the lookup_and_prefetch server
         # (e.g., worker process).
         self.lock = threading.Lock()
 
@@ -121,9 +120,9 @@ class LMCacheLookupAndPrefetchClient(LookupClientInterface):
         self.running = True
 
         self.thread = threading.Thread(
-            target=process_responses_from_workers, daemon=True)
+            target=process_responses_from_workers, daemon=True
+        )
         self.thread.start()
-        
 
     # TODO(Jiayi): We might want to differentiate sync and async lookup.
     # For example, we might want sync lookup if for local lookup.
@@ -133,7 +132,6 @@ class LMCacheLookupAndPrefetchClient(LookupClientInterface):
         batched_token_ids: Union[list[torch.Tensor], list[list[int]]],
         batched_request_configs: list[Optional[dict]],
     ) -> list[Optional[int]]:
-
         batched_res = []
 
         batched_msg_buf = []
@@ -165,22 +163,21 @@ class LMCacheLookupAndPrefetchClient(LookupClientInterface):
                 )
             request_configs_buf = request_configs_str.encode("utf-8")
 
-            batched_msg_buf.extend([
-                hash_buf,
-                offset_buf,
-                req_id_buf,
-                request_configs_buf,
-            ])
+            batched_msg_buf.extend(
+                [
+                    hash_buf,
+                    offset_buf,
+                    req_id_buf,
+                    request_configs_buf,
+                ]
+            )
 
         ranks = self.tensor_parallel_size
         if self.create_lookup_server_only_on_worker_0_for_mla:
             ranks = 1
         for i in range(ranks):
-            self.push_sockets[i].send_multipart(
-                batched_msg_buf, copy=False)
-            
+            self.push_sockets[i].send_multipart(batched_msg_buf, copy=False)
 
-    
     def process_responses_from_workers(self):
         while self.running:
             frames = self.pull_socket.recv_multipart(copy=False)
@@ -198,12 +195,11 @@ class LMCacheLookupAndPrefetchClient(LookupClientInterface):
                 if len(all_res) == self.tensor_parallel_size:
                     self.res_for_each_worker.pop(req_id)
 
-                    # NOTE: it is possible that the number of hit 
-                    # tokens is different across TP ranks, so we 
-                    # can use the minimum value as the number of 
+                    # NOTE: it is possible that the number of hit
+                    # tokens is different across TP ranks, so we
+                    # can use the minimum value as the number of
                     # hit tokens.
                     self.reqs_status[req_id] = min(all_res)
-
 
     def supports_producer_reuse(self) -> bool:
         """Return True as LMCacheLookupClient supports producer kvcache reuse"""
@@ -244,33 +240,34 @@ class LMCacheLookupServer:
         self.lmcache_engine = lmcache_engine
         self.running = True
 
-        logger.info("lmcache lookup server start with"
-                    f" scheduler socket path {scheduler_socket_path}, "
-                    f"worker socket path {worker_socket_path}")
+        logger.info(
+            "lmcache lookup server start with"
+            f" scheduler socket path {scheduler_socket_path}, "
+            f"worker socket path {worker_socket_path}"
+        )
         self.thread = threading.Thread(
-            target=process_requests_from_scheduler, daemon=True)
+            target=process_requests_from_scheduler, daemon=True
+        )
         self.thread.start()
 
         # The four parts are [hash, offset, req_id, request_configs]
         self.num_parts = 4
 
-    
     def process_requests_from_scheduler(self):
         while self.running:
             frames = self.pull_socket.recv_multipart(copy=False)
             num_framses = len(frames)
             assert num_frames % self.num_parts == 0
             for i in range(0, num_frames, self.num_parts):
-                
                 req_id = frames[i].bytes.decode("utf-8")
 
-                hash_frame = frames[i+1]
+                hash_frame = frames[i + 1]
                 hashes = self.decoder.decode(hash_frames)
 
-                offset_frame = frames[i+2]
+                offset_frame = frames[i + 2]
                 offsets = self.decoder.decode(offset_frames)
 
-                request_configs_str = frames[i+3].bytes.decode("utf-8")
+                request_configs_str = frames[i + 3].bytes.decode("utf-8")
                 request_configs = None
                 if request_configs_str != "":
                     request_configs = {}
@@ -280,24 +277,19 @@ class LMCacheLookupServer:
                         if len(kvs) != 2:
                             raise ValueError(f"Unexpected tags_str: {kvs}")
                         request_configs[kvs[0]] = kvs[1]
-            
+
                 self.lmcache_engine.lookup_and_prefetch(
                     lookup_id=req_id,
-                    hashes=hashes, 
+                    hashes=hashes,
                     offsets=offsets,
                     pin=True,
                     request_configs=request_configs,
                 )
-    
-    def send_response_to_scheduler(
-        self, 
-        req_id: str, 
-        num_hit_tokens: int
-    ):
+
+    def send_response_to_scheduler(self, req_id: str, num_hit_tokens: int):
         req_id_buf = req_id.encode("utf-8")
         num_hit_tokens_buf = num_hit_tokens.to_bytes(4, "big")
-        self.push_socket.send_multipart(
-            [req_id_buf, num_hit_tokens_buf], copy=False)
+        self.push_socket.send_multipart([req_id_buf, num_hit_tokens_buf], copy=False)
 
     def close(self):
         self.socket.close(linger=0)
