@@ -9,6 +9,7 @@ if TYPE_CHECKING:
 
 # Third Party
 import torch
+from vllm.v1.kv_cache_interface import KVCacheConfig
 
 # First Party
 from lmcache.config import LMCacheEngineConfig as Config  # type: ignore[assignment]
@@ -16,6 +17,8 @@ from lmcache.logging import init_logger
 from lmcache.v1.config import (
     LMCacheEngineConfig as V1Config,  # type: ignore[assignment]
 )
+
+
 
 logger = init_logger(__name__)
 ENGINE_NAME = "vllm-instance"
@@ -156,3 +159,62 @@ def create_lmcache_metadata(
     )
 
     return metadata, config
+
+
+def get_layer_to_kv_cache_group_id_mapping(
+        kv_cache_config: KVCacheConfig
+) -> tuple[dict[str, int], dict[int, int]]:
+    """
+    Create mappings from layer names/IDs to KV cache group IDs for hybrid 
+    memory allocation.
+    
+    This function constructs two mapping dictionaries that allow efficient 
+    lookup of which KV cache group a given layer belongs to. This is 
+    essential for the hybrid memory allocator to properly manage memory 
+    allocation across different layers.
+    
+    The function processes each KV cache group and creates mappings for both 
+    the full layer names and the extracted numeric layer IDs. This enables 
+    fast lookups using either identifier format.
+    
+    Args:
+        kv_cache_config (KVCacheConfig): Configuration object 
+            containing KV cache groups and their associated layer names.
+    
+    Returns:
+        tuple[dict[str, int], dict[int, int]]: A tuple containing:
+            - layer_name_to_kv_cache_group_id: Maps full layer names (e.g., 
+              'language_model.model.layers.18.self_attn.attn') to their
+              corresponding KV cache group ID.
+            - layer_id_to_kv_cache_group_id: Maps numeric layer IDs (e.g., 
+                18) to their corresponding KV cache group ID.
+    
+    Raises:
+        ValueError: If a layer name cannot be parsed to extract 
+            the layer ID.
+    
+    Example:
+        >>> config = KVCacheConfig(kv_cache_groups=[...])
+        >>> name_map, id_map = get_layer_to_kv_cache_group_id_mapping(config)
+        >>> name_map['language_model.model.layers.18.self_attn.attn']
+        0
+        >>> id_map[5]
+        1
+    """
+    # NOTE(Kuntai): for hybrid memory allocator, we need to map from layer id
+    # or layer name to kv cache group id.
+    layer_name_to_kv_cache_group_id = {}
+    layer_id_to_kv_cache_group_id = {}
+    kv_cache_groups = kv_cache_config.kv_cache_groups
+
+    # Third Party
+    from vllm.model_executor.models.utils import extract_layer_index
+
+    # construct the mapping from layer name/id to kv cache group id
+    for kv_cache_group_id, group in enumerate(kv_cache_groups):
+        for layer_name in group.layer_names:
+            layer_name_to_kv_cache_group_id[layer_name] = kv_cache_group_id
+            layer_id = extract_layer_index(layer_name)
+            layer_id_to_kv_cache_group_id[layer_id] = kv_cache_group_id
+
+    return layer_name_to_kv_cache_group_id, layer_id_to_kv_cache_group_id
