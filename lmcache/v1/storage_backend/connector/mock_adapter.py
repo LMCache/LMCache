@@ -13,11 +13,11 @@ from lmcache.v1.storage_backend.connector.base_connector import RemoteConnector
 logger = init_logger(__name__)
 
 
-class BenchmarkConnectorAdapter(ConnectorAdapter):
-    """Adapter for Benchmark Connector"""
+class MockConnectorAdapter(ConnectorAdapter):
+    """Adapter for Mock Connector"""
 
     def __init__(self) -> None:
-        super().__init__("benchmark://")
+        super().__init__("mock://")
 
     def can_parse(self, url: str) -> bool:
         return url.startswith(self.schema)
@@ -25,22 +25,22 @@ class BenchmarkConnectorAdapter(ConnectorAdapter):
     def create_connector(self, context: ConnectorContext) -> RemoteConnector:
         # Local import to avoid circular dependencies
         # Local
-        from .benchmark_connector import BenchmarkConnector
+        from .mock_connector import MockConnector
 
-        logger.info(f"Creating Benchmark connector for URL: {context.url}")
+        logger.info(f"Creating Mock connector for URL: {context.url}")
 
         parsed = urlparse(context.url)
-        # capacity is provided as the netloc in URLs like: benchmark://100/?...
+        # capacity is provided as the netloc in URLs like: mock://100/?...
         if not parsed.netloc:
             raise ValueError(
-                "benchmark connector requires capacity in GB as netloc, e.g. benchmark://100/?..."
+                "mock connector requires capacity in GB as netloc, e.g. mock://100/?..."
             )
         try:
             capacity_gb = int(parsed.netloc)
         except ValueError as e:
             raise ValueError(
                 f"Invalid capacity '{parsed.netloc}' for",
-                " benchmark connector; must be an integer (GB).",
+                " mock connector; must be an integer (GB).",
             ) from e
 
         params = parse_qs(parsed.query) if parsed.query else {}
@@ -49,7 +49,7 @@ class BenchmarkConnectorAdapter(ConnectorAdapter):
         read_throughput_gbps = float(params.get("read_throughput", ["2"])[0])
         write_throughput_gbps = float(params.get("write_throughput", ["2"])[0])
 
-        return BenchmarkConnector(
+        return MockConnector(
             url=context.url,
             loop=context.loop,
             local_cpu_backend=context.local_cpu_backend,

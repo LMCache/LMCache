@@ -18,14 +18,14 @@ logger = init_logger(__name__)
 
 
 @dataclass
-class BenchmarkMemoryObj:
+class MockMemoryObj:
     metadata: MemoryObjMetadata
     num_bytes: int
 
     @staticmethod
-    def from_tensor_memory_obj(tensor_memory_obj: MemoryObj) -> "BenchmarkMemoryObj":
+    def from_tensor_memory_obj(tensor_memory_obj: MemoryObj) -> "MockMemoryObj":
         assert isinstance(tensor_memory_obj, TensorMemoryObj)
-        return BenchmarkMemoryObj(
+        return MockMemoryObj(
             metadata=tensor_memory_obj.metadata,
             num_bytes=len(tensor_memory_obj.byte_array),
         )
@@ -42,7 +42,7 @@ class AsyncLRU:
         # current size in bytes
         self.size = 0
         self.capacity = capacity * 1024**3
-        self.dict: OrderedDict[CacheEngineKey, BenchmarkMemoryObj] = OrderedDict()
+        self.dict: OrderedDict[CacheEngineKey, MockMemoryObj] = OrderedDict()
 
     async def exists(self, key: CacheEngineKey):
         async with self.lock:
@@ -51,7 +51,7 @@ class AsyncLRU:
                 return True
             return False
 
-    async def get(self, key: CacheEngineKey) -> Optional[BenchmarkMemoryObj]:
+    async def get(self, key: CacheEngineKey) -> Optional[MockMemoryObj]:
         async with self.lock:
             if key not in self.dict:
                 return None
@@ -60,13 +60,13 @@ class AsyncLRU:
 
     async def batched_get(
         self, keys: List[CacheEngineKey]
-    ) -> List[Optional[BenchmarkMemoryObj]]:
+    ) -> List[Optional[MockMemoryObj]]:
         async with self.lock:
             return [self.dict.get(key, None) for key in keys]
 
-    async def put(self, key: CacheEngineKey, benchmark_obj: BenchmarkMemoryObj):
+    async def put(self, key: CacheEngineKey, mock_obj: MockMemoryObj):
         async with self.lock:
-            alloc_size = benchmark_obj.num_bytes
+            alloc_size = mock_obj.num_bytes
             if alloc_size > self.capacity:
                 raise ValueError(
                     f"Allocation size {alloc_size} is",
@@ -75,10 +75,10 @@ class AsyncLRU:
             if key in self.dict:
                 self.dict.move_to_end(key)
                 return None
-            self.dict[key] = benchmark_obj
+            self.dict[key] = mock_obj
             while self.size + alloc_size > self.capacity:
-                _, benchmark_obj = self.dict.popitem(last=False)
-                self.size -= benchmark_obj.num_bytes
+                _, mock_obj = self.dict.popitem(last=False)
+                self.size -= mock_obj.num_bytes
             self.size += alloc_size
 
     async def list(self) -> List[CacheEngineKey]:
@@ -92,7 +92,7 @@ class AsyncLRU:
 
 class PressureManager:
     """
-    Manage I/O pressure of the benchmark connector
+    Manage I/O pressure of the mock connector
     Assumption: Read and Write throughput are independent
     Locks control overall backend throughput, not per-operation throughput
     """
@@ -118,35 +118,35 @@ class PressureManager:
         if self.peeking_latency > 0:
             await asyncio.sleep(self.peeking_latency)
 
-    async def on_put(self, benchmark_obj: BenchmarkMemoryObj):
-        total_wait_time = self.write_latency_per_byte * benchmark_obj.num_bytes
+    async def on_put(self, mock_obj: MockMemoryObj):
+        total_wait_time = self.write_latency_per_byte * mock_obj.num_bytes
         logger.debug(
-            f"waiting {total_wait_time} seconds to put {benchmark_obj.num_bytes} bytes"
+            f"waiting {total_wait_time} seconds to put {mock_obj.num_bytes} bytes"
         )
         async with self.write_lock:
             await asyncio.sleep(total_wait_time)
 
-    async def on_get(self, benchmark_obj: BenchmarkMemoryObj):
-        total_wait_time = self.read_latency_per_byte * benchmark_obj.num_bytes
+    async def on_get(self, mock_obj: MockMemoryObj):
+        total_wait_time = self.read_latency_per_byte * mock_obj.num_bytes
         logger.debug(
-            f"waiting {total_wait_time} seconds to get {benchmark_obj.num_bytes} bytes"
+            f"waiting {total_wait_time} seconds to get {mock_obj.num_bytes} bytes"
         )
         async with self.read_lock:
             await asyncio.sleep(total_wait_time)
 
-    async def on_batched_get(self, benchmark_objs: List[Optional[BenchmarkMemoryObj]]):
+    async def on_batched_get(self, mock_objs: List[Optional[MockMemoryObj]]):
         total_bytes = 0
-        for benchmark_obj in benchmark_objs:
-            if benchmark_obj is None:
+        for mock_obj in mock_objs:
+            if mock_obj is None:
                 continue
-            total_bytes += benchmark_obj.num_bytes
+            total_bytes += mock_obj.num_bytes
         total_wait_time = self.read_latency_per_byte * total_bytes
         logger.debug(f"waiting {total_wait_time} seconds to get {total_bytes} bytes")
         async with self.read_lock:
             await asyncio.sleep(total_wait_time)
 
 
-class BenchmarkConnector(RemoteConnector):
+class MockConnector(RemoteConnector):
     """
     A CPU "remote" backend that doesn't actually go through any network/DB layers and
     let's you manually set R/W throughput and peek latency
@@ -190,16 +190,14 @@ class BenchmarkConnector(RemoteConnector):
         return await self.lru_store.exists(key)
 
     def exists_sync(self, key: CacheEngineKey) -> bool:
-        raise NotImplementedError(
-            "BenchmarkConnector does not support synchronous exists"
-        )
+        raise NotImplementedError("MockConnector does not support synchronous exists")
 
     async def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
-        benchmark_obj = await self.lru_store.get(key)
-        if benchmark_obj is None:
+        mock_obj = await self.lru_store.get(key)
+        if mock_obj is None:
             return None
-        await self.pressure_manager.on_get(benchmark_obj)
-        metadata = benchmark_obj.metadata
+        await self.pressure_manager.on_get(mock_obj)
+        metadata = mock_obj.metadata
         memory_obj = self.local_cpu_backend.allocate(
             metadata.shape,
             metadata.dtype,
@@ -212,9 +210,9 @@ class BenchmarkConnector(RemoteConnector):
         return memory_obj
 
     async def put(self, key: CacheEngineKey, memory_obj: MemoryObj):
-        benchmark_obj = BenchmarkMemoryObj.from_tensor_memory_obj(memory_obj)
-        await self.lru_store.put(key, benchmark_obj)
-        await self.pressure_manager.on_put(benchmark_obj)
+        mock_obj = MockMemoryObj.from_tensor_memory_obj(memory_obj)
+        await self.lru_store.put(key, mock_obj)
+        await self.pressure_manager.on_put(mock_obj)
 
     async def list(self) -> List[str]:
         keys = await self.lru_store.list()
@@ -226,18 +224,18 @@ class BenchmarkConnector(RemoteConnector):
     async def batched_get(
         self, keys: List[CacheEngineKey]
     ) -> List[Optional[MemoryObj]]:
-        benchmark_objs = await self.lru_store.batched_get(keys)
-        await self.pressure_manager.on_batched_get(benchmark_objs)
+        mock_objs = await self.lru_store.batched_get(keys)
+        await self.pressure_manager.on_batched_get(mock_objs)
         memory_objs = []
 
-        for i, benchmark_obj in enumerate(benchmark_objs):
-            if benchmark_obj is None:
+        for i, mock_obj in enumerate(mock_objs):
+            if mock_obj is None:
                 logger.warning(
-                    f"Benchmark object is None on {i}",
-                    f" out of {len(benchmark_objs)} objects",
+                    f"Mock object is None on {i}",
+                    f" out of {len(mock_objs)} objects",
                 )
                 break
-            metadata = benchmark_obj.metadata
+            metadata = mock_obj.metadata
             memory_obj = self.local_cpu_backend.allocate(
                 metadata.shape,
                 metadata.dtype,
@@ -246,7 +244,7 @@ class BenchmarkConnector(RemoteConnector):
             if memory_obj is None:
                 logger.warning(
                     "Failed to allocate memory even with",
-                    f" busy loop on {i} out of {len(benchmark_objs)} objects",
+                    f" busy loop on {i} out of {len(mock_objs)} objects",
                 )
                 break
             memory_objs.append(memory_obj)
@@ -258,7 +256,7 @@ class BenchmarkConnector(RemoteConnector):
 
     def __repr__(self) -> str:
         return (
-            f"BenchmarkConnector(capacity={self.capacity}GB, "
+            f"MockConnector(capacity={self.capacity}GB, "
             f"peeking_latency={self.peeking_latency}ms, "
             f"read_throughput={self.read_throughput}GB/s, "
             f"write_throughput={self.write_throughput}GB/s)"
