@@ -19,7 +19,9 @@ from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
 from lmcache.v1.storage_backend.abstract_backend import StorageBackendInterface
 from lmcache.v1.storage_backend.cache_policy import get_cache_policy
-from lmcache.v1.storage_backend.job_executor.pq_executor import AsyncPQExecutor
+from lmcache.v1.storage_backend.job_executor.pq_executor import (
+    AsyncPQThreadPoolExecutor,
+)
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 
 if TYPE_CHECKING:
@@ -38,7 +40,7 @@ class LocalDiskWorker:
         self.prefetch_tasks: dict[CacheEngineKey, Future] = {}
 
         # TODO(Jiayi): make executor and its parameters configurable
-        self.executor = AsyncPQExecutor(max_workers=4)
+        self.executor = AsyncPQThreadPoolExecutor(max_workers=4)
 
     async def submit_task(
         self,
@@ -525,8 +527,8 @@ class LocalDiskBackend(StorageBackendInterface):
             self.disk_lock.release()
 
             # Write back to cpu
-            if write_back:
-                self.local_cpu_backend.submit_put_task(key, mem_obj)
+            # if write_back:
+            #    self.local_cpu_backend.submit_put_task(key, mem_obj)
 
             # self.disk_worker.remove_prefetch_task(key)
 

@@ -8,7 +8,7 @@ class BaseJobExecutor(metaclass=abc.ABCMeta):
     @abc.abstractmethod
     async def submit_job(
         self,
-        fn: Callable[..., Awaitable[Any]],
+        fn: Callable[..., Awaitable[Any]] | Callable[..., Any],
         **kwargs: Any,
     ) -> Any:
         """

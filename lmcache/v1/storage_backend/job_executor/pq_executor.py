@@ -11,6 +11,8 @@ _SENTINEL = object()
 
 
 class AsyncPQExecutor(BaseJobExecutor):
+    "Execute async functions with a priority queue andusing event loop"
+
     def __init__(self, max_workers: int = 4):
         max_size = 0  # infinite
         self._queue: asyncio.PriorityQueue[
@@ -66,3 +68,43 @@ class AsyncPQExecutor(BaseJobExecutor):
         if wait:
             await self._q.join()
             await asyncio.gather(*self._workers, return_exceptions=True)
+
+
+class AsyncPQThreadPoolExecutor(AsyncPQExecutor):
+    "Execute sync functions with a priority queue and using threadpool"
+
+    def __init__(self, max_workers: int = 4):
+        max_size = 0  # infinite
+        self._queue: asyncio.PriorityQueue[
+            tuple[
+                int,
+                int,
+                Callable[..., Any],
+                dict[str, Any],
+                asyncio.Future[Any],
+            ]
+            | object
+        ] = asyncio.PriorityQueue(maxsize=max_size)
+        self._counter = itertools.count()
+        self._workers = [
+            asyncio.create_task(self._worker()) for _ in range(max_workers)
+        ]
+        self._closed = False
+
+    async def _worker(self):
+        while True:
+            item = await self._queue.get()
+            if item is _SENTINEL:
+                self._q.task_done()
+                break
+
+            _, _, fn, kwargs, done = item
+            try:
+                result = await asyncio.to_thread(fn, **kwargs)
+                done.set_result(result)
+            except Exception as e:
+                done.set_exception(e)
+            finally:
+                # decrement task count
+                # join needs to wait until task count is zero
+                self._queue.task_done()

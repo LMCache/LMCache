@@ -1087,10 +1087,11 @@ class LMCacheEngine:
         chunks: list[tuple[CacheEngineKey, MemoryObj, int, int]] = []
         future = self.event_manager.pop_event(EventType.LOADING, kwargs["req_id"])
 
-        # TODO (Jiayi): This is a temporary solution to make asyncio working
-        # with threadpool.
         memory_objs = future.result()
+        memory_objs = [mm for m in memory_objs for mm in m]
 
+        # NOTE(Jiayi): here we assume the retrieved memory_objs have
+        # the same order as the lookup order.
         # TODO(Jiayi): hashing inside `process_tokens` can be skipped.
         for idx, (start, end, key) in enumerate(
             self.token_database.process_tokens(
@@ -1103,6 +1104,7 @@ class LMCacheEngine:
             memory_obj = memory_objs[idx]
             chunks.append((key, memory_obj, start, end))
             tot_kv_size += memory_obj.get_size()
+            ret_mask[start:end] = True
 
         return chunks, tot_kv_size
 
