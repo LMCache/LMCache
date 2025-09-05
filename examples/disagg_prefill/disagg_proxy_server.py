@@ -273,7 +273,7 @@ async def stream_service_response(
             yield chunk
 
 
-def round_robin_pick_client(clients, idx):
+def round_robin_pick_client(clients, idx) -> ClientInfo:
     return clients[idx % len(clients)]
 
 
@@ -295,7 +295,7 @@ async def handle_completions(request: Request):
         req_data = await request.json()
 
         tokenization_client = round_robin_pick_client(app.state.total_clients, counter)
-
+        await asyncio.sleep(1)
         tokenize_output = await send_request_to_service(
             tokenization_client.client, "/tokenize", {"prompt": req_data["prompt"]}
         )
@@ -313,8 +313,9 @@ async def handle_completions(request: Request):
             "receiver_host": decode_client.host,
             "receiver_init_port": decode_client.init_port,
             "receiver_alloc_port": decode_client.alloc_port,
+            "receiver_tp_size": len(decode_client.init_port or []),
         }
-        num_tp_rank = len(decode_client.init_port)
+        num_tp_rank = len(decode_client.init_port or [])
 
         req_data["kv_transfer_params"] = {
             "ret_first_tok": True,
@@ -404,6 +405,7 @@ async def handle_chat_completions(request: Request):
         )
         tokenize_output = tokenize_output.json()
 
+        await asyncio.sleep(1)
         org_max_tokens = req_data["max_tokens"]
         req_data["prompt"] = tokenize_output["tokens"]
         req_data["max_tokens"] = 1

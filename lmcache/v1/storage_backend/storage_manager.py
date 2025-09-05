@@ -396,6 +396,7 @@ class StorageManager:
 
         for cname, (ks, objs) in obj_dict.items():
             for memory_obj in objs:
+                logger.debug(f"HOWDY bk: {cname} stm_batch_put_ref_cnt_down, {memory_obj}")
                 memory_obj.ref_count_down()
 
     def get(

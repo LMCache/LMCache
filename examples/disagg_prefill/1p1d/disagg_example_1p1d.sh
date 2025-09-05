@@ -118,7 +118,7 @@ main() {
     # Launch the proxy first
     python3 ../disagg_proxy_server.py \
         --host localhost \
-        --port 9100 \
+        --port 9487 \
         --prefiller-host localhost \
         --prefiller-port 7100 \
         --num-prefillers 1 \
@@ -149,7 +149,7 @@ main() {
 
     wait_for_server 7200
     wait_for_server 7100
-    wait_for_server 9100
+    wait_for_server 9487
 
     echo "==================================================="
     echo "All servers are up. You can send request now..."

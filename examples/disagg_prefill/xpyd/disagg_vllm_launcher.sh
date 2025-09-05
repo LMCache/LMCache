@@ -11,8 +11,8 @@ if [[ $# -lt 1 ]]; then
 fi
 
 if [[ $# -eq 1 ]]; then
-    echo "Using default model: meta-llama/Llama-3.1-8B-Instruct"
-    MODEL="meta-llama/Llama-3.1-8B-Instruct"
+    echo "Using default model: meta-llama/Llama-3.2-3B"
+    MODEL="meta-llama/Llama-3.2-3B"
 else
     echo "Using model: $2"
     MODEL=$2
@@ -25,6 +25,7 @@ if [[ $1 == "prefiller1" ]]; then
 
     UCX_TLS=cuda_ipc,cuda_copy,tcp \
         LMCACHE_CONFIG_FILE=$prefill_config_file \
+        LMCACHE_LOG_LEVEL=DEBUG \
         VLLM_ENABLE_V1_MULTIPROCESSING=1 \
         VLLM_WORKER_MULTIPROC_METHOD=spawn \
         CUDA_VISIBLE_DEVICES=0 \
@@ -42,6 +43,7 @@ elif [[ $1 == "prefiller2" ]]; then
 
     UCX_TLS=cuda_ipc,cuda_copy,tcp \
         LMCACHE_CONFIG_FILE=$prefill_config_file \
+        LMCACHE_LOG_LEVEL=DEBUG \
         VLLM_ENABLE_V1_MULTIPROCESSING=1 \
         VLLM_WORKER_MULTIPROC_METHOD=spawn \
         CUDA_VISIBLE_DEVICES=1 \
@@ -61,6 +63,7 @@ elif [[ $1 == "decoder1" ]]; then
 
     UCX_TLS=cuda_ipc,cuda_copy,tcp \
         LMCACHE_CONFIG_FILE=$decode_config_file \
+        LMCACHE_LOG_LEVEL=DEBUG \
         VLLM_ENABLE_V1_MULTIPROCESSING=1 \
         VLLM_WORKER_MULTIPROC_METHOD=spawn \
         CUDA_VISIBLE_DEVICES=2 \
@@ -78,6 +81,7 @@ elif [[ $1 == "decoder2" ]]; then
 
     UCX_TLS=cuda_ipc,cuda_copy,tcp \
         LMCACHE_CONFIG_FILE=$decode_config_file \
+        LMCACHE_LOG_LEVEL=DEBUG \
         VLLM_ENABLE_V1_MULTIPROCESSING=1 \
         VLLM_WORKER_MULTIPROC_METHOD=spawn \
         CUDA_VISIBLE_DEVICES=3 \

@@ -363,6 +363,7 @@ class TensorMemoryObj(MemoryObj):
         return self.meta.dtype
 
     def get_memory_format(self) -> MemoryFormat:
+        logger.debug(f"HOWDY fmt_lock{self}")
         with self.lock:
             return self.meta.fmt
 
@@ -370,10 +371,12 @@ class TensorMemoryObj(MemoryObj):
         return self.meta.phy_size
 
     def ref_count_up(self):
+        logger.debug(f"HOWDYC8segy ref_cnt_up, {self}")
         with self.lock:
             self.meta.ref_count += 1
 
     def ref_count_down(self):
+        logger.debug(f"HOWDYc8ref_cnt_down, {self}")
         with self.lock:
             self.meta.ref_count -= 1
             if self.meta.ref_count < 0:
@@ -392,15 +395,18 @@ class TensorMemoryObj(MemoryObj):
                 self.parent_allocator.free(self)
 
     def get_ref_count(self) -> int:
+        logger.debug(f"HOWDY get_ref_cnt_lock{self}")
         with self.lock:
             return self.meta.ref_count
 
     def get_num_tokens(self) -> int:
+        logger.debug(f"HOWDY get_num_tokens_lock{self}")
         with self.lock:
             token_dim = self.meta.fmt.token_dim()
             return self.meta.shape[token_dim]
 
     def pin(self) -> bool:
+        logger.debug(f"HOWDY pin_lock{self}")
         with self.lock:
             # if pin_count is 0, indicates that the object is pinned for the first time
             if self.meta.pin_count == 0:
@@ -410,6 +416,7 @@ class TensorMemoryObj(MemoryObj):
             return True
 
     def unpin(self) -> bool:
+        logger.debug(f"HOWDY unpin_lock{self}")
         with self.lock:
             self.meta.pin_count -= 1
 
@@ -438,6 +445,7 @@ class TensorMemoryObj(MemoryObj):
 
     @property
     def metadata(self) -> MemoryObjMetadata:
+        logger.debug(f"HOWDY metadata_lock{self}")
         with self.lock:
             return self.meta
 
@@ -477,6 +485,10 @@ class TensorMemoryObj(MemoryObj):
         A memory obj can be evicted if it is not pinned and ref_count=1.
         """
         return not self.is_pinned and self.get_ref_count() == 1
+
+    def __str__(self):
+        return f"""addr: {self.meta.address},ref_count: {self.meta.ref_count}"
+                ,pin_count: {self.meta.pin_count}"""
 
 
 class BytesBufferMemoryObj(MemoryObj):
@@ -1107,6 +1119,7 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
             return None
 
         # TODO (Jiayi): This is a bit redundant.
+        logger.debug(f"HOWDYPagedAlloc: {free_block}")
         free_block.meta.shape = shape
         free_block.meta.fmt = fmt
         free_block.meta.ref_count = 1
@@ -1183,6 +1196,7 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
 
     @_lmcache_nvtx_annotate
     def free(self, memory_obj: TensorMemoryObj, allocator_type: Optional[str] = None):
+        logger.debug(f"HOWDYPagedFree: {memory_obj}")
         if not memory_obj.is_valid():
             return
         if memory_obj.meta.shape != self.shape:

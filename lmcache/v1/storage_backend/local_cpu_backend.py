@@ -132,6 +132,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
             if key in self.hot_cache:
                 return None
 
+            logger.debug(f"HOWDY cpu_put_ref_up: {memory_obj}")
             memory_obj.ref_count_up()
             self.hot_cache[key] = memory_obj
 
@@ -235,6 +236,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
             return False
 
         memory_obj = self.hot_cache.pop(key)
+        logger.debug(f"HOWDY cpu_remove_ref_cnt_down, {memory_obj}")
         memory_obj.ref_count_down()
 
         if force:

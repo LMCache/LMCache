@@ -118,10 +118,10 @@ main() {
     # Launch the proxy first
     python3 ../disagg_proxy_server.py \
         --host localhost \
-        --port 9100 \
+        --port 9487 \
         --prefiller-host localhost \
         --prefiller-port 7100 \
-        --num-prefillers 2 \
+        --num-prefillers 1 \
         --decoder-host localhost \
         --decoder-port 7200  \
         --decoder-init-port 7300 \
@@ -156,14 +156,14 @@ main() {
     PIDS+=($prefiller_pid)
 
     sleep 5  # Don't launch the second prefiller too quickly
-    bash disagg_vllm_launcher.sh prefiller2 \
-        > >(tee prefiller2.log) 2>&1 &
-    prefiller2_pid=$!
-    PIDS+=($prefiller2_pid)
+    # bash disagg_vllm_launcher.sh prefiller2 \
+    #     > >(tee prefiller2.log) 2>&1 &
+    # prefiller2_pid=$!
+    # PIDS+=($prefiller2_pid)
 
     wait_for_server 7100
-    wait_for_server 7101
-    wait_for_server 9100
+    # wait_for_server 7101
+    wait_for_server 9487
 
     echo "==================================================="
     echo "All servers are up. You can send request now..."
