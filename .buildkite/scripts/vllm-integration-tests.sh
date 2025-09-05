@@ -176,14 +176,14 @@ run_pd_lmcache() {
         [[ -n $e ]] && prefiller_docker_args+=(--env "$e")
     done < <(yq -r '.env[]?' <<<"$prefiller_docker")
     proxy=$(yq -er '."proxy-port"' <<<"$prefiller_docker" 2>/dev/null)
-    docker_args+=(--env "LMCACHE_NIXL_PROXY_PORT=$proxy")
+    prefiller_docker_args+=(--env "LMCACHE_NIXL_PROXY_PORT=$proxy")
 
     # vllm args
     prefiller_vllm_model="$(yq -r '.model' <<<"$prefiller_vllm")"
     mapfile -t prefiller_vllm_cli_args < <(yq -r '.args // [] | .[]' <<<"$prefiller_vllm")
     prefiller_cmd_args=(
         lmcache/vllm-openai:build-latest
-        "$vllm_model"
+        "$prefiller_vllm_model"
     )
     prefiller_cmd_args+=("${prefiller_vllm_cli_args[@]}")
     prefiller_cmd_args+=("--port" "$PORT1")
