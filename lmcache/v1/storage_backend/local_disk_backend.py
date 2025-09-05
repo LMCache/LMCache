@@ -32,7 +32,7 @@ logger = init_logger(__name__)
 
 
 class LocalDiskWorker:
-    def __init__(self) -> None:
+    def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
         self.put_lock = threading.Lock()
         self.put_tasks: List[CacheEngineKey] = []
 
@@ -40,7 +40,7 @@ class LocalDiskWorker:
         self.prefetch_tasks: dict[CacheEngineKey, Future] = {}
 
         # TODO(Jiayi): make executor and its parameters configurable
-        self.executor = AsyncPQThreadPoolExecutor(max_workers=4)
+        self.executor = AsyncPQThreadPoolExecutor(loop, max_workers=4)
 
     async def submit_task(
         self,
@@ -55,7 +55,6 @@ class LocalDiskWorker:
             priority = 1
         elif task_type == "put":
             priority = 2
-            self.insert_put_task(kwargs["key"])
         else:
             raise ValueError(f"Unknown task type: {task_type}")
 
@@ -165,7 +164,7 @@ class LocalDiskBackend(StorageBackendInterface):
             self.use_odirect = config.extra_config.get("use_odirect", False)
         logger.info("Using O_DIRECT for disk I/O: %s", self.use_odirect)
 
-        self.disk_worker = LocalDiskWorker()
+        self.disk_worker = LocalDiskWorker(loop)
 
         # TODO(Jiayi): We need a disk space allocator to avoid fragmentation
         # and hide the following details away from the backend.
@@ -304,6 +303,8 @@ class LocalDiskBackend(StorageBackendInterface):
             logger.debug(f"Put task for {key} is already in progress.")
             return None
 
+        self.disk_worker.insert_put_task(key)
+
         # TODO(Jiayi): Fragmentation is not considered here.
         required_size = memory_obj.get_physical_size()
         all_evict_keys = []
@@ -432,7 +433,9 @@ class LocalDiskBackend(StorageBackendInterface):
             assert shape is not None
 
             memory_obj = self.local_cpu_backend.allocate(
-                shape, dtype, fmt, busy_loop=True
+                shape,
+                dtype,
+                fmt,
             )
 
             assert memory_obj is not None, (
@@ -453,9 +456,9 @@ class LocalDiskBackend(StorageBackendInterface):
         return await self.disk_worker.submit_task(
             "prefetch",
             self.batched_async_load_bytes_from_disk,
-            path=paths,
-            key=keys,
-            memory_obj=mem_objs,
+            paths=paths,
+            keys=keys,
+            memory_objs=mem_objs,
         )
 
     async def batched_async_contains(

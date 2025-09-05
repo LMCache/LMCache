@@ -13,8 +13,9 @@ _SENTINEL = object()
 class AsyncPQExecutor(BaseJobExecutor):
     "Execute async functions with a priority queue andusing event loop"
 
-    def __init__(self, max_workers: int = 4):
+    def __init__(self, loop: asyncio.AbstractEventLoop, max_workers: int = 4):
         max_size = 0  # infinite
+        self.loop = loop
         self._queue: asyncio.PriorityQueue[
             tuple[
                 int,
@@ -26,9 +27,9 @@ class AsyncPQExecutor(BaseJobExecutor):
             | object
         ] = asyncio.PriorityQueue(maxsize=max_size)
         self._counter = itertools.count()
-        self._workers = [
-            asyncio.create_task(self._worker()) for _ in range(max_workers)
-        ]
+        self.max_workers = max_workers
+        for _ in range(max_workers):
+            asyncio.run_coroutine_threadsafe(self._worker(), self.loop)
         self._closed = False
 
     async def submit_job(
@@ -38,8 +39,7 @@ class AsyncPQExecutor(BaseJobExecutor):
     ) -> Any:
         # Assign highest priority by default
         priority = kwargs.pop("priority", 0)
-        loop = asyncio.get_running_loop()
-        done: asyncio.Future[Any] = loop.create_future()
+        done: asyncio.Future[Any] = self.loop.create_future()
         await self._queue.put((priority, next(self._counter), fn, kwargs, done))
         return await done
 
@@ -63,7 +63,7 @@ class AsyncPQExecutor(BaseJobExecutor):
 
     async def shutdown(self, wait=True):
         self._closed = True
-        for _ in self._workers:
+        for _ in self.max_workers:
             await self._q.put(_SENTINEL)
         if wait:
             await self._q.join()
@@ -73,8 +73,9 @@ class AsyncPQExecutor(BaseJobExecutor):
 class AsyncPQThreadPoolExecutor(AsyncPQExecutor):
     "Execute sync functions with a priority queue and using threadpool"
 
-    def __init__(self, max_workers: int = 4):
+    def __init__(self, loop: asyncio.AbstractEventLoop, max_workers: int = 4):
         max_size = 0  # infinite
+        self.loop = loop
         self._queue: asyncio.PriorityQueue[
             tuple[
                 int,
@@ -86,9 +87,8 @@ class AsyncPQThreadPoolExecutor(AsyncPQExecutor):
             | object
         ] = asyncio.PriorityQueue(maxsize=max_size)
         self._counter = itertools.count()
-        self._workers = [
-            asyncio.create_task(self._worker()) for _ in range(max_workers)
-        ]
+        for _ in range(max_workers):
+            asyncio.run_coroutine_threadsafe(self._worker(), self.loop)
         self._closed = False
 
     async def _worker(self):
