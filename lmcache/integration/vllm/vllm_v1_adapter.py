@@ -21,6 +21,7 @@ from vllm.distributed.parallel_state import (
 from vllm.sampling_params import SamplingParams
 from vllm.utils import cdiv, get_kv_cache_torch_dtype
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.kv_cache_interface import KVCacheConfig
 import torch
 
 # First Party
@@ -415,6 +416,7 @@ def _calculate_mtp_layers(vllm_config, model_config):
 def _init_lmcache_engine(
     lmcache_config: LMCacheEngineConfig,
     vllm_config: "VllmConfig",
+    kv_cache_config: Optional["KVCacheConfig"],
 ) -> LMCacheEngine:
     """Initialize the LMCache engine by the given model config and parallel
     config. This function will check the environment variable
@@ -466,7 +468,7 @@ def _init_lmcache_engine(
     layer_name_to_kv_cache_group_id: Optional[dict[str, int]] = None
     layer_id_to_kv_cache_group_id: Optional[dict[int, int]] = None
 
-    if hasattr(vllm_config, "kv_cache_config"):
+    if kv_cache_config is not None:
         # Calculate mapping from layer id / layer name to kv cache group id.
 
         # First Party
@@ -475,7 +477,7 @@ def _init_lmcache_engine(
         )
 
         layer_name_to_kv_cache_group_id, layer_id_to_kv_cache_group_id = (
-            get_layer_to_kv_cache_group_id_mapping(vllm_config.kv_cache_config)
+            get_layer_to_kv_cache_group_id_mapping(kv_cache_config)
         )
 
     # Change current device.
@@ -579,6 +581,7 @@ class LMCacheConnectorV1Impl:
     def __init__(
         self,
         vllm_config: "VllmConfig",
+        kv_cache_config: Optional["KVCacheConfig"],
         role: KVConnectorRole,
         parent: KVConnectorBase_V1,
     ):
@@ -605,6 +608,7 @@ class LMCacheConnectorV1Impl:
             self.lmcache_engine = _init_lmcache_engine(
                 config,
                 vllm_config,
+                kv_cache_config,
             )
 
             self.use_layerwise = config.use_layerwise
