@@ -91,7 +91,6 @@ class TestLocalCPUBackend:
         backend = LocalCPUBackend(config=config, memory_allocator=memory_allocator)
 
         assert backend.use_hot is True
-        assert backend.lookup_server is None
         assert backend.memory_allocator == memory_allocator
         assert backend.lmcache_worker is None
         assert backend.instance_id == "test_instance"
@@ -104,17 +103,14 @@ class TestLocalCPUBackend:
     def test_init_with_lookup_server_and_worker(self, memory_allocator):
         """Test LocalCPUBackend initialization with lookup server and worker."""
         config = create_test_config()
-        lookup_server = MockLookupServer()
         lmcache_worker = MockLMCacheWorker()
 
         backend = LocalCPUBackend(
             config=config,
             memory_allocator=memory_allocator,
-            lookup_server=lookup_server,
             lmcache_worker=lmcache_worker,
         )
 
-        assert backend.lookup_server == lookup_server
         assert backend.lmcache_worker == lmcache_worker
 
         memory_allocator.close()
