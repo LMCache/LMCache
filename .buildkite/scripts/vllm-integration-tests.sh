@@ -35,15 +35,24 @@ PORT=
 cleanup() {
     local code="${1:-0}"
 
-    echo "→ Cleaning up Docker container and port..."
-    if [[ -n "${CID:-}" ]]; then
-        docker kill "$CID" &>/dev/null || true
-        docker rm "$CID" &>/dev/null || true
-    fi
+    echo "→ Cleaning up Docker containers and ports..."
 
-    if [[ -n "${PORT:-}" ]]; then
-        fuser -k "${PORT}/tcp" &>/dev/null || true
-    fi
+    # Clean up container IDs if defined
+    for cid_var in CID PREFILLER_CID DECODER_CID; do
+        local cid="${!cid_var:-}"
+        if [[ -n "$cid" ]]; then
+            docker kill "$cid" &>/dev/null || true
+            docker rm "$cid" &>/dev/null || true
+        fi
+    done
+
+    # Clean up ports if defined
+    for port_var in PORT PORT1 PORT2; do
+        local port="${!port_var:-}"
+        if [[ -n "$port" ]]; then
+            fuser -k "${port}/tcp" &>/dev/null || true
+        fi
+    done
 }
 
 find_available_port() {
