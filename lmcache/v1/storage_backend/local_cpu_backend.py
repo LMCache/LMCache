@@ -257,7 +257,10 @@ class LocalCPUBackend(AllocatorBackendInterface):
         if memory_obj is not None or not eviction:
             return memory_obj
 
-        assert isinstance(self.memory_allocator, (MixedMemoryAllocator, NixlCPUMemoryAllocator, PagedTensorMemoryAllocator))
+        assert isinstance(
+            self.memory_allocator,
+            (MixedMemoryAllocator, NixlCPUMemoryAllocator, PagedTensorMemoryAllocator)
+        )
 
         evict_keys_count = 0
         num_attempts = 0
@@ -353,7 +356,10 @@ class LocalCPUBackend(AllocatorBackendInterface):
         if memory_objs is not None or not eviction:
             return memory_objs
 
-        assert isinstance(self.memory_allocator, (MixedMemoryAllocator, NixlCPUMemoryAllocator, PagedTensorMemoryAllocator))
+        assert isinstance(
+            self.memory_allocator,
+            (MixedMemoryAllocator, NixlCPUMemoryAllocator, PagedTensorMemoryAllocator)
+        )
 
         evict_keys_count = 0
         num_attempts = 0
