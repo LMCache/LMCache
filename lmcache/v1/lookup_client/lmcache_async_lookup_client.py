@@ -69,7 +69,7 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
             push_socket = make_zmq_socket(
                 self.ctx,
                 worker_socket_path,
-                zmq.REQ,  # type: ignore[attr-defined]
+                zmq.PUSH,  # type: ignore[attr-defined]
                 bind=False,
             )
 
@@ -144,10 +144,10 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
             self.reqs_status[lookup_id] = None
         hashes = []
         offsets = []
-        for start, end, key in self.token_database.process_tokens(
+        for start, end, hash_val in self.token_database.process_tokens(
             token_ids, make_key=False
         ):
-            hashes.append(key)
+            hashes.append(hash_val)
             offsets.append(end - start)
         hash_buf = self.encoder.encode(hashes)
         offset_buf = self.encoder.encode(offsets)
@@ -161,9 +161,9 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
         request_configs_buf = request_configs_str.encode("utf-8")
 
         msg_buf = [
+            lookup_id_buf,
             hash_buf,
             offset_buf,
-            lookup_id_buf,
             request_configs_buf,
         ]
 
@@ -183,7 +183,7 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
             res = int.from_bytes(frames[1], "big")
 
             with self.lock:
-                if lookup_id not in self.ress_for_each_worker:
+                if lookup_id not in self.res_for_each_worker:
                     self.res_for_each_worker[lookup_id] = [res]
                 else:
                     self.res_for_each_worker[lookup_id].append(res)
@@ -276,7 +276,7 @@ class LMCacheAsyncLookupServer:
                             raise ValueError(f"Unexpected tags_str: {kvs}")
                         request_configs[kvs[0]] = kvs[1]
 
-                self.lmcache_engine.lookup_and_prefetch(
+                self.lmcache_engine.async_lookup_and_prefetch(
                     lookup_id=lookup_id,
                     hashes=hashes,
                     offsets=offsets,

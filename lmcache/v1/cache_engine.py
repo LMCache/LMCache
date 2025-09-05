@@ -1096,7 +1096,7 @@ class LMCacheEngine:
 
         # TODO (Jiayi): This is a temporary solution to make asyncio working
         # with threadpool.
-        memory_objs = future.result().result()
+        memory_objs = future.result()
 
         # TODO(Jiayi): hashing inside `process_tokens` can be skipped.
         for idx, (start, end, key) in enumerate(

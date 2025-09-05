@@ -1046,6 +1046,11 @@ class LMCacheConnectorV1Impl:
         )
 
         if num_external_hit_tokens is None:
+            logger.info(
+                "Reqid: %s, Total tokens %d, LMCache hit tokens: None.",
+                request.request_id,
+                request.num_tokens,
+            )
             return None
 
         # When prompt length is divisible by the block size and all

@@ -165,16 +165,14 @@ class LocalCPUBackend(AllocatorBackendInterface):
         self,
         lookup_id: str,
         keys: list[CacheEngineKey],
-    ) -> Future[list[MemoryObj]]:
+    ) -> list[MemoryObj]:
         mem_objs = []
         with self.cpu_lock:
             for key in keys:
                 mem_obj = self.hot_cache[key]
                 mem_obj.ref_count_up()
                 mem_objs.append(mem_obj)
-        future: Future = Future()
-        future.set_result(mem_objs)
-        return future
+        return mem_objs
 
     async def batched_async_contains(
         self,

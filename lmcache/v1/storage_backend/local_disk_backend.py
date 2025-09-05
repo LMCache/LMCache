@@ -4,7 +4,6 @@ from concurrent.futures import Future
 from typing import TYPE_CHECKING, Any, Callable, List, Optional, Sequence
 import asyncio
 import os
-import queue
 import threading
 import time
 
@@ -21,7 +20,7 @@ from lmcache.v1.lookup_server import LookupServerInterface
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
 from lmcache.v1.storage_backend.abstract_backend import StorageBackendInterface
 from lmcache.v1.storage_backend.cache_policy import get_cache_policy
-from lmcache.v1.storage_backend.job_executor.pq_thread_pool import PQThreadPoolExecutor
+from lmcache.v1.storage_backend.job_executor.pq_executor import AsyncPQExecutor
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 
 if TYPE_CHECKING:
@@ -33,10 +32,6 @@ logger = init_logger(__name__)
 
 class LocalDiskWorker:
     def __init__(self) -> None:
-        self.pq: queue.PriorityQueue[tuple[int, int, str, Callable, dict[str, Any]]] = (
-            queue.PriorityQueue()
-        )
-
         self.put_lock = threading.Lock()
         self.put_tasks: List[CacheEngineKey] = []
 
@@ -44,14 +39,14 @@ class LocalDiskWorker:
         self.prefetch_tasks: dict[CacheEngineKey, Future] = {}
 
         # TODO(Jiayi): make executor and its parameters configurable
-        self.executor = PQThreadPoolExecutor(max_workers=1)
+        self.executor = AsyncPQExecutor(max_workers=4)
 
-    def submit_task(
+    async def submit_task(
         self,
         task_type: str,
         task: Callable,
         **kwargs,
-    ) -> Future:
+    ) -> Any:
         if task_type == "prefetch":
             priority = 0
             # self.insert_prefetch_task(kwargs["key"], None)
@@ -63,18 +58,16 @@ class LocalDiskWorker:
         else:
             raise ValueError(f"Unknown task type: {task_type}")
 
-        future = self.executor.submit_job(
-            task,
-            priority=priority,
-            **kwargs,
-        )
-
         # FIXME: For now, keys could be repetitively prefetched.
         # But i guess it's okay.
         # if task_type == "prefetch":
         #     self.insert_prefetch_task(kwargs["key"], future)
 
-        return future
+        return await self.executor.submit_job(
+            task,
+            priority=priority,
+            **kwargs,
+        )
 
     def remove_put_task(self, key: CacheEngineKey):
         with self.put_lock:
@@ -258,7 +251,13 @@ class LocalDiskBackend(StorageBackendInterface):
         size = meta.size
         self.usage -= size
         self.stats_monitor.update_local_storage_usage(self.usage)
-        self.disk_worker.submit_task("delete", os.remove, path=path)
+
+        res = asyncio.run_coroutine_threadsafe(
+            self.disk_worker.submit_task("delete", os.remove, path=path),
+            self.loop,
+        )
+
+        res.result()
 
         if force:
             self.cache_policy.update_on_force_evict(key)
@@ -331,13 +330,17 @@ class LocalDiskBackend(StorageBackendInterface):
         self.cache_policy.update_on_put(key)
         memory_obj.ref_count_up()
 
-        self.disk_worker.submit_task(
-            "put",
-            self.async_save_bytes_to_disk,
-            key=key,
-            memory_obj=memory_obj,
+        asyncio.run_coroutine_threadsafe(
+            self.disk_worker.submit_task(
+                "put",
+                self.async_save_bytes_to_disk,
+                key=key,
+                memory_obj=memory_obj,
+            ),
+            self.loop,
         )
 
+    # TODO(Jiayi): enable real batching
     def batched_submit_put_task(
         self,
         keys: Sequence[CacheEngineKey],
@@ -396,7 +399,7 @@ class LocalDiskBackend(StorageBackendInterface):
         self,
         lookup_id: str,
         keys: list[CacheEngineKey],
-    ) -> Future[list[MemoryObj]]:
+    ) -> list[MemoryObj]:
         mem_objs: list[MemoryObj] = []
         paths: list[str] = []
 
@@ -439,14 +442,13 @@ class LocalDiskBackend(StorageBackendInterface):
             mem_objs.append(memory_obj)
             paths.append(path)
 
-        future = self.disk_worker.submit_task(
+        return await self.disk_worker.submit_task(
             "prefetch",
             self.batched_async_load_bytes_from_disk,
             path=paths,
             key=keys,
             memory_obj=mem_objs,
         )
-        return future
 
     async def batched_async_contains(
         self,

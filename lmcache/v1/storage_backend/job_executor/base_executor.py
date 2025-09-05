@@ -1,24 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from concurrent.futures import Future
-from typing import Callable
+from typing import Any, Awaitable, Callable
 import abc
 
 
 class BaseJobExecutor(metaclass=abc.ABCMeta):
     @abc.abstractmethod
-    def submit_job(
+    async def submit_job(
         self,
-        fn: Callable,
-        **kwargs,
-    ) -> Future:
+        fn: Callable[..., Awaitable[Any]],
+        **kwargs: Any,
+    ) -> Any:
         """
         Submit a job to the executor.
 
         :param fn: The function to execute.
         :param kwargs: The keyword arguments to pass to the function (e.g., priority).
 
-        :return: A Future representing the execution of the function.
+        :return: Return type aligned with the function being executed.
         """
         raise NotImplementedError
 

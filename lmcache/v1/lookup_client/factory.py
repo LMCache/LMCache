@@ -97,11 +97,17 @@ class LookupClientFactory:
             or lmcache_engine.metadata.worker_id == 0
         ):
             # First Party
+            from lmcache.v1.lookup_client.lmcache_async_lookup_client import (
+                LMCacheAsyncLookupServer,
+            )
             from lmcache.v1.lookup_client.lmcache_lookup_client import (
                 LMCacheLookupServer,
             )
 
-            return LMCacheLookupServer(lmcache_engine, vllm_config)
+            if config.enable_async_loading:
+                return LMCacheAsyncLookupServer(lmcache_engine, vllm_config)
+            else:
+                return LMCacheLookupServer(lmcache_engine, vllm_config)
 
         return None
 

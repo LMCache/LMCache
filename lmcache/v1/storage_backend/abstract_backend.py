@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from concurrent.futures import Future
 from typing import List, Optional, Sequence
 import abc
 
@@ -114,7 +113,7 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
         self,
         lookup_id: str,
         keys: list[CacheEngineKey],
-    ) -> Future[list[MemoryObj]]:
+    ) -> list[MemoryObj]:
         """
         A non-blcocking function to get the kv cache from the storage backend.
 
