@@ -87,6 +87,7 @@ wait_for_openai_api_server() {
                 | grep -Fq \"\\\"id\\\":\\\"${model}\\\"\"; do
             sleep 30
         done
+        echo \"Model ${model} is available on ${port}\"
     "; then
         echo "OpenAI API server did not start"
         docker logs $CID
@@ -100,25 +101,9 @@ run_lmcache_vllmopenai_container() {
     local cfg_name="$3"
     LOGFILE="/tmp/build_${BUILD_ID}_${cfg_name}.log"
 
-    # PD detection
-    is_prefiller=false
-    is_decoder=false
-    if yq -e 'has("proxy-port")' >/dev/null 2>&1 <<<"$docker"; then
-        is_prefiller=true
-    elif yq -e 'has("init-port")' >/dev/null 2>&1 <<<"$docker"; then
-        is_decoder=true
-    fi
-
-    # Determine CUDA_VISIBLE_DEVICES
-    if "$is_prefiller"; then
-        best_gpu=0
-    elif "$is_decoder"; then
-        best_gpu=1
-    else
-        # Pick the GPU with the largest free memory
-        source "$ORIG_DIR/.buildkite/scripts/pick-free-gpu.sh" ""
-        best_gpu="${CUDA_VISIBLE_DEVICES}"
-    fi
+    # Pick the GPU with the largest free memory
+    source "$ORIG_DIR/.buildkite/scripts/pick-free-gpu.sh" ""
+    best_gpu="${CUDA_VISIBLE_DEVICES}"
 
     # docker args
     docker_args=(
@@ -128,22 +113,10 @@ run_lmcache_vllmopenai_container() {
         --volume ~/.cache/huggingface:/root/.cache/huggingface
         --env VLLM_USE_FLASHINFER_SAMPLER=0
         --env HF_TOKEN="$HF_TOKEN"
-        --env UCX_TLS=cuda_ipc,cuda_copy,tcp
-        --ipc host
-        --shm-size 4G
     )
     while IFS= read -r e; do
         [[ -n $e ]] && docker_args+=(--env "$e")
     done < <(yq -r '.env[]?' <<<"$docker")
-    if proxy=$(yq -er '."proxy-port"' <<<"$docker" 2>/dev/null); then
-        docker_args+=(--env "LMCACHE_NIXL_PROXY_PORT=$proxy")
-    fi
-    if init=$(yq -er '."init-port"' <<<"$docker" 2>/dev/null); then
-        docker_args+=(--env "LMCACHE_NIXL_PEER_INIT_PORT=$init")
-    fi
-    if alloc=$(yq -er '."alloc-port"' <<<"$docker" 2>/dev/null); then
-        docker_args+=(--env "LMCACHE_NIXL_PEER_ALLOC_PORT=$alloc")
-    fi
 
     # vllm args
     vllm_model="$(yq -r '.model' <<<"$vllm")"
@@ -153,13 +126,7 @@ run_lmcache_vllmopenai_container() {
         "$vllm_model"
     )
     cmd_args+=("${vllm_cli_args[@]}")
-    if "$is_prefiller"; then
-        cmd_args+=("--port" "$PORT1")
-    elif "$is_decoder"; then
-        cmd_args+=("--port" "$PORT2")
-    else
-        cmd_args+=("--port" "$PORT")
-    fi
+    cmd_args+=("--port" "$PORT")
 
     # Start docker
     CID=$(
@@ -168,35 +135,120 @@ run_lmcache_vllmopenai_container() {
             "${cmd_args[@]}"
     )
 
-    # Health check
-    if "$is_prefiller"; then
-        wait_for_openai_api_server "$PORT1" "$vllm_model"
-    elif "$is_decoder"; then
-        wait_for_openai_api_server "$PORT2" "$vllm_model"
-    else
-        wait_for_openai_api_server "$PORT" "$vllm_model"
-    fi
+    wait_for_openai_api_server "$PORT" "$vllm_model"
 
     # Logging
     touch "$LOGFILE"
     docker logs -f "$CID" >>"$LOGFILE" 2>&1 &
     LOG_PID=$!
+}
+
+run_pd_lmcache() {
+    local prefiller_docker="$1"
+    local prefiller_vllm="$2"
+    local decoder_docker="$3"
+    local decoder_vllm="$4"
+    local cfg_name="$5"
+    PREFILLER_LOGFILE="/tmp/build_${BUILD_ID}_${cfg_name}_prefiller.log"
+    DECODER_LOGFILE="/tmp/build_${BUILD_ID}_${cfg_name}_decoder.log"
+
+    ########## Prefiller ##########
+    # docker args
+    prefiller_docker_args=(
+        --runtime nvidia
+        --network host
+        --gpus "device=0"
+        --volume ~/.cache/huggingface:/root/.cache/huggingface
+        --env VLLM_USE_FLASHINFER_SAMPLER=0
+        --env HF_TOKEN="$HF_TOKEN"
+    )
+    while IFS= read -r e; do
+        [[ -n $e ]] && prefiller_docker_args+=(--env "$e")
+    done < <(yq -r '.env[]?' <<<"$prefiller_docker")
+    proxy=$(yq -er '."proxy-port"' <<<"$prefiller_docker" 2>/dev/null)
+    docker_args+=(--env "LMCACHE_NIXL_PROXY_PORT=$proxy")
+
+    # vllm args
+    prefiller_vllm_model="$(yq -r '.model' <<<"$prefiller_vllm")"
+    mapfile -t prefiller_vllm_cli_args < <(yq -r '.args // [] | .[]' <<<"$prefiller_vllm")
+    prefiller_cmd_args=(
+        lmcache/vllm-openai:build-latest
+        "$vllm_model"
+    )
+    prefiller_cmd_args+=("${prefiller_vllm_cli_args[@]}")
+    prefiller_cmd_args+=("--port" "$PORT1")
+
+    # Start docker
+    PREFILLER_CID=$(
+        docker run -d \
+            "${prefiller_docker_args[@]}" \
+            "${prefiller_cmd_args[@]}"
+    )
 
     # Health check
-    end=$((SECONDS + 120))
-    while [ $SECONDS -lt $end ]; do
-        if grep -qi 'Starting vLLM API server' "$LOGFILE"; then
-            echo "vLLM API server started."
-            break
-        fi
-        sleep 1
-    done
-    if [ $SECONDS -ge $end ]; then
-        echo "Timeout waiting for startup marker, dumping full log:"
-        cat "$LOGFILE"
-        kill $LOG_PID
-        return 1
+    wait_for_openai_api_server "$PORT1" "$prefiller_vllm_model"
+
+    # Logging
+    touch "$PREFILLER_LOGFILE"
+    docker logs -f "$PREFILLER_CID" >>"$PREFILLER_LOGFILE" 2>&1 &
+
+    ########## Decoder ##########
+    # docker args
+    decoder_docker_args=(
+        --runtime nvidia
+        --network host
+        --gpus "device=1"
+        --volume ~/.cache/huggingface:/root/.cache/huggingface
+        --env VLLM_USE_FLASHINFER_SAMPLER=0
+        --env HF_TOKEN="$HF_TOKEN"
+    )
+    while IFS= read -r e; do
+        [[ -n $e ]] && decoder_docker_args+=(--env "$e")
+    done < <(yq -r '.env[]?' <<<"$decoder_docker")
+    init=$(yq -er '."init-port"' <<<"$decoder_docker" 2>/dev/null)
+    decoder_docker_args+=(--env "LMCACHE_NIXL_INIT_PORT=$init")
+    alloc=$(yq -er '."alloc-port"' <<<"$decoder_docker" 2>/dev/null)
+    decoder_docker_args+=(--env "LMCACHE_NIXL_ALLOC_PORT=$alloc")
+
+    # vllm args
+    decoder_vllm_model="$(yq -r '.model' <<<"$decoder_vllm")"
+    mapfile -t decoder_vllm_cli_args < <(yq -r '.args // [] | .[]' <<<"$decoder_vllm")
+    decoder_cmd_args=(
+        lmcache/vllm-openai:build-latest
+        "$decoder_vllm_model"
+    )
+    decoder_cmd_args+=("${decoder_vllm_cli_args[@]}")
+    decoder_cmd_args+=("--port" "$PORT2")
+
+    # Start docker
+    DECODER_CID=$(
+        docker run -d \
+            "${decoder_docker_args[@]}" \
+            "${decoder_cmd_args[@]}"
+    )
+
+    # Health check
+    wait_for_openai_api_server "$PORT2" "$decoder_vllm_model"
+
+    # Logging
+    touch "$DECODER_LOGFILE"
+    docker logs -f "$DECODER_CID" >>"$DECODER_LOGFILE" 2>&1 &
+
+    ########## Proxy ##########
+    if [ ! -d ".venv" ]; then
+        UV_PYTHON=python3 uv -q venv
     fi
+    source .venv/bin/activate
+    uv pip install lmcache 
+    # Start proxy
+    python3 "$ORIG_DIR/examples/disagg_prefill/disagg_proxy_server.py" \
+        --port "$PORT" \
+        --prefiller-port "$PORT1" \
+        --decoder-port "$PORT2" \
+        --decoder-init-port "$init" \
+        --decoder-alloc-port "$alloc" \
+        --proxy-port "$proxy" \
+        > "/tmp/build_${BUILD_ID}_${cfg_name}_proxy.log" 2>&1 &
 }
 
 usage() {
@@ -323,7 +375,7 @@ if [ $? -ne 0 ]; then
     echo "Failed to find an available port"
     exit 1
 fi
-echo "Using port: $PORT"
+echo "Using port $PORT to send or receive requests."
 
 # Need to run from docker directory
 cd docker/
@@ -339,34 +391,17 @@ for cfg_name in "${CONFIG_NAMES[@]}"; do
     echo -e "\033[1;33m===== Testing LMCache with ${cfg_name} =====\033[0m"
     cfg_file="${CONFIG_DIR}/${cfg_name}"
 
-    if yq -e '.router.type == "pd"' "$cfg_file" >/dev/null 2>&1; then
-        # Start prefiller
+    # Start engine
+    feature_type=$(yq -r '.feature.type // ""' "$cfg_file")
+    if [[ "$feature_type" == "pd" ]]; then
         PORT1=$(find_available_port 8100)
-        docker_args="$(yq '.docker1' "$cfg_file")"
-        vllm_args="$(yq '.vllm1' "$cfg_file")"
-        run_lmcache_vllmopenai_container "$docker_args" "$vllm_args" "${cfg_name}_prefiller"
-
-        # Start decoder
+        prefiller_docker_args="$(yq '.["docker-prefiller"]' "$cfg_file")"
+        prefiller_vllm_args="$(yq '.vllm1' "$cfg_file")"
         PORT2=$(find_available_port 8200)
-        docker_args="$(yq '.docker2' "$cfg_file")"
-        vllm_args="$(yq '.vllm2' "$cfg_file")"
-        run_lmcache_vllmopenai_container "$docker_args" "$vllm_args" "${cfg_name}_decoder"
-
-        if [ ! -d ".venv" ]; then
-            UV_PYTHON=python3 uv -q venv
-        fi
-        source .venv/bin/activate
-        uv pip install lmcache 
-        # Start proxy
-        python3 "$ORIG_DIR/examples/disagg_prefill/disagg_proxy_server.py" \
-            --port "$PORT" \
-            --prefiller-port "$PORT1" \
-            --decoder-port "$PORT2" \
-            --decoder-init-port "$(yq -r '.docker2["init-port"] // empty' "$cfg_file")" \
-            --decoder-alloc-port "$(yq -r '.docker2["alloc-port"] // empty' "$cfg_file")" \
-            --proxy-port "$(yq -r '.docker1["proxy-port"] // empty' "$cfg_file")" \
-            > "/tmp/build_${BUILD_ID}_${cfg_name}_proxy.log" 2>&1 &
-    elif yq -e '(.router.type // "") == ""' "$cfg_file" >/dev/null 2>&1; then
+        decoder_docker_args="$(yq '.["docker-decoder"]' "$cfg_file")"
+        decoder_vllm_args="$(yq '.vllm2' "$cfg_file")"
+        run_pd_lmcache "$prefiller_docker_args" "$prefiller_vllm_args" "$decoder_docker_args" "$decoder_vllm_args" "$cfg_name" 
+    elif [[ -z "$feature_type" ]]; then
         docker_args="$(yq '.docker' "$cfg_file")"
         vllm_args="$(yq '.vllm' "$cfg_file")"
         run_lmcache_vllmopenai_container "$docker_args" "$vllm_args" "$cfg_name"

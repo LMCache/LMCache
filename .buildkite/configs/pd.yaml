@@ -4,10 +4,10 @@ workload:
   repeat-count: 1
   expected-latency: 4
 
-router:
+feature:
   type: pd
 
-docker1:
+docker-prefiller:
   env:
     - "LMCACHE_LOCAL_CPU=False"
     - "LMCACHE_MAX_LOCAL_CPU_SIZE=5"
@@ -20,7 +20,7 @@ docker1:
     - "PYTHONHASHSEED=0"
   proxy-port: 7500
 
-docker2:
+docker-decoder:
   env:
     - "LMCACHE_LOCAL_CPU=False"
     - "LMCACHE_MAX_LOCAL_CPU_SIZE=0"
@@ -34,7 +34,7 @@ docker2:
   init-port: 7300
   alloc-port: 7400
 
-vllm1:
+vllm-prefiller:
   model: "meta-llama/Llama-3.2-1B-Instruct"
   args:
     - "--load-format"
@@ -43,7 +43,7 @@ vllm1:
     - "--kv-transfer-config"
     - "{\"kv_connector\":\"LMCacheConnectorV1\",\"kv_role\":\"kv_producer\",\"kv_connector_extra_config\": {\"discard_partial_chunks\": false, \"lmcache_rpc_port\": \"producer1\"}}"
 
-vllm2:
+vllm-decoder:
   model: "meta-llama/Llama-3.2-1B-Instruct"
   args:
     - "--load-format"
