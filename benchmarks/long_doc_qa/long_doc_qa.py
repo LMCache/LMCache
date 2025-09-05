@@ -325,8 +325,6 @@ def visualize_results(warmup_df, benchmark_df):
     """
     Separate visualization for warmup and benchmark results.
     """
-    # Third Party
-    import matplotlib.pyplot as plt
 
     # x axis is prompt id
     # y axis is time (relative to the start of the benchmark) with three points:
@@ -607,6 +605,6 @@ if __name__ == "__main__":
     visualize = args.visualize
     if visualize:
         # Third Party
-        pass
+        import matplotlib.pyplot as plt
     OUTPUT_FILE = args.output
     asyncio.run(main(args))
