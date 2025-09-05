@@ -169,6 +169,11 @@ class LMCacheEngine:
 
         self.post_inited = False
 
+        # Whether to force store to wait if no CPU buffer is available
+        self.force_store_wait = config.extra_config and config.extra_config.get(
+            "force_store_wait", False
+        )
+
         gc.collect()
         if not config.py_enable_gc:
             gc.disable()
@@ -261,7 +266,9 @@ class LMCacheEngine:
 
             # TODO (Jiayi): should be batched in the future
             memory_obj = self.storage_manager.allocate(
-                kv_shape, kv_dtype, busy_loop=False
+                kv_shape,
+                kv_dtype,
+                busy_loop=self.force_store_wait,
             )
             if memory_obj is None:
                 logger.warning(
@@ -369,7 +376,7 @@ class LMCacheEngine:
                 kv_dtype,
                 batch_size=self.num_layers,
                 fmt=self.fmt,
-                busy_loop=False,
+                busy_loop=self.force_store_wait,
             )
 
             if memory_objs_multi_layer is None:
@@ -1188,15 +1195,18 @@ class LMCacheEngine:
 
                 # Create tensor and receive data
                 metadata = MemoryObjMetadata.from_dict(metadata_dict)
+                local_rank = self.metadata.worker_id % torch.cuda.device_count()
                 tensor = torch.empty(
                     metadata.shape,
                     dtype=metadata.dtype,
-                    device=f"cuda:{self.metadata.worker_id}",
+                    device=f"cuda:{local_rank}",
                 )
                 self.broadcast_fn(tensor, self.metadata.first_rank)
 
                 # Create temporary memory object (key not needed for other ranks)
-                memory_obj = TensorMemoryObj(raw_data=tensor, metadata=metadata)
+                memory_obj = TensorMemoryObj(
+                    raw_data=tensor, metadata=metadata, parent_allocator=None
+                )
                 reordered_chunks.append((None, memory_obj, start, end))
 
     def _is_passive(self):

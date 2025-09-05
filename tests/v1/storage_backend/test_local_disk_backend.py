@@ -67,7 +67,7 @@ def create_test_metadata():
     )
 
 
-def create_test_key(key_id: str = "test_key") -> CacheEngineKey:
+def create_test_key(key_id: int = 0) -> CacheEngineKey:
     """Create a test CacheEngineKey."""
     return CacheEngineKey("vllm", "test_model", 3, 123, hash(key_id))
 
@@ -173,7 +173,7 @@ class TestLocalDiskBackend:
 
     def test_key_to_path(self, local_disk_backend):
         """Test key to path conversion."""
-        key = create_test_key("test_hash")
+        key = create_test_key(1)
         path = local_disk_backend._key_to_path(key)
 
         expected_filename = key.to_string().replace("/", "-") + ".pt"
@@ -183,7 +183,7 @@ class TestLocalDiskBackend:
 
     def test_contains_key_not_exists(self, local_disk_backend):
         """Test contains() when key doesn't exist."""
-        key = create_test_key("nonexistent")
+        key = create_test_key(2)
         assert not local_disk_backend.contains(key)
         assert not local_disk_backend.contains(key, pin=True)
 
@@ -191,7 +191,7 @@ class TestLocalDiskBackend:
 
     def test_contains_key_exists(self, local_disk_backend):
         """Test contains() when key exists."""
-        key = create_test_key("test_key")
+        key = create_test_key(3)
         memory_obj = create_test_memory_obj()
 
         # Insert key first
@@ -204,7 +204,7 @@ class TestLocalDiskBackend:
 
     def test_pin_unpin(self, local_disk_backend):
         """Test pin() and unpin() operations."""
-        key = create_test_key("test_key")
+        key = create_test_key(3)
         memory_obj = create_test_memory_obj()
         # Insert key first
         local_disk_backend.insert_key(key, memory_obj)
@@ -216,7 +216,7 @@ class TestLocalDiskBackend:
         assert local_disk_backend.dict[key].pin_count == 0
 
         # Test pin/unpin non-existent key
-        non_existent_key = create_test_key("non_existent")
+        non_existent_key = create_test_key(4)
         assert not local_disk_backend.pin(non_existent_key)
         assert not local_disk_backend.unpin(non_existent_key)
 
@@ -224,7 +224,7 @@ class TestLocalDiskBackend:
 
     def test_insert_key(self, local_disk_backend):
         """Test insert_key()."""
-        key = create_test_key("test_key")
+        key = create_test_key(3)
         memory_obj = create_test_memory_obj()
         local_disk_backend.insert_key(key, memory_obj)
         assert key in local_disk_backend.dict
@@ -238,7 +238,7 @@ class TestLocalDiskBackend:
 
     def test_insert_key_reinsert(self, local_disk_backend):
         """Test insert_key() with reinsertion."""
-        key = create_test_key("test_key")
+        key = create_test_key(3)
         memory_obj1 = create_test_memory_obj(shape=(2, 16, 8, 128))
         memory_obj2 = create_test_memory_obj(shape=(2, 32, 8, 128))
 
@@ -257,7 +257,7 @@ class TestLocalDiskBackend:
 
     def test_remove(self, local_disk_backend):
         """Test remove()."""
-        key = create_test_key("test_key")
+        key = create_test_key(3)
         memory_obj = create_test_memory_obj()
 
         # Insert key first
@@ -292,7 +292,7 @@ class TestLocalDiskBackend:
             dst_device="cuda",
             lmcache_worker=lmcache_worker,
         )
-        key = create_test_key("test_key")
+        key = create_test_key(3)
         memory_obj = create_test_memory_obj()
         # Insert key first
         backend.insert_key(key, memory_obj)
@@ -314,7 +314,7 @@ class TestLocalDiskBackend:
 
     def test_submit_put_task(self, local_disk_backend):
         """Test submit_put_task() synchronous"""
-        key = create_test_key("test_key")
+        key = create_test_key(3)
         memory_obj = create_test_memory_obj()
 
         # Test that the key is not in put_tasks initially
@@ -345,7 +345,7 @@ class TestLocalDiskBackend:
 
     def test_submit_prefetch_task_key_not_exists(self, local_disk_backend):
         """Test submit_prefetch_task() when key doesn't exist."""
-        key = create_test_key("nonexistent")
+        key = create_test_key(2)
         res = local_disk_backend.submit_prefetch_task(key)
 
         assert not res
@@ -354,7 +354,7 @@ class TestLocalDiskBackend:
 
     def test_submit_prefetch_task_key_exists(self, local_disk_backend):
         """Test submit_prefetch_task() when key exists."""
-        key = create_test_key("test_key")
+        key = create_test_key(3)
         memory_obj = create_test_memory_obj()
 
         # Insert key first
@@ -374,7 +374,7 @@ class TestLocalDiskBackend:
 
     def test_get_blocking_key_not_exists(self, local_disk_backend):
         """Test get_blocking() when key doesn't exist."""
-        key = create_test_key("nonexistent")
+        key = create_test_key(2)
         result = local_disk_backend.get_blocking(key)
 
         assert result is None
@@ -383,7 +383,7 @@ class TestLocalDiskBackend:
 
     def test_get_blocking_key_exists(self, local_disk_backend):
         """Test get_blocking() when key exists."""
-        key = create_test_key("test_key")
+        key = create_test_key(3)
         memory_obj = create_test_memory_obj()
 
         # Insert key first
@@ -405,7 +405,7 @@ class TestLocalDiskBackend:
 
     def test_async_save_bytes_to_disk(self, local_disk_backend, async_loop):
         """Test async_save_bytes_to_disk()."""
-        key = create_test_key("test_key")
+        key = create_test_key(3)
         memory_obj = create_test_memory_obj()
 
         local_disk_backend.insert_key(key, memory_obj)
@@ -421,7 +421,7 @@ class TestLocalDiskBackend:
 
     def test_async_load_bytes_from_disk(self, local_disk_backend):
         """Test async_load_bytes_from_disk()"""
-        key = create_test_key("test_key")
+        key = create_test_key(3)
         memory_obj = create_test_memory_obj()
 
         # Create the file first
@@ -446,7 +446,7 @@ class TestLocalDiskBackend:
 
     def test_load_bytes_from_disk(self, local_disk_backend):
         """Test load_bytes_from_disk()."""
-        key = create_test_key("test_key")
+        key = create_test_key(3)
         memory_obj = create_test_memory_obj()
 
         # Create the file first
@@ -485,7 +485,7 @@ class TestLocalDiskBackend:
 
         # Add some keys
         for i in range(3):
-            key = create_test_key(f"key_{i}")
+            key = create_test_key(i + 5)
             memory_obj = create_test_memory_obj()
             storage_manager.storage_backends["LocalDiskBackend"].insert_key(
                 key, memory_obj
@@ -501,7 +501,7 @@ class TestLocalDiskBackend:
 
     def test_concurrent_access(self, local_disk_backend):
         """Test concurrent access to the backend."""
-        key = create_test_key("test_key")
+        key = create_test_key(3)
         memory_obj = create_test_memory_obj()
 
         # Insert key
@@ -523,7 +523,7 @@ class TestLocalDiskBackend:
     def test_file_operations_error_handling(self, local_disk_backend):
         """Test error handling in file operations."""
         # Test with non-existent file
-        key = create_test_key("test_key")
+        key = create_test_key(3)
         non_existent_path = "/non/existent/path/file.pt"
 
         memory_obj = local_disk_backend.load_bytes_from_disk(
@@ -538,7 +538,7 @@ class TestLocalDiskBackend:
 
     def test_cleanup_on_remove(self, local_disk_backend):
         """Test that resources are properly cleaned up on remove."""
-        key = create_test_key("test_key")
+        key = create_test_key(3)
         memory_obj = create_test_memory_obj()
 
         # Insert key
@@ -564,7 +564,7 @@ class TestLocalDiskBackend:
 
     def test_thread_safety(self, local_disk_backend):
         """Test thread safety of the backend."""
-        key = create_test_key("test_key")
+        key = create_test_key(3)
         memory_obj = create_test_memory_obj()
 
         # Insert key
