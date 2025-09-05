@@ -89,6 +89,7 @@ build_lmcache_vllmopenai_image() {
 wait_for_openai_api_server() {
     local port="$1"
     local model="$2"
+    local cid="$3"
 
     if ! timeout "$SERVER_WAIT_TIMEOUT" bash -c "
         echo \"Curl /v1/models endpoint\"
@@ -99,7 +100,7 @@ wait_for_openai_api_server() {
         echo \"Model ${model} is available on ${port}\"
     "; then
         echo "OpenAI API server did not start"
-        docker logs $CID
+        docker logs $cid
         return 1
     fi
 }
@@ -144,7 +145,7 @@ run_lmcache_vllmopenai_container() {
             "${cmd_args[@]}"
     )
 
-    wait_for_openai_api_server "$PORT" "$vllm_model"
+    wait_for_openai_api_server "$PORT" "$vllm_model" "$CID"
 
     # Logging
     touch "$LOGFILE"
@@ -195,7 +196,7 @@ run_pd_lmcache() {
     )
 
     # Health check
-    wait_for_openai_api_server "$PORT1" "$prefiller_vllm_model"
+    wait_for_openai_api_server "$PORT1" "$prefiller_vllm_model" "$PREFILLER_CID"
 
     # Logging
     touch "$PREFILLER_LOGFILE"
@@ -237,7 +238,7 @@ run_pd_lmcache() {
     )
 
     # Health check
-    wait_for_openai_api_server "$PORT2" "$decoder_vllm_model"
+    wait_for_openai_api_server "$PORT2" "$decoder_vllm_model" "$DECODER_CID"
 
     # Logging
     touch "$DECODER_LOGFILE"
