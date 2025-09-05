@@ -115,10 +115,8 @@ class PluginLauncher:
             with open(file, "r", encoding="utf-8") as f:
                 first_line = f.readline().strip()
                 if first_line.startswith("#!"):
-                    # Extract interpreter paths by comma-separated
-                    interpreters_str = first_line[2:].strip()
-                    interpreters = interpreters_str.split(",")
-                    # If none found, fall through to the default behavior
+                    # Extract interpreter path from shebang
+                    return first_line[2:].strip()
         except Exception as e:
             logger.error(f"Error reading plugin file {file}: {e}")
             pass
