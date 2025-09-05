@@ -469,9 +469,10 @@ def _init_lmcache_engine(
     if hasattr(vllm_config, "kv_cache_config"):
         # Calculate mapping from layer id / layer name to kv cache group id.
 
-        # Third Party
-        from lmcache.integration.vllm.utils import \
-            get_layer_to_kv_cache_group_id_mapping
+        # First Party
+        from lmcache.integration.vllm.utils import (
+            get_layer_to_kv_cache_group_id_mapping,
+        )
 
         layer_name_to_kv_cache_group_id, layer_id_to_kv_cache_group_id = (
             get_layer_to_kv_cache_group_id_mapping(vllm_config.kv_cache_config)
