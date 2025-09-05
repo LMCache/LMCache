@@ -1,1 +1,2 @@
-pd.yaml
+local_cpu.yaml
+local_disk.yaml
