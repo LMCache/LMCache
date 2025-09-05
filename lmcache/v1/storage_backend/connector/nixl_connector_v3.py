@@ -139,7 +139,6 @@ class NixlSenderTask:
             last_chunk_toks=last_chunk_toks,
         )
 
-    # TODO (Jiayi): reduce for loop
     def get_local_indexes(
         self,
         already_sent_indexes: list[int],
@@ -148,12 +147,12 @@ class NixlSenderTask:
         Get the page indexes of the memory objects.
         This is needed for nixl transfer.
         """
-        local_indexes = []
-        for idx, mem_obj in enumerate(self.mem_objs):
-            if idx in already_sent_indexes:
-                continue
-            local_indexes.append(mem_obj.meta.address)
-        return local_indexes
+        already_sent_set = set(already_sent_indexes)
+        return [
+            mem_obj.meta.address
+            for idx, mem_obj in enumerate(self.mem_objs)
+            if idx not in already_sent_set
+        ]
 
     def free_mem_objs(self):
         for mem_obj in self.mem_objs:
