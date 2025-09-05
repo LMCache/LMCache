@@ -30,6 +30,7 @@ from lmcache.v1.storage_backend.abstract_backend import (
     StorageBackendInterface,
 )
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
+from lmcache.v1.storage_backend.storage_backend_listener import StorageBackendListener
 
 if TYPE_CHECKING:
     # First Party
@@ -43,6 +44,34 @@ class StorageManager:
     """
     The StorageManager is responsible for managing the storage backends.
     """
+
+    class _CPUDiskListener(StorageBackendListener):
+        def __init__(self, storage_manager: "StorageManager"):
+            self.storage_manager = storage_manager
+
+        def on_evict(
+            self, backend: StorageBackendInterface, keys: List[CacheEngineKey]
+        ):
+            """
+            remove keys from lookup server only if they don't exist in local backends.
+
+            :param StorageBackendInterface backend: The backend that evicted the keys.
+            :param List[CacheEngineKey] keys: The keys that were evicted.
+            """
+            if self.storage_manager.lookup_server is None:
+                return
+
+            search_range = ["LocalCPUBackend", "LocalDiskBackend"]
+            if str(backend) in search_range:
+                search_range.remove(str(backend))
+
+            keys_to_remove = []
+            for key in keys:
+                if not self.storage_manager.contains(key, search_range=search_range):
+                    keys_to_remove.append(key)
+
+            if keys_to_remove:
+                self.storage_manager.lookup_server.batched_remove(keys_to_remove)
 
     def __init__(
         self,
@@ -89,6 +118,16 @@ class StorageManager:
         self.worker_id = metadata.worker_id
 
         self.nixl_offload_stream = torch.cuda.Stream()
+
+        self._cpu_disk_listener = self._CPUDiskListener(self)
+        if "LocalCPUBackend" in self.storage_backends:
+            self.storage_backends["LocalCPUBackend"].set_listener(
+                self._cpu_disk_listener
+            )
+        if "LocalDiskBackend" in self.storage_backends:
+            self.storage_backends["LocalDiskBackend"].set_listener(
+                self._cpu_disk_listener
+            )
 
     def _get_allocator_backend(
         self, config: LMCacheEngineConfig
@@ -219,6 +258,9 @@ class StorageManager:
             # NOTE: the handling of exists_in_put_tasks
             # is done in the backend
             backend.batched_submit_put_task(keys, memory_objs)
+
+        if self.lookup_server is not None:
+            self.lookup_server.batched_insert(keys)
 
         for memory_obj in memory_objs:
             memory_obj.ref_count_down()

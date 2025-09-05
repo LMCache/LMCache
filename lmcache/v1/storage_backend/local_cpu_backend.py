@@ -14,7 +14,6 @@ from lmcache.observability import LMCStatsMonitor, PrometheusLogger
 from lmcache.utils import CacheEngineKey, _lmcache_nvtx_annotate
 from lmcache.v1.cache_controller.message import KVAdmitMsg, KVEvictMsg
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.lookup_server import LookupServerInterface
 from lmcache.v1.memory_management import (
     MemoryAllocatorInterface,
     MemoryFormat,
@@ -43,14 +42,14 @@ class LocalCPUBackend(AllocatorBackendInterface):
         self,
         config: LMCacheEngineConfig,
         memory_allocator: MemoryAllocatorInterface,
-        lookup_server: Optional[LookupServerInterface] = None,
+        dst_device: str = "cuda",
         lmcache_worker: Optional["LMCacheWorker"] = None,
     ):
+        super().__init__(dst_device)
         self.cache_policy = get_cache_policy(config.cache_policy)
         self.hot_cache = self.cache_policy.init_mutable_mapping()
 
         self.use_hot = config.local_cpu
-        self.lookup_server = lookup_server
         self.memory_allocator = memory_allocator
         self.lmcache_worker = lmcache_worker
         self.instance_id = config.lmcache_instance_id
@@ -269,6 +268,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
                 # TODO(Jiayi): optimize `num_candidates` with estimation.
                 # Accurate estimation is hard due to fragmentation
                 num_candidates = 1
+                evict_keys = None
                 with self.cpu_lock:
                     evict_keys = self.cache_policy.get_evict_candidates(
                         self.hot_cache, num_candidates=num_candidates
@@ -287,6 +287,8 @@ class LocalCPUBackend(AllocatorBackendInterface):
                         self.stats_monitor.update_local_cpu_evict_failed_count(
                             num_candidates
                         )
+                if evict_keys:
+                    super()._on_evict(evict_keys)
 
             if wait_other_requests:
                 if not busy_loop:
@@ -294,6 +296,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
                         "Not busy looping becausewe are not immediately able to evict"
                     )
                     break
+
                 # TODO: make time_to_wait a config
                 time_to_wait = 0.1
                 logger.warning(
@@ -366,6 +369,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
                 # TODO(Jiayi): optimize `num_candidates` with estimation.
                 # Accurate estimation is hard due to fragmentation
                 num_candidates = 1
+                evict_keys = None
                 with self.cpu_lock:
                     evict_keys = self.cache_policy.get_evict_candidates(
                         self.hot_cache, num_candidates=num_candidates
@@ -392,9 +396,6 @@ class LocalCPUBackend(AllocatorBackendInterface):
 
                             self.memory_allocator.batched_free(old_mem_objs)
 
-                            if self.lookup_server is not None:
-                                self.lookup_server.batched_remove(evict_key_all_layer)
-
                             logger.debug(
                                 f"Evicting {len(old_mem_objs)} chunks from cpu memory"
                             )
@@ -402,6 +403,8 @@ class LocalCPUBackend(AllocatorBackendInterface):
                         self.stats_monitor.update_local_cpu_evict_failed_count(
                             num_candidates
                         )
+                if evict_keys:
+                    super()._on_evict(evict_keys)
 
             if wait_other_requests:
                 if not busy_loop:
@@ -409,6 +412,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
                         "Not busy looping becausewe are not immediately able to evict"
                     )
                     break
+
                 # TODO: make time_to_wait a config
                 time_to_wait = 0.1
                 logger.warning(
@@ -460,9 +464,8 @@ class LocalCPUBackend(AllocatorBackendInterface):
         # TODO(Jiayi): might not be accurate if we don't calculate
         # `num_cleared_token` and remove the keys in an atomic way.
         self.batched_remove(clear_keys)
-
-        if self.lookup_server is not None:
-            self.lookup_server.batched_remove(clear_keys)
+        if clear_keys:
+            super()._on_evict(clear_keys)
 
         return num_cleared_tokens
 

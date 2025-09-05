@@ -18,7 +18,6 @@ from lmcache.observability import LMCStatsMonitor
 from lmcache.utils import CacheEngineKey, DiskCacheMetadata, _lmcache_nvtx_annotate
 from lmcache.v1.cache_controller.message import KVAdmitMsg, KVEvictMsg
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.lookup_server import LookupServerInterface
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
 from lmcache.v1.storage_backend.abstract_backend import StorageBackendInterface
 from lmcache.v1.storage_backend.cache_policy import get_cache_policy
@@ -158,8 +157,8 @@ class LocalDiskBackend(StorageBackendInterface):
         local_cpu_backend: LocalCPUBackend,
         dst_device: str = "cuda",
         lmcache_worker: Optional["LMCacheWorker"] = None,
-        lookup_server: Optional[LookupServerInterface] = None,
     ):
+        super().__init__(dst_device)
         self.cache_policy = get_cache_policy(config.cache_policy)
         self.dict = self.cache_policy.init_mutable_mapping()
 
@@ -174,8 +173,6 @@ class LocalDiskBackend(StorageBackendInterface):
         if not os.path.exists(self.path):
             os.makedirs(self.path)
             logger.info(f"Created local disk cache directory: {self.path}")
-
-        self.lookup_server = lookup_server
 
         self.loop = loop
 
@@ -325,6 +322,8 @@ class LocalDiskBackend(StorageBackendInterface):
 
         # TODO(Jiayi): Fragmentation is not considered here.
         required_size = memory_obj.get_physical_size()
+        all_evict_keys = []
+        evict_success = True
         with self.disk_lock:
             while self.current_cache_size + required_size > self.max_cache_size:
                 evict_keys = self.cache_policy.get_evict_candidates(
@@ -334,16 +333,23 @@ class LocalDiskBackend(StorageBackendInterface):
                     logger.warning(
                         "No eviction candidates found.", "Disk space under pressure."
                     )
-                    return None
+                    evict_success = False
+                    break
 
                 for evict_key in evict_keys:
                     self.current_cache_size -= self.dict[evict_key].size
 
                 self.batched_remove(evict_keys, force=False)
 
-                if self.lookup_server is not None:
-                    self.lookup_server.batched_remove(evict_keys)
-            self.current_cache_size += required_size
+                all_evict_keys.extend(evict_keys)
+            if evict_success:
+                self.current_cache_size += required_size
+
+        if all_evict_keys:
+            self._on_evict(all_evict_keys)
+
+        if not evict_success:
+            return None
 
         self.cache_policy.update_on_put(key)
         memory_obj.ref_count_up()
@@ -456,10 +462,10 @@ class LocalDiskBackend(StorageBackendInterface):
         assert dtype is not None
         assert shape is not None
 
+        self.disk_lock.release()
         memory_obj = self.load_bytes_from_disk(
             key, path, dtype=dtype, shape=shape, fmt=fmt
         )
-        self.disk_lock.release()
 
         return memory_obj
 
@@ -603,7 +609,7 @@ class LocalDiskBackend(StorageBackendInterface):
         )
 
     def close(self) -> None:
-        if self.lookup_server is not None:
-            self.disk_lock.acquire()
-            self.lookup_server.batched_remove(list(self.dict.keys()))
-            self.disk_lock.release()
+        with self.disk_lock:
+            keys = list(self.dict.keys())
+        if keys:
+            super()._on_evict(keys)

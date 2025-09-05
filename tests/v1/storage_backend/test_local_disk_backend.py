@@ -11,14 +11,17 @@ import pytest
 import torch
 
 # First Party
+from lmcache.config import LMCacheEngineMetadata
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import (
     MemoryFormat,
     MemoryObj,
+    MixedMemoryAllocator,
 )
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.v1.storage_backend.local_disk_backend import LocalDiskBackend
+from lmcache.v1.storage_backend.storage_manager import StorageManager
 
 
 class MockLookupServer:
@@ -50,6 +53,18 @@ def create_test_config(disk_path: str, max_disk_size: float = 1.0):
         lmcache_instance_id="test_instance",
     )
     return config
+
+
+def create_test_metadata():
+    """Create a test metadata for LMCacheEngineMetadata."""
+    return LMCacheEngineMetadata(
+        model_name="test_model",
+        world_size=1,
+        worker_id=0,
+        fmt="vllm",
+        kv_dtype=torch.bfloat16,
+        kv_shape=(28, 2, 256, 8, 128),
+    )
 
 
 def create_test_key(key_id: int = 0) -> CacheEngineKey:
@@ -125,7 +140,6 @@ class TestLocalDiskBackend:
         assert backend.local_cpu_backend == local_cpu_backend
         assert backend.path == temp_disk_path
         assert os.path.exists(temp_disk_path)
-        assert backend.lookup_server is None
         assert backend.lmcache_worker is None
         assert backend.instance_id == "test_instance"
         assert backend.usage == 0
@@ -138,7 +152,6 @@ class TestLocalDiskBackend:
     ):
         """Test LocalDiskBackend initialization with lookup server and worker."""
         config = create_test_config(temp_disk_path)
-        lookup_server = MockLookupServer()
         lmcache_worker = MockLMCacheWorker()
 
         backend = LocalDiskBackend(
@@ -146,11 +159,9 @@ class TestLocalDiskBackend:
             loop=async_loop,
             local_cpu_backend=local_cpu_backend,
             dst_device="cuda",
-            lookup_server=lookup_server,
             lmcache_worker=lmcache_worker,
         )
 
-        assert backend.lookup_server == lookup_server
         assert backend.lmcache_worker == lmcache_worker
 
         local_cpu_backend.memory_allocator.close()
@@ -458,16 +469,17 @@ class TestLocalDiskBackend:
 
         local_disk_backend.local_cpu_backend.memory_allocator.close()
 
-    def test_close(self, temp_disk_path, async_loop, local_cpu_backend):
+    def test_close(self, temp_disk_path):
         """Test close()."""
         config = create_test_config(temp_disk_path)
         lookup_server = MockLookupServer()
+        metadata = create_test_metadata()
+        memory_allocator = MixedMemoryAllocator(1024 * 1024 * 1024)
 
-        backend = LocalDiskBackend(
+        storage_manager = StorageManager(
             config=config,
-            loop=async_loop,
-            local_cpu_backend=local_cpu_backend,
-            dst_device="cuda",
+            metadata=metadata,
+            allocator=memory_allocator,
             lookup_server=lookup_server,
         )
 
@@ -475,15 +487,17 @@ class TestLocalDiskBackend:
         for i in range(3):
             key = create_test_key(i + 5)
             memory_obj = create_test_memory_obj()
-            backend.insert_key(key, memory_obj)
+            storage_manager.storage_backends["LocalDiskBackend"].insert_key(
+                key, memory_obj
+            )
 
-        # Close the backend
-        backend.close()
+        storage_manager.storage_backends["LocalDiskBackend"].close()
 
-        # Check that keys were removed from lookup server
+        # check that keys were removed from lookup server
         assert len(lookup_server.removed_keys) == 3
 
-        local_cpu_backend.memory_allocator.close()
+        storage_manager.close()
+        memory_allocator.close()
 
     def test_concurrent_access(self, local_disk_backend):
         """Test concurrent access to the backend."""

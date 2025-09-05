@@ -298,9 +298,6 @@ class LMCacheEngine:
 
         tot_time = offload_time + put_time
 
-        if self.lookup_server is not None:
-            self.lookup_server.batched_insert(keys)
-
         logger.info(
             "Stored %d out of total %d tokens. size: %.4f gb, cost %.4f ms, "
             "throughput: %.4f GB/s; offload_time: %.4f ms, put_time: %.4f ms",
@@ -394,10 +391,6 @@ class LMCacheEngine:
             keys.append(keys_multi_layer)
             memory_objs.append(memory_objs_multi_layer)
             tot_token_num += num_tokens
-
-            # Update lookup server
-            if self.lookup_server is not None:
-                self.lookup_server.batched_insert(keys_multi_layer)
 
         if keys:
             # Transpose the keys and memory objects into layer major format
