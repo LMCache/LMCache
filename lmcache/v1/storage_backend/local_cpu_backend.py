@@ -259,7 +259,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
 
         assert isinstance(
             self.memory_allocator,
-            (MixedMemoryAllocator, NixlCPUMemoryAllocator, PagedTensorMemoryAllocator)
+            (MixedMemoryAllocator, NixlCPUMemoryAllocator, PagedTensorMemoryAllocator),
         )
 
         evict_keys_count = 0
@@ -358,7 +358,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
 
         assert isinstance(
             self.memory_allocator,
-            (MixedMemoryAllocator, NixlCPUMemoryAllocator, PagedTensorMemoryAllocator)
+            (MixedMemoryAllocator, NixlCPUMemoryAllocator, PagedTensorMemoryAllocator),
         )
 
         evict_keys_count = 0
