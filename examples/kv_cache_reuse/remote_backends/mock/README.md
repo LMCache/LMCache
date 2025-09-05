@@ -3,7 +3,7 @@
 LMCache provides a mock remote connector that allows you to manually set the peeking latency, read throughput, and write throughput inside of the remote url. It will create copies of your KV cache in unmanaged local RAM.
 
 
-Deploy a serving engine with the benchmarking remote backend: 
+Deploy a serving engine with the mock remote backend: 
 ```bash
 LMCACHE_CONFIG_FILE=example.yaml vllm serve meta-llama/Llama-3.1-8B-Instruct --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1", "kv_role":"kv_both"}' --disable-log-requests --no-enable-prefix-caching
 ```
