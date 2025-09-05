@@ -126,7 +126,8 @@ class PluginLauncher:
             interpreters.append("python")
             interpreters.append("python3")
         elif file.suffix == ".sh":
-            interpreters.append("bash")
+            else:
+                raise ValueError(f"Plugin type {file.suffix} not supported ")
 
         # Try each interpreter until we find one that exists
         for interp in interpreters:
