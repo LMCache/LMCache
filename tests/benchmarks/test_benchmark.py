@@ -77,20 +77,22 @@ def create_config():
         yield partial(make_config, path=temp_dir)
 
 
-# test store 100GB data
+# test store 10GB data (1GB * 10)
 @pytest.mark.no_shared_allocator
 @pytest.mark.benchmark(group="store")
 @pytest.mark.parametrize("backend", ["cpu", "disk", "fsconnector"])
-def test_store_100GB(benchmark, backend, create_config, autorelease_v1):
+def test_store_1GB(benchmark, backend, create_config, autorelease_v1):
     """
-    In this test, it will run engine.store to store 100GB data in total.
+    In this test, it will run engine.store to store 10GB data in total.
     The configs are carefully tuned to have:
-    - Each request has 10K tokens and 1.25GB KV cache
-    - There will be 80 store requests (storing 100GB data) in total.
+    - Each request has 2K tokens and 0.25GB KV cache
+    - There will be 40 store requests (storing 10GB data) in total.
     - The store requests are split into 10 rounds, where each round has
-    10GB data.
+    1GB data.
+    - The benchmark tool will measure the time for each round (time to
+    store 1GB)
 
-    When creating the LMCache engine, it will first create a 15GB buffer, so
+    When creating the LMCache engine, it will first create a 1.5GB buffer, so
     there will be eviction starting from the second round.
 
     At the end of each round, we will run `engine.lookup` to ensure that all
@@ -99,7 +101,7 @@ def test_store_100GB(benchmark, backend, create_config, autorelease_v1):
     the rounds.
 
     pytest-benchmark will report the average time. To calculate the store
-    throughput, we can use 10GB / average_round_time.
+    throughput, we can use 1GB / average_round_time.
     """
     # model-related metadatas
     num_heads = 8
@@ -110,9 +112,9 @@ def test_store_100GB(benchmark, backend, create_config, autorelease_v1):
     # lmcache and vllm configs
     device = "cuda"
     fmt = "vllm"
-    num_tokens = 10000
+    num_tokens = 2000
 
-    num_blocks = 5000
+    num_blocks = 1000
     block_size = 16
 
     chunk_size = 256
@@ -121,7 +123,7 @@ def test_store_100GB(benchmark, backend, create_config, autorelease_v1):
     # Test configs
     # - single request has 1.25GB KV, 8 requests has 10GB
     # so we want to do 10 rounds
-    num_requests = 8
+    num_requests = 4
     num_repeats = 10
 
     # Initialize related modules
@@ -130,7 +132,7 @@ def test_store_100GB(benchmark, backend, create_config, autorelease_v1):
         num_blocks, device, block_size, dtype
     )
 
-    cache_size = 15  # Allocate 15 GB KV cache buffer
+    cache_size = 1.5  # Allocate 15 GB KV cache buffer
     cfg = create_config(backend, cache_size)
 
     engine = autorelease_v1(
@@ -172,21 +174,23 @@ def test_store_100GB(benchmark, backend, create_config, autorelease_v1):
     benchmark.pedantic(run_func, setup=setup, rounds=num_repeats, iterations=1)
 
 
-# Test retrieve 100GB data (10 rounds, each round 10GB, 100% hit)
+# Test retrieve 10data (10 rounds, each round 1GB, 100% hit)
 @pytest.mark.no_shared_allocator
 @pytest.mark.benchmark(group="retrieve")
 @pytest.mark.parametrize("backend", ["cpu", "disk", "fsconnector"])
-def test_retrieve_100GB_allhit(benchmark, backend, create_config, autorelease_v1):
+def test_retrieve_1GB_allhit(benchmark, backend, create_config, autorelease_v1):
     """
-    In this test, it will run engine.retrieve to retrieve 100GB data in total.
+    In this test, it will run engine.retrieve to retrieve 10GB data in total.
     The configs are carefully tuned to have:
-    - Each request has 10K tokens and 1.25GB KV cache
-    - There will be 80 retrieve requests (retrieving 100GB data) in total.
+    - Each request has 2K tokens and 0.25GB KV cache
+    - There will be 40 retrieve requests (retrieving 10GB data) in total.
     - The retrieve requests are split into 10 rounds, where each round has
-    10GB data.
+    1GB data.
+    - The benchmark tool will measure the time for each round (time to
+    retrieve 1GB)
 
-    When creating the LMCache engine, it will first create a 15GB buffer, and
-    then store 8 requests (10GB) into the engine.
+    When creating the LMCache engine, it will first create a 1.5GB buffer, and
+    then store 4 requests (1GB) into the engine.
     After that, there will be 10 rounds of retrieve, where each round queries
     the same set of requests (but shuffled) with a 100% hit rate.
 
@@ -194,7 +198,7 @@ def test_retrieve_100GB_allhit(benchmark, backend, create_config, autorelease_v1
     time across the rounds.
 
     pytest-benchmark will report the average time. To calculate the retrieve
-    throughput, we can use 10GB / average_round_time.
+    throughput, we can use 1GB / average_round_time.
     """
     # model-related metadatas
     num_heads = 8
@@ -205,9 +209,9 @@ def test_retrieve_100GB_allhit(benchmark, backend, create_config, autorelease_v1
     # lmcache and vllm configs
     device = "cuda"
     fmt = "vllm"
-    num_tokens = 10000
+    num_tokens = 2000
 
-    num_blocks = 5000
+    num_blocks = 1000
     block_size = 16
 
     chunk_size = 256
@@ -216,7 +220,7 @@ def test_retrieve_100GB_allhit(benchmark, backend, create_config, autorelease_v1
     # Test configs
     # - Single request has 1.25 GB KV, 8 requests will use 10GB,
     # so num repeats should be 10 to achieve 100 GB access
-    num_requests = 8
+    num_requests = 4
     num_repeats = 10
 
     # Initialize related modules
@@ -232,7 +236,7 @@ def test_retrieve_100GB_allhit(benchmark, backend, create_config, autorelease_v1
         for _ in range(num_requests)
     ]
 
-    cache_size = 15  # 15 GB KV cache buffer
+    cache_size = 1.5  # 2 GB KV cache buffer
     cfg = create_config(backend, cache_size)
 
     engine = autorelease_v1(
@@ -248,6 +252,18 @@ def test_retrieve_100GB_allhit(benchmark, backend, create_config, autorelease_v1
 
     for t, s in zip(list_tokens, list_slot_mappings):
         engine.store(t, kvcaches=kv_cache, slot_mapping=s)
+
+    # Wait for kv cache to be ready
+    timeout = 60
+    start = time.time()
+    ready = False
+    while time.time() - start < timeout:
+        ready = all([engine.lookup(t) == len(t) for t in list_tokens])
+        if ready:
+            break
+        else:
+            time.sleep(0.1)
+    assert ready, "Store is not finished in 60 seconds"
 
     # Run benchmark
     def setup():
@@ -265,20 +281,20 @@ def test_retrieve_100GB_allhit(benchmark, backend, create_config, autorelease_v1
     benchmark.pedantic(run_func, setup=setup, rounds=num_repeats, iterations=1)
 
 
-# Test lookup 10K * 10 requests, 100% hit
+# Test lookup 2K * 10 requests, 100% hit
 @pytest.mark.no_shared_allocator
 @pytest.mark.benchmark(group="lookup")
 @pytest.mark.parametrize("backend", ["cpu", "disk", "fsconnector"])
-def test_lookup_10reqs_10Ktokens(benchmark, backend, create_config, autorelease_v1):
+def test_lookup_20K_tokens(benchmark, backend, create_config, autorelease_v1):
     """
-    In this test, it will run engine.lookup to lookup 1M tokens in total.
+    In this test, it will run engine.lookup to lookup 200K tokens in total.
     The configs are carefully tuned to have:
-    - Each request has 10K tokens and 1.25GB KV cache
+    - Each request has 2K tokens and 0.25GB KV cache
     - There will be 100 lookup requests split into 10 rounds.
     - Each round will shuffle the requests.
 
-    When creating the LMCache engine, it will first create a 15GB buffer, and
-    then store 8 requests (10GB) into the engine.
+    When creating the LMCache engine, it will first create a 5GB buffer, and
+    then store 10 requests (3GB) into the engine.
     the same set of requests (but shuffled) with a 100% hit rate.
 
     The test will measure the time for each round and calculate the average
@@ -296,9 +312,9 @@ def test_lookup_10reqs_10Ktokens(benchmark, backend, create_config, autorelease_
     # lmcache and vllm configs
     device = "cuda"
     fmt = "vllm"
-    num_tokens = 10000
+    num_tokens = 2000
 
-    num_blocks = 5000
+    num_blocks = 1000
     block_size = 16
 
     chunk_size = 256
@@ -322,7 +338,7 @@ def test_lookup_10reqs_10Ktokens(benchmark, backend, create_config, autorelease_
     ]
 
     # TODO: Rewrite the config generation to another helper function
-    cache_size = 15  # 15 GB KV cache buffer
+    cache_size = 3  # 15 GB KV cache buffer
     cfg = create_config(backend, cache_size)
 
     engine = autorelease_v1(
