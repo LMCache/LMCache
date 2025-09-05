@@ -93,11 +93,12 @@ Documentation
    :caption: KV Cache management
 
    kv_cache_management/controller
-   kv_cache_management/lookup
-   kv_cache_management/persist
    kv_cache_management/clear
-   kv_cache_management/move
    kv_cache_management/compress
+   kv_cache_management/health
+   kv_cache_management/lookup
+   kv_cache_management/move
+   kv_cache_management/pin
    kv_cache_management/check_finish
 
 :raw-html:`<br />`
