@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Standard
-from concurrent.futures import Future
 from typing import List, Optional, Sequence
 import time
 
@@ -129,7 +128,7 @@ class AuditBackend(StorageBackendInterface):
         self,
         lookup_id: str,
         keys: list[CacheEngineKey],
-    ) -> Future[list[MemoryObj]]:
+    ) -> list[MemoryObj]:
         start_time = time.perf_counter()
         try:
             result = await self.real_backend.batched_get_non_blocking(lookup_id, keys)
