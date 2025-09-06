@@ -762,19 +762,15 @@ def test_cacheblend_executor_multiple_queries():
     assert torch.equal(ret.positions, pos_2)
     assert ret.k.shape[0] == total_query_len
     assert ret.v.shape[0] == total_query_len
-    for pos in selected_indices:
-        if pos < prefix_len:
-            assert (ret.k[pos] == 0).all()
-            assert (ret.v[pos] == 0).all()
-    unchanged_positions = list(
-        filter(
-            lambda x: x not in selected_indices,
-            range(min(total_query_len, prefix_len)),
-        )
-    )
-    if unchanged_positions:
-        assert (ret.k[unchanged_positions] == 1).all()
-        assert (ret.v[unchanged_positions] == 1).all()
+
+    # Create expected tensors and verify all positions
+    expected_k = torch.ones_like(ret.k)
+    expected_v = torch.ones_like(ret.v)
+    expected_k[selected_indices] = 0
+    expected_v[selected_indices] = 0
+    assert torch.equal(ret.k, expected_k)
+    assert torch.equal(ret.v, expected_v)
+
     assert torch.equal(
         ret.local_indices,
         torch.tensor(selected_indices, dtype=torch.int, device="cpu"),
