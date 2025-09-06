@@ -645,8 +645,10 @@ def test_cacheblend_executor_multiple_queries():
     query_len_1 = 8
     query_len_2 = 6
     total_query_len = query_len_1 + query_len_2
-    q_shape = (total_query_len, 4096)
-    kv_shape = (total_query_len, 1024)
+    Q_DIM = 4096
+    KV_DIM = 1024
+    q_shape = (total_query_len, Q_DIM)
+    kv_shape = (total_query_len, KV_DIM)
 
     changed_positions_q1 = [2, 6]
     changed_positions_q2 = [10, 12]
