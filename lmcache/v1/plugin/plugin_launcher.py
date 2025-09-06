@@ -118,7 +118,10 @@ class PluginLauncher:
                     # Extract interpreter path from shebang
                     return first_line[2:].strip()
         except Exception as e:
-            logger.error(f"Error reading plugin file {file}: {e}")
+            logger.error(
+                f"Error reading interpreter from plugin file {file} - "
+                f"using default interpreters: {e}"
+            )
             pass
 
         # Fallback to default interpreters
@@ -126,15 +129,16 @@ class PluginLauncher:
             interpreters.append("python")
             interpreters.append("python3")
         elif file.suffix == ".sh":
-            else:
-                raise ValueError(f"Plugin type {file.suffix} not supported ")
+            interpreters.append("bash")
+        else:
+            raise ValueError(f"Plugin type {file.suffix} not supported ")
 
         # Try each interpreter until we find one that exists
-        for interp in interpreters:
-            interp = interp.strip()
-            resolved_interp = shutil.which(interp)
-            if resolved_interp:
-                return resolved_interp
+        for interpreter in interpreters:
+            interpreter = interpreter.strip()
+            resolved_interpreter = shutil.which(interpreter)
+            if resolved_interpreter:
+                return resolved_interpreter
 
         raise ValueError(f"No valid interpreter found for {file} from {interpreters}")
 
