@@ -406,10 +406,10 @@ for cfg_name in "${CONFIG_NAMES[@]}"; do
     if [[ "$feature_type" == "pd" ]]; then
         PORT1=$(find_available_port 8100)
         prefiller_docker_args="$(yq '.["docker-prefiller"]' "$cfg_file")"
-        prefiller_vllm_args="$(yq '.vllm1' "$cfg_file")"
+        prefiller_vllm_args="$(yq '.["vllm-prefiller"]' "$cfg_file")"
         PORT2=$(find_available_port 8200)
         decoder_docker_args="$(yq '.["docker-decoder"]' "$cfg_file")"
-        decoder_vllm_args="$(yq '.vllm2' "$cfg_file")"
+        decoder_vllm_args="$(yq '.["vllm-decoder"]' "$cfg_file")"
         run_pd_lmcache "$prefiller_docker_args" "$prefiller_vllm_args" "$decoder_docker_args" "$decoder_vllm_args" "$cfg_name" 
         model="$(yq -r '.["vllm-prefiller"]].model' "$cfg_file")"
     elif [[ -z "$feature_type" ]]; then
