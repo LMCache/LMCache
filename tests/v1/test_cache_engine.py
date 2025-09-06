@@ -738,6 +738,7 @@ def test_paged_hierarchy_retrieve(
     "prefetch_from",
     [
         "local_disk",
+        "local_cpu",
     ],
 )
 def test_paged_prefetch_retrieve(backend, prefetch_from, autorelease_v1):

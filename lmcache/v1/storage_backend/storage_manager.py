@@ -357,6 +357,10 @@ class StorageManager:
         keys: list[CacheEngineKey],
         backend_name: str,
     ) -> None:
+        """
+        Callback function when a single prefetch task
+        (i.e., prefetching from a single backend) is done.
+        """
         # TODO(Jiayi): support write-back policy here
         pass
 
@@ -366,6 +370,10 @@ class StorageManager:
         lookup_id: str,
         retrieved_length: int,
     ) -> None:
+        """
+        Callback function when all prefetch tasks
+        (i.e., prefetching from all backends for the entire request) are done.
+        """
         assert self.async_lookup_server is not None
         self.async_lookup_server.send_response_to_scheduler(lookup_id, retrieved_length)
 
@@ -378,19 +386,22 @@ class StorageManager:
         pin: bool = False,
     ) -> None:
         """
+        Perform asynchronous lookup and prefetching across all storage backends.
 
-        starts
-        ends
-        potentially other args
+        :param str lookup_id: The unique id (e.g., request id) for the request.
+        :param list[CacheEngineKey] keys: The keys to lookup and prefetch.
+        :param list[int] cum_chunk_lengths: The cumulative lengths of the chunks.
+        :param Optional[list[str]] search_range: The range of storage backends
+        to search in. Should be a subset of ["LocalCPUBackend",
+        "LocalDiskBackend"] for now. If None, search in all backends.
+        :param bool pin: Whether to pin the keys.
         """
-
-        # FIXME: add retrieved lengths
-        # FIXME docstring
-        # FIXME review logic
 
         # NOTE(Jiayi): Currently, the retrieval pattern is always
         # prefix-based. That is, we retrieve 0-t1 tokens from backend 1
-        # and retrieve t1-t2 tokens from backend 2, etc.
+        # and retrieve t1-t2 tokens from backend 2, etc. The assumption
+        # here is that the suffix chunks are more likely to be evicted
+        # than the prefix chunks.
         # TODO(Jiayi): We need to change/optimize this for non-prefix
         # based retrieval patterns or cases where middle chunks are missing.
 

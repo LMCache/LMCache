@@ -30,6 +30,8 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+# TODO(Jiayi): handle cases where cache is repetitvely prefetched.
+
 
 class LocalDiskWorker:
     def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
@@ -58,11 +60,6 @@ class LocalDiskWorker:
         else:
             raise ValueError(f"Unknown task type: {task_type}")
 
-        # FIXME: For now, keys could be repetitively prefetched.
-        # But i guess it's okay.
-        # if task_type == "prefetch":
-        #     self.insert_prefetch_task(kwargs["key"], future)
-
         return await self.executor.submit_job(
             task,
             priority=priority,
@@ -83,44 +80,6 @@ class LocalDiskWorker:
     def exists_in_put_tasks(self, key: CacheEngineKey) -> bool:
         with self.put_lock:
             return key in self.put_tasks
-
-    # def remove_prefetch_task(self, key: CacheEngineKey):
-    #     with self.prefetch_lock:
-    #         if key in self.prefetch_tasks:
-    #             self.prefetch_tasks.pop(key)
-    #         else:
-    #             logger.warning(f"Key {key} not found in prefetch tasks.")
-
-    # def insert_prefetch_task(
-    #     self,
-    #     key: CacheEngineKey,
-    #     future_or_none: Optional[Future] = None,
-    # ):
-    #     with self.prefetch_lock:
-    #         self.prefetch_tasks[key] = future_or_none
-
-    # def exists_in_prefetch_tasks(self, key: CacheEngineKey) -> bool:
-    #     with self.prefetch_lock:
-    #         return key in self.prefetch_tasks
-
-    # def wait_prefetch_task(self, key: CacheEngineKey) -> Optional[MemoryObj]:
-    #     """
-    #     Wait for the prefetch task to complete and return the MemoryObj.
-    #     If the key is not in the prefetch tasks, return None.
-    #     """
-
-    #     self.prefetch_lock.acquire()
-    #     if key not in self.prefetch_tasks:
-    #         self.prefetch_lock.release()
-    #         return None
-
-    #     logger.debug(f"Waiting for prefetch task for key {key} to complete.")
-    #     future = self.prefetch_tasks[key]
-
-    #     self.prefetch_lock.release()
-
-    #     memory_obj = future.result()
-    #     return memory_obj
 
     def close(self):
         self.thread.join()
@@ -375,16 +334,6 @@ class LocalDiskBackend(StorageBackendInterface):
 
         self.disk_lock.release()
 
-        # FIXME: review this
-        # if memory_obj := self.disk_worker.wait_prefetch_task(key):
-        #     # NOTE(Jiayi): We don't directly use pin here as
-        #     # the memory_obj could be evicted from cpu backend
-        #     # before pin.
-        #     # TODO(Jiayi): Cache recency is not strictly
-        #     # handled in prefetching.
-        #     if self.local_cpu_backend.contains(key, pin=True):
-        #         return memory_obj
-
         self.disk_lock.acquire()
         # Update cache recency
         self.cache_policy.update_on_hit(key, self.dict)
@@ -412,6 +361,7 @@ class LocalDiskBackend(StorageBackendInterface):
         mem_objs: list[MemoryObj] = []
         paths: list[str] = []
 
+        logger.info(f"lookup_id: {lookup_id}; Prefetching {len(keys)} keys from disk.")
         for key in keys:
             self.disk_lock.acquire()
             assert key in self.dict, f"Key {key} not found in disk cache after pinning"
@@ -497,7 +447,7 @@ class LocalDiskBackend(StorageBackendInterface):
         self.usage += size
         self.stats_monitor.update_local_storage_usage(self.usage)
 
-        # FIXME(Jiayi): need to add ref count in disk memory object
+        # TODO(Jiayi): need to add ref count in disk memory object
         self.write_file(buffer, path)
 
         self.insert_key(key, memory_obj)
@@ -528,12 +478,6 @@ class LocalDiskBackend(StorageBackendInterface):
             self.disk_lock.acquire()
             self.dict[key].unpin()
             self.disk_lock.release()
-
-            # Write back to cpu
-            # if write_back:
-            #    self.local_cpu_backend.submit_put_task(key, mem_obj)
-
-            # self.disk_worker.remove_prefetch_task(key)
 
         return memory_objs
 

@@ -222,16 +222,6 @@ class TestLocalCPUBackend:
 
         local_cpu_backend_disabled.memory_allocator.close()
 
-    def test_submit_prefetch_task(self, local_cpu_backend):
-        """Test submit_prefetch_task()."""
-        key = create_test_key("test_key")
-        ret = local_cpu_backend.submit_prefetch_task(key)
-
-        # LocalCPUBackend always returns None for submit_prefetch_task
-        assert ret is False
-
-        local_cpu_backend.memory_allocator.close()
-
     def test_get_blocking_key_not_exists(self, local_cpu_backend):
         """Test get_blocking() when key doesn't exist."""
         key = create_test_key("nonexistent")
@@ -257,33 +247,6 @@ class TestLocalCPUBackend:
         assert (
             result.get_ref_count() == 3
         )  # 1 from creation + 1 from submit_put_task + 1 from get_blocking
-
-        local_cpu_backend.memory_allocator.close()
-
-    def test_get_non_blocking_key_not_exists(self, local_cpu_backend):
-        """Test get_non_blocking() when key doesn't exist."""
-        key = create_test_key("nonexistent")
-        future = local_cpu_backend.get_non_blocking(key)
-
-        assert future is None
-
-        local_cpu_backend.memory_allocator.close()
-
-    def test_get_non_blocking_key_exists(self, local_cpu_backend):
-        """Test get_non_blocking() when key exists."""
-        key = create_test_key("test_key")
-        memory_obj = create_test_memory_obj()
-
-        # Insert key first
-        local_cpu_backend.submit_put_task(key, memory_obj)
-
-        future = local_cpu_backend.get_non_blocking(key)
-
-        assert future is not None
-        result = future.result()
-        assert result is not None
-        assert isinstance(result, MemoryObj)
-        assert result == memory_obj
 
         local_cpu_backend.memory_allocator.close()
 

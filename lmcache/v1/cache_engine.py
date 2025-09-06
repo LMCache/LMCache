@@ -2,7 +2,6 @@
 # Standard
 from collections import defaultdict
 from typing import (
-    TYPE_CHECKING,
     Any,
     Callable,
     Dict,
@@ -59,9 +58,6 @@ from lmcache.v1.token_database import (
     TokenDatabase,
 )
 
-if TYPE_CHECKING:
-    # First Party
-    pass
 logger = init_logger(__name__)
 
 
@@ -1105,6 +1101,10 @@ class LMCacheEngine:
             chunks.append((key, memory_obj, start, end))
             tot_kv_size += memory_obj.get_size()
             ret_mask[start:end] = True
+
+        # NOTE: free the memory objects that are not hit.
+        for unused_mem_obj in memory_objs[len(chunks) :]:
+            unused_mem_obj.ref_count_down()
 
         return chunks, tot_kv_size
 

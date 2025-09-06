@@ -343,35 +343,6 @@ class TestLocalDiskBackend:
 
         local_disk_backend.local_cpu_backend.memory_allocator.close()
 
-    def test_submit_prefetch_task_key_not_exists(self, local_disk_backend):
-        """Test submit_prefetch_task() when key doesn't exist."""
-        key = create_test_key(2)
-        res = local_disk_backend.submit_prefetch_task(key)
-
-        assert not res
-
-        local_disk_backend.local_cpu_backend.memory_allocator.close()
-
-    def test_submit_prefetch_task_key_exists(self, local_disk_backend):
-        """Test submit_prefetch_task() when key exists."""
-        key = create_test_key(3)
-        memory_obj = create_test_memory_obj()
-
-        # Insert key first
-        local_disk_backend.insert_key(key, memory_obj)
-
-        # Create the actual file on disk
-        path = local_disk_backend._key_to_path(key)
-        with open(path, "wb") as f:
-            f.write(memory_obj.byte_array)
-
-        future = local_disk_backend.submit_prefetch_task(key)
-
-        assert future is not None
-        # Don't call future.result() to avoid blocking
-
-        local_disk_backend.local_cpu_backend.memory_allocator.close()
-
     def test_get_blocking_key_not_exists(self, local_disk_backend):
         """Test get_blocking() when key doesn't exist."""
         key = create_test_key(2)

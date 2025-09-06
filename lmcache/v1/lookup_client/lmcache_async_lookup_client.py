@@ -127,7 +127,7 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
 
         if config.extra_config is not None:
             self.lookup_backoff_time = float(
-                config.extra_config.get("lookup_backoff_time", 0.002)
+                config.extra_config.get("lookup_backoff_time", 0.01)
             )
 
     # TODO(Jiayi): Consider batching here
@@ -138,8 +138,12 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
         request_configs: Optional[dict] = None,
     ) -> Optional[int]:
         with self.lock:
-            req_status = self.reqs_status.get(lookup_id, None)
-            if req_status is not None:
+            # -1 indicates not found; None indicates ongoing.
+            req_status = self.reqs_status.get(lookup_id, -1)
+            if req_status is None:
+                return None
+            elif req_status != -1:
+                self.reqs_status.pop(lookup_id)
                 return req_status
             self.reqs_status[lookup_id] = None
         hashes = []
