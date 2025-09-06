@@ -665,11 +665,9 @@ def test_cacheblend_executor_multiple_queries():
 
     # Newly generated KV is 0 on the "changed_positions"
     fk_1 = torch.full(kv_shape, 1, dtype=dtype, device=device)
-    for pos in all_changed_positions:
-        fk_1[pos, ...] = 0
+    fk_1[all_changed_positions] = 0
     fv_1 = torch.full(kv_shape, 1, dtype=dtype, device=device)
-    for pos in all_changed_positions:
-        fv_1[pos, ...] = 0
+    fv_1[all_changed_positions] = 0
 
     # Retrieved KV are all 1
     rk_1 = torch.full(kv_shape, 1, dtype=dtype, device=device)
