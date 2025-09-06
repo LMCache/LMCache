@@ -661,9 +661,7 @@ def test_cacheblend_executor_multiple_queries():
     blender.set_positional_encoder(dumb_posional_encoding)
     blender.set_reverse_positional_encoder(dumb_posional_encoding)
 
-    fq_1 = torch.zeros(q_shape, dtype=dtype, device=device)
-    for i in range(total_query_len):
-        fq_1[i] = i
+    fq_1 = torch.arange(total_query_len, dtype=dtype, device=device).unsqueeze(1).expand(q_shape)
 
     # Newly generated KV is 0 on the "changed_positions"
     fk_1 = torch.full(kv_shape, 1, dtype=dtype, device=device)
