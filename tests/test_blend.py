@@ -636,6 +636,149 @@ def test_cacheblend_executor_single_query():
     )
     assert ret.query_start_loc is None
 
-    # TODO: un-tested cases:
-    # - some positions are invalid
-    # - multiple queries (batch size > 1)
+
+def test_cacheblend_executor_multiple_queries():
+    # Case 1: multiple queries (batch size > 1)
+    dtype = torch.bfloat16
+    device = "cuda"
+    prefix_len = 10
+    query_len_1 = 8
+    query_len_2 = 6
+    total_query_len = query_len_1 + query_len_2
+    Q_DIM = 4096
+    KV_DIM = 1024
+    q_shape = (total_query_len, Q_DIM)
+    kv_shape = (total_query_len, KV_DIM)
+
+    changed_positions_q1 = [2, 6]
+    changed_positions_q2 = [10, 12]
+    all_changed_positions = changed_positions_q1 + changed_positions_q2
+
+    def dumb_posional_encoding(p, q, k):
+        return q, k
+
+    blender = CacheBlendImpl(0.2)
+    blender.set_positional_encoder(dumb_posional_encoding)
+    blender.set_reverse_positional_encoder(dumb_posional_encoding)
+
+    fq_1 = (
+        torch.arange(total_query_len, dtype=dtype, device=device)
+        .unsqueeze(1)
+        .expand(q_shape)
+    )
+
+    # Newly generated KV is 0 on the "changed_positions"
+    fk_1 = torch.full(kv_shape, 1, dtype=dtype, device=device)
+    fk_1[all_changed_positions] = 0
+    fv_1 = torch.full(kv_shape, 1, dtype=dtype, device=device)
+    fv_1[all_changed_positions] = 0
+
+    # Retrieved KV are all 1
+    rk_1 = torch.full(kv_shape, 1, dtype=dtype, device=device)
+    rv_1 = torch.full(kv_shape, 1, dtype=dtype, device=device)
+    valid = torch.full((total_query_len,), 1, dtype=torch.long, device="cpu")
+    positions = torch.arange(
+        prefix_len, prefix_len + total_query_len, dtype=torch.int32, device="cuda"
+    )
+    query_start_loc = torch.tensor(
+        [0, query_len_1, total_query_len], dtype=torch.int32, device="cuda"
+    )
+    original_positions = torch.arange(total_query_len)
+
+    # First layer should do nothing!
+    ret = blender.blend(
+        0,
+        rk_1,
+        rv_1,
+        valid,
+        original_positions,
+        fq_1,
+        fk_1,
+        fv_1,
+        positions,
+        query_start_loc,
+        0,
+    )
+    assert torch.equal(ret.q, fq_1)
+    assert torch.equal(ret.k, fk_1)
+    assert torch.equal(ret.v, fv_1)
+    assert torch.equal(ret.positions, positions)
+    assert torch.equal(
+        ret.local_indices,
+        torch.arange(total_query_len, dtype=torch.int, device="cpu"),
+    )
+    assert ret.query_start_loc is None
+
+    # Second layer should do token selection
+    ret = blender.blend(
+        1,
+        rk_1,
+        rv_1,
+        valid,
+        original_positions,
+        fq_1,
+        fk_1,
+        fv_1,
+        positions,
+        query_start_loc,
+        0,
+    )
+    expected_q1 = int(query_len_1 * 0.2)
+    expected_q2 = int(query_len_2 * 0.2)
+    expected_total = expected_q1 + expected_q2
+    assert len(ret.positions) == expected_total
+    assert ret.k.shape[0] == total_query_len
+    assert ret.v.shape[0] == total_query_len
+    assert ret.query_start_loc[0].item() == 0
+    assert ret.query_start_loc[1].item() == expected_q1
+    assert ret.query_start_loc[2].item() == expected_total
+    for i in range(len(ret.local_indices)):
+        pos = ret.local_indices[i].item()
+        assert (ret.k[pos] == 0).all()
+        assert (ret.v[pos] == 0).all()
+
+    # Third layer should do kv update
+    fq_2 = ret.q
+    selected_indices = ret.local_indices.tolist()
+    fk_2 = fk_1[selected_indices]
+    fv_2 = fv_1[selected_indices]
+    rk_2 = rk_1
+    rv_2 = rv_1
+    pos_2 = ret.positions
+    ret = blender.blend(
+        2,
+        rk_2,
+        rv_2,
+        valid,
+        original_positions,
+        ret.q,
+        fk_2,
+        fv_2,
+        pos_2,
+        query_start_loc,
+        0,
+    )
+
+    # Should update the KV without changing q or positions
+    assert torch.equal(ret.q, fq_2)
+    assert torch.equal(ret.positions, pos_2)
+    assert ret.k.shape[0] == total_query_len
+    assert ret.v.shape[0] == total_query_len
+
+    # Create expected tensors and verify all positions
+    expected_k = torch.ones_like(ret.k)
+    expected_v = torch.ones_like(ret.v)
+    expected_k[selected_indices] = 0
+    expected_v[selected_indices] = 0
+    assert torch.equal(ret.k, expected_k)
+    assert torch.equal(ret.v, expected_v)
+
+    assert torch.equal(
+        ret.local_indices,
+        torch.tensor(selected_indices, dtype=torch.int, device="cpu"),
+    )
+    assert ret.query_start_loc is None
+
+
+# TODO: un-tested cases:
+# - some positions are invalid
