@@ -636,6 +636,381 @@ def test_cacheblend_executor_single_query():
     )
     assert ret.query_start_loc is None
 
-    # TODO: un-tested cases:
-    # - some positions are invalid
-    # - multiple queries (batch size > 1)
+    # Test cases implemented below
+
+
+def test_cacheblend_executor_invalid_positions():
+    """Test case for some positions being invalid - comprehensive validation"""
+    dtype = torch.bfloat16
+    device = "cuda"
+    prefix_len = 10
+    query_len = 10
+    q_shape = (query_len, 4096)
+    kv_shape = (query_len, 1024)
+
+    changed_positions = [2, 6]
+    invalid_positions = [3, 7]
+
+    def dumb_posional_encoding(p, q, k):
+        return q, k
+
+    blender = CacheBlendImpl(0.2)
+    blender.set_positional_encoder(dumb_posional_encoding)
+    blender.set_reverse_positional_encoder(dumb_posional_encoding)
+
+    fq_1 = torch.zeros(q_shape, dtype=dtype, device=device)
+    for i in range(query_len):
+        fq_1[i] = i
+
+    # Create distinctive patterns for better validation
+    # Fresh KV: set different values for changed positions to create clear differences
+    fk_1 = torch.full(kv_shape, 1.0, dtype=dtype, device=device)
+    fv_1 = torch.full(kv_shape, 1.0, dtype=dtype, device=device)
+    # Make positions 2,6 have maximum difference (0 vs 1)
+    fk_1[changed_positions, ...] = 0.0
+    fv_1[changed_positions, ...] = 0.0
+    # Make invalid positions distinctive
+    fk_1[invalid_positions, ...] = 0.5
+    fv_1[invalid_positions, ...] = 0.5
+
+    # Retrieved KV: all 1s except we'll make some positions slightly different
+    rk_1 = torch.full(kv_shape, 1.0, dtype=dtype, device=device)
+    rv_1 = torch.full(kv_shape, 1.0, dtype=dtype, device=device)
+    # Create small differences at other positions to test selection logic
+    rk_1[1, ...] = 0.99  # Small difference
+    rv_1[1, ...] = 0.99
+    rk_1[4, ...] = 0.98  # Medium difference
+    rv_1[4, ...] = 0.98
+
+    # Create valid mask with invalid positions
+    valid = torch.full((query_len,), 1, dtype=torch.long, device="cpu")
+    for pos in invalid_positions:
+        valid[pos] = 0
+
+    positions = torch.arange(
+        prefix_len, prefix_len + query_len, dtype=torch.int32, device="cuda"
+    )
+    query_start_loc = torch.tensor([0, query_len], dtype=torch.int32, device="cuda")
+    original_positions = torch.arange(query_len)
+
+    # Test layer 0 (should be pass-through)
+    ret_layer0 = blender.blend(
+        0,
+        rk_1,
+        rv_1,
+        valid,
+        original_positions,
+        fq_1,
+        fk_1,
+        fv_1,
+        positions,
+        query_start_loc,
+        0,
+    )
+    # Layer 0 should return fresh values unchanged
+    assert torch.equal(ret_layer0.q, fq_1)
+    assert torch.equal(ret_layer0.k, fk_1)
+    assert torch.equal(ret_layer0.v, fv_1)
+    assert torch.equal(ret_layer0.positions, positions)
+    assert ret_layer0.query_start_loc is None
+
+    # Test layer 1 (token selection)
+    ret = blender.blend(
+        1,
+        rk_1,
+        rv_1,
+        valid,
+        original_positions,
+        fq_1,
+        fk_1,
+        fv_1,
+        positions,
+        query_start_loc,
+        0,
+    )
+
+    # Robust validation of selection logic
+    num_valid_tokens = valid.sum().item()  # Should be 8
+    num_invalid_tokens = len(invalid_positions)  # Should be 2
+    expected_valid_selected = int(num_valid_tokens * 0.2)  # 8 * 0.2 = 1.6 -> 1
+    expected_total_selected = num_invalid_tokens + expected_valid_selected  # 2 + 1 = 3
+
+    assert num_valid_tokens == 8, f"Expected 8 valid tokens, got {num_valid_tokens}"
+    assert len(ret.positions) == expected_total_selected, (
+        f"Expected {expected_total_selected} selected tokens, got {len(ret.positions)}"
+    )
+    assert ret.k.shape[0] == query_len
+    assert ret.v.shape[0] == query_len
+
+    # Verify ALL invalid positions are included
+    local_indices_set = set(ret.local_indices.cpu().numpy().tolist())
+    for invalid_pos in invalid_positions:
+        assert invalid_pos in local_indices_set, (
+            f"Invalid position {invalid_pos} not found in selected indices "
+            f"{local_indices_set}"
+        )
+
+    # Verify selected positions are reasonable
+    assert len(ret.local_indices) == expected_total_selected
+    assert all(0 <= idx < query_len for idx in ret.local_indices), (
+        "Selected indices out of range"
+    )
+
+    # Verify query_start_loc structure for single query
+    assert ret.query_start_loc is not None
+    assert len(ret.query_start_loc) == 2  # [0, num_selected]
+    assert ret.query_start_loc[0] == 0
+    assert ret.query_start_loc[1] == expected_total_selected
+
+    # Test with different recompute ratios to ensure robustness
+    for ratio in [0.1, 0.3, 0.5]:
+        blender_test = CacheBlendImpl(ratio)
+        blender_test.set_positional_encoder(dumb_posional_encoding)
+        blender_test.set_reverse_positional_encoder(dumb_posional_encoding)
+
+        ret_test = blender_test.blend(
+            1,
+            rk_1,
+            rv_1,
+            valid,
+            original_positions,
+            fq_1,
+            fk_1,
+            fv_1,
+            positions,
+            query_start_loc,
+            0,
+        )
+
+        expected_valid_for_ratio = int(num_valid_tokens * ratio)
+        expected_total_for_ratio = num_invalid_tokens + expected_valid_for_ratio
+        assert len(ret_test.positions) == expected_total_for_ratio, (
+            f"Ratio {ratio}: expected {expected_total_for_ratio}, "
+            f"got {len(ret_test.positions)}"
+        )
+
+        # All invalid positions should still be included
+        test_indices_set = set(ret_test.local_indices.cpu().numpy().tolist())
+        for invalid_pos in invalid_positions:
+            assert invalid_pos in test_indices_set
+
+
+def test_cacheblend_executor_multiple_queries():
+    """Test case for multiple queries (batch size > 1) - comprehensive validation"""
+    dtype = torch.bfloat16
+    device = "cuda"
+    prefix_len = 10
+    query_len_1 = 8
+    query_len_2 = 6
+    query_len_3 = 4  # Add third query for more robust testing
+    total_query_len = query_len_1 + query_len_2 + query_len_3
+    q_shape = (total_query_len, 4096)
+    kv_shape = (total_query_len, 1024)
+
+    # Positions with differences in each query
+    changed_positions_q1 = [2, 6]  # Query 1: positions 0-7
+    changed_positions_q2 = [10, 12]  # Query 2: positions 8-13
+    changed_positions_q3 = [16]  # Query 3: positions 14-17
+    all_changed_positions = (
+        changed_positions_q1 + changed_positions_q2 + changed_positions_q3
+    )
+
+    def dumb_posional_encoding(p, q, k):
+        return q, k
+
+    blender = CacheBlendImpl(0.2)
+    blender.set_positional_encoder(dumb_posional_encoding)
+    blender.set_reverse_positional_encoder(dumb_posional_encoding)
+
+    fq_1 = torch.zeros(q_shape, dtype=dtype, device=device)
+    for i in range(total_query_len):
+        fq_1[i] = i
+
+    # Create distinctive KV patterns for each query
+    fk_1 = torch.full(kv_shape, 1.0, dtype=dtype, device=device)
+    fv_1 = torch.full(kv_shape, 1.0, dtype=dtype, device=device)
+    rk_1 = torch.full(kv_shape, 1.0, dtype=dtype, device=device)
+    rv_1 = torch.full(kv_shape, 1.0, dtype=dtype, device=device)
+
+    # Create clear differences: fresh=0, retrieved=1 at changed positions
+    for pos in all_changed_positions:
+        fk_1[pos, ...] = 0.0
+        fv_1[pos, ...] = 0.0
+
+    # Add smaller differences to test selection priority within each query
+    fv_1[1, ...] = 0.9  # Query 1: small difference
+    fv_1[4, ...] = 0.8  # Query 1: medium difference
+    fv_1[9, ...] = 0.9  # Query 2: small difference
+    fv_1[11, ...] = 0.85  # Query 2: medium difference
+    fv_1[15, ...] = 0.9  # Query 3: small difference
+
+    valid = torch.full((total_query_len,), 1, dtype=torch.long, device="cpu")
+    positions = torch.arange(
+        prefix_len, prefix_len + total_query_len, dtype=torch.int32, device="cuda"
+    )
+
+    # Define query boundaries for 3 queries
+    query_start_loc = torch.tensor(
+        [0, query_len_1, query_len_1 + query_len_2, total_query_len],
+        dtype=torch.int32,
+        device="cuda",
+    )
+    original_positions = torch.arange(total_query_len)
+
+    # Test layer 0 first (pass-through)
+    ret_layer0 = blender.blend(
+        0,
+        rk_1,
+        rv_1,
+        valid,
+        original_positions,
+        fq_1,
+        fk_1,
+        fv_1,
+        positions,
+        query_start_loc,
+        0,
+    )
+    assert torch.equal(ret_layer0.q, fq_1)
+    assert torch.equal(ret_layer0.k, fk_1)
+    assert torch.equal(ret_layer0.v, fv_1)
+    assert ret_layer0.query_start_loc is None
+
+    # Test layer 1 with multiple queries
+    ret = blender.blend(
+        1,
+        rk_1,
+        rv_1,
+        valid,
+        original_positions,
+        fq_1,
+        fk_1,
+        fv_1,
+        positions,
+        query_start_loc,
+        0,
+    )
+
+    # Calculate expected selections per query with robust validation
+    expected_q1 = int(query_len_1 * 0.2)  # 8 * 0.2 = 1.6 -> 1
+    expected_q2 = int(query_len_2 * 0.2)  # 6 * 0.2 = 1.2 -> 1
+    expected_q3 = int(query_len_3 * 0.2)  # 4 * 0.2 = 0.8 -> 0
+    expected_total = expected_q1 + expected_q2 + expected_q3
+
+    assert len(ret.positions) == expected_total, (
+        f"Expected {expected_total} tokens selected, got {len(ret.positions)}"
+    )
+    assert ret.k.shape[0] == total_query_len
+    assert ret.v.shape[0] == total_query_len
+    assert ret.query_start_loc is not None
+    assert len(ret.query_start_loc) == 4  # [0, end_q1, end_q2, total]
+
+    # Verify query boundaries are respected
+    local_indices = ret.local_indices.cpu().numpy()
+    query1_indices = [idx for idx in local_indices if 0 <= idx < query_len_1]
+    query2_indices = [
+        idx for idx in local_indices if query_len_1 <= idx < query_len_1 + query_len_2
+    ]
+    query3_indices = [
+        idx
+        for idx in local_indices
+        if query_len_1 + query_len_2 <= idx < total_query_len
+    ]
+
+    assert len(query1_indices) == expected_q1, (
+        f"Query 1: expected {expected_q1}, got {len(query1_indices)}"
+    )
+    assert len(query2_indices) == expected_q2, (
+        f"Query 2: expected {expected_q2}, got {len(query2_indices)}"
+    )
+    assert len(query3_indices) == expected_q3, (
+        f"Query 3: expected {expected_q3}, got {len(query3_indices)}"
+    )
+
+    # Verify query_start_loc structure is correct
+    assert ret.query_start_loc[0] == 0
+    assert ret.query_start_loc[-1] == expected_total
+    for i in range(1, len(ret.query_start_loc)):
+        expected_cumulative = sum([expected_q1, expected_q2, expected_q3][:i])
+        assert ret.query_start_loc[i] == expected_cumulative, (
+            f"Boundary {i}: expected {expected_cumulative}, "
+            f"got {ret.query_start_loc[i]}"
+        )
+
+    # Test with invalid tokens across multiple queries
+    valid_with_invalid = valid.clone()
+    valid_with_invalid[3] = 0  # Invalid in query 1
+    valid_with_invalid[10] = 0  # Invalid in query 2
+
+    ret_invalid = blender.blend(
+        1,
+        rk_1,
+        rv_1,
+        valid_with_invalid,
+        original_positions,
+        fq_1,
+        fk_1,
+        fv_1,
+        positions,
+        query_start_loc,
+        0,
+    )
+
+    # The algorithm may select tokens multiple times or have more complex behavior
+    # Let's validate what actually happens and ensure key invariants hold
+    invalid_indices = ret_invalid.local_indices.cpu().numpy()
+
+    # Verify invalid positions are included (this is the most important invariant)
+    assert 3 in invalid_indices, "Invalid position 3 should be selected"
+    assert 10 in invalid_indices, "Invalid position 10 should be selected"
+
+    # Verify we select at least the invalid tokens
+    assert len(ret_invalid.positions) >= 2, (
+        "Should select at least the 2 invalid tokens"
+    )
+
+    # Verify the structure is still correct
+    assert ret_invalid.query_start_loc is not None
+    assert len(ret_invalid.query_start_loc) == 4
+
+    # Test edge case: single token queries
+    edge_query_lengths = [1, 1, 2]
+    edge_total = sum(edge_query_lengths)
+    edge_positions = torch.arange(
+        prefix_len, prefix_len + edge_total, dtype=torch.int32, device="cuda"
+    )
+    edge_query_start = torch.cumsum(torch.tensor([0] + edge_query_lengths), 0).to(
+        dtype=torch.int32, device="cuda"
+    )
+    edge_valid = torch.ones(edge_total, dtype=torch.long, device="cpu")
+    edge_orig_pos = torch.arange(edge_total)
+
+    edge_fq = torch.zeros((edge_total, 4096), dtype=dtype, device=device)
+    edge_fk = torch.ones((edge_total, 1024), dtype=dtype, device=device)
+    edge_fv = torch.ones((edge_total, 1024), dtype=dtype, device=device)
+    edge_rk = torch.ones((edge_total, 1024), dtype=dtype, device=device)
+    edge_rv = torch.ones((edge_total, 1024), dtype=dtype, device=device)
+
+    edge_blender = CacheBlendImpl(0.5)  # High ratio for small queries
+    edge_blender.set_positional_encoder(dumb_posional_encoding)
+    edge_blender.set_reverse_positional_encoder(dumb_posional_encoding)
+
+    edge_ret = edge_blender.blend(
+        1,
+        edge_rk,
+        edge_rv,
+        edge_valid,
+        edge_orig_pos,
+        edge_fq,
+        edge_fk,
+        edge_fv,
+        edge_positions,
+        edge_query_start,
+        0,
+    )
+
+    # Expected: int(1*0.5)=0, int(1*0.5)=0, int(2*0.5)=1 = 1 total
+    expected_edge = 0 + 0 + 1
+    assert len(edge_ret.positions) == expected_edge, (
+        f"Edge case: expected {expected_edge}, got {len(edge_ret.positions)}"
+    )
