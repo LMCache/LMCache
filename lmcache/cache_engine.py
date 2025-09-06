@@ -532,7 +532,6 @@ class LMCacheEngineBuilder:
     @classmethod
     def destroy(cls, instance_id: str) -> None:
         """Close and delete the LMCacheEngine instance by the instance ID"""
-        # TODO: unit test for this
         if instance_id in cls._instances:
             engine = cls._instances[instance_id]
             engine.close()
