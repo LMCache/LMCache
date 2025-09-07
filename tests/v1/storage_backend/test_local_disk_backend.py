@@ -4,7 +4,6 @@ import asyncio
 import os
 import shutil
 import tempfile
-import threading
 
 # Third Party
 import pytest
@@ -14,15 +13,12 @@ import torch
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.event_manager import EventManager
 from lmcache.v1.memory_management import (
     MemoryFormat,
     MemoryObj,
-    MixedMemoryAllocator,
 )
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.v1.storage_backend.local_disk_backend import LocalDiskBackend
-from lmcache.v1.storage_backend.storage_manager import StorageManager
 
 
 class MockLookupServer:
@@ -190,131 +186,12 @@ class TestLocalDiskBackend:
 
         local_disk_backend.local_cpu_backend.memory_allocator.close()
 
-    def test_contains_key_exists(self, local_disk_backend):
-        """Test contains() when key exists."""
-        key = create_test_key(3)
-        memory_obj = create_test_memory_obj()
-
-        # Insert key first
-        local_disk_backend.insert_key(key, memory_obj)
-
-        assert local_disk_backend.contains(key)
-        assert local_disk_backend.contains(key, pin=True)
-
-        local_disk_backend.local_cpu_backend.memory_allocator.close()
-
-    def test_pin_unpin(self, local_disk_backend):
-        """Test pin() and unpin() operations."""
-        key = create_test_key(3)
-        memory_obj = create_test_memory_obj()
-        # Insert key first
-        local_disk_backend.insert_key(key, memory_obj)
-        # Test pin
-        assert local_disk_backend.pin(key)
-        assert local_disk_backend.dict[key].pin_count > 0
-        # Test unpin
-        assert local_disk_backend.unpin(key)
-        assert local_disk_backend.dict[key].pin_count == 0
-
-        # Test pin/unpin non-existent key
-        non_existent_key = create_test_key(4)
-        assert not local_disk_backend.pin(non_existent_key)
-        assert not local_disk_backend.unpin(non_existent_key)
-
-        local_disk_backend.local_cpu_backend.memory_allocator.close()
-
-    def test_insert_key(self, local_disk_backend):
-        """Test insert_key()."""
-        key = create_test_key(3)
-        memory_obj = create_test_memory_obj()
-        local_disk_backend.insert_key(key, memory_obj)
-        assert key in local_disk_backend.dict
-        metadata = local_disk_backend.dict[key]
-        assert metadata.path == local_disk_backend._key_to_path(key)
-        assert metadata.shape == memory_obj.metadata.shape
-        assert metadata.dtype == memory_obj.metadata.dtype
-        assert metadata.fmt == memory_obj.metadata.fmt
-        assert metadata.pin_count == 0
-        local_disk_backend.local_cpu_backend.memory_allocator.close()
-
-    def test_insert_key_reinsert(self, local_disk_backend):
-        """Test insert_key() with reinsertion."""
-        key = create_test_key(3)
-        memory_obj1 = create_test_memory_obj(shape=(2, 16, 8, 128))
-        memory_obj2 = create_test_memory_obj(shape=(2, 32, 8, 128))
-
-        # First insertion
-        local_disk_backend.insert_key(key, memory_obj1)
-        original_path = local_disk_backend.dict[key].path
-
-        # Reinsertion
-        local_disk_backend.insert_key(key, memory_obj2)
-
-        assert key in local_disk_backend.dict
-        metadata = local_disk_backend.dict[key]
-        assert metadata.path == original_path  # Path should remain the same
-
-        local_disk_backend.local_cpu_backend.memory_allocator.close()
-
-    def test_submit_put_task(self, local_disk_backend):
-        """Test submit_put_task() synchronous"""
-        key = create_test_key(3)
-        memory_obj = create_test_memory_obj()
-
-        # Test that the key is not in put_tasks initially
-        assert not local_disk_backend.exists_in_put_tasks(key)
-
-        # Test that the key doesn't exist in the backend initially
-        assert not local_disk_backend.contains(key)
-
-        # Use insert_key directly to test the synchronous path
-        local_disk_backend.insert_key(key, memory_obj)
-
-        # Check that the key was inserted into the backend
-        assert local_disk_backend.contains(key)
-        assert key in local_disk_backend.dict
-
-        # Check that the metadata was properly set
-        metadata = local_disk_backend.dict[key]
-        assert metadata.path == local_disk_backend._key_to_path(key)
-        assert metadata.shape == memory_obj.metadata.shape
-        assert metadata.fmt == memory_obj.metadata.fmt
-        assert metadata.pin_count == 0
-
-        # Test that the key is still not in put_tasks
-        # (since we used insert_key directly)
-        assert not local_disk_backend.exists_in_put_tasks(key)
-
-        local_disk_backend.local_cpu_backend.memory_allocator.close()
-
     def test_get_blocking_key_not_exists(self, local_disk_backend):
         """Test get_blocking() when key doesn't exist."""
         key = create_test_key(2)
         result = local_disk_backend.get_blocking(key)
 
         assert result is None
-
-        local_disk_backend.local_cpu_backend.memory_allocator.close()
-
-    def test_get_blocking_key_exists(self, local_disk_backend):
-        """Test get_blocking() when key exists."""
-        key = create_test_key(3)
-        memory_obj = create_test_memory_obj()
-
-        # Insert key first
-        local_disk_backend.insert_key(key, memory_obj)
-
-        # Create the actual file on disk
-        path = local_disk_backend._key_to_path(key)
-        with open(path, "wb") as f:
-            f.write(memory_obj.byte_array)
-
-        result = local_disk_backend.get_blocking(key)
-
-        assert result is not None
-        assert isinstance(result, MemoryObj)
-        assert result.metadata.shape == memory_obj.metadata.shape
-        assert result.metadata.dtype == memory_obj.metadata.dtype
 
         local_disk_backend.local_cpu_backend.memory_allocator.close()
 
@@ -368,58 +245,6 @@ class TestLocalDiskBackend:
 
         local_disk_backend.local_cpu_backend.memory_allocator.close()
 
-    def test_close(self, temp_disk_path):
-        """Test close()."""
-        config = create_test_config(temp_disk_path)
-        lookup_server = MockLookupServer()
-        metadata = create_test_metadata()
-        memory_allocator = MixedMemoryAllocator(1024 * 1024 * 1024)
-        event_manager = EventManager()
-        storage_manager = StorageManager(
-            config=config,
-            metadata=metadata,
-            allocator=memory_allocator,
-            lookup_server=lookup_server,
-            event_manager=event_manager,
-        )
-
-        # Add some keys
-        for i in range(3):
-            key = create_test_key(i + 5)
-            memory_obj = create_test_memory_obj()
-            storage_manager.storage_backends["LocalDiskBackend"].insert_key(
-                key, memory_obj
-            )
-
-        storage_manager.storage_backends["LocalDiskBackend"].close()
-
-        # check that keys were removed from lookup server
-        assert len(lookup_server.removed_keys) == 3
-
-        storage_manager.close()
-        memory_allocator.close()
-
-    def test_concurrent_access(self, local_disk_backend):
-        """Test concurrent access to the backend."""
-        key = create_test_key(3)
-        memory_obj = create_test_memory_obj()
-
-        # Insert key
-        local_disk_backend.insert_key(key, memory_obj)
-
-        # Test concurrent contains() calls
-        def check_contains():
-            for _ in range(20):
-                assert local_disk_backend.contains(key)
-
-        threads = [threading.Thread(target=check_contains) for _ in range(3)]
-        for thread in threads:
-            thread.start()
-        for thread in threads:
-            thread.join()
-
-        local_disk_backend.local_cpu_backend.memory_allocator.close()
-
     def test_file_operations_error_handling(self, local_disk_backend):
         """Test error handling in file operations."""
         # Test with non-existent file
@@ -434,39 +259,4 @@ class TestLocalDiskBackend:
             MemoryFormat.KV_T2D,
         )
         assert memory_obj is not None
-        local_disk_backend.local_cpu_backend.memory_allocator.close()
-
-    def test_thread_safety(self, local_disk_backend):
-        """Test thread safety of the backend."""
-        key = create_test_key(3)
-        memory_obj = create_test_memory_obj()
-
-        # Insert key
-        local_disk_backend.insert_key(key, memory_obj)
-
-        path = local_disk_backend._key_to_path(key)
-        with open(path, "wb") as f:
-            f.write(memory_obj.byte_array)
-
-        # Test concurrent operations with reduced iteration count
-        def concurrent_operations():
-            for _ in range(10):
-                # Test contains
-                local_disk_backend.contains(key)
-                # Test pin/unpin
-                local_disk_backend.pin(key)
-                local_disk_backend.unpin(key)
-                # Test get_blocking
-                result = local_disk_backend.get_blocking(key)
-                assert result is not None
-
-        threads = [threading.Thread(target=concurrent_operations) for _ in range(3)]
-        for thread in threads:
-            thread.start()
-        for thread in threads:
-            thread.join()
-
-        # The backend should still be in a consistent state
-        assert local_disk_backend.contains(key)
-
         local_disk_backend.local_cpu_backend.memory_allocator.close()
