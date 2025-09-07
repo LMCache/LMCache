@@ -228,12 +228,15 @@ class LocalDiskBackend(StorageBackendInterface):
 
         return True
 
-    def insert_key(self, key: CacheEngineKey, memory_obj: MemoryObj) -> None:
+    def insert_key(
+        self,
+        key: CacheEngineKey,
+        size: int,
+        shape: torch.Size,
+        dtype: torch.dtype,
+        fmt: MemoryFormat,
+    ) -> None:
         path = self._key_to_path(key)
-        size = memory_obj.get_physical_size()
-        shape = memory_obj.metadata.shape
-        dtype = memory_obj.metadata.dtype
-        fmt = memory_obj.metadata.fmt
 
         has_stored = False
         with self.disk_lock:
@@ -369,11 +372,6 @@ class LocalDiskBackend(StorageBackendInterface):
             # NOTE(Jiayi): Currently, we consider prefetch as cache hit.
             self.cache_policy.update_on_hit(key, self.dict)
 
-            # if self.disk_worker.exists_in_prefetch_tasks(key):
-            #     logger.debug(f"Prefetch task for {key} is already in progress.")
-            #     self.disk_lock.release()
-            #     return False
-
             path = self.dict[key].path
             dtype = self.dict[key].dtype
             shape = self.dict[key].shape
@@ -450,11 +448,17 @@ class LocalDiskBackend(StorageBackendInterface):
         # TODO(Jiayi): need to add ref count in disk memory object
         self.write_file(buffer, path)
 
-        self.insert_key(key, memory_obj)
-
         # ref count down here because there's a ref_count_up in
-        # `submit_put_task` above
+        # `submit_put_task` above.
+        # Ref count down better be before `insert_key` for testing
+        # purposes (e.g., testing mem_leak).
+        size = memory_obj.get_physical_size()
+        shape = memory_obj.metadata.shape
+        dtype = memory_obj.metadata.dtype
+        fmt = memory_obj.metadata.fmt
         memory_obj.ref_count_down()
+
+        self.insert_key(key, size, shape, dtype, fmt)
 
         self.disk_worker.remove_put_task(key)
 

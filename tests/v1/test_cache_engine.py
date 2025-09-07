@@ -185,7 +185,7 @@ def test_paged_retrieve_prefix(
         timeout = 30
         search_range = "RemoteBackend"
     start_time = time.time()
-    while engine.lookup(tokens, search_range) < expected_length:
+    while engine.lookup(tokens, search_range=search_range) < expected_length:
         if time.time() - start_time > timeout:
             raise TimeoutError(f"Operation timed out after {timeout} seconds.")
         time.sleep(0.01)
@@ -380,7 +380,7 @@ def test_paged_mixed_retrieve(fmt, chunk_size, backend, autorelease_v1):
         timeout = 30
         search_range = "LocalDiskBackend"
     start_time = time.time()
-    while engine.lookup(tokens, search_range) < expected_length:
+    while engine.lookup(tokens, search_range=search_range) < expected_length:
         if time.time() - start_time > timeout:
             raise TimeoutError(f"Operation timed out after {timeout} seconds.")
         time.sleep(0.01)
@@ -402,7 +402,7 @@ def test_paged_mixed_retrieve(fmt, chunk_size, backend, autorelease_v1):
     """Wait for store to finish"""
     expected_length = new_num_tokens
     start_time = time.time()
-    while engine.lookup(new_tokens, search_range) < expected_length:
+    while engine.lookup(new_tokens, search_range=search_range) < expected_length:
         if time.time() - start_time > timeout:
             raise TimeoutError(f"Operation timed out after {timeout} seconds.")
         time.sleep(0.01)
@@ -430,7 +430,8 @@ def test_paged_mixed_retrieve(fmt, chunk_size, backend, autorelease_v1):
     expected_length = num_tokens + new_num_tokens
     start_time = time.time()
     while (
-        engine.lookup(torch.cat([tokens, new_tokens]), search_range) < expected_length
+        engine.lookup(torch.cat([tokens, new_tokens]), search_range=search_range)
+        < expected_length
     ):
         if time.time() - start_time > timeout:
             raise TimeoutError(f"Operation timed out after {timeout} seconds.")
@@ -684,7 +685,9 @@ def test_paged_hierarchy_retrieve(
         engine.storage_manager.clear(locations=["LocalCPUBackend"])
         timeout = 30
         start_time = time.time()
-        while engine.lookup(tokens, ["LocalDiskBackend"]) < expected_length:
+        while (
+            engine.lookup(tokens, search_range=["LocalDiskBackend"]) < expected_length
+        ):
             if time.time() - start_time > timeout:
                 raise TimeoutError(f"Operation timed out after {timeout} seconds.")
             time.sleep(0.01)
@@ -695,7 +698,7 @@ def test_paged_hierarchy_retrieve(
         engine.storage_manager.storage_backends["LocalDiskBackend"].dict.clear()
         timeout = 30
         start_time = time.time()
-        while engine.lookup(tokens, ["RemoteBackend"]) < expected_length:
+        while engine.lookup(tokens, search_range=["RemoteBackend"]) < expected_length:
             if time.time() - start_time > timeout:
                 raise TimeoutError(f"Operation timed out after {timeout} seconds.")
             time.sleep(0.01)
@@ -860,7 +863,7 @@ def test_paged_prefetch_retrieve(backend, prefetch_from, autorelease_v1):
 
 
 @pytest.mark.parametrize("fmt", ["vllm"])
-@pytest.mark.parametrize("chunk_size", [128])
+@pytest.mark.parametrize("chunk_size", [256])
 @pytest.mark.parametrize(
     "backend",
     [
@@ -916,24 +919,27 @@ def test_paged_mem_leak(fmt, chunk_size, backend, lmserver_v1_process, autorelea
     """Wait until cpu store finishes"""
     if "cpu" in backend:
         start_time = time.time()
-        while engine.lookup(tokens, ["LocalCPUBackend"]) < expected_length:
+        while engine.lookup(tokens, search_range=["LocalCPUBackend"]) < expected_length:
             if time.time() - start_time > timeout:
                 raise TimeoutError(f"Operation timed out after {timeout} seconds.")
             time.sleep(0.01)
     """Wait until disk store finishes"""
     if "disk" in backend:
         start_time = time.time()
-        while engine.lookup(tokens, ["LocalDiskBackend"]) < expected_length:
+        while (
+            engine.lookup(tokens, search_range=["LocalDiskBackend"]) < expected_length
+        ):
             if time.time() - start_time > timeout:
                 raise TimeoutError(f"Operation timed out after {timeout} seconds.")
             time.sleep(0.01)
 
     if "remote" in backend:
         start_time = time.time()
-        while engine.lookup(tokens, ["RemoteBackend"]) < expected_length:
+        while engine.lookup(tokens, search_range=["RemoteBackend"]) < expected_length:
             if time.time() - start_time > timeout:
                 raise TimeoutError(f"Operation timed out after {timeout} seconds.")
             time.sleep(0.01)
+    # time.sleep(5)
     tensor_memory_allocator = (
         engine.storage_manager.allocator_backend.memory_allocator.pin_allocator
     )
