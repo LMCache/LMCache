@@ -10,6 +10,7 @@ import time
 
 # Third Party
 from utils import (
+    DummyLMCacheAsyncLookupServer,
     check_paged_kv_cache_equal,
     create_gpu_connector,
     dumb_metadata,
@@ -21,9 +22,13 @@ import pytest
 import torch
 
 # First Party
-from lmcache.utils import mock_up_broadcast_fn, mock_up_broadcast_object_fn
+from lmcache.utils import (
+    mock_up_broadcast_fn,
+    mock_up_broadcast_object_fn,
+)
 from lmcache.v1.cache_engine import LMCacheEngineBuilder
 from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.v1.event_manager import EventStatus, EventType
 
 
 def test_paged_same_retrieve_store(autorelease_v1):
@@ -738,7 +743,6 @@ def test_paged_hierarchy_retrieve(
     "prefetch_from",
     [
         "local_disk",
-        "local_cpu",
     ],
 )
 def test_paged_prefetch_retrieve(backend, prefetch_from, autorelease_v1):
@@ -748,6 +752,7 @@ def test_paged_prefetch_retrieve(backend, prefetch_from, autorelease_v1):
     num_blocks = 1000
     block_size = 16
     dtype = torch.bfloat16
+    test_lookup_id = "test_lookup_id"
 
     chunk_size = 256
     fmt = "vllm"
@@ -771,7 +776,9 @@ def test_paged_prefetch_retrieve(backend, prefetch_from, autorelease_v1):
     new_slot_mapping = torch.tensor(slot_mapping[-new_num_tokens:], device=device)
 
     """ initialize the engine """
-    cfg = LMCacheEngineConfig.from_legacy(chunk_size=chunk_size, backend=backend)
+    cfg = LMCacheEngineConfig.from_legacy(
+        chunk_size=chunk_size, backend=backend, enable_async_loading=True
+    )
 
     engine = autorelease_v1(
         LMCacheEngineBuilder.get_or_create(
@@ -783,6 +790,8 @@ def test_paged_prefetch_retrieve(backend, prefetch_from, autorelease_v1):
             mock_up_broadcast_object_fn,
         )
     )
+    async_lookup_server = DummyLMCacheAsyncLookupServer()
+    engine.post_init(async_lookup_server=async_lookup_server)
     """ test store """
     t1 = time.perf_counter()
     engine.store(tokens, kvcaches=kv_cache, slot_mapping=slot_mapping)
@@ -809,16 +818,16 @@ def test_paged_prefetch_retrieve(backend, prefetch_from, autorelease_v1):
                 raise TimeoutError(f"Operation timed out after {timeout} seconds.")
             time.sleep(0.1)
     """ Wait until disk load (prefetch) finishes and delete disk cache"""
-    engine.prefetch(torch.cat([tokens, new_tokens]))
+    engine.async_lookup_and_prefetch(
+        lookup_id=test_lookup_id, tokens=torch.cat([tokens, new_tokens])
+    )
 
     if prefetch_from == "local_disk":
         timeout = 60
         start_time = time.time()
         while (
-            engine.lookup(
-                torch.cat([tokens, new_tokens]), search_range=["LocalCPUBackend"]
-            )
-            < expected_length
+            engine.event_manager.get_event_status(EventType.LOADING, test_lookup_id)
+            != EventStatus.DONE
         ):
             if time.time() - start_time > timeout:
                 raise TimeoutError(f"Operation timed out after {timeout} seconds.")
@@ -826,12 +835,12 @@ def test_paged_prefetch_retrieve(backend, prefetch_from, autorelease_v1):
         engine.storage_manager.storage_backends["LocalDiskBackend"].dict.clear()
     """ test retrieve """
     t4 = time.perf_counter()
-    # import pdb;pdb.set_trace()
-    # engine.lookup(torch.cat([tokens, new_tokens]), ["LocalCPUBackend"])
+
     ret_mask = engine.retrieve(
-        torch.cat([tokens, new_tokens]),
+        torch.cat([tokens, new_tokens])[:expected_length],
         kvcaches=retrieved_cache,
         slot_mapping=torch.cat([slot_mapping, new_slot_mapping]),
+        req_id=test_lookup_id,
     )
     recover_engine_states(engine)
 

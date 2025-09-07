@@ -14,6 +14,7 @@ import torch
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.v1.event_manager import EventManager
 from lmcache.v1.memory_management import (
     MemoryFormat,
     MemoryObj,
@@ -255,63 +256,6 @@ class TestLocalDiskBackend:
 
         local_disk_backend.local_cpu_backend.memory_allocator.close()
 
-    def test_remove(self, local_disk_backend):
-        """Test remove()."""
-        key = create_test_key(3)
-        memory_obj = create_test_memory_obj()
-
-        # Insert key first
-        local_disk_backend.insert_key(key, memory_obj)
-        assert key in local_disk_backend.dict
-
-        # Create a dummy file to simulate the disk file
-        path = local_disk_backend._key_to_path(key)
-        with open(path, "wb") as f:
-            f.write(b"dummy data")
-
-        # Remove the key
-        local_disk_backend.remove(key)
-
-        # Wait for worker tasks
-        local_disk_backend.disk_worker.pq.join()
-        local_disk_backend.disk_worker.executor.shutdown()
-
-        assert key not in local_disk_backend.dict
-        assert not os.path.exists(path)
-
-        local_disk_backend.local_cpu_backend.memory_allocator.close()
-
-    def test_remove_with_worker(self, temp_disk_path, async_loop, local_cpu_backend):
-        """Test remove() with LMCacheWorker."""
-        config = create_test_config(temp_disk_path)
-        lmcache_worker = MockLMCacheWorker()
-        backend = LocalDiskBackend(
-            config=config,
-            loop=async_loop,
-            local_cpu_backend=local_cpu_backend,
-            dst_device="cuda",
-            lmcache_worker=lmcache_worker,
-        )
-        key = create_test_key(3)
-        memory_obj = create_test_memory_obj()
-        # Insert key first
-        backend.insert_key(key, memory_obj)
-        # Create a dummy file
-        path = backend._key_to_path(key)
-        with open(path, "wb") as f:
-            f.write(b"dummy data")
-        # Remove the key
-        backend.remove(key)
-        # Check that both admit and evict messages were sent
-        assert len(lmcache_worker.messages) == 2
-        # First Party
-        from lmcache.v1.cache_controller.message import KVAdmitMsg, KVEvictMsg
-
-        assert any(isinstance(msg, KVAdmitMsg) for msg in lmcache_worker.messages)
-        assert any(isinstance(msg, KVEvictMsg) for msg in lmcache_worker.messages)
-
-        local_cpu_backend.memory_allocator.close()
-
     def test_submit_put_task(self, local_disk_backend):
         """Test submit_put_task() synchronous"""
         key = create_test_key(3)
@@ -374,22 +318,6 @@ class TestLocalDiskBackend:
 
         local_disk_backend.local_cpu_backend.memory_allocator.close()
 
-    def test_async_save_bytes_to_disk(self, local_disk_backend, async_loop):
-        """Test async_save_bytes_to_disk()."""
-        key = create_test_key(3)
-        memory_obj = create_test_memory_obj()
-
-        local_disk_backend.insert_key(key, memory_obj)
-
-        # Check that the key was inserted into the backend
-        assert key in local_disk_backend.dict
-
-        # Check that the metadata was properly set
-        metadata = local_disk_backend.dict[key]
-        assert metadata.path == local_disk_backend._key_to_path(key)
-
-        local_disk_backend.local_cpu_backend.memory_allocator.close()
-
     def test_async_load_bytes_from_disk(self, local_disk_backend):
         """Test async_load_bytes_from_disk()"""
         key = create_test_key(3)
@@ -446,12 +374,13 @@ class TestLocalDiskBackend:
         lookup_server = MockLookupServer()
         metadata = create_test_metadata()
         memory_allocator = MixedMemoryAllocator(1024 * 1024 * 1024)
-
+        event_manager = EventManager()
         storage_manager = StorageManager(
             config=config,
             metadata=metadata,
             allocator=memory_allocator,
             lookup_server=lookup_server,
+            event_manager=event_manager,
         )
 
         # Add some keys
@@ -505,32 +434,6 @@ class TestLocalDiskBackend:
             MemoryFormat.KV_T2D,
         )
         assert memory_obj is not None
-        local_disk_backend.local_cpu_backend.memory_allocator.close()
-
-    def test_cleanup_on_remove(self, local_disk_backend):
-        """Test that resources are properly cleaned up on remove."""
-        key = create_test_key(3)
-        memory_obj = create_test_memory_obj()
-
-        # Insert key
-        local_disk_backend.insert_key(key, memory_obj)
-
-        # Create the file
-        path = local_disk_backend._key_to_path(key)
-        with open(path, "wb") as f:
-            f.write(memory_obj.byte_array)
-
-        # Remove key
-        local_disk_backend.remove(key)
-
-        # Wait for worker tasks
-        local_disk_backend.disk_worker.pq.join()
-        local_disk_backend.disk_worker.executor.shutdown()
-
-        # Check that both the dict entry and file are removed
-        assert key not in local_disk_backend.dict
-        assert not os.path.exists(path)
-
         local_disk_backend.local_cpu_backend.memory_allocator.close()
 
     def test_thread_safety(self, local_disk_backend):

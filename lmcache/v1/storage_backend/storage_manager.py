@@ -19,7 +19,7 @@ from lmcache.utils import (
     start_loop_in_thread_with_exceptions,
 )
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.event_manager import EventManager, EventType
+from lmcache.v1.event_manager import EventManager, EventStatus, EventType
 from lmcache.v1.lookup_server import LookupServerInterface
 from lmcache.v1.memory_management import (
     MemoryAllocatorInterface,
@@ -376,6 +376,9 @@ class StorageManager:
         """
         assert self.async_lookup_server is not None
         self.async_lookup_server.send_response_to_scheduler(lookup_id, retrieved_length)
+        self.event_manager.update_event_status(
+            EventType.LOADING, lookup_id, status=EventStatus.DONE
+        )
 
     async def async_lookup_and_prefetch(
         self,
