@@ -15,6 +15,7 @@ from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.lookup_server import LookupServerInterface
 from lmcache.v1.memory_management import (
     MemoryAllocatorInterface,
+    MixedMemoryAllocator,
     NixlCPUMemoryAllocator,
     PagedTensorMemoryAllocator,
 )
@@ -155,7 +156,13 @@ def CreateStorageBackends(
             NixlStorageBackend,
         )
 
-        if not isinstance(memory_allocator, PagedTensorMemoryAllocator):
+        if not isinstance(memory_allocator, MixedMemoryAllocator):
+            raise TypeError(
+                f"Expected MixedTensorMemoryAllocator,"
+                f" but got {type(memory_allocator).__name__}"
+            )
+
+        if not isinstance(memory_allocator.pin_allocator, PagedTensorMemoryAllocator):
             raise TypeError(
                 f"Expected PagedTensorMemoryAllocator,"
                 f" but got {type(memory_allocator).__name__}"

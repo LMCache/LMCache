@@ -47,7 +47,6 @@ from lmcache.v1.memory_management import (  # noqa: E501
     MemoryObjMetadata,
     MixedMemoryAllocator,
     NixlCPUMemoryAllocator,
-    PagedTensorMemoryAllocator,
     TensorMemoryObj,
 )
 from lmcache.v1.storage_backend.storage_manager import StorageManager
@@ -1368,25 +1367,16 @@ class LMCacheEngineBuilder:
                 metadata.worker_id,
             )
 
-            buffer = torch.empty(
-                config.nixl_buffer_size,
-                dtype=torch.uint8,
-                device=corrected_device,
-            )
-
-            if corrected_device == "cpu":
-                torch.cuda.cudart().cudaHostRegister(
-                    buffer.data_ptr(), config.nixl_buffer_size, 0
-                )
-            else:
+            if corrected_device != "cpu":
                 logger.info(f"Setting cuda device to {corrected_device} ")
                 torch.cuda.set_device(corrected_device)
 
-            return PagedTensorMemoryAllocator(
-                buffer,
-                torch.Size(metadata.kv_shape),
-                metadata.kv_dtype,
-                MemoryFormat.KV_2LTD,
+            return MixedMemoryAllocator(
+                size=config.nixl_buffer_size,
+                use_paging=True,
+                shape=torch.Size(metadata.kv_shape),
+                dtype=metadata.kv_dtype,
+                fmt=MemoryFormat.KV_2LTD,
             )
 
         if config.weka_path is not None or config.gds_path is not None:

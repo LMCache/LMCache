@@ -13,7 +13,10 @@ from lmcache.config import LMCacheEngineMetadata
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.cache_engine import LMCacheEngineBuilder
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.memory_management import PagedTensorMemoryAllocator
+from lmcache.v1.memory_management import (
+    MixedMemoryAllocator,
+    PagedTensorMemoryAllocator,
+)
 from lmcache.v1.storage_backend import CreateStorageBackends
 from lmcache.v1.storage_backend.nixl_storage_backend import NixlStorageBackend
 
@@ -55,7 +58,10 @@ def run(config: LMCacheEngineConfig, shape, dtype):
 
         nixl_backend = backends[BACKEND_NAME]
         assert isinstance(nixl_backend, NixlStorageBackend)
-        assert isinstance(nixl_backend.memory_allocator, PagedTensorMemoryAllocator)
+        assert isinstance(nixl_backend.memory_allocator, MixedMemoryAllocator)
+        assert isinstance(
+            nixl_backend.memory_allocator.pin_allocator, PagedTensorMemoryAllocator
+        )
         assert nixl_backend is not None
         assert nixl_backend.memory_allocator is not None
 

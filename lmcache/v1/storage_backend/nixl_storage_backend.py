@@ -37,8 +37,10 @@ from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import (
+    MemoryFormat,
     MemoryObj,
     MemoryObjMetadata,
+    MixedMemoryAllocator,
     PagedTensorMemoryAllocator,
 )
 from lmcache.v1.storage_backend.abstract_backend import StorageBackendInterface
@@ -139,14 +141,16 @@ class NixlStorageAgent:
 
     def __init__(
         self,
-        allocator: PagedTensorMemoryAllocator,
+        allocator: MixedMemoryAllocator,
         file_pool: NixlFilePool,
         device: str,
         backend: str,
     ):
-        buffer_ptr = allocator.buffer_ptr
-        buffer_size = allocator.buffer_size
-        page_size = allocator.align_bytes
+        assert isinstance(allocator, MixedMemoryAllocator)
+        assert isinstance(allocator.pin_allocator, PagedTensorMemoryAllocator)
+        buffer_ptr = allocator.pin_allocator.buffer_ptr
+        buffer_size = allocator.pin_allocator.buffer_size
+        page_size = allocator.pin_allocator.align_bytes
 
         self.agent_name = "NixlAgent_" + str(uuid.uuid4())
         nixl_conf = NixlAgentConfig(backends=[backend])
@@ -236,7 +240,7 @@ class NixlStorageBackend(StorageBackendInterface):
         self,
         nixl_config: NixlStorageConfig,
         loop: asyncio.AbstractEventLoop,
-        memory_allocator: PagedTensorMemoryAllocator,
+        memory_allocator: MixedMemoryAllocator,
     ):
         """
         Initialize the Nixl storage backend.
@@ -296,6 +300,7 @@ class NixlStorageBackend(StorageBackendInterface):
     ) -> None:
         with self.key_lock:
             assert key.chunk_hash not in self.key_dict
+            assert obj.fmt != MemoryFormat.BINARY_BUFFER
             self.key_dict[key.chunk_hash] = MemoryObjMetadata(
                 shape=obj.shape,
                 dtype=obj.dtype,
@@ -411,7 +416,7 @@ class NixlStorageBackend(StorageBackendInterface):
         config: LMCacheEngineConfig,
         loop: asyncio.AbstractEventLoop,
         metadata: LMCacheEngineMetadata,
-        memory_allocator: PagedTensorMemoryAllocator,
+        memory_allocator: MixedMemoryAllocator,
     ):
         """
         Create a Nixl backend with the given configuration.
