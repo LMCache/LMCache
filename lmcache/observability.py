@@ -29,6 +29,7 @@ class LMCacheStats:
     interval_hit_tokens: int
     interval_lookup_tokens: int
     interval_lookup_hits: int
+    interval_vllm_hit_tokens: int
 
     interval_remote_read_requests: int
     interval_remote_read_bytes: int
@@ -121,6 +122,7 @@ class LMCStatsMonitor:
         self.interval_hit_tokens = 0  # total hit tokens retrieve
         self.interval_lookup_tokens = 0  # total requested tokens lookup
         self.interval_lookup_hits = 0  # total hit tokens lookup
+        self.interval_vllm_hit_tokens = 0  # total hit tokens in vllm
 
         # remote backends read/write metrics
         self.interval_remote_read_requests = 0
@@ -290,6 +292,10 @@ class LMCStatsMonitor:
     def update_pinned_memory_objs_count(self, delta: int):
         self.pinned_memory_objs_count += delta
 
+    @thread_safe
+    def update_interval_vllm_hit_tokens(self, delta: int):
+        self.interval_vllm_hit_tokens += delta
+
     def _clear(self):
         """
         Clear all the distribution stats
@@ -302,6 +308,7 @@ class LMCStatsMonitor:
         self.interval_hit_tokens = 0
         self.interval_lookup_tokens = 0
         self.interval_lookup_hits = 0
+        self.interval_vllm_hit_tokens = 0
 
         self.interval_remote_read_requests = 0
         self.interval_remote_read_bytes = 0
@@ -405,6 +412,7 @@ class LMCStatsMonitor:
             time_to_store=time_to_store,
             retrieve_speed=retrieve_speed,
             store_speed=store_speed,
+            interval_vllm_hit_tokens=self.interval_vllm_hit_tokens,
         )
         self._clear()
         return ret
@@ -488,6 +496,12 @@ class PrometheusLogger:
         self.counter_num_lookup_hits = self._counter_cls(
             name="lmcache:num_lookup_hits",
             documentation="Total number of tokens hit in lookup from lmcache",
+            labelnames=labelnames,
+        )
+
+        self.counter_num_vllm_hit_tokens = self._counter_cls(
+            name="lmcache:num_vllm_hit_tokens",
+            documentation="Number of hit tokens in vllm",
             labelnames=labelnames,
         )
 
@@ -832,6 +846,9 @@ class PrometheusLogger:
         self._log_counter(self.counter_num_hit_tokens, stats.interval_hit_tokens)
         self._log_counter(self.counter_num_lookup_tokens, stats.interval_lookup_tokens)
         self._log_counter(self.counter_num_lookup_hits, stats.interval_lookup_hits)
+        self._log_counter(
+            self.counter_num_vllm_hit_tokens, stats.interval_vllm_hit_tokens
+        )
 
         self._log_counter(
             self.counter_num_remote_read_requests,
