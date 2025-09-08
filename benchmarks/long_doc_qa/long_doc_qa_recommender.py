@@ -127,10 +127,13 @@ def get_cpu_offload_GiB_per_gpu(
 ):
     vm = psutil.virtual_memory()
     available_pinnable_cpu_size_GiB = vm.available / 1024**3 / tp
-    memlock = subprocess.check_output("ulimit -l", shell=True, text=True).strip()
-    if memlock != "unlimited":
-        print(f"OS restricts pinnable CPU size to {memlock} bytes")
-        available_pinnable_cpu_size_GiB = int(memlock) / 1024**3 / tp
+    # `import resource` should be added at the top of the file.
+    # The `resource` module is not available on Windows.
+    memlock_limit_bytes, _ = resource.getrlimit(resource.RLIMIT_MEMLOCK)
+    if memlock_limit_bytes != resource.RLIM_INFINITY:
+        print(f"OS restricts pinnable CPU size to {memlock_limit_bytes} bytes")
+        memlock_GiB = memlock_limit_bytes / (1024**3) / tp
+        available_pinnable_cpu_size_GiB = min(available_pinnable_cpu_size_GiB, memlock_GiB)
     else:
         print("You have unlimited pinnable CPU size")
     # try to allocate space for 120000 additional tokens
