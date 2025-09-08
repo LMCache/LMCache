@@ -24,8 +24,8 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
     && echo 'tzdata tzdata/Zones/America select Los_Angeles' | debconf-set-selections \
     && apt-get update -y \
     && apt-get install -y --no-install-recommends \
-        ccache software-properties-common git curl sudo \
-        python3 python3-dev python3-venv python3-pip tzdata \
+    ccache software-properties-common git curl sudo \
+    python3 python3-dev python3-venv python3-pip tzdata \
     && ldconfig /usr/local/cuda-$(echo $CUDA_VERSION | cut -d. -f1,2)/compat/ \
     && curl -LsSf https://astral.sh/uv/install.sh | sh \
     && mv ~/.local/bin/uv /usr/local/bin/ \
@@ -50,11 +50,9 @@ RUN git clone https://github.com/ai-dynamo/nixl && \
     cd nixl && \
     git checkout b1c22edd8fe10e2e5221c107ee51200fce6f09a8
 RUN cd /workspace/nixl
-RUN source /opt/venv/bin/activate
-RUN . /opt/venv/bin/activate && \
-    uv pip install meson
+ENV PATH="/opt/venv/bin:$PATH"
+RUN uv pip install meson
 RUN cd /workspace/nixl && \
-    . /opt/venv/bin/activate && \
     rm -rf build && \
     mkdir build && \
     uv run meson setup build/ --prefix=/usr/local/nixl && \
@@ -65,7 +63,6 @@ RUN echo "/usr/local/nixl/lib/x86_64-linux-gnu" > /etc/ld.so.conf.d/nixl.conf
 RUN echo "/usr/local/nixl/lib/x86_64-linux-gnu/plugins" >> /etc/ld.so.conf.d/nixl.conf
 RUN ldconfig
 RUN cd /workspace/nixl/ && \
-    . /opt/venv/bin/activate && \
     uv build --wheel --out-dir /tmp/dist && \
     uv pip install /tmp/dist/nixl-0.3.0-cp312-cp312-linux_x86_64.whl
 
@@ -73,7 +70,6 @@ RUN cd /workspace/nixl/ && \
 COPY ./requirements/common.txt common.txt
 COPY ./requirements/cuda.txt cuda.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
-    . /opt/venv/bin/activate && \
     uv pip install -r cuda.txt
 
 # CUDA arch list used by torch
@@ -101,7 +97,6 @@ ARG nvcc_threads=8
 ENV NVCC_THREADS=$nvcc_threads
 
 RUN --mount=type=cache,target=/root/.cache/pip \
-    . /opt/venv/bin/activate && \
     uv pip install -r build.txt
 
 ARG LMCACHE_COMMIT_ID=1
@@ -116,7 +111,6 @@ WORKDIR /workspace/LMCache
 # Stable vLLM release will be used if nightly build is not available.
 RUN --mount=type=cache,target=/root/.cache/ccache,id=ccache \
     --mount=type=cache,target=/root/.cache/uv,id=uv-cache,sharing=locked \
-    . /opt/venv/bin/activate && \
     uv pip install --prerelease=allow 'vllm[runai,tensorizer]' \
         --extra-index-url https://wheels.vllm.ai/nightly \
         --index-strategy unsafe-best-match && \
@@ -125,7 +119,7 @@ RUN --mount=type=cache,target=/root/.cache/ccache,id=ccache \
     uv pip install ./dist_lmcache/*.whl --verbose
 
 WORKDIR /workspace
-ENTRYPOINT ["/opt/venv/bin/vllm", "serve"]
+ENTRYPOINT ["vllm", "serve"]
 
 #################### vLLM IMAGE & LMCache (Release) #######################
 # Integrate vLLM and LMCache stable releases, and expose vLLM OpenAI API
@@ -135,9 +129,8 @@ FROM base AS image-release
 # Install LMCache and vLLM stable releases.
 # It is imperative that LMCache uses the same torch version as the 
 # vLLM stable release.
-RUN . /opt/venv/bin/activate && \
-    uv pip install --prerelease=allow vllm[runai,tensorizer] && \
+RUN uv pip install --prerelease=allow vllm[runai,tensorizer] && \
     uv pip install lmcache --verbose
 
 WORKDIR /workspace
-ENTRYPOINT ["/opt/venv/bin/vllm", "serve"]
+ENTRYPOINT ["vllm", "serve"]

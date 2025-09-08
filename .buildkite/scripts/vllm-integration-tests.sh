@@ -311,13 +311,22 @@ run_long_doc_qa() {
     local workload_args=()
     mapfile -d '' -t workload_args < <(
     jq -j '
-        to_entries[]
-        | select(.value != null and (.value|tostring) != "")
+    to_entries[]
+    | select(.value != null and (.value|tostring) != "")
+    | if (.value|type) == "boolean" then
+        if .value == true then
+            "--\(.key)", "\u0000"
+        else
+            empty
+        end
+        elif (.value|type) == "array" then
+        .value[] as $v
         | "--\(.key)", "\u0000",
-        (if (.value|type) == "string"
-        then .value
-        else (.value|tostring)
-        end), "\u0000"
+            ( ($v|type) == "string" ? $v : ($v|tostring) ), "\u0000"
+        else
+        "--\(.key)", "\u0000",
+        ( (.value|type) == "string" ? .value : (.value|tostring) ), "\u0000"
+        end
     ' <<<"$workload_yaml"
     )
 
@@ -325,7 +334,7 @@ run_long_doc_qa() {
         UV_PYTHON=python3 uv -q venv
     fi
     source .venv/bin/activate
-    uv -q pip install openai
+    uv -q pip install openai pandas
     python3 "$ORIG_DIR/benchmarks/long_doc_qa/long_doc_qa.py" \
         "${workload_args[@]}" \
         --port="$PORT" \

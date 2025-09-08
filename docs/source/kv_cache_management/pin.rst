@@ -1,17 +1,17 @@
-.. _clear:
+.. _pin:
 
-Clear the KV cache
-==================
+Pin the KV cache
+================
 
-The ``clear`` interface is defined as the following:
+The ``pin`` interface is defined as the following:
 
 .. code-block:: python
 
-    clear(instance_id: str, location: str) -> event_id: str, num_tokens: int
+    pin(instance_id: str, location: str, tokens: List[int]) -> event_id: str, num_tokens: int
 
-The function removes the KV cache stored at ``location`` for the specified
-``instance_id``. It returns an ``event_id`` and the number of tokens scheduled
-for clearing.
+The function pins (persists) the KV cache chunks specified by ``tokens`` in the
+given ``location`` of the ``instance_id``. The controller returns an ``event_id``
+and the number of tokens scheduled for pinning.
 
 Example usage:
 ---------------------------------------
@@ -28,8 +28,8 @@ First, create a yaml file ``example.yaml`` to configure the lmcache instance:
     enable_controller: True
     lmcache_instance_id: "lmcache_default_instance"
     controller_url: "localhost:9001"
-    distributed_url: "localhost:8002"
     lmcache_worker_port: 8001
+    distributed_url: "localhost:8002"
 
 Start the vllm/lmcache instance at port 8000:
 
@@ -56,17 +56,28 @@ Send a request to vllm:
             "max_tokens": 10
           }'
 
-Clear the KV cache in the system:
+Tokenize the prompt to obtain token ids:
 
 .. code-block:: bash
 
-    curl -X POST http://localhost:9000/clear \
+    curl -X POST http://localhost:8000/tokenize \
       -H "Content-Type: application/json" \
       -d '{
+            "model": "meta-llama/Llama-3.1-8B-Instruct",
+            "prompt": "Explain the significance of KV cache in language models."
+          }'
+
+Pin the KV cache in the system:
+
+.. code-block:: bash
+
+    curl -X POST http://localhost:9000/pin \
+      -H "Content-Type: application/json" \
+      -d '{
+            "tokens": [128000, 849, 21435, 279, 26431, 315, 85748, 6636, 304, 4221, 4211, 13],
             "instance_id": "lmcache_default_instance",
             "location": "LocalCPUBackend"
           }'
-
 
 The controller responds with a message similar to:
 
@@ -74,16 +85,5 @@ The controller responds with a message similar to:
 
     {"event_id": "xxx", "num_tokens": 12}
 
-This indicates that the KV cache for 12 tokens has been scheduled for clearing.
-We can verify the cache has been cleared by performing a lookup:
-
-.. code-block:: bash
-
-    curl -X POST http://localhost:9000/lookup \
-      -H "Content-Type: application/json" \
-      -d '{
-            "tokens": [128000, 849, 21435, 279, 26431, 315, 85748, 6636, 304, 4221, 4211, 13]
-          }'
-
-The lookup should return an empty result, confirming that the KV cache has been
-cleared for the given tokens.
+``num_tokens`` indicates how many tokens' KV cache are pinned. The
+returned ``event_id`` can be used to query the status of the operation.

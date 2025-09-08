@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from concurrent.futures import Future
 from typing import List, Optional, Sequence
 import threading
 
@@ -153,16 +152,6 @@ class NixlBackend(AllocatorBackendInterface):
             transfer_spec=transfer_spec,
         )
 
-    def submit_prefetch_task(self, key: CacheEngineKey) -> bool:
-        """
-        An async function to get the MemoryObj from the storage backend.
-
-        :param key: The key of the MemoryObj.
-
-        :return: a future object. None if the key does not exist.
-        """
-        raise NotImplementedError
-
     def get_blocking(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         """
         A blocking function to get the kv cache from the storage backend.
@@ -191,12 +180,6 @@ class NixlBackend(AllocatorBackendInterface):
             # leak in decoder buffer when prefix caching is enabled.
 
             return mem_obj
-
-    def get_non_blocking(
-        self,
-        key: CacheEngineKey,
-    ) -> Optional[Future]:
-        raise NotImplementedError
 
     def remove(
         self,

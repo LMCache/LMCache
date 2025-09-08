@@ -3,6 +3,7 @@ workload:
   max-inflight-requests: 20
   repeat-count: 1
   expected-latency: 4
+  completion: true
 
 feature:
   type: pd

@@ -3,6 +3,7 @@
 from pathlib import Path
 import atexit
 import os
+import shutil
 import subprocess
 import threading
 
@@ -109,22 +110,37 @@ class PluginLauncher:
 
     def _get_interpreter(self, file: Path) -> str:
         """Get interpreter from first line comment"""
+        interpreters = []
         try:
             with open(file, "r", encoding="utf-8") as f:
                 first_line = f.readline().strip()
                 if first_line.startswith("#!"):
                     # Extract interpreter path from shebang
                     return first_line[2:].strip()
-        except Exception:
+        except Exception as e:
+            logger.error(
+                f"Error reading interpreter from plugin file {file} - "
+                f"using default interpreters: {e}"
+            )
             pass
 
         # Fallback to default interpreters
         if file.suffix == ".py":
-            return "python"
+            interpreters.append("python")
+            interpreters.append("python3")
         elif file.suffix == ".sh":
-            return "bash"
+            interpreters.append("bash")
         else:
-            raise ValueError(f"Unsupported plugin type: {file.suffix}")
+            raise ValueError(f"Plugin type {file.suffix} not supported ")
+
+        # Try each interpreter until we find one that exists
+        for interpreter in interpreters:
+            interpreter = interpreter.strip()
+            resolved_interpreter = shutil.which(interpreter)
+            if resolved_interpreter:
+                return resolved_interpreter
+
+        raise ValueError(f"No valid interpreter found for {file} from {interpreters}")
 
     def _capture_plugin_output(self, proc: subprocess.Popen, plugin_name: str):
         """Continuously capture and log plugin output"""

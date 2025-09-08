@@ -32,6 +32,7 @@ from lmcache.integration.vllm.utils import (
     mla_enabled,
 )
 from lmcache.logging import init_logger
+from lmcache.observability import LMCStatsMonitor
 from lmcache.utils import _lmcache_nvtx_annotate
 from lmcache.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
 from lmcache.v1.compute.blend import LMCBlenderBuilder
@@ -43,6 +44,9 @@ from lmcache.v1.gpu_connector import (
 )
 from lmcache.v1.internal_api_server.api_server import InternalAPIServer
 from lmcache.v1.lookup_client import LookupClientFactory
+from lmcache.v1.lookup_client.lmcache_async_lookup_client import (
+    LMCacheAsyncLookupServer,
+)
 from lmcache.v1.offload_server.zmq_server import ZMQOffloadServer
 from lmcache.v1.plugin.plugin_launcher import PluginLauncher
 from lmcache.v1.storage_backend.connector.nixl_connector_v3 import (
@@ -542,9 +546,11 @@ class LMCacheConnectorV1Impl:
             "LMCache v1 configuration is should be passed for vLLM v1."
         )
         self.config = config
+        self.async_loading = config.enable_async_loading
         self.layerwise_retrievers: list[
             Generator[Optional[torch.Tensor], None, None]
         ] = []
+        self._stats_monitor = LMCStatsMonitor.GetOrCreate()
         if role == KVConnectorRole.SCHEDULER:
             # Create lookup client using factory
             self.lookup_client = LookupClientFactory.create_lookup_client(
@@ -581,6 +587,10 @@ class LMCacheConnectorV1Impl:
                 vllm_config,
                 get_tensor_model_parallel_rank(),
             )
+
+            if self.async_loading:
+                assert isinstance(self.lookup_server, LMCacheAsyncLookupServer)
+                self.lmcache_engine.post_init(async_lookup_server=self.lookup_server)
 
         self.kv_caches: dict[str, torch.Tensor] = {}
 
@@ -698,6 +708,9 @@ class LMCacheConnectorV1Impl:
             slot_mapping = request.slot_mapping.cuda()
             assert len(tokens) == len(slot_mapping)
 
+            self._stats_monitor.update_interval_vllm_hit_tokens(
+                request.load_spec.vllm_cached_tokens
+            )
             token_mask = torch.ones(len(tokens), dtype=torch.bool)
             masked_token_count = (
                 request.load_spec.vllm_cached_tokens
@@ -740,6 +753,7 @@ class LMCacheConnectorV1Impl:
                     kvcaches=kvcaches,
                     slot_mapping=slot_mapping[:lmcache_cached_tokens],
                     request_configs=request.request_configs,
+                    req_id=request.req_id,
                 )
 
                 # Check the result
@@ -826,8 +840,7 @@ class LMCacheConnectorV1Impl:
                     continue
 
                 token_ids = request.token_ids
-                assert isinstance(token_ids, torch.Tensor)
-                assert token_ids.is_cpu
+                assert isinstance(token_ids, list)
 
                 slot_mapping = request.slot_mapping
                 assert isinstance(slot_mapping, torch.Tensor)
@@ -850,7 +863,7 @@ class LMCacheConnectorV1Impl:
                         * self._lmcache_chunk_size
                     )
 
-                store_mask = torch.ones_like(token_ids, dtype=torch.bool)
+                store_mask = torch.ones(len(token_ids), dtype=torch.bool)
                 store_mask[:skip_leading_tokens] = False
 
                 logger.info(
@@ -990,7 +1003,7 @@ class LMCacheConnectorV1Impl:
         self,
         request: "Request",
         num_computed_tokens: int,
-    ) -> int:
+    ) -> Optional[int]:
         """
         Check for external KV cache hit.
 
@@ -1019,22 +1032,30 @@ class LMCacheConnectorV1Impl:
             )
             token_ids = token_ids.tolist()
 
-        lookup_id = str(uuid.uuid4())
-        self._lookup_requests_in_step.append(lookup_id)
-
         request_configs = extract_request_configs(request.sampling_params)
         if self.skip_last_n_tokens > 0:
-            num_external_hit_tokens = self.lookup_client.lookup(
-                token_ids[: -self.skip_last_n_tokens],
-                lookup_id=lookup_id,
-                request_configs=request_configs,
-            )
+            token_ids = token_ids[: -self.skip_last_n_tokens]
+
+        if self.async_loading:
+            lookup_id = request.request_id
         else:
-            num_external_hit_tokens = self.lookup_client.lookup(
-                token_ids,
-                lookup_id=lookup_id,
-                request_configs=request_configs,
+            lookup_id = str(uuid.uuid4())
+
+        self._lookup_requests_in_step.append(lookup_id)
+
+        num_external_hit_tokens = self.lookup_client.lookup(
+            token_ids,
+            lookup_id=lookup_id,
+            request_configs=request_configs,
+        )
+
+        if num_external_hit_tokens is None:
+            logger.info(
+                "Reqid: %s, Total tokens %d, LMCache hit tokens: None.",
+                request.request_id,
+                request.num_tokens,
             )
+            return None
 
         # When prompt length is divisible by the block size and all
         # blocks are cached, we need to recompute the last token.
