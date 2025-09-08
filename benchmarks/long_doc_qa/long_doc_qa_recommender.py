@@ -3,6 +3,7 @@
 import argparse
 import math
 import re
+import resource
 import subprocess
 
 # Third Party
@@ -42,7 +43,7 @@ def get_tensor_parallel_recommendation(model_name: str):
         per_gpu_memory * 0.9 - intermediate_buffer - minimum_kv_cache_buffer
     )
     print(
-        f"Estimated usable gpu memory for model weights per gpu: {usable_per_gpu_memory}"
+        "Estimated usable gpu memory for model weights per gpu: {usable_per_gpu_memory}"
     )
     initial_tp = math.ceil(total_model_weights_gb / usable_per_gpu_memory)
     # round up to a power of 2
@@ -133,12 +134,17 @@ def get_cpu_offload_GiB_per_gpu(
     if memlock_limit_bytes != resource.RLIM_INFINITY:
         print(f"OS restricts pinnable CPU size to {memlock_limit_bytes} bytes")
         memlock_GiB = memlock_limit_bytes / (1024**3) / tp
-        available_pinnable_cpu_size_GiB = min(available_pinnable_cpu_size_GiB, memlock_GiB)
+        available_pinnable_cpu_size_GiB = min(
+            available_pinnable_cpu_size_GiB, memlock_GiB
+        )
     else:
         print("You have unlimited pinnable CPU size")
     # try to allocate space for 120000 additional tokens
     DESIRED_ADDITIONAL_TOKENS_IN_OFFLOAD = 120_000
-    desired_offload_GiB = DESIRED_ADDITIONAL_TOKENS_IN_OFFLOAD / 1000 * GiB_1K_tokens_per_gpu + per_gpu_kv_cache_GiB
+    desired_offload_GiB = (
+        DESIRED_ADDITIONAL_TOKENS_IN_OFFLOAD / 1000 * GiB_1K_tokens_per_gpu
+        + per_gpu_kv_cache_GiB
+    )
     offload_GiB_per_gpu = min(desired_offload_GiB, available_pinnable_cpu_size_GiB)
     return offload_GiB_per_gpu
 
