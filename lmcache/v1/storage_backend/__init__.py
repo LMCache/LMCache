@@ -170,7 +170,7 @@ def CreateStorageBackends(
         local_cpu_backend = LocalCPUBackend(
             config,
             local_cpu_allocator,
-            lookup_server,
+            dst_device,
             lmcache_worker,
         )
         backend_name = str(local_cpu_backend)
@@ -196,12 +196,7 @@ def CreateStorageBackends(
 
     if config.local_disk and config.max_local_disk_size > 0:
         local_disk_backend = LocalDiskBackend(
-            config,
-            loop,
-            local_cpu_backend,
-            dst_device,
-            lmcache_worker,
-            lookup_server,
+            config, loop, local_cpu_backend, dst_device, lmcache_worker
         )
 
         backend_name = str(local_disk_backend)

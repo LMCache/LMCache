@@ -61,6 +61,12 @@ class InternalAPIServer:
             "host": config.internal_api_server_host,
             "loop": "uvloop",
             "http": "httptools",
+            "access_log": config.get_extra_config_value(
+                "internal_api_server_access_log", True
+            ),
+            "log_level": config.get_extra_config_value(
+                "internal_api_server_log_level", "warning"
+            ),
         }
 
         if self.socket_path:

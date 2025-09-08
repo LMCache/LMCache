@@ -264,6 +264,11 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "default": None,
         "env_converter": str,
     },
+    "enable_async_loading": {
+        "type": bool,
+        "default": False,
+        "env_converter": _to_bool,
+    },
     "internal_api_server_enabled": {
         "type": bool,
         "default": False,

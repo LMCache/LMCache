@@ -89,7 +89,7 @@ class LMCacheLookupClient(LookupClientInterface):
         token_ids: Union[torch.Tensor, list[int]],
         lookup_id: str,
         request_configs: Optional[dict] = None,
-    ) -> int:
+    ) -> Optional[int]:
         hashes = []
         offsets = []
         for start, end, key in self.token_database.process_tokens(
