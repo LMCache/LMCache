@@ -144,7 +144,7 @@ Llama 80B vLLM Metrics:
     Query round time: 54.974s
     Query round prompt count: 50
 
-Llama 80B LMCache Metrics: 
+Llama 70B LMCache Metrics: 
 ^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 .. code-block:: text
