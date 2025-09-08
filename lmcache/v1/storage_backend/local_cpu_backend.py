@@ -291,7 +291,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
             if wait_other_requests:
                 if not busy_loop:
                     logger.debug(
-                        "Not busy looping becausewe are not immediately able to evict"
+                        "Not busy looping because we are not immediately able to evict"
                     )
                     break
                 # TODO: make time_to_wait a config
@@ -406,7 +406,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
             if wait_other_requests:
                 if not busy_loop:
                     logger.debug(
-                        "Not busy looping becausewe are not immediately able to evict"
+                        "Not busy looping because we are not immediately able to evict"
                     )
                     break
                 # TODO: make time_to_wait a config
