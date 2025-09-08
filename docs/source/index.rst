@@ -65,6 +65,7 @@ Documentation
 
    getting_started/installation
    getting_started/quickstart/index
+   getting_started/benchmarking
    getting_started/troubleshoot
    getting_started/faq
 
