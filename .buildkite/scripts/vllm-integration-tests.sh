@@ -311,19 +311,21 @@ run_long_doc_qa() {
     local workload_args=()
     mapfile -d '' -t workload_args < <(
     jq -j '
-    to_entries[]
-    | select(.value != null and (.value|tostring) != "")
-    | if (.value|type) == "boolean" then
-        if .value then
+        to_entries[]
+        | select(.value != null and (.value|tostring) != "")
+        | if (.value|type) == "boolean" then
+            if .value == true then
             "--\(.key)", "\u0000"
-        else
+            else
             empty
-        end
+            end
         elif (.value|type) == "array" then
-        .value[] | "--\(.key)", "\u0000", ( (type=="string")? . : tostring ), "\u0000"
+            .value[] as $v
+            | "--\(.key)", "\u0000",
+            ( ($v|type) == "string" ? $v : ($v|tostring) ), "\u0000"
         else
-        "--\(.key)", "\u0000",
-        ( (.value|type)=="string" ? .value : (.value|tostring) ), "\u0000"
+            "--\(.key)", "\u0000",
+            ( (.value|type) == "string" ? .value : (.value|tostring) ), "\u0000"
         end
     ' <<<"$workload_yaml"
     )
