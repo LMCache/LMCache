@@ -329,13 +329,15 @@ def visualize_results(warmup_df, benchmark_df):
     # x axis is prompt id
     # y axis is time (relative to the start of the benchmark) with three points:
     # 1. request start
-    # 2. request ttft
+    # 2. request first token
     # 3. request end
     plt.figure(figsize=(10, 5))
     plt.scatter(
         warmup_df["prompt_id"], warmup_df["request_start"], label="Request Start"
     )
-    plt.scatter(warmup_df["prompt_id"], warmup_df["ttft_time"], label="Request TTFT")
+    plt.scatter(
+        warmup_df["prompt_id"], warmup_df["ttft_time"], label="Request first token"
+    )
     plt.scatter(warmup_df["prompt_id"], warmup_df["request_end"], label="Request End")
     plt.xlabel("Prompt ID")
     plt.ylabel("Time (s)")
@@ -348,7 +350,9 @@ def visualize_results(warmup_df, benchmark_df):
         benchmark_df["prompt_id"], benchmark_df["request_start"], label="Request Start"
     )
     plt.scatter(
-        benchmark_df["prompt_id"], benchmark_df["ttft_time"], label="Request TTFT"
+        benchmark_df["prompt_id"],
+        benchmark_df["ttft_time"],
+        label="Request first token",
     )
     plt.scatter(
         benchmark_df["prompt_id"], benchmark_df["request_end"], label="Request End"
