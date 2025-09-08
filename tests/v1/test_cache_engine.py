@@ -9,15 +9,6 @@ import tempfile
 import time
 
 # Third Party
-from utils import (
-    DummyLMCacheAsyncLookupServer,
-    check_paged_kv_cache_equal,
-    create_gpu_connector,
-    dumb_metadata,
-    generate_kv_cache_paged_list_tensors,
-    generate_tokens,
-    recover_engine_states,
-)
 import pytest
 import torch
 
@@ -29,6 +20,17 @@ from lmcache.utils import (
 from lmcache.v1.cache_engine import LMCacheEngineBuilder
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.event_manager import EventStatus, EventType
+
+# Local
+from .utils import (
+    DummyLMCacheAsyncLookupServer,
+    check_paged_kv_cache_equal,
+    create_gpu_connector,
+    dumb_metadata,
+    generate_kv_cache_paged_list_tensors,
+    generate_tokens,
+    recover_engine_states,
+)
 
 
 def test_paged_same_retrieve_store(autorelease_v1):
