@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8"/>
+    <title>test.html</title>
+    <link href="assets/style.css" rel="stylesheet" type="text/css"/></head>
+  <body onLoad="init()">
+    <script>/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this file,
+ * You can obtain one at http://mozilla.org/MPL/2.0/. */
+
+
+function toArray(iter) {
+    if (iter === null) {
+        return null;
+    }
+    return Array.prototype.slice.call(iter);
+}
+
+function find(selector, elem) { // eslint-disable-line no-redeclare
+    if (!elem) {
+        elem = document;
+    }
+    return elem.querySelector(selector);
+}
+
+function findAll(selector, elem) {
+    if (!elem) {
+        elem = document;
+    }
+    return toArray(elem.querySelectorAll(selector));
+}
+
+function sortColumn(elem) {
+    toggleSortStates(elem);
+    const colIndex = toArray(elem.parentNode.childNodes).indexOf(elem);
+    let key;
+    if (elem.classList.contains('result')) {
+        key = keyResult;
+    } else if (elem.classList.contains('links')) {
+        key = keyLink;
+    } else {
+        key = keyAlpha;
+    }
+    sortTable(elem, key(colIndex));
+}
+
+function showAllExtras() { // eslint-disable-line no-unused-vars
+    findAll('.col-result').forEach(showExtras);
+}
+
+function hideAllExtras() { // eslint-disable-line no-unused-vars
+    findAll('.col-result').forEach(hideExtras);
+}
+
+function showExtras(colresultElem) {
+    const extras = colresultElem.parentNode.nextElementSibling;
+    const expandcollapse = colresultElem.firstElementChild;
+    extras.classList.remove('collapsed');
+    expandcollapse.classList.remove('expander');
+    expandcollapse.classList.add('collapser');
+}
+
+function hideExtras(colresultElem) {
+    const extras = colresultElem.parentNode.nextElementSibling;
+    const expandcollapse = colresultElem.firstElementChild;
+    extras.classList.add('collapsed');
+    expandcollapse.classList.remove('collapser');
+    expandcollapse.classList.add('expander');
+}
+
+function showFilters() {
+    let visibleString = getQueryParameter('visible') || 'all';
+    visibleString = visibleString.toLowerCase();
+    const checkedItems = visibleString.split(',');
+
+    const filterItems = document.getElementsByClassName('filter');
+    for (let i = 0; i < filterItems.length; i++) {
+        filterItems[i].hidden = false;
+
+        if (visibleString != 'all') {
+            filterItems[i].checked = checkedItems.includes(filterItems[i].getAttribute('data-test-result'));
+            filterTable(filterItems[i]);
+        }
+    }
+}
+
+function addCollapse() {
+    // Add links for show/hide all
+    const resulttable = find('table#results-table');
+    const showhideall = document.createElement('p');
+    showhideall.innerHTML = '<a href="javascript:showAllExtras()">Show all details</a> / ' +
+                            '<a href="javascript:hideAllExtras()">Hide all details</a>';
+    resulttable.parentElement.insertBefore(showhideall, resulttable);
+
+    // Add show/hide link to each result
+    findAll('.col-result').forEach(function(elem) {
+        const collapsed = getQueryParameter('collapsed') || 'Passed';
+        const extras = elem.parentNode.nextElementSibling;
+        const expandcollapse = document.createElement('span');
+        if (extras.classList.contains('collapsed')) {
+            expandcollapse.classList.add('expander');
+        } else if (collapsed.includes(elem.innerHTML)) {
+            extras.classList.add('collapsed');
+            expandcollapse.classList.add('expander');
+        } else {
+            expandcollapse.classList.add('collapser');
+        }
+        elem.appendChild(expandcollapse);
+
+        elem.addEventListener('click', function(event) {
+            if (event.currentTarget.parentNode.nextElementSibling.classList.contains('collapsed')) {
+                showExtras(event.currentTarget);
+            } else {
+                hideExtras(event.currentTarget);
+            }
+        });
+    });
+}
+
+function getQueryParameter(name) {
+    const match = RegExp('[?&]' + name + '=([^&]*)').exec(window.location.search);
+    return match && decodeURIComponent(match[1].replace(/\+/g, ' '));
+}
+
+function init () { // eslint-disable-line no-unused-vars
+    resetSortHeaders();
+
+    addCollapse();
+
+    showFilters();
+
+    sortColumn(find('.initial-sort'));
+
+    findAll('.sortable').forEach(function(elem) {
+        elem.addEventListener('click',
+            function() {
+                sortColumn(elem);
+            }, false);
+    });
+}
+
+function sortTable(clicked, keyFunc) {
+    const rows = findAll('.results-table-row');
+    const reversed = !clicked.classList.contains('asc');
+    const sortedRows = sort(rows, keyFunc, reversed);
+    /* Whole table is removed here because browsers acts much slower
+     * when appending existing elements.
+     */
+    const thead = document.getElementById('results-table-head');
+    document.getElementById('results-table').remove();
+    const parent = document.createElement('table');
+    parent.id = 'results-table';
+    parent.appendChild(thead);
+    sortedRows.forEach(function(elem) {
+        parent.appendChild(elem);
+    });
+    document.getElementsByTagName('BODY')[0].appendChild(parent);
+}
+
+function sort(items, keyFunc, reversed) {
+    const sortArray = items.map(function(item, i) {
+        return [keyFunc(item), i];
+    });
+
+    sortArray.sort(function(a, b) {
+        const keyA = a[0];
+        const keyB = b[0];
+
+        if (keyA == keyB) return 0;
+
+        if (reversed) {
+            return keyA < keyB ? 1 : -1;
+        } else {
+            return keyA > keyB ? 1 : -1;
+        }
+    });
+
+    return sortArray.map(function(item) {
+        const index = item[1];
+        return items[index];
+    });
+}
+
+function keyAlpha(colIndex) {
+    return function(elem) {
+        return elem.childNodes[1].childNodes[colIndex].firstChild.data.toLowerCase();
+    };
+}
+
+function keyLink(colIndex) {
+    return function(elem) {
+        const dataCell = elem.childNodes[1].childNodes[colIndex].firstChild;
+        return dataCell == null ? '' : dataCell.innerText.toLowerCase();
+    };
+}
+
+function keyResult(colIndex) {
+    return function(elem) {
+        const strings = ['Error', 'Failed', 'Rerun', 'XFailed', 'XPassed',
+            'Skipped', 'Passed'];
+        return strings.indexOf(elem.childNodes[1].childNodes[colIndex].firstChild.data);
+    };
+}
+
+function resetSortHeaders() {
+    findAll('.sort-icon').forEach(function(elem) {
+        elem.parentNode.removeChild(elem);
+    });
+    findAll('.sortable').forEach(function(elem) {
+        const icon = document.createElement('div');
+        icon.className = 'sort-icon';
+        icon.textContent = 'vvv';
+        elem.insertBefore(icon, elem.firstChild);
+        elem.classList.remove('desc', 'active');
+        elem.classList.add('asc', 'inactive');
+    });
+}
+
+function toggleSortStates(elem) {
+    //if active, toggle between asc and desc
+    if (elem.classList.contains('active')) {
+        elem.classList.toggle('asc');
+        elem.classList.toggle('desc');
+    }
+
+    //if inactive, reset all other functions and add ascending active
+    if (elem.classList.contains('inactive')) {
+        resetSortHeaders();
+        elem.classList.remove('inactive');
+        elem.classList.add('active');
+    }
+}
+
+function isAllRowsHidden(value) {
+    return value.hidden == false;
+}
+
+function filterTable(elem) { // eslint-disable-line no-unused-vars
+    const outcomeAtt = 'data-test-result';
+    const outcome = elem.getAttribute(outcomeAtt);
+    const classOutcome = outcome + ' results-table-row';
+    const outcomeRows = document.getElementsByClassName(classOutcome);
+
+    for(let i = 0; i < outcomeRows.length; i++){
+        outcomeRows[i].hidden = !elem.checked;
+    }
+
+    const rows = findAll('.results-table-row').filter(isAllRowsHidden);
+    const allRowsHidden = rows.length == 0 ? true : false;
+    const notFoundMessage = document.getElementById('not-found-message');
+    notFoundMessage.hidden = !allRowsHidden;
+}
+</script>
+    <h1>test.html</h1>
+    <p>Report generated on 08-Sep-2025 at 20:31:42 by <a href="https://pypi.python.org/pypi/pytest-html">pytest-html</a> v3.2.0</p>
+    <h2>Summary</h2>
+    <p>2 tests ran in 217.32 seconds. </p>
+    <p class="filter" hidden="true">(Un)check the boxes to filter the results.</p><input checked="true" class="filter" data-test-result="passed" hidden="true" name="filter_checkbox" onChange="filterTable(this)" type="checkbox"/><span class="passed">2 passed</span>, <input checked="true" class="filter" data-test-result="skipped" disabled="true" hidden="true" name="filter_checkbox" onChange="filterTable(this)" type="checkbox"/><span class="skipped">0 skipped</span>, <input checked="true" class="filter" data-test-result="failed" disabled="true" hidden="true" name="filter_checkbox" onChange="filterTable(this)" type="checkbox"/><span class="failed">0 failed</span>, <input checked="true" class="filter" data-test-result="error" disabled="true" hidden="true" name="filter_checkbox" onChange="filterTable(this)" type="checkbox"/><span class="error">0 errors</span>, <input checked="true" class="filter" data-test-result="xfailed" disabled="true" hidden="true" name="filter_checkbox" onChange="filterTable(this)" type="checkbox"/><span class="xfailed">0 expected failures</span>, <input checked="true" class="filter" data-test-result="xpassed" disabled="true" hidden="true" name="filter_checkbox" onChange="filterTable(this)" type="checkbox"/><span class="xpassed">0 unexpected passes</span>
+    <h2>Results</h2>
+    <table id="results-table">
+      <thead id="results-table-head">
+        <tr>
+          <th class="sortable result initial-sort" col="result">Result</th>
+          <th class="sortable" col="name">Test</th>
+          <th class="sortable" col="duration">Duration</th>
+          <th class="sortable links" col="links">Links</th></tr>
+        <tr hidden="true" id="not-found-message">
+          <th colspan="4">No results found. Try to check the filters</th></tr></thead>
+      <tbody class="passed results-table-row">
+        <tr>
+          <td class="col-result">Passed</td>
+          <td class="col-name">tests/benchmarks/test_benchmark.py::test_store_1GB[cpu]</td>
+          <td class="col-duration">17.25</td>
+          <td class="col-links"></td></tr>
+        <tr>
+          <td class="extra" colspan="4">
+            <div class="log"> -----------------------------Captured stdout setup------------------------------ <br/>Temp dir is: /home/ubuntu/tmp9nemoxw9
+<br/> ------------------------------Captured stdout call------------------------------ <br/>INFO 09-08 20:28:11 [__init__.py:241] Automatically detected platform cuda.
+<br/> ------------------------------Captured stderr call------------------------------ <br/>[2025-09-08 20:28:09,797] LMCache INFO: LMCache Configuration: {&#x27;chunk_size&#x27;: 256, &#x27;local_cpu&#x27;: True, &#x27;max_local_cpu_size&#x27;: &#x27;1.5 GB&#x27;, &#x27;local_disk&#x27;: None, &#x27;max_local_disk_size&#x27;: &#x27;0.0 GB&#x27;, &#x27;remote_url&#x27;: None, &#x27;remote_serde&#x27;: &#x27;naive&#x27;, &#x27;use_layerwise&#x27;: False, &#x27;save_decode_cache&#x27;: False, &#x27;pre_caching_hash_algorithm&#x27;: &#x27;builtin&#x27;, &#x27;enable_blending&#x27;: False, &#x27;blend_recompute_ratio&#x27;: 0.15, &#x27;blend_min_tokens&#x27;: 256, &#x27;blend_special_str&#x27;: &#x27; # # &#x27;, &#x27;enable_p2p&#x27;: False, &#x27;lookup_url&#x27;: None, &#x27;distributed_url&#x27;: None, &#x27;enable_controller&#x27;: False, &#x27;lmcache_instance_id&#x27;: &#x27;lmcache_default_instance&#x27;, &#x27;controller_url&#x27;: None, &#x27;lmcache_worker_port&#x27;: None, &#x27;lmcache_worker_heartbeat_delay_time&#x27;: 10, &#x27;lmcache_worker_heartbeat_time&#x27;: None, &#x27;enable_nixl&#x27;: False, &#x27;nixl_role&#x27;: None, &#x27;nixl_receiver_host&#x27;: None, &#x27;nixl_receiver_port&#x27;: None, &#x27;nixl_buffer_size&#x27;: None, &#x27;nixl_buffer_device&#x27;: None, &#x27;nixl_enable_gc&#x27;: False, &#x27;nixl_backends&#x27;: None, &#x27;enable_xpyd&#x27;: False, &#x27;nixl_peer_host&#x27;: None, &#x27;nixl_peer_init_port&#x27;: None, &#x27;nixl_peer_alloc_port&#x27;: None, &#x27;nixl_proxy_host&#x27;: None, &#x27;nixl_proxy_port&#x27;: None, &#x27;weka_path&#x27;: None, &#x27;gds_path&#x27;: None, &#x27;cufile_buffer_size&#x27;: None, &#x27;audit_actual_remote_url&#x27;: None, &#x27;internal_api_server_host&#x27;: &#x27;0.0.0.0&#x27;, &#x27;extra_config&#x27;: {&#x27;force_store_wait&#x27;: False}, &#x27;save_unfull_chunk&#x27;: True, &#x27;blocking_timeout_secs&#x27;: 10, &#x27;external_lookup_client&#x27;: None, &#x27;py_enable_gc&#x27;: True, &#x27;cache_policy&#x27;: &#x27;LRU&#x27;, &#x27;numa_mode&#x27;: None, &#x27;enable_async_loading&#x27;: False, &#x27;internal_api_server_enabled&#x27;: False, &#x27;internal_api_server_port_start&#x27;: 6999, &#x27;internal_api_server_include_index_list&#x27;: None, &#x27;internal_api_server_socket_path_prefix&#x27;: None, &#x27;plugin_locations&#x27;: None, &#x27;external_backends&#x27;: None} (config.py:411:lmcache.v1.config)
+[2025-09-08 20:28:09,797] LMCache INFO: Creating LMCacheEngine instance test (cache_engine.py:1448:lmcache.v1.cache_engine)
+[2025-09-08 20:28:09,797] LMCache INFO: NUMA mapping for instance test: None (cache_engine.py:1451:lmcache.v1.cache_engine)
+[2025-09-08 20:28:12,895] LMCache INFO: Creating LMCacheEngine with config: {&#x27;chunk_size&#x27;: 256, &#x27;local_cpu&#x27;: True, &#x27;max_local_cpu_size&#x27;: 1.5, &#x27;local_disk&#x27;: None, &#x27;max_local_disk_size&#x27;: 0.0, &#x27;remote_url&#x27;: None, &#x27;remote_serde&#x27;: &#x27;naive&#x27;, &#x27;use_layerwise&#x27;: False, &#x27;save_decode_cache&#x27;: False, &#x27;pre_caching_hash_algorithm&#x27;: &#x27;builtin&#x27;, &#x27;enable_blending&#x27;: False, &#x27;blend_recompute_ratio&#x27;: 0.15, &#x27;blend_min_tokens&#x27;: 256, &#x27;blend_special_str&#x27;: &#x27; # # &#x27;, &#x27;enable_p2p&#x27;: False, &#x27;lookup_url&#x27;: None, &#x27;distributed_url&#x27;: None, &#x27;enable_controller&#x27;: False, &#x27;lmcache_instance_id&#x27;: &#x27;lmcache_default_instance&#x27;, &#x27;controller_url&#x27;: None, &#x27;lmcache_worker_port&#x27;: None, &#x27;lmcache_worker_heartbeat_delay_time&#x27;: 10, &#x27;lmcache_worker_heartbeat_time&#x27;: None, &#x27;enable_nixl&#x27;: False, &#x27;nixl_role&#x27;: None, &#x27;nixl_receiver_host&#x27;: None, &#x27;nixl_receiver_port&#x27;: None, &#x27;nixl_buffer_size&#x27;: None, &#x27;nixl_buffer_device&#x27;: None, &#x27;nixl_enable_gc&#x27;: False, &#x27;nixl_backends&#x27;: None, &#x27;enable_xpyd&#x27;: False, &#x27;nixl_peer_host&#x27;: None, &#x27;nixl_peer_init_port&#x27;: None, &#x27;nixl_peer_alloc_port&#x27;: None, &#x27;nixl_proxy_host&#x27;: None, &#x27;nixl_proxy_port&#x27;: None, &#x27;weka_path&#x27;: None, &#x27;gds_path&#x27;: None, &#x27;cufile_buffer_size&#x27;: None, &#x27;audit_actual_remote_url&#x27;: None, &#x27;internal_api_server_host&#x27;: &#x27;0.0.0.0&#x27;, &#x27;extra_config&#x27;: {&#x27;force_store_wait&#x27;: False}, &#x27;save_unfull_chunk&#x27;: True, &#x27;blocking_timeout_secs&#x27;: 10, &#x27;external_lookup_client&#x27;: None, &#x27;py_enable_gc&#x27;: True, &#x27;cache_policy&#x27;: &#x27;LRU&#x27;, &#x27;numa_mode&#x27;: None, &#x27;enable_async_loading&#x27;: False, &#x27;internal_api_server_enabled&#x27;: False, &#x27;internal_api_server_port_start&#x27;: 6999, &#x27;internal_api_server_include_index_list&#x27;: None, &#x27;internal_api_server_socket_path_prefix&#x27;: None, &#x27;plugin_locations&#x27;: None, &#x27;external_backends&#x27;: None} (cache_engine.py:95:lmcache.v1.cache_engine)
+[2025-09-08 20:28:12,897] LMCache INFO: Initializing LRUCachePolicy (lru.py:20:lmcache.v1.storage_backend.cache_policy.lru)
+[2025-09-08 20:28:12,897] LMCache INFO: Initializing usage context. (usage_context.py:261:lmcache.usage_context)
+[2025-09-08 20:28:14,994] LMCache INFO: Stored 2000 out of total 2000 tokens. size: 0.2441 gb, cost 6.5998 ms, throughput: 36.9919 GB/s; offload_time: 6.5310 ms, put_time: 0.0689 ms (cache_engine.py:309:lmcache.v1.cache_engine)
+[2025-09-08 20:28:15,001] LMCache INFO: Stored 2000 out of total 2000 tokens. size: 0.2441 gb, cost 5.8192 ms, throughput: 41.9543 GB/s; offload_time: 5.7938 ms, put_time: 0.0254 ms (cache_engine.py:309:lmcache.v1.cache_engine)
+[2025-09-08 20:28:15,006] LMCache INFO: Stored 2000 out of total 2000 tokens. size: 0.2441 gb, cost 5.6293 ms, throughput: 43.3695 GB/s; offload_time: 5.6085 ms, put_time: 0.0208 ms (cache_engine.py:309:lmcache.v1.cache_engine)
+[2025-09-08 20:28:15,012] LMCache INFO: Stored 2000 out of total 2000 tokens. size: 0.2441 gb, cost 5.6246 ms, throughput: 43.4057 GB/s; offload_time: 5.6053 ms, put_time: 0.0194 ms (cache_engine.py:309:lmcache.v1.cache_engine)
+[2025-09-08 20:28:15,023] LMCache INFO: Stored 2000 out of total 2000 tokens. size: 0.2441 gb, cost 5.6592 ms, throughput: 43.1407 GB/s; offload_time: 5.6382 ms, put_time: 0.0209 ms (cache_engine.py:309:lmcache.v1.cache_engine)
+[2025-09-08 20:28:15,029] LMCache INFO: Stored 2000 out of total 2000 tokens. size: 0.2441 gb, cost 5.6485 ms, throughput: 43.2220 GB/s; offload_time: 5.6268 ms, put_time: 0.0217 ms (cache_engine.py:309:lmcache.v1.cache_engine)
+[2025-09-08 20:28:15,035] LMCache INFO: Stored 2000 out of total 2000 tokens. size: 0.2441 gb, cost 5.8864 ms, throughput: 41.4757 GB/s; offload_time: 5.8675 ms, put_time: 0.0188 ms (cache_engine.py:309:lmcache.v1.cache_engine)
+[2025-09-08 20:28:15,041] LMCache INFO: Stored 2000 out of total 2000 tokens. size: 0.2441 gb, cost 5.7592 ms, throughput: 42.3911 GB/s; offload_time: 5.7404 ms, put_time: 0.0188 ms (cache_engine.py:309:lmcache.v1.cache_engine)
+[2025-09-08 20:28:15,053] LMCache INFO: Stored 2000 out of total 2000 tokens. size: 0.2441 gb, cost 5.8321 ms, throughput: 41.8613 GB/s; offload_time: 5.8114 ms, put_time: 0.0207 ms (cache_engine.py:309:lmcache.v1.cache_engine)
+[2025-09-08 20:28:15,059] LMCache INFO: Stored 2000 out of total 2000 tokens. size: 0.2441 gb, cost 5.7702 ms, throughput: 42.3106 GB/s; offload_time: 5.7513 ms, put_time: 0.0189 ms (cache_engine.py:309:lmcache.v1.cache_engine)
+[2025-09-08 20:28:15,064] LMCache INFO: Stored 2000 out of total 2000 tokens. size: 0.2441 gb, cost 5.7527 ms, throughput: 42.4391 GB/s; offload_time: 5.7321 ms, put_time: 0.0207 ms (cache_engine.py:309:lmcache.v1.cache_engine)
+[2025-09-08 20:28:15,070] LMCache INFO: Stored 2000 out of total 2000 tokens. size: 0.2441 gb, cost 5.7310 ms, throughput: 42.5999 GB/s; offload_time: 5.7125 ms, put_time: 0.0185 ms (cache_engine.py:309:lmcache.v1.cache_engine)
+[2025-09-08 20:28:15,082] LMCache INFO: Stored 2000 out of total 2000 tokens. size: 0.2441 gb, cost 5.8340 ms, throughput: 41.8476 GB/s; offload_time: 5.8139 ms, put_time: 0.0201 ms (cache_engine.py:309:lmcache.v1.cache_engine)
+[2025-09-08 20:28:15,088] LMCache INFO: Stored 2000 out of total 2000 tokens. size: 0.2441 gb, cost 5.7484 ms, throughput: 42.4712 GB/s; offload_time: 5.7293 ms, put_time: 0.0191 ms (cache_engine.py:309:lmcache.v1.cache_engine)
+[2025-09-08 20:28:15,093] LMCache INFO: Stored 2000 out of total 2000 tokens. size: 0.2441 gb, cost 5.7276 ms, throughput: 42.6253 GB/s; offload_time: 5.7096 ms, put_time: 0.0180 ms (cache_engine.py:309:lmcache.v1.cache_engine)
+[2025-09-08 20:28:15,099] LMCache INFO: Stored 2000 out of total 2000 tokens. size: 0.2441 gb, cost 5.7576 ms, throughput: 42.4034 GB/s; offload_time: 5.7391 ms, put_time: 0.0185 ms (cache_engine.py:309:lmcache.v1.cache_engine)
+[2025-09-08 20:28:15,111] LMCache INFO: Stored 2000 out of total 2000 tokens. size: 0.2441 gb, cost 5.7937 ms, throughput: 42.1387 GB/s; offload_time: 5.7735 ms, put_time: 0.0202 ms (cache_engine.py:309:lmcache.v1.cache_engine)
+[2025-09-08 20:28:15,117] LMCache INFO: Stored 2000 out of total 2000 tokens. size: 0.2441 gb, cost 5.7739 ms, throughput: 42.2837 GB/s; offload_time: 5.7563 ms, put_time: 0.0176 ms (cache_engine.py:309:lmcache.v1.cache_engine)
+[2025-09-08 20:28:15,123] LMCache INFO: Stored 2000 out of total 2000 tokens. size: 0.2441 gb, cost 5.7633 ms, throughput: 42.3613 GB/s; offload_time: 5.7448 ms, put_time: 0.0185 ms (cache_engine.py:309:lmcache.v1.cache_engine)
+[2025-09-08 20:28:15,128] LMCache INFO: Stored 2000 out of total 2000 tokens. size: 0.2441 gb, cost 5.7281 ms, throughput: 42.6214 GB/s; offload_time: 5.7103 ms, put_time: 0.0178 ms (cache_engine.py:309:lmcache.v1.cache_engine)
+[2025-09-08 20:28:15,140] LMCache INFO: Stored 2000 out of total 2000 tokens. size: 0.2441 gb, cost 5.8130 ms, throughput: 41.9994 GB/s; offload_time: 5.7917 ms, put_time: 0.0212 ms (cache_engine.py:309:lmcache.v1.cache_engine)
+[2025-09-08 20:28:15,146] LMCache INFO: Stored 2000 out of total 2000 tokens. size: 0.2441 gb, cost 5.7569 ms, throughput: 42.4081 GB/s; offload_time: 5.7380 ms, put_time: 0.0189 ms (cache_engine.py:309:lmcache.v1.cache_engine)
+[2025-09-08 20:28:15,151] LMCache INFO: Stored 2000 out of total 2000 tokens. size: 0.2441 gb, cost 5.7382 ms, throughput: 42.5466 GB/s; offload_time: 5.7201 ms, put_time: 0.0181 ms (cache_engine.py:309:lmcache.v1.cache_engine)
+[2025-09-08 20:28:15,157] LMCache INFO: Stored 2000 out of total 2000 tokens. size: 0.2441 gb, cost 5.7331 ms, throughput: 42.5845 GB/s; offload_time: 5.7148 ms, put_time: 0.0183 ms (cache_engine.py:309:lmcache.v1.cache_engine)
+[2025-09-08 20:28:15,169] LMCache INFO: Stored 2000 out of total 2000 tokens. size: 0.2441 gb, cost 5.8314 ms, throughput: 41.8663 GB/s; offload_time: 5.8110 ms, put_time: 0.0204 ms (cache_engine.py:309:lmcache.v1.cache_engine)
+[2025-09-08 20:28:15,175] LMCache INFO: Stored 2000 out of total 2000 tokens. size: 0.2441 gb, cost 5.7487 ms, throughput: 42.4689 GB/s; offload_time: 5.7309 ms, put_time: 0.0178 ms (cache_engine.py:309:lmcache.v1.cache_engine)
+[2025-09-08 20:28:15,181] LMCache INFO: Stored 2000 out of total 2000 tokens. size: 0.2441 gb, cost 5.7464 ms, throughput: 42.4860 GB/s; offload_time: 5.7253 ms, put_time: 0.0210 ms (cache_engine.py:309:lmcache.v1.cache_engine)
+[2025-09-08 20:28:15,186] LMCache INFO: Stored 2000 out of total 2000 tokens. size: 0.2441 gb, cost 5.7616 ms, throughput: 42.3736 GB/s; offload_time: 5.7435 ms, put_time: 0.0181 ms (cache_engine.py:309:lmcache.v1.cache_engine)
+[2025-09-08 20:28:15,198] LMCache INFO: Stored 2000 out of total 2000 tokens. size: 0.2441 gb, cost 5.7990 ms, throughput: 42.1008 GB/s; offload_time: 5.7786 ms, put_time: 0.0204 ms (cache_engine.py:309:lmcache.v1.cache_engine)
+[2025-09-08 20:28:15,204] LMCache INFO: Stored 2000 out of total 2000 tokens. size: 0.2441 gb, cost 5.7512 ms, throughput: 42.4502 GB/s; offload_time: 5.7315 ms, put_time: 0.0197 ms (cache_engine.py:309:lmcache.v1.cache_engine)
+[2025-09-08 20:28:15,210] LMCache INFO: Stored 2000 out of total 2000 tokens. size: 0.2441 gb, cost 5.7520 ms, throughput: 42.4446 GB/s; offload_time: 5.7334 ms, put_time: 0.0185 ms (cache_engine.py:309:lmcache.v1.cache_engine)
+[2025-09-08 20:28:15,215] LMCache INFO: Stored 2000 out of total 2000 tokens. size: 0.2441 gb, cost 5.7427 ms, throughput: 42.5130 GB/s; offload_time: 5.7225 ms, put_time: 0.0203 ms (cache_engine.py:309:lmcache.v1.cache_engine)
+[2025-09-08 20:28:15,227] LMCache INFO: Stored 2000 out of total 2000 tokens. size: 0.2441 gb, cost 5.8012 ms, throughput: 42.0848 GB/s; offload_time: 5.7819 ms, put_time: 0.0193 ms (cache_engine.py:309:lmcache.v1.cache_engine)
+[2025-09-08 20:28:15,233] LMCache INFO: Stored 2000 out of total 2000 tokens. size: 0.2441 gb, cost 5.7565 ms, throughput: 42.4110 GB/s; offload_time: 5.7385 ms, put_time: 0.0180 ms (cache_engine.py:309:lmcache.v1.cache_engine)
+[2025-09-08 20:28:15,239] LMCache INFO: Stored 2000 out of total 2000 tokens. size: 0.2441 gb, cost 5.7482 ms, throughput: 42.4728 GB/s; offload_time: 5.7307 ms, put_time: 0.0174 ms (cache_engine.py:309:lmcache.v1.cache_engine)
+[2025-09-08 20:28:15,244] LMCache INFO: Stored 2000 out of total 2000 tokens. size: 0.2441 gb, cost 5.7347 ms, throughput: 42.5727 GB/s; offload_time: 5.7171 ms, put_time: 0.0176 ms (cache_engine.py:309:lmcache.v1.cache_engine)
+[2025-09-08 20:28:15,256] LMCache INFO: Stored 2000 out of total 2000 tokens. size: 0.2441 gb, cost 5.8269 ms, throughput: 41.8992 GB/s; offload_time: 5.8070 ms, put_time: 0.0198 ms (cache_engine.py:309:lmcache.v1.cache_engine)
+[2025-09-08 20:28:15,262] LMCache INFO: Stored 2000 out of total 2000 tokens. size: 0.2441 gb, cost 5.7654 ms, throughput: 42.3460 GB/s; offload_time: 5.7459 ms, put_time: 0.0194 ms (cache_engine.py:309:lmcache.v1.cache_engine)
+[2025-09-08 20:28:15,267] LMCache INFO: Stored 2000 out of total 2000 tokens. size: 0.2441 gb, cost 5.7335 ms, throughput: 42.5813 GB/s; offload_time: 5.7156 ms, put_time: 0.0179 ms (cache_engine.py:309:lmcache.v1.cache_engine)
+[2025-09-08 20:28:15,273] LMCache INFO: Stored 2000 out of total 2000 tokens. size: 0.2441 gb, cost 5.7469 ms, throughput: 42.4823 GB/s; offload_time: 5.7288 ms, put_time: 0.0181 ms (cache_engine.py:309:lmcache.v1.cache_engine)
+<br/> ----------------------------Captured stderr teardown---------------------------- <br/>[2025-09-08 20:28:22,897] LMCache INFO: Storage manager closed. (storage_manager.py:609:lmcache.v1.storage_backend.storage_manager)
+[2025-09-08 20:28:23,071] LMCache INFO: LMCacheEngine closed. (cache_engine.py:1059:lmcache.v1.cache_engine)
+<br/></div></td></tr></tbody>
+      <tbody class="passed results-table-row">
+        <tr>
+          <td class="col-result">Passed</td>
+          <td class="col-name">tests/benchmarks/test_benchmark.py::test_store_1GB[disk]</td>
+          <td class="col-duration">0.00</td>
+          <td class="col-links"></td></tr>
+        <tr>
+          <td class="extra" colspan="4">
+            <div class="log"> -----------------------------Captured stdout setup------------------------------ <br/>Temp dir is: /home/ubuntu/tmplu87hyh7
+<br/></div></td></tr></tbody></table></body></html>

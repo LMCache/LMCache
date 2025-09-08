@@ -6,14 +6,6 @@ import random
 import threading
 
 # Third Party
-from utils import (
-    check_paged_kv_cache_equal,
-    check_paged_kv_cache_equal_with_mla,
-    check_sglang_paged_kv_cache_equal,
-    generate_kv_cache_paged_list_tensors,
-    generate_sglang_kv_cache_paged_list_tensors,
-    recover_gpu_connector_states,
-)
 import pytest
 import torch
 
@@ -30,6 +22,16 @@ from lmcache.v1.memory_management import (
     PagedTensorMemoryAllocator,
     PinMemoryAllocator,
     TensorMemoryAllocator,
+)
+
+# Local
+from .utils import (
+    check_paged_kv_cache_equal,
+    check_paged_kv_cache_equal_with_mla,
+    check_sglang_paged_kv_cache_equal,
+    generate_kv_cache_paged_list_tensors,
+    generate_sglang_kv_cache_paged_list_tensors,
+    recover_gpu_connector_states,
 )
 
 

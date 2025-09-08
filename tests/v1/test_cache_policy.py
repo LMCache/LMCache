@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
-# Third Party
-from utils import dumb_cache_engine_key
-
 # First Party
 from lmcache.v1.storage_backend.cache_policy import get_cache_policy
+
+# Local
+from .utils import dumb_cache_engine_key
 
 
 class DummyMemoryObj:
