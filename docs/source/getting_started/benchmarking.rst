@@ -131,7 +131,7 @@ Example #2:
     --repeat-mode tile \
     --max-inflight-requests 4
 
-Llama 80B vLLM Metrics:
+Llama 70B vLLM Metrics:
 ^^^^^^^^^^^^^^^^^^^^^^^
 
 .. code-block:: text
