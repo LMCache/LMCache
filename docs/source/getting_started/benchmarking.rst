@@ -94,7 +94,7 @@ Example #2:
 
 .. code-block:: bash
 
-    python long_doc_qa_recommender.py --model meta-llama/Llama-3.1-70B-Instruct
+    python benchmarks/long_doc_qa/long_doc_qa_recommender.py --model meta-llama/Llama-3.1-70B-Instruct
 
 .. code-block:: text
 
