@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # Copyright 2024-2025 LMCache Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,20 +14,16 @@
 # limitations under the License.
 
 # Standard
-from typing import List, Optional, Tuple, Union
-import abc
+from typing import List, Optional
 
 # Third Party
 import torch
 
 # First Party
-from lmcache.integration.vllm.utils import ENGINE_NAME
 from lmcache.logging import init_logger
 from lmcache.utils import _lmcache_nvtx_annotate
-from lmcache.v1.compute.blend.utils import LMCBlenderBuilder
-from lmcache.v1.memory_management import GPUMemoryAllocator  # noqa: E501
-from lmcache.v1.memory_management import MemoryFormat, MemoryObj
 from lmcache.v1.gpu_connector import GPUConnectorInterface
+from lmcache.v1.memory_management import MemoryFormat, MemoryObj
 
 try:
     # First Party
@@ -47,6 +44,7 @@ class VLLMPagedMemHPUConnectorV2(GPUConnectorInterface):
     - Tensor: [num_blocks, block_size, num_heads, head_size]
     It will produce / consume memory object with KV_2LTD format
     """
+
     def __init__(
         self,
         hidden_dim_size: int,
@@ -141,19 +139,7 @@ class VLLMPagedMemHPUConnectorV2(GPUConnectorInterface):
             raise ValueError("'slot_mapping' should be provided in kwargs.")
 
         slot_mapping: torch.Tensor = kwargs["slot_mapping"]
-        if lmc_ops:
-            kv_cache_pointers = self._initialize_pointers(self.kvcaches)
-
-            lmc_ops.multi_layer_kv_transfer(
-                memory_obj.tensor,
-                kv_cache_pointers,
-                slot_mapping[start:end],
-                self.kvcaches[0].device,
-                self.page_buffer_size,
-                False,
-                self.use_mla,
-            )
-        else:
+        if lmc_ops is None:
             if self.gpu_buffer is not None:
                 assert self.gpu_buffer.device == self.kvcaches[0][0].device
                 tmp_gpu_buffer = self.gpu_buffer[:, :, : end - start, :]
@@ -194,35 +180,7 @@ class VLLMPagedMemHPUConnectorV2(GPUConnectorInterface):
             raise ValueError("'slot_mapping' should be provided in kwargs.")
 
         slot_mapping: torch.Tensor = kwargs["slot_mapping"]
-        if lmc_ops:
-            kv_cache_pointers = self._initialize_pointers(self.kvcaches)
-
-            with torch.cuda.stream(self.store_stream):
-                if self.gpu_buffer is None or end - start != self.gpu_buffer.shape[2]:
-                    lmc_ops.multi_layer_kv_transfer(
-                        memory_obj.tensor,
-                        kv_cache_pointers,
-                        slot_mapping[start:end],
-                        self.kvcaches[0].device,
-                        self.page_buffer_size,
-                        True,
-                        self.use_mla,
-                    )
-                else:
-                    # kvcaches -> gpu_buffer -> memobj
-                    assert self.gpu_buffer.device == self.kvcaches[0].device
-                    tmp_gpu_buffer = self.gpu_buffer[:, :, : end - start, :]
-                    lmc_ops.multi_layer_kv_transfer(
-                        tmp_gpu_buffer,
-                        kv_cache_pointers,
-                        slot_mapping[start:end],
-                        self.kvcaches[0].device,
-                        self.page_buffer_size,
-                        True,
-                        self.use_mla,
-                    )
-                    memory_obj.tensor.copy_(tmp_gpu_buffer, non_blocking=True)
-        else:
+        if lmc_ops is None:
             if self.gpu_buffer is not None:
                 assert self.gpu_buffer.device == self.kvcaches[0][0].device
                 tmp_gpu_buffer = self.gpu_buffer[:, :, : end - start, :]

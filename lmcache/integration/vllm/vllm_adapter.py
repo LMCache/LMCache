@@ -24,8 +24,10 @@ except (ModuleNotFoundError, ImportError):
     if hasattr(torch, "hpu") and torch.hpu.is_available():
         # Third Party
         try:
+            # Third Party
             from vllm_gaudi.attention.backends.hpu_attn import HPUAttentionMetadata
         except (ModuleNotFoundError, ImportError):
+            # Third Party
             from vllm.attention.backends.hpu_attn import HPUAttentionMetadata
     else:
         # vllm_flash_attn is not installed, try the ROCm FA metadata
@@ -47,10 +49,11 @@ from vllm.config import (
     SchedulerConfig,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.utils import cdiv, round_down
+from vllm.utils import cdiv, get_kv_cache_torch_dtype, round_down
 
 # First Party
-from lmcache.integration.vllm.utils import ENGINE_NAME
+from lmcache.config import LMCacheEngineMetadata
+from lmcache.integration.vllm.utils import ENGINE_NAME, lmcache_get_config
 from lmcache.logging import init_logger
 from lmcache.utils import _lmcache_nvtx_annotate
 from lmcache.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
@@ -193,9 +196,9 @@ def init_lmcache_engine(
 
     if hasattr(torch, "hpu") and torch.hpu.is_available():
         vllm_gpu_connector = Union[
-		BaseVLLMGPUConnector,
-		VLLMPagedMemHPUConnectorV2,
-	]
+            BaseVLLMGPUConnector,
+            VLLMPagedMemHPUConnectorV2,
+        ]
     else:
         vllm_gpu_connector = BaseVLLMGPUConnector
 

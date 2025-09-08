@@ -18,6 +18,7 @@ import torch
 from lmcache.logging import init_logger
 from lmcache.observability import LMCStatsMonitor
 from lmcache.utils import _lmcache_nvtx_annotate
+
 try:
     # First Party
     import lmcache.c_ops as lmc_ops
@@ -1470,12 +1471,17 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
         :param int size: The size of the pinned memory in bytes.
         """
 
+        self.numa_mapping = kwargs.get("numa_mapping", None)
+
+        self.size = size
+
         if lmc_ops:
             if self.numa_mapping:
                 current_device_id = torch.cuda.current_device()
                 gpu_to_numa_mapping = self.numa_mapping.gpu_to_numa_mapping
                 assert current_device_id in gpu_to_numa_mapping, (
-                    f"Current device {current_device_id} is not in the GPU NUMA mapping."
+                    f"Current device {current_device_id}",
+                    "is not in the GPU NUMA mapping.",
                 )
                 numa_id = gpu_to_numa_mapping[current_device_id]
                 ptr = lmc_ops.alloc_pinned_numa_ptr(size, numa_id)

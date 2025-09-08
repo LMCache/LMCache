@@ -21,6 +21,7 @@ try:
 except (ModuleNotFoundError, ImportError):
     lmc_ops = None
 
+
 class GPUConnectorInterface(metaclass=abc.ABCMeta):
     @abc.abstractmethod
     def to_gpu(self, memory_obj: MemoryObj, start: int, end: int, **kwargs):
