@@ -137,7 +137,8 @@ def get_cpu_offload_GiB_per_gpu(
     else:
         print("You have unlimited pinnable CPU size")
     # try to allocate space for 120000 additional tokens
-    desired_offload_GiB = 120 * GiB_1K_tokens_per_gpu + per_gpu_kv_cache_GiB
+    DESIRED_ADDITIONAL_TOKENS_IN_OFFLOAD = 120_000
+    desired_offload_GiB = DESIRED_ADDITIONAL_TOKENS_IN_OFFLOAD / 1000 * GiB_1K_tokens_per_gpu + per_gpu_kv_cache_GiB
     offload_GiB_per_gpu = min(desired_offload_GiB, available_pinnable_cpu_size_GiB)
     return offload_GiB_per_gpu
 
