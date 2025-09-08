@@ -31,9 +31,9 @@ class ParsedRemoteURL:
 
     host: str
     port: int
+    path: str
     username: Optional[str] = None
     password: Optional[str] = None
-    path: Optional[str] = None
     query_params: Dict[str, List[str]] = field(default_factory=dict)
 
 
@@ -64,6 +64,8 @@ def parse_remote_url(url: str) -> ParsedRemoteURL:
     path = parsed.path if parsed.path else ""
     query = parse_qs(parsed.query) if parsed.query else {}
 
+    assert host is not None, f"Invalid URL {url}: missing host"
+    assert port is not None, f"Invalid URL {url}: missing port"
     return ParsedRemoteURL(
         host=host,
         port=port,
@@ -104,7 +106,7 @@ class ConnectorContext:
 class ConnectorAdapter(ABC):
     """Base class for connector adapters."""
 
-    def __init__(self, schema: str):
+    def __init__(self, schema: str = "") -> None:
         self.schema = schema
 
     @abstractmethod
@@ -138,6 +140,7 @@ class ConnectorManager:
         config: Optional[LMCacheEngineConfig] = None,
         metadata: Optional[LMCacheEngineMetadata] = None,
     ) -> None:
+        logger.info("Initializing ConnectorManager")
         self.context = ConnectorContext(
             url=url,
             loop=loop,
@@ -189,6 +192,7 @@ class ConnectorManager:
             if adapter.can_parse(self.context.url):
                 connector = adapter.create_connector(self.context)
                 connector.init_chunk_meta(self.context.config, self.context.metadata)
+                connector.post_init()
                 return connector
 
         raise ValueError(f"No adapter found for URL: {self.context.url}")
@@ -200,7 +204,7 @@ def CreateConnector(
     local_cpu_backend: LocalCPUBackend,
     config: Optional[LMCacheEngineConfig] = None,
     metadata: Optional[LMCacheEngineMetadata] = None,
-) -> Optional[InstrumentedRemoteConnector]:
+) -> InstrumentedRemoteConnector:
     """
     Create a remote connector from the given URL.
 
@@ -214,6 +218,10 @@ def CreateConnector(
     - blackhole://[any_text]
     - audit://host:port[?verify=true|false]
     - fs://[host:port]/path
+    - s3://[bucket].s3express-[az_id].[region].amazonaws.com"
+    - mock://[capacity]/?peeking_latency=[ms]&read_throughput=[GB/s]&write_throughput=[GB/s]
+    or
+    - s3://[bucket].s3.[region].amazonaws.com
 
     Examples:
     - redis://localhost:6379
@@ -226,6 +234,10 @@ def CreateConnector(
     - audit://localhost:8080?verify=true
     - fs:///tmp/lmcache
     - external://host:0/external_log_connector.lmc_external_log_connector/?connector_name=ExternalLogConnector
+    - s3://fakefile--use1-az4--x-s3.s3express-use1-az4.us-east-1.amazonaws.com
+    - mock://100/?peeking_latency=1&read_throughput=2&write_throughput=2
+    or
+    - s3://fakefile--use1-az4--x-s3.s3.us-east-1.amazonaws.com
 
     Args:
         url: The remote URL

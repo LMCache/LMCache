@@ -1,12 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from dataclasses import dataclass
-from typing import Dict, List, Union
+from typing import Dict, List, Optional, Union
 import os
 import threading
 import time
 
 # Third Party
+from prometheus_client import REGISTRY
 import prometheus_client
 
 # First Party
@@ -45,6 +46,7 @@ class LMCacheStats:
 
     interval_local_cpu_evict_count: int  # evict count
     interval_local_cpu_evict_keys_count: int  # evict keys count
+    interval_local_cpu_evict_failed_count: int  # evict failed count
 
     # Real time value measurements (will be reset after each log)
     retrieve_hit_rate: float
@@ -53,6 +55,9 @@ class LMCacheStats:
     local_cache_usage_bytes: int  # Size of the used local cache in bytes
     remote_cache_usage_bytes: int  # Size of the used remote cache in bytes
     local_storage_usage_bytes: int  # Size of the used local storage in bytes
+
+    active_memory_objs_count: int  # the number of active memory objects
+    pinned_memory_objs_count: int  # the number of pinned memory objects
 
     # Distribution measurements
     time_to_retrieve: List[float]
@@ -137,10 +142,14 @@ class LMCStatsMonitor:
 
         self.interval_local_cpu_evict_count = 0
         self.interval_local_cpu_evict_keys_count = 0
+        self.interval_local_cpu_evict_failed_count = 0
 
         self.local_cache_usage_bytes = 0
         self.remote_cache_usage_bytes = 0
         self.local_storage_usage_bytes = 0
+
+        self.active_memory_objs_count = 0
+        self.pinned_memory_objs_count = 0
 
         self.retrieve_requests: Dict[int, RetrieveRequestStats] = {}
         self.store_requests: Dict[int, StoreRequestStats] = {}
@@ -269,6 +278,18 @@ class LMCStatsMonitor:
         self.interval_local_cpu_evict_count += 1
         self.interval_local_cpu_evict_keys_count += evict_keys_count
 
+    @thread_safe
+    def update_local_cpu_evict_failed_count(self, evict_failed_count: int):
+        self.interval_local_cpu_evict_failed_count += evict_failed_count
+
+    @thread_safe
+    def update_active_memory_objs_count(self, active_memory_objs_count: int):
+        self.active_memory_objs_count = active_memory_objs_count
+
+    @thread_safe
+    def update_pinned_memory_objs_count(self, delta: int):
+        self.pinned_memory_objs_count += delta
+
     def _clear(self):
         """
         Clear all the distribution stats
@@ -298,6 +319,7 @@ class LMCStatsMonitor:
 
         self.interval_local_cpu_evict_count = 0
         self.interval_local_cpu_evict_keys_count = 0
+        self.interval_local_cpu_evict_failed_count = 0
 
         new_retrieve_requests = {}
         for request_id, retrieve_stats in self.retrieve_requests.items():
@@ -373,9 +395,12 @@ class LMCStatsMonitor:
             lookup_hit_rate=lookup_hit_rate,
             interval_local_cpu_evict_count=self.interval_local_cpu_evict_count,
             interval_local_cpu_evict_keys_count=self.interval_local_cpu_evict_keys_count,
+            interval_local_cpu_evict_failed_count=self.interval_local_cpu_evict_failed_count,
             local_cache_usage_bytes=self.local_cache_usage_bytes,
             remote_cache_usage_bytes=self.remote_cache_usage_bytes,
             local_storage_usage_bytes=self.local_storage_usage_bytes,
+            active_memory_objs_count=self.active_memory_objs_count,
+            pinned_memory_objs_count=self.pinned_memory_objs_count,
             time_to_retrieve=time_to_retrieve,
             time_to_store=time_to_store,
             retrieve_speed=retrieve_speed,
@@ -395,6 +420,15 @@ class LMCStatsMonitor:
     @staticmethod
     def DestroyInstance():
         LMCStatsMonitor._instance = None
+
+    @staticmethod
+    def unregister_all_metrics():
+        collectors = list(REGISTRY._collector_to_names.keys())
+        for collector in collectors:
+            try:
+                REGISTRY.unregister(collector)
+            except KeyError:
+                pass
 
 
 class PrometheusLogger:
@@ -495,6 +529,12 @@ class PrometheusLogger:
             labelnames=labelnames,
         )
 
+        self.counter_local_cpu_evict_failed_count = self._counter_cls(
+            name="lmcache:local_cpu_evict_failed_count",
+            documentation="Total number of failed eviction in local cpu backend",
+            labelnames=labelnames,
+        )
+
         self.gauge_retrieve_hit_rate = self._gauge_cls(
             name="lmcache:retrieve_hit_rate",
             documentation="Hit rate of lmcache retrieve requests since last log",
@@ -526,6 +566,20 @@ class PrometheusLogger:
         self.gauge_local_storage_usage = self._gauge_cls(
             name="lmcache:local_storage_usage",
             documentation="Local storage usage (bytes) of lmcache",
+            labelnames=labelnames,
+            multiprocess_mode="sum",
+        )
+
+        self.gauge_active_memory_objs_count = self._gauge_cls(
+            name="lmcache:active_memory_objs_count",
+            documentation="The number of active memory objects",
+            labelnames=labelnames,
+            multiprocess_mode="sum",
+        )
+
+        self.gauge_pinned_memory_objs_count = self._gauge_cls(
+            name="lmcache:pinned_memory_objs_count",
+            documentation="The number of pinned memory objects",
             labelnames=labelnames,
             multiprocess_mode="sum",
         )
@@ -726,6 +780,24 @@ class PrometheusLogger:
             labelnames=labelnames,
             multiprocess_mode="livemostrecent",
         )
+        self._dynamic_metrics(labelnames)
+
+    def _dynamic_metrics(self, labelnames):
+        """
+        Dynamically get value by lambda function while capture
+        """
+        self.local_cpu_hot_cache_count = self._gauge_cls(
+            name="lmcache:local_cpu_hot_cache_count",
+            documentation="The size of the hot_cache",
+            labelnames=labelnames,
+            multiprocess_mode="livemostrecent",
+        ).labels(**self.labels)
+        self.local_cpu_keys_in_request_count = self._gauge_cls(
+            name="lmcache:local_cpu_keys_in_request_count",
+            documentation="The size of the keys_in_request",
+            labelnames=labelnames,
+            multiprocess_mode="livemostrecent",
+        ).labels(**self.labels)
 
     def _log_gauge(self, gauge, data: Union[int, float]) -> None:
         # Convenience function for logging to gauge.
@@ -784,6 +856,10 @@ class PrometheusLogger:
             self.counter_local_cpu_evict_keys_count,
             stats.interval_local_cpu_evict_keys_count,
         )
+        self._log_counter(
+            self.counter_local_cpu_evict_failed_count,
+            stats.interval_local_cpu_evict_failed_count,
+        )
 
         self._log_gauge(self.gauge_retrieve_hit_rate, stats.retrieve_hit_rate)
 
@@ -825,6 +901,12 @@ class PrometheusLogger:
         self._log_gauge(
             self.gauge_remote_ping_error_code, stats.interval_remote_ping_error_code
         )
+        self._log_gauge(
+            self.gauge_active_memory_objs_count, stats.active_memory_objs_count
+        )
+        self._log_gauge(
+            self.gauge_pinned_memory_objs_count, stats.pinned_memory_objs_count
+        )
 
     @staticmethod
     def _metadata_to_labels(metadata: LMCacheEngineMetadata):
@@ -854,6 +936,14 @@ class PrometheusLogger:
         assert PrometheusLogger._instance is not None, (
             "PrometheusLogger instance not created yet"
         )
+        return PrometheusLogger._instance
+
+    @staticmethod
+    def GetInstanceOrNone() -> Optional["PrometheusLogger"]:
+        """
+        Returns the singleton instance of PrometheusLogger if it exists,
+        otherwise returns None.
+        """
         return PrometheusLogger._instance
 
 

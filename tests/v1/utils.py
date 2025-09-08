@@ -14,6 +14,14 @@ from lmcache.utils import CacheEngineKey
 from lmcache.v1.gpu_connector import VLLMPagedMemGPUConnectorV2
 
 
+def recover_engine_states(engine):
+    engine.gpu_connector.kv_cache_pointers_on_gpu = {}
+
+
+def recover_gpu_connector_states(gpu_connector):
+    gpu_connector.kv_cache_pointers_on_gpu = {}
+
+
 def dumb_metadata(fmt="vllm", kv_shape=(32, 2, 256, 8, 128)):
     return LMCacheEngineMetadata("test_model", 3, 123, fmt, torch.bfloat16, kv_shape)
 
@@ -287,3 +295,15 @@ def check_kv_cache_device(kvs, device):
 
 def create_gpu_connector(hidden_dim, num_layers):
     return VLLMPagedMemGPUConnectorV2(hidden_dim, num_layers)
+
+
+class DummyLMCacheAsyncLookupServer:
+    def __init__(self):
+        pass
+
+    def send_response_to_scheduler(
+        self,
+        lookup_id: str,
+        retrieved_length: int,
+    ) -> None:
+        pass

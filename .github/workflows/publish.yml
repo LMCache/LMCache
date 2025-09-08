@@ -42,6 +42,7 @@ jobs:
                 disable-sudo-and-containers: false
                 egress-policy: block
                 allowed-endpoints: >
+                  api.github.com:443
                   github.com:443
                   registry-1.docker.io:443
                   production.cloudflare.docker.com:443
@@ -49,9 +50,12 @@ jobs:
                   azure.archive.ubuntu.com:80
                   pypi.org:443
                   files.pythonhosted.org:443
+                  codeload.github.com:443
+                  objects.githubusercontent.com:443
+                  releases.githubusercontent.com:443
 
             - name: Checkout code
-              uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+              uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
               with:
                 # for setuptools-scm
                 fetch-depth: 0
@@ -59,12 +63,12 @@ jobs:
             - name: Free disk space
               uses: ./.github/actions/free-disk-space
 
-            - name: Setup Python 3.11
+            - name: Setup Python 3.13
               uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
               with:
-                python-version: "3.11"
+                python-version: "3.13"
 
-            - name: Install dependencies
+            - name: Install build tooling
               run: |
                 python -m pip install --upgrade pip
                 pip install build cibuildwheel
@@ -79,6 +83,9 @@ jobs:
 
             - name: Build CUDA wheels with cibuildwheel
               # Configuration is set in pyproject.toml
+              # this will build lmcache with the latest version of torch
+              # building from source will be required if a serving engine uses
+              # an earlier non-ABI compatible version of torch
               run: |
                 python -m cibuildwheel --output-dir dist
 
@@ -120,7 +127,7 @@ jobs:
                   rekor.sigstore.dev:443
 
             - name: Fetch release artifacts
-              uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+              uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
               with:
                   name: release-artifacts
                   path: dist
@@ -163,7 +170,7 @@ jobs:
                     rekor.sigstore.dev:443
 
             - name: Fetch release artifacts
-              uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+              uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
               with:
                   name: release-artifacts
                   path: dist
@@ -222,7 +229,7 @@ jobs:
               uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
 
             - name: Checkout code
-              uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+              uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
               with:
                 # for setuptools-scm
                 fetch-depth: 0

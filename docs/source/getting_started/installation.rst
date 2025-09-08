@@ -10,8 +10,8 @@ Prerequisites
 ~~~~~~~~~~~~~
 
 - OS: Linux
-- Python: 3.10 -- 3.12
-- GPU: NVIDIA compute capability 7.0+ (e.g., V100, T4, RTX20xx, A100, L4, H100, etc.)
+- Python: 3.9 -- 3.13
+- GPU: NVIDIA compute capability 7.0+ (e.g., V100, T4, RTX20xx, A100, L4, H100, B200, etc.)
 - CUDA 12.8+
 
 .. note::
@@ -20,22 +20,48 @@ Prerequisites
 Install Stable LMCache from PyPI
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The simplest way to install the latest stable release of LMCache is through PyPI:
+The simplest way to install the latest stable release of LMCache is through PyPI.
+If you require a different version of torch for the LMCache instance that you built with (symbol undefined error), please follow the install from source instructions below.
 
 .. code-block:: bash
-
+    
+    # LMCache wheels are built with the latest version of torch.
     pip install lmcache
+
+**Compatibility Matrix:** 
+
+This compatibility matrix accounts for dependencies as well as connector API changes. Please raise an issue on GitHub if you encounter any incompatibilities.
+
+.. csv-table::
+   :header: "", "LMCache 0.3.5 (Aug 28)", "LMCache 0.3.4 (Aug 24)", "LMCache 0.3.3 (Aug 1)", "LMCache 0.3.2 (Jul 14)", "LMCache 0.3.1 (June 25)", "LMCache 0.3.0 (May 28)"
+   :widths: 20, 15, 15, 15, 15, 15, 15
+
+   "vLLM 0.10.1.x (Aug 19)", "✅", "❌", "✅", "✅", "✅", "❌"
+   "vLLM 0.10.0.x (Jul 24)", "✅", "❌", "✅", "✅", "✅", "❌"
+   "vLLM 0.9.2.x (Jul 3)", "✅", "❌", "✅", "✅", "✅", "❌"
+   "vLLM 0.9.1.x (June 10)", "✅", "❌", "✅", "✅", "❌", "❌"
+   "vLLM 0.9.0.x (May 14)", "✅", "❌", "✅", "✅", "❌", "❌"
+   "vLLM 0.8.5.x (Apr 28)", "✅", "❌", "✅", "✅", "❌", "✅"
+
+
+Notable Change List: 
+
+* June 30: vLLM Cached Req Scheduler Output Changes https://github.com/vllm-project/vllm/pull/20232 and https://github.com/vllm-project/vllm/pull/20291
+
 
 Install Latest LMCache from TestPyPI
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-These wheels are continually built from the latest LMCache source code (not officially stable release).
+TestPyPI wheels are continually built from the latest LMCache source code (not officially stable release). 
 
 .. code-block:: bash
 
-    pip install --index-url https://pypi.org/simple --extra-index-url https://test.pypi.org/simple lmcache==0.2.2.dev57
+    # By default, this will adopt the version of torch from the latest *NIGHTLY* vLLM wheel.
+    # If you require a different version of torch for the LMCache instance that you built with (symbol undefined error), please
+    # follow the install from source instructions below. 
+    pip install --index-url https://pypi.org/simple --extra-index-url https://test.pypi.org/simple lmcache==0.3.4.dev61
 
-See the latest pre-release of LMCache: `latest LMCache pre-releases <https://test.pypi.org/project/lmcache/#history>`__ and replace `0.2.2.dev57` with the latest pre-release version.
+See the latest pre-release of LMCache: `latest LMCache pre-releases <https://test.pypi.org/project/lmcache/#history>`__ and replace `0.3.4.dev61` with the latest pre-release version.
 
 This will install all dependencies from the real PyPI and only LMCache itself from TestPyPI.
 
@@ -47,23 +73,45 @@ Confirm that you have the latest pre-release:
     >>> import lmcache
     >>> from importlib.metadata import version
     >>> print(version("lmcache"))
-    0.2.2.dev57 # should be the latest pre-release version you installed
+    0.3.4.dev61 # should be the latest pre-release version you installed
 
 Install Latest LMCache from Source
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-To install from source, clone the repository and install in editable mode:
+To install from source, clone the repository and install in editable mode. 
+
+`--no-build-isolation` bypasses `PEP 517 <https://peps.python.org/pep-0517/>`_ / `PEP 518 <https://peps.python.org/pep-0518/>`_
+avoiding a potential issue where LMCache's kernels are compiled with `torch.utils.cuda_extension` or `torch.utils.hipify`
+inside of `setup.py` with one torch version while during runtime, the version of torch differs across major versions 
+(which is possible because LMCache intentionally has an unpinned torch version in `requirements/common.txt`), causing 
+linker issues that will show up as undefined symbol references.
 
 .. code-block:: bash
 
     git clone https://github.com/LMCache/LMCache.git
     cd LMCache
-    pip install -e .
+
+    # Need to install these packages manually to avoid build isolation
+    pip install -r requirements/build.txt
+
+    # Option 1. 
+    # select the torch version that matches the dependency of your serving engine
+    # 2.7.1 is an example for vllm 0.10.0
+    pip install torch==2.7.1
+
+    # Option 2. 
+    # install your serving engine with its required torch version bundled
+    # example: vllm 0.10.0 will install torch 2.7.1
+    pip install vllm==0.10.0
+
+    # no build isolation requires torch to already be installed
+    # with your desired version
+    pip install -e . --no-build-isolation
 
 Install LMCache with uv
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
-We recommend developers to use `uv` for a better package management:
+We recommend developers to use `uv` for faster package management.
 
 .. code-block:: bash
 
@@ -72,8 +120,29 @@ We recommend developers to use `uv` for a better package management:
 
     uv venv --python 3.12
     source .venv/bin/activate
-    uv pip install -e .
 
+    # Need to install these packages manually to avoid build isolation
+    uv pip install -r requirements/build.txt
+
+    # Option 1. 
+    # select the torch version that matches the dependency of your serving engine
+    # 2.7.1 is an example for vllm 0.10.0
+    uv pip install torch==2.7.1
+
+    # Option 2. 
+    # install your serving engine with its required torch version bundled
+    # example: vllm 0.10.0 will install torch 2.7.1
+    uv pip install vllm==0.10.0
+
+    # no build isolation requires torch to already be installed
+    # with your desired version
+    uv pip install -e . --no-build-isolation
+
+You can quickly test whether you have undefined symbol references by running: 
+
+.. code-block:: bash
+
+    python3 -c "import lmcache.c_ops"
 
 LMCache with vLLM v1
 ~~~~~~~~~~~~~~~~~~~~
@@ -100,8 +169,8 @@ LMCache with vLLM v0
 Setup using Docker
 ------------------
 
-Prerequisites
-~~~~~~~~~~~~~
+Docker Prerequisites
+~~~~~~~~~~~~~~~~~~~~
 
 - Docker Engine 27.0+
 

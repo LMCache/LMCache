@@ -1,7 +1,12 @@
 [build-system]
 # Requirements for package build
 # Should be mirrored in requirements/build.txt (for builds external to setuptools)
-# the torch version in requirements/common.txt MUST match
+# The recommended installation from source will avoid the requirements here in order
+# to stay flexible for the torch version with `--no-build-isolation`. Thus, these packages
+# should be installed before `pip install -e . --no-build-isolation`. 
+# However, build isolation is still used for the cibuildwheel releases
+# Thus, we will still lock a torch version here because we can choose to release wheels
+# in sync with vllm and update our torch version accordingly
 requires = [
     "ninja",
     "packaging>=24.2",
@@ -23,14 +28,19 @@ classifiers = [
     "Development Status :: 3 - Alpha",
     "Operating System :: POSIX :: Linux",
     "Environment :: GPU",
-    "Topic :: Scientific/Engineering :: Artificial Intelligence",
-    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: Implementation :: CPython",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Information Technology",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Information Analysis",
 ]
-requires-python = ">=3.10,<3.13"
+requires-python = ">=3.9,<3.14"
 dynamic = ["dependencies", "version"]
 
 [project.scripts]
@@ -95,21 +105,21 @@ from-first = true
 # import-heading-localfolder=Local
 
 [tool.mypy]
-modules = ["lmcache", "tests"]
 
-# TODO: tighten MyPy checks by enabling these checks over time.
+modules = ["lmcache", "tests", "benchmarks"]
+
 disable_error_code = [
-    "annotation-unchecked",
-    "union-attr",
-    "var-annotated",
-    "arg-type",
-    "call-arg",
-    "import-untyped",
-    "attr-defined",
-    "return-value",
-    "assignment",
-    "call-overload",
-    "misc",
+    #"annotation-unchecked",
+    #"union-attr",
+    #"var-annotated",
+    #"arg-type",
+    # "call-arg",
+    #"import-untyped",
+    #"attr-defined",
+    #"return-value",
+    #"assignment",
+    #"call-overload",
+    #"misc",
 ]
 
 ignore_missing_imports = true
@@ -126,17 +136,17 @@ follow_imports = "silent"
 
 [tool.cibuildwheel]
 build = "cp3*-manylinux_x86_64"
-skip = "pp*"
 
 # see https://developer.nvidia.com/cuda-gpus for compute capabilities
 # "CUDA-Enabled Datacenter Products"
-# 7.0: V100
-# 7.5: T4
-# 8.0: A100, A30
-# 8.6: A40, A10, A16, A2
-# 8.9: L4, L40, L40S
-# 9.0: H100
-environment = {TORCH_CUDA_ARCH_LIST = "7.0;7.5;8.0;8.6;8.9;9.0", ENABLE_CXX11_ABI = "1"}
+# 7.0:  V100
+# 7.5:  T4
+# 8.0:  A100, A30
+# 8.6:  A40, A10, A16, A2
+# 8.9:  L4, L40, L40S
+# 9.0:  GH200, H200, H100
+# 10.0: GB200, B200
+environment = {TORCH_CUDA_ARCH_LIST = "7.0;7.5;8.0;8.6;8.9;9.0;10.0", ENABLE_CXX11_ABI = "1"}
 
 # Use the PyTorch manylinux image version '2_28' that contains CUDA 12.8
 # and torch 2.7 supports (https://pypi.org/project/torch/2.7.0/#files)

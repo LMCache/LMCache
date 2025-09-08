@@ -103,13 +103,20 @@ class RemoteConnector(metaclass=abc.ABCMeta):
 
         return memory_obj
 
+    def post_init(self):
+        """
+        Post-initialization method to be called after the connector is created.
+        This can be used to perform any additional setup required by the connector.
+        """
+        logger.info("Dummy post-initializing remote connector")
+
     @abc.abstractmethod
     async def exists(self, key: CacheEngineKey) -> bool:
         """
         Check if the remote server contains the key
 
         Input:
-            key: a string
+            key: a CacheEngineKey
 
         Returns:
             True if the cache engine contains the key, False otherwise
@@ -122,7 +129,7 @@ class RemoteConnector(metaclass=abc.ABCMeta):
         Check if the remote server contains the key synchronized
 
         Input:
-            key: a string
+            key: a CacheEngineKey
 
         Returns:
             True if the cache engine contains the key, False otherwise
@@ -213,6 +220,25 @@ class RemoteConnector(metaclass=abc.ABCMeta):
         Returns:
             The memory_objs of the corresponding keys
             Return None if the key does not exist
+        """
+        raise NotImplementedError
+
+    def support_batched_put(self) -> bool:
+        """
+        Check if the connector supports batched put
+        Returns:
+            True if batched put is supported, False otherwise
+        """
+        return False
+
+    async def batched_put(
+        self, keys: List[CacheEngineKey], memory_objs: List[MemoryObj]
+    ):
+        """
+        Batched put the memory_objs with the corresponding keys
+        Input:
+            keys: the keys of the corresponding objects
+            memory_objs: the memory_objs of the corresponding keys
         """
         raise NotImplementedError
 

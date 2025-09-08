@@ -1,26 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from contextlib import nullcontext
 from dataclasses import dataclass
 from unittest.mock import patch
 import random
 import shlex
 import socket
 import subprocess
-import threading
 import time
 
 # Third Party
 import pytest
-import torch
 
 # First Party
 from lmcache.v1.cache_engine import LMCacheEngineBuilder
-from lmcache.v1.memory_management import (
-    BufferAllocator,
-    PagedTensorMemoryAllocator,
-    TensorMemoryAllocator,
-)
+from lmcache.v1.memory_management import MixedMemoryAllocator
 
 # This is to mock the constructor and destructor of
 # MixedMemoryAllocator and PinMemoryAllocator to
@@ -34,13 +27,10 @@ from lmcache.v1.memory_management import (
 # In production, using the cuda C++ API gives us a larger pinned buffer
 # but for the tests, we do not need this so this mock leaves the unit tests
 # functionally the same
+"""
 @pytest.fixture(autouse=True, scope="session")
 def patch_mixed_allocator():
     def fake_mixed_init(self, size: int, use_paging: bool = False, **kwargs):
-        """
-        :param int size: The size of the pinned memory in bytes.
-        """
-
         # self.buffer = torch.empty(size, dtype=torch.uint8)
         # ptr = self.buffer.data_ptr()
         # err = torch.cuda.cudart().cudaHostRegister(ptr, size, 0)
@@ -92,9 +82,6 @@ def patch_mixed_allocator():
 @pytest.fixture(autouse=True, scope="session")
 def patch_pin_allocator():
     def fake_pin_init(self, size: int, use_paging: bool = False, **kwargs):
-        """
-        :param int size: The size of the pinned memory in bytes.
-        """
 
         # self.buffer = torch.empty(size, dtype=torch.uint8)
         # ptr = self.buffer.data_ptr()
@@ -137,6 +124,7 @@ def patch_pin_allocator():
         patch("lmcache.v1.memory_management.PinMemoryAllocator.close", fake_pin_close),
     ):
         yield
+"""
 
 
 class MockRedis:
@@ -372,3 +360,46 @@ def autorelease_v1(request):
     # Cleanup all objects created by the factory
     # for obj in objects:
     #    obj.close()
+
+
+@pytest.fixture(scope="session")
+def memory_allocator():
+    """One MixedMemoryAllocator (5GB) for the whole test session;
+    .close() is a no-op per-test."""
+    _real = MixedMemoryAllocator(5 * 1024 * 1024 * 1024)  # 5GB
+
+    class _NoCloseWrapper:
+        def __init__(self, real):
+            self._real = real
+
+        def __getattr__(self, name):
+            return getattr(self._real, name)
+
+        def close(self):
+            # No-op so per-test close() calls don't shut down the shared allocator
+            pass
+
+    try:
+        yield _NoCloseWrapper(_real)
+    finally:
+        # Actually close once when the session ends
+        _real.close()
+
+
+@pytest.fixture(autouse=True)  # function-scoped by default
+def use_shared_allocator(request, monkeypatch, memory_allocator):
+    """Default: patch. Opt out with @pytest.mark.no_shared_allocator."""
+    if request.node.get_closest_marker("no_shared_allocator"):
+        # do NOT patch for this test
+        yield
+        return
+
+    def _create_shared_allocator(config, metadata, numa_mapping):
+        return memory_allocator
+
+    monkeypatch.setattr(
+        LMCacheEngineBuilder,
+        "_Create_memory_allocator",
+        _create_shared_allocator,
+    )
+    yield

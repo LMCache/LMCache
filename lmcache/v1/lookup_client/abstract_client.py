@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import TYPE_CHECKING, Optional, OrderedDict
+from typing import TYPE_CHECKING, Optional, Union
 import abc
 
 # Third Party
@@ -17,10 +17,10 @@ class LookupClientInterface(metaclass=abc.ABCMeta):
     @abc.abstractmethod
     def lookup(
         self,
-        token_ids: torch.Tensor,
-        lookup_id: Optional[str] = None,
-        tags: OrderedDict = None,
-    ) -> int:
+        token_ids: Union[torch.Tensor, list[int]],
+        lookup_id: str,
+        request_configs: Optional[dict] = None,
+    ) -> Optional[int]:
         """
         Perform lookup for the given token IDs.
 
@@ -29,8 +29,12 @@ class LookupClientInterface(metaclass=abc.ABCMeta):
 
             lookup_id: The lookup ID to associate with the lookup
 
+            request_configs: The configs of the request,
+            includes tags and the other configs
+
         Returns:
-            The number of tokens that can be loaded from cache
+            The number of tokens that can be loaded from cache.
+            None indicates the lookup/prefetch is in progress.
         """
         raise NotImplementedError
 

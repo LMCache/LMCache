@@ -16,10 +16,13 @@ from lmcache.v1.cache_controller.message import (
     ClearWorkerRetMsg,
     CompressWorkerMsg,
     CompressWorkerRetMsg,
+    DecompressWorkerMsg,
+    DecompressWorkerRetMsg,
     DeRegisterMsg,
     ErrorMsg,
     HealthWorkerMsg,
     HealthWorkerRetMsg,
+    HeartbeatMsg,
     MoveWorkerMsg,
     MoveWorkerRetMsg,
     Msg,
@@ -59,6 +62,7 @@ class LMCacheWorker:
     ):
         # TODO (Jiayi): "instance_id" might not be needed anymore.
         # Please consider removing it.
+        self.config = config
         self.lmcache_instance_id = config.lmcache_instance_id
         assert self.lmcache_instance_id is not None
         self.lmcache_engine = lmcache_engine
@@ -167,6 +171,30 @@ class LMCacheWorker:
                 break
         return batch
 
+    async def heartbeat(self):
+        enable_heartbeat = (
+            self.config.lmcache_worker_heartbeat_time is not None
+            and self.config.lmcache_worker_heartbeat_time > 0
+        )
+        if enable_heartbeat:
+            logger.info(
+                f"Start heartbeat in {self.lmcache_instance_id} : {self.worker_id}, "
+                f"delay time: {self.config.lmcache_worker_heartbeat_delay_time}s, "
+                f"heartbeat time: {self.config.lmcache_worker_heartbeat_time}s"
+            )
+            await asyncio.sleep(self.config.lmcache_worker_heartbeat_delay_time)
+            while True:
+                self.put_msg(
+                    HeartbeatMsg(
+                        instance_id=self.lmcache_instance_id,
+                        worker_id=self.worker_id,
+                        ip=self.lmcache_worker_ip,
+                        port=self.lmcache_worker_port,
+                        distributed_url=self.distributed_url,
+                    )
+                )
+                await asyncio.sleep(self.config.lmcache_worker_heartbeat_time)
+
     async def push(self):
         while True:
             try:
@@ -205,8 +233,9 @@ class LMCacheWorker:
 
                         # TODO(Jiayi): We need to align prefetch and move.
                         logger.debug("Executing prefetch operation.")
-                        self.lmcache_engine.prefetch(tokens)
-                        num_tokens = 0
+                        raise NotImplementedError(
+                            "Prefetch from controller is not implemented yet."
+                        )
                     else:
                         assert self.lmcache_engine.distributed_server is not None
                         logger.debug("Executing cross-node move operation.")
@@ -233,6 +262,16 @@ class LMCacheWorker:
                     )
                     serialized_ret_msg = msgspec.msgpack.encode(
                         CompressWorkerRetMsg(num_tokens=num_compressed_tokens)
+                    )
+                elif isinstance(request, DecompressWorkerMsg):
+                    num_decompressed_tokens = self.lmcache_engine.decompress(
+                        tokens=request.tokens,
+                        method=request.method,
+                        location=request.location,
+                        event_id=request.worker_event_id,
+                    )
+                    serialized_ret_msg = msgspec.msgpack.encode(
+                        DecompressWorkerRetMsg(num_tokens=num_decompressed_tokens)
                     )
                 elif isinstance(request, PinWorkerMsg):
                     num_pinned_tokens = self.lmcache_engine.lookup(
@@ -279,6 +318,7 @@ class LMCacheWorker:
             await asyncio.gather(
                 self.push(),
                 self.handle_request(),
+                self.heartbeat(),
             )
         except Exception as e:
             logger.error(

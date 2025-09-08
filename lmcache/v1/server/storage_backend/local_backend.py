@@ -17,7 +17,7 @@ logger = init_logger(__name__)
 class LMSLocalBackend(LMSBackendInterface):
     def __init__(
         self,
-    ):
+    ) -> None:
         self.dict: OrderedDict[CacheEngineKey, LMSMemoryObj] = OrderedDict()
 
         self.lock = threading.Lock()
