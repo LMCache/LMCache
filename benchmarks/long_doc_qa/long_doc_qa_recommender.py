@@ -42,7 +42,7 @@ def get_tensor_parallel_recommendation(model_name: str):
         per_gpu_memory * 0.9 - intermediate_buffer - minimum_kv_cache_buffer
     )
     print(
-        "Estimated usable gpu memory for model weights per gpu: {usable_per_gpu_memory}"
+        f"Estimated usable gpu memory for model weights per gpu: {usable_per_gpu_memory}"
     )
     initial_tp = math.ceil(total_model_weights_gb / usable_per_gpu_memory)
     # round up to a power of 2
