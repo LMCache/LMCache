@@ -10,16 +10,21 @@ import hashlib
 import threading
 import traceback
 
-# Third Party
 try:
+    # Third Party
     from nvtx import annotate  # type: ignore
 except ImportError:
+
     def annotate(*args, **kwargs):
         """Dummy decorator when nvtx is not available."""
+
         def decorator(func):
             return func
+
         return decorator
 
+
+# Third Party
 import torch
 
 # First Party
