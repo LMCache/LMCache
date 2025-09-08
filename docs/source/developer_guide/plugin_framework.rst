@@ -6,7 +6,7 @@ LMCache Plugin Framework
 The LMCache plugin system allows developers to extend functionality by running custom scripts alongside LMCache processes. Plugins can be written in Python and Bash for now, and are managed by the ``PluginLauncher`` class.
 
 Key Use Cases
-------------------------
+-------------
 - Start metric reporters for centralized monitoring
 - Implement log reporters for log collection systems
 - Report process-level metrics to alerting systems
