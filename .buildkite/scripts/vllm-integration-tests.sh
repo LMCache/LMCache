@@ -427,7 +427,7 @@ for cfg_name in "${CONFIG_NAMES[@]}"; do
         decoder_docker_args="$(yq '.["docker-decoder"]' "$cfg_file")"
         decoder_vllm_args="$(yq '.["vllm-decoder"]' "$cfg_file")"
         run_pd_lmcache "$prefiller_docker_args" "$prefiller_vllm_args" "$decoder_docker_args" "$decoder_vllm_args" "$cfg_name" 
-        model="$(yq -r '.["vllm-prefiller"]].model' "$cfg_file")"
+        model="$(yq -r '.["vllm-prefiller"].model' "$cfg_file")"
     elif [[ -z "$feature_type" ]]; then
         docker_args="$(yq '.docker' "$cfg_file")"
         vllm_args="$(yq '.vllm' "$cfg_file")"
