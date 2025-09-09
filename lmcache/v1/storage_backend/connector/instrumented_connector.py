@@ -89,7 +89,7 @@ class InstrumentedRemoteConnector(RemoteConnector):
     async def batched_async_contains(
         self,
         lookup_id: str,
-        keys: list[CacheEngineKey],
+        keys: List[CacheEngineKey],
         pin: bool = False,
     ) -> int:
         return await self._connector.batched_async_contains(lookup_id, keys, pin)
@@ -100,8 +100,8 @@ class InstrumentedRemoteConnector(RemoteConnector):
     async def batched_get_non_blocking(
         self,
         lookup_id: str,
-        keys: list[CacheEngineKey],
-    ) -> list[MemoryObj]:
+        keys: List[CacheEngineKey],
+    ) -> List[MemoryObj]:
         return await self._connector.batched_get_non_blocking(lookup_id, keys)
 
     async def batched_get(

@@ -251,7 +251,7 @@ class RemoteConnector(metaclass=abc.ABCMeta):
     async def batched_async_contains(
         self,
         lookup_id: str,
-        keys: list[CacheEngineKey],
+        keys: List[CacheEngineKey],
         pin: bool = False,
     ) -> int:
         """
@@ -268,8 +268,8 @@ class RemoteConnector(metaclass=abc.ABCMeta):
     async def batched_get_non_blocking(
         self,
         lookup_id: str,
-        keys: list[CacheEngineKey],
-    ) -> list[MemoryObj]:
+        keys: List[CacheEngineKey],
+    ) -> List[MemoryObj]:
         """
         Batched get the memory_objs of the corresponding keys
         """

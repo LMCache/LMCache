@@ -289,11 +289,11 @@ class MockConnector(RemoteConnector):
     async def _batched_async_contains(
         self,
         lookup_id: str,
-        keys: list[CacheEngineKey],
+        keys: List[CacheEngineKey],
         pin: bool = False,
     ) -> int:
         num_hit_counts = 0
-        for key in keys: 
+        for key in keys:
             await self.pressure_manager.on_exists()
             if not await self.lru_store.exists(key):
                 return num_hit_counts
@@ -303,7 +303,7 @@ class MockConnector(RemoteConnector):
     async def batched_async_contains(
         self,
         lookup_id: str,
-        keys: list[CacheEngineKey],
+        keys: List[CacheEngineKey],
         pin: bool = False,
     ) -> int:
         return await self.pq_executor.submit_job(
@@ -316,8 +316,8 @@ class MockConnector(RemoteConnector):
     async def batched_get_non_blocking(
         self,
         lookup_id: str,
-        keys: list[CacheEngineKey],
-    ) -> list[MemoryObj]:
+        keys: List[CacheEngineKey],
+    ) -> List[MemoryObj]:
         # batched get is already async and the non-blocking element is handled
         # in the StorageManager
         return await self.pq_executor.submit_job(
