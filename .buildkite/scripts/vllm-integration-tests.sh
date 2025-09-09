@@ -222,9 +222,9 @@ run_pd_lmcache() {
         [[ -n $e ]] && decoder_docker_args+=(--env "$e")
     done < <(yq -r '.env[]?' <<<"$decoder_docker")
     init=$(yq -er '."init-port"' <<<"$decoder_docker" 2>/dev/null)
-    decoder_docker_args+=(--env "LMCACHE_NIXL_INIT_PORT=$init")
+    decoder_docker_args+=(--env "LMCACHE_NIXL_PEER_INIT_PORT=$init")
     alloc=$(yq -er '."alloc-port"' <<<"$decoder_docker" 2>/dev/null)
-    decoder_docker_args+=(--env "LMCACHE_NIXL_ALLOC_PORT=$alloc")
+    decoder_docker_args+=(--env "LMCACHE_NIXL_PEER_ALLOC_PORT=$alloc")
 
     # vllm args
     decoder_vllm_model="$(yq -r '.model' <<<"$decoder_vllm")"
@@ -407,7 +407,7 @@ echo "Using port $PORT to send or receive requests."
 cd docker/
 
 # Create the container image
-build_lmcache_vllmopenai_image
+# build_lmcache_vllmopenai_image
 
 ########
 # MAIN #
