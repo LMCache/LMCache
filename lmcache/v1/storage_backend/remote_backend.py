@@ -386,6 +386,37 @@ class RemoteBackend(StorageBackendInterface):
         )
         return decompressed_memory_objs
 
+    async def batched_async_contains(
+        self,
+        lookup_id: str,
+        keys: list[CacheEngineKey],
+        pin: bool = False,
+    ) -> int:
+        num_hit_counts = 0
+        if self.connection is None:
+            logger.warning("Connection is None in batched_async_contains, returning 0")
+            return 0
+        if self._mla_worker_id_as0_mode:
+            keys = [
+                CacheEngineKey(
+                    key.fmt,
+                    key.model_name,
+                    key.world_size,
+                    0,
+                    key.chunk_hash,
+                    key.request_configs,
+                )
+                for key in keys
+            ]
+        
+        try:
+            assert self.connection.support_batched_async_contains(), \
+                f"Connector {self.connection} does not support batched async contains"
+            return await self.connection.batched_async_contains(lookup_id, keys, pin)
+        except Exception as e:
+            logger.warning(f"Error occurred in batched_async_contains: {e}")
+
+
     def pin(self, key: CacheEngineKey) -> bool:
         logger.debug(
             "Remote backend does not support pin. "

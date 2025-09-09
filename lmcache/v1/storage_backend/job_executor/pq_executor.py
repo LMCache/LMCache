@@ -11,7 +11,7 @@ _SENTINEL = object()
 
 
 class AsyncPQExecutor(BaseJobExecutor):
-    "Execute async functions with a priority queue andusing event loop"
+    """Execute async functions with a priority queue and using event loop"""
 
     def __init__(self, loop: asyncio.AbstractEventLoop, max_workers: int = 4):
         max_size = 0  # infinite
@@ -63,7 +63,7 @@ class AsyncPQExecutor(BaseJobExecutor):
                 # join needs to wait until task count is zero
                 self._queue.task_done()
 
-    async def shutdown(self, wait=True):
+    async def shutdown(self, wait: bool = True):
         self._closed = True
         for _ in range(self.max_workers):
             await self._queue.put(_SENTINEL)
@@ -71,9 +71,8 @@ class AsyncPQExecutor(BaseJobExecutor):
             await self._queue.join()
             await asyncio.gather(*self._workers, return_exceptions=True)
 
-
 class AsyncPQThreadPoolExecutor(AsyncPQExecutor):
-    "Execute sync functions with a priority queue and using threadpool"
+    """Execute sync functions with a priority queue and using threadpool"""
 
     def __init__(self, loop: asyncio.AbstractEventLoop, max_workers: int = 4):
         max_size = 0  # infinite
@@ -90,6 +89,7 @@ class AsyncPQThreadPoolExecutor(AsyncPQExecutor):
             | object
         ] = asyncio.PriorityQueue(maxsize=max_size)
         self._counter = itertools.count()
+        self.max_workers = max_workers
         for _ in range(max_workers):
             asyncio.run_coroutine_threadsafe(self._worker(), self.loop)
         self._closed = False

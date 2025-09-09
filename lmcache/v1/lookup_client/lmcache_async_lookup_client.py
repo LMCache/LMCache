@@ -125,9 +125,11 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
         )
         self.thread.start()
 
+        # default backoff time
+        self.lookup_backoff_time = 0.01
         if config.extra_config is not None:
             self.lookup_backoff_time = float(
-                config.extra_config.get("lookup_backoff_time", 0.01)
+                config.extra_config.get("lookup_backoff_time", self.lookup_backoff_time)
             )
 
     # TODO(Jiayi): Consider batching here
@@ -207,7 +209,25 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
         return True
 
     def close(self):
-        self.socket.close(linger=0)
+        self.running = False
+        try:
+            if self.thread.is_alive():
+                self.thread.join(timeout=1.0)
+        except Exception:
+            pass
+        for s in self.push_sockets:
+            try:
+                s.close(linger=0)  # type: ignore[arg-type]
+            except Exception:
+                pass
+        try:
+            self.pull_socket.close(linger=0)  # type: ignore[arg-type]
+        except Exception:
+            pass
+        try:
+            self.ctx.term()
+        except Exception:
+            pass
 
 
 class LMCacheAsyncLookupServer:
@@ -294,5 +314,21 @@ class LMCacheAsyncLookupServer:
         self.push_socket.send_multipart([lookup_id_buf, num_hit_tokens_buf], copy=False)
 
     def close(self):
-        self.socket.close(linger=0)
-        # TODO: close the thread!
+        self.running = False
+        try:
+            if self.thread.is_alive():
+                self.thread.join(timeout=1.0)
+        except Exception:
+            pass
+        try:
+            self.push_socket.close(linger=0)  # type: ignore[arg-type]
+        except Exception:
+            pass
+        try:
+            self.pull_socket.close(linger=0)  # type: ignore[arg-type]
+        except Exception:
+            pass
+        try:
+            self.ctx.term()
+        except Exception:
+            pass
