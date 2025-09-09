@@ -145,17 +145,14 @@ class RequestTracker:
     @_lmcache_nvtx_annotate
     @staticmethod
     def from_new_request(
-        lmcache_config: LMCacheEngineConfig,
         new_request: "NewRequestData",
         num_tokens_to_compute: int,
         lmcache_cached_tokens: int,
-        request_priority: int,
-        force_skip_save: bool,
+        skip_save: bool,
     ) -> "RequestTracker":
         """Create the request tracker from a new request.
 
         Args:
-            lmcache_config (LMCacheEngineConfig): the LMCache engine config.
             new_request (NewRequestData): the new request data.
             num_tokens_to_compute (int): the number of tokens that will
                 be 'computed', including the `num_computed_tokens` (vLLM's
@@ -163,8 +160,7 @@ class RequestTracker:
             lmcache_cached_tokens (int): the number of tokens that are
                 cached in LMCache.
             request_priority (int): the priority of the request
-            force_skip_save (bool): whether it is forced to skip saving cache
-                of the request
+            skip_save (bool): whether the request cache should be saved
         """
         # vLLM 0.9.0 update: request.block_ids changed from list[int] to
         # list[list[int]]
@@ -188,10 +184,6 @@ class RequestTracker:
         # NOTE: Initialized in `update_state_after_alloc`
         disagg_spec = tmp_disagg_tracker.pop(new_request.req_id, None)
 
-        skip_save = force_skip_save or (
-            lmcache_config.priority_limit is not None
-            and request_priority > lmcache_config.priority_limit
-        )
         request_configs = extract_request_configs(new_request.sampling_params)
 
         return RequestTracker(
@@ -1207,13 +1199,17 @@ class LMCacheConnectorV1Impl:
             if load_spec is not None:
                 lmcache_cached_tokens = load_spec.lmcache_cached_tokens
             request_priority = self._requests_priority.pop(request.req_id, 0)
+
+            skip_save = force_skip_save or (
+                self.config.priority_limit is not None
+                and request_priority > self.config.priority_limit
+            )
+
             request_tracker = RequestTracker.from_new_request(
-                self.config,
                 request,
                 num_tokens_to_compute,
                 lmcache_cached_tokens,
-                request_priority,
-                force_skip_save,
+                skip_save,
             )
             self._request_trackers[request.req_id] = request_tracker
 
