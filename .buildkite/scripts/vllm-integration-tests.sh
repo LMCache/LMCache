@@ -171,6 +171,7 @@ run_pd_lmcache() {
         --volume ~/.cache/huggingface:/root/.cache/huggingface
         --env VLLM_USE_FLASHINFER_SAMPLER=0
         --env HF_TOKEN="$HF_TOKEN"
+        --ipc host
     )
     while IFS= read -r e; do
         [[ -n $e ]] && prefiller_docker_args+=(--env "$e")
