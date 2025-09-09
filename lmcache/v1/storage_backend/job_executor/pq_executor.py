@@ -21,6 +21,7 @@ class AsyncPQExecutor(BaseJobExecutor):
                 int,
                 int,
                 Callable[..., Awaitable[Any]],
+                Any,
                 dict[str, Any],
                 asyncio.Future[Any],
             ]
@@ -35,24 +36,25 @@ class AsyncPQExecutor(BaseJobExecutor):
     async def submit_job(
         self,
         fn: Callable[..., Awaitable[Any]],
+        *args: Any,
         **kwargs: Any,
     ) -> Any:
         # Assign highest priority by default
         priority = kwargs.pop("priority", 0)
         done: asyncio.Future[Any] = self.loop.create_future()
-        await self._queue.put((priority, next(self._counter), fn, kwargs, done))
+        await self._queue.put((priority, next(self._counter), fn, args, kwargs, done))
         return await done
 
     async def _worker(self):
         while True:
             item = await self._queue.get()
             if item is _SENTINEL:
-                self._q.task_done()
+                self._queue.task_done()
                 break
 
-            _, _, fn, kwargs, done = item
+            _, _, fn, args, kwargs, done = item
             try:
-                result = await fn(**kwargs)
+                result = await fn(*args, **kwargs)
                 done.set_result(result)
             except Exception as e:
                 done.set_exception(e)
@@ -63,10 +65,10 @@ class AsyncPQExecutor(BaseJobExecutor):
 
     async def shutdown(self, wait=True):
         self._closed = True
-        for _ in self.max_workers:
-            await self._q.put(_SENTINEL)
+        for _ in range(self.max_workers):
+            await self._queue.put(_SENTINEL)
         if wait:
-            await self._q.join()
+            await self._queue.join()
             await asyncio.gather(*self._workers, return_exceptions=True)
 
 
@@ -81,6 +83,7 @@ class AsyncPQThreadPoolExecutor(AsyncPQExecutor):
                 int,
                 int,
                 Callable[..., Any],
+                Any,
                 dict[str, Any],
                 asyncio.Future[Any],
             ]
@@ -95,12 +98,12 @@ class AsyncPQThreadPoolExecutor(AsyncPQExecutor):
         while True:
             item = await self._queue.get()
             if item is _SENTINEL:
-                self._q.task_done()
+                self._queue.task_done()
                 break
 
-            _, _, fn, kwargs, done = item
+            _, _, fn, args, kwargs, done = item
             try:
-                result = await asyncio.to_thread(fn, **kwargs)
+                result = await asyncio.to_thread(fn, *args, **kwargs)
                 done.set_result(result)
             except Exception as e:
                 done.set_exception(e)

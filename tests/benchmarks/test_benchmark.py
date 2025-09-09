@@ -3,6 +3,8 @@
 from functools import partial
 import os
 import random
+import shlex
+import subprocess
 import tempfile
 import time
 
@@ -169,6 +171,7 @@ def test_store_1GB(benchmark, backend, create_config, autorelease_v1):
             generate_random_slot_mapping(num_blocks, block_size, num_tokens, device)
             for _ in range(num_requests)
         ]
+        subprocess.run(shlex.split("rm -rf local/disk_test/local_disk/"))
         return (list_tokens, list_slot_mappings), {}
 
     benchmark.pedantic(run_func, setup=setup, rounds=num_repeats, iterations=1)
