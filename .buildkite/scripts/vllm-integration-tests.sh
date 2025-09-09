@@ -310,7 +310,7 @@ run_long_doc_qa() {
 
     local workload_args=()
     mapfile -d '' -t workload_args < <(
-    jq -r '
+    jq -j '
         to_entries[]
         | select(.value != null and (.value|tostring) != "")
         | (
@@ -328,7 +328,7 @@ run_long_doc_qa() {
             end
         )
         | .[]
-    ' <<<"$workload_yaml"
+    ' <<<"$workload_config"
     )
 
     if [ ! -d ".venv" ]; then
