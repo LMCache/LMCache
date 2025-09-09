@@ -242,7 +242,7 @@ class RemoteConnector(metaclass=abc.ABCMeta):
         """
         raise NotImplementedError
 
-    def support_batched_async_contains(self) -> bool: 
+    def support_batched_async_contains(self) -> bool:
         """
         Connectors that support batched async contains should override this method.
         """
@@ -258,13 +258,13 @@ class RemoteConnector(metaclass=abc.ABCMeta):
         Check if the remote server contains the keys
         """
         raise NotImplementedError
-    
-    def support_batched_get_non_blocking(self) -> bool: 
+
+    def support_batched_get_non_blocking(self) -> bool:
         """
         Connectors that support batched get non-blocking should override this method.
         """
         return False
-    
+
     async def batched_get_non_blocking(
         self,
         lookup_id: str,

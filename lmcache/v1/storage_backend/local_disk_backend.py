@@ -85,7 +85,9 @@ class LocalDiskWorker:
 
     def close(self):
         # Gracefully shut down the executor
-        fut = asyncio.run_coroutine_threadsafe(self.executor.shutdown(wait=True), self.loop)
+        fut = asyncio.run_coroutine_threadsafe(
+            self.executor.shutdown(wait=True), self.loop
+        )
         fut.result()
 
 class LocalDiskBackend(StorageBackendInterface):

@@ -4,25 +4,27 @@
 # Standard
 from collections import OrderedDict
 from dataclasses import dataclass
+from enum import IntEnum
 from typing import List, Optional
 import asyncio
-from enum import IntEnum
 
 # First Party
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.memory_management import MemoryObj, MemoryObjMetadata, TensorMemoryObj
 from lmcache.v1.storage_backend.connector.base_connector import RemoteConnector
-from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.v1.storage_backend.job_executor.pq_executor import AsyncPQExecutor
+from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 
 logger = init_logger(__name__)
 
-class Priorities(IntEnum): 
-    PEEK = 0 
+
+class Priorities(IntEnum):
+    PEEK = 0
     PREFETCH = 1
     GET = 2
     PUT = 3
+
 
 @dataclass
 class MockMemoryObj:
@@ -277,8 +279,10 @@ class MockConnector(RemoteConnector):
             memory_objs.append(memory_obj)
 
         return memory_objs
-    
-    async def batched_get(self, keys: List[CacheEngineKey]) -> List[Optional[MemoryObj]]:
+
+    async def batched_get(
+        self, keys: List[CacheEngineKey]
+    ) -> List[Optional[MemoryObj]]:
         return await self.pq_executor.submit_job(
             self._batched_get, keys=keys, priority=Priorities.GET
         )
@@ -307,7 +311,11 @@ class MockConnector(RemoteConnector):
         pin: bool = False,
     ) -> int:
         return await self.pq_executor.submit_job(
-            self._batched_async_contains, lookup_id=lookup_id, keys=keys, pin=pin, priority=Priorities.PEEK
+            self._batched_async_contains,
+            lookup_id=lookup_id,
+            keys=keys,
+            pin=pin,
+            priority=Priorities.PEEK,
         )
 
     def support_batched_get_non_blocking(self) -> bool:
@@ -323,7 +331,6 @@ class MockConnector(RemoteConnector):
         return await self.pq_executor.submit_job(
             self._batched_get, keys=keys, priority=Priorities.PREFETCH
         )
-
 
     async def close(self):
         await self.lru_store.close()

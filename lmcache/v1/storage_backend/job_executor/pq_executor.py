@@ -63,13 +63,20 @@ class AsyncPQExecutor(BaseJobExecutor):
                 # join needs to wait until task count is zero
                 self._queue.task_done()
 
-    async def shutdown(self, wait: bool = True):
+    async def _shutdown_async(self, wait: bool = True) -> None:
         self._closed = True
         for _ in range(self.max_workers):
             await self._queue.put(_SENTINEL)
         if wait:
             await self._queue.join()
             await asyncio.gather(*self._workers, return_exceptions=True)
+
+    def shutdown(self, wait: bool = True) -> None:
+        future = asyncio.run_coroutine_threadsafe(self._shutdown_async(wait), self.loop)
+        if wait:
+            # Propagate exceptions if any
+            future.result()
+
 
 class AsyncPQThreadPoolExecutor(AsyncPQExecutor):
     """Execute sync functions with a priority queue and using threadpool"""
