@@ -151,7 +151,6 @@ autodoc_mock_imports = [
     "lmcache.c_ops",
     "aiofiles",
     "zmq",
-    "infinistore",
     "transformers",
     "safetensors",
     "torch.Tensor",

@@ -233,8 +233,9 @@ class LMCacheWorker:
 
                         # TODO(Jiayi): We need to align prefetch and move.
                         logger.debug("Executing prefetch operation.")
-                        self.lmcache_engine.prefetch(tokens)
-                        num_tokens = 0
+                        raise NotImplementedError(
+                            "Prefetch from controller is not implemented yet."
+                        )
                     else:
                         assert self.lmcache_engine.distributed_server is not None
                         logger.debug("Executing cross-node move operation.")

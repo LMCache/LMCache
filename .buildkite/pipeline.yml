@@ -4,6 +4,7 @@ env:
 steps:
   - label: "Unit Tests"
     key: "unit_tests"
+    timeout_in_minutes: 30
     command: |
       echo $PWD # for debugging
 

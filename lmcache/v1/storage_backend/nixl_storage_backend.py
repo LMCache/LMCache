@@ -14,7 +14,6 @@
 # limitations under the License.
 
 # Standard
-from concurrent.futures import Future
 from dataclasses import dataclass
 from typing import List, Optional, Sequence, Set
 import asyncio
@@ -54,7 +53,7 @@ class NixlStorageConfig:
     file_pool_size: int
     buffer_device: str
     path: str
-    backends: list[str]
+    backend: str
 
     @staticmethod
     def validate_nixl_backend(backend: str, device: str):
@@ -92,7 +91,7 @@ class NixlStorageConfig:
             file_pool_size=extra_config.get("nixl_file_pool_size"),
             buffer_device=corrected_device,
             path=extra_config.get("nixl_path"),
-            backends=[extra_config.get("nixl_backend")],
+            backend=extra_config.get("nixl_backend"),
         )
 
 
@@ -143,14 +142,14 @@ class NixlStorageAgent:
         allocator: PagedTensorMemoryAllocator,
         file_pool: NixlFilePool,
         device: str,
-        backends: list[str],
+        backend: str,
     ):
         buffer_ptr = allocator.buffer_ptr
         buffer_size = allocator.buffer_size
         page_size = allocator.align_bytes
 
         self.agent_name = "NixlAgent_" + str(uuid.uuid4())
-        nixl_conf = NixlAgentConfig(backends=backends)
+        nixl_conf = NixlAgentConfig(backends=[backend])
         self.nixl_agent = NixlAgent(self.agent_name, nixl_conf)
 
         device_id = torch.cuda.current_device()
@@ -257,11 +256,12 @@ class NixlStorageBackend(StorageBackendInterface):
         self.memory_allocator = memory_allocator
 
         self.file_pool = NixlFilePool(nixl_config.path, nixl_config.file_pool_size)
+
         self.agent = NixlStorageAgent(
             memory_allocator,
             self.file_pool,
             nixl_config.buffer_device,
-            nixl_config.backends,
+            nixl_config.backend,
         )
 
     def contains(self, key: CacheEngineKey, pin: bool = False) -> bool:
@@ -337,7 +337,7 @@ class NixlStorageBackend(StorageBackendInterface):
         assert shape is not None
         assert fmt is not None
 
-        obj = self.memory_allocator.allocate(shape, dtype, fmt, allocator_type="nixl")
+        obj = self.memory_allocator.allocate(shape, dtype, fmt)
         if obj is None:
             return None
 
@@ -361,17 +361,6 @@ class NixlStorageBackend(StorageBackendInterface):
 
         asyncio.run_coroutine_threadsafe(self.gpu_to_file(keys, memory_objs), self.loop)
 
-    def submit_prefetch_task(self, key: CacheEngineKey) -> bool:
-        """
-        An async function to get the MemoryObj from the storage backend.
-
-        :param key: The key of the MemoryObj.
-
-        :return: True if prefetch succeeded, else False.
-        """
-
-        return False
-
     def get_blocking(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         """
         A blocking function to get the kv cache from the storage backend.
@@ -381,17 +370,12 @@ class NixlStorageBackend(StorageBackendInterface):
         :return: MemoryObj. None if the key does not exist.
         """
 
-        future = self.get_non_blocking(key)
+        future = asyncio.run_coroutine_threadsafe(self.file_to_gpu(key), self.loop)
 
         if future is None:
             return None
 
         return future.result()
-
-    def get_non_blocking(self, key: CacheEngineKey) -> Optional[Future]:
-        future = asyncio.run_coroutine_threadsafe(self.file_to_gpu(key), self.loop)
-
-        return future
 
     def remove(self, key: CacheEngineKey, force: bool = True) -> bool:
         """

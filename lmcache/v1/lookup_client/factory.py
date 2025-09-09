@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Optional, Union
 
 # First Party
 from lmcache.integration.vllm.utils import lmcache_get_config
@@ -15,6 +15,9 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
     # First Party
+    from lmcache.v1.lookup_client.lmcache_async_lookup_client import (
+        LMCacheAsyncLookupServer,
+    )
     from lmcache.v1.lookup_client.lmcache_lookup_client import LMCacheLookupServer
 
 logger = init_logger(__name__)
@@ -41,22 +44,32 @@ class LookupClientFactory:
 
         # Check if external_lookup_client is configured
         if config.external_lookup_client is not None:
+            if config.enable_async_loading:
+                raise ValueError(
+                    "Asynchronous loading is not supported for external lookup clients."
+                )
             return LookupClientFactory._create_external_lookup_client(
                 config.external_lookup_client, vllm_config
             )
         else:
             # First Party
+            from lmcache.v1.lookup_client.lmcache_async_lookup_client import (
+                LMCacheAsyncLookupClient,
+            )
             from lmcache.v1.lookup_client.lmcache_lookup_client import (
                 LMCacheLookupClient,
             )
 
-            return LMCacheLookupClient(vllm_config)  # , config)
+            if config.enable_async_loading:
+                return LMCacheAsyncLookupClient(vllm_config)
+            else:
+                return LMCacheLookupClient(vllm_config)
 
     @staticmethod
     def create_lookup_server(
         lmcache_engine: LMCacheEngine,
         vllm_config: "VllmConfig",
-    ) -> Optional["LMCacheLookupServer"]:
+    ) -> Optional[Union["LMCacheLookupServer", "LMCacheAsyncLookupServer"]]:
         """
         Create a lookup server based on the configuration.
 
@@ -84,11 +97,17 @@ class LookupClientFactory:
             or lmcache_engine.metadata.worker_id == 0
         ):
             # First Party
+            from lmcache.v1.lookup_client.lmcache_async_lookup_client import (
+                LMCacheAsyncLookupServer,
+            )
             from lmcache.v1.lookup_client.lmcache_lookup_client import (
                 LMCacheLookupServer,
             )
 
-            return LMCacheLookupServer(lmcache_engine, vllm_config)
+            if config.enable_async_loading:
+                return LMCacheAsyncLookupServer(lmcache_engine, vllm_config)
+            else:
+                return LMCacheLookupServer(lmcache_engine, vllm_config)
 
         return None
 

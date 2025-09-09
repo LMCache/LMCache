@@ -10,8 +10,21 @@ import hashlib
 import threading
 import traceback
 
+try:
+    # Third Party
+    from nvtx import annotate  # type: ignore
+except ImportError:
+
+    def annotate(*args, **kwargs):
+        """Dummy decorator when nvtx is not available."""
+
+        def decorator(func):
+            return func
+
+        return decorator
+
+
 # Third Party
-from nvtx import annotate  # type: ignore
 import torch
 
 # First Party
@@ -116,7 +129,7 @@ class CacheEngineKey:
     def to_string(self):
         s = (
             f"{self.fmt}@{self.model_name}@{self.world_size}"
-            f"@{self.worker_id}@{self.chunk_hash}"
+            f"@{self.worker_id}@{self.chunk_hash:x}"
         )
         if self.tags is not None and len(self.tags) != 0:
             tags = [f"{k}%{v}" for k, v in self.tags.items()]
@@ -244,7 +257,7 @@ class LayerCacheEngineKey(CacheEngineKey):
     def to_string(self):
         s = (
             f"{self.fmt}@{self.model_name}@{self.world_size}"
-            f"@{self.worker_id}@{self.chunk_hash}@{self.layer_id}"
+            f"@{self.worker_id}@{self.chunk_hash:x}@{self.layer_id}"
         )
         if self.tags is not None and len(self.tags) != 0:
             tags = [f"{k}%{v}" for k, v in self.tags.items()]
