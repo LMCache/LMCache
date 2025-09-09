@@ -145,6 +145,7 @@ class RequestTracker:
     @_lmcache_nvtx_annotate
     @staticmethod
     def from_new_request(
+        lmcache_config: LMCacheEngineConfig,
         new_request: "NewRequestData",
         num_tokens_to_compute: int,
         lmcache_cached_tokens: int,
@@ -153,6 +154,7 @@ class RequestTracker:
         """Create the request tracker from a new request.
 
         Args:
+            lmcache_config (LMCacheEngineConfig): the LMCache engine config.
             new_request (NewRequestData): the new request data.
             num_tokens_to_compute (int): the number of tokens that will
                 be 'computed', including the `num_computed_tokens` (vLLM's
@@ -1206,6 +1208,7 @@ class LMCacheConnectorV1Impl:
             )
 
             request_tracker = RequestTracker.from_new_request(
+                self.config,
                 request,
                 num_tokens_to_compute,
                 lmcache_cached_tokens,
