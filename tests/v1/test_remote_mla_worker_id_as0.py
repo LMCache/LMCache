@@ -26,6 +26,9 @@ class MockConnector(RemoteConnector):
     async def exists(self, key):
         return key in self.storage
 
+    def exists_sync(self, key):
+        return key in self.storage
+
     async def put(self, key, value):
         self.storage[key] = value
 

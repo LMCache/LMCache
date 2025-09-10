@@ -6,7 +6,7 @@ import abc
 # First Party
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.memory_management import MemoryObj
-from lmcache.v1.protocol import ServerMetaMessage
+from lmcache.v1.protocol import ClientMetaMessage
 
 
 class DistributedServerInterface(metaclass=abc.ABCMeta):
@@ -30,7 +30,7 @@ class DistributedServerInterface(metaclass=abc.ABCMeta):
     @abc.abstractmethod
     async def handle_put(
         self,
-        meta: ServerMetaMessage,
+        meta: ClientMetaMessage,
         reader,
         writer,
     ) -> bool:
@@ -42,7 +42,7 @@ class DistributedServerInterface(metaclass=abc.ABCMeta):
     @abc.abstractmethod
     async def batched_issue_put(
         self,
-        keys: CacheEngineKey,
+        keys: list[CacheEngineKey],
         memory_objs: list[MemoryObj],
         dst_url: str,
         dst_location: Optional[str] = None,

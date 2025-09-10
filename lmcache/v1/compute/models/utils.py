@@ -11,16 +11,13 @@ from lmcache.logging import init_logger
 logger = init_logger(__name__)
 
 
-# TODO (Jiayi): Need to infer the model type from vllm model
-
-
-def infer_model_from_vllm(vllm_model, blender):
+def infer_model_from_vllm(vllm_model, blender, enable_sparse: bool = False):
     model_name = type(vllm_model).__name__
     if model_name == "LlamaForCausalLM":
         # First Party
         from lmcache.v1.compute.models.llama import LMCLlamaModel
 
-        return LMCLlamaModel(vllm_model, blender)
+        return LMCLlamaModel(vllm_model, blender, enable_sparse)
     else:
         # TODO(Jiayi): Add support for more models
         raise NotImplementedError(

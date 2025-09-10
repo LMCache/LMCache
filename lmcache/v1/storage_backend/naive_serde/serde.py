@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import Optional
 import abc
 
 # First Party
@@ -24,7 +23,7 @@ class Serializer(metaclass=abc.ABCMeta):
 
 class Deserializer(metaclass=abc.ABCMeta):
     @abc.abstractmethod
-    def deserialize(self, memory_obj: MemoryObj) -> Optional[MemoryObj]:
+    def deserialize(self, memory_obj: MemoryObj) -> MemoryObj:
         """
         Deserialize/decompress the memory object.
 

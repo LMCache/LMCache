@@ -6,6 +6,8 @@ labels: ''
 assignees: ''
 
 ---
+**Label**
+Please label your issue with "new feature" and any other relevant labels so that it can easily be easily categorized under [LMCache Onboarding](https://github.com/LMCache/LMCache/issues/627)
 
 **Is your feature request related to a problem? Please describe.**
 A clear and concise description of what the problem is. Ex. I'm always frustrated when [...]

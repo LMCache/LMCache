@@ -116,7 +116,7 @@ main() {
     echo "Please check prefiller.log, decoder.log and proxy.log for logs."
 
     # Launch the proxy first
-    python3 disagg_proxy_server.py \
+    python3 ../disagg_proxy_server.py \
         --host localhost \
         --port 9100 \
         --prefiller-host localhost \

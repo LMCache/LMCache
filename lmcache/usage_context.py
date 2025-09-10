@@ -3,6 +3,7 @@
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+import importlib.metadata
 import os
 import platform
 import subprocess
@@ -10,7 +11,6 @@ import threading
 
 # Third Party
 import cpuinfo
-import pkg_resources
 import psutil
 import requests
 import torch
@@ -233,9 +233,9 @@ class UsageContext:
                     if "docker" in line:
                         return "DOCKER"
         try:
-            _ = pkg_resources.get_distribution("LMCache")
+            _ = importlib.metadata.distribution("LMCache")
             return "PIP"
-        except pkg_resources.DistributionNotFound:
+        except importlib.metadata.PackageNotFoundError:
             pass
         try:
             result = subprocess.run(

@@ -20,9 +20,9 @@ to start disaggregated prefill and benchmark the performance.
 
 The script will:
 
-1. Launch 2 decoder instances listening on port 8200 and 8202, respectively
-2. Launch 2 prefill instances listening on ports 8100 and 8101, respectively
-3. Launch a proxy server that uses round-robin to distribute requests between the prefill instances and decode instances, listening on port 9000
+1. Launch 2 decoder instances listening on port 7200 and 7201, respectively
+2. Launch 2 prefill instances listening on ports 7100 and 7101, respectively
+3. Launch a proxy server that uses round-robin to distribute requests between the prefill instances and decode instances, listening on port 9100
 
 Press `Ctrl+C` to stop the servers.
 
@@ -31,7 +31,7 @@ Press `Ctrl+C` to stop the servers.
 If you have vLLM [benchmark_serving.py](https://github.com/vllm-project/vllm/blob/main/benchmarks/benchmark_serving.py), you can run the following command to benchmark the serving performance of the disaggregated prefill setup:
 
 ```bash
-python benchmark_serving.py --port 9000 --seed $(date +%s) \
+python benchmark_serving.py --port 9100 --seed $(date +%s) \
     --model meta-llama/Llama-3.1-8B-Instruct \
     --dataset-name random --random-input-len 7500 --random-output-len 200 \
     --num-prompts 30 --burstiness 100 --request-rate 1 --ignore-eos

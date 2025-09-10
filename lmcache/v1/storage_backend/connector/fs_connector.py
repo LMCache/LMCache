@@ -3,6 +3,7 @@
 from pathlib import Path
 from typing import List, Optional, no_type_check
 import asyncio
+import os
 
 # Third Party
 import aiofiles
@@ -75,26 +76,36 @@ class FSConnector(RemoteConnector):
         file_path = self._get_file_path(key)
         return await aiofiles.os.path.exists(file_path)
 
+    def exists_sync(self, key: CacheEngineKey) -> bool:
+        """Check if key exists in file system synchronized"""
+        file_path = self._get_file_path(key)
+        return os.path.exists(file_path)
+
     async def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         """Get data from file system"""
         file_path = self._get_file_path(key)
 
         try:
             async with aiofiles.open(file_path, "rb") as f:
-                # Read metadata buffer first to get shape, dtype, fmt
-                # to be able to allocate memory object for the data and read into it
-                md_buffer = bytearray(METADATA_BYTES_LEN)
-                num_read = await f.readinto(md_buffer)
-                if num_read != len(md_buffer):
-                    raise RuntimeError(
-                        f"Partial read meta {len(md_buffer)} got {num_read}"
-                    )
+                if self.save_chunk_meta:
+                    # Read metadata buffer first to get shape, dtype, fmt
+                    # to be able to allocate memory object for the data and read into it
+                    md_buffer = bytearray(METADATA_BYTES_LEN)
+                    num_read = await f.readinto(md_buffer)
+                    if num_read != len(md_buffer):
+                        raise RuntimeError(
+                            f"Partial read meta {len(md_buffer)} got {num_read}"
+                        )
 
-                # Deserialize metadata and allocate memory
-                metadata = RemoteMetadata.deserialize(md_buffer)
-                memory_obj = self.local_cpu_backend.allocate(
-                    metadata.shape, metadata.dtype, metadata.fmt
-                )
+                    # Deserialize metadata and allocate memory
+                    metadata = RemoteMetadata.deserialize(md_buffer)
+                    memory_obj = self.local_cpu_backend.allocate(
+                        metadata.shape, metadata.dtype, metadata.fmt
+                    )
+                else:
+                    memory_obj = self.local_cpu_backend.allocate(
+                        self.meta_shape, self.meta_dtype, self.meta_fmt
+                    )
                 if memory_obj is None:
                     logger.debug("Memory allocation failed during async disk load.")
                     return None
@@ -102,10 +113,15 @@ class FSConnector(RemoteConnector):
                 # Read the actual data into allocated memory
                 buffer = memory_obj.byte_array
                 num_read = await f.readinto(buffer)
-                if num_read != len(buffer):
-                    raise RuntimeError(
-                        f"Partial read data {len(buffer)} got {num_read}"
-                    )
+                if self.save_chunk_meta:
+                    if num_read != len(buffer):
+                        raise RuntimeError(
+                            f"Partial read data {len(buffer)} got {num_read}"
+                        )
+                else:
+                    # reshape and check
+                    assert num_read is not None
+                    memory_obj = self.reshape_partial_chunk(memory_obj, num_read)
 
             return memory_obj
 
@@ -124,16 +140,21 @@ class FSConnector(RemoteConnector):
         try:
             # Prepare metadata
             buffer = memory_obj.byte_array
-            metadata = RemoteMetadata(
-                len(buffer),
-                memory_obj.get_shape(),
-                memory_obj.get_dtype(),
-                memory_obj.get_memory_format(),
+            metadata = (
+                RemoteMetadata(
+                    len(buffer),
+                    memory_obj.get_shape(),
+                    memory_obj.get_dtype(),
+                    memory_obj.get_memory_format(),
+                )
+                if self.save_chunk_meta
+                else None
             )
 
             # Write to file (metadata + data)
             async with aiofiles.open(temp_path, "wb") as f:
-                await f.write(metadata.serialize())
+                if metadata is not None:
+                    await f.write(metadata.serialize())
                 await f.write(buffer)
 
             # Atomically rename temp file to final destination

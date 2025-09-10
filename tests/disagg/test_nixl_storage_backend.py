@@ -32,7 +32,7 @@ def generate_test_data(
                 model_name="test_model",
                 world_size=1,
                 worker_id=0,
-                chunk_hash=f"test_{i}",
+                chunk_hash=i,
             )
         )
         obj = allocator.allocate(shape, dtype, fmt=MemoryFormat.KV_2LTD)
@@ -76,8 +76,7 @@ def send_and_measure_throughput(
 
     backend.register_put_tasks(keys, [obj.metadata for obj in objs])
     start_time = time.time()
-    for key, obj in zip(keys, objs, strict=False):
-        backend.submit_put_task(key, obj)
+    backend.batched_submit_put_task(keys, objs)
     backend.flush_put_tasks()
     end_time = time.time()
 
@@ -135,7 +134,7 @@ def receive_and_verify_data(
         # Verify the received data
         for i, key in enumerate(keys):
             received_obj = backend.get_blocking(key)
-            if received_obj is None:
+            if received_obj is None or received_obj.tensor is None:
                 logger.error(f"Failed to retrieve object for key {key}")
                 passed_check = False
                 break

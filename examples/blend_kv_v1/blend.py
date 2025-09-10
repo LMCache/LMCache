@@ -18,7 +18,9 @@ from lmcache.v1.cache_engine import LMCacheEngineBuilder
 
 
 def setup_environment_variables(
-    use_disk: bool = False, blend_special_str: str = " # # "
+    use_disk: bool = False,
+    blend_special_str: str = " # # ",
+    enable_sparse: bool = False,
 ):
     # LMCache-related environment variables
 
@@ -29,6 +31,9 @@ def setup_environment_variables(
     os.environ["LMCACHE_ENABLE_BLENDING"] = "True"
     os.environ["LMCACHE_BLEND_SPECIAL_STR"] = blend_special_str
     os.environ["LMCACHE_USE_LAYERWISE"] = "True"
+
+    if enable_sparse:
+        os.environ["LMCACHE_EXTRA_CONFIG"] = '{"enable_sparse": true}'
 
     if use_disk:
         # Disable local CPU backend in LMCache
@@ -60,9 +65,10 @@ def build_llm_with_lmcache(lmcache_connector: str, model: str):
     llm_args = EngineArgs(
         model=model,
         kv_transfer_config=ktc,
-        max_model_len=8000,
+        max_model_len=32648,
         gpu_memory_utilization=0.8,
         enable_prefix_caching=False,
+        enforce_eager=True,
     )
 
     llm = LLM(**asdict(llm_args))
@@ -80,7 +86,9 @@ def print_output(
     req_str: str,
 ):
     start = time.time()
-    outputs = llm.generate(prompt_token_ids=prompt, sampling_params=sampling_params)
+    outputs = llm.generate(
+        prompts={"prompt_token_ids": prompt}, sampling_params=sampling_params
+    )
     print("-" * 50)
     for output in outputs:
         generated_text = output.outputs[0].text
@@ -105,6 +113,17 @@ def parse_args():
         help="Specify the special separators to separate chunks (default: '# #')",
     )
 
+    parser.add_argument(
+        "--model",
+        type=str,
+        default="mistralai/Mistral-7B-Instruct-v0.2",
+    )
+
+    parser.add_argument(
+        "--enable-sparse",
+        action="store_true",
+    )
+
     return parser.parse_args()
 
 
@@ -112,18 +131,21 @@ def main():
     args = parse_args()
 
     lmcache_connector = "LMCacheConnectorV1"
-    model = "mistralai/Mistral-7B-Instruct-v0.2"
+    model = args.model
 
-    setup_environment_variables(args.use_disk, args.blend_special_str)
+    setup_environment_variables(
+        args.use_disk, args.blend_special_str, args.enable_sparse
+    )
 
     tokenizer = AutoTokenizer.from_pretrained(model)
 
     with build_llm_with_lmcache(lmcache_connector, model) as llm:
-        # This example script runs two requests with a shared prefix.
         # Define the shared prompt and specific prompts
+        warmup_prompt = tokenizer.encode("Nice to meet you" * 500)[1:]
         sys_prompt = tokenizer.encode("You are a very helpful assistant.")
         chunk1_prompt = tokenizer.encode("Hello, how are you?" * 500)[1:]
         chunk2_prompt = tokenizer.encode("Hello, what's up?" * 500)[1:]
+        chunk3_prompt = tokenizer.encode("Hi, what are you up to?" * 500)[1:]
         blend_special_str = tokenizer.encode(os.getenv("LMCACHE_BLEND_SPECIAL_STR"))[1:]
         first_prompt = (
             sys_prompt
@@ -131,6 +153,8 @@ def main():
             + chunk1_prompt
             + blend_special_str
             + chunk2_prompt
+            + blend_special_str
+            + chunk3_prompt
             + blend_special_str
             + tokenizer.encode("Hello, my name is")[1:]
         )
@@ -142,10 +166,26 @@ def main():
             + blend_special_str
             + chunk1_prompt
             + blend_special_str
+            + chunk3_prompt
+            + blend_special_str
             + tokenizer.encode("Hello, how are you?")[1:]
         )
 
-        sampling_params = SamplingParams(temperature=0, top_p=0.95, max_tokens=10)
+        third_prompt = (
+            sys_prompt
+            + blend_special_str
+            + chunk3_prompt
+            + blend_special_str
+            + chunk1_prompt
+            + blend_special_str
+            + chunk2_prompt
+            + blend_special_str
+            + tokenizer.encode("Hello, what's up?")[1:]
+        )
+
+        sampling_params = SamplingParams(temperature=0, top_p=0.95, max_tokens=1)
+
+        print_output(llm, warmup_prompt, sampling_params, "warmup")
 
         # Print the first output
         print_output(llm, first_prompt, sampling_params, "first")
@@ -153,7 +193,14 @@ def main():
         time.sleep(1)
 
         # print the second output
-        print_output(llm, second_prompt, sampling_params, "second")
+        print_output(
+            llm, second_prompt, sampling_params, "second (warming up blend code path)"
+        )
+
+        time.sleep(1)
+
+        # print the third output
+        print_output(llm, third_prompt, sampling_params, "third")
 
 
 if __name__ == "__main__":

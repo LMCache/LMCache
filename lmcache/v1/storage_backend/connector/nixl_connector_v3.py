@@ -26,12 +26,14 @@ from lmcache.v1.memory_management import (
     MemoryFormat,
     MemoryObj,
 )
-from lmcache.v1.storage_backend.abstract_backend import StorageBackendInterface
 from lmcache.v1.storage_backend.connector.nixl_utils import NixlConfigXpYd, NixlRole
 
 if TYPE_CHECKING:
     # Third Party
     from nixl._api import NixlAgent
+
+    # First Party
+    from lmcache.v1.storage_backend.nixl_backend_v3 import NixlBackend
 
 logger = init_logger(__name__)
 
@@ -138,7 +140,10 @@ class NixlSenderTask:
         )
 
     # TODO (Jiayi): reduce for loop
-    def get_local_indexes(self, already_sent_indexes: list[int] = None) -> list[int]:
+    def get_local_indexes(
+        self,
+        already_sent_indexes: list[int],
+    ) -> list[int]:
         """
         Get the page indexes of the memory objects.
         This is needed for nixl transfer.
@@ -162,7 +167,7 @@ class NixlSender:
         self,
         nixl_config: NixlConfigXpYd,
         config: LMCacheEngineConfig,
-        backend: StorageBackendInterface,
+        backend: "NixlBackend",
         tp_rank: int,
     ):
         assert nixl_config.role == NixlRole.SENDER, (
@@ -188,9 +193,11 @@ class NixlSender:
 
         self._mem_alloc_sockets: dict[str, zmq.Socket] = {}
 
-        self.req_queue = Queue()
+        self.req_queue: Queue[NixlSenderTask] = Queue()
 
-        self._remote_xfer_handlers_dict = {}
+        self._remote_xfer_handlers_dict: dict[
+            str, NixlAgent.nixl_prepped_dlist_handle
+        ] = {}
 
         # Start the seder thread
         self._running = True
@@ -273,7 +280,17 @@ class NixlSender:
             alloc_response.already_sent_indexes
         )
         remote_indexes = alloc_response.remote_indexes
-        self._blocking_send(req_id, receiver_id, local_indexes, remote_indexes)
+
+        # NOTE (vladnosiv): len(local_indexes) may be zero
+        # if the requests in the batch have a large common prefix
+        if not local_indexes:
+            logger.debug(
+                "Sending objs with request ID: %s is not required: "
+                "all indexes already sent",
+                sender_task.req_id,
+            )
+        else:
+            self._blocking_send(req_id, receiver_id, local_indexes, remote_indexes)
 
         logger.debug(f"transfer spec: {transfer_spec}")
         if transfer_spec.is_last_prefill:
@@ -473,7 +490,7 @@ class NixlReceiver:
         self,
         nixl_config: NixlConfigXpYd,
         config: LMCacheEngineConfig,
-        backend: StorageBackendInterface,
+        backend: "NixlBackend",
         tp_rank: int,
     ):
         assert nixl_config.role == NixlRole.RECEIVER, (
@@ -489,6 +506,7 @@ class NixlReceiver:
             buffer_size=self.memory_allocator.nixl_allocator.buffer_size,
             page_size=self.memory_allocator.nixl_allocator.align_bytes,
             tp_rank=tp_rank,
+            backends=nixl_config.backends,
         )
 
         self._nixl_agent = self._receiver_nixl_wrapper.agent
@@ -546,7 +564,8 @@ class NixlReceiver:
         alloc_indexes = []
         already_send_indexes = []
 
-        for idx, key in enumerate(alloc_request.keys):
+        for idx, key_str in enumerate(alloc_request.keys):
+            key = CacheEngineKey.from_string(key_str)
             if self._backend.contains(key, pin=True):
                 already_send_indexes.append(idx)
                 continue
@@ -573,7 +592,7 @@ class NixlReceiver:
 
             alloc_indexes.append(mem_obj.meta.address)
 
-            self._backend.put(CacheEngineKey.from_string(key), mem_obj)
+            self._backend.put(key, mem_obj)
 
         return NixlAllocResponse(
             already_sent_indexes=already_send_indexes, remote_indexes=alloc_indexes
@@ -695,7 +714,7 @@ class NixlChannel:
         self,
         nixl_config: NixlConfigXpYd,
         config: LMCacheEngineConfig,
-        backend: StorageBackendInterface,
+        backend: "NixlBackend",
     ):
         self.nixl_config = nixl_config
         self.role = nixl_config.role
@@ -778,6 +797,7 @@ class NixlAgentWrapper:
         buffer_size: int,
         page_size: int,
         tp_rank: int,
+        backends: Optional[list[str]] = None,
     ):
         """
         Initialize the NIXL agent.
@@ -798,11 +818,19 @@ class NixlAgentWrapper:
         try:
             # Third Party
             from nixl._api import nixl_agent as NixlAgent
+            from nixl._api import nixl_agent_config
         except ImportError as err:
             raise RuntimeError("NIXL is not available") from err
 
+        # Handle None backends by setting default to ["UCX"]
+        if backends is None:
+            backends = ["UCX"]
+
         # Create a NIXL agent
-        nixl_agent = NixlAgent(str(uuid.uuid4()))
+        nixl_agent = NixlAgent(
+            str(uuid.uuid4()),
+            nixl_agent_config(backends=backends),
+        )
 
         # Register the memory
         memory_desc = [(buffer_ptr, buffer_size, tp_rank, "")]
@@ -828,7 +856,7 @@ class NixlAgentWrapper:
 
         self.agent.release_dlist_handle(self.xfer_handler)
 
-        for remote_xfer_handler in self._remote_xfer_handlers.values():
+        for remote_xfer_handler in self.agent._remote_xfer_handlers_dict.values():
             self.agent.release_dlist_handle(remote_xfer_handler)
 
         if remote_xfer_handlers is not None:

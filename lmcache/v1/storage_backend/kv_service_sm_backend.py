@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # Copyright 2024-2025 LMCache Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -16,7 +17,7 @@
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from multiprocessing import shared_memory
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 import asyncio
 import threading
 
@@ -87,12 +88,12 @@ class KVServiceSMBackend(StorageBackendInterface):
         self.timeout_ms = extra_config.get("kv_service_sm_timeout_ms", 5000)
 
         # Performance optimizations for scale
-        self.max_connections = getattr(config, "kv_service_sm_max_connections", 256)
-        self.max_connections_per_host = getattr(
-            config, "kv_service_sm_max_connections_per_host", 128
+        self.max_connections = extra_config.get("kv_service_sm_max_connections", 256)
+        self.max_connections_per_host = extra_config.get(
+            "kv_service_sm_max_connections_per_host", 128
         )
-        self.serialization_threads = getattr(
-            config, "kv_service_sm_serialization_threads", 16
+        self.serialization_threads = extra_config.get(
+            "kv_service_sm_serialization_threads", 16
         )
 
         # HTTP connection pool for high-scale performance
@@ -150,7 +151,6 @@ class KVServiceSMBackend(StorageBackendInterface):
         """Check if key is currently being stored."""
         with self.put_lock:
             return key in self.put_tasks
-        return None
 
     @_lmcache_nvtx_annotate
     def batched_submit_put_task(
@@ -370,13 +370,16 @@ class KVServiceSMBackend(StorageBackendInterface):
             if result["status"] == 200:
                 success = True
             elif result["status"] == 404:
-                logger.debug(f"Lease {lease_id} not found on server, "
-                             f"already released or expired")
+                logger.debug(
+                    f"Lease {lease_id} not found on server, already released or expired"
+                )
                 success = True
             else:
-                logger.warning(f"Failed to release lease {lease_id}, "
-                               f"status: {result['status']}, "
-                               f"response: {result.get('json', {})}")
+                logger.warning(
+                    f"Failed to release lease {lease_id}, "
+                    f"status: {result['status']}, "
+                    f"response: {result.get('json', {})}"
+                )
 
         if success:
             with self.lease_lock:
@@ -460,7 +463,7 @@ class KVServiceSMBackend(StorageBackendInterface):
             # by removing trailing zeros
             original_shape = metadata.shape
             # Remove trailing zeros to get the actual shape
-            actual_shape_list = []
+            actual_shape_list: List[int] = []
             for dim in original_shape:
                 if dim == 0 and len(actual_shape_list) > 0:
                     # Stop at first zero after we have at least one dimension
@@ -549,6 +552,10 @@ class KVServiceSMBackend(StorageBackendInterface):
         """Unpin operation - not implemented for KVServiceSM."""
         return True
 
+    def remove(self, key: CacheEngineKey, force: bool = True) -> bool:
+        """Remove operation - not implemented for KVServiceSM."""
+        return True
+
     def close(self) -> None:
         """Close the backend and release resources."""
         # Release all leases
@@ -580,7 +587,7 @@ class KVServiceSMBackend(StorageBackendInterface):
         # Shutdown thread pool
         if self.thread_pool is not None:
             try:
-                self.thread_pool.shutdown(wait=True, timeout=10.0)
+                self.thread_pool.shutdown(wait=True)
                 logger.info("Thread pool shutdown complete")
             except Exception as e:
                 logger.error(f"Error shutting down thread pool: {e}")

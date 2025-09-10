@@ -10,6 +10,8 @@ from lmcache.v1.cache_controller.message import (
     ClearRetMsg,
     CompressMsg,
     CompressRetMsg,
+    DecompressMsg,
+    DecompressRetMsg,
     KVAdmitMsg,
     KVEvictMsg,
     LookupMsg,
@@ -39,7 +41,7 @@ class KVChunkMetadata:
 
 
 class KVController:
-    def __init__(self):
+    def __init__(self) -> None:
         # NOTE (Jiayi): Even if we offload kv_pool to
         # redis. We might need a local cache for handling
         # messages like `check_finish`. Or everything should be
@@ -112,6 +114,12 @@ class KVController:
         """
         return await self.cluster_executor.execute("compress", msg)
 
+    async def decompress(self, msg: DecompressMsg) -> DecompressRetMsg:
+        """
+        Decompress kv chunks of instance-worker(s).
+        """
+        return await self.cluster_executor.execute("decompress", msg)
+
     async def move(self, msg: MoveMsg) -> MoveRetMsg:
         """
         Move kv chunks of instance-worker(s).
@@ -151,9 +159,10 @@ class KVController:
         for start, end, key in self.token_database.process_tokens(
             tokens, make_key=False
         ):
+            key = str(key)
             if key not in self.kv_pool:
                 break
-            matched_instance = self.kv_pool[str(key)][0].instance_id
-            matched_location = self.kv_pool[str(key)][0].location
+            matched_instance = self.kv_pool[key][0].instance_id
+            matched_location = self.kv_pool[key][0].location
             layout_info[matched_instance] = (matched_location, end)
-        return LookupRetMsg(layout_info=layout_info)
+        return LookupRetMsg(layout_info=layout_info, event_id=msg.event_id)

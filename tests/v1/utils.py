@@ -14,6 +14,14 @@ from lmcache.utils import CacheEngineKey
 from lmcache.v1.gpu_connector import VLLMPagedMemGPUConnectorV2
 
 
+def recover_engine_states(engine):
+    engine.gpu_connector.kv_cache_pointers_on_gpu = {}
+
+
+def recover_gpu_connector_states(gpu_connector):
+    gpu_connector.kv_cache_pointers_on_gpu = {}
+
+
 def dumb_metadata(fmt="vllm", kv_shape=(32, 2, 256, 8, 128)):
     return LMCacheEngineMetadata("test_model", 3, 123, fmt, torch.bfloat16, kv_shape)
 
@@ -24,8 +32,8 @@ def dumb_metadata_with_model_name(
     return LMCacheEngineMetadata(model_name, 3, 123, fmt, torch.bfloat16, kv_shape)
 
 
-def dumb_cache_engine_key():
-    return CacheEngineKey("vllm", "test_model", 3, 123, 1234)
+def dumb_cache_engine_key(id: int = 0) -> CacheEngineKey:
+    return CacheEngineKey("vllm", "test_model", 3, 123, id)
 
 
 def random_string(N):
@@ -175,24 +183,41 @@ def concatenate_kv_caches(kv_chunks, fmt):
     return tuple(ret)
 
 
-def check_mem_obj_equal(left, right):
+def check_mem_obj_equal(left, right, use_mla: bool = False):
     """
     check whether two memory objects are the same
     """
     for left_mem_obj, right_mem_obj in zip(left, right, strict=False):
-        left_kv, right_kv = left_mem_obj.tensor, right_mem_obj.tensor
-        left_k, left_v = left_kv[0], left_kv[1]
-        right_k, right_v = right_kv[0], right_kv[1]
-        right_k = right_k.to(left_k.device)
-        right_v = right_v.to(left_v.device)
+        left_tensor_size = left_mem_obj.tensor.size()
+        right_tensor_size = right_mem_obj.tensor.size()
+        if use_mla:
+            assert left_tensor_size[0] == 1
+            assert right_tensor_size[0] == 1
 
-        assert len(left_k.shape) == 3
-        assert len(left_v.shape) == 3
-        assert len(right_k.shape) == 3
-        assert len(right_v.shape) == 3
+            left_kv, right_kv = left_mem_obj.tensor[0], right_mem_obj.tensor[0]
+            right_kv = right_kv.to(left_kv.device)
 
-        assert (left_k[:, :, :] == right_k[:, :, :]).all()
-        assert (left_v[:, :, :] == right_v[:, :, :]).all()
+            assert len(left_kv.shape) == 3
+            assert len(right_kv.shape) == 3
+
+            assert (left_kv[:, :, :] == right_kv[:, :, :]).all()
+        else:
+            assert left_tensor_size[0] == 2
+            assert right_tensor_size[0] == 2
+
+            left_kv, right_kv = left_mem_obj.tensor, right_mem_obj.tensor
+            left_k, left_v = left_kv[0], left_kv[1]
+            right_k, right_v = right_kv[0], right_kv[1]
+            right_k = right_k.to(left_k.device)
+            right_v = right_v.to(left_v.device)
+
+            assert len(left_k.shape) == 3
+            assert len(left_v.shape) == 3
+            assert len(right_k.shape) == 3
+            assert len(right_v.shape) == 3
+
+            assert (left_k[:, :, :] == right_k[:, :, :]).all()
+            assert (left_v[:, :, :] == right_v[:, :, :]).all()
 
 
 def check_paged_kv_cache_equal(left, right, slot_mapping, num_heads=8, head_size=128):
@@ -270,3 +295,15 @@ def check_kv_cache_device(kvs, device):
 
 def create_gpu_connector(hidden_dim, num_layers):
     return VLLMPagedMemGPUConnectorV2(hidden_dim, num_layers)
+
+
+class DummyLMCacheAsyncLookupServer:
+    def __init__(self):
+        pass
+
+    def send_response_to_scheduler(
+        self,
+        lookup_id: str,
+        retrieved_length: int,
+    ) -> None:
+        pass

@@ -11,7 +11,7 @@ git pull
 
 # Install requirements for benchmark scripts
 cd ../benchmark
-pip install -r ./benchmarks/multi-round-qa/requirements.txt
+pip install -r ./benchmarks/multi_round_qa/requirements.txt
 
 set +x
 

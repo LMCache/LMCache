@@ -3,8 +3,8 @@ Configuring LMCache
 
 LMCache supports two types of configurations:
 
-1. **Configuration file**: a YAML file that contains the configuration items.
-2. **Environment variables**: environment variables that start with ``LMCACHE_``.
+1. **Configuration file**: a YAML (recommended) or JSON file that contains the configuration items.
+2. **Environment variables**: environment variables that start with ``LMCACHE_``. 
 
 To use a configuration file, you can set the ``LMCACHE_CONFIG_FILE`` environment variable to the path of the configuration file.
 
@@ -36,23 +36,47 @@ Basic cache settings that control the core functionality of LMCache.
      - Maximum CPU cache size in GB. Default: 5.0
    * - local_disk
      - LMCACHE_LOCAL_DISK
-     - Path to local disk cache. Format: "file:///path/to/cache" or null
+     - Path to local disk cache. Format: "file:///path/to/cache".
    * - max_local_disk_size
      - LMCACHE_MAX_LOCAL_DISK_SIZE
-     - Maximum disk cache size in GB. Default: 0
+     - Maximum disk cache size in GB. Default: 0.0
    * - remote_url
      - LMCACHE_REMOTE_URL
-     - Remote storage URL. Format: "protocol://host:port" or null
+     - Remote storage URL. Format: "protocol://host:port".
    * - remote_serde
      - LMCACHE_REMOTE_SERDE
      - Serialization format. Values: "naive" or "cachegen". Default: "naive"
    * - save_decode_cache
      - LMCACHE_SAVE_DECODE_CACHE
      - Whether to store decode KV cache. Values: true/false. Default: false
-   * - error_handling
-     - LMCACHE_ERROR_HANDLING
-     - Whether to enable error handling. Values: true/false. Default: false
-
+   * - use_layerwise
+     - LMCACHE_USE_LAYERWISE
+     - Whether to enable layerwise pipelining. Values: true/false. Default: false
+   * - pre_caching_hash_algorithm
+     - LMCACHE_PRE_CACHING_HASH_ALGORITHM
+     - Hash algorithm for prefix-caching. Default: "builtin"
+   * - save_unfull_chunk
+     - LMCACHE_SAVE_UNFULL_CHUNK
+     - Whether to save unfull chunks. Values: true/false. Default: true
+   * - blocking_timeout_secs
+     - LMCACHE_BLOCKING_TIMEOUT_SECS
+     - Timeout for blocking operations in seconds. Default: 10
+   * - py_enable_gc
+     - LMCACHE_PY_ENABLE_GC
+     - Whether to enable Python garbage collection. Values: true/false. Default: true
+   * - cache_policy
+     - LMCACHE_CACHE_POLICY
+     - Cache eviction policy (e.g. "LRU", "LFU", "FIFO"). Default: "LRU"
+   * - numa_mode
+     - LMCACHE_NUMA_MODE
+     - NUMA-aware memory allocation mode. Values: "auto" (detect from system), "manual" (use extra_config mapping), null (disabled). When enabled, allocates pinned memory on specific NUMA nodes for better GPU-CPU memory bandwidth. Default: null
+   * - external_lookup_client
+     - LMCACHE_EXTERNAL_LOOKUP_CLIENT
+     - External KV lookup service URI (e.g., "mooncakestore://address"). If null, defaults to LMCache's internal lookup client. Default: null
+   * - extra_config
+     - LMCACHE_EXTRA_CONFIG={"key": value, ...}
+     - Additional configuration as JSON dict. For NUMA manual mode, include "gpu_to_numa_mapping": {gpu_id: numa_node, ...}. Default: {}
+     
 Cache Blending Configurations
 -----------------------------
 
@@ -132,15 +156,12 @@ Settings for the KV cache controller functionality.
 Nixl (Disaggregated Prefill) Configurations
 -------------------------------------------
 
-Settings for Nixl-based disaggregated prefill functionality.
+Settings for Nixl-based disaggregated prefill functionality. The latest/default nixl backend/connector are implemented inside of `lmcache/v1/storage_backend/nixl_backend_v3` and `lmcache/v1/storage_backend/connector/nixl_connector_v3.py`.
 
 .. note::
 
-    When Nixl is enabled, the following restrictions apply:
+    When Nixl is enabled, the following restrictions apply (welcome contributions to remove these restrictions):
     
-    - local_cpu must be false
-    - max_local_cpu_size must be 0
-    - local_disk must be null
     - remote_url must be null
     - save_decode_cache must be false
     - enable_p2p must be false
@@ -155,25 +176,169 @@ Settings for Nixl-based disaggregated prefill functionality.
    * - enable_nixl
      - LMCACHE_ENABLE_NIXL
      - Whether to enable Nixl. Values: true/false. Default: false
+   * - enable_xpyd
+     - LMCACHE_ENABLE_XPYD
+     - Should be true when enable_nixl=true to use latest v3 nixl backend/connector. Values: true/false. Default: false
    * - nixl_role
      - LMCACHE_NIXL_ROLE
-     - Nixl role. Values: "sender" or "receiver"
-   * - nixl_receiver_host
-     - LMCACHE_NIXL_RECEIVER_HOST
-     - Host of the Nixl receiver
-   * - nixl_receiver_port
-     - LMCACHE_NIXL_RECEIVER_PORT
-     - Base port of the Nixl receiver
+     - Nixl role. Values: "sender" (prefiller) or "receiver" (decoder). Required when enable_nixl=true
    * - nixl_buffer_size
      - LMCACHE_NIXL_BUFFER_SIZE
-     - Transport buffer size for Nixl in bytes
+     - Transport buffer size for Nixl in bytes. Required for both senders and receivers when enable_nixl=true
    * - nixl_buffer_device
      - LMCACHE_NIXL_BUFFER_DEVICE
-     - Device that Nixl uses
+     - Device for Nixl buffer. Values: "cpu", "cuda". Required for both senders and receivers when enable_nixl=true
+   * - nixl_backends
+     - LMCACHE_NIXL_BACKENDS
+     - List of Nixl transport backends. Useful for non-disaggregated use case (see below). UCX default is sufficient for disagg use case. Default: ["UCX"]
    * - nixl_enable_gc
      - LMCACHE_NIXL_ENABLE_GC
      - Whether to enable Nixl garbage collection. Values: true/false. Default: false
+   * - nixl_peer_host
+     - LMCACHE_NIXL_PEER_HOST
+     - Host for peer connections. Required for receivers to bind to
+   * - nixl_peer_init_port
+     - LMCACHE_NIXL_PEER_INIT_PORT
+     - Initialization port for peer connections. Required for receivers to bind to
+   * - nixl_peer_alloc_port
+     - LMCACHE_NIXL_PEER_ALLOC_PORT
+     - Allocation port for peer connections. Required for receivers to bind to
+   * - nixl_proxy_host
+     - LMCACHE_NIXL_PROXY_HOST
+     - Host for proxy server. Required for senders to connect to inform the proxy when transfer to decoder has been completed
+   * - nixl_proxy_port
+     - LMCACHE_NIXL_PROXY_PORT
+     - Port for proxy server. Required for senders to connect to inform the proxy when transfer to decoder has been completed
+
+Nixl (as a storage backend) Configurations
+------------------------------------------
+
+Settings for using Nixl as a storage backend instead of disaggregated prefill. This mode requires additional configurations in ``extra_config``.
+
+.. note::
+
+    This is a different mode from disaggregated prefill. When using Nixl as a storage backend, you need to configure it through ``extra_config``.
+
+.. code-block:: yaml
+
+  
+    extra_config: 
+      # enable_nixl_storage will disable disaggregated prefill mode, even if
+      # enable_nixl is true.
+      enable_nixl_storage: true
+      nixl_backend: "POSIX"  # Options: "GDS", "GDS_MT", "POSIX", "HF3FS"
+      nixl_path: "/path/to/storage/"
+      nixl_file_pool_size: 64
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 40
+
+   * - Configuration Key
+     - Description
+   * - enable_nixl_storage
+     - Whether to enable Nixl storage backend. Values: true/false
+   * - nixl_backend
+     - Storage backend type. Options: "GDS", "GDS_MT", "POSIX", "HF3FS"
+   * - nixl_path
+     - File system path for Nixl storage
+   * - nixl_file_pool_size
+     - Number of files in the storage pool
 
 
+Additional Storage Configurations
+---------------------------------
 
+Settings for different storage backends and paths.
 
+.. list-table::
+   :header-rows: 1
+   :widths: 30 30 40
+
+   * - YAML Config Name
+     - Environment Variable
+     - Description
+   * - weka_path
+     - LMCACHE_WEKA_PATH
+     - Path for Weka storage backend
+   * - gds_path
+     - LMCACHE_GDS_PATH
+     - Path for GDS backend
+   * - cufile_buffer_size
+     - LMCACHE_CUFILE_BUFFER_SIZE
+     - Buffer size for cuFile operations
+
+Internal API Server Configurations
+----------------------------------
+
+Settings for the internal API server that provides management and debugging APIs for LMCache engines. The API server runs on each worker and scheduler, allowing you to inspect and control LMCache behavior at runtime.
+
+.. note::
+
+    The internal API server provides endpoints for:
+    
+    - **Metrics**: Performance and cache statistics 
+    - **Configuration**: Runtime configuration inspection
+    - **Metadata**: Engine and model metadata
+    - **Threads**: Thread debugging information
+    - **Log Level**: Dynamic log level adjustment
+    - **Script Execution**: Run custom Python scripts with access to the LMCache engine
+
+Configuration Options
+~~~~~~~~~~~~~~~~~~~~~
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 30 40
+
+   * - YAML Config Name
+     - Environment Variable
+     - Description
+   * - internal_api_server_enabled
+     - LMCACHE_INTERNAL_API_SERVER_ENABLED
+     - Whether to enable internal API server. Default: false
+   * - internal_api_server_host
+     - LMCACHE_INTERNAL_API_SERVER_HOST
+     - Host for internal API server to bind to. Default: "0.0.0.0"
+   * - internal_api_server_port_start
+     - LMCACHE_INTERNAL_API_SERVER_PORT_START
+     - Starting port for internal API server. Port assignment: Scheduler = port_start + 0, Worker i = port_start + i + 1. Example: If port_start=6999, then Scheduler=6999, Worker 0=7000, Worker 1=7001, etc. Default: 6999
+   * - internal_api_server_include_index_list
+     - LMCACHE_INTERNAL_API_SERVER_INCLUDE_INDEX_LIST
+     - List of worker/scheduler indices to enable API server on. Use 0 for scheduler, 1 for worker 0, 2 for worker 1, etc. If null, enables on all workers/scheduler. Example: [0, 1] enables only on scheduler and worker 0. Default: null
+   * - internal_api_server_socket_path_prefix
+     - LMCACHE_INTERNAL_API_SERVER_SOCKET_PATH_PREFIX
+     - If specified, use Unix domain sockets instead of TCP ports. Socket paths will be "{prefix}_{port}". Example: "/tmp/lmcache_api_socket" creates "/tmp/lmcache_api_socket_6999", "/tmp/lmcache_api_socket_7000", etc. Default: null
+
+Plugin Configurations
+---------------------
+
+Settings for plugin system.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 30 40
+
+   * - YAML Config Name
+     - Environment Variable
+     - Description
+   * - plugin_locations
+     - LMCACHE_PLUGIN_LOCATIONS
+     - List of plugin locations. Default: []
+
+Deprecated Configurations
+-------------------------
+
+These configurations are deprecated and may be removed in future versions.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 30 40
+
+   * - YAML Config Name
+     - Environment Variable
+     - Description
+   * - audit_actual_remote_url
+     - LMCACHE_AUDIT_ACTUAL_REMOTE_URL
+     - (Deprecated) URL of actual remote LMCache instance for auditing. Use extra_config['audit_actual_remote_url'] instead
+     

@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING, Union
 import os
 
 if TYPE_CHECKING:
+    from vllm.config import ModelConfig
     from vllm.multimodal.inputs import PlaceholderRange
 
 # Third Party
@@ -86,6 +87,14 @@ def apply_mm_hashes_to_token_ids(
     return token_ids
 
 
+def mla_enabled(model_config: "ModelConfig") -> bool:
+    return (
+        hasattr(model_config, "use_mla")
+        and isinstance(model_config.use_mla, bool)
+        and model_config.use_mla
+    )
+
+
 def create_lmcache_metadata(
     vllm_config=None, model_config=None, parallel_config=None, cache_config=None
 ):
@@ -126,13 +135,7 @@ def create_lmcache_metadata(
     kv_dtype = get_kv_cache_torch_dtype(cache_cfg.cache_dtype, model_cfg.dtype)
 
     # Check if MLA is enabled
-    use_mla = False
-    if (
-        hasattr(model_cfg, "use_mla")
-        and isinstance(model_cfg.use_mla, bool)
-        and model_cfg.use_mla
-    ):
-        use_mla = True
+    use_mla = mla_enabled(model_cfg)
 
     # Construct KV shape (for memory pool)
     num_layer = model_cfg.get_num_layers(parallel_cfg)

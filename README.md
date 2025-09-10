@@ -26,9 +26,9 @@
 
 | [**Blog**](https://blog.lmcache.ai/)
 | [**Documentation**](https://docs.lmcache.ai/)
-| [**Join Slack**](https://join.slack.com/t/lmcacheworkspace/shared_invite/zt-36x1m765z-8FgDA_73vcXtlZ_4XvpE6Q)
+| [**Join Slack**](https://join.slack.com/t/lmcacheworkspace/shared_invite/zt-3bgx768yd-H8WkOTmPtbxVYJ5nuZ4dmA)
 | [**Interest Form**](https://forms.gle/MHwLiYDU6kcW3dLj7)
-| [**Roadmap**](https://github.com/LMCache/LMCache/issues/574)
+| [**Roadmap**](https://github.com/LMCache/LMCache/issues/1253)
 
 🔥 **NEW: For enterprise-scale deployment of LMCache and vLLM, please check out vLLM [Production Stack](https://github.com/vllm-project/production-stack). LMCache is also officially supported in [llm-d](https://github.com/llm-d/llm-d/) and [KServe](https://github.com/kserve/kserve)!**
 
@@ -65,7 +65,7 @@ pip install lmcache
 
 Works on Linux NVIDIA GPU platform.
 
-More [detailed installation instructions](https://docs.lmcache.ai/getting_started/installation) are available in the docs.
+More [detailed installation instructions](https://docs.lmcache.ai/getting_started/installation) are available in the docs, particularly if you are not using the latest stable version of vllm or using another serving engine with different dependencies. Any "undefined symbol" or torch mismatch versions can be resolved in the documentation. 
 
 ## Getting started
 
@@ -84,7 +84,7 @@ demonstrating how to address different use cases with LMCache.
 
 ## Interested in Connecting?
 
-Fill out the [interest form](https://forms.gle/mQfQDUXbKfp2St1z7), [sign up for our newsletter](https://mailchi.mp/tensormesh/lmcache-sign-up-newsletter), [join LMCache slack](https://join.slack.com/t/lmcacheworkspace/shared_invite/zt-2viziwhue-5Amprc9k5hcIdXT7XevTaQ), [check out LMCache website](https://lmcache.ai/), or [drop an email](contact@lmcache.ai), and our team will reach out to you!
+Fill out the [interest form](https://forms.gle/mQfQDUXbKfp2St1z7), [sign up for our newsletter](https://mailchi.mp/tensormesh/lmcache-sign-up-newsletter), [join LMCache slack](https://join.slack.com/t/lmcacheworkspace/shared_invite/zt-2viziwhue-5Amprc9k5hcIdXT7XevTaQ), [check out LMCache website](https://lmcache.ai/), or [drop an email](mailto:contact@lmcache.ai), and our team will reach out to you!
 
 ## Community meeting
 
@@ -100,6 +100,7 @@ Recordings of meetings are available on the [YouTube LMCache channel](https://ww
 
 We welcome and value all contributions and collaborations.  Please check out [Contributing Guide](CONTRIBUTING.md) on how to contribute.
 
+We continually update [[Onboarding] Welcoming contributors with good first issues!](https://github.com/LMCache/LMCache/issues/627)
 
 ## Citation
 

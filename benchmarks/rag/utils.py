@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from enum import Enum
+from enum import Enum, auto
 from logging import Logger
 import asyncio
 import collections
@@ -58,8 +58,8 @@ def init_logger(name: str, log_level=logging.DEBUG) -> Logger:
 
 
 class AsyncLoopWrapper:
-    _loop: asyncio.AbstractEventLoop = None
-    _thread: threading.Thread = None
+    _loop: asyncio.AbstractEventLoop | None = None
+    _thread: threading.Thread | None = None
     _logger = init_logger("AsyncLoopWrapper")
 
     @classmethod
@@ -126,12 +126,13 @@ class AsyncLoopWrapper:
     def GetOrStartLoop(cls) -> asyncio.AbstractEventLoop:
         if cls._loop is None:
             cls.StartLoop()
+        assert cls._loop is not None, "Loop is not started"
         return cls._loop
 
 
 class PromptBuildMethodType(Enum):
-    QA = 0
-    FEW_SHOT = 1
+    QA = auto()
+    FEW_SHOT = auto()
 
 
 def load_dataset(dataset_path):

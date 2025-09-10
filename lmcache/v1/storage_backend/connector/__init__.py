@@ -10,6 +10,7 @@ import inspect
 import pkgutil
 
 # First Party
+from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.storage_backend.connector.base_connector import RemoteConnector
@@ -30,9 +31,9 @@ class ParsedRemoteURL:
 
     host: str
     port: int
+    path: str
     username: Optional[str] = None
     password: Optional[str] = None
-    path: Optional[str] = None
     query_params: Dict[str, List[str]] = field(default_factory=dict)
 
 
@@ -63,6 +64,8 @@ def parse_remote_url(url: str) -> ParsedRemoteURL:
     path = parsed.path if parsed.path else ""
     query = parse_qs(parsed.query) if parsed.query else {}
 
+    assert host is not None, f"Invalid URL {url}: missing host"
+    assert port is not None, f"Invalid URL {url}: missing port"
     return ParsedRemoteURL(
         host=host,
         port=port,
@@ -91,17 +94,19 @@ class ConnectorContext:
         loop: asyncio.AbstractEventLoop,
         local_cpu_backend: LocalCPUBackend,
         config: Optional[LMCacheEngineConfig],
+        metadata: Optional[LMCacheEngineMetadata],
     ):
         self.url = url
         self.loop = loop
         self.local_cpu_backend = local_cpu_backend
         self.config = config
+        self.metadata = metadata
 
 
 class ConnectorAdapter(ABC):
     """Base class for connector adapters."""
 
-    def __init__(self, schema: str):
+    def __init__(self, schema: str = "") -> None:
         self.schema = schema
 
     @abstractmethod
@@ -133,12 +138,15 @@ class ConnectorManager:
         loop: asyncio.AbstractEventLoop,
         local_cpu_backend: LocalCPUBackend,
         config: Optional[LMCacheEngineConfig] = None,
+        metadata: Optional[LMCacheEngineMetadata] = None,
     ) -> None:
+        logger.info("Initializing ConnectorManager")
         self.context = ConnectorContext(
             url=url,
             loop=loop,
             local_cpu_backend=local_cpu_backend,
             config=config,
+            metadata=metadata,
         )
         self.adapters: List[ConnectorAdapter] = []
         self._discover_adapters()
@@ -182,7 +190,10 @@ class ConnectorManager:
     def create_connector(self) -> RemoteConnector:
         for adapter in self.adapters:
             if adapter.can_parse(self.context.url):
-                return adapter.create_connector(self.context)
+                connector = adapter.create_connector(self.context)
+                connector.init_chunk_meta(self.context.config, self.context.metadata)
+                connector.post_init()
+                return connector
 
         raise ValueError(f"No adapter found for URL: {self.context.url}")
 
@@ -192,7 +203,8 @@ def CreateConnector(
     loop: asyncio.AbstractEventLoop,
     local_cpu_backend: LocalCPUBackend,
     config: Optional[LMCacheEngineConfig] = None,
-) -> Optional[InstrumentedRemoteConnector]:
+    metadata: Optional[LMCacheEngineMetadata] = None,
+) -> InstrumentedRemoteConnector:
     """
     Create a remote connector from the given URL.
 
@@ -206,6 +218,10 @@ def CreateConnector(
     - blackhole://[any_text]
     - audit://host:port[?verify=true|false]
     - fs://[host:port]/path
+    - s3://[bucket].s3express-[az_id].[region].amazonaws.com"
+    - mock://[capacity]/?peeking_latency=[ms]&read_throughput=[GB/s]&write_throughput=[GB/s]
+    or
+    - s3://[bucket].s3.[region].amazonaws.com
 
     Examples:
     - redis://localhost:6379
@@ -218,12 +234,17 @@ def CreateConnector(
     - audit://localhost:8080?verify=true
     - fs:///tmp/lmcache
     - external://host:0/external_log_connector.lmc_external_log_connector/?connector_name=ExternalLogConnector
+    - s3://fakefile--use1-az4--x-s3.s3express-use1-az4.us-east-1.amazonaws.com
+    - mock://100/?peeking_latency=1&read_throughput=2&write_throughput=2
+    or
+    - s3://fakefile--use1-az4--x-s3.s3.us-east-1.amazonaws.com
 
     Args:
         url: The remote URL
         loop: The asyncio event loop
         local_cpu_backend: The local CPU backend
         config: Optional LMCache engine configuration
+        metadata: Optional LMCache engine metadata
 
     Returns:
         RemoteConnector: The created connector
@@ -236,7 +257,7 @@ def CreateConnector(
     if "://" not in url:
         raise ValueError(f"Invalid remote url {url}: missing scheme")
 
-    manager = ConnectorManager(url, loop, local_cpu_backend, config)
+    manager = ConnectorManager(url, loop, local_cpu_backend, config, metadata)
     connector = manager.create_connector()
 
     return InstrumentedRemoteConnector(connector)

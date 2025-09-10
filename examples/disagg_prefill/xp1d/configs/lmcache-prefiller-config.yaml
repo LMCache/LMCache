@@ -10,3 +10,4 @@ nixl_receiver_port: 55555
 nixl_buffer_size: 1073741824 # 1GB
 nixl_buffer_device: "cuda"
 nixl_enable_gc: True
+nixl_backends: [UCX]

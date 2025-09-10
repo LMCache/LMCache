@@ -13,6 +13,7 @@ from lmcache.v1.compute.models.utils import VLLMModelTracker
 if TYPE_CHECKING:
     # First Party
     from lmcache.v1.cache_engine import LMCacheEngine
+    from lmcache.v1.config import LMCacheEngineConfig
     from lmcache.v1.gpu_connector import GPUConnectorInterface
 
 logger = init_logger(__name__)
@@ -27,6 +28,7 @@ class LMCBlenderBuilder:
         instance_id: str,
         cache_engine: "LMCacheEngine",
         gpu_connector: "GPUConnectorInterface",
+        config: "LMCacheEngineConfig",
     ):
         """
         Get or create a blender for the given instance_id.
@@ -39,6 +41,7 @@ class LMCBlenderBuilder:
                 cache_engine=cache_engine,
                 gpu_connector=gpu_connector,
                 vllm_model=vllm_model,
+                config=config,
             )
             cls._blenders[instance_id] = blender
         else:

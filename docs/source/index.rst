@@ -74,14 +74,8 @@ Documentation
    :maxdepth: 2
    :caption: KV Cache offloading and sharing
 
-   kv_cache/cpu_ram
-   kv_cache/local_storage
-   kv_cache/gds
-   kv_cache/redis
-   kv_cache/infinistore
-   kv_cache/mooncake
-   kv_cache/valkey
-   kv_cache/weka
+   kv_cache/storage_backends/index
+   kv_cache/caching_policies
 
 :raw-html:`<br />`
 
@@ -99,11 +93,12 @@ Documentation
    :caption: KV Cache management
 
    kv_cache_management/controller
-   kv_cache_management/lookup
-   kv_cache_management/persist
    kv_cache_management/clear
-   kv_cache_management/move
    kv_cache_management/compress
+   kv_cache_management/health
+   kv_cache_management/lookup
+   kv_cache_management/move
+   kv_cache_management/pin
    kv_cache_management/check_finish
 
 :raw-html:`<br />`
@@ -128,11 +123,20 @@ Documentation
 
 .. toctree::
    :maxdepth: 2
+   :caption: Internal API Server
+   
+   internal_api_server/internal_api_server
+
+:raw-html:`<br />`
+
+.. toctree::
+   :maxdepth: 2
    :caption: Developer Guide
 
    developer_guide/contributing
    developer_guide/docker_file
    developer_guide/usage/index
+   developer_guide/plugin_framework
 
 :raw-html:`<br />`
 
@@ -143,7 +147,8 @@ Documentation
    api_reference/configurations
    api_reference/storage_backends
    api_reference/dynamic_connector
-
+   api_reference/multimodality
+   
 :raw-html:`<br />`
 
 .. toctree::

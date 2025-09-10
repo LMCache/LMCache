@@ -1,0 +1,22 @@
+env:
+  DOCKER_BUILDKIT: 1
+
+steps:
+  - label: ":compression: Comprehensive Tests"
+    key: "test"
+    timeout_in_minutes: 60
+    commands:
+      - chmod +x .buildkite/scripts/vllm-integration-tests.sh
+      - BUILD_ID=${BUILDKITE_BUILD_ID} .buildkite/scripts/vllm-integration-tests.sh --hf-token=$HF_TOKEN --server-wait-timeout=240 --configs=.buildkite/cases/comprehensive-cases.txt
+      - cat /tmp/build_${BUILDKITE_BUILD_ID}_*.log > build_${BUILDKITE_BUILD_ID}.log
+    artifact_paths:
+      - "build_${BUILDKITE_BUILD_ID}.log"
+
+  - label: ":broom: Clean up"
+    depends_on: ["test"]
+    allow_dependency_failure: true
+    command: |
+      export TARGET="$PWD"
+      echo "Deleting current workspace $TARGET"
+      cd /
+      sudo rm -rf "$TARGET"

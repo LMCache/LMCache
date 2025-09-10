@@ -173,13 +173,13 @@ def test_device_allocators(alloc_cls, use_paging):
     ],
 )
 def test_inplace_modification(alloc_cls):
-    total_size = 1024
+    total_size = 1024 * 1024
     allocator = alloc_cls(total_size)
 
-    data = allocator.allocate([10], torch.float)
+    data = allocator.allocate([4096], torch.float)
     assert data is not None
     assert data.tensor.dtype == torch.float
-    assert data.tensor.shape == (10,)
+    assert data.tensor.shape == (4096,)
 
     data.tensor.fill_(1.0)
     assert torch.all(data.tensor == 1.0)

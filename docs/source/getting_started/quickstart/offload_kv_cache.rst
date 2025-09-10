@@ -381,9 +381,9 @@ Supported offloading destinations
 
 LMCache now supports offloading KV cache to the following destinations:
 
-- :doc:`CPU memory <../../kv_cache/cpu_ram>`
-- :doc:`Local file system <../../kv_cache/local_storage>`
-- :doc:`Mooncake Storage <../../kv_cache/mooncake>`
-- :doc:`InfiniStore <../../kv_cache/infinistore>`
-- :doc:`Redis <../../kv_cache/redis>`
-- :doc:`ValKey <../../kv_cache/valkey>`
+- :doc:`CPU memory <../../kv_cache/storage_backends/cpu_ram>`
+- :doc:`Local file system <../../kv_cache/storage_backends/local_storage>`
+- :doc:`Mooncake Storage <../../kv_cache/storage_backends/mooncake>`
+- :doc:`InfiniStore <../../kv_cache/storage_backends/infinistore>`
+- :doc:`Redis <../../kv_cache/storage_backends/redis>`
+- :doc:`ValKey <../../kv_cache/storage_backends/valkey>`

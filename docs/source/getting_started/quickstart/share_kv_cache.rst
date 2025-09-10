@@ -53,7 +53,7 @@ Run centralized sharing example
 
     LMCACHE_CONFIG_FILE=lmcache_config.yaml \
     CUDA_VISIBLE_DEVICES=0 \
-    vllm serve mistralai/Mistral-7B-Instruct-v0.2 \
+    vllm serve meta-llama/Meta-Llama-3.1-8B-Instruct \
         --gpu-memory-utilization 0.8 \
         --port 8000 --kv-transfer-config \
         '{"kv_connector":"LMCacheConnectorV1", "kv_role":"kv_both"}'
@@ -64,7 +64,7 @@ In another terminal,
 
     LMCACHE_CONFIG_FILE=lmcache_config.yaml \
     CUDA_VISIBLE_DEVICES=1 \
-    vllm serve mistralai/Mistral-7B-Instruct-v0.2 \
+    vllm serve meta-llama/Meta-Llama-3.1-8B-Instruct \
         --gpu-memory-utilization 0.8 \
         --port 8001 \
         --kv-transfer-config \

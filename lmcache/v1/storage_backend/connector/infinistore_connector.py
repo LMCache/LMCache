@@ -81,6 +81,9 @@ class InfinistoreConnector(RemoteConnector):
 
         return await self.loop.run_in_executor(None, blocking_io)
 
+    def exists_sync(self, key: CacheEngineKey) -> bool:
+        return self.rdma_conn.check_exist(key.to_string())
+
     async def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         key_str = key.to_string()
 
@@ -141,7 +144,7 @@ class InfinistoreConnector(RemoteConnector):
 
         buffer[METADATA_BYTES_LEN : METADATA_BYTES_LEN + len(kv_bytes)] = kv_bytes
 
-        size = memory_obj.get_size()
+        size = memory_obj.get_physical_size()
 
         if size + METADATA_BYTES_LEN > self.buffer_size:
             raise ValueError(
