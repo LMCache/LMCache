@@ -121,25 +121,13 @@ class CacheEngineKey:
         self.tags = tags
 
     def __hash__(self):
-        if self.tags is None:
-            return hash(
-                (
-                    self.fmt,
-                    self.model_name,
-                    self.world_size,
-                    self.worker_id,
-                    self.chunk_hash,
-                )
-            )
         return hash(
-            (
-                self.fmt,
-                self.model_name,
-                self.world_size,
-                self.worker_id,
-                self.chunk_hash,
-                "%".join([f"{k}={v}" for k, v in self.tags.items()]),
-            )
+            self.fmt,
+            self.model_name,
+            self.world_size,
+            self.worker_id,
+            self.chunk_hash,
+            self.tags,
         )
 
     def __eq__(self, other):
@@ -260,27 +248,14 @@ class LayerCacheEngineKey(CacheEngineKey):
     layer_id: int = 0
 
     def __hash__(self):
-        if self.tags is None:
-            return hash(
-                (
-                    self.fmt,
-                    self.model_name,
-                    self.world_size,
-                    self.worker_id,
-                    self.chunk_hash,
-                    self.layer_id,
-                )
-            )
         return hash(
-            (
-                self.fmt,
-                self.model_name,
-                self.world_size,
-                self.worker_id,
-                self.chunk_hash,
-                "%".join([f"{k}={v}" for k, v in self.tags.items()]),
-                self.layer_id,
-            )
+            self.fmt,
+            self.model_name,
+            self.world_size,
+            self.worker_id,
+            self.chunk_hash,
+            self.tags,
+            self.layer_id,
         )
 
     def __eq__(self, other):

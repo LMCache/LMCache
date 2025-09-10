@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from typing import TYPE_CHECKING, Optional, Union
+import json
 import threading
 
 # Third Party
@@ -103,9 +104,7 @@ class LMCacheLookupClient(LookupClientInterface):
         lookup_id_buf = lookup_id.encode("utf-8")
         request_configs_str = ""
         if request_configs is not None and len(request_configs) != 0:
-            request_configs_str = "@".join(
-                [f"{k}%{v}" for k, v in request_configs.items()]
-            )
+            request_configs_str = json.dumps(request_configs)
         request_configs_buf = request_configs_str.encode("utf-8")
         ranks = self.tensor_parallel_size
         if self.create_lookup_server_only_on_worker_0_for_mla:
@@ -176,13 +175,7 @@ class LMCacheLookupServer:
                 request_configs_str = frames[-1].bytes.decode("utf-8")
                 request_configs = None
                 if request_configs_str != "":
-                    request_configs = {}
-                    request_configs_list = request_configs_str.split("@")
-                    for kv in request_configs_list:
-                        kvs = kv.split("%", 1)
-                        if len(kvs) != 2:
-                            raise ValueError("Unexpected tags_str: {tags_str}")
-                        request_configs[kvs[0]] = kvs[1]
+                    request_configs = json.loads(request_configs_str)
 
                 hashes = self.decoder.decode(hash_frames)
                 offsets = self.decoder.decode(offset_frames)
