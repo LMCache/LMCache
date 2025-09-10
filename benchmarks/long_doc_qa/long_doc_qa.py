@@ -17,7 +17,7 @@ Commandline arguments:
                     (Optional, default: 2)
 
     --repeat-mode: The mode to repeat prompts. The supported modes are:
-        - 'random': shuffle the prompts randomly.
+        - 'random': shuffle the prompts randomly. (Default)
         - 'tile': the entire prompt list is repeated in sequence.
         - 'interleave': each prompt is repeated consecutively before
                         moving to the next element.
@@ -518,7 +518,7 @@ def create_argument_parser():
     parser.add_argument(
         "--num-documents",
         type=int,
-        default=20,
+        default=8,
         help="Number of documents to generate for testing.",
     )
 
