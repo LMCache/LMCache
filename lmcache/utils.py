@@ -198,7 +198,7 @@ class CacheEngineKey:
                 kvs = kv.split("%", 1)
                 if len(kvs) != 2:
                     raise ValueError(f"Invalid key string: {s}")
-                request_configs[kvs[0]] = kvs[1]
+                request_configs["lmcache.tag." + kvs[0]] = kvs[1]
         return CacheEngineKey(
             parts[0],
             parts[1],
@@ -308,7 +308,7 @@ class LayerCacheEngineKey(CacheEngineKey):
                 kvs = kv.split("%", 1)
                 if len(kvs) != 2:
                     raise ValueError(f"Invalid key string: {s}")
-                request_configs[kvs[0]] = kvs[1]
+                request_configs["lmcache.tag." + kvs[0]] = kvs[1]
         return LayerCacheEngineKey(
             parts[0],
             parts[1],
