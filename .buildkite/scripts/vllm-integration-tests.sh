@@ -256,7 +256,7 @@ run_pd_lmcache() {
     fi
     source .venv/bin/activate
     uv pip install -r $ORIG_DIR/requirements/build.txt
-    uv pip install torch==2.7.1 httpx fastapi
+    uv pip install torch==2.7.1 httpx fastapi uvicorn
     uv pip install -e $ORIG_DIR --no-build-isolation
     # Start proxy
     python3 "$ORIG_DIR/examples/disagg_prefill/disagg_proxy_server.py" \
