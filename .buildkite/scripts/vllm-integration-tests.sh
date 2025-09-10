@@ -218,7 +218,7 @@ run_long_doc_qa() {
         UV_PYTHON=python3 uv -q venv
     fi
     source .venv/bin/activate
-    uv -q pip install openai
+    uv -q pip install openai pandas matplotlib
     python3 "$ORIG_DIR/benchmarks/long_doc_qa/long_doc_qa.py" \
         "${workload_args[@]}" \
         --port="$PORT" \
