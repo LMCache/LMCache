@@ -101,7 +101,6 @@ Create your ``mooncake-config.yaml``:
 .. code-block:: bash
 
     LMCACHE_CONFIG_FILE="mooncake-config.yaml" \
-    LMCACHE_USE_EXPERIMENTAL=True \
     vllm serve \
         meta-llama/Llama-3.1-70B-Instruct \
         --max-model-len 65536 \
