@@ -99,13 +99,8 @@ wait_for_openai_api_server() {
         done
         echo \"Model ${model} is available on ${port}\"
     "; then
-        if [ -n "$cid" ]; then
-            echo "OpenAI API server did not start"
-            docker logs $cid
-        else
-            echo "Proxy failed to start"
-            cat "/tmp/build_${BUILD_ID}_pd.yaml_proxy.log"
-        fi
+        echo "OpenAI API server did not start"
+        docker logs $cid
         return 1
     fi
 }
@@ -272,7 +267,7 @@ run_pd_lmcache() {
         --decoder-alloc-port "$alloc" \
         --proxy-port "$proxy" \
         > "/tmp/build_${BUILD_ID}_${cfg_name}_proxy.log" 2>&1 &
-    wait_for_openai_api_server "$PORT" "$prefiller_vllm_model" ""
+    sleep 10
 }
 
 usage() {
