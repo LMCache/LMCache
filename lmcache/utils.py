@@ -127,7 +127,7 @@ class CacheEngineKey:
         )
 
     def __eq__(self, other):
-        if type(self) == type(other):
+        if type(self) is type(other):
             return (
                 self.fmt == other.fmt
                 and self.model_name == other.model_name
