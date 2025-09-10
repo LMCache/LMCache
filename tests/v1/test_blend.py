@@ -152,22 +152,44 @@ class TestLMCBlender:
         assert result[1].shape == k.shape
         assert result[2].shape == v.shape
 
-    @patch.object(LMCBlender, "process_qkv")
-    def test_process_qkv_with_check_layer(self, mock_process_qkv):
+    def test_process_qkv_with_check_layer(self, blender):
         """Test process_qkv method when layer is in check_layers."""
         device = "cpu"
-        q = torch.randn(10, 32, 128, device=device)
-        k = torch.randn(10, 32, 128, device=device)
-        v = torch.randn(10, 32, 128, device=device)
-        residual = torch.randn(10, 4096, device=device)
-        attn_output = torch.randn(10, 32, 128, device=device)
+        # Use larger num_tokens to accommodate the way topk works with dim=[1]
+        num_tokens = 200  # Increased to handle potential large indices from topk
+        q = torch.randn(num_tokens, 32, 128, device=device)
+        k = torch.randn(num_tokens, 32, 128, device=device)
+        v = torch.randn(num_tokens, 32, 128, device=device)
+        residual = torch.randn(num_tokens, 4096, device=device)
+        attn_output = torch.randn(num_tokens, 32, 128, device=device)
         attn_metadata = Mock(spec=LMCAttnMetadata)
+        attn_metadata.update_from_top_indices = Mock()
 
-        mock_process_qkv.return_value = (q, k, v, residual, attn_output, attn_metadata)
+        # Mock GPU connector to return similar KV caches
+        old_k = k + torch.randn_like(k) * 0.001  # Very small perturbation
+        old_v = v + torch.randn_like(v) * 0.001
+        blender.gpu_connector.get_kv.return_value = (old_k, old_v)
 
-        result = mock_process_qkv(q, k, v, residual, 1, attn_output, attn_metadata)
+        # The blender fixture has check_layers=[1] by default
+        layer_id = 1
+
+        result = blender.process_qkv(
+            q, k, v, residual, layer_id, attn_output, attn_metadata
+        )
 
         assert len(result) == 6
+        q_res, k_res, v_res, residual_res, attn_output_res, _ = result
+
+        # Check that we get valid tensors back
+        assert q_res is not None
+        assert k_res is not None
+        assert v_res is not None
+        assert residual_res is not None
+        assert attn_output_res is not None
+
+        # Check metadata updates
+        assert blender.metadata.imp_indices is not None
+        assert blender.metadata.positions is not None
 
     def test_blend_layer_generator(self, blender):
         """Test blend_layer method returns generator."""
