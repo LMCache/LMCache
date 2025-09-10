@@ -445,15 +445,18 @@ def _init_lmcache_engine(
 
     # Change current device.
     if Platform.is_cuda():
-        num_gpus = torch.cuda.device_count()
-        local_rank = parallel_config.rank % num_gpus
-        torch.cuda.set_device(local_rank)
-        device = torch.device(f"cuda:{local_rank}")
+        torch_dev = torch.cuda
+        dev_name = "cuda"
     elif Platform.is_xpu():
-        num_gpus = torch.xpu.device_count()
-        local_rank = parallel_config.rank % num_gpus
-        torch.xpu.set_device(local_rank)
-        device = torch.device(f"xpu:{local_rank}")
+        torch_dev = torch.xpu
+        dev_name = "xpu"
+    else:
+        raise RuntimeError("Unsupported device platform for LMCache engine.")
+
+    num_gpus = torch_dev.device_count()
+    local_rank = parallel_config.rank % num_gpus
+    torch_dev.set_device(local_rank)
+    device = torch.device(f"{dev_name}:{local_rank}")
     metadata = LMCacheEngineMetadata(
         model_config.model,
         parallel_config.world_size,
@@ -499,25 +502,21 @@ def _init_lmcache_engine(
             )
     else:
         if Platform.is_cuda():
-            vllm_gpu_connector = VLLMPagedMemGPUConnectorV2(
-                hidden_dim_size,
-                num_layer,
-                use_gpu=use_gpu,
-                chunk_size=chunk_size,
-                dtype=kv_dtype,
-                device=device,
-                use_mla=use_mla,
-            )
+            connector_cls = VLLMPagedMemGPUConnectorV2
         elif Platform.is_xpu():
-            vllm_gpu_connector = VLLMPagedMemXPUConnectorV2(
-                hidden_dim_size,
-                num_layer,
-                use_gpu=use_gpu,
-                chunk_size=chunk_size,
-                dtype=kv_dtype,
-                device=device,
-                use_mla=use_mla,
-            )
+            connector_cls = VLLMPagedMemXPUConnectorV2
+        else:
+            raise RuntimeError("No supported vLLM paged memory connector found for the current platform.")
+
+        vllm_gpu_connector = connector_cls(
+            hidden_dim_size,
+            num_layer,
+            use_gpu=use_gpu,
+            chunk_size=chunk_size,
+            dtype=kv_dtype,
+            device=device,
+            use_mla=use_mla,
+        )
 
     tpg = get_tp_group()
     engine = LMCacheEngineBuilder.get_or_create(

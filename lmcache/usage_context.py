@@ -226,7 +226,11 @@ class UsageContext:
             gpu_memory_per_device = device_property.total_memory
             return gpu_count, gpu_type, gpu_memory_per_device
         if Platform.is_xpu():
-            return 1, "xpu", 0
+            device_property = torch.xpu.get_device_properties(0)
+            gpu_count = torch.xpu.device_count()
+            gpu_type = device_property.name
+            gpu_memory_per_device = device_property.total_memory
+            return gpu_count, gpu_type, gpu_memory_per_device
         raise ValueError("Unsupported device type")
 
     def _get_source(self):

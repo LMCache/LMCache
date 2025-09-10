@@ -19,7 +19,7 @@ try:
     # First Party
     import lmcache.c_ops as lmc_ops
 except (ModuleNotFoundError, ImportError):
-    pass
+    lmc_ops = None
 import lmcache.storage_backend.serde.cachegen_basics as CGBasics
 
 logger = init_logger(__name__)
