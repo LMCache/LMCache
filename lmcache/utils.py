@@ -111,14 +111,15 @@ class CacheEngineKey:
     request_configs: Optional[dict] = None
 
     def __post_init__(self):
-        tags = None
+        tag_list = None
         if self.request_configs is not None:
             for k, v in self.request_configs.items():
                 if k.startswith("lmcache.tag."):
-                    if tags is None:
-                        tags = {}
-                    tags[k[len("lmcache.tag.") :]] = str(v)
-        self.tags = tags
+                    if tag_list is None:
+                        tag_list = []
+                    tag_list.append((k[len("lmcache.tag.") :], v))
+        # use tuple to save tags
+        self.tags = None if tag_list is None else tuple(tag_list)
 
     def __hash__(self):
         return hash(
@@ -151,7 +152,7 @@ class CacheEngineKey:
             f"@{self.worker_id}@{self.chunk_hash:x}"
         )
         if self.tags is not None and len(self.tags) != 0:
-            tags = [f"{k}%{v}" for k, v in self.tags.items()]
+            tags = [f"{k}%{v}" for k, v in self.tags]
             s += "@" + "@".join(tags)
         return s
 
@@ -274,7 +275,7 @@ class LayerCacheEngineKey(CacheEngineKey):
             f"@{self.worker_id}@{self.chunk_hash:x}@{self.layer_id}"
         )
         if self.tags is not None and len(self.tags) != 0:
-            tags = [f"{k}%{v}" for k, v in self.tags.items()]
+            tags = [f"{k}%{v}" for k, v in self.tags]
             s += "@" + "@".join(tags)
         return s
 
