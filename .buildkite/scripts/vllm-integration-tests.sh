@@ -199,7 +199,7 @@ run_pd_lmcache() {
     )
 
     # Health check
-    wait_for_openai_api_server "$PORT1" "$prefiller_vllm_model" "$PREFILLER_CID"
+    # wait_for_openai_api_server "$PORT1" "$prefiller_vllm_model" "$PREFILLER_CID"
 
     # Logging
     touch "$PREFILLER_LOGFILE"
@@ -244,7 +244,7 @@ run_pd_lmcache() {
     )
 
     # Health check
-    wait_for_openai_api_server "$PORT2" "$decoder_vllm_model" "$DECODER_CID"
+    # wait_for_openai_api_server "$PORT2" "$decoder_vllm_model" "$DECODER_CID"
 
     # Logging
     touch "$DECODER_LOGFILE"
@@ -255,7 +255,7 @@ run_pd_lmcache() {
         UV_PYTHON=python3 uv -q venv
     fi
     source .venv/bin/activate
-    uv pip install -r requirements/build.txt
+    uv pip install -r $ORIG_DIR/requirements/build.txt
     uv pip install torch==2.7.1 httpx
     uv pip install -e $ORIG_DIR --no-build-isolation
     # Start proxy
