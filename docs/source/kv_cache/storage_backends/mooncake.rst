@@ -82,7 +82,6 @@ Create your ``mooncake-config.yaml``:
 .. code-block:: yaml
 
     chunk_size: 256
-    local_device: "cpu"
     remote_url: "mooncakestore://127.0.0.1:50051/"
     remote_serde: "naive"
     local_cpu: False
@@ -159,9 +158,6 @@ Configuration
    * - ``chunk_size``
      - 256
      - Number of tokens per KV chunk
-   * - ``local_device``
-     - "cpu"
-     - Local storage device type
    * - ``remote_url``
      - Required
      - Mooncake store connection URL (format: ``mooncakestore://host:port/``)
