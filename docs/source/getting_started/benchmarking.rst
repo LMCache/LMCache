@@ -3,13 +3,15 @@ Benchmarking
 
 This is a simple tutorial on how to deploy and benchmark LMCache. 
 
-Workload Generator:
--------------------
+Workload Generator -- Long Doc QA:
+----------------------------------
 
-LMCache has a few benchmarking scripts inside of the ``benchmarks/`` directory, including ``multi_doc_qa/`` which demonstrates the performance gain of CacheBlend and ``long_doc_qa/``, which is a general purpose workload generator that simulates sending many long context queries ("documents"). 
+Long Doc QA (found in ``benchmarks/long_doc_qa/``) is a highly flexible traffic simulator that sends long context queries ("documents") to your serving engine.
+Some configurable parameters include the number of tokens in the documents (default is 10000), the number of documents to send to the model (default is 20), the number of output tokens per request (default is 100), and the cache hit/miss ratio (e.g. 2:2 means a repeated 2 hit and 2 miss pattern through all the documents).
+You can also choose the number of times to repeat prompts and the mode of repetition (random, tile, interleave).
 
-LMCache provides a simple script that helps you deploy LMCache and "route traffic" (number of documents) accordingly.
-It will help you determine the tensor parallelism and the amount of CPU RAM to deploy LMCache with based on the specifications of your hardware.
+LMCache provides a simple Long Doc QA Recommender that helps you deploy LMCache and generate the appropriate traffic through Long Doc QA.
+It will also help you determine the tensor parallelism and the amount of CPU RAM to deploy LMCache with based on the specifications of your hardware.
 
 First set your ``HF_TOKEN`` environment variable with access to the model you want to benchmark. Then run the recommendation script: 
 
@@ -28,6 +30,7 @@ Example #1:
 .. code-block:: text
 
     # this output is hardware specific, blindly copying it may not yield optimal results
+    # please run the recommender script yourself
     1. vLLM Deployment: 
     -----------------
 
