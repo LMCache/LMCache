@@ -2,7 +2,6 @@
 # Standard
 from typing import TYPE_CHECKING, Optional, Union
 import threading
-import time
 
 # Third Party
 from vllm.utils import make_zmq_socket
@@ -178,7 +177,9 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
             ranks = 1
         for i in range(ranks):
             self.push_sockets[i].send_multipart(msg_buf, copy=False)
-        time.sleep(self.lookup_backoff_time)
+        # it is okay for the scheduler to busy loop as long as we are using
+        # --distributed-executor-backen "mp" or else the GIL will stall the worker
+        # time.sleep(self.lookup_backoff_time)
         return None
 
     def process_responses_from_workers(self):

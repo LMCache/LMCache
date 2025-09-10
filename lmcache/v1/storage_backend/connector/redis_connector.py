@@ -6,7 +6,7 @@ import inspect
 import os
 
 # Third Party
-import redis
+import redis.asyncio as redis
 
 # First Party
 from lmcache.logging import init_logger
@@ -35,19 +35,23 @@ class RedisConnector(RemoteConnector):
         loop: asyncio.AbstractEventLoop,
         local_cpu_backend: LocalCPUBackend,
     ):
-        self.connection = redis.from_url(url=url, decode_responses=False)
+        # set a large max
+        max_connections = 100
+        self.pool = redis.ConnectionPool.from_url(url, max_connections=max_connections)
+        self.connection = redis.Redis.from_pool(self.pool)
         self.loop = loop
         self.local_cpu_backend = local_cpu_backend
 
     async def exists(self, key: CacheEngineKey) -> bool:
-        return bool(self.connection.exists(key.to_string() + "metadata"))
+        return bool(await self.connection.exists(key.to_string() + "metadata"))
 
     def exists_sync(self, key: CacheEngineKey) -> bool:
-        return bool(self.connection.exists(key.to_string() + "metadata"))
+        future = asyncio.run_coroutine_threadsafe(self.exists(key), self.loop)
+        return bool(future.result())
 
     async def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         key_str = key.to_string()
-        metadata_bytes = self.connection.get(key_str + "metadata")
+        metadata_bytes = await self.connection.get(key_str + "metadata")
 
         if metadata_bytes is None:
             return None
@@ -66,7 +70,7 @@ class RedisConnector(RemoteConnector):
             return None
 
         # TODO(Jiayi): Find a way to do `get` inplace
-        kv_bytes = self.connection.get(key_str + "kv_bytes")
+        kv_bytes = await self.connection.get(key_str + "kv_bytes")
         assert not inspect.isawaitable(kv_bytes)
 
         if kv_bytes is None:
@@ -78,7 +82,7 @@ class RedisConnector(RemoteConnector):
                 "Key exists but KV cache does not exist."
                 "Might happen when the cache is evicted by redis."
             )
-            self.connection.delete(key_str + "metadata")
+            await self.connection.delete(key_str + "metadata")
             return None
 
         if isinstance(memory_obj.byte_array, memoryview):
@@ -99,6 +103,16 @@ class RedisConnector(RemoteConnector):
 
         return memory_obj
 
+    def support_batched_put(self) -> bool:
+        return True
+
+    async def batched_put(
+        self, keys: List[CacheEngineKey], memory_objs: List[MemoryObj]
+    ):
+        await asyncio.gather(
+            *(self.put(key, memory_obj) for key, memory_obj in zip(keys, memory_objs))
+        )
+
     async def put(self, key: CacheEngineKey, memory_obj: MemoryObj):
         # TODO(Jiayi): The following code is ugly.
         # Please use a function like `memory_obj.to_meta()`.
@@ -112,8 +126,9 @@ class RedisConnector(RemoteConnector):
         ).serialize()
 
         key_str = key.to_string()
-        self.connection.set(key_str + "metadata", metadata_bytes)
-        self.connection.set(key_str + "kv_bytes", kv_bytes)
+        # kv bytes needs to be set first to avoid race condition
+        await self.connection.set(key_str + "kv_bytes", kv_bytes)
+        await self.connection.set(key_str + "metadata", metadata_bytes)
 
     # TODO
     @no_type_check
@@ -121,8 +136,35 @@ class RedisConnector(RemoteConnector):
         pass
 
     async def close(self):
-        self.connection.close()
+        await self.connection.close()
         logger.info("Closed the redis connection")
+
+    def support_batched_async_contains(self) -> bool:
+        return True
+
+    async def batched_async_contains(
+        self,
+        lookup_id: str,
+        keys: List[CacheEngineKey],
+        pin: bool = False,
+    ) -> int:
+        num_hit_counts = 0
+        for key in keys:
+            if not await self.connection.exists(key.to_string() + "metadata"):
+                return num_hit_counts
+            num_hit_counts += 1
+        return num_hit_counts
+
+    def support_batched_get_non_blocking(self) -> bool:
+        return True
+
+    async def batched_get_non_blocking(
+        self,
+        lookup_id: str,
+        keys: List[CacheEngineKey],
+    ) -> List[MemoryObj]:
+        results = await asyncio.gather(*(self.get(key) for key in keys))
+        return [r for r in results if r is not None]
 
 
 class RedisSentinelConnector(RemoteConnector):

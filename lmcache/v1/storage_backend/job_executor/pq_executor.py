@@ -20,12 +20,11 @@ class AsyncPQExecutor(BaseJobExecutor):
             tuple[
                 int,
                 int,
-                Callable[..., Awaitable[Any]],
+                Callable[..., Awaitable[Any]] | object,
                 Any,
                 dict[str, Any],
-                asyncio.Future[Any],
+                asyncio.Future[Any] | None,
             ]
-            | object
         ] = asyncio.PriorityQueue(maxsize=max_size)
         self._counter = itertools.count()
         self.max_workers = max_workers
@@ -48,7 +47,10 @@ class AsyncPQExecutor(BaseJobExecutor):
     async def _worker(self):
         while True:
             item = await self._queue.get()
-            if item is _SENTINEL:
+            # Detect sentinel both as raw object and wrapped tuple
+            if item is _SENTINEL or (
+                isinstance(item, tuple) and len(item) >= 3 and item[2] is _SENTINEL
+            ):
                 self._queue.task_done()
                 break
 
@@ -65,8 +67,14 @@ class AsyncPQExecutor(BaseJobExecutor):
 
     async def _shutdown_async(self, wait: bool = True) -> None:
         self._closed = True
+        # Enqueue comparable sentinel tuples with the highest priority value so
+        # that outstanding work drains before shutdown signals are consumed.
+        # Use a very large integer to satisfy the typed queue's expected int priority
+        sentinel_priority = 2**31 - 1
         for _ in range(self.max_workers):
-            await self._queue.put(_SENTINEL)
+            await self._queue.put(
+                (sentinel_priority, next(self._counter), _SENTINEL, None, {}, None)
+            )
         if wait:
             await self._queue.join()
             await asyncio.gather(*self._workers, return_exceptions=True)
@@ -88,12 +96,11 @@ class AsyncPQThreadPoolExecutor(AsyncPQExecutor):
             tuple[
                 int,
                 int,
-                Callable[..., Any],
+                Callable[..., Any] | object,
                 Any,
                 dict[str, Any],
-                asyncio.Future[Any],
+                asyncio.Future[Any] | None,
             ]
-            | object
         ] = asyncio.PriorityQueue(maxsize=max_size)
         self._counter = itertools.count()
         self.max_workers = max_workers
@@ -104,7 +111,10 @@ class AsyncPQThreadPoolExecutor(AsyncPQExecutor):
     async def _worker(self):
         while True:
             item = await self._queue.get()
-            if item is _SENTINEL:
+            # Detect sentinel both as raw object and wrapped tuple
+            if item is _SENTINEL or (
+                isinstance(item, tuple) and len(item) >= 3 and item[2] is _SENTINEL
+            ):
                 self._queue.task_done()
                 break
 
