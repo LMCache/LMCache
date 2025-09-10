@@ -38,7 +38,11 @@ class RedisLookupServer(LookupServerInterface):
         Perform lookup in the lookup server.
         """
         logger.debug("Call to lookup in lookup server")
-        url = self.connection.get(key.to_string())
+        try:
+            url = self.connection.get(key.to_string())
+        except redis.exceptions.RedisError as e:
+            logger.warning(f"Error in lookup: {e}")
+            return None
         logger.debug(f"KV cache lives on {url}")
         assert not inspect.isawaitable(url)
         if url is None:
@@ -52,7 +56,10 @@ class RedisLookupServer(LookupServerInterface):
         """
         assert self.distributed_url is not None
         logger.debug("Call to insert in lookup server")
-        self.connection.set(key.to_string(), self.distributed_url)
+        try:
+            self.connection.set(key.to_string(), self.distributed_url)
+        except redis.exceptions.RedisError as e:
+            logger.warning(f"Error in insert: {e}")
 
     def batched_insert(self, keys: Sequence[CacheEngineKey]):
         """
@@ -62,15 +69,21 @@ class RedisLookupServer(LookupServerInterface):
         logger.debug("Call to batched insert in lookup server")
 
         # TODO(Jiayi): Optimize this with redis pipe
-        for key in keys:
-            self.connection.set(key.to_string(), self.distributed_url)
+        try:
+            for key in keys:
+                self.connection.set(key.to_string(), self.distributed_url)
+        except redis.exceptions.RedisError as e:
+            logger.warning(f"Error in batched_insert: {e}")
 
     def remove(self, key: CacheEngineKey):
         """
         Perform remove in the lookup server.
         """
         logger.debug("Call to remove in lookup server")
-        self.connection.delete(key.to_string())
+        try:
+            self.connection.delete(key.to_string())
+        except redis.exceptions.RedisError as e:
+            logger.warning(f"Error in remove: {e}")
 
     def batched_remove(self, keys: Sequence[CacheEngineKey]):
         """
@@ -79,4 +92,7 @@ class RedisLookupServer(LookupServerInterface):
         logger.debug("Call to batched remove in lookup server")
         # TODO(Jiayi): We might need to cache the `str_keys` for performance.
         str_keys = [key.to_string() for key in keys]
-        self.connection.delete(*str_keys)
+        try:
+            self.connection.delete(*str_keys)
+        except redis.exceptions.RedisError as e:
+            logger.warning(f"Error in batched_remove: {e}")
