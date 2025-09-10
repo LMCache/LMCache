@@ -829,7 +829,6 @@ class LMCacheEngine:
 
     # TODO(Jiayi): Add p2p + async lookup support.
     # TODO(Jiayi): Add layerwise support.
-    # FIXME: support pin
     @_lmcache_nvtx_annotate
     def async_lookup_and_prefetch(
         self,
