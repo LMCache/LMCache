@@ -36,14 +36,19 @@ class RedisConnector(RemoteConnector):
         local_cpu_backend: LocalCPUBackend,
     ):
         # set a large max
-        max_connections = 100
-        self.pool = redis.ConnectionPool.from_url(url, max_connections=max_connections)
+        self.max_connections = 150
+        # redis will crash if we have more than max_connections connections
+        self.sem = asyncio.Semaphore(self.max_connections)
+        self.pool = redis.ConnectionPool.from_url(
+            url, max_connections=self.max_connections
+        )
         self.connection = redis.Redis.from_pool(self.pool)
         self.loop = loop
         self.local_cpu_backend = local_cpu_backend
 
     async def exists(self, key: CacheEngineKey) -> bool:
-        return bool(await self.connection.exists(key.to_string() + "metadata"))
+        async with self.sem:
+            return bool(await self.connection.exists(key.to_string() + "metadata"))
 
     def exists_sync(self, key: CacheEngineKey) -> bool:
         future = asyncio.run_coroutine_threadsafe(self.exists(key), self.loop)
@@ -51,26 +56,27 @@ class RedisConnector(RemoteConnector):
 
     async def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         key_str = key.to_string()
-        metadata_bytes = await self.connection.get(key_str + "metadata")
+        async with self.sem:
+            metadata_bytes = await self.connection.get(key_str + "metadata")
 
-        if metadata_bytes is None:
-            return None
+            if metadata_bytes is None:
+                return None
 
-        assert not inspect.isawaitable(metadata_bytes)
+            assert not inspect.isawaitable(metadata_bytes)
 
-        metadata = RemoteMetadata.deserialize(memoryview(metadata_bytes))
+            metadata = RemoteMetadata.deserialize(memoryview(metadata_bytes))
 
-        memory_obj = self.local_cpu_backend.allocate(
-            metadata.shape,
-            metadata.dtype,
-            metadata.fmt,
-        )
-        if memory_obj is None:
-            logger.warning("Failed to allocate memory during remote receive")
-            return None
+            memory_obj = self.local_cpu_backend.allocate(
+                metadata.shape,
+                metadata.dtype,
+                metadata.fmt,
+            )
+            if memory_obj is None:
+                logger.warning("Failed to allocate memory during remote receive")
+                return None
 
-        # TODO(Jiayi): Find a way to do `get` inplace
-        kv_bytes = await self.connection.get(key_str + "kv_bytes")
+            # TODO(Jiayi): Find a way to do `get` inplace
+            kv_bytes = await self.connection.get(key_str + "kv_bytes")
         assert not inspect.isawaitable(kv_bytes)
 
         if kv_bytes is None:
@@ -82,7 +88,8 @@ class RedisConnector(RemoteConnector):
                 "Key exists but KV cache does not exist."
                 "Might happen when the cache is evicted by redis."
             )
-            await self.connection.delete(key_str + "metadata")
+            async with self.sem:
+                await self.connection.delete(key_str + "metadata")
             return None
 
         if isinstance(memory_obj.byte_array, memoryview):
@@ -127,8 +134,9 @@ class RedisConnector(RemoteConnector):
 
         key_str = key.to_string()
         # kv bytes needs to be set first to avoid race condition
-        await self.connection.set(key_str + "kv_bytes", kv_bytes)
-        await self.connection.set(key_str + "metadata", metadata_bytes)
+        async with self.sem:
+            await self.connection.set(key_str + "kv_bytes", kv_bytes)
+            await self.connection.set(key_str + "metadata", metadata_bytes)
 
     # TODO
     @no_type_check
@@ -150,8 +158,9 @@ class RedisConnector(RemoteConnector):
     ) -> int:
         num_hit_counts = 0
         for key in keys:
-            if not await self.connection.exists(key.to_string() + "metadata"):
-                return num_hit_counts
+            async with self.sem:
+                if not await self.connection.exists(key.to_string() + "metadata"):
+                    return num_hit_counts
             num_hit_counts += 1
         return num_hit_counts
 

@@ -116,10 +116,14 @@ class RemoteMonitor:
                         if self.original_connector is None:
                             continue
                         if not self.original_connector.support_ping():
-                            logger.info(
-                                f"Connector {self.original_connector} "
-                                "does not support ping, break RemoteMonitor thread."
-                            )
+                            try:
+                                logger.info(
+                                    f"Connector {self.original_connector} "
+                                    "does not support ping, break RemoteMonitor thread."
+                                )
+                            except (ValueError, OSError):
+                                # Stream closed during teardown, ignore
+                                pass
                             break
 
             try:
