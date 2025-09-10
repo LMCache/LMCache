@@ -148,9 +148,12 @@ class TestLMCBlender:
         )
 
         assert len(result) == 6
-        assert result[0].shape == q.shape
-        assert result[1].shape == k.shape
-        assert result[2].shape == v.shape
+        q_res, k_res, v_res, residual_res, attn_output_res, _ = result
+        assert q_res.shape == q.shape
+        assert k_res.shape == k.shape
+        assert v_res.shape == v.shape
+        assert residual_res.shape == residual.shape
+        assert attn_output_res.shape == attn_output.shape
 
     def test_process_qkv_with_check_layer(self, blender):
         """Test process_qkv method when layer is in check_layers."""
@@ -180,16 +183,20 @@ class TestLMCBlender:
         assert len(result) == 6
         q_res, k_res, v_res, residual_res, attn_output_res, _ = result
 
-        # Check that we get valid tensors back
-        assert q_res is not None
-        assert k_res is not None
-        assert v_res is not None
-        assert residual_res is not None
-        assert attn_output_res is not None
+        # Check that we get valid tensors back and their shapes
+        recomp_ratio = blender.common_metadata.recomp_ratios[0]
+        topk_num = int(num_tokens * recomp_ratio)
+        assert q_res.shape == (num_tokens, topk_num, 32, 128)
+        assert k_res.shape == k.shape
+        assert v_res.shape == v.shape
+        assert residual_res.shape == (num_tokens, topk_num, 4096)
+        assert attn_output_res.shape == (topk_num, 32, 128)
 
         # Check metadata updates
         assert blender.metadata.imp_indices is not None
+        assert blender.metadata.imp_indices.shape == (num_tokens, topk_num)
         assert blender.metadata.positions is not None
+        assert blender.metadata.positions.shape == (num_tokens, topk_num)
 
     def test_blend_layer_generator(self, blender):
         """Test blend_layer method returns generator."""
@@ -206,8 +213,15 @@ class TestLMCBlender:
         # Should be a generator
         assert hasattr(blender_gen, "__next__")
 
-        # Should be able to iterate through all layers
-        for _ in range(6):  # num_layers (4) + 2
+        # Should be able to iterate through all layers without stopping prematurely
+        for i in range(6):  # num_layers (4) + 2
+            try:
+                next(blender_gen)
+            except StopIteration:
+                pytest.fail(f"Generator stopped prematurely at iteration {i + 1}")
+
+        # Should raise StopIteration after all layers are consumed
+        with pytest.raises(StopIteration):
             next(blender_gen)
 
     def test_blend_method(self, blender):
