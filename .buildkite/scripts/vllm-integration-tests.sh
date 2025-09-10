@@ -255,7 +255,9 @@ run_pd_lmcache() {
         UV_PYTHON=python3 uv -q venv
     fi
     source .venv/bin/activate
-    uv pip install lmcache 
+    uv pip install -r requirements/build.txt
+    uv pip install torch==2.7.1 httpx
+    uv pip install -e $ORIG_DIR --no-build-isolation
     # Start proxy
     python3 "$ORIG_DIR/examples/disagg_prefill/disagg_proxy_server.py" \
         --port "$PORT" \
@@ -407,7 +409,7 @@ echo "Using port $PORT to send or receive requests."
 cd docker/
 
 # Create the container image
-build_lmcache_vllmopenai_image
+# build_lmcache_vllmopenai_image
 
 ########
 # MAIN #
