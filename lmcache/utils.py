@@ -39,6 +39,22 @@ logger = init_logger(__name__)
 # Type definition
 KVCache = Tuple[Tuple[torch.Tensor, torch.Tensor], ...]
 
+try:
+    # First Party
+    from lmcache import _version  # type: ignore[attr-defined]
+
+    VERSION = getattr(_version, "__version__", "")
+    COMMIT_ID = getattr(_version, "__commit_id__", "")
+except ImportError:
+    VERSION = ""
+    COMMIT_ID = ""
+
+
+def get_version():
+    version_display = VERSION if VERSION else "NA"
+    commit_id_display = COMMIT_ID if COMMIT_ID else "NA"
+    return f"{version_display}-{commit_id_display}"
+
 
 @dataclass
 class DiskCacheMetadata:
