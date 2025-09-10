@@ -199,7 +199,7 @@ run_pd_lmcache() {
     )
 
     # Health check
-    # wait_for_openai_api_server "$PORT1" "$prefiller_vllm_model" "$PREFILLER_CID"
+    wait_for_openai_api_server "$PORT1" "$prefiller_vllm_model" "$PREFILLER_CID"
 
     # Logging
     touch "$PREFILLER_LOGFILE"
@@ -244,7 +244,7 @@ run_pd_lmcache() {
     )
 
     # Health check
-    # wait_for_openai_api_server "$PORT2" "$decoder_vllm_model" "$DECODER_CID"
+    wait_for_openai_api_server "$PORT2" "$decoder_vllm_model" "$DECODER_CID"
 
     # Logging
     touch "$DECODER_LOGFILE"
@@ -409,7 +409,7 @@ echo "Using port $PORT to send or receive requests."
 cd docker/
 
 # Create the container image
-# build_lmcache_vllmopenai_image
+build_lmcache_vllmopenai_image
 
 ########
 # MAIN #

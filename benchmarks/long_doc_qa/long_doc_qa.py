@@ -485,6 +485,7 @@ async def main(args):
     if args.expected_latency is not None:
         warmup_duration = warmup_end_time - warmup_start_time
         warmup_per_prompt = warmup_duration / len(warmup_df)
+        print(f"{CSI}34mActual latency: {warmup_per_prompt:.2f}×{RESET}")
         if warmup_per_prompt > args.expected_latency:
             sys.exit(
                 f"ERROR: latency {warmup_per_prompt:.2f}s > expected "
