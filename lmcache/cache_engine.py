@@ -86,10 +86,23 @@ class LMCacheEngine:
         :return: a generator of chunks of tokens, each with
                 shape [chunk_size]
         """
-        # TODO(Jiayi): the following step can be parallelized
+        # Use PyTorch's unfold method for vectorized chunking
         tokens = tokens.cpu()
-        for i in range(0, len(tokens), self.chunk_size):
-            yield tokens[i : i + self.chunk_size]
+        chunk_size = self.chunk_size
+        num_tokens = len(tokens)
+
+        # Calculate the number of complete chunks
+        num_complete_chunks = num_tokens // chunk_size
+
+        if num_complete_chunks > 0:
+            # Create a view using unfold to avoid data duplication
+            complete_tokens = tokens[: num_complete_chunks * chunk_size]
+            chunks = complete_tokens.unfold(0, chunk_size, chunk_size)
+            yield from chunks
+
+        # Handle the last incomplete chunk if it exists
+        if num_tokens % chunk_size > 0:
+            yield tokens[num_complete_chunks * chunk_size :]
 
     def _prefix_hash(
         self,
