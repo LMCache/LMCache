@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from enum import IntEnum
 from typing import List, Optional, Tuple, no_type_check
 import asyncio
 import inspect
@@ -14,6 +15,7 @@ from lmcache.utils import CacheEngineKey
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.protocol import RemoteMetadata
 from lmcache.v1.storage_backend.connector.base_connector import RemoteConnector
+from lmcache.v1.storage_backend.job_executor.pq_executor import AsyncPQExecutor
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 
 logger = init_logger(__name__)
@@ -22,6 +24,13 @@ logger = init_logger(__name__)
 # NOTE(Jiayi): `redis-py` supports async operations, but data copy
 # cannot be avoided. `hiredis` is more lower-level but asyncio is
 # not supported.
+
+
+class Priorities(IntEnum):
+    PEEK = 0
+    PREFETCH = 1
+    GET = 2
+    PUT = 3
 
 
 class RedisConnector(RemoteConnector):
@@ -46,15 +55,22 @@ class RedisConnector(RemoteConnector):
         self.loop = loop
         self.local_cpu_backend = local_cpu_backend
 
-    async def exists(self, key: CacheEngineKey) -> bool:
+        self.pq_executor = AsyncPQExecutor(loop)
+
+    async def _exists(self, key: CacheEngineKey) -> bool:
         async with self.sem:
             return bool(await self.connection.exists(key.to_string() + "metadata"))
+
+    async def exists(self, key: CacheEngineKey) -> bool:
+        return await self.pq_executor.submit_job(
+            self._exists, key=key, priority=Priorities.PEEK
+        )
 
     def exists_sync(self, key: CacheEngineKey) -> bool:
         future = asyncio.run_coroutine_threadsafe(self.exists(key), self.loop)
         return bool(future.result())
 
-    async def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
+    async def _get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         key_str = key.to_string()
         async with self.sem:
             metadata_bytes = await self.connection.get(key_str + "metadata")
@@ -110,17 +126,33 @@ class RedisConnector(RemoteConnector):
 
         return memory_obj
 
+    async def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
+        return await self.pq_executor.submit_job(
+            self._get, key=key, priority=Priorities.GET
+        )
+
     def support_batched_put(self) -> bool:
         return True
+
+    async def _batched_put(
+        self, keys: List[CacheEngineKey], memory_objs: List[MemoryObj]
+    ):
+        # calling self.put will create a circular dependency
+        await asyncio.gather(
+            *(self._put(key, memory_obj) for key, memory_obj in zip(keys, memory_objs))
+        )
 
     async def batched_put(
         self, keys: List[CacheEngineKey], memory_objs: List[MemoryObj]
     ):
-        await asyncio.gather(
-            *(self.put(key, memory_obj) for key, memory_obj in zip(keys, memory_objs))
+        await self.pq_executor.submit_job(
+            self._batched_put,
+            keys=keys,
+            memory_objs=memory_objs,
+            priority=Priorities.PUT,
         )
 
-    async def put(self, key: CacheEngineKey, memory_obj: MemoryObj):
+    async def _put(self, key: CacheEngineKey, memory_obj: MemoryObj):
         # TODO(Jiayi): The following code is ugly.
         # Please use a function like `memory_obj.to_meta()`.
         kv_bytes = memory_obj.byte_array
@@ -138,19 +170,25 @@ class RedisConnector(RemoteConnector):
             await self.connection.set(key_str + "kv_bytes", kv_bytes)
             await self.connection.set(key_str + "metadata", metadata_bytes)
 
+    async def put(self, key: CacheEngineKey, memory_obj: MemoryObj):
+        await self.pq_executor.submit_job(
+            self._put, key=key, memory_obj=memory_obj, priority=Priorities.PUT
+        )
+
     # TODO
     @no_type_check
     async def list(self) -> List[str]:
         pass
 
     async def close(self):
+        await self.pq_executor.shutdown(wait=True)
         await self.connection.close()
         logger.info("Closed the redis connection")
 
     def support_batched_async_contains(self) -> bool:
         return True
 
-    async def batched_async_contains(
+    async def _batched_async_contains(
         self,
         lookup_id: str,
         keys: List[CacheEngineKey],
@@ -164,16 +202,43 @@ class RedisConnector(RemoteConnector):
             num_hit_counts += 1
         return num_hit_counts
 
+    async def batched_async_contains(
+        self,
+        lookup_id: str,
+        keys: List[CacheEngineKey],
+        pin: bool = False,
+    ) -> int:
+        return await self.pq_executor.submit_job(
+            self._batched_async_contains,
+            lookup_id=lookup_id,
+            keys=keys,
+            pin=pin,
+            priority=Priorities.PEEK,
+        )
+
     def support_batched_get_non_blocking(self) -> bool:
         return True
+
+    async def _batched_get_non_blocking(
+        self,
+        lookup_id: str,
+        keys: List[CacheEngineKey],
+    ) -> List[MemoryObj]:
+        # calling self.get will create a circular dependency
+        results = await asyncio.gather(*(self._get(key) for key in keys))
+        return [r for r in results if r is not None]
 
     async def batched_get_non_blocking(
         self,
         lookup_id: str,
         keys: List[CacheEngineKey],
     ) -> List[MemoryObj]:
-        results = await asyncio.gather(*(self.get(key) for key in keys))
-        return [r for r in results if r is not None]
+        return await self.pq_executor.submit_job(
+            self._batched_get_non_blocking,
+            lookup_id=lookup_id,
+            keys=keys,
+            priority=Priorities.PREFETCH,
+        )
 
 
 class RedisSentinelConnector(RemoteConnector):
