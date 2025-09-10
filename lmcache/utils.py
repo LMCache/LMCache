@@ -122,12 +122,14 @@ class CacheEngineKey:
 
     def __hash__(self):
         return hash(
-            self.fmt,
-            self.model_name,
-            self.world_size,
-            self.worker_id,
-            self.chunk_hash,
-            self.tags,
+            (
+                self.fmt,
+                self.model_name,
+                self.world_size,
+                self.worker_id,
+                self.chunk_hash,
+                self.tags,
+            )
         )
 
     def __eq__(self, other):
@@ -249,13 +251,15 @@ class LayerCacheEngineKey(CacheEngineKey):
 
     def __hash__(self):
         return hash(
-            self.fmt,
-            self.model_name,
-            self.world_size,
-            self.worker_id,
-            self.chunk_hash,
-            self.tags,
-            self.layer_id,
+            (
+                self.fmt,
+                self.model_name,
+                self.world_size,
+                self.worker_id,
+                self.chunk_hash,
+                self.tags,
+                self.layer_id,
+            )
         )
 
     def __eq__(self, other):
