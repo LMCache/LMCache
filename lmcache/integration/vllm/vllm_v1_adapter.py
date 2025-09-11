@@ -292,10 +292,16 @@ class ReqMeta:
         )
 
         # NOTE(vladnosiv): for disagg, you cannot skip saving, as saving is a transfer
+        # Check if request_configs has lmcache.cache.skip set to True
+        request_skip = False
+        if tracker.request_configs is not None:
+            request_skip = tracker.request_configs.get("lmcache.skip_save", False)
+
         skip_save = tracker.disagg_spec is None and (
             skip_save
             or (tracker.num_saved_tokens > 0 and input_token_len < chunk_boundary)
             or (tracker.is_decode_phase and not save_decode_cache)
+            or request_skip
         )
 
         if skip_save and load_spec is None:
