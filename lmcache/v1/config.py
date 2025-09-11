@@ -577,6 +577,8 @@ def _update_config_from_env(self):
                 # Keep existing value if conversion fails
 
     return self
+
+
 def _from_env(cls):
     """Load configuration from environment variables"""
     instance = cls.from_defaults()
