@@ -615,5 +615,16 @@ def _to_json(self):
     return json.dumps(self.to_dict(), indent=2)
 
 
+def validate_and_set_config_value(config, config_key, value):
+    """Validate and set configuration value"""
+    try:
+        setattr(config, config_key, value)
+    except Exception as e:
+        logger.error(
+            f"Failed to set config item '{config_key}' with value {value}: {e}"
+        )
+        pass
+
+
 # Create configuration class
 LMCacheEngineConfig = _create_config_class()
