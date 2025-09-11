@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from collections import OrderedDict
-from dataclasses import dataclass
 from enum import IntEnum
 from typing import List, Optional, Tuple, no_type_check
 import asyncio
@@ -10,12 +8,11 @@ import os
 
 # Third Party
 import redis.asyncio as redis
-import torch
 
 # First Party
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
-from lmcache.v1.memory_management import MemoryFormat, MemoryObj
+from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.protocol import RemoteMetadata
 from lmcache.v1.storage_backend.connector.base_connector import RemoteConnector
 from lmcache.v1.storage_backend.job_executor.pq_executor import AsyncPQExecutor
@@ -36,80 +33,6 @@ class Priorities(IntEnum):
     PUT = 3
 
 
-@dataclass
-class Metadata:
-    length: int
-    shape: torch.Size
-    dtype: Optional[torch.dtype]
-    fmt: MemoryFormat
-
-
-class MetadataDict:
-    def __init__(self):
-        self.metadata_dict = OrderedDict()
-        # 5 TB overestimation
-        # Metadata is cheap to store but we just want to
-        # prevent infinite growth (mem leak)
-        # LRU evict
-        self.capacity = 5 * 1024**4
-        # number of bytes
-        self.size = 0
-        self.lock = asyncio.Lock()
-
-    async def apeek(self, key_str: str) -> bool:
-        async with self.lock:
-            return key_str in self.metadata_dict
-
-    async def aget(self, key_str: str) -> Optional[Metadata]:
-        async with self.lock:
-            if key_str in self.metadata_dict:
-                self.metadata_dict.move_to_end(key_str)
-                return self.metadata_dict[key_str]
-            else:
-                return None
-
-    async def aset(self, key_str: str, value: Metadata):
-        async with self.lock:
-            self.metadata_dict[key_str] = value
-            self.size += value.length
-            if self.size > self.capacity:
-                self.size -= self.metadata_dict.popitem(last=False).length
-
-    async def adel(self, key_str: str):
-        """
-        Safe async metadata deletion (even if does not exist)
-        """
-        async with self.lock:
-            if key_str in self.metadata_dict:
-                value = self.metadata_dict.pop(key_str)
-                self.size -= value.length
-
-
-class ConnectionPoolSafe:
-    def __init__(self, url: str, max_connections: int = 150):
-        self.max_connections = max_connections
-        self.pool = redis.ConnectionPool.from_url(url, max_connections=max_connections)
-        self.connection = redis.Redis.from_pool(self.pool)
-        # redis will crash if we have more than max_connections connections
-        self.sem = asyncio.Semaphore(self.max_connections)
-
-    async def exists(self, key_str: str) -> bool:
-        async with self.sem:
-            return await self.connection.exists(key_str)
-
-    async def get(self, key_str: str) -> Optional[bytes]:
-        async with self.sem:
-            return await self.connection.get(key_str)
-
-    async def set(self, key_str: str, value: bytes):
-        async with self.sem:
-            return await self.connection.set(key_str, value)
-
-    async def close(self):
-        await self.connection.close()
-        self.pool.close()
-
-
 class RedisConnector(RemoteConnector):
     """
     The remote url should start with "redis://" and only have one host-port pair
@@ -121,21 +44,22 @@ class RedisConnector(RemoteConnector):
         loop: asyncio.AbstractEventLoop,
         local_cpu_backend: LocalCPUBackend,
     ):
+        # set a large max
+        self.max_connections = 150
+        # redis will crash if we have more than max_connections connections
+        self.sem = asyncio.Semaphore(self.max_connections)
+        self.pool = redis.ConnectionPool.from_url(
+            url, max_connections=self.max_connections
+        )
+        self.connection = redis.Redis.from_pool(self.pool)
         self.loop = loop
         self.local_cpu_backend = local_cpu_backend
 
         self.pq_executor = AsyncPQExecutor(loop)
-        self.connection_pool = ConnectionPoolSafe(url)
-        self.metadata_dict = MetadataDict()
 
     async def _exists(self, key: CacheEngineKey) -> bool:
-        key_str = key.to_string()
-        # need to check for bytes, not metadata
-        if not bool(await self.connection_pool.exists(key_str)):
-            # delete metadata if kv_bytes is not found
-            await self.metadata_dict.adel(key_str)
-            return False
-        return True
+        async with self.sem:
+            return bool(await self.connection.exists(key.to_string() + "metadata"))
 
     async def exists(self, key: CacheEngineKey) -> bool:
         return await self.pq_executor.submit_job(
@@ -148,24 +72,27 @@ class RedisConnector(RemoteConnector):
 
     async def _get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         key_str = key.to_string()
-        metadata = await self.metadata_dict.aget(key_str)
+        async with self.sem:
+            metadata_bytes = await self.connection.get(key_str + "metadata")
 
-        assert not inspect.isawaitable(metadata)
+            if metadata_bytes is None:
+                return None
 
-        if metadata is None:
-            return None
+            assert not inspect.isawaitable(metadata_bytes)
 
-        memory_obj = self.local_cpu_backend.allocate(
-            metadata.shape,
-            metadata.dtype,
-            metadata.fmt,
-        )
-        if memory_obj is None:
-            logger.warning("Failed to allocate memory during remote receive")
-            return None
+            metadata = RemoteMetadata.deserialize(memoryview(metadata_bytes))
 
-        # TODO(Jiayi): Find a way to do `get` inplace
-        kv_bytes = await self.connection_pool.get(key_str)
+            memory_obj = self.local_cpu_backend.allocate(
+                metadata.shape,
+                metadata.dtype,
+                metadata.fmt,
+            )
+            if memory_obj is None:
+                logger.warning("Failed to allocate memory during remote receive")
+                return None
+
+            # TODO(Jiayi): Find a way to do `get` inplace
+            kv_bytes = await self.connection.get(key_str + "kv_bytes")
         assert not inspect.isawaitable(kv_bytes)
 
         if kv_bytes is None:
@@ -173,7 +100,12 @@ class RedisConnector(RemoteConnector):
             # consistency issues.
             # TODO (Jiayi): A better way is to aggregate metadata
             # and kv cache in one key.
-            await self.metadata_dict.adel(key_str)
+            logger.warning(
+                "Key exists but KV cache does not exist."
+                "Might happen when the cache is evicted by redis."
+            )
+            async with self.sem:
+                await self.connection.delete(key_str + "metadata")
             return None
 
         if isinstance(memory_obj.byte_array, memoryview):
@@ -228,11 +160,15 @@ class RedisConnector(RemoteConnector):
         kv_dtype = memory_obj.get_dtype()
         memory_format = memory_obj.get_memory_format()
 
-        metadata = Metadata(len(kv_bytes), kv_shape, kv_dtype, memory_format)
+        metadata_bytes = RemoteMetadata(
+            len(kv_bytes), kv_shape, kv_dtype, memory_format
+        ).serialize()
 
         key_str = key.to_string()
-        await self.metadata_dict.aset(key_str, metadata)
-        await self.connection_pool.set(key_str, kv_bytes)
+        # kv bytes needs to be set first to avoid race condition
+        async with self.sem:
+            await self.connection.set(key_str + "kv_bytes", kv_bytes)
+            await self.connection.set(key_str + "metadata", metadata_bytes)
 
     async def put(self, key: CacheEngineKey, memory_obj: MemoryObj):
         await self.pq_executor.submit_job(
@@ -243,6 +179,11 @@ class RedisConnector(RemoteConnector):
     @no_type_check
     async def list(self) -> List[str]:
         pass
+
+    async def close(self):
+        await self.pq_executor.shutdown(wait=True)
+        await self.connection.close()
+        logger.info("Closed the redis connection")
 
     def support_batched_async_contains(self) -> bool:
         return True
@@ -255,10 +196,9 @@ class RedisConnector(RemoteConnector):
     ) -> int:
         num_hit_counts = 0
         for key in keys:
-            key_str = key.to_string()
-            if not await self.connection_pool.exists(key_str):
-                await self.metadata_dict.adel(key_str)
-                return num_hit_counts
+            async with self.sem:
+                if not await self.connection.exists(key.to_string() + "metadata"):
+                    return num_hit_counts
             num_hit_counts += 1
         return num_hit_counts
 
@@ -299,11 +239,6 @@ class RedisConnector(RemoteConnector):
             keys=keys,
             priority=Priorities.PREFETCH,
         )
-
-    async def close(self):
-        await self.pq_executor.shutdown(wait=True)
-        await self.connection_pool.close()
-        logger.info("Closed the redis connection")
 
 
 class RedisSentinelConnector(RemoteConnector):
