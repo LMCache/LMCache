@@ -455,7 +455,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
 
     def clear(self) -> int:
         """
-        counts the number of memory objects removed
+        Returns the number of tokens removed
         """
         if not self.use_hot:
             return 0
@@ -465,9 +465,8 @@ class LocalCPUBackend(AllocatorBackendInterface):
             for key in self.hot_cache:
                 memory_obj = self.hot_cache[key]
                 if memory_obj.can_evict:
-                    continue
-                clear_keys.append(key)
-                num_cleared_tokens += memory_obj.get_num_tokens()
+                    clear_keys.append(key)
+                    num_cleared_tokens += memory_obj.get_num_tokens()
 
         # TODO(Jiayi): might not be accurate if we don't calculate
         # `num_cleared_token` and remove the keys in an atomic way.

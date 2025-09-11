@@ -552,6 +552,27 @@ class LocalDiskBackend(StorageBackendInterface):
             f"Bandwidth: {size / disk_read_time / 1e6:.2f} MB/s"
         )
 
+    def clear(self) -> int:
+        """
+        Returns the number of tokens removed
+        """
+        clear_keys = []
+        num_cleared_tokens = 0
+        with self.disk_lock:
+            for key in self.dict:
+                metadata = self.dict[key]
+                if metadata.can_evict:
+                    clear_keys.append(key)
+                    if metadata.shape is not None and metadata.fmt is not None:
+                        token_dim = metadata.fmt.token_dim()
+                        num_cleared_tokens += metadata.shape[token_dim]
+
+        self.batched_remove(clear_keys)
+        if clear_keys:
+            super()._on_evict(clear_keys)
+
+        return num_cleared_tokens
+
     def close(self) -> None:
         self.disk_worker.close()
         with self.disk_lock:
