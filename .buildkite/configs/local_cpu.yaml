@@ -1,7 +1,7 @@
 workload:
   type: long_doc_qa
   max-inflight-requests: 20
-  expected-latency-gain: 3.5
+  expected-latency-gain: 3.7
 
 docker:
   env:
@@ -15,3 +15,5 @@ vllm:
     - "--load-format"
     - "dummy"
     - "--no-enable-prefix-caching"
+    - "--kv-transfer-config"
+    - "{\"kv_connector\":\"LMCacheConnectorV1\",\"kv_role\":\"kv_both\"}"

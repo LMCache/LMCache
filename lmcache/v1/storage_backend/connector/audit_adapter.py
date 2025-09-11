@@ -18,9 +18,6 @@ class AuditConnectorAdapter(ConnectorAdapter):
     def __init__(self) -> None:
         super().__init__("audit://")
 
-    def can_parse(self, url: str) -> bool:
-        return url.startswith(self.schema)
-
     def create_connector(self, context: ConnectorContext) -> RemoteConnector:
         # Local
         from .audit_connector import AuditConnector

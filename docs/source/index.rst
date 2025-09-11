@@ -65,6 +65,7 @@ Documentation
 
    getting_started/installation
    getting_started/quickstart/index
+   getting_started/benchmarking
    getting_started/troubleshoot
    getting_started/faq
 
@@ -93,11 +94,12 @@ Documentation
    :caption: KV Cache management
 
    kv_cache_management/controller
-   kv_cache_management/lookup
-   kv_cache_management/persist
    kv_cache_management/clear
-   kv_cache_management/move
    kv_cache_management/compress
+   kv_cache_management/health
+   kv_cache_management/lookup
+   kv_cache_management/move
+   kv_cache_management/pin
    kv_cache_management/check_finish
 
 :raw-html:`<br />`
@@ -135,6 +137,7 @@ Documentation
    developer_guide/contributing
    developer_guide/docker_file
    developer_guide/usage/index
+   developer_guide/plugin_framework
 
 :raw-html:`<br />`
 

@@ -121,7 +121,7 @@ class LMCacheConnectorV1Dynamic(KVConnectorBase_V1):
         self,
         request: "Request",
         num_computed_tokens: int,
-    ) -> tuple[int, bool]:
+    ) -> tuple[Optional[int], bool]:
         """
         Get number of new tokens that can be loaded from the
         external KV cache beyond the num_computed_tokens.

@@ -264,6 +264,11 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "default": None,
         "env_converter": str,
     },
+    "enable_async_loading": {
+        "type": bool,
+        "default": False,
+        "env_converter": _to_bool,
+    },
     "internal_api_server_enabled": {
         "type": bool,
         "default": False,
@@ -457,9 +462,9 @@ def _from_legacy(cls, **kwargs):
         },
         "local_disk": {
             "local_cpu": False,
-            "max_local_cpu_size": 2,
+            "max_local_cpu_size": 3,
             "local_disk": "local/disk_test/local_disk/",
-            "max_local_disk_size": 5,
+            "max_local_disk_size": 2,
             "remote_url": None,
         },
         "local_cpu_disk": {

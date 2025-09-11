@@ -21,7 +21,7 @@ CUDA_VISIBLE_DEVICES=0 LMCACHE_CONFIG_FILE=example1.yaml vllm serve meta-llama/M
 ```
 Start vllm engine 2 at port 8001:
 ```bash
-CUDA_VISIBLE_DEVICES=0=1 LMCACHE_CONFIG_FILE=example2.yaml vllm serve meta-llama/Meta-Llama-3.1-8B-Instruct --max-model-len 4096  --gpu-memory-utilization 0.8 --port 8001 --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1", "kv_role":"kv_both"}'  
+CUDA_VISIBLE_DEVICES=1 LMCACHE_CONFIG_FILE=example2.yaml vllm serve meta-llama/Meta-Llama-3.1-8B-Instruct --max-model-len 4096  --gpu-memory-utilization 0.8 --port 8001 --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1", "kv_role":"kv_both"}'  
 ```
 Note that the two distributed cache servers will start at port 8200 and 8201.
 

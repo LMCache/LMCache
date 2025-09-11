@@ -324,17 +324,26 @@ async def handle_completions(request: Request):
         raise
 
 
-# FIXME (Jiayi): chat completion support need to apply prompt template
 @app.post("/v1/chat/completions")
 async def handle_chat_completions(request: Request):
     global counter, stats_calculator
     counter += 1
+    req_id = str(counter)
 
     st = time.time()
     try:
         req_data = await request.json()
 
+        tokenization_client = round_robin_pick_client(app.state.total_clients, counter)
+
+        # For chat completions, we need to tokenize the messages
+        tokenize_output = await send_request_to_service(
+            tokenization_client.client, "/tokenize", {"messages": req_data["messages"]}
+        )
+        tokenize_output = tokenize_output.json()
+
         org_max_tokens = req_data["max_tokens"]
+        req_data["prompt"] = tokenize_output["tokens"]
         req_data["max_tokens"] = 1
 
         org_max_completion_tokens = None
@@ -342,23 +351,135 @@ async def handle_chat_completions(request: Request):
             org_max_completion_tokens = req_data["max_completion_tokens"]
             req_data["max_completion_tokens"] = 1
 
-        # Send request to prefill service, ignore the response
-        client = round_robin_pick_client(app.state.prefill_clients, counter)
-        await send_request_to_service(client, "/v1/chat/completions", req_data)
+        # Pick decode client
+        decode_client = round_robin_pick_client(app.state.decode_clients, counter)
+
+        disagg_spec = {
+            "req_id": req_id,
+            "receiver_host": decode_client.host,
+            "receiver_init_port": decode_client.init_port,
+            "receiver_alloc_port": decode_client.alloc_port,
+        }
+
+        num_tp_rank = len(decode_client.init_port)
+
+        req_data["kv_transfer_params"] = {
+            "ret_first_tok": True,
+            "disagg_spec": disagg_spec,
+        }
+
+        req_data["stream"] = False
+        stream_options = req_data.pop("stream_options", None)
+
+        # Send request to prefill service round robin, get the response
+        prefill_client = round_robin_pick_client(app.state.prefill_clients, counter)
+        prefill_output = await send_request_to_service(
+            prefill_client.client, "/v1/completions", req_data
+        )
+
+        prefill_output = prefill_output.json()
 
         et = time.time()
         stats_calculator.add(et - st)
 
-        req_data["max_tokens"] = org_max_tokens
+        req_data["max_tokens"] = org_max_tokens - 1
         if org_max_completion_tokens is not None:
-            req_data["max_completion_tokens"] = org_max_completion_tokens
+            req_data["max_completion_tokens"] = org_max_completion_tokens - 1
+
+        # Add the first token from prefill to the tokenized messages for decode
+        req_data["prompt"].append(prefill_output["kv_transfer_params"]["first_tok"])
+
+        req_data.pop("kv_transfer_params")
+        req_data["stream"] = True
+        if stream_options is not None:
+            req_data["stream_options"] = stream_options
 
         # Stream response from decode service
         async def generate_stream():
+            initial_chunk = {
+                "id": prefill_output["id"],
+                "object": "chat.completion.chunk",
+                "created": prefill_output["created"],
+                "model": prefill_output["model"],
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"role": "assistant", "content": ""},
+                        "logprobs": None,
+                        "finish_reason": None,
+                    }
+                ],
+            }
+            yield (
+                "data: " + json.dumps(initial_chunk, separators=(",", ":")) + "\n\n"
+            ).encode()
+
+            head_chunk = {
+                "id": prefill_output["id"],
+                "object": "chat.completion.chunk",
+                "created": prefill_output["created"],
+                "model": prefill_output["model"],
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"content": prefill_output["choices"][0]["text"]},
+                        "logprobs": None,
+                        "finish_reason": None,
+                    }
+                ],
+            }
+            yield (
+                "data: " + json.dumps(head_chunk, separators=(",", ":")) + "\n\n"
+            ).encode()
+
+            await wait_decode_kv_ready(req_id, num_tp_rank)
+
+            # Stream and convert completion format chunks to chat completion format
             async for chunk in stream_service_response(
-                app.state.decode_client, "/v1/chat/completions", req_data
+                decode_client.client, "/v1/completions", req_data
             ):
-                yield chunk
+                chunk_str = chunk.decode("utf-8")
+                if chunk_str.startswith("data: ") and not chunk_str.startswith(
+                    "data: [DONE]"
+                ):
+                    try:
+                        json_str = chunk_str[6:].strip()  # Remove 'data: ' prefix
+                        if json_str:
+                            completion_data = json.loads(json_str)
+                            chat_completion_data = {
+                                "id": completion_data["id"],
+                                "object": "chat.completion.chunk",
+                                "created": completion_data["created"],
+                                "model": completion_data["model"],
+                                "choices": [
+                                    {
+                                        "index": 0,
+                                        "delta": {
+                                            "content": completion_data["choices"][0][
+                                                "text"
+                                            ]
+                                        },
+                                        "logprobs": completion_data["choices"][0].get(
+                                            "logprobs"
+                                        ),
+                                        "finish_reason": completion_data["choices"][
+                                            0
+                                        ].get("finish_reason"),
+                                    }
+                                ],
+                            }
+                            converted_chunk = (
+                                "data: "
+                                + json.dumps(
+                                    chat_completion_data, separators=(",", ":")
+                                )
+                                + "\n\n"
+                            ).encode()
+                            yield converted_chunk
+                    except (json.JSONDecodeError, KeyError):
+                        yield chunk
+                else:
+                    yield chunk
 
         return StreamingResponse(generate_stream(), media_type="application/json")
 

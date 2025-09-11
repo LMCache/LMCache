@@ -349,27 +349,6 @@ class WekaGdsBackend(StorageBackendInterface):
         with self.hot_lock:
             self.hot_cache[key] = DiskCacheMetadata(path, size, shape, dtype)
 
-    def submit_prefetch_task(
-        self,
-        key: CacheEngineKey,
-    ) -> bool:
-        # with self.hot_lock:
-        #     entry = self.hot_cache.get(key)
-        # if entry is None:
-        #     return None
-
-        # path = entry.path
-        # dtype = entry.dtype
-        # shape = entry.shape
-        # assert dtype is not None
-        # assert shape is not None
-        # return asyncio.run_coroutine_threadsafe(
-        #     self._async_load_bytes_from_disk(key, path, dtype, shape), self.loop
-        # )
-
-        # TODO(Jiayi): Need to modify this when prefetch interface is determined.
-        return False
-
     async def _async_load_bytes_from_disk(
         self,
         key: CacheEngineKey,
@@ -518,16 +497,6 @@ class WekaGdsBackend(StorageBackendInterface):
             f" {gds_read_bytes / 1024 / 1024}MiB | {gds_reads} ops."
         )
         return results
-
-    def get_non_blocking(
-        self,
-        key: CacheEngineKey,
-    ) -> Optional[Future]:
-        # TODO(Serapheim): Using a dummy wrapper around prefetch for now.
-        self.submit_prefetch_task(key)
-        f: Future = Future()
-        f.set_result(None)
-        return f
 
     @_lmcache_nvtx_annotate
     @torch.inference_mode()
