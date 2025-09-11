@@ -176,6 +176,31 @@ class MockRedisSentinel:
     ):
         return self.redis
 
+class MockRedisCluster:
+    def __init__(self, startup_nodes=None, socket_timeout=None, decode_responses=False, **kwargs):
+        self.store = {}
+        self.startup_nodes = startup_nodes or []
+        self.socket_timeout = socket_timeout
+        self.decode_responses = decode_responses
+
+    def set(self, key, value):
+        self.store[key] = value
+        return True
+
+    def get(self, key: str):
+        return self.store.get(key, None)
+
+    def exists(self, key: str):
+        return key in self.store
+
+    def delete(self, key):
+        if key in self.store:
+            self.store.pop(key, None)
+            return 1
+        return 0
+
+    def close(self):
+        pass
 
 @dataclass
 class LMCacheServerProcess:
@@ -197,6 +222,10 @@ def mock_redis_sentinel():
     with patch("redis.Sentinel", MockRedisSentinel) as mock:
         yield mock
 
+@pytest.fixture(scope="function", autouse=True)
+def mock_redis_cluster():
+    with patch("redis.RedisCluster", MockRedisCluster) as mock:
+        yield mock
 
 @pytest.fixture(scope="module")
 def lmserver_v1_process(request):

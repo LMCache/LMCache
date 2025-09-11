@@ -7,6 +7,7 @@ import os
 
 # Third Party
 import redis
+from redis.cluster import RedisCluster, ClusterNode
 
 # First Party
 from lmcache.logging import init_logger
@@ -268,3 +269,130 @@ class RedisSentinelConnector(RemoteConnector):
     async def close(self):
         self.master.close()
         self.slave.close()
+
+class RedisClusterConnector(RemoteConnector):
+    """
+    The remote url starts with "redis-cluster:// and can include one or multiple hosts:ports, separated by commas.
+
+    Example:
+        remote_url: "redis-cluster://host1:7000,host2:7000,host3:7000"
+
+    Extra environment variables:
+    - REDIS_TIMEOUT (optional) -- Timeout in seconds, default is 1 if not set
+    """
+
+    ENV_REDIS_TIMEOUT = "REDIS_TIMEOUT"
+
+    def __init__(
+            self,
+            hosts_and_ports: List[Tuple[str, int]],
+            username: str,
+            password: str,
+            loop: asyncio.AbstractEventLoop,
+            local_cpu_backend: LocalCPUBackend,
+    ):
+        timeout: float = -1000.0
+
+        # Get timeout
+        match os.environ.get(self.ENV_REDIS_TIMEOUT):
+            case None:
+                timeout = 1
+            case value:
+                timeout = float(value)
+
+        logger.info(f"Connecting to Redis Cluster nodes, host and ports: {hosts_and_ports}")
+        startup_nodes = [ClusterNode(h, p) for (h, p) in hosts_and_ports]
+
+        self.cluster = redis.RedisCluster(
+            startup_nodes=startup_nodes,
+            username=username,
+            password=password,
+            socket_timeout=timeout,
+            decode_responses=False,
+        )
+        self.local_cpu_backend = local_cpu_backend
+
+    async def exists(self, key: CacheEngineKey) -> bool:
+        return bool(self.cluster.exists(key.to_string() + "metadata"))
+
+    def exists_sync(self, key: CacheEngineKey) -> bool:
+        return bool(self.cluster.exists(key.to_string() + "metadata"))
+
+    async def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
+        key_str = key.to_string()
+        metadata_bytes = self.cluster.get(key_str + "metadata")
+
+        if metadata_bytes is None:
+            return None
+
+        assert not inspect.isawaitable(metadata_bytes)
+
+        metadata = RemoteMetadata.deserialize(memoryview(metadata_bytes))
+
+        memory_obj = self.local_cpu_backend.allocate(
+            metadata.shape,
+            metadata.dtype,
+            metadata.fmt,
+        )
+        if memory_obj is None:
+            logger.warning("Failed to allocate memory during cluster receive")
+            return None
+
+        # TODO(Jiayi): Find a way to do `get` inplace
+        kv_bytes = self.cluster.get(key_str + "kv_bytes")
+        assert not inspect.isawaitable(kv_bytes)
+
+        if kv_bytes is None:
+            # TODO (Jiayi): We might need a way to better handle
+            # consistency issues.
+            # TODO (Jiayi): A better way is to aggregate metadata
+            # and kv cache in one key.
+            logger.warning(
+                "Key exists but KV cache does not exist."
+                "Might happen when the cache is evicted by redis."
+            )
+            self.cluster.delete(key_str + "metadata")
+            return None
+
+        if isinstance(memory_obj.byte_array, memoryview):
+            view = memory_obj.byte_array
+            if view.format == "<B":
+                view = view.cast("B")
+        else:
+            view = memoryview(memory_obj.byte_array)
+
+        if isinstance(kv_bytes, (bytes, bytearray)):
+            view[: metadata.length] = kv_bytes
+        elif isinstance(kv_bytes, str):
+            converted = kv_bytes.encode("utf-8")
+            view[: metadata.length] = converted
+        else:
+            converted = bytes(kv_bytes)
+            view[: metadata.length] = converted
+
+        return memory_obj
+
+    async def put(self, key: CacheEngineKey, memory_obj: MemoryObj):
+        # TODO(Jiayi): The following code is ugly.
+        # Please use a function like `memory_obj.to_meta()`.
+        kv_bytes = memory_obj.byte_array
+        kv_shape = memory_obj.get_shape()
+        kv_dtype = memory_obj.get_dtype()
+        memory_format = memory_obj.get_memory_format()
+
+        metadata_bytes = RemoteMetadata(
+            len(kv_bytes), kv_shape, kv_dtype, memory_format
+        ).serialize()
+
+        key_str = key.to_string()
+        self.cluster.set(key_str + "metadata", metadata_bytes)
+        self.cluster.set(key_str + "kv_bytes", kv_bytes)
+
+    # TODO
+    @no_type_check
+    async def list(self) -> List[str]:
+        pass
+
+    async def close(self):
+        self.cluster.close()
+        logger.info("Closed the redis cluster connection")
