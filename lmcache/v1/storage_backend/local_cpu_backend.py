@@ -48,7 +48,11 @@ class LocalCPUBackend(AllocatorBackendInterface):
         lmcache_worker: Optional["LMCacheWorker"] = None,
         memory_allocator: Optional[MemoryAllocatorInterface] = None,
     ):
-        super().__init__(dst_device)
+        if torch.cuda.is_available():
+            super().__init__(dst_device)
+        else:
+            super().__init__("cpu")
+
         self.cache_policy = get_cache_policy(config.cache_policy)
         self.hot_cache = self.cache_policy.init_mutable_mapping()
 
@@ -66,7 +70,10 @@ class LocalCPUBackend(AllocatorBackendInterface):
         self.instance_id = config.lmcache_instance_id
         self.cpu_lock = threading.Lock()
 
-        self.stream = torch.cuda.Stream()
+        if torch.cuda.is_available():
+            self.stream = torch.cuda.Stream()
+        else:  # CPU doesn't need streams
+            self.stream = None
 
         self.stats_monitor = LMCStatsMonitor.GetOrCreate()
 

@@ -17,9 +17,16 @@ import torch
 # First Party
 from lmcache.logging import init_logger
 from lmcache.observability import LMCStatsMonitor
-from lmcache.utils import _lmcache_nvtx_annotate
+from lmcache.utils import (
+    _lmcache_nvtx_annotate,
+    alloc_pinned_numa_ptr,
+    alloc_pinned_ptr,
+)
 from lmcache.v1.system_detection import NUMAMapping
-import lmcache.c_ops as lmc_ops
+if torch.cuda.is_available():
+    # First Party
+    import lmcache.c_ops as lmc_ops
+
 
 logger = init_logger(__name__)
 
@@ -295,15 +302,24 @@ def _allocate_cpu_memory(
     numa_mapping: Optional[NUMAMapping] = None,
 ) -> torch.Tensor:
     if numa_mapping:
-        current_device_id = torch.cuda.current_device()
+        if torch.cuda.is_available():
+                current_device_id = torch.cuda.current_device()
+        else:
+            current_device_id = 0
         gpu_to_numa_mapping = numa_mapping.gpu_to_numa_mapping
         assert current_device_id in gpu_to_numa_mapping, (
             f"Current device {current_device_id} is not in the GPU NUMA mapping."
         )
         numa_id = gpu_to_numa_mapping[current_device_id]
-        ptr = lmc_ops.alloc_pinned_numa_ptr(size, numa_id)
+        if torch.cuda.is_available():
+            ptr = lmc_ops.alloc_pinned_numa_ptr(size, numa_id)
+        else:
+            ptr = alloc_pinned_numa_ptr(size)
     else:
-        ptr = lmc_ops.alloc_pinned_ptr(size, 0)
+        if torch.cuda.is_available():
+                ptr = lmc_ops.alloc_pinned_ptr(size, 0)
+        else:
+            ptr = alloc_pinned_ptr(size)
     array_type = ctypes.c_uint8 * size
     buf = array_type.from_address(ptr)
     buffer = torch.frombuffer(buf, dtype=torch.uint8)
@@ -1395,7 +1411,10 @@ class PinMemoryAllocator(MemoryAllocatorInterface):
         :param int size: The size of the pinned memory in bytes.
         """
 
-        ptr = lmc_ops.alloc_pinned_ptr(size, 0)
+        if torch.cuda.is_available():
+            ptr = lmc_ops.alloc_pinned_ptr(size, 0)
+        else:
+            ptr = alloc_pinned_ptr(size)
         array_type = ctypes.c_uint8 * size
         buf = array_type.from_address(ptr)
         self.buffer = torch.frombuffer(buf, dtype=torch.uint8)
@@ -1468,8 +1487,9 @@ class PinMemoryAllocator(MemoryAllocatorInterface):
 
     def close(self):
         if not self._unregistered:
-            torch.cuda.synchronize()
-            lmc_ops.free_pinned_ptr(self.buffer.data_ptr())
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+                lmc_ops.free_pinned_ptr(self.buffer.data_ptr())
             self._unregistered = True
 
     def __str__(self):
@@ -1606,11 +1626,12 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
 
     def close(self):
         if not self._unregistered:
-            torch.cuda.synchronize()
-            if self.numa_mapping:
-                lmc_ops.free_pinned_numa_ptr(self.buffer.data_ptr(), self.size)
-            else:
-                lmc_ops.free_pinned_ptr(self.buffer.data_ptr())
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+                if self.numa_mapping:
+                    lmc_ops.free_pinned_numa_ptr(self.buffer.data_ptr(), self.size)
+                else:
+                    lmc_ops.free_pinned_ptr(self.buffer.data_ptr())
             self._unregistered = True
 
     def __str__(self):
@@ -1797,7 +1818,10 @@ class CuFileMemoryAllocator(GPUMemoryAllocator):
         if device is None:
             # TODO(Serapheim): Ideally we'd get the device from the upper
             # layer - for now just use the current device.
-            device = f"cuda:{torch.cuda.current_device()}"
+            if torch.cuda.is_available():
+                device = f"cuda:{torch.cuda.current_device()}"
+            else:
+                device = "cpu:0"
         super().__init__(size, device, align_bytes=4096)
         self.base_pointer = self.tensor.data_ptr()
         cuFileBufRegister(ctypes.c_void_p(self.base_pointer), size, flags=0)

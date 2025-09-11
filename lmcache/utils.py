@@ -384,3 +384,26 @@ def mock_up_broadcast_fn(t: torch.Tensor, i: int) -> None:
 
 def mock_up_broadcast_object_fn(a: Any, i: int) -> None:
     raise NotImplementedError("Calling invalid broadcast object function")
+
+
+#### Python equivalents of CPP CUDA  functions ####
+def alloc_pinned_numa_ptr(size: int) -> int:
+    # Allocate CPU tensor
+    tensor = torch.empty(size, dtype=torch.float32, pin_memory=True)
+
+    # First-touch initialization (forces physical allocation)
+    tensor.fill_(0.0)
+
+    # Now tensor is pinned and ready for fast GPU transfer
+    gpu_tensor = tensor.to("cuda", non_blocking=True)
+
+    # Return the address of first element of GPU tensor
+    return gpu_tensor.data_ptr()
+
+
+def alloc_pinned_ptr(size: int) -> int:
+    # Create a 1D uint8 tensor in pinned memory, as uint8 == 1 byte
+    tensor = torch.empty(size, dtype=torch.uint8, pin_memory=True)
+
+    # Return address of first element of tensor
+    return tensor.data_ptr()
