@@ -2,6 +2,7 @@
 # Standard
 from typing import TYPE_CHECKING, Optional, Union
 import threading
+import time
 
 # Third Party
 from vllm.utils import make_zmq_socket
@@ -177,9 +178,7 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
             ranks = 1
         for i in range(ranks):
             self.push_sockets[i].send_multipart(msg_buf, copy=False)
-        # it is okay for the scheduler to busy loop as long as we are using
-        # --distributed-executor-backen "mp" or else the GIL will stall the worker
-        # time.sleep(self.lookup_backoff_time)
+        time.sleep(self.lookup_backoff_time)
         return None
 
     def process_responses_from_workers(self):
@@ -214,21 +213,12 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
         try:
             if self.thread.is_alive():
                 self.thread.join(timeout=1.0)
-        except Exception:
-            pass
-        for s in self.push_sockets:
-            try:
+            for s in self.push_sockets:
                 s.close(linger=0)  # type: ignore[arg-type]
-            except Exception:
-                pass
-        try:
             self.pull_socket.close(linger=0)  # type: ignore[arg-type]
-        except Exception:
-            pass
-        try:
             self.ctx.term()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Failed to join thread during close: {e}")
 
 
 class LMCacheAsyncLookupServer:
@@ -319,17 +309,9 @@ class LMCacheAsyncLookupServer:
         try:
             if self.thread.is_alive():
                 self.thread.join(timeout=1.0)
-        except Exception:
-            pass
-        try:
-            self.push_socket.close(linger=0)  # type: ignore[arg-type]
-        except Exception:
-            pass
-        try:
+            for s in self.push_sockets:
+                s.close(linger=0)  # type: ignore[arg-type]
             self.pull_socket.close(linger=0)  # type: ignore[arg-type]
-        except Exception:
-            pass
-        try:
             self.ctx.term()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Failed to join thread during close: {e}")
