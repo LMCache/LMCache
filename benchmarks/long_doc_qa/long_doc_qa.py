@@ -334,7 +334,6 @@ def add_cache_misses(prompts, hit_miss_ratio):
     return prompts, miss_mask
 
 
-
 def relative_time(df, start_time):
     """
     Relative time to the start of the benchmark.
@@ -342,6 +341,7 @@ def relative_time(df, start_time):
     df["request_start"] = df["request_start"] - start_time
     df["request_end"] = df["request_end"] - start_time
     df["ttft_time"] = df["request_start"] + df["ttft"]
+
 
 def visualize_results(warmup_df, benchmark_df):
     def plot_bars(df, title, filename):
@@ -380,7 +380,7 @@ def visualize_results(warmup_df, benchmark_df):
                 hits["request_end"] - hits["ttft_time"],
                 left=hits["ttft_time"],
                 color="skyblue",
-                label="Decoding after loading"
+                label="Decoding after loading",
             )
         if not misses.empty:
             plt.barh(
@@ -388,7 +388,7 @@ def visualize_results(warmup_df, benchmark_df):
                 misses["request_end"] - misses["ttft_time"],
                 left=misses["ttft_time"],
                 color="pink",
-                label="Decoding after compute"
+                label="Decoding after compute",
             )
 
         plt.xlabel("Time (s)")
@@ -400,6 +400,7 @@ def visualize_results(warmup_df, benchmark_df):
 
     plot_bars(warmup_df, "Warmup Round", "warmup_round.png")
     plot_bars(benchmark_df, "Query Round", "query_round.png")
+
 
 async def main(args):
     random.seed(args.shuffle_seed)
