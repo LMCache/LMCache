@@ -313,6 +313,9 @@ def test_redis_cluster_connector(url, autorelease_v1):
     Redis Cluster behavior without requiring an actual Redis Cluster setup.
     """
 
+    # Standard
+    import os
+
     os.environ["REDIS_TIMEOUT"] = "3.5"
 
     async_loop, async_thread = init_asyncio_loop()
