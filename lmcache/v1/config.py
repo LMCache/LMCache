@@ -580,7 +580,8 @@ def _update_config_from_env(self):
 def _from_env(cls):
     """Load configuration from environment variables"""
     instance = cls.from_defaults()
-    return _update_config_from_env(instance).log_config()
+    _update_config_from_env(instance)
+    return instance.log_config()
 
 
 def _from_dict(cls, config_dict: dict):
