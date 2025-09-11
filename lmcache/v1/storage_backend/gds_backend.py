@@ -29,7 +29,7 @@ from lmcache.v1.memory_management import (
     MemoryFormat,
     MemoryObj,
 )
-from lmcache.v1.storage_backend.abstract_backend import StorageBackendInterface
+from lmcache.v1.storage_backend.abstract_backend import AllocatorBackendInterface
 
 logger = init_logger(__name__)
 
@@ -486,10 +486,12 @@ class GdsBackend(AllocatorBackendInterface):
         # path = entry.path
         # dtype = entry.dtype
         # shape = entry.shape
+        # fmt = entry.fmt
         # assert dtype is not None
         # assert shape is not None
+        # assert fmt is not None
         # return asyncio.run_coroutine_threadsafe(
-        #     self._async_load_bytes_from_disk(key, path, dtype, shape), self.loop
+        #     self._async_load_bytes_from_disk(key, path, dtype, shape，fmt), self.loop
         # )
 
         # TODO(Jiayi): Need to modify this when prefetch interface is determined.
@@ -503,8 +505,9 @@ class GdsBackend(AllocatorBackendInterface):
         path: str,
         dtype: torch.dtype,
         shape: torch.Size,
+        fmt: MemoryFormat,
     ) -> Optional[MemoryObj]:
-        return self._load_bytes_from_disk(key, path, dtype, shape)
+        return self._load_bytes_from_disk(key, path, dtype, shape, fmt=fmt)
 
     def get_blocking(
         self,

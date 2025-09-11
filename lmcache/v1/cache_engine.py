@@ -136,7 +136,7 @@ class LMCacheEngine:
 
         self.use_layerwise = config.use_layerwise
         self.num_layers = metadata.kv_shape[0]
-        self.fmt = MemoryFormat.KV_2LTD
+        self.fmt = None
         if self.use_layerwise:
             if config.enable_blending:
                 self.fmt = MemoryFormat.KV_2TD
