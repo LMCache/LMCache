@@ -18,10 +18,9 @@ Commandline arguments:
 
     --repeat-mode: The mode to repeat prompts. The supported modes are:
         - 'random': shuffle the prompts randomly. (Default)
-        - 'tile': the entire prompt list is repeated in sequence. (Potentially
-                  lowest cache hit)
+        - 'tile': the entire prompt list is repeated in sequence.
         - 'interleave': each prompt is repeated consecutively before
-                        moving to the next element. (Highest cache hit)
+                        moving to the next element.
 
     --shuffle-seed: Random seed when the repeat mode is "random".
                     (Optional, default: 0)
@@ -45,9 +44,13 @@ Commandline arguments:
                             (warmup/query) as a factor, e.g. 4.5 for 4.5×.
                             If actual gain is below this, exits.
 
+    --expected-latency: Expected end to end latency for the first query round.
     --completions: Use completions API instead of chat completions API
 
     --visualize: Visualize the results
+
+    --hit-miss-ratio: In query round, control how many of the prompts
+    will miss the cache. For example, 3:1 means every fourth repeated prompt
 """
 
 # Standard
@@ -312,6 +315,21 @@ def repeat_prompts(prompts, repeat_count, mode: str):
         )
 
 
+def add_cache_misses(prompts, hit_miss_ratio):
+    """
+    Add cache misses to the prompts.
+    """
+    if hit_miss_ratio is None:
+        return prompts
+
+    hit, miss = map(int, hit_miss_ratio.split(":", 1))
+
+    for i in range(len(prompts)):
+        if i % (hit + miss) >= hit:
+            prompts[i] = str(random.randint(-10000000, 10000000)) + " " + prompts[i]
+    return prompts
+
+
 def relative_time(df, start_time):
     """
     Relative time to the start of the benchmark.
@@ -393,6 +411,7 @@ async def main(args):
     ]
 
     prompts = repeat_prompts(warmup_prompts, args.repeat_count, mode=args.repeat_mode)
+    prompts = add_cache_misses(prompts, args.hit_miss_ratio)
 
     write_resp("------warm up round------\n")
     warmup_start_time = time.time()
@@ -479,6 +498,16 @@ async def main(args):
             sys.exit(
                 f"ERROR: latency gain {actual_latency_gain:.2f}× < expected "
                 f"{args.expected_latency_gain:.2f}×"
+            )
+
+    if args.expected_latency is not None:
+        warmup_duration = warmup_end_time - warmup_start_time
+        warmup_per_prompt = warmup_duration / len(warmup_df)
+        print(f"{CSI}34mActual latency: {warmup_per_prompt:.2f}s{RESET}")
+        if warmup_per_prompt > args.expected_latency:
+            sys.exit(
+                f"ERROR: latency {warmup_per_prompt:.2f}s > expected "
+                f"{args.expected_latency:.2f}s"
             )
 
 
@@ -586,6 +615,12 @@ def create_argument_parser():
             "as a factor, e.g. 4.5 for 4.5×. If actual gain is below this, exits."
         ),
     )
+    parser.add_argument(
+        "--expected-latency",
+        type=float,
+        default=None,
+        help="Expected end to end latency for the first query round.",
+    )
 
     parser.add_argument(
         "--completions",
@@ -597,6 +632,17 @@ def create_argument_parser():
         "--visualize",
         action="store_true",
         help="Visualize the results",
+    )
+
+    parser.add_argument(
+        "--hit-miss-ratio",
+        type=str,
+        default=None,
+        help=(
+            "In query round, control how many of the prompts will miss the cache."
+            "For example, 3:1 means every fourth repeated prompt will be randomized "
+            "to force a cache miss. 2:2 means 2 hits and 2 misses"
+        ),
     )
 
     return parser

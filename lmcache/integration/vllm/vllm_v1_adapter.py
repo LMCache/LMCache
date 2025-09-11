@@ -21,9 +21,11 @@ from vllm.distributed.parallel_state import (
 from vllm.sampling_params import SamplingParams
 from vllm.utils import cdiv, get_kv_cache_torch_dtype
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.version import __version__ as VLLM_VERSION
 import torch
 
 # First Party
+from lmcache import utils
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.integration.vllm.utils import (
     ENGINE_NAME,
@@ -634,21 +636,34 @@ class LMCacheConnectorV1Impl:
 
         self._requests_priority: dict[str, int] = {}
 
-        # Start internal API server if enabled
-        # The enabled check is in the InternalAPIServer constructor
-        self.api_server = InternalAPIServer(self)
-        self.api_server.start()
-
-        # Launch plugins
-        self.plugin_launcher = PluginLauncher(
-            self.config,
-            role,
-            self.worker_count,
-            -1
-            if self.lmcache_engine is None  # scheduler side
-            else self.lmcache_engine.metadata.worker_id,
+        # TODO(baoloongmao): Internal api server & plugin framework support dp > 1
+        if (
+            vllm_config.parallel_config.data_parallel_size_local == 1
+            or vllm_config.parallel_config.data_parallel_rank_local == 0
+        ):
+            # Start internal API server if enabled
+            # The enabled check is in the InternalAPIServer constructor
+            self.api_server = InternalAPIServer(self)
+            self.api_server.start()
+            # Launch plugins
+            self.plugin_launcher = PluginLauncher(
+                self.config,
+                role,
+                self.worker_count,
+                -1
+                if self.lmcache_engine is None  # scheduler side
+                else self.lmcache_engine.metadata.worker_id,
+            )
+            self.plugin_launcher.launch_plugins()
+        else:
+            self.api_server = None  # type: ignore[assignment]
+            self.plugin_launcher = None  # type: ignore[assignment]
+        logger.info(
+            f"LMCache initialized for role {role} with version {utils.get_version()}, "
+            f"vllm version {VLLM_VERSION}, "
+            "lmcache cache_engine metadata: "
+            f"{getattr(self.lmcache_engine, 'metadata', None)}"
         )
-        self.plugin_launcher.launch_plugins()
 
     @_lmcache_nvtx_annotate
     def _init_kv_caches_from_forward_context(self, forward_context: "ForwardContext"):

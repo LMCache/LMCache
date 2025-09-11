@@ -17,9 +17,6 @@ class ExternalConnectorAdapter(ConnectorAdapter):
     def __init__(self) -> None:
         super().__init__("external://")
 
-    def can_parse(self, url: str) -> bool:
-        return url.startswith(self.schema)
-
     def create_connector(self, context: ConnectorContext) -> RemoteConnector:
         """
         Create an External connector. This connector stores data
