@@ -38,6 +38,7 @@ Plugin filenames determine execution targets:
 Role-Specific Plugins:
 - Format: ``<ROLE>[_<WORKER_ID>][_<DESCRIPTION>].<EXTENSION>``
 - Examples:
+
   - ``scheduler_foo_plugin.py``: Runs only on ``SCHEDULER``
   - ``worker_0_test.sh``: Runs only on worker ID 0
   - ``all_plugin.sh``: Runs on all workers
@@ -52,6 +53,7 @@ Execution Model
 1. **Interpreter Detection**:
    - Uses shebang line (e.g., ``#!/opt/venv/bin/python``)
    - Fallback interpreters:
+
      - ``.py`` → ``python``
      - ``.sh`` → ``bash``
 

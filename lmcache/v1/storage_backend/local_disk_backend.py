@@ -30,9 +30,8 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+
 # TODO(Jiayi): handle cases where cache is repetitvely prefetched.
-
-
 class LocalDiskWorker:
     def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
         self.put_lock = threading.Lock()
@@ -48,6 +47,7 @@ class LocalDiskWorker:
         self,
         task_type: str,
         task: Callable,
+        *args,
         **kwargs,
     ) -> Any:
         if task_type == "prefetch":
@@ -62,6 +62,7 @@ class LocalDiskWorker:
 
         return await self.executor.submit_job(
             task,
+            *args,
             priority=priority,
             **kwargs,
         )
@@ -82,7 +83,7 @@ class LocalDiskWorker:
             return key in self.put_tasks
 
     def close(self):
-        self.thread.join()
+        self.executor.shutdown()
 
 
 class LocalDiskBackend(StorageBackendInterface):
@@ -209,12 +210,14 @@ class LocalDiskBackend(StorageBackendInterface):
         self.usage -= size
         self.stats_monitor.update_local_storage_usage(self.usage)
 
-        res = asyncio.run_coroutine_threadsafe(
-            self.disk_worker.submit_task("delete", os.remove, path=path),
-            self.loop,
-        )
+        # NOTE: The following code will cause deadlock
+        # res = asyncio.run_coroutine_threadsafe(
+        #     self.disk_worker.submit_task("delete", os.remove, path),
+        #     self.loop,
+        # )
+        # res.result()
 
-        res.result()
+        os.remove(path)
 
         if force:
             self.cache_policy.update_on_force_evict(key)
@@ -278,7 +281,7 @@ class LocalDiskBackend(StorageBackendInterface):
                 )
                 if not evict_keys:
                     logger.warning(
-                        "No eviction candidates found.", "Disk space under pressure."
+                        "No eviction candidates found. Disk space under pressure."
                     )
                     evict_success = False
                     break
@@ -550,6 +553,7 @@ class LocalDiskBackend(StorageBackendInterface):
         )
 
     def close(self) -> None:
+        self.disk_worker.close()
         with self.disk_lock:
             keys = list(self.dict.keys())
         if keys:
