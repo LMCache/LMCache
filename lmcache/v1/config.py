@@ -576,7 +576,7 @@ def _update_config_from_env(self):
                 logger.warning(f"Failed to parse {get_env_name(name)}: {e}")
                 # Keep existing value if conversion fails
 
-
+    return self
 def _from_env(cls):
     """Load configuration from environment variables"""
     instance = cls.from_defaults()
