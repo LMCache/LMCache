@@ -7,7 +7,7 @@ LMCache provides detailed metrics via a Prometheus endpoint, allowing for in-dep
 This section outlines how to enable and configure observability from embedded vLLM ``/metrics`` API endpoint.
 
 
-Steps
+Quick Start Guide
 -----
 
 1) On vLLM/LMCache side
@@ -52,20 +52,143 @@ or equivalent configuration to scrape the metrics endpoint:
 Available Metrics
 -----------------
 
-LMCache exposes a variety of metrics to monitor its performance, including:
+LMCache exposes a variety of metrics to monitor its performance. The following table lists all available metrics organized by category:
 
-- ``lmcache:num_retrieve_requests``: Total number of retrieve requests.
-- ``lmcache:num_store_requests``: Total number of store requests.
-- ``lmcache:num_lookup_requests``: Total number of lookup requests.
-- ``lmcache:num_requested_tokens``: Total number of tokens requested for retrieval.
-- ``lmcache:num_hit_tokens``: Total number of cache hit tokens from retrieval.
-- ``lmcache:retrieve_hit_rate``: The hit rate for retrieve requests.
-- ``lmcache:lookup_hit_rate``: The hit rate for lookup requests.
-- ``lmcache:local_cache_usage``: Local cache usage in bytes.
-- ``lmcache:remote_cache_usage``: Remote cache usage in bytes.
-- ``lmcache:time_to_retrieve``: A histogram of time taken to retrieve from the cache (seconds).
-- ``lmcache:time_to_store``: A histogram of time taken to store to the cache (seconds).
-- ``lmcache:retrieve_speed``: A histogram of retrieval speed (tokens per second).
-- ``lmcache:store_speed``: A histogram of storage speed (tokens per second).
+.. list-table:: LMCache Metrics
+   :header-rows: 1
+   :widths: 30 15 55
+
+   * - Metric Name
+     - Type
+     - Description
+   * - **Core Request Metrics**
+     - 
+     - 
+   * - ``lmcache:num_retrieve_requests``
+     - Counter
+     - Total number of retrieve requests
+   * - ``lmcache:num_store_requests``
+     - Counter
+     - Total number of store requests
+   * - ``lmcache:num_lookup_requests``
+     - Counter
+     - Total number of lookup requests
+   * - ``lmcache:num_requested_tokens``
+     - Counter
+     - Total number of tokens requested for retrieval
+   * - ``lmcache:num_hit_tokens``
+     - Counter
+     - Total number of cache hit tokens from retrieval
+   * - ``lmcache:num_lookup_tokens``
+     - Counter
+     - Total number of tokens requested in lookup operations
+   * - ``lmcache:num_lookup_hits``
+     - Counter
+     - Total number of tokens hit in lookup operations
+   * - ``lmcache:num_vllm_hit_tokens``
+     - Counter
+     - Number of hit tokens in vLLM
+   * - **Hit Rate Metrics**
+     - 
+     - 
+   * - ``lmcache:retrieve_hit_rate``
+     - Gauge
+     - The hit rate for retrieve requests
+   * - ``lmcache:lookup_hit_rate``
+     - Gauge
+     - The hit rate for lookup requests
+   * - **Cache Usage Metrics**
+     - 
+     - 
+   * - ``lmcache:local_cache_usage``
+     - Gauge
+     - Local cache usage in bytes
+   * - ``lmcache:remote_cache_usage``
+     - Gauge
+     - Remote cache usage in bytes
+   * - ``lmcache:local_storage_usage``
+     - Gauge
+     - Local storage usage in bytes
+   * - **Performance Metrics**
+     - 
+     - 
+   * - ``lmcache:time_to_retrieve``
+     - Histogram
+     - Time taken to retrieve from the cache (seconds)
+   * - ``lmcache:time_to_store``
+     - Histogram
+     - Time taken to store to the cache (seconds)
+   * - ``lmcache:retrieve_speed``
+     - Histogram
+     - Retrieval speed (tokens per second)
+   * - ``lmcache:store_speed``
+     - Histogram
+     - Storage speed (tokens per second)
+   * - **Remote Backend Metrics**
+     - 
+     - 
+   * - ``lmcache:num_remote_read_requests``
+     - Counter
+     - Total number of read requests to remote backends
+   * - ``lmcache:num_remote_read_bytes``
+     - Counter
+     - Total number of bytes read from remote backends
+   * - ``lmcache:num_remote_write_requests``
+     - Counter
+     - Total number of write requests to remote backends
+   * - ``lmcache:num_remote_write_bytes``
+     - Counter
+     - Total number of bytes written to remote backends
+   * - ``lmcache:remote_time_to_get``
+     - Histogram
+     - Time taken to get data from remote backends (milliseconds)
+   * - ``lmcache:remote_time_to_put``
+     - Histogram
+     - Time taken to put data to remote backends (milliseconds)
+   * - ``lmcache:remote_time_to_get_sync``
+     - Histogram
+     - Time taken to get data from remote backends synchronously (milliseconds)
+   * - **Network Monitoring Metrics**
+     - 
+     - 
+   * - ``lmcache:remote_ping_latency``
+     - Gauge
+     - Latest ping latency to remote backends (milliseconds)
+   * - ``lmcache:remote_ping_errors``
+     - Counter
+     - Number of ping errors to remote backends
+   * - ``lmcache:remote_ping_successes``
+     - Counter
+     - Number of ping successes to remote backends
+   * - ``lmcache:remote_ping_error_code``
+     - Gauge
+     - Latest ping error code to remote backends
+   * - **Local CPU Backend Metrics**
+     - 
+     - 
+   * - ``lmcache:local_cpu_evict_count``
+     - Counter
+     - Total number of evictions in local CPU backend
+   * - ``lmcache:local_cpu_evict_keys_count``
+     - Counter
+     - Total number of evicted keys in local CPU backend
+   * - ``lmcache:local_cpu_evict_failed_count``
+     - Counter
+     - Total number of failed evictions in local CPU backend
+   * - ``lmcache:local_cpu_hot_cache_count``
+     - Gauge
+     - The size of the hot cache
+   * - ``lmcache:local_cpu_keys_in_request_count``
+     - Gauge
+     - The size of the keys in request
+   * - **Memory Management Metrics**
+     - 
+     - 
+   * - ``lmcache:active_memory_objs_count``
+     - Gauge
+     - The number of active memory objects
+   * - ``lmcache:pinned_memory_objs_count``
+     - Gauge
+     - The number of pinned memory objects
 
 
