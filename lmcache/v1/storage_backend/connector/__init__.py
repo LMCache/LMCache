@@ -110,7 +110,7 @@ class ConnectorAdapter(ABC):
         self.schema = schema
 
     def can_parse(self, url: str) -> bool:
-        return url.startswith(self.schema)
+        return self.schema != "" and url.startswith(self.schema)
 
     @abstractmethod
     def create_connector(self, context: ConnectorContext) -> RemoteConnector:
