@@ -356,6 +356,11 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "default": 3000,
         "env_converter": int,
     },
+    "hit_limit_upper": {
+        "type": Optional[float],
+        "default": None,
+        "env_converter": float,
+    },
 }
 
 
