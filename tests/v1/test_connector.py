@@ -359,13 +359,13 @@ def test_redis_cluster_connector(url, autorelease_v1):
     memory_allocator.close()
 
 @pytest.mark.parametrize("url", REDIS_CLUSTER_URLS)
-def test_cluster_metadata_without_kv_bytes(url, autorelease_v1): # test if metadata key survives in redis but kv_bytes evicted/expired
+def test_cluster_metadata_without_kv_bytes(url, autorelease_v1):
     async_loop, async_thread = init_asyncio_loop()
     memory_allocator = PinMemoryAllocator(1024 * 1024 * 1024)
     connector = autorelease_v1(CreateConnector(url, async_loop, memory_allocator))
 
     random_key = dumb_cache_engine_key()
-    # Build a small mem obj just to derive correct metadata bytes
+    # build a small mem obj to get correct metadata bytes
     memory_obj = memory_allocator.allocate([2, 32, 8, 64], torch.bfloat16)
     kv_bytes = memory_obj.byte_array
     meta = RemoteMetadata(len(kv_bytes), memory_obj.get_shape(), memory_obj.get_dtype(), memory_obj.get_memory_format())
