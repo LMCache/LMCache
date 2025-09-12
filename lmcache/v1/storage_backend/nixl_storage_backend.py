@@ -236,8 +236,9 @@ class NixlStorageBackend(AllocatorBackendInterface):
     def __init__(
         self,
         nixl_config: NixlStorageConfig,
+        config: LMCacheEngineConfig,
+        metadata: LMCacheEngineMetadata,
         loop: asyncio.AbstractEventLoop,
-        memory_allocator: PagedTensorMemoryAllocator,
     ):
         """
         Initialize the Nixl storage backend.
@@ -254,12 +255,12 @@ class NixlStorageBackend(AllocatorBackendInterface):
         self.progress_lock = threading.Lock()
         self.progress_set: Set[int] = set()
 
-        self.memory_allocator = memory_allocator
+        self.memory_allocator = self.initialize_allocator(config, metadata)
 
         self.file_pool = NixlFilePool(nixl_config.path, nixl_config.file_pool_size)
 
         self.agent = NixlStorageAgent(
-            memory_allocator,
+            self.memory_allocator,
             self.file_pool,
             nixl_config.buffer_device,
             nixl_config.backend,
@@ -407,6 +408,49 @@ class NixlStorageBackend(AllocatorBackendInterface):
 
         self.file_pool.close()
 
+        self.memory_allocator.close()
+
+    def initialize_allocator(
+        self,
+        config: LMCacheEngineConfig,
+        metadata: LMCacheEngineMetadata,
+    ) -> PagedTensorMemoryAllocator:
+        extra_config = config.extra_config
+        enable_nixl_storage = extra_config is not None and extra_config.get(
+            "enable_nixl_storage"
+        )
+        assert enable_nixl_storage
+        # First Party
+        from lmcache.v1.storage_backend.connector.nixl_utils import (
+            get_correct_nixl_device,
+        )
+
+        corrected_device = get_correct_nixl_device(
+            config.nixl_buffer_device,
+            metadata.worker_id,
+        )
+
+        buffer = torch.empty(
+            config.nixl_buffer_size,
+            dtype=torch.uint8,
+            device=corrected_device,
+        )
+
+        if corrected_device == "cpu":
+            torch.cuda.cudart().cudaHostRegister(
+                buffer.data_ptr(), config.nixl_buffer_size, 0
+            )
+        else:
+            logger.info(f"Setting cuda device to {corrected_device} ")
+            torch.cuda.set_device(corrected_device)
+
+        return PagedTensorMemoryAllocator(
+            buffer,
+            torch.Size(metadata.kv_shape),
+            metadata.kv_dtype,
+            MemoryFormat.KV_2LTD,
+        )
+
     def allocate(
         self,
         shape: torch.Size,
@@ -446,7 +490,6 @@ class NixlStorageBackend(AllocatorBackendInterface):
         config: LMCacheEngineConfig,
         loop: asyncio.AbstractEventLoop,
         metadata: LMCacheEngineMetadata,
-        memory_allocator: PagedTensorMemoryAllocator,
     ):
         """
         Create a Nixl backend with the given configuration.
@@ -459,5 +502,5 @@ class NixlStorageBackend(AllocatorBackendInterface):
         # Create the Nixl config
         nixl_config = NixlStorageConfig.from_cache_engine_config(config, metadata)
         # Create the Nixl backend
-        backend = NixlStorageBackend(nixl_config, loop, memory_allocator)
+        backend = NixlStorageBackend(nixl_config, config, metadata, loop)
         return backend

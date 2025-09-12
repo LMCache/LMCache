@@ -17,11 +17,12 @@ import aiofile
 import torch
 
 # First Party
+from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey, DiskCacheMetadata, _lmcache_nvtx_annotate
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import (
-    MemoryAllocatorInterface,
+    CuFileMemoryAllocator,
     MemoryFormat,
     MemoryObj,
 )
@@ -121,8 +122,8 @@ class WekaGdsBackend(AllocatorBackendInterface):
     def __init__(
         self,
         config: LMCacheEngineConfig,
+        metadata: LMCacheEngineMetadata,
         loop: asyncio.AbstractEventLoop,
-        memory_allocator: MemoryAllocatorInterface,
         dst_device: str = "cuda",
     ):
         # HACK(Jiayi): cufile import is buggy on some hardware
@@ -137,7 +138,7 @@ class WekaGdsBackend(AllocatorBackendInterface):
 
         self.config = config
         self.loop = loop
-        self.memory_allocator = memory_allocator
+        self.memory_allocator = self.initialize_allocator(config, metadata)
         self.dst_device = dst_device
 
         assert config.weka_path is not None, (
@@ -562,6 +563,16 @@ class WekaGdsBackend(AllocatorBackendInterface):
     def remove(self, key, force=True):
         raise NotImplementedError("Remote backend does not support remove now.")
 
+    def initialize_allocator(
+        self, config: LMCacheEngineConfig, metadata: LMCacheEngineMetadata
+    ) -> CuFileMemoryAllocator:
+        assert config.weka_path is not None
+        assert config.cufile_buffer_size is not None
+        return CuFileMemoryAllocator(config.cufile_buffer_size * 1024**2)
+
+    def get_allocator_backend(self):
+        return self
+
     def allocate(
         self,
         shape: torch.Size,
@@ -594,5 +605,6 @@ class WekaGdsBackend(AllocatorBackendInterface):
         return self.memory_allocator.batched_allocate(shape, dtype, batch_size, fmt)
 
     def close(self) -> None:
+        self.memory_allocator.close()
         self._thread_pool.shutdown(wait=True)
         logger.info("Weka backend closed.")

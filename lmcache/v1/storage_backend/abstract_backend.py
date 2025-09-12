@@ -7,8 +7,14 @@ import abc
 import torch
 
 # First Party
+from lmcache.config import LMCacheEngineMetadata
 from lmcache.utils import CacheEngineKey
-from lmcache.v1.memory_management import MemoryFormat, MemoryObj
+from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.v1.memory_management import (
+    MemoryAllocatorInterface,
+    MemoryFormat,
+    MemoryObj,
+)
 from lmcache.v1.storage_backend.storage_backend_listener import StorageBackendListener
 
 
@@ -237,10 +243,25 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
 
 class AllocatorBackendInterface(StorageBackendInterface):
     """
-    return self.allocator_backend.allocate(
-        shape, dtype, fmt, eviction=eviction, busy_loop=busy_loop
-    )
+    AllocatorBackendInterface extends the StorageBackendInterface with
+    the ability to actively allocate the memory objects.
     """
+
+    @abc.abstractmethod
+    def initialize_allocator(
+        self, config: LMCacheEngineConfig, metadata: LMCacheEngineMetadata
+    ) -> MemoryAllocatorInterface:
+        """
+        Create the correct memory allocator for the current storage backend
+
+        Args:
+            config: The cache engine config
+            metadata: the cache engine metadata
+
+        Returns:
+            The memory allocator for this storage backend
+        """
+        raise NotImplementedError
 
     @abc.abstractmethod
     def allocate(

@@ -9,13 +9,13 @@ import time
 import torch
 
 # First Party
+from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
 from lmcache.observability import LMCStatsMonitor, PrometheusLogger
 from lmcache.utils import CacheEngineKey, _lmcache_nvtx_annotate
 from lmcache.v1.cache_controller.message import KVAdmitMsg, KVEvictMsg
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import (
-    MemoryAllocatorInterface,
     MemoryFormat,
     MemoryObj,
     MixedMemoryAllocator,
@@ -23,6 +23,7 @@ from lmcache.v1.memory_management import (
 )
 from lmcache.v1.storage_backend.abstract_backend import AllocatorBackendInterface
 from lmcache.v1.storage_backend.cache_policy import get_cache_policy
+from lmcache.v1.system_detection import NUMADetector
 
 if TYPE_CHECKING:
     # First Party
@@ -41,7 +42,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
     def __init__(
         self,
         config: LMCacheEngineConfig,
-        memory_allocator: MemoryAllocatorInterface,
+        metadata: LMCacheEngineMetadata,
         dst_device: str = "cuda",
         lmcache_worker: Optional["LMCacheWorker"] = None,
     ):
@@ -50,7 +51,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
         self.hot_cache = self.cache_policy.init_mutable_mapping()
 
         self.use_hot = config.local_cpu
-        self.memory_allocator = memory_allocator
+        self.memory_allocator = self.initialize_allocator(config, metadata)
         self.lmcache_worker = lmcache_worker
         self.instance_id = config.lmcache_instance_id
         self.cpu_lock = threading.Lock()
@@ -232,6 +233,33 @@ class LocalCPUBackend(AllocatorBackendInterface):
         # other backends might still (temporarily) hold the memory object.
         return True
 
+    def initialize_allocator(
+        self, config: LMCacheEngineConfig, metadata: LMCacheEngineMetadata
+    ) -> MixedMemoryAllocator:
+        cpu_size = config.max_local_cpu_size
+        # save_only_first_rank only works when use mla
+        save_only_first_rank = (
+            config.get_extra_config_value("save_only_first_rank", metadata.use_mla)
+            and metadata.use_mla
+        )
+
+        if save_only_first_rank and metadata.is_first_rank():
+            # Only the first rank will save the cache,
+            # so we need to set it lager than other ranks
+            cpu_size = (
+                config.extra_config.get("first_rank_max_local_cpu_size", cpu_size)
+                if config.extra_config
+                else cpu_size
+            )
+
+        # Detect the numa mapping
+        numa_mapping = NUMADetector.get_numa_mapping(config)
+        logger.info(f"NUMA mapping {numa_mapping}")
+        return MixedMemoryAllocator(
+            int(cpu_size * 1024**3),
+            numa_mapping=numa_mapping,
+        )
+
     @_lmcache_nvtx_annotate
     def allocate(
         self,
@@ -263,9 +291,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
         if memory_obj is not None or not eviction:
             return memory_obj
 
-        assert isinstance(self.memory_allocator, MixedMemoryAllocator) or isinstance(
-            self.memory_allocator, NixlCPUMemoryAllocator
-        )
+        assert isinstance(self.memory_allocator, MixedMemoryAllocator)
 
         evict_keys_count = 0
         num_attempts = 0
@@ -481,4 +507,5 @@ class LocalCPUBackend(AllocatorBackendInterface):
         return self
 
     def close(self) -> None:
+        self.memory_allocator.close()
         self.clear()
