@@ -384,7 +384,7 @@ class SegmentTokenDatabase(TokenDatabase):
                 num_falses = 0
             assert num_falses < len(tokens), (
                 "The number of Falses in the mask shouldn't "
-                "be less than the length of tokens."
+                "be greater than the length of tokens."
             )
 
             token_chunks = self._fast_split_by_subtensor(tokens)
