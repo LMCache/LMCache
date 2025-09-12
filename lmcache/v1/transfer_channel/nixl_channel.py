@@ -1,12 +1,31 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import Any, Union
-import abc
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Optional, Union
+import asyncio
+import threading
 import time
+import uuid
+
+# Third Party
+import msgspec
+import zmq
 
 # First Party
-from lmcache.v1.memory_management import MemoryObj
+from lmcache.logging import init_logger
+from lmcache.v1.memory_management import (
+    MemoryObj,
+)
+
+if TYPE_CHECKING:
+    # Third Party
+    from nixl._api import NixlAgent
+
+# First Party
+from lmcache.v1.rpc_utils import get_zmq_socket
 from lmcache.v1.transfer.abstract import BaseTransferChannel
+
+logger = init_logger(__name__)
 
 
 class NixlChannel(BaseTransferChannel):
@@ -52,9 +71,9 @@ class NixlChannel(BaseTransferChannel):
     ############################################################
     # Initialization functions
     ############################################################
-    def lazy_init_peer_connection(**kwargs):
-        assert peer_init_url in kwargs
-        assert peer_id in kwargs
+    def lazy_init_peer_connection(self, **kwargs):
+        assert "peer_init_url" in kwargs
+        assert "peer_id" in kwargs
         peer_init_url = kwargs["peer_init_url"]
         peer_id = kwargs["peer_id"]
 
@@ -87,14 +106,14 @@ class NixlChannel(BaseTransferChannel):
             nixl_mem_reg_resp_bytes, type=NixlMsg
         )
         remote_xfer_dlist_bytes = nixl_mem_reg_resp.remote_xfer_dlist_bytes
-        remote_xfer_dlist = self._nixl_agent.deserialize_descs(remote_xfer_dlist_bytes)
-        remote_xfer_handlers = self._nixl_agent.prep_xfer_dlist(
+        remote_xfer_dlist = self.nixl_agent.deserialize_descs(remote_xfer_dlist_bytes)
+        remote_xfer_handlers = self.nixl_agent.prep_xfer_dlist(
             remote_agent_name, remote_xfer_dlist
         )
         self.remote_xfer_handlers_dict[peer_id] = remote_xfer_handlers
         init_tmp_socket.close()
 
-    def _init_side_channels(self):
+    def _init_side_channels(self, **kwargs):
         peer_init_url = kwargs["peer_init_url"]
         if peer_init_url is None:
             return
@@ -102,7 +121,7 @@ class NixlChannel(BaseTransferChannel):
         # Initialize initialization side channels
         self.init_side_channel = get_zmq_socket(
             self.zmq_context,
-            init_url,
+            peer_init_url,
             "tcp",
             zmq.REPLY,
             "bind",
@@ -167,6 +186,7 @@ class NixlChannel(BaseTransferChannel):
         local_indices = []
         if isinstance(data[0], MemoryObj):
             for mem_obj in data:
+                assert isinstance(mem_obj, MemoryObj)
                 local_indices.append(mem_obj.meta.address)
         elif isinstance(data[0], bytes):
             raise NotImplementedError(
@@ -178,7 +198,7 @@ class NixlChannel(BaseTransferChannel):
     def batched_send(
         self,
         data: Union[list[bytes], list[MemoryObj]],
-        transfer_spec: dict = None,
+        transfer_spec: Optional[dict] = None,
     ) -> bool:
         """
         Send a batch of data through the nixl channel.
@@ -193,7 +213,7 @@ class NixlChannel(BaseTransferChannel):
     def batched_recv(
         self,
         buffer: Union[list[bytes], list[MemoryObj]],
-        transfer_spec: dict = None,
+        transfer_spec: Optional[dict] = None,
     ) -> bool:
         """
         Receive a batch of data through the nixl channel.
@@ -203,10 +223,10 @@ class NixlChannel(BaseTransferChannel):
         """
         raise NotImplementedError
 
-    async def batched_send(
+    async def async_batched_send(
         self,
         data: Union[list[bytes], list[MemoryObj]],
-        transfer_spec: dict = None,
+        transfer_spec: Optional[dict] = None,
     ) -> bool:
         """
         Send a batch of data through the nixl channel.
@@ -218,10 +238,10 @@ class NixlChannel(BaseTransferChannel):
         """
         raise NotImplementedError
 
-    async def batched_recv(
+    async def async_batched_recv(
         self,
         buffer: Union[list[bytes], list[MemoryObj]],
-        transfer_spec: dict = None,
+        transfer_spec: Optional[dict] = None,
     ) -> bool:
         """
         Receive a batch of data through the nixl channel.
@@ -237,7 +257,7 @@ class NixlChannel(BaseTransferChannel):
     def batched_write(
         self,
         data: Union[list[bytes], list[MemoryObj]],
-        transfer_spec: dict = None,
+        transfer_spec: Optional[dict] = None,
     ) -> bool:
         """
         Write a batch of data through the nixl channel.
@@ -245,6 +265,7 @@ class NixlChannel(BaseTransferChannel):
         :param data: A list of bytes or MemoryObj to be written.
         :param transfer_spec: Additional specifications for the transfer.
         """
+        assert transfer_spec is not None
 
         handle = self.nixl_agent.make_prepped_xfer(
             "WRITE",
@@ -267,16 +288,17 @@ class NixlChannel(BaseTransferChannel):
                 raise RuntimeError("Failed to send data to remote peer")
             elif status == "PROC":
                 time.sleep(wait_time)  # Avoid busy waiting
-                wait_time /= decay
                 continue
             assert status == "DONE", f"Transfer status is {status}, expected DONE"
             # self._proxy_side_channel.send(notif_msg_bytes)
             break
 
+        return True
+
     def batched_read(
         self,
         buffer: Union[list[bytes], list[MemoryObj]],
-        transfer_spec: dict = None,
+        transfer_spec: Optional[dict] = None,
     ) -> bool:
         """
         Read a batch of data through the channel.
@@ -286,10 +308,10 @@ class NixlChannel(BaseTransferChannel):
         """
         raise NotImplementedError
 
-    async def batched_write(
+    async def async_batched_write(
         self,
         data: Union[list[bytes], list[MemoryObj]],
-        transfer_spec: dict = None,
+        transfer_spec: Optional[dict] = None,
     ) -> bool:
         """
         Write a batch of data through the channel.
@@ -300,6 +322,8 @@ class NixlChannel(BaseTransferChannel):
 
         :return: True if the send operation is successful.
         """
+
+        assert transfer_spec is not None
 
         handle = self.nixl_agent.make_prepped_xfer(
             "WRITE",
@@ -327,11 +351,12 @@ class NixlChannel(BaseTransferChannel):
             # self._proxy_side_channel.send(notif_msg_bytes)
             break
 
-    @abc.abstractmethod
-    async def batched_read(
+        return True
+
+    async def async_batched_read(
         self,
         buffer: Union[list[bytes], list[MemoryObj]],
-        transfer_spec: dict = None,
+        transfer_spec: Optional[dict] = None,
     ) -> bool:
         """
         Read a batch of data through the channel.
@@ -425,6 +450,12 @@ class NixlAgentWrapper:
             self.agent.release_dlist_handle(remote_xfer_handler)
 
 
+class NixlMsgBase(msgspec.Struct, tag=True):
+    """Base class for all nixl-related messages"""
+
+    pass
+
+
 class NixlInitRequest(NixlMsgBase):
     local_meta_bytes: bytes  # Metadata from the sender nixl agent
 
@@ -439,3 +470,8 @@ class NixlInitResponse(NixlMsgBase):
 
 class NixlMemRegResponse(NixlMsgBase):
     remote_xfer_dlist_bytes: bytes  # Serialized transfer descriptors for the receiver
+
+
+NixlMsg = Union[
+    NixlInitRequest, NixlInitResponse, NixlMemRegRequest, NixlMemRegResponse
+]

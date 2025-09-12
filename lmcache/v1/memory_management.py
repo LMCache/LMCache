@@ -1812,7 +1812,7 @@ class PDCPUMemoryAllocator(MemoryAllocatorInterface):
         dtype: torch.dtype,
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
     ):
-        self.pd_allocator = PagedTensorMemoryAllocator(
+        self.gpu_allocator = PagedTensorMemoryAllocator(
             tensor,
             shape,
             dtype,
@@ -1856,7 +1856,7 @@ class PDCPUMemoryAllocator(MemoryAllocatorInterface):
 
     def free(self, memory_obj: MemoryObj, allocator_type: Optional[str] = "cpu"):
         if allocator_type == "gpu":
-            self.nixl_allocator.free(memory_obj)
+            self.gpu_allocator.free(memory_obj)
         elif allocator_type == "cpu":
             self.cpu_allocator.free(memory_obj)
         else:
@@ -1869,7 +1869,7 @@ class PDCPUMemoryAllocator(MemoryAllocatorInterface):
         update_stats: bool = True,
     ):
         if allocator_type == "gpu":
-            self.nixl_allocator.batched_free(memory_objs, update_stats=update_stats)
+            self.gpu_allocator.batched_free(memory_objs, update_stats=update_stats)
         elif allocator_type == "cpu":
             self.cpu_allocator.batched_free(memory_objs, update_stats=update_stats)
         else:

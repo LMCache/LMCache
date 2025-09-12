@@ -119,6 +119,7 @@ def CreateStorageBackends(
         # First Party
         from lmcache.v1.storage_backend.pd_backend import PDBackend
 
+        assert isinstance(memory_allocator, PDCPUMemoryAllocator)
         storage_backends["PDBackend"] = PDBackend(config, metadata, memory_allocator)
 
     # TODO(Jiayi): The hierarchy is fixed for now

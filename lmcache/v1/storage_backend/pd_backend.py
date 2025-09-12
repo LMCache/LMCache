@@ -1,13 +1,119 @@
 # SPDX-License-Identifier: Apache-2.0
 
+# Standard
+from dataclasses import dataclass
+from typing import List, Optional, Sequence, Union
+import threading
+import time
+
+# Third Party
+import msgspec
+import torch
+import zmq
+
 # First Party
+from lmcache.config import LMCacheEngineMetadata
+from lmcache.logging import init_logger
 from lmcache.utils import (
     STR_DTYPE_TO_TORCH_DTYPE,
     TORCH_DTYPE_TO_STR_DTYPE,
     CacheEngineKey,
 )
+from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.v1.memory_management import MemoryFormat, MemoryObj, PDCPUMemoryAllocator
 from lmcache.v1.rpc_utils import get_zmq_socket
 from lmcache.v1.storage_backend.abstract_backend import AllocatorBackendInterface
+from lmcache.v1.transfer_channel.nixl_channel import NixlChannel
+from lmcache.v1.transfer_channel.transfer_utils import get_correct_device
+
+logger = init_logger(__name__)
+
+
+class PDMsgBase(msgspec.Struct, tag=True):
+    """Base class for all PD-related messages"""
+
+    pass
+
+
+class AllocRequest(PDMsgBase):
+    """Allocation request message"""
+
+    keys: list[str]  # len(keys) indicates num_chunks
+    fmt: int
+    shape: list[int]  # The shape of the memory objects
+    dtype: str
+    last_chunk_toks: int
+
+
+class AllocResponse(PDMsgBase):
+    """Allocation response message"""
+
+    # Indexes (local) of already sent memory objects
+    already_sent_indexes: list[int]
+
+    # Indexes (remote) of allocated memory objects (to be written)
+    remote_indexes: list[int]
+
+
+class ProxyNotif(PDMsgBase):
+    req_id: str  # The request UUID to notify the proxy
+
+
+PDMsg = Union[AllocRequest, AllocResponse, ProxyNotif]
+
+
+@dataclass
+class PDConfig:
+    role: str
+
+    peer_host: str
+    peer_init_port: list[int]
+    peer_alloc_port: list[int]
+
+    proxy_host: str
+    proxy_port: int
+
+    buffer_size: int
+    buffer_device: str
+
+    @staticmethod
+    def from_cache_engine_config(
+        config: LMCacheEngineConfig, metadata: LMCacheEngineMetadata
+    ) -> "PDConfig":
+        """Convert the LMCacheEngineConfig to PDConfig"""
+
+        role = config.pd_role
+
+        # TODO(Jiayi): Could be both if we want to do dynamic role switch.
+        assert role in ["sender", "receiver"], (
+            f"Invalid role: {config.pd_role}, must be either sender or receiver"
+        )
+
+        assert config.pd_buffer_size is not None
+        assert config.pd_buffer_device is not None
+
+        if role == "receiver":
+            assert config.pd_peer_host is not None
+            assert config.pd_peer_init_port is not None
+            assert config.pd_peer_alloc_port is not None
+        elif role == "sender":
+            assert config.pd_proxy_host is not None
+            assert config.pd_proxy_port is not None
+
+        corrected_device = get_correct_device(
+            config.pd_buffer_device, metadata.worker_id
+        )
+
+        return PDConfig(
+            role=role,
+            peer_host=config.pd_peer_host,
+            peer_init_port=config.pd_peer_init_port,
+            peer_alloc_port=config.pd_peer_alloc_port,
+            proxy_host=config.pd_proxy_host,
+            proxy_port=config.pd_proxy_port,
+            buffer_size=config.pd_buffer_size,
+            buffer_device=corrected_device,
+        )
 
 
 class PDBackend(AllocatorBackendInterface):
@@ -35,7 +141,7 @@ class PDBackend(AllocatorBackendInterface):
 
         # TODO(Jiayi): add async zmq context if we want better asynchrony.
         self.zmq_context = zmq.Context()
-        self.running_threads = []
+        self.running_threads: list[threading.Thread] = []
         # TODO: Have an init_channel function.
         if config.transfer_channel == "nixl":
             # TODO: verify if this is needed
@@ -44,7 +150,7 @@ class PDBackend(AllocatorBackendInterface):
                 get_tensor_model_parallel_rank,
             )
 
-            tp_rank = get_tensor_model_parallel_rank()
+            self.tp_rank = get_tensor_model_parallel_rank()
 
             assert isinstance(memory_allocator, PDCPUMemoryAllocator)
             self.transfer_channel = NixlChannel(
@@ -52,9 +158,9 @@ class PDBackend(AllocatorBackendInterface):
                 buffer_ptr=self.memory_allocator.gpu_allocator.buffer_ptr,
                 buffer_size=self.memory_allocator.gpu_allocator.buffer_size,
                 page_size=self.memory_allocator.gpu_allocator.align_bytes,
-                tp_rank=tp_rank,
+                tp_rank=self.tp_rank,
                 peer_init_url=f"{self.pd_config.peer_host}:{self.pd_config.peer_init_port}",
-                backends=self.config.nixl_backends,
+                backends=config.nixl_backends,
             )
         else:
             raise ValueError(
@@ -64,12 +170,14 @@ class PDBackend(AllocatorBackendInterface):
 
         if self.pd_config.role == "sender":
             self._init_sender()
-            self.initialized_peers = set()
-            self.mem_alloc_sockets = {}
+            self.initialized_peers: set[str] = set()
+            self.mem_alloc_sockets: dict[str, zmq.Socket] = {}
         elif self.pd_config.role == "receiver":
             self._init_receiver()
         else:
             raise ValueError("Invalid PD role.")
+
+        self.full_chunk_size = config.chunk_size
 
     # NOTE(Jiayi): If two requests have overlapped keys, will
     # the later one cause any problems here?
@@ -101,7 +209,7 @@ class PDBackend(AllocatorBackendInterface):
 
         # NOTE: no eviction and busy_loop in PD
         mem_obj = self.memory_allocator.allocate(
-            shape=shape, dtype=dtype, fmt=fmt, allocator_type="nixl"
+            shape=shape, dtype=dtype, fmt=fmt, allocator_type="gpu"
         )
 
         return mem_obj
@@ -116,13 +224,14 @@ class PDBackend(AllocatorBackendInterface):
         busy_loop: bool = True,
     ):
         return self.memory_allocator.batched_allocate(
-            shape, dtype, batch_size, fmt, allocator_type="nixl"
+            shape, dtype, batch_size, fmt, allocator_type="gpu"
         )
 
     ############################################################
     # Prefiller functions
     ############################################################
     def _init_sender(self):
+        proxy_url = f"{self.pd_config.proxy_host}:{self.pd_config.proxy_port}"
         self.proxy_side_channel = get_zmq_socket(
             self.zmq_context,
             proxy_url,
@@ -145,7 +254,7 @@ class PDBackend(AllocatorBackendInterface):
         receiver_mem_alloc_url = f"{receiver_host}:{receiver_alloc_port}"
 
         # Establish the connection with the receiver/decoder
-        self.channel.lazy_init_peer_connection(peer_init_url=receiver_init_url)
+        self.transfer_channel.lazy_init_peer_connection(peer_init_url=receiver_init_url)
 
         # Set up the memory allocation socket
         mem_alloc_socket = get_zmq_socket(
@@ -165,12 +274,12 @@ class PDBackend(AllocatorBackendInterface):
         side_channel = self.mem_alloc_sockets[receiver_id]
         side_channel.send(msgspec.msgpack.encode(alloc_request))
         msg = side_channel.recv()
-        alloc_response = msgspec.msgpack.decode(msg, type=NixlMsg)
+        alloc_response = msgspec.msgpack.decode(msg, type=PDMsg)
 
         return alloc_response
 
     def _get_remote_alloc_request(
-        keys: Sequence[CacheEngineKey], memory_objs: List[MemoryObj]
+        self, keys: Sequence[CacheEngineKey], mem_objs: List[MemoryObj]
     ) -> AllocRequest:
         """
         Get the allocation request given the keys and memory objects.
@@ -183,16 +292,16 @@ class PDBackend(AllocatorBackendInterface):
         `last_chunk_toks` tokens.
         """
 
-        fmt = self.mem_objs[0].meta.fmt
-        shape = self.mem_objs[0].meta.shape
-        dtype = TORCH_DTYPE_TO_STR_DTYPE[self.mem_objs[0].meta.dtype]
+        fmt = mem_objs[0].meta.fmt
+        shape = mem_objs[0].meta.shape
+        dtype = TORCH_DTYPE_TO_STR_DTYPE[mem_objs[0].meta.dtype]
         token_dim = fmt.token_dim()
-        last_chunk_toks = self.mem_objs[-1].meta.shape[token_dim]
+        last_chunk_toks = mem_objs[-1].meta.shape[token_dim]
 
-        keys = [key.to_string() for key in self.keys]
+        str_keys = [key.to_string() for key in keys]
 
         return AllocRequest(
-            keys=keys,
+            keys=str_keys,
             fmt=fmt.value,
             shape=list(shape),
             dtype=dtype,
@@ -216,7 +325,7 @@ class PDBackend(AllocatorBackendInterface):
             self.tp_rank
         ]
         receiver_id = transfer_spec.receiver_info.receiver_host + str(
-            receiver_info.receiver_init_port
+            receiver_init_port
         )
         receiver_host = transfer_spec.receiver_info.receiver_host
 
@@ -268,9 +377,9 @@ class PDBackend(AllocatorBackendInterface):
 
         if transfer_spec.is_last_prefill:
             # Notify the proxy that the transfer is done
-            notif_msg = ProxyNotif(req_id=req_id)
+            notif_msg = ProxyNotif(req_id=transfer_spec.req_id)
             notif_msg_bytes = msgspec.msgpack.encode(notif_msg)
-            self._proxy_side_channel.send(notif_msg_bytes)
+            self.proxy_side_channel.send(notif_msg_bytes)
 
     ############################################################
     # Prefiller functions end
@@ -281,6 +390,9 @@ class PDBackend(AllocatorBackendInterface):
     ############################################################
     def _init_receiver(self):
         # Initialize initialization side channels
+        receiver_alloc_url = (
+            f"{self.pd_config.peer_host}:{self.pd_config.peer_alloc_port}"
+        )
         self.alloc_side_channel = get_zmq_socket(
             self.zmq_context, receiver_alloc_url, zmq.REP, "bind"
         )
@@ -293,7 +405,7 @@ class PDBackend(AllocatorBackendInterface):
         self.mem_alloc_thread.start()
         self.running_threads.append(self.mem_alloc_thread)
 
-    def _allocate_and_put(self, alloc_request: NixlAllocRequest) -> NixlAllocResponse:
+    def _allocate_and_put(self, alloc_request: AllocRequest) -> AllocResponse:
         total_allocs = len(alloc_request.keys)
         fmt = MemoryFormat(alloc_request.fmt)
         dtype = STR_DTYPE_TO_TORCH_DTYPE[alloc_request.dtype]
@@ -304,7 +416,7 @@ class PDBackend(AllocatorBackendInterface):
 
         for idx, key_str in enumerate(alloc_request.keys):
             key = CacheEngineKey.from_string(key_str)
-            if self._backend.contains(key, pin=True):
+            if self.contains(key, pin=True):
                 already_send_indexes.append(idx)
                 continue
 
@@ -344,9 +456,9 @@ class PDBackend(AllocatorBackendInterface):
             try:
                 # receive alloc request
                 alloc_req_bytes = self.alloc_side_channel.recv()
-                alloc_req = msgspec.msgpack.decode(alloc_req_bytes, type=NixlMsg)
+                alloc_req = msgspec.msgpack.decode(alloc_req_bytes, type=PDMsg)
                 assert isinstance(alloc_req, AllocRequest), (
-                    "The request from the remote peer is not a NixlAllocRequest"
+                    "The request from the remote peer is not a AllocRequest"
                 )
 
                 # NOTE: it's okay to put the memory objs into the storage backend
@@ -414,93 +526,3 @@ class PDBackend(AllocatorBackendInterface):
 
     def unpin(self, key: CacheEngineKey) -> bool:
         return True
-
-
-class PDlMsgBase(msgspec.Struct, tag=True):
-    """Base class for all nixl-related messages"""
-
-    pass
-
-
-class PDMsgBase(msgspec.Struct, tag=True):
-    """Base class for all PD-related messages"""
-
-    pass
-
-
-class AllocRequest(PDMsgBase):
-    """Allocation request message"""
-
-    keys: list[str]  # len(keys) indicates num_chunks
-    fmt: int
-    shape: list[int]  # The shape of the memory objects
-    dtype: str
-    last_chunk_toks: int
-
-
-class AllocResponse(PDMsgBase):
-    """Allocation response message"""
-
-    # Indexes (local) of already sent memory objects
-    already_sent_indexes: list[int]
-
-    # Indexes (remote) of allocated memory objects (to be written)
-    remote_indexes: list[int]
-
-
-class ProxyNotif(PDMsgBase):
-    req_id: str  # The request UUID to notify the proxy
-
-
-@dataclass
-class PDConfig:
-    role: str
-
-    peer_host: str
-    peer_init_port: list[int]
-    peer_alloc_port: list[int]
-
-    proxy_host: str
-    proxy_port: int
-
-    buffer_size: int
-    buffer_device: str
-
-    @staticmethod
-    def from_cache_engine_config(
-        config: LMCacheEngineConfig, metadata: LMCacheEngineMetadata
-    ) -> "PDConfig":
-        """Convert the LMCacheEngineConfig to PDConfig"""
-
-        role = config.pd_role
-
-        # TODO(Jiayi): Could be both if we want to do dynamic role switch.
-        assert role in ["sender", "receiver"], (
-            f"Invalid role: {config.pd_role}, must be either sender or receiver"
-        )
-
-        assert config.pd_buffer_size is not None
-        assert config.pd_buffer_device is not None
-
-        if role == "receiver":
-            assert config.pd_peer_host is not None
-            assert config.pd_peer_init_port is not None
-            assert config.pd_peer_alloc_port is not None
-        elif role == NixlRole.SENDER:
-            assert config.pd_proxy_host is not None
-            assert config.pd_proxy_port is not None
-
-        corrected_device = get_correct_device(
-            config.pd_buffer_device, metadata.worker_id
-        )
-
-        return NixlConfigXpYd(
-            role=role,
-            peer_host=config.pd_peer_host,
-            peer_init_port=config.pd_peer_init_port,
-            peer_alloc_port=config.pd_peer_alloc_port,
-            proxy_host=config.pd_proxy_host,
-            proxy_port=config.pd_proxy_port,
-            buffer_size=config.pd_buffer_size,
-            buffer_device=corrected_device,
-        )

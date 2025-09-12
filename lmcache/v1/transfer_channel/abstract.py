@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import Union
+from typing import Optional, Union
 import abc
 
 # First Party
@@ -13,7 +13,7 @@ class BaseTransferChannel(metaclass=abc.ABCMeta):
     def batched_send(
         self,
         data: Union[list[bytes], list[MemoryObj]],
-        transfer_spec: dict = None,
+        transfer_spec: Optional[dict] = None,
     ) -> bool:
         """
         Send a batch of data through the channel.
@@ -29,7 +29,7 @@ class BaseTransferChannel(metaclass=abc.ABCMeta):
     def batched_recv(
         self,
         buffer: Union[list[bytes], list[MemoryObj]],
-        transfer_spec: dict = None,
+        transfer_spec: Optional[dict] = None,
     ) -> bool:
         """
         Receive a batch of data through the channel.
@@ -43,7 +43,7 @@ class BaseTransferChannel(metaclass=abc.ABCMeta):
     async def async_batched_send(
         self,
         data: Union[list[bytes], list[MemoryObj]],
-        transfer_spec: dict = None,
+        transfer_spec: Optional[dict] = None,
     ) -> bool:
         """
         Async send a batch of data through the channel.
@@ -59,7 +59,7 @@ class BaseTransferChannel(metaclass=abc.ABCMeta):
     async def async_batched_recv(
         self,
         buffer: Union[list[bytes], list[MemoryObj]],
-        transfer_spec: dict = None,
+        transfer_spec: Optional[dict] = None,
     ) -> bool:
         """
         Async ceceive a batch of data through the channel.
@@ -74,7 +74,7 @@ class BaseTransferChannel(metaclass=abc.ABCMeta):
     def batched_write(
         self,
         data: Union[list[bytes], list[MemoryObj]],
-        transfer_spec: dict = None,
+        transfer_spec: Optional[dict] = None,
     ) -> bool:
         """
         Write a batch of data through the channel.
@@ -88,7 +88,7 @@ class BaseTransferChannel(metaclass=abc.ABCMeta):
     def batched_read(
         self,
         buffer: Union[list[bytes], list[MemoryObj]],
-        transfer_spec: dict = None,
+        transfer_spec: Optional[dict] = None,
     ) -> bool:
         """
         Read a batch of data through the channel.
@@ -99,10 +99,10 @@ class BaseTransferChannel(metaclass=abc.ABCMeta):
         raise NotImplementedError
 
     @abc.abstractmethod
-    async def batched_write(
+    async def async_batched_write(
         self,
         data: Union[list[bytes], list[MemoryObj]],
-        transfer_spec: dict = None,
+        transfer_spec: Optional[dict] = None,
     ) -> bool:
         """
         Async write a batch of data through the channel.
@@ -113,10 +113,10 @@ class BaseTransferChannel(metaclass=abc.ABCMeta):
         raise NotImplementedError
 
     @abc.abstractmethod
-    async def batched_read(
+    async def async_batched_read(
         self,
         buffer: Union[list[bytes], list[MemoryObj]],
-        transfer_spec: dict = None,
+        transfer_spec: Optional[dict] = None,
     ) -> bool:
         """
         Async read a batch of data through the channel.

@@ -19,7 +19,7 @@ from lmcache.v1.memory_management import (
     MemoryFormat,
     MemoryObj,
     MixedMemoryAllocator,
-    NixlCPUMemoryAllocator,
+    PDCPUMemoryAllocator,
 )
 from lmcache.v1.storage_backend.abstract_backend import AllocatorBackendInterface
 from lmcache.v1.storage_backend.cache_policy import get_cache_policy
@@ -264,7 +264,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
             return memory_obj
 
         assert isinstance(self.memory_allocator, MixedMemoryAllocator) or isinstance(
-            self.memory_allocator, NixlCPUMemoryAllocator
+            self.memory_allocator, PDCPUMemoryAllocator
         )
 
         evict_keys_count = 0
@@ -366,7 +366,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
             return memory_objs
 
         assert isinstance(self.memory_allocator, MixedMemoryAllocator) or isinstance(
-            self.memory_allocator, NixlCPUMemoryAllocator
+            self.memory_allocator, PDCPUMemoryAllocator
         )
 
         evict_keys_count = 0
