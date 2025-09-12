@@ -197,8 +197,8 @@ class RequestTracker:
             allocated_block_ids=unfolded_block_ids,
             num_saved_tokens=lmcache_cached_tokens,
             disagg_spec=disagg_spec,
-            mm_hashes=[f.identifier for f in new_request.mm_features].copy(),
-            mm_positions=[f.mm_position for f in new_request.mm_features].copy(),
+            mm_hashes=[f.identifier for f in new_request.mm_features],
+            mm_positions=[f.mm_position for f in new_request.mm_features],
             skip_save=skip_save,
             request_configs=request_configs,
         )
