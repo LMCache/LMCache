@@ -6,6 +6,7 @@ import os
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
     from vllm.multimodal.inputs import PlaceholderRange
+    from vllm.v1.request import Request
 
 # Third Party
 import torch
@@ -159,7 +160,7 @@ def create_lmcache_metadata(
 
 
 def extract_mm_features(
-    request, modify: bool = False
+    request: "Request", modify: bool = False
 ) -> Tuple[list[str], list["PlaceholderRange"]]:
     if getattr(request, "mm_features", None):
         mm_hashes, mm_positions = zip(
