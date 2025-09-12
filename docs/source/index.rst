@@ -119,6 +119,7 @@ Documentation
 
    production/docker_deployment
    production/kubernetes_deployment
+   production/observability/index
 
 :raw-html:`<br />`
 

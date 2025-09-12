@@ -44,6 +44,7 @@ Commandline arguments:
                             (warmup/query) as a factor, e.g. 4.5 for 4.5×.
                             If actual gain is below this, exits.
 
+    --expected-latency: Expected end to end latency for the first query round.
     --completions: Use completions API instead of chat completions API
 
     --visualize: Visualize the results
@@ -521,6 +522,16 @@ async def main(args):
                 f"{args.expected_latency_gain:.2f}×"
             )
 
+    if args.expected_latency is not None:
+        warmup_duration = warmup_end_time - warmup_start_time
+        warmup_per_prompt = warmup_duration / len(warmup_df)
+        print(f"{CSI}34mActual latency: {warmup_per_prompt:.2f}s{RESET}")
+        if warmup_per_prompt > args.expected_latency:
+            sys.exit(
+                f"ERROR: latency {warmup_per_prompt:.2f}s > expected "
+                f"{args.expected_latency:.2f}s"
+            )
+
 
 def create_argument_parser():
     parser = argparse.ArgumentParser(
@@ -625,6 +636,12 @@ def create_argument_parser():
             "Expected minimum speed-up in total round time (warmup/query) "
             "as a factor, e.g. 4.5 for 4.5×. If actual gain is below this, exits."
         ),
+    )
+    parser.add_argument(
+        "--expected-latency",
+        type=float,
+        default=None,
+        help="Expected end to end latency for the first query round.",
     )
 
     parser.add_argument(

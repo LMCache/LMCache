@@ -111,26 +111,17 @@ class CacheEngineKey:
     request_configs: Optional[dict] = None
 
     def __post_init__(self):
-        tags = None
+        tag_list = None
         if self.request_configs is not None:
             for k, v in self.request_configs.items():
                 if k.startswith("lmcache.tag."):
-                    if tags is None:
-                        tags = {}
-                    tags[k[len("lmcache.tag.") :]] = str(v)
-        self.tags = tags
+                    if tag_list is None:
+                        tag_list = []
+                    tag_list.append((k[len("lmcache.tag.") :], v))
+        # use tuple to save tags
+        self.tags = None if tag_list is None else tuple(tag_list)
 
     def __hash__(self):
-        if self.tags is None:
-            return hash(
-                (
-                    self.fmt,
-                    self.model_name,
-                    self.world_size,
-                    self.worker_id,
-                    self.chunk_hash,
-                )
-            )
         return hash(
             (
                 self.fmt,
@@ -138,7 +129,7 @@ class CacheEngineKey:
                 self.world_size,
                 self.worker_id,
                 self.chunk_hash,
-                "%".join([f"{k}={v}" for k, v in self.tags.items()]),
+                self.tags,
             )
         )
 
@@ -161,7 +152,7 @@ class CacheEngineKey:
             f"@{self.worker_id}@{self.chunk_hash:x}"
         )
         if self.tags is not None and len(self.tags) != 0:
-            tags = [f"{k}%{v}" for k, v in self.tags.items()]
+            tags = [f"{k}%{v}" for k, v in self.tags]
             s += "@" + "@".join(tags)
         return s
 
@@ -207,7 +198,7 @@ class CacheEngineKey:
                 kvs = kv.split("%", 1)
                 if len(kvs) != 2:
                     raise ValueError(f"Invalid key string: {s}")
-                request_configs[kvs[0]] = kvs[1]
+                request_configs["lmcache.tag." + kvs[0]] = kvs[1]
         return CacheEngineKey(
             parts[0],
             parts[1],
@@ -260,17 +251,6 @@ class LayerCacheEngineKey(CacheEngineKey):
     layer_id: int = 0
 
     def __hash__(self):
-        if self.tags is None:
-            return hash(
-                (
-                    self.fmt,
-                    self.model_name,
-                    self.world_size,
-                    self.worker_id,
-                    self.chunk_hash,
-                    self.layer_id,
-                )
-            )
         return hash(
             (
                 self.fmt,
@@ -278,7 +258,7 @@ class LayerCacheEngineKey(CacheEngineKey):
                 self.world_size,
                 self.worker_id,
                 self.chunk_hash,
-                "%".join([f"{k}={v}" for k, v in self.tags.items()]),
+                self.tags,
                 self.layer_id,
             )
         )
@@ -295,7 +275,7 @@ class LayerCacheEngineKey(CacheEngineKey):
             f"@{self.worker_id}@{self.chunk_hash:x}@{self.layer_id}"
         )
         if self.tags is not None and len(self.tags) != 0:
-            tags = [f"{k}%{v}" for k, v in self.tags.items()]
+            tags = [f"{k}%{v}" for k, v in self.tags]
             s += "@" + "@".join(tags)
         return s
 
@@ -328,7 +308,7 @@ class LayerCacheEngineKey(CacheEngineKey):
                 kvs = kv.split("%", 1)
                 if len(kvs) != 2:
                     raise ValueError(f"Invalid key string: {s}")
-                request_configs[kvs[0]] = kvs[1]
+                request_configs["lmcache.tag." + kvs[0]] = kvs[1]
         return LayerCacheEngineKey(
             parts[0],
             parts[1],

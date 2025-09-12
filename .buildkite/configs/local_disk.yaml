@@ -18,3 +18,5 @@ vllm:
     - "--load-format"
     - "dummy"
     - "--no-enable-prefix-caching"
+    - "--kv-transfer-config"
+    - "{\"kv_connector\":\"LMCacheConnectorV1\",\"kv_role\":\"kv_both\"}"

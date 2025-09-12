@@ -141,6 +141,9 @@ class RequestTracker:
     # Whether the request is in decode phase
     is_decode_phase = False
 
+    # Whether the request cache should be saved
+    skip_save: bool = False
+
     @_lmcache_nvtx_annotate
     @staticmethod
     def from_new_request(
@@ -148,6 +151,7 @@ class RequestTracker:
         new_request: "NewRequestData",
         num_tokens_to_compute: int,
         lmcache_cached_tokens: int,
+        skip_save: bool,
     ) -> "RequestTracker":
         """Create the request tracker from a new request.
 
@@ -157,7 +161,10 @@ class RequestTracker:
             num_tokens_to_compute (int): the number of tokens that will
                 be 'computed', including the `num_computed_tokens` (vLLM's
                 local cache hit) and new tokens that will be scheduled.
-
+            lmcache_cached_tokens (int): the number of tokens that are
+                cached in LMCache.
+            request_priority (int): the priority of the request
+            skip_save (bool): whether the request cache should be saved
         """
         # vLLM 0.9.0 update: request.block_ids changed from list[int] to
         # list[list[int]]
@@ -183,6 +190,12 @@ class RequestTracker:
 
         request_configs = extract_request_configs(new_request.sampling_params)
 
+        mm_hashes, mm_positions = [], []
+        if new_request.mm_features:
+            for f in new_request.mm_features:
+                mm_hashes.append(f.identifier)
+                mm_positions.append(f.mm_position)
+
         return RequestTracker(
             req_id=new_request.req_id,
             prompt_len=len(new_request.prompt_token_ids),
@@ -190,8 +203,9 @@ class RequestTracker:
             allocated_block_ids=unfolded_block_ids,
             num_saved_tokens=lmcache_cached_tokens,
             disagg_spec=disagg_spec,
-            mm_hashes=new_request.mm_hashes.copy(),
-            mm_positions=new_request.mm_positions.copy(),
+            mm_hashes=mm_hashes,
+            mm_positions=mm_positions,
+            skip_save=skip_save,
             request_configs=request_configs,
         )
 
@@ -255,7 +269,6 @@ class ReqMeta:
         block_size: int,
         lmcache_chunk_size: int = 256,
         load_spec: Optional[LoadSpec] = None,
-        skip_save: bool = False,
         discard_partial_chunks: bool = True,
         save_decode_cache: bool = False,
     ) -> Optional["ReqMeta"]:
@@ -266,7 +279,6 @@ class ReqMeta:
             block_size (int): the block size in vLLM.
             lmcache_chunk_size (int): the chunk size for LMCache.
             load_spec (Optional[LoadSpec]): the load spec for KV cache loading.
-            skip_save (bool): whether to skip the save operation.
             discard_partial_chunks (bool): whether to discard partial chunks.
             save_decode_cache (bool): whether to save the cache in decode phase.
 
@@ -293,7 +305,7 @@ class ReqMeta:
 
         # NOTE(vladnosiv): for disagg, you cannot skip saving, as saving is a transfer
         skip_save = tracker.disagg_spec is None and (
-            skip_save
+            tracker.skip_save
             or (tracker.num_saved_tokens > 0 and input_token_len < chunk_boundary)
             or (tracker.is_decode_phase and not save_decode_cache)
         )
@@ -628,21 +640,30 @@ class LMCacheConnectorV1Impl:
 
         self.force_skip_save = bool(os.environ.get("LMCACHE_FORCE_SKIP_SAVE", False))
 
-        # Start internal API server if enabled
-        # The enabled check is in the InternalAPIServer constructor
-        self.api_server = InternalAPIServer(self)
-        self.api_server.start()
+        self._requests_priority: dict[str, int] = {}
 
-        # Launch plugins
-        self.plugin_launcher = PluginLauncher(
-            self.config,
-            role,
-            self.worker_count,
-            -1
-            if self.lmcache_engine is None  # scheduler side
-            else self.lmcache_engine.metadata.worker_id,
-        )
-        self.plugin_launcher.launch_plugins()
+        # TODO(baoloongmao): Internal api server & plugin framework support dp > 1
+        if (
+            vllm_config.parallel_config.data_parallel_size_local == 1
+            or vllm_config.parallel_config.data_parallel_rank_local == 0
+        ):
+            # Start internal API server if enabled
+            # The enabled check is in the InternalAPIServer constructor
+            self.api_server = InternalAPIServer(self)
+            self.api_server.start()
+            # Launch plugins
+            self.plugin_launcher = PluginLauncher(
+                self.config,
+                role,
+                self.worker_count,
+                -1
+                if self.lmcache_engine is None  # scheduler side
+                else self.lmcache_engine.metadata.worker_id,
+            )
+            self.plugin_launcher.launch_plugins()
+        else:
+            self.api_server = None  # type: ignore[assignment]
+            self.plugin_launcher = None  # type: ignore[assignment]
         logger.info(
             f"LMCache initialized for role {role} with version {utils.get_version()}, "
             f"vllm version {VLLM_VERSION}, "
@@ -1029,14 +1050,21 @@ class LMCacheConnectorV1Impl:
         ):
             return 0
 
+        self._requests_priority[request.request_id] = request.priority
+
         token_ids = request.prompt_token_ids
 
         # If the request has multimodal hashes, apply them to the token ids
-        if request.mm_hashes:
+        if request.mm_features:
             # TODO(Jiayi): Optimize this
             token_ids = torch.tensor(request.prompt_token_ids)
+            mm_hashes, mm_positions = zip(
+                *((f.identifier, f.mm_position) for f in request.mm_features)
+            )
             apply_mm_hashes_to_token_ids(
-                token_ids, request.mm_hashes, request.mm_positions
+                token_ids,
+                list(mm_hashes),
+                list(mm_positions),
             )
             token_ids = token_ids.tolist()
 
@@ -1198,11 +1226,19 @@ class LMCacheConnectorV1Impl:
             lmcache_cached_tokens = 0
             if load_spec is not None:
                 lmcache_cached_tokens = load_spec.lmcache_cached_tokens
+            request_priority = self._requests_priority.pop(request.req_id, 0)
+
+            skip_save = force_skip_save or (
+                self.config.priority_limit is not None
+                and request_priority > self.config.priority_limit
+            )
+
             request_tracker = RequestTracker.from_new_request(
                 self.config,
                 request,
                 num_tokens_to_compute,
                 lmcache_cached_tokens,
+                skip_save,
             )
             self._request_trackers[request.req_id] = request_tracker
 
@@ -1211,7 +1247,6 @@ class LMCacheConnectorV1Impl:
                 self._block_size,
                 self._lmcache_chunk_size,
                 load_spec=load_spec,
-                skip_save=force_skip_save,
                 discard_partial_chunks=self._discard_partial_chunks,
                 save_decode_cache=self._save_decode_cache,
             )
@@ -1233,7 +1268,6 @@ class LMCacheConnectorV1Impl:
                     self._block_size,
                     self._lmcache_chunk_size,
                     load_spec=None,
-                    skip_save=force_skip_save,
                     discard_partial_chunks=self._discard_partial_chunks,
                 )
                 if req_meta is not None:
@@ -1262,7 +1296,6 @@ class LMCacheConnectorV1Impl:
                 self._block_size,
                 self._lmcache_chunk_size,
                 load_spec=None,
-                skip_save=force_skip_save,
                 discard_partial_chunks=self._discard_partial_chunks,
                 save_decode_cache=self._save_decode_cache,
             )

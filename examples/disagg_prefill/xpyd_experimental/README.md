@@ -26,6 +26,40 @@ The script will:
 
 Press `Ctrl+C` to stop the servers.
 
+### Advanced Configuration
+
+#### Multi-Host Support
+
+The proxy server supports CSV format for specifying multiple hosts and ports for both prefillers and decoders. This enables flexible deployment across multiple machines:
+
+```bash
+# Multi-machine deployment
+python disagg_proxy_server.py \
+    --prefiller-host "${host1-IP},${host2-IP}" \
+    --prefiller-port "8000" \
+    --decoder-host "${host3-IP},${host4-IP}" \
+    --decoder-port "8000,8001"
+
+# Above example `--prefiller-port "8000"` means the host1 and host2 vLLM instances both use port 8000 for model serving.
+# Above example `--decoder-port "8000,8001"` means host3 uses port 8000 and host4 uses 8001 for model serving. (Using different ports on different hosts is not required, but demonstrates argument flexibility)
+```
+
+#### To support Tensor-Parallel
+
+In Decoder's lmcache configuration file, different ports are required for different TP ranks. The below example shows a TP=8 case with 8 ports (to support vLLM instance with `--tensor-parallel-size 8`)
+
+```yaml
+nixl_peer_init_port:  [7300,7301,7302,7303,7304,7305,7306,7307]
+nixl_peer_alloc_port: [7400,7401,7402,7403,7404,7405,7406,7407]
+```
+
+Accordingly, the `disagg_proxy_server.py` should use the same ports aligning with decoder configuration:
+```bash
+python disagg_proxy_server.py \
+    .... \ # other arguments
+    --decoder-init-port  "7300,7301,7302,7303,7304,7305,7306,7307" \
+    --decoder-alloc-port "7400,7401,7402,7403,7404,7405,7406,7407"
+```
 #### Example benchmark command
 
 If you have vLLM [benchmark_serving.py](https://github.com/vllm-project/vllm/blob/main/benchmarks/benchmark_serving.py), you can run the following command to benchmark the serving performance of the disaggregated prefill setup:

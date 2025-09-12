@@ -28,6 +28,8 @@ The following parameters can be configured in the YAML file:
     #   /tmp/lmcache_internal_api_server/socket_6999 (scheduler)
     #   /tmp/lmcache_internal_api_server/socket_7000 (worker 0)
 
+.. _testing_internal_api_server:
+
 Testing the Server
 ---------------------------------------
 
