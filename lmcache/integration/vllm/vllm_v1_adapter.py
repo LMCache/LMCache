@@ -379,7 +379,7 @@ class ReqMeta:
 
 
 def need_gpu_interm_buffer(lmcache_config: LMCacheEngineConfig):
-    if lmcache_config.enable_nixl:
+    if lmcache_config.enable_pd:
         return False
     else:
         return True

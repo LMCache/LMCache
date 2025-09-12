@@ -370,16 +370,16 @@ def _validate_config(self):
     enable_nixl_storage = self.extra_config is not None and self.extra_config.get(
         "enable_nixl_storage"
     )
-    if self.enable_nixl:
-        assert self.nixl_role is not None
-        assert self.nixl_buffer_size is not None
-        assert self.nixl_buffer_device is not None
+    if self.enable_pd:
+        assert self.pd_role is not None
+        assert self.pd_buffer_size is not None
+        assert self.pd_buffer_device is not None
 
-        assert self.remote_url is None, "Nixl only supports remote_url=None"
+        assert self.remote_url is None, "PD only supports remote_url=None"
         assert self.save_decode_cache is False, (
-            "Nixl only supports save_decode_cache=False"
+            "PD only supports save_decode_cache=False"
         )
-        assert self.enable_p2p is False, "Nixl only supports enable_p2p=False"
+        assert self.enable_p2p is False, "PD only supports enable_p2p=False"
 
     if enable_nixl_storage:
         assert self.extra_config.get("nixl_backend") is not None

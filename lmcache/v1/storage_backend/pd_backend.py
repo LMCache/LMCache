@@ -157,7 +157,7 @@ class PDBackend(AllocatorBackendInterface):
                 role=self.pd_config.role,
                 buffer_ptr=self.memory_allocator.gpu_allocator.buffer_ptr,
                 buffer_size=self.memory_allocator.gpu_allocator.buffer_size,
-                page_size=self.memory_allocator.gpu_allocator.align_bytes,
+                align_bytes=self.memory_allocator.gpu_allocator.align_bytes,
                 tp_rank=self.tp_rank,
                 peer_init_url=f"{self.pd_config.peer_host}:{self.pd_config.peer_init_port}",
                 backends=config.nixl_backends,

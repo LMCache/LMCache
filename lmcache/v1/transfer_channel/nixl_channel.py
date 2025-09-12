@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 
 # First Party
 from lmcache.v1.rpc_utils import get_zmq_socket
-from lmcache.v1.transfer.abstract import BaseTransferChannel
+from lmcache.v1.transfer_channel.abstract import BaseTransferChannel
 
 logger = init_logger(__name__)
 
@@ -269,7 +269,7 @@ class NixlChannel(BaseTransferChannel):
 
         handle = self.nixl_agent.make_prepped_xfer(
             "WRITE",
-            self.sender_nixl_wrapper.xfer_handler,
+            self.nixl_wrapper.xfer_handler,
             self._get_local_mem_indices(data),
             self.remote_xfer_handlers_dict[transfer_spec["receiver_id"]],
             transfer_spec["remote_indexes"],
@@ -280,7 +280,7 @@ class NixlChannel(BaseTransferChannel):
         # TODO(Jiayi) tune hyperparameters
         wait_time = 0.001
         while True:
-            status = self._nixl_agent.check_xfer_state(handle)
+            status = self.nixl_agent.check_xfer_state(handle)
             logger.debug(f"Transfer status: {status}")
 
             if status == "ERR":
@@ -327,8 +327,8 @@ class NixlChannel(BaseTransferChannel):
 
         handle = self.nixl_agent.make_prepped_xfer(
             "WRITE",
-            self.sender_nixl_wrapper.xfer_handler,
-            self._get_mem_indices(data),
+            self.nixl_wrapper.xfer_handler,
+            self._get_local_mem_indices(data),
             self.remote_xfer_handlers_dict[transfer_spec["receiver_id"]],
             transfer_spec["remote_indexes"],
         )
@@ -338,7 +338,7 @@ class NixlChannel(BaseTransferChannel):
         # TODO(Jiayi) tune hyperparameters
         wait_time = 0.001
         while True:
-            status = self._nixl_agent.check_xfer_state(handle)
+            status = self.nixl_agent.check_xfer_state(handle)
             logger.debug(f"Transfer status: {status}")
 
             if status == "ERR":
