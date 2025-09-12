@@ -1,3 +1,4 @@
 local_cpu.yaml
 local_disk.yaml
+local_cpu_mla.yaml
 pd.yaml
