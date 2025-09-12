@@ -9,12 +9,14 @@ class BaseJobExecutor(metaclass=abc.ABCMeta):
     async def submit_job(
         self,
         fn: Callable[..., Awaitable[Any]] | Callable[..., Any],
+        *args: Any,
         **kwargs: Any,
     ) -> Any:
         """
         Submit a job to the executor.
 
         :param fn: The function to execute.
+        :param args: The positional arguments to pass to the function.
         :param kwargs: The keyword arguments to pass to the function (e.g., priority).
 
         :return: Return type aligned with the function being executed.

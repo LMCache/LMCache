@@ -5,12 +5,6 @@ import asyncio
 import tempfile
 
 # Third Party
-from utils import (
-    check_mem_obj_equal,
-    close_asyncio_loop,
-    dumb_cache_engine_key,
-    init_asyncio_loop,
-)
 import pytest
 import torch
 
@@ -19,6 +13,14 @@ from lmcache.config import LMCacheEngineMetadata
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import PinMemoryAllocator
 from lmcache.v1.storage_backend.connector import CreateConnector
+
+# Local
+from .utils import (
+    check_mem_obj_equal,
+    close_asyncio_loop,
+    dumb_cache_engine_key,
+    init_asyncio_loop,
+)
 
 
 @pytest.mark.parametrize("lmserver_v1_process", ["cpu"], indirect=True)

@@ -21,9 +21,11 @@ from vllm.distributed.parallel_state import (
 from vllm.sampling_params import SamplingParams
 from vllm.utils import cdiv, get_kv_cache_torch_dtype
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.version import __version__ as VLLM_VERSION
 import torch
 
 # First Party
+from lmcache import utils
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.integration.vllm.utils import (
     ENGINE_NAME,
@@ -32,6 +34,7 @@ from lmcache.integration.vllm.utils import (
     mla_enabled,
 )
 from lmcache.logging import init_logger
+from lmcache.observability import LMCStatsMonitor
 from lmcache.utils import _lmcache_nvtx_annotate
 from lmcache.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
 from lmcache.v1.compute.blend import LMCBlenderBuilder
@@ -549,6 +552,7 @@ class LMCacheConnectorV1Impl:
         self.layerwise_retrievers: list[
             Generator[Optional[torch.Tensor], None, None]
         ] = []
+        self._stats_monitor = LMCStatsMonitor.GetOrCreate()
         if role == KVConnectorRole.SCHEDULER:
             # Create lookup client using factory
             self.lookup_client = LookupClientFactory.create_lookup_client(
@@ -624,21 +628,34 @@ class LMCacheConnectorV1Impl:
 
         self.force_skip_save = bool(os.environ.get("LMCACHE_FORCE_SKIP_SAVE", False))
 
-        # Start internal API server if enabled
-        # The enabled check is in the InternalAPIServer constructor
-        self.api_server = InternalAPIServer(self)
-        self.api_server.start()
-
-        # Launch plugins
-        self.plugin_launcher = PluginLauncher(
-            self.config,
-            role,
-            self.worker_count,
-            -1
-            if self.lmcache_engine is None  # scheduler side
-            else self.lmcache_engine.metadata.worker_id,
+        # TODO(baoloongmao): Internal api server & plugin framework support dp > 1
+        if (
+            vllm_config.parallel_config.data_parallel_size_local == 1
+            or vllm_config.parallel_config.data_parallel_rank_local == 0
+        ):
+            # Start internal API server if enabled
+            # The enabled check is in the InternalAPIServer constructor
+            self.api_server = InternalAPIServer(self)
+            self.api_server.start()
+            # Launch plugins
+            self.plugin_launcher = PluginLauncher(
+                self.config,
+                role,
+                self.worker_count,
+                -1
+                if self.lmcache_engine is None  # scheduler side
+                else self.lmcache_engine.metadata.worker_id,
+            )
+            self.plugin_launcher.launch_plugins()
+        else:
+            self.api_server = None  # type: ignore[assignment]
+            self.plugin_launcher = None  # type: ignore[assignment]
+        logger.info(
+            f"LMCache initialized for role {role} with version {utils.get_version()}, "
+            f"vllm version {VLLM_VERSION}, "
+            "lmcache cache_engine metadata: "
+            f"{getattr(self.lmcache_engine, 'metadata', None)}"
         )
-        self.plugin_launcher.launch_plugins()
 
     @_lmcache_nvtx_annotate
     def _init_kv_caches_from_forward_context(self, forward_context: "ForwardContext"):
@@ -706,6 +723,9 @@ class LMCacheConnectorV1Impl:
             slot_mapping = request.slot_mapping.cuda()
             assert len(tokens) == len(slot_mapping)
 
+            self._stats_monitor.update_interval_vllm_hit_tokens(
+                request.load_spec.vllm_cached_tokens
+            )
             token_mask = torch.ones(len(tokens), dtype=torch.bool)
             masked_token_count = (
                 request.load_spec.vllm_cached_tokens

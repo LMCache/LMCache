@@ -3,7 +3,6 @@
 from typing import TYPE_CHECKING, Optional, Union
 
 # First Party
-from lmcache.integration.vllm.utils import lmcache_get_config
 from lmcache.logging import init_logger
 from lmcache.v1.cache_engine import LMCacheEngine
 from lmcache.v1.config import LMCacheEngineConfig
@@ -80,7 +79,7 @@ class LookupClientFactory:
         Returns:
             A lookup server instance, or None if no server should be created
         """
-        config = lmcache_get_config()
+        config = lmcache_engine.config
         assert isinstance(config, LMCacheEngineConfig), (
             "LMCache v1 config is expected for lookup server and client"
         )

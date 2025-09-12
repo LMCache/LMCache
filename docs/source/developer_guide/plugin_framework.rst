@@ -6,7 +6,7 @@ LMCache Plugin Framework
 The LMCache plugin system allows developers to extend functionality by running custom scripts alongside LMCache processes. Plugins can be written in Python and Bash for now, and are managed by the ``PluginLauncher`` class.
 
 Key Use Cases
-------------
+-------------
 - Start metric reporters for centralized monitoring
 - Implement log reporters for log collection systems
 - Report process-level metrics to alerting systems
@@ -24,6 +24,7 @@ Environment Variables:
 - ``LMCACHE_PLUGIN_WORKER_COUNT``: Total worker count in cluster
 
 Configuration File (``lmcache.yaml``):
+
 .. code-block:: yaml
 
     plugin_locations: ["/path/to/plugins"]
@@ -37,6 +38,7 @@ Plugin filenames determine execution targets:
 Role-Specific Plugins:
 - Format: ``<ROLE>[_<WORKER_ID>][_<DESCRIPTION>].<EXTENSION>``
 - Examples:
+
   - ``scheduler_foo_plugin.py``: Runs only on ``SCHEDULER``
   - ``worker_0_test.sh``: Runs only on worker ID 0
   - ``all_plugin.sh``: Runs on all workers
@@ -51,6 +53,7 @@ Execution Model
 1. **Interpreter Detection**:
    - Uses shebang line (e.g., ``#!/opt/venv/bin/python``)
    - Fallback interpreters:
+
      - ``.py`` → ``python``
      - ``.sh`` → ``bash``
 
@@ -65,11 +68,13 @@ Execution Model
 Example Plugins
 ---------------
 Python Plugin (``scheduler_foo_plugin.py``):
+
 .. literalinclude:: ../../../examples/plugins/scheduler_foo_plugin.py
    :language: python
    :linenos:
 
 Bash Plugin (``all_plugin.sh``):
+
 .. literalinclude:: ../../../examples/plugins/all_plugin.sh
    :language: bash
    :linenos:
