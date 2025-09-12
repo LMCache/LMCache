@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from concurrent.futures import Future
 from typing import Any, Awaitable, Callable
 import asyncio
 import itertools
@@ -28,8 +29,12 @@ class AsyncPQExecutor(BaseJobExecutor):
         ] = asyncio.PriorityQueue(maxsize=max_size)
         self._counter = itertools.count()
         self.max_workers = max_workers
-        for _ in range(max_workers):
-            asyncio.run_coroutine_threadsafe(self._worker(), self.loop)
+        # we don't use asyncio.create_task so that PQ executor can be invoked
+        # from sync code
+        self._workers: list[Future] = [
+            asyncio.run_coroutine_threadsafe(self._worker(), loop)
+            for _ in range(max_workers)
+        ]
         self._closed = False
 
     async def submit_job(
@@ -77,7 +82,10 @@ class AsyncPQExecutor(BaseJobExecutor):
             )
         if wait:
             await self._queue.join()
-            await asyncio.gather(*self._workers, return_exceptions=True)
+            await asyncio.gather(
+                *[asyncio.wrap_future(fut, loop=self.loop) for fut in self._workers],
+                return_exceptions=True,
+            )
 
     def shutdown(self, wait: bool = True) -> None:
         future = asyncio.run_coroutine_threadsafe(self._shutdown_async(wait), self.loop)
@@ -104,8 +112,11 @@ class AsyncPQThreadPoolExecutor(AsyncPQExecutor):
         ] = asyncio.PriorityQueue(maxsize=max_size)
         self._counter = itertools.count()
         self.max_workers = max_workers
+        self._workers = []
         for _ in range(max_workers):
-            asyncio.run_coroutine_threadsafe(self._worker(), self.loop)
+            self._workers.append(
+                asyncio.run_coroutine_threadsafe(self._worker(), self.loop)
+            )
         self._closed = False
 
     async def _worker(self):
@@ -128,3 +139,26 @@ class AsyncPQThreadPoolExecutor(AsyncPQExecutor):
                 # decrement task count
                 # join needs to wait until task count is zero
                 self._queue.task_done()
+
+    async def _shutdown_async(self, wait: bool = True) -> None:
+        self._closed = True
+        # Enqueue comparable sentinel tuples with the highest priority value so
+        # that outstanding work drains before shutdown signals are consumed.
+        # Use a very large integer to satisfy the typed queue's expected int priority
+        sentinel_priority = 2**31 - 1
+        for _ in range(self.max_workers):
+            await self._queue.put(
+                (sentinel_priority, next(self._counter), _SENTINEL, None, {}, None)
+            )
+        if wait:
+            await self._queue.join()
+            await asyncio.gather(
+                *[asyncio.wrap_future(fut, loop=self.loop) for fut in self._workers],
+                return_exceptions=True,
+            )
+
+    def shutdown(self, wait: bool = True) -> None:
+        future = asyncio.run_coroutine_threadsafe(self._shutdown_async(wait), self.loop)
+        if wait:
+            # Propagate exceptions if any
+            future.result()
