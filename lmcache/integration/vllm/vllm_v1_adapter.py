@@ -190,6 +190,12 @@ class RequestTracker:
 
         request_configs = extract_request_configs(new_request.sampling_params)
 
+        mm_hashes, mm_positions = [], []
+        if new_request.mm_features:
+            for f in new_request.mm_features:
+                mm_hashes.append(f.identifier)
+                mm_positions.append(f.mm_position)
+
         return RequestTracker(
             req_id=new_request.req_id,
             prompt_len=len(new_request.prompt_token_ids),
@@ -197,8 +203,8 @@ class RequestTracker:
             allocated_block_ids=unfolded_block_ids,
             num_saved_tokens=lmcache_cached_tokens,
             disagg_spec=disagg_spec,
-            mm_hashes=[f.identifier for f in new_request.mm_features],
-            mm_positions=[f.mm_position for f in new_request.mm_features],
+            mm_hashes=mm_hashes,
+            mm_positions=mm_positions,
             skip_save=skip_save,
             request_configs=request_configs,
         )
