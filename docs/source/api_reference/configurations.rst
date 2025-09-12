@@ -73,6 +73,9 @@ Basic cache settings that control the core functionality of LMCache.
    * - external_lookup_client
      - LMCACHE_EXTERNAL_LOOKUP_CLIENT
      - External KV lookup service URI (e.g., "mooncakestore://address"). If null, defaults to LMCache's internal lookup client. Default: null
+   * - priority_limit
+     - LMCACHE_PRIORITY_LIMIT
+     - Caches requests only if priority value ≤ limit. (**Not applicable for PD Disaggregation**) Type: int. Default: None
    * - extra_config
      - LMCACHE_EXTRA_CONFIG={"key": value, ...}
      - Additional configuration as JSON dict. For NUMA manual mode, include "gpu_to_numa_mapping": {gpu_id: numa_node, ...}. Default: {}

@@ -279,6 +279,11 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "default": 6999,
         "env_converter": int,
     },
+    "priority_limit": {
+        "type": Optional[int],
+        "default": None,
+        "env_converter": int,
+    },
     "internal_api_server_include_index_list": {
         "type": Optional[list[int]],
         "default": None,
