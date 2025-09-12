@@ -4,7 +4,7 @@
 # Standard
 from collections import OrderedDict
 from dataclasses import dataclass
-from enum import IntEnum
+from enum import IntEnum, auto
 from typing import List, Optional
 import asyncio
 
@@ -20,10 +20,10 @@ logger = init_logger(__name__)
 
 
 class Priorities(IntEnum):
-    PEEK = 0
-    PREFETCH = 1
-    GET = 2
-    PUT = 3
+    PEEK = auto()
+    PREFETCH = auto()
+    GET = auto()
+    PUT = auto()
 
 
 @dataclass

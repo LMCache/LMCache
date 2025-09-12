@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from enum import IntEnum
+from enum import IntEnum, auto
 from typing import List, Optional, Tuple, no_type_check
 import asyncio
 import inspect
@@ -27,10 +27,10 @@ logger = init_logger(__name__)
 
 
 class Priorities(IntEnum):
-    PEEK = 0
-    PREFETCH = 1
-    GET = 2
-    PUT = 3
+    PEEK = auto()
+    PREFETCH = auto()
+    GET = auto()
+    PUT = auto()
 
 
 class RedisConnector(RemoteConnector):
