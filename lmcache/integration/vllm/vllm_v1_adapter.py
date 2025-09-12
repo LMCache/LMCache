@@ -30,6 +30,7 @@ from lmcache.config import LMCacheEngineMetadata
 from lmcache.integration.vllm.utils import (
     ENGINE_NAME,
     apply_mm_hashes_to_token_ids,
+    extract_mm_features,
     lmcache_get_config,
     mla_enabled,
 )
@@ -190,14 +191,7 @@ class RequestTracker:
 
         request_configs = extract_request_configs(new_request.sampling_params)
 
-        mm_hashes, mm_positions = [], []
-        if new_request.mm_features:
-            for f in new_request.mm_features:
-                mm_hashes.append(f.identifier)
-                mm_positions.append(f.mm_position)
-        elif new_request.mm_hashes:
-            mm_hashes = new_request.mm_hashes.copy()
-            mm_positions = new_request.mm_positions.copy()
+        mm_hashes, mm_positions = extract_mm_features(new_request, modify=True)
 
         return RequestTracker(
             req_id=new_request.req_id,
@@ -1058,22 +1052,12 @@ class LMCacheConnectorV1Impl:
         token_ids = request.prompt_token_ids
 
         # If the request has multimodal hashes, apply them to the token ids
-        if request.mm_features or request.mm_hashes:
+        mm_features = extract_mm_features(request)
+        if mm_features[0] != [] and mm_features[1] != []:
             # TODO(Jiayi): Optimize this
             token_ids = torch.tensor(request.prompt_token_ids)
-            if request.mm_features:
-                mm_hashes, mm_positions = zip(
-                    *((f.identifier, f.mm_position) for f in request.mm_features)
-                )
-                apply_mm_hashes_to_token_ids(
-                    token_ids,
-                    list(mm_hashes),
-                    list(mm_positions),
-                )
-            elif request.mm_hashes:
-                apply_mm_hashes_to_token_ids(
-                    token_ids, request.mm_hashes, request.mm_positions
-                )
+            mm_hashes, mm_positions = mm_features
+            apply_mm_hashes_to_token_ids(token_ids, mm_hashes, mm_positions)
             token_ids = token_ids.tolist()
 
         request_configs = extract_request_configs(request.sampling_params)

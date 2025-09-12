@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import TYPE_CHECKING, Union
+from typing import TYPE_CHECKING, Tuple, Union
 import os
 
 if TYPE_CHECKING:
@@ -156,3 +156,20 @@ def create_lmcache_metadata(
     )
 
     return metadata, config
+
+
+def extract_mm_features(
+    request, modify: bool = False
+) -> Tuple[list[str], list["PlaceholderRange"]]:
+    if request.mm_features:
+        mm_hashes, mm_positions = zip(
+            *((f.identifier, f.mm_position) for f in request.mm_features)
+        )
+        return (list(mm_hashes), list(mm_positions))
+    elif request.mm_hashes:
+        if modify:
+            return (request.mm_hashes.copy(), request.mm_positions.copy())
+        else:
+            return (request.mm_hashes, request.mm_positions)
+    else:
+        return ([], [])
