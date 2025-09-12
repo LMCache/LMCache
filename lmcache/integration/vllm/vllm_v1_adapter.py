@@ -195,6 +195,9 @@ class RequestTracker:
             for f in new_request.mm_features:
                 mm_hashes.append(f.identifier)
                 mm_positions.append(f.mm_position)
+        elif new_request.mm_hashes:
+            mm_hashes = new_request.mm_hashes.copy()
+            mm_positions = new_request.mm_positions.copy()
 
         return RequestTracker(
             req_id=new_request.req_id,
@@ -1055,23 +1058,27 @@ class LMCacheConnectorV1Impl:
         token_ids = request.prompt_token_ids
 
         # If the request has multimodal hashes, apply them to the token ids
-        if request.mm_features:
+        if request.mm_features or request.mm_hashes:
             # TODO(Jiayi): Optimize this
             token_ids = torch.tensor(request.prompt_token_ids)
-            mm_hashes, mm_positions = zip(
-                *((f.identifier, f.mm_position) for f in request.mm_features)
-            )
-            apply_mm_hashes_to_token_ids(
-                token_ids,
-                list(mm_hashes),
-                list(mm_positions),
-            )
+            if request.mm_features:
+                mm_hashes, mm_positions = zip(
+                    *((f.identifier, f.mm_position) for f in request.mm_features)
+                )
+                apply_mm_hashes_to_token_ids(
+                    token_ids,
+                    list(mm_hashes),
+                    list(mm_positions),
+                )
+            elif request.mm_hashes:
+                apply_mm_hashes_to_token_ids(
+                    token_ids, request.mm_hashes, request.mm_positions
+                )
             token_ids = token_ids.tolist()
 
         request_configs = extract_request_configs(request.sampling_params)
         if self.skip_last_n_tokens > 0:
             token_ids = token_ids[: -self.skip_last_n_tokens]
-
         if self.async_loading:
             lookup_id = request.request_id
         else:
