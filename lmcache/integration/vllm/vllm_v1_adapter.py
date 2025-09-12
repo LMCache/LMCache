@@ -190,6 +190,12 @@ class RequestTracker:
 
         request_configs = extract_request_configs(new_request.sampling_params)
 
+        mm_hashes, mm_positions = [], []
+        if new_request.mm_features:
+            for f in new_request.mm_features:
+                mm_hashes.append(f.identifier)
+                mm_positions.append(f.mm_position)
+
         return RequestTracker(
             req_id=new_request.req_id,
             prompt_len=len(new_request.prompt_token_ids),
@@ -197,8 +203,8 @@ class RequestTracker:
             allocated_block_ids=unfolded_block_ids,
             num_saved_tokens=lmcache_cached_tokens,
             disagg_spec=disagg_spec,
-            mm_hashes=new_request.mm_hashes.copy(),
-            mm_positions=new_request.mm_positions.copy(),
+            mm_hashes=mm_hashes,
+            mm_positions=mm_positions,
             skip_save=skip_save,
             request_configs=request_configs,
         )
@@ -1049,11 +1055,16 @@ class LMCacheConnectorV1Impl:
         token_ids = request.prompt_token_ids
 
         # If the request has multimodal hashes, apply them to the token ids
-        if request.mm_hashes:
+        if request.mm_features:
             # TODO(Jiayi): Optimize this
             token_ids = torch.tensor(request.prompt_token_ids)
+            mm_hashes, mm_positions = zip(
+                *((f.identifier, f.mm_position) for f in request.mm_features)
+            )
             apply_mm_hashes_to_token_ids(
-                token_ids, request.mm_hashes, request.mm_positions
+                token_ids,
+                list(mm_hashes),
+                list(mm_positions),
             )
             token_ids = token_ids.tolist()
 
