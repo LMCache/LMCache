@@ -1052,10 +1052,13 @@ class LMCacheConnectorV1Impl:
         if request.mm_features:
             # TODO(Jiayi): Optimize this
             token_ids = torch.tensor(request.prompt_token_ids)
+            mm_hashes, mm_positions = zip(
+                *((f.identifier, f.mm_position) for f in request.mm_features)
+            )
             apply_mm_hashes_to_token_ids(
                 token_ids,
-                [f.identifier for f in request.mm_features],
-                [f.mm_position for f in request.mm_features],
+                list(mm_hashes),
+                list(mm_positions),
             )
             token_ids = token_ids.tolist()
 
