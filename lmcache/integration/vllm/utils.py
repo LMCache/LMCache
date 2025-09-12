@@ -161,12 +161,12 @@ def create_lmcache_metadata(
 def extract_mm_features(
     request, modify: bool = False
 ) -> Tuple[list[str], list["PlaceholderRange"]]:
-    if request.mm_features:
+    if getattr(request, "mm_features", None):
         mm_hashes, mm_positions = zip(
             *((f.identifier, f.mm_position) for f in request.mm_features)
         )
         return (list(mm_hashes), list(mm_positions))
-    elif request.mm_hashes:
+    elif getattr(request, "mm_hashes", None):
         if modify:
             return (request.mm_hashes.copy(), request.mm_positions.copy())
         else:
