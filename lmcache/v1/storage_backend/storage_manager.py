@@ -44,6 +44,57 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+# Helper function to get the class name of the backend
+def get_backend_cname(backend: StorageBackendInterface):
+    return backend.__class__.__name__
+
+
+# Helper function to allocate and copy memory objects between D and H
+def allocate_and_copy_objects(
+    allocator_backend: AllocatorBackendInterface,
+    keys: Sequence[CacheEngineKey],
+    src_memory_objs: list[MemoryObj],
+    stream: torch.cuda.Stream,
+) -> tuple[Sequence[CacheEngineKey], list[MemoryObj]]:
+    """
+    Allocate the memory objects and copy the data from src_memory_objs to
+    the newly allocated memory objects
+
+    Args:
+        allocator_backend: the allocator backend to allocate the new memory
+          objects
+        keys: the cache engine keys corresponding to the memory objects
+        src_memory_objs: the memory objects to copy from
+        stream: the cuda stream to run the copy in
+
+    Returns:
+        - list of cache engine keys that corresponds to the memory objects
+          that has been successfully allocated
+        - list of the memory objects that has been successfully allocated
+    """
+    allocated_objects = []
+    for key, src_memory_obj in zip(keys, src_memory_objs, strict=False):
+        if allocator_backend.contains(key):
+            continue
+        memory_obj = allocator_backend.allocate(
+            shape=src_memory_obj.get_shape(),
+            dtype=src_memory_obj.get_dtype(),
+            fmt=src_memory_obj.meta.fmt,
+            eviction=True,
+            busy_loop=False,
+        )
+
+        if memory_obj is None or memory_obj.tensor is None:
+            break
+
+        with torch.cuda.stream(stream):
+            memory_obj.tensor.copy_(src_memory_obj.tensor, non_blocking=True)
+        allocated_objects.append(memory_obj)
+
+    stream.synchronize()
+    return keys[: len(allocated_objects)], allocated_objects
+
+
 # TODO: extend this class to implement caching policies and eviction policies
 class StorageManager:
     """
@@ -181,7 +232,7 @@ class StorageManager:
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
         eviction=True,
         busy_loop=True,
-    ) -> Optional[MemoryObj]:
+    ) -> Optional[list[MemoryObj]]:
         """
         Batched allocate memory object with memory allocator.
         Use LRU evictor if eviction is enabled.
@@ -228,56 +279,76 @@ class StorageManager:
         storage manager) or has been stored (handled by storage backend).
         """
 
-        if self.enable_nixl or (location and location == "NixlBackend"):
-            self.allocator_backend.batched_submit_put_task(
-                keys, memory_objs, transfer_spec=transfer_spec
-            )
+        # if self.enable_nixl or (location and location == "NixlBackend"):
+        #    self.allocator_backend.batched_submit_put_task(
+        #        keys, memory_objs, transfer_spec=transfer_spec
+        #    )
 
-            cpu_memory_objs = []
-            cpu_keys = []
-            if len(self.storage_backends) > 1:
-                # TODO(Jiayi): Optimize this with batched_allocate
-                # TODO(Jiayi): Refactor this into gpu connector.
-                for key, memory_obj in zip(keys, memory_objs, strict=False):
-                    if self.local_cpu_backend.contains(key):
-                        continue
-                    assert isinstance(self.local_cpu_backend, LocalCPUBackend)
-                    cpu_memory_obj = self.local_cpu_backend.allocate(
-                        shape=memory_obj.get_shape(),
-                        dtype=memory_obj.get_dtype(),
-                        fmt=memory_obj.meta.fmt,
-                        eviction=True,
-                        busy_loop=False,
-                    )
-                    if cpu_memory_obj is None:
-                        break
-                    with torch.cuda.stream(self.nixl_offload_stream):
-                        cpu_memory_obj.tensor.copy_(
-                            memory_obj.tensor, non_blocking=True
-                        )
-                    cpu_memory_objs.append(cpu_memory_obj)
-                    cpu_keys.append(key)
-                self.nixl_offload_stream.synchronize()
+        #    cpu_memory_objs = []
+        #    cpu_keys = []
+        #    if len(self.storage_backends) > 1:
+        #        # TODO(Jiayi): Optimize this with batched_allocate
+        #        # TODO(Jiayi): Refactor this into gpu connector.
+        #        for key, memory_obj in zip(keys, memory_objs, strict=False):
+        #            if self.local_cpu_backend.contains(key):
+        #                continue
+        #            assert isinstance(self.local_cpu_backend, LocalCPUBackend)
+        #            cpu_memory_obj = self.local_cpu_backend.allocate(
+        #                shape=memory_obj.get_shape(),
+        #                dtype=memory_obj.get_dtype(),
+        #                fmt=memory_obj.meta.fmt,
+        #                eviction=True,
+        #                busy_loop=False,
+        #            )
+        #            if cpu_memory_obj is None:
+        #                break
+        #            with torch.cuda.stream(self.nixl_offload_stream):
+        #                cpu_memory_obj.tensor.copy_(
+        #                    memory_obj.tensor, non_blocking=True
+        #                )
+        #            cpu_memory_objs.append(cpu_memory_obj)
+        #            cpu_keys.append(key)
+        #        self.nixl_offload_stream.synchronize()
 
-                for memory_obj in memory_objs:
-                    memory_obj.ref_count_down()
-                memory_objs = cpu_memory_objs
-                keys = cpu_keys
+        #        for memory_obj in memory_objs:
+        #            memory_obj.ref_count_down()
+        #        memory_objs = cpu_memory_objs
+        #        keys = cpu_keys
+
+        memory_objects_to_put: dict[
+            str,
+            tuple[Sequence[CacheEngineKey], list[MemoryObj]],
+        ] = {}
+        memory_objects_to_put[get_backend_cname(self.allocator_backend)] = (
+            keys,
+            memory_objs,
+        )
 
         for backend_name, backend in self.storage_backends.items():
-            if backend_name == "NixlBackend":
-                continue
+            # if backend_name == "NixlBackend":
+            #    continue
             if location and backend_name != location:
                 continue
+
+            allocator_backend = backend.get_allocator_backend()
+            allocator_backend_cname = get_backend_cname(allocator_backend)
+            if allocator_backend_cname not in memory_objects_to_put:
+                new_keys, new_objs = allocate_and_copy_objects(
+                    allocator_backend, keys, memory_objs, self.nixl_offload_stream
+                )
+                memory_objects_to_put[allocator_backend_cname] = (new_keys, new_objs)
+
             # NOTE: the handling of exists_in_put_tasks
             # is done in the backend
-            backend.batched_submit_put_task(keys, memory_objs)
+            ks, objs = memory_objects_to_put[allocator_backend_cname]
+            backend.batched_submit_put_task(ks, objs)
 
         if self.lookup_server is not None:
             self.lookup_server.batched_insert(keys)
 
-        for memory_obj in memory_objs:
-            memory_obj.ref_count_down()
+        for cname, (ks, objs) in memory_objects_to_put.items():
+            for memory_obj in objs:
+                memory_obj.ref_count_down()
 
     def get(
         self,

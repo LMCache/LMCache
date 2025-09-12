@@ -23,8 +23,12 @@ import torch
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey, DiskCacheMetadata, _lmcache_nvtx_annotate
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.memory_management import MemoryAllocatorInterface, MemoryObj
-from lmcache.v1.storage_backend.abstract_backend import StorageBackendInterface
+from lmcache.v1.memory_management import (
+    MemoryAllocatorInterface,
+    MemoryFormat,
+    MemoryObj,
+)
+from lmcache.v1.storage_backend.abstract_backend import AllocatorBackendInterface
 
 logger = init_logger(__name__)
 
@@ -155,7 +159,7 @@ def get_extra_config_bool(key, config: LMCacheEngineConfig) -> bool | None:
     return bool_value
 
 
-class GdsBackend(StorageBackendInterface):
+class GdsBackend(AllocatorBackendInterface):
     """
     Originally based on the open sourced WekaGdsBackend, this is a backend that
     leverages NVIDIA's cuFile API to issue GDS requests directly to the
@@ -682,6 +686,40 @@ class GdsBackend(StorageBackendInterface):
 
     def remove(self, key: CacheEngineKey, force: bool = True):
         raise NotImplementedError("Remote backend does not support remove now.")
+
+    def allocate(
+        self,
+        shape: torch.Size,
+        dtype: torch.dtype,
+        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
+        eviction: bool = True,
+        busy_loop: bool = True,
+    ) -> Optional[MemoryObj]:
+        if busy_loop:
+            logger.warning("GDS Backend does not support allocation with busy loop")
+        if eviction:
+            logger.warning("GDS Backend does not support eviction")
+
+        return self.memory_allocator.allocate(shape, dtype, fmt)
+
+    def batched_allocate(
+        self,
+        shape: torch.Size,
+        dtype: torch.dtype,
+        batch_size: int,
+        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
+        eviction: bool = True,
+        busy_loop: bool = True,
+    ) -> Optional[list[MemoryObj]]:
+        if busy_loop:
+            logger.warning("GDS Backend does not support allocation with busy loop")
+        if eviction:
+            logger.warning("GDS Backend does not support eviction")
+
+        return self.memory_allocator.batched_allocate(shape, dtype, batch_size, fmt)
+
+    def get_allocator_backend(self):
+        return self
 
     def close(self) -> None:
         logger.info("GDS backend closed.")

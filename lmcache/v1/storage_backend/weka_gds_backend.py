@@ -20,8 +20,12 @@ import torch
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey, DiskCacheMetadata, _lmcache_nvtx_annotate
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.memory_management import MemoryAllocatorInterface, MemoryObj
-from lmcache.v1.storage_backend.abstract_backend import StorageBackendInterface
+from lmcache.v1.memory_management import (
+    MemoryAllocatorInterface,
+    MemoryFormat,
+    MemoryObj,
+)
+from lmcache.v1.storage_backend.abstract_backend import AllocatorBackendInterface
 
 logger = init_logger(__name__)
 
@@ -88,7 +92,7 @@ async def save_metadata(path: str, tmp: str, metadata: bytes):
     os.rename(tmp_path, path)
 
 
-class WekaGdsBackend(StorageBackendInterface):
+class WekaGdsBackend(AllocatorBackendInterface):
     """
     This is a backend that leverages NVIDIA's cuFile API to issue GDS requests
     directly to the Weka Filesystem.  In order to use it, users need to specify
@@ -557,6 +561,37 @@ class WekaGdsBackend(StorageBackendInterface):
 
     def remove(self, key, force=True):
         raise NotImplementedError("Remote backend does not support remove now.")
+
+    def allocate(
+        self,
+        shape: torch.Size,
+        dtype: torch.dtype,
+        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
+        eviction: bool = True,
+        busy_loop: bool = True,
+    ) -> Optional[MemoryObj]:
+        if busy_loop:
+            logger.warning("Weka Backend does not support allocation with busy loop")
+        if eviction:
+            logger.warning("Weka Backend does not support eviction")
+
+        return self.memory_allocator.allocate(shape, dtype, fmt)
+
+    def batched_allocate(
+        self,
+        shape: torch.Size,
+        dtype: torch.dtype,
+        batch_size: int,
+        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
+        eviction: bool = True,
+        busy_loop: bool = True,
+    ) -> Optional[list[MemoryObj]]:
+        if busy_loop:
+            logger.warning("Weka Backend does not support allocation with busy loop")
+        if eviction:
+            logger.warning("Weka Backend does not support eviction")
+
+        return self.memory_allocator.batched_allocate(shape, dtype, batch_size, fmt)
 
     def close(self) -> None:
         self._thread_pool.shutdown(wait=True)

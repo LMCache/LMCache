@@ -477,5 +477,8 @@ class LocalCPUBackend(AllocatorBackendInterface):
 
         return num_cleared_tokens
 
+    def get_allocator_backend(self):
+        return self
+
     def close(self) -> None:
         self.clear()

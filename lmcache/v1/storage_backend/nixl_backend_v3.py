@@ -210,6 +210,9 @@ class NixlBackend(AllocatorBackendInterface):
     def unpin(self, key: CacheEngineKey) -> bool:
         return True
 
+    def get_allocator_backend(self):
+        return self
+
     # TODO (Jiayi): put this in _init__.py later
     @staticmethod
     def CreateNixlBackend(

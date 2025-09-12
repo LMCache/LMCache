@@ -216,6 +216,16 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
         return num_removed
 
     @abc.abstractmethod
+    def get_allocator_backend(self) -> "AllocatorBackendInterface":
+        """
+        Get the allocator backend that is used by the current storage backend
+        to allocate memory objects during `get` operations.
+
+        :return: an instance of AllocateBackendInterface
+        """
+        raise NotImplementedError
+
+    @abc.abstractmethod
     def close(
         self,
     ) -> None:
@@ -268,7 +278,7 @@ class AllocatorBackendInterface(StorageBackendInterface):
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
         eviction: bool = True,
         busy_loop: bool = True,
-    ) -> Optional[MemoryObj]:
+    ) -> Optional[list[MemoryObj]]:
         """
         Allocates memory in the backend to hold a tensor of the given shape
         in a batched manner. The allocated memory objects will have the same
