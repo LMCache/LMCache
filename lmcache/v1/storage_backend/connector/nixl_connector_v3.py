@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from dataclasses import dataclass
-from queue import Queue
 from typing import TYPE_CHECKING, Any, Optional, Union
 import copy
 import threading
@@ -193,14 +192,14 @@ class NixlSender:
 
         self._mem_alloc_sockets: dict[str, zmq.Socket] = {}
 
-        self.req_queue: Queue[NixlSenderTask] = Queue()
+        # self.req_queue: Queue[NixlSenderTask] = Queue()
 
         self._remote_xfer_handlers_dict: dict[
             str, NixlAgent.nixl_prepped_dlist_handle
         ] = {}
 
         # Start the seder thread
-        self._running = True
+        # self._running = True
 
         # self._sender_thread = threading.Thread(
         #     target=self._sender_loop, daemon=True
@@ -272,7 +271,6 @@ class NixlSender:
 
         # use remote alloc
         alloc_request = sender_task.get_alloc_request()
-
         alloc_response = self._remote_allocate(receiver_id, alloc_request)
 
         # send kv
@@ -833,6 +831,8 @@ class NixlAgentWrapper:
         )
 
         # Register the memory
+        # The four fields are (base_addr, length, dev_id, meta_info)
+        # https://github.com/ai-dynamo/nixl/blob/main/src/api/cpp/nixl_descriptors.h#L152
         memory_desc = [(buffer_ptr, buffer_size, tp_rank, "")]
         # TODO(Jiayi): remove hardcode `mem_type`
         reg_descs = nixl_agent.get_reg_descs(memory_desc, mem_type="cuda")

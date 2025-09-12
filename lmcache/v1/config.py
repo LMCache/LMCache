@@ -156,58 +156,50 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "default": None,
         "env_converter": int,
     },
-    # Nixl configurations
-    "enable_nixl": {
+    # PD-related configurations
+    "enable_pd": {
         "type": bool,
         "default": False,
         "env_converter": _to_bool,
     },
-    "nixl_role": {"type": Optional[str], "default": None, "env_converter": str},
-    "nixl_receiver_host": {
+    "pd_role": {"type": Optional[str], "default": None, "env_converter": str},
+    "pd_buffer_size": {"type": Optional[int], "default": None, "env_converter": int},
+    "pd_buffer_device": {
         "type": Optional[str],
         "default": None,
         "env_converter": str,
     },
-    "nixl_receiver_port": {
-        "type": Optional[int],
+    "pd_peer_host": {"type": Optional[str], "default": None, "env_converter": str},
+    "pd_peer_init_port": {
+        "type": Optional[list[int]],
         "default": None,
-        "env_converter": int,
+        "env_converter": _to_int_list,
     },
-    "nixl_buffer_size": {"type": Optional[int], "default": None, "env_converter": int},
-    "nixl_buffer_device": {
-        "type": Optional[str],
+    "pd_peer_alloc_port": {
+        "type": Optional[list[int]],
         "default": None,
-        "env_converter": str,
+        "env_converter": _to_int_list,
     },
-    "nixl_enable_gc": {
-        "type": bool,
-        "default": False,
-        "env_converter": _to_bool,
-    },
+    "pd_proxy_host": {"type": Optional[str], "default": None, "env_converter": str},
+    "pd_proxy_port": {"type": Optional[int], "default": None, "env_converter": int},
+    # Transfer-related configurations
+    "transfer_channel": {"type": Optional[str], "default": None, "env_converter": str},
+    # Nixl-related configurations
     "nixl_backends": {
         "type": Optional[list[str]],
         "default": None,
         "env_converter": _to_str_list,
     },
-    # Experimental Nixl configurations
-    "enable_xpyd": {
-        "type": bool,
-        "default": False,
-        "env_converter": _to_bool,
-    },
-    "nixl_peer_host": {"type": Optional[str], "default": None, "env_converter": str},
-    "nixl_peer_init_port": {
-        "type": Optional[list[int]],
+    "nixl_buffer_size": {
+        "type": Optional[int],
         "default": None,
-        "env_converter": _to_int_list,
+        "env_converter": int,
     },
-    "nixl_peer_alloc_port": {
-        "type": Optional[list[int]],
+    "nixl_buffer_device": {
+        "type": Optional[str],
         "default": None,
-        "env_converter": _to_int_list,
+        "env_converter": str,
     },
-    "nixl_proxy_host": {"type": Optional[str], "default": None, "env_converter": str},
-    "nixl_proxy_port": {"type": Optional[int], "default": None, "env_converter": int},
     # Storage paths
     "weka_path": {"type": Optional[str], "default": None, "env_converter": str},
     "gds_path": {"type": Optional[str], "default": None, "env_converter": str},

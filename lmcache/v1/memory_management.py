@@ -1796,23 +1796,23 @@ class CuFileMemoryAllocator(GPUMemoryAllocator):
         return "CuFileMemoryAllocator"
 
 
-class NixlCPUMemoryAllocator(MemoryAllocatorInterface):
+class PDCPUMemoryAllocator(MemoryAllocatorInterface):
     """
-    NIXL + CPU Memory Allocator
+    PD + CPU Memory Allocator
     This is a special allocator makes pd and cpu compatible.
     """
 
     def __init__(self):
         pass
 
-    def init_nixl_memory_allocator(
+    def init_gpu_memory_allocator(
         self,
         tensor: torch.Tensor,
         shape: torch.Size,
         dtype: torch.dtype,
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
     ):
-        self.nixl_allocator = PagedTensorMemoryAllocator(
+        self.pd_allocator = PagedTensorMemoryAllocator(
             tensor,
             shape,
             dtype,
@@ -1832,8 +1832,8 @@ class NixlCPUMemoryAllocator(MemoryAllocatorInterface):
         fmt: MemoryFormat = MemoryFormat.UNDEFINED,
         allocator_type: Optional[str] = "cpu",
     ) -> Optional[MemoryObj]:
-        if allocator_type == "nixl":
-            return self.nixl_allocator.allocate(shape, dtype, fmt)
+        if allocator_type == "gpu":
+            return self.gpu_allocator.allocate(shape, dtype, fmt)
         elif allocator_type == "cpu":
             return self.cpu_allocator.allocate(shape, dtype, fmt)
         else:
@@ -1845,17 +1845,17 @@ class NixlCPUMemoryAllocator(MemoryAllocatorInterface):
         dtype: Optional[torch.dtype],
         batch_size: int,
         fmt: MemoryFormat = MemoryFormat.UNDEFINED,
-        allocator_type: Optional[str] = "cpu",
+        allocator_type: Optional[str] = "gpu",
     ) -> Optional[List[MemoryObj]]:
-        if allocator_type == "nixl":
-            return self.nixl_allocator.batched_allocate(shape, dtype, batch_size, fmt)
+        if allocator_type == "gpu":
+            return self.gpu_allocator.batched_allocate(shape, dtype, batch_size, fmt)
         elif allocator_type == "cpu":
             return self.cpu_allocator.batched_allocate(shape, dtype, batch_size, fmt)
         else:
             raise ValueError(f"Unsupported allocator type: {allocator_type}")
 
     def free(self, memory_obj: MemoryObj, allocator_type: Optional[str] = "cpu"):
-        if allocator_type == "nixl":
+        if allocator_type == "gpu":
             self.nixl_allocator.free(memory_obj)
         elif allocator_type == "cpu":
             self.cpu_allocator.free(memory_obj)
@@ -1868,7 +1868,7 @@ class NixlCPUMemoryAllocator(MemoryAllocatorInterface):
         allocator_type: Optional[str] = None,
         update_stats: bool = True,
     ):
-        if allocator_type == "nixl":
+        if allocator_type == "gpu":
             self.nixl_allocator.batched_free(memory_objs, update_stats=update_stats)
         elif allocator_type == "cpu":
             self.cpu_allocator.batched_free(memory_objs, update_stats=update_stats)
@@ -1876,4 +1876,4 @@ class NixlCPUMemoryAllocator(MemoryAllocatorInterface):
             raise ValueError(f"Unsupported allocator type: {allocator_type}")
 
     def __str__(self):
-        return "NixlCPUMemoryAllocator"
+        return "PDCPUMemoryAllocator"

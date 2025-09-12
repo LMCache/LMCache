@@ -15,8 +15,8 @@ from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.lookup_server import LookupServerInterface
 from lmcache.v1.memory_management import (
     MemoryAllocatorInterface,
-    NixlCPUMemoryAllocator,
     PagedTensorMemoryAllocator,
+    PDCPUMemoryAllocator,
 )
 from lmcache.v1.storage_backend.abstract_backend import StorageBackendInterface
 from lmcache.v1.storage_backend.gds_backend import GdsBackend
@@ -115,31 +115,16 @@ def CreateStorageBackends(
         "enable_nixl_storage"
     )
 
-    if config.enable_nixl:
-        if config.enable_xpyd:
-            # First Party
-            from lmcache.v1.storage_backend.nixl_backend_v3 import (
-                NixlBackend as NixlBackendV3,
-            )
+    if config.enable_pd:
+        # First Party
+        from lmcache.v1.storage_backend.pd_backend import PDBackend
 
-            assert isinstance(memory_allocator, NixlCPUMemoryAllocator)
-            storage_backends["NixlBackend"] = NixlBackendV3.CreateNixlBackend(
-                config, metadata, memory_allocator
-            )
-        else:
-            # First Party
-            from lmcache.v1.storage_backend.nixl_backend import NixlBackend
-
-            storage_backends["NixlBackend"] = NixlBackend.CreateNixlBackend(
-                config, metadata
-            )
-
-        assert config.nixl_buffer_device is not None
+        storage_backends["PDBackend"] = PDBackend(config, metadata, memory_allocator)
 
     # TODO(Jiayi): The hierarchy is fixed for now
     # NOTE(Jiayi): The local_cpu backend is always created because
     # other backends might need it as a buffer.
-    if not config.enable_nixl or config.local_cpu:
+    if not config.enable_pd or config.local_cpu:
         local_cpu_backend = LocalCPUBackend(
             config,
             memory_allocator,
@@ -191,7 +176,7 @@ def CreateStorageBackends(
         backend_name = str(remote_backend)
         storage_backends[backend_name] = remote_backend
 
-    if not config.enable_nixl or config.local_cpu:
+    if not config.enable_pd or config.local_cpu:
         # Create dynamic backends from configuration
         create_dynamic_backends(
             config,
