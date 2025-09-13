@@ -9,7 +9,7 @@ from flashinfer.page import block_sparse_indices_to_vector_sparse_offsets
 from flashinfer.utils import (
     TensorLayout,
     _check_pos_encoding_mode,
-    _check_shape_dtype_device,
+    check_shape_dtype_device,
     device_support_pdl,
 )
 from vllm.attention import Attention

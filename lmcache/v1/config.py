@@ -128,7 +128,7 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
     },
     "blend_recompute_ratios": {
         "type": Optional[list[float]],
-        "default": [0.15],
+        "default": lambda: [0.15],
         "env_converter": _to_float_list,
     },
     "blend_thresholds": {
@@ -138,7 +138,7 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
     },
     "blend_check_layers": {
         "type": list[int],
-        "default": [1],
+        "default": lambda: [1],
         "env_converter": _to_int_list,
     },
     "blend_min_tokens": {"type": int, "default": 256, "env_converter": int},
@@ -455,7 +455,7 @@ def _to_original_config(self):
         pipelined_backend=False,
         save_decode_cache=self.save_decode_cache,
         enable_blending=self.enable_blending,
-        blend_recompute_ratio=self.blend_recompute_ratios[0],
+        blend_recompute_ratio=0.15,
         blend_min_tokens=self.blend_min_tokens,
         blend_separator="[BLEND_SEP]",
         blend_add_special_in_precomp=False,
