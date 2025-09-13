@@ -40,11 +40,13 @@ class LMCBlender:
         # TODO: remove this hardcode
         self.num_layers = len(vllm_model.model.layers)
 
-        # TODO (Jiayi): make this less hard-coded
+        # TODO(Jiayi): support threshold-based blending
+        # TODO(Jiayi): support different ratios for different layers
+        # TODO(Jiayi): support "skipping blending if hit too short"
         self.common_metadata = LMCBlendCommonMetadata(
-            check_layers=[1],
-            recomp_ratios=[0.15],
-            thresholds=None,
+            check_layers=config.blend_check_layers,
+            recomp_ratios=config.blend_recompute_ratios,
+            thresholds=config.blend_thresholds,
         )
 
         # This will be set during the blending process
