@@ -375,10 +375,10 @@ class StorageManager:
         (i.e., prefetching from all backends for the entire request) are done.
         """
         assert self.async_lookup_server is not None
-        self.async_lookup_server.send_response_to_scheduler(lookup_id, retrieved_length)
         self.event_manager.update_event_status(
             EventType.LOADING, lookup_id, status=EventStatus.DONE
         )
+        self.async_lookup_server.send_response_to_scheduler(lookup_id, retrieved_length)
 
     async def async_lookup_and_prefetch(
         self,
@@ -438,19 +438,24 @@ class StorageManager:
                 break
             keys = keys[num_hit_chunks:]
 
+        # If no chunks were hit across all backends, respond immediately and return.
+        if num_total_hit_chunks == 0:
+            if self.async_lookup_server is not None:
+                self.async_lookup_server.send_response_to_scheduler(lookup_id, 0)
+            return
+
         all_done = asyncio.gather(*loading_tasks)
+        # Register the event before adding the callback to avoid race conditions
+        self.event_manager.add_event(
+            EventType.LOADING,
+            lookup_id,
+            all_done,
+        )
         all_done.add_done_callback(
             lambda future: self.prefetch_all_done_callback(
                 future, lookup_id, cum_chunk_lengths[num_total_hit_chunks]
             )
         )
-
-        if num_total_hit_chunks > 0:
-            self.event_manager.add_event(
-                EventType.LOADING,
-                lookup_id,
-                all_done,
-            )
 
     def contains(
         self,
