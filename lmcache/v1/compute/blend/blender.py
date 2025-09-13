@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import Optional
+from typing import Optional, Union
 
 # Third Party
 import torch
@@ -150,13 +150,17 @@ class LMCBlender:
 
     def blend(
         self,
-        tokens: torch.Tensor,
+        tokens: Union[torch.Tensor, list[int]],
         mask: Optional[torch.Tensor] = None,
         **kwargs,
     ):
         """
         Perform blending for the given tokens.
         """
+
+        if isinstance(tokens, list):
+            tokens = torch.tensor(tokens).cuda()
+
         layerwise_blender = self.blend_layer(tokens, mask, **kwargs)
 
         for i in range(self.num_layers + 2):

@@ -103,14 +103,14 @@ class HackBSAWrapper(VariableBlockSparseAttentionWrapper):
                     (q.size(0), q.size(1)), dtype=torch.float32, device=q.device
                 )
             else:
-                _check_shape_dtype_device(
+                check_shape_dtype_device(
                     lse, (q.size(0), q.size(1)), torch.float32, q.device, "lse"
                 )
 
         if out is None:
             out = torch.empty_like(q, dtype=self._o_dtype)
         else:
-            _check_shape_dtype_device(out, q.shape, self._o_dtype, q.device, "out")
+            check_shape_dtype_device(out, q.shape, self._o_dtype, q.device, "out")
 
         if self._backend == "fa3":
             if (

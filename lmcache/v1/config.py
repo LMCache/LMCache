@@ -128,7 +128,7 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
     },
     "blend_recompute_ratios": {
         "type": Optional[list[float]],
-        "default": lambda: [0.15],
+        "default": None,
         "env_converter": _to_float_list,
     },
     "blend_thresholds": {
@@ -138,7 +138,7 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
     },
     "blend_check_layers": {
         "type": list[int],
-        "default": lambda: [1],
+        "default": None,
         "env_converter": _to_int_list,
     },
     "blend_min_tokens": {"type": int, "default": 256, "env_converter": int},

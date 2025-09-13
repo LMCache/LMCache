@@ -79,8 +79,9 @@ class LMCacheLookupClient(LookupClientInterface):
             TokenDatabase,
         )
 
+        self.enable_blending = config.enable_blending
         self.token_database: TokenDatabase
-        if config.enable_blending:
+        if self.enable_blending:
             self.token_database = SegmentTokenDatabase(config, metadata)
         else:
             self.token_database = ChunkedTokenDatabase(config, metadata)
@@ -92,7 +93,7 @@ class LMCacheLookupClient(LookupClientInterface):
         lookup_id: str,
         request_configs: Optional[dict] = None,
     ) -> Optional[int]:
-        if not conifg.enable_blending:
+        if not self.enable_blending:
             hashes = []
             offsets = []
             for start, end, key in self.token_database.process_tokens(
@@ -111,7 +112,6 @@ class LMCacheLookupClient(LookupClientInterface):
             ranks = self.tensor_parallel_size
             if self.create_lookup_server_only_on_worker_0_for_mla:
                 ranks = 1
-            results = []
             msg_buf = [
                 hash_buf,
                 offset_buf,
@@ -128,7 +128,6 @@ class LMCacheLookupClient(LookupClientInterface):
             ranks = self.tensor_parallel_size
             if self.create_lookup_server_only_on_worker_0_for_mla:
                 ranks = 1
-            results = []
             msg_buf = [
                 tokens_buf,
                 lookup_id_buf,
@@ -138,6 +137,7 @@ class LMCacheLookupClient(LookupClientInterface):
         for i in range(ranks):
             self.sockets[i].send_multipart(msg_buf, copy=False)
 
+        results = []
         # TODO(Jiayi): we can use zmq poll to optimize a bit
         for i in range(ranks):
             resp = self.sockets[i].recv()
@@ -225,7 +225,6 @@ class LMCacheLookupServer:
                     )
                 response = result.to_bytes(4, "big")
                 self.socket.send(response)
-
 
         logger.info(f"lmcache lookup server start on {socket_path}")
         self.thread = threading.Thread(target=process_request, daemon=True)
