@@ -67,8 +67,8 @@ class PDConfig:
     role: str
 
     peer_host: str
-    peer_init_port: list[int]
-    peer_alloc_port: list[int]
+    peer_init_port: int
+    peer_alloc_port: int
 
     proxy_host: str
     proxy_port: int
@@ -78,7 +78,9 @@ class PDConfig:
 
     @staticmethod
     def from_cache_engine_config(
-        config: LMCacheEngineConfig, metadata: LMCacheEngineMetadata
+        config: LMCacheEngineConfig,
+        metadata: LMCacheEngineMetadata,
+        tp_rank: int,
     ) -> "PDConfig":
         """Convert the LMCacheEngineConfig to PDConfig"""
 
@@ -104,11 +106,21 @@ class PDConfig:
             config.pd_buffer_device, metadata.worker_id
         )
 
+        if config.pd_peer_alloc_port is not None:
+            pd_peer_alloc_port = config.pd_peer_alloc_port[tp_rank]
+        else:
+            pd_peer_alloc_port = None
+
+        if config.pd_peer_init_port is not None:
+            pd_peer_init_port = config.pd_peer_init_port[tp_rank]
+        else:
+            pd_peer_init_port = None
+
         return PDConfig(
             role=role,
             peer_host=config.pd_peer_host,
-            peer_init_port=config.pd_peer_init_port,
-            peer_alloc_port=config.pd_peer_alloc_port,
+            peer_init_port=pd_peer_init_port,
+            peer_alloc_port=pd_peer_alloc_port,
             proxy_host=config.pd_proxy_host,
             proxy_port=config.pd_proxy_port,
             buffer_size=config.pd_buffer_size,
@@ -130,7 +142,19 @@ class PDBackend(AllocatorBackendInterface):
         metadata: LMCacheEngineMetadata,
         memory_allocator: PDCPUMemoryAllocator,
     ):
-        self.pd_config = PDConfig.from_cache_engine_config(config, metadata)
+        self.running = True
+
+        # TODO: verify if this is needed
+        # Third Party
+        from vllm.distributed.parallel_state import (
+            get_tensor_model_parallel_rank,
+        )
+
+        self.tp_rank = get_tensor_model_parallel_rank()
+
+        self.pd_config = PDConfig.from_cache_engine_config(
+            config, metadata, self.tp_rank
+        )
 
         # NOTE(Jiayi): sender/prefiller will not use this pool;
         # only receiver/decoder will.
@@ -142,16 +166,14 @@ class PDBackend(AllocatorBackendInterface):
         # TODO(Jiayi): add async zmq context if we want better asynchrony.
         self.zmq_context = zmq.Context()
         self.running_threads: list[threading.Thread] = []
+        self.side_channels: list[zmq.Socket] = []
         # TODO: Have an init_channel function.
         if config.transfer_channel == "nixl":
-            # TODO: verify if this is needed
-            # Third Party
-            from vllm.distributed.parallel_state import (
-                get_tensor_model_parallel_rank,
-            )
-
-            self.tp_rank = get_tensor_model_parallel_rank()
-
+            peer_init_url = None
+            if self.pd_config.peer_init_port is not None:
+                peer_init_url = (
+                    f"{self.pd_config.peer_host}:{self.pd_config.peer_init_port}"
+                )
             assert isinstance(memory_allocator, PDCPUMemoryAllocator)
             self.transfer_channel = NixlChannel(
                 role=self.pd_config.role,
@@ -159,7 +181,7 @@ class PDBackend(AllocatorBackendInterface):
                 buffer_size=self.memory_allocator.gpu_allocator.buffer_size,
                 align_bytes=self.memory_allocator.gpu_allocator.align_bytes,
                 tp_rank=self.tp_rank,
-                peer_init_url=f"{self.pd_config.peer_host}:{self.pd_config.peer_init_port}",
+                peer_init_url=peer_init_url,
                 backends=config.nixl_backends,
             )
         else:
@@ -178,6 +200,9 @@ class PDBackend(AllocatorBackendInterface):
             raise ValueError("Invalid PD role.")
 
         self.full_chunk_size = config.chunk_size
+
+    def __str__(self):
+        return "PDBackend"
 
     # NOTE(Jiayi): If two requests have overlapped keys, will
     # the later one cause any problems here?
@@ -254,7 +279,9 @@ class PDBackend(AllocatorBackendInterface):
         receiver_mem_alloc_url = f"{receiver_host}:{receiver_alloc_port}"
 
         # Establish the connection with the receiver/decoder
-        self.transfer_channel.lazy_init_peer_connection(peer_init_url=receiver_init_url)
+        self.transfer_channel.lazy_init_peer_connection(
+            peer_id=receiver_id, peer_init_url=receiver_init_url
+        )
 
         # Set up the memory allocation socket
         mem_alloc_socket = get_zmq_socket(
@@ -318,16 +345,10 @@ class PDBackend(AllocatorBackendInterface):
         for mem_obj in memory_objs:
             mem_obj.ref_count_up()
 
-        receiver_init_port = transfer_spec.receiver_info.receiver_init_port[
-            self.tp_rank
-        ]
-        receiver_alloc_port = transfer_spec.receiver_info.receiver_alloc_port[
-            self.tp_rank
-        ]
-        receiver_id = transfer_spec.receiver_info.receiver_host + str(
-            receiver_init_port
-        )
-        receiver_host = transfer_spec.receiver_info.receiver_host
+        receiver_init_port = transfer_spec.receiver_init_port[self.tp_rank]
+        receiver_alloc_port = transfer_spec.receiver_alloc_port[self.tp_rank]
+        receiver_id = transfer_spec.receiver_host + str(receiver_init_port)
+        receiver_host = transfer_spec.receiver_host
 
         self._ensure_peer_connection(
             receiver_id=receiver_id,
@@ -394,9 +415,9 @@ class PDBackend(AllocatorBackendInterface):
             f"{self.pd_config.peer_host}:{self.pd_config.peer_alloc_port}"
         )
         self.alloc_side_channel = get_zmq_socket(
-            self.zmq_context, receiver_alloc_url, zmq.REP, "bind"
+            self.zmq_context, receiver_alloc_url, "tcp", zmq.REP, "bind"
         )
-        self.side_channels.append(self._alloc_side_channel)
+        self.side_channels.append(self.alloc_side_channel)
 
         # Start the memory allocation thread
         self.mem_alloc_thread = threading.Thread(

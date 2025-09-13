@@ -125,3 +125,10 @@ class BaseTransferChannel(metaclass=abc.ABCMeta):
         :param transfer_spec: Additional specifications for the transfer.
         """
         raise NotImplementedError
+
+    @abc.abstractmethod
+    def close(self) -> None:
+        """
+        Close the transfer channel and release any resources.
+        """
+        raise NotImplementedError

@@ -109,7 +109,7 @@ class StorageManager:
             )
         )
 
-        self.enable_nixl = config.enable_nixl
+        self.enable_pd = config.enable_pd
 
         self.allocator_backend = self._get_allocator_backend(config)
         if config.local_cpu:
@@ -127,7 +127,7 @@ class StorageManager:
 
         self.async_lookup_server: Optional["LMCacheAsyncLookupServer"] = None
 
-        self.nixl_offload_stream = torch.cuda.Stream()
+        self.pd_offload_stream = torch.cuda.Stream()
 
         self._cpu_disk_listener = self._CPUDiskListener(self)
         if "LocalCPUBackend" in self.storage_backends:
@@ -146,8 +146,8 @@ class StorageManager:
     def _get_allocator_backend(
         self, config: LMCacheEngineConfig
     ) -> AllocatorBackendInterface:
-        if self.enable_nixl:
-            allocator_backend = self.storage_backends["NixlBackend"]
+        if self.enable_pd:
+            allocator_backend = self.storage_backends["PDBackend"]
         else:
             allocator_backend = self.storage_backends["LocalCPUBackend"]
         assert isinstance(allocator_backend, AllocatorBackendInterface)
@@ -228,7 +228,7 @@ class StorageManager:
         storage manager) or has been stored (handled by storage backend).
         """
 
-        if self.enable_nixl or (location and location == "NixlBackend"):
+        if self.enable_pd:
             self.allocator_backend.batched_submit_put_task(
                 keys, memory_objs, transfer_spec=transfer_spec
             )
@@ -251,13 +251,13 @@ class StorageManager:
                     )
                     if cpu_memory_obj is None:
                         break
-                    with torch.cuda.stream(self.nixl_offload_stream):
+                    with torch.cuda.stream(self.pd_offload_stream):
                         cpu_memory_obj.tensor.copy_(
                             memory_obj.tensor, non_blocking=True
                         )
                     cpu_memory_objs.append(cpu_memory_obj)
                     cpu_keys.append(key)
-                self.nixl_offload_stream.synchronize()
+                self.pd_offload_stream.synchronize()
 
                 for memory_obj in memory_objs:
                     memory_obj.ref_count_down()
@@ -265,7 +265,7 @@ class StorageManager:
                 keys = cpu_keys
 
         for backend_name, backend in self.storage_backends.items():
-            if backend_name == "NixlBackend":
+            if backend_name == "PDBackend":
                 continue
             if location and backend_name != location:
                 continue
@@ -296,7 +296,7 @@ class StorageManager:
             # are allocated by the allocator backend.
             memory_obj = backend.get_blocking(key)
             if memory_obj:
-                if backend_name not in ["LocalCPUBackend", "NixlBackend"]:
+                if backend_name not in ["LocalCPUBackend", "PDBackend"]:
                     local_cpu_backend = self.storage_backends["LocalCPUBackend"]
                     assert isinstance(local_cpu_backend, LocalCPUBackend)
                     local_cpu_backend.submit_put_task(key, memory_obj)
@@ -477,8 +477,8 @@ class StorageManager:
             if search_range and backend_name not in search_range:
                 continue
 
-            # NOTE(Jiayi): We do not pin for NixlBackend
-            if backend_name == "NixlBackend":
+            # NOTE(Jiayi): We do not pin for PDBackend
+            if backend_name == "PDBackend":
                 pin = False
 
             if backend.contains(key, pin):

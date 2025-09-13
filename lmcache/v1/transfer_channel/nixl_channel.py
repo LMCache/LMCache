@@ -123,7 +123,7 @@ class NixlChannel(BaseTransferChannel):
             self.zmq_context,
             peer_init_url,
             "tcp",
-            zmq.REPLY,
+            zmq.REP,
             "bind",
         )
         self.side_channels.append(self.init_side_channel)
@@ -143,33 +143,33 @@ class NixlChannel(BaseTransferChannel):
         # (handle always give "PROC" status) during the first request.
         while self.running:
             try:
-                req_bytes = self._init_side_channel.recv()
+                req_bytes = self.init_side_channel.recv()
 
                 logger.debug("Received initialization request")
 
                 req = msgspec.msgpack.decode(req_bytes, type=NixlMsg)
 
                 if isinstance(req, NixlInitRequest):
-                    self._nixl_agent.add_remote_agent(req.sender_meta_bytes)
+                    self.nixl_agent.add_remote_agent(req.local_meta_bytes)
 
                     resp = NixlInitResponse(
-                        receiver_meta_bytes=local_meta,
+                        remote_meta_bytes=local_meta,
                     )
 
                     logger.debug("Replying initialization response")
 
                 elif isinstance(req, NixlMemRegRequest):
-                    local_xfer_descs = self._nixl_agent.get_serialized_descs(
-                        self._receiver_nixl_wrapper.xfer_descs
+                    local_xfer_descs = self.nixl_agent.get_serialized_descs(
+                        self.nixl_wrapper.xfer_descs
                     )
 
                     resp = NixlMemRegResponse(
-                        receiver_xfer_dlist_bytes=local_xfer_descs,
+                        remote_xfer_dlist_bytes=local_xfer_descs,
                     )
 
                     logger.debug("Replying mem register response")
 
-                self._init_side_channel.send(msgspec.msgpack.encode(resp))
+                self.init_side_channel.send(msgspec.msgpack.encode(resp))
 
             except Exception as e:
                 logger.error("Failed to process initialization loop: %s", str(e))
@@ -368,6 +368,16 @@ class NixlChannel(BaseTransferChannel):
         """
         raise NotImplementedError
 
+    def close(self):
+        self.running = False
+        for thread in self.running_threads:
+            thread.join()
+        self.zmq_context.term()
+        self.agent.deregister_memory(self.reg_descs)
+        self.agent.release_dlist_handle(self.xfer_handler)
+        for remote_xfer_handler in self.remote_xfer_handlers_dict.values():
+            self.agent.release_dlist_handle(remote_xfer_handler)
+
 
 @dataclass
 class NixlAgentWrapper:
@@ -438,16 +448,6 @@ class NixlAgentWrapper:
         self.reg_descs = reg_descs
         self.xfer_descs = xfer_descs
         self.xfer_handler = xfer_handler
-
-    def close(self):
-        self.running = False
-        for thread in self.running_threads:
-            thread.join()
-        self.zmq_context.term()
-        self.agent.deregister_memory(self.reg_descs)
-        self.agent.release_dlist_handle(self.xfer_handler)
-        for remote_xfer_handler in self.remote_xfer_handlers_dict.values():
-            self.agent.release_dlist_handle(remote_xfer_handler)
 
 
 class NixlMsgBase(msgspec.Struct, tag=True):
