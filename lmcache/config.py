@@ -116,16 +116,15 @@ class LMCacheEngineConfig:
         local_device: Optional[str] = None
         remote_url: Optional[str] = None
 
-        match backend:
-            case "cpu" | "cuda":
-                local_device = backend
-                remote_url = None
-            case path if re.match(r"file://(.*)/", path):  # local disk directory
-                local_device = path[7:]
-                remote_url = None
-            case url if re.match(r"(.*)://(.*):(\d+)", url):
-                local_device = None
-                remote_url = url
+        if backend in ["cpu", "cuda"]:
+            local_device = backend
+            remote_url = None
+        elif re.match(r"file://(.*)/", backend):  # local disk directory
+            local_device = backend[7:]
+            remote_url = None
+        elif re.match(r"(.*)://(.*):(\d+)", backend):
+            local_device = None
+            remote_url = backend
         return LMCacheEngineConfig(
             chunk_size,
             local_device,
@@ -162,21 +161,19 @@ class LMCacheEngineConfig:
         blend_separator = config.get("blend_separator", blend_default_separator)
         blend_add_special_in_precomp = config.get("blend_add_special_in_precomp", False)
 
-        match local_device:
-            case "cpu" | "cuda" | None:
-                pass
-            case path if re.match(r"file://(.*)/", path):  # local disk directory
-                local_device = path[7:]
-            case _:
-                raise ValueError(f"Invalid local storage device: {local_device}")
+        if local_device in ["cpu", "cuda", None]:
+            pass
+        elif local_device is not None and re.match(r"file://(.*)/", local_device):  # local disk directory
+            local_device = local_device[7:]
+        else:
+            raise ValueError(f"Invalid local storage device: {local_device}")
 
-        match remote_url:
-            case None:
-                pass
-            case url if re.match(r"(.*)://(.*):(\d+)", url):
-                pass
-            case _:
-                raise ValueError(f"Invalid remote storage url: {remote_url}")
+        if remote_url is None:
+            pass
+        elif re.match(r"(.*)://(.*):(\d+)", remote_url):
+            pass
+        else:
+            raise ValueError(f"Invalid remote storage url: {remote_url}")
 
         return LMCacheEngineConfig(
             chunk_size,
