@@ -35,9 +35,50 @@ async def lifespan(app: FastAPI):
     """
     # Startup: Initialize clients
 
-    for i in range(global_args.num_prefillers):
-        port = int(global_args.prefiller_port) + i
-        prefiller_base_url = f"http://{global_args.prefiller_host}:{port}"
+    # Build prefill clients with CSV-based broadcast pairing
+    pref_hosts = global_args.prefiller_host
+    pref_ports = global_args.prefiller_port
+
+    def pair_hosts_and_ports(hosts, ports, count=None):
+        """
+        Flexible host-port pairing with expansion strategies.
+
+        Multiple pairing strategies:
+        1. Single host + single port + count: Generate incremental ports on same host
+        2. Single host + multiple ports: Pair the host with each port
+        3. Multiple hosts + single port: Pair each host with the same port
+        4. Multiple hosts + multiple ports: Strict one-to-one pairing
+           (must have same length)
+        """
+        # Ensure lists
+        if not isinstance(hosts, list):
+            hosts = [hosts]
+        if not isinstance(ports, list):
+            ports = [ports]
+        # Single host/port with count -> incremental ports
+        if len(hosts) == 1 and len(ports) == 1:
+            if count is None or count <= 1:
+                return [(hosts[0], ports[0])]
+            else:
+                return [(hosts[0], ports[0] + i) for i in range(count)]
+        # Expand single host to multiple ports
+        if len(hosts) == 1:
+            return [(hosts[0], p) for p in ports]
+        # Expand single port to multiple hosts
+        if len(ports) == 1:
+            return [(h, ports[0]) for h in hosts]
+        # Strict one-to-one pairing when both lists are provided
+        if len(hosts) != len(ports):
+            raise ValueError(
+                "Length mismatch between hosts and ports lists for pairing"
+            )
+        return list(zip(hosts, ports))
+
+    prefill_pairs = pair_hosts_and_ports(
+        pref_hosts, pref_ports, global_args.num_prefillers
+    )
+    for host, port in prefill_pairs:
+        prefiller_base_url = f"http://{host}:{int(port)}"
         prefill_client = httpx.AsyncClient(timeout=None, base_url=prefiller_base_url)
         app.state.prefill_clients.append(
             ClientInfo(
@@ -45,17 +86,34 @@ async def lifespan(app: FastAPI):
             )
         )
 
-    for i in range(global_args.num_decoders):
-        port = int(global_args.decoder_port) + i
-        decoder_base_url = f"http://{global_args.decoder_host}:{port}"
+    # Build decoder clients with CSV-based broadcast pairing
+    dec_hosts = global_args.decoder_host
+    dec_ports = global_args.decoder_port
+
+    decoder_pairs = pair_hosts_and_ports(dec_hosts, dec_ports, global_args.num_decoders)
+
+    # Whether the ports increase per instances
+    # (only when using single host/port with num_decoders > 1)
+    incremental_mode = (
+        len(dec_hosts) == 1 and len(dec_ports) == 1 and global_args.num_decoders > 1
+    )
+
+    for i, (host, port) in enumerate(decoder_pairs):
+        decoder_base_url = f"http://{host}:{int(port)}"
         decode_client = httpx.AsyncClient(timeout=None, base_url=decoder_base_url)
-        init_ports = [p + i for p in global_args.decoder_init_port]
-        alloc_ports = [p + i for p in global_args.decoder_alloc_port]
+        if incremental_mode:
+            init_ports = [p + i for p in global_args.decoder_init_port]
+            alloc_ports = [p + i for p in global_args.decoder_alloc_port]
+        else:
+            # Use the provided ports as-is
+            # (suitable when different hosts can reuse same port numbers)
+            init_ports = list(global_args.decoder_init_port)
+            alloc_ports = list(global_args.decoder_alloc_port)
 
         app.state.decode_clients.append(
             ClientInfo(
                 decode_client,
-                global_args.decoder_host,
+                host,
                 init_ports,
                 alloc_ports,
             )
@@ -118,16 +176,20 @@ def csv_ints(s):
     return [int(x) for x in s.split(",")]
 
 
+def csv_strs(s):
+    return [x.strip() for x in s.split(",")]
+
+
 def parse_args():
     parser = argparse.ArgumentParser()
 
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--host", type=str, default="localhost")
-    parser.add_argument("--prefiller-host", type=str, default="localhost")
-    parser.add_argument("--prefiller-port", type=int, default=8100)
+    parser.add_argument("--prefiller-host", type=csv_strs, default=["localhost"])
+    parser.add_argument("--prefiller-port", type=csv_ints, default=[8100])
     parser.add_argument("--num-prefillers", type=int, default=1)
-    parser.add_argument("--decoder-host", type=str, default="localhost")
-    parser.add_argument("--decoder-port", type=int, default=8200)
+    parser.add_argument("--decoder-host", type=csv_strs, default=["localhost"])
+    parser.add_argument("--decoder-port", type=csv_ints, default=[8200])
     parser.add_argument("--decoder-init-port", type=csv_ints, default=[8300])
     parser.add_argument("--decoder-alloc-port", type=csv_ints, default=[8400])
 

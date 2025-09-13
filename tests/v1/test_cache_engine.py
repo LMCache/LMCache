@@ -1164,3 +1164,104 @@ def test_force_store_wait(autorelease_v1):
         # No KV cache should be skipped
         for t in list_tokens:
             assert engine.lookup(t) == len(t)
+
+
+def test_builder_destroy(autorelease_v1):
+    """Test the destroy method of LMCacheEngineBuilder"""
+    instance_id = "test_destroy"
+    cfg = LMCacheEngineConfig.from_legacy(chunk_size=256)
+    connector = create_gpu_connector(1024, 32)
+
+    # Verify instance doesn't exist initially
+    should_be_none = LMCacheEngineBuilder.get(instance_id)
+    assert should_be_none is None
+
+    # Create an engine instance
+    engine = LMCacheEngineBuilder.get_or_create(
+        instance_id,
+        cfg,
+        dumb_metadata(),
+        connector,
+        mock_up_broadcast_fn,
+        mock_up_broadcast_object_fn,
+    )
+
+    # Verify instance exists
+    retrieved_engine = LMCacheEngineBuilder.get(instance_id)
+    assert retrieved_engine is not None
+    assert retrieved_engine is engine
+
+    # Verify internal state is populated
+    assert instance_id in LMCacheEngineBuilder._instances
+    assert instance_id in LMCacheEngineBuilder._cfgs
+    assert instance_id in LMCacheEngineBuilder._metadatas
+    assert instance_id in LMCacheEngineBuilder._stat_loggers
+
+    # Destroy the instance
+    LMCacheEngineBuilder.destroy(instance_id)
+
+    # Verify instance is completely removed
+    should_be_none_after_destroy = LMCacheEngineBuilder.get(instance_id)
+    assert should_be_none_after_destroy is None
+
+    # Verify all internal state is cleaned up
+    assert instance_id not in LMCacheEngineBuilder._instances
+    assert instance_id not in LMCacheEngineBuilder._cfgs
+    assert instance_id not in LMCacheEngineBuilder._metadatas
+    assert instance_id not in LMCacheEngineBuilder._stat_loggers
+
+    # Verify destroying non-existent instance doesn't raise error
+    LMCacheEngineBuilder.destroy("non_existent_id")  # Should not raise
+
+
+def test_builder_destroy_multiple_instances(autorelease_v1):
+    """Test destroying one instance doesn't affect others"""
+    instance_id1 = "test_destroy_1"
+    instance_id2 = "test_destroy_2"
+    cfg = LMCacheEngineConfig.from_legacy(chunk_size=256)
+    connector = create_gpu_connector(1024, 32)
+
+    # Create two engine instances
+    engine1 = LMCacheEngineBuilder.get_or_create(
+        instance_id1,
+        cfg,
+        dumb_metadata(),
+        connector,
+        mock_up_broadcast_fn,
+        mock_up_broadcast_object_fn,
+    )
+
+    engine2 = LMCacheEngineBuilder.get_or_create(
+        instance_id2,
+        cfg,
+        dumb_metadata(),
+        connector,
+        mock_up_broadcast_fn,
+        mock_up_broadcast_object_fn,
+    )
+
+    # Verify both instances exist
+    assert LMCacheEngineBuilder.get(instance_id1) is engine1
+    assert LMCacheEngineBuilder.get(instance_id2) is engine2
+
+    # Destroy only the first instance
+    LMCacheEngineBuilder.destroy(instance_id1)
+
+    # Verify first instance is destroyed but second remains
+    assert LMCacheEngineBuilder.get(instance_id1) is None
+    assert LMCacheEngineBuilder.get(instance_id2) is engine2
+
+    # Verify internal state for first instance is cleaned up
+    assert instance_id1 not in LMCacheEngineBuilder._instances
+    assert instance_id1 not in LMCacheEngineBuilder._cfgs
+    assert instance_id1 not in LMCacheEngineBuilder._metadatas
+    assert instance_id1 not in LMCacheEngineBuilder._stat_loggers
+
+    # Verify internal state for second instance remains
+    assert instance_id2 in LMCacheEngineBuilder._instances
+    assert instance_id2 in LMCacheEngineBuilder._cfgs
+    assert instance_id2 in LMCacheEngineBuilder._metadatas
+    assert instance_id2 in LMCacheEngineBuilder._stat_loggers
+
+    # Clean up second instance
+    LMCacheEngineBuilder.destroy(instance_id2)

@@ -82,7 +82,6 @@ Create your ``mooncake-config.yaml``:
 .. code-block:: yaml
 
     chunk_size: 256
-    local_device: "cpu"
     remote_url: "mooncakestore://127.0.0.1:50051/"
     remote_serde: "naive"
     local_cpu: False
@@ -102,7 +101,6 @@ Create your ``mooncake-config.yaml``:
 .. code-block:: bash
 
     LMCACHE_CONFIG_FILE="mooncake-config.yaml" \
-    LMCACHE_USE_EXPERIMENTAL=True \
     vllm serve \
         meta-llama/Llama-3.1-70B-Instruct \
         --max-model-len 65536 \
@@ -159,9 +157,6 @@ Configuration
    * - ``chunk_size``
      - 256
      - Number of tokens per KV chunk
-   * - ``local_device``
-     - "cpu"
-     - Local storage device type
    * - ``remote_url``
      - Required
      - Mooncake store connection URL (format: ``mooncakestore://host:port/``)
