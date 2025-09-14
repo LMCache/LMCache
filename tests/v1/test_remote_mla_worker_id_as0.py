@@ -57,8 +57,6 @@ def test_remote_mla_worker_id_as0(mock_stream):
         use_layerwise=False,
         save_decode_cache=False,
         enable_blending=False,
-        blend_recompute_ratio=0.15,
-        blend_min_tokens=256,
         extra_config={"remote_enable_mla_worker_id_as0": True},
     )
 

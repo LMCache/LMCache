@@ -39,6 +39,19 @@ def _to_int_list(
     return [int(p) for p in parts]
 
 
+def _to_float_list(
+    value: Optional[Union[str, float, list[Any]]],
+) -> Optional[list[float]]:
+    if value is None:
+        return None
+    if isinstance(value, list):
+        return [float(x) for x in value]
+    if isinstance(value, float):
+        return [value]
+    parts = [p.strip() for p in str(value).split(",") if p.strip()]
+    return [float(p) for p in parts]
+
+
 def _to_str_list(
     value: Optional[Union[str, list[str]]],
 ) -> Optional[list[str]]:
@@ -113,7 +126,21 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "default": False,
         "env_converter": _to_bool,
     },
-    "blend_recompute_ratio": {"type": float, "default": 0.15, "env_converter": float},
+    "blend_recompute_ratios": {
+        "type": Optional[list[float]],
+        "default": None,
+        "env_converter": _to_float_list,
+    },
+    "blend_thresholds": {
+        "type": Optional[list[float]],
+        "default": None,
+        "env_converter": _to_float_list,
+    },
+    "blend_check_layers": {
+        "type": list[int],
+        "default": None,
+        "env_converter": _to_int_list,
+    },
     "blend_min_tokens": {"type": int, "default": 256, "env_converter": int},
     "blend_special_str": {"type": str, "default": " # # ", "env_converter": str},
     # P2P configurations
@@ -428,7 +455,7 @@ def _to_original_config(self):
         pipelined_backend=False,
         save_decode_cache=self.save_decode_cache,
         enable_blending=self.enable_blending,
-        blend_recompute_ratio=self.blend_recompute_ratio,
+        blend_recompute_ratio=0.15,
         blend_min_tokens=self.blend_min_tokens,
         blend_separator="[BLEND_SEP]",
         blend_add_special_in_precomp=False,
