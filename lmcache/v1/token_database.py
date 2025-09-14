@@ -375,6 +375,8 @@ class SegmentTokenDatabase(TokenDatabase):
         if tokens is not None:
             if not isinstance(tokens, torch.Tensor):
                 tokens = torch.tensor(tokens, dtype=torch.long, device="cuda")
+            else:
+                tokens = tokens.to(device="cuda", dtype=torch.long)
 
             if mask is not None:
                 num_falses = mask.numel() - mask.long().sum().item()
