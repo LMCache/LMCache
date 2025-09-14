@@ -311,7 +311,7 @@ class SegmentTokenDatabase(TokenDatabase):
         # to use `1:` (whether there's a special starting token
         # in the beginning)
         self.sep_tokens = self.tokenizer.encode(config.blend_special_str)[1:]
-        self.sep_tokens = torch.tensor(self.sep_tokens, device="cuda")
+        self.sep_tokens = torch.tensor(self.sep_tokens, device="cpu")
         self.sep_len = len(self.sep_tokens)
 
     def _fast_split_by_subtensor(self, tokens: torch.Tensor) -> Iterable[torch.Tensor]:
@@ -374,9 +374,9 @@ class SegmentTokenDatabase(TokenDatabase):
 
         if tokens is not None:
             if not isinstance(tokens, torch.Tensor):
-                tokens = torch.tensor(tokens, dtype=torch.long, device="cuda")
+                tokens = torch.tensor(tokens, dtype=torch.long, device="cpu")
             else:
-                tokens = tokens.to(device="cuda", dtype=torch.long)
+                tokens = tokens.to(device="cpu", dtype=torch.long)
 
             if mask is not None:
                 num_falses = mask.numel() - mask.long().sum().item()
