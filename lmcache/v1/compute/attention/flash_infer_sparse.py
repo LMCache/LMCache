@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from lmcache.v1.compute.attention.metadata import LMCAttnMetadata
 
 
+# NOTE(Jiayi): This flashinfer version is 0.3.1.
 class HackBSAWrapper(VariableBlockSparseAttentionWrapper):
     def run(
         self,
