@@ -191,7 +191,7 @@ class RequestTracker:
         request_configs = extract_request_configs(new_request.sampling_params)
 
         mm_hashes, mm_positions = [], []
-        if new_request.mm_features:
+        if getattr(new_request, "mm_features", None):
             for f in new_request.mm_features:
                 mm_hashes.append(f.identifier)
                 mm_positions.append(f.mm_position)
@@ -1055,7 +1055,7 @@ class LMCacheConnectorV1Impl:
         token_ids = request.prompt_token_ids
 
         # If the request has multimodal hashes, apply them to the token ids
-        if request.mm_features:
+        if getattr(request, "mm_features", None):
             # TODO(Jiayi): Optimize this
             token_ids = torch.tensor(request.prompt_token_ids)
             mm_hashes, mm_positions = zip(
