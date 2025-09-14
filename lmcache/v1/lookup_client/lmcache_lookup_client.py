@@ -93,6 +93,18 @@ class LMCacheLookupClient(LookupClientInterface):
         lookup_id: str,
         request_configs: Optional[dict] = None,
     ) -> Optional[int]:
+
+        lookup_id_buf = lookup_id.encode("utf-8")
+        request_configs_str = ""
+        if request_configs is not None and len(request_configs) != 0:
+            request_configs_str = json.dumps(request_configs)
+        request_configs_buf = request_configs_str.encode("utf-8")
+        ranks = self.tensor_parallel_size
+        if self.create_lookup_server_only_on_worker_0_for_mla:
+            ranks = 1
+
+        # NOTE(Jiayi): We cannot only send hashes when blending enabled
+        # because the blender need the input embedding.
         if not self.enable_blending:
             hashes = []
             offsets = []
@@ -103,15 +115,6 @@ class LMCacheLookupClient(LookupClientInterface):
                 offsets.append(end - start)
             hash_buf = self.encoder.encode(hashes)
             offset_buf = self.encoder.encode(offsets)
-
-            lookup_id_buf = lookup_id.encode("utf-8")
-            request_configs_str = ""
-            if request_configs is not None and len(request_configs) != 0:
-                request_configs_str = json.dumps(request_configs)
-            request_configs_buf = request_configs_str.encode("utf-8")
-            ranks = self.tensor_parallel_size
-            if self.create_lookup_server_only_on_worker_0_for_mla:
-                ranks = 1
             msg_buf = [
                 hash_buf,
                 offset_buf,
@@ -120,14 +123,6 @@ class LMCacheLookupClient(LookupClientInterface):
             ]
         else:
             tokens_buf = self.encoder.encode(token_ids)
-            lookup_id_buf = lookup_id.encode("utf-8")
-            request_configs_str = ""
-            if request_configs is not None and len(request_configs) != 0:
-                request_configs_str = json.dumps(request_configs)
-            request_configs_buf = request_configs_str.encode("utf-8")
-            ranks = self.tensor_parallel_size
-            if self.create_lookup_server_only_on_worker_0_for_mla:
-                ranks = 1
             msg_buf = [
                 tokens_buf,
                 lookup_id_buf,
@@ -189,16 +184,14 @@ class LMCacheLookupServer:
         def process_request():
             while self.running:
                 frames = self.socket.recv_multipart(copy=False)
+                lookup_id = frames[-2].bytes.decode("utf-8")
+                request_configs_str = frames[-1].bytes.decode("utf-8")
+                request_configs = None
+                if request_configs_str != "":
+                    request_configs = json.loads(request_configs_str)
                 if not self.enable_blending:
                     hash_frames = frames[0]
                     offset_frames = frames[1]
-
-                    lookup_id = frames[-2].bytes.decode("utf-8")
-                    request_configs_str = frames[-1].bytes.decode("utf-8")
-                    request_configs = None
-                    if request_configs_str != "":
-                        request_configs = json.loads(request_configs_str)
-
                     hashes = self.decoder.decode(hash_frames)
                     offsets = self.decoder.decode(offset_frames)
                     result = self.lmcache_engine.lookup(
@@ -210,12 +203,6 @@ class LMCacheLookupServer:
                     )
                 else:
                     token_frames = frames[0]
-                    lookup_id = frames[-2].bytes.decode("utf-8")
-                    request_configs_str = frames[-1].bytes.decode("utf-8")
-                    request_configs = None
-                    if request_configs_str != "":
-                        request_configs = json.loads(request_configs_str)
-
                     tokens = self.decoder.decode(token_frames)
                     result = self.lmcache_engine.lookup(
                         tokens=tokens,

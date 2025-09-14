@@ -393,7 +393,6 @@ class SegmentTokenDatabase(TokenDatabase):
                 if idx > 0:
                     start_idx += self.sep_len
                     end_idx += self.sep_len
-                    # end_idx = min(end_idx, len(tokens))
                 if start_idx >= num_falses:
                     if make_key:
                         yield (
