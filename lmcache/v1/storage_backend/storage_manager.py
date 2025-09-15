@@ -374,6 +374,7 @@ class StorageManager:
         Callback function when all prefetch tasks
         (i.e., prefetching from all backends for the entire request) are done.
         """
+        logger.info("prefetch_all_done_callback started")
         assert self.async_lookup_server is not None
         self.event_manager.update_event_status(
             EventType.LOADING, lookup_id, status=EventStatus.DONE
@@ -414,13 +415,15 @@ class StorageManager:
         for backend_name, backend in self.storage_backends.items():
             if search_range and backend_name not in search_range:
                 continue
+            logger.info(f"batched_async_contains started for {backend_name}")
             num_hit_chunks = await backend.batched_async_contains(lookup_id, keys, pin)
-
+            logger.info(f"batched_async_contains finished for {backend_name}")
             if num_hit_chunks == 0:
                 continue
 
             num_total_hit_chunks += num_hit_chunks
 
+            logger.info(f"batched_get_non_blocking started for {backend_name}")
             loading_task = asyncio.create_task(
                 backend.batched_get_non_blocking(lookup_id, keys[:num_hit_chunks])
             )
