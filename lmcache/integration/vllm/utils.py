@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import TYPE_CHECKING, Union
+from typing import TYPE_CHECKING, Tuple, Union
 import os
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
     from vllm.multimodal.inputs import PlaceholderRange
+    from vllm.v1.request import Request
 
 # Third Party
 import torch
@@ -157,3 +158,45 @@ def create_lmcache_metadata(
     )
 
     return metadata, config
+
+
+def extract_mm_features(
+    request: "Request", modify: bool = False
+) -> Tuple[list[str], list["PlaceholderRange"]]:
+    """
+    Normalize multimodal information from a Request into parallel lists.
+
+    This helper reads either:
+      1) `request.mm_features` (objects each exposing `.identifier` and
+      `.mm_position`), or
+      2) legacy fields `request.mm_hashes` and `request.mm_positions`.
+
+    It returns two equally sized lists: the multimodal hash identifiers and their
+    corresponding positions. If the request contains no multimodal info, it returns
+    `([], [])`.
+
+    Args:
+        request (Request): The source object.
+        modify (bool):
+            Controls copy semantics for the legacy-path return values.
+            - If True and legacy fields are used, shallow-copies are returned so
+              the caller can mutate the lists without affecting `request`.
+            - If False, the original legacy sequences are returned as-is
+              (zero-copy); treat them as read-only.
+
+    Returns:
+        Tuple[list[str], list[PlaceholderRange]]: (`mm_hashes`, `mm_positions`).
+        May be `([], [])` when no multimodal data is present.
+    """
+    if getattr(request, "mm_features", None):
+        mm_hashes, mm_positions = zip(
+            *((f.identifier, f.mm_position) for f in request.mm_features)
+        )
+        return (list(mm_hashes), list(mm_positions))
+    elif getattr(request, "mm_hashes", None):
+        if modify:
+            return (request.mm_hashes.copy(), request.mm_positions.copy())
+        else:
+            return (request.mm_hashes, request.mm_positions)
+    else:
+        return ([], [])

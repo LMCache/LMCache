@@ -30,6 +30,7 @@ from lmcache.config import LMCacheEngineMetadata
 from lmcache.integration.vllm.utils import (
     ENGINE_NAME,
     apply_mm_hashes_to_token_ids,
+    extract_mm_features,
     lmcache_get_config,
     mla_enabled,
 )
@@ -190,11 +191,7 @@ class RequestTracker:
 
         request_configs = extract_request_configs(new_request.sampling_params)
 
-        mm_hashes, mm_positions = [], []
-        if getattr(new_request, "mm_features", None):
-            for f in new_request.mm_features:
-                mm_hashes.append(f.identifier)
-                mm_positions.append(f.mm_position)
+        mm_hashes, mm_positions = extract_mm_features(new_request, modify=True)
 
         return RequestTracker(
             req_id=new_request.req_id,
@@ -1063,23 +1060,16 @@ class LMCacheConnectorV1Impl:
         token_ids = request.prompt_token_ids
 
         # If the request has multimodal hashes, apply them to the token ids
-        if getattr(request, "mm_features", None):
+        mm_hashes, mm_positions = extract_mm_features(request)
+        if mm_hashes and mm_positions:
             # TODO(Jiayi): Optimize this
             token_ids = torch.tensor(request.prompt_token_ids)
-            mm_hashes, mm_positions = zip(
-                *((f.identifier, f.mm_position) for f in request.mm_features)
-            )
-            apply_mm_hashes_to_token_ids(
-                token_ids,
-                list(mm_hashes),
-                list(mm_positions),
-            )
+            apply_mm_hashes_to_token_ids(token_ids, mm_hashes, mm_positions)
             token_ids = token_ids.tolist()
 
         request_configs = extract_request_configs(request.sampling_params)
         if self.skip_last_n_tokens > 0:
             token_ids = token_ids[: -self.skip_last_n_tokens]
-
         if self.async_loading:
             lookup_id = request.request_id
         else:
