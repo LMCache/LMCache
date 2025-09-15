@@ -195,10 +195,6 @@ class TestLocalDiskBackend:
 
         local_disk_backend.local_cpu_backend.memory_allocator.close()
 
-    @pytest.mark.skipif(
-        not torch.cuda.is_available(),
-        reason="Requires CUDA for LocalDiskBackend load_bytes_from_disk",
-    )
     def test_async_load_bytes_from_disk(self, local_disk_backend):
         """Test async_load_bytes_from_disk()"""
         key = create_test_key(3)
@@ -224,10 +220,6 @@ class TestLocalDiskBackend:
 
         local_disk_backend.local_cpu_backend.memory_allocator.close()
 
-    @pytest.mark.skipif(
-        not torch.cuda.is_available(),
-        reason="Requires CUDA for LocalDiskBackend load_bytes_from_disk",
-    )
     def test_load_bytes_from_disk(self, local_disk_backend):
         """Test load_bytes_from_disk()."""
         key = create_test_key(3)

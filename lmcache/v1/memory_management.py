@@ -314,15 +314,22 @@ def _allocate_cpu_memory(
         if torch.cuda.is_available():
             ptr = lmc_ops.alloc_pinned_numa_ptr(size, numa_id)
         else:
-            ptr = alloc_pinned_numa_ptr(size)
+            _cpu_tensor: Optional[torch.Tensor] = None
+            _cpu_tensor = alloc_pinned_numa_ptr(size)
     else:
         if torch.cuda.is_available():
                 ptr = lmc_ops.alloc_pinned_ptr(size, 0)
         else:
-            ptr = alloc_pinned_ptr(size)
-    array_type = ctypes.c_uint8 * size
-    buf = array_type.from_address(ptr)
-    buffer = torch.frombuffer(buf, dtype=torch.uint8)
+            _cpu_tensor: Optional[torch.Tensor] = None  # type: ignore[no-redef]
+            _cpu_tensor = alloc_pinned_ptr(size)
+
+    if torch.cuda.is_available():
+        array_type = ctypes.c_uint8 * size
+        buf = array_type.from_address(ptr)
+        buffer = torch.frombuffer(buf, dtype=torch.uint8)
+    else:
+        buffer = _cpu_tensor
+
     return buffer
 
 
@@ -1413,11 +1420,13 @@ class PinMemoryAllocator(MemoryAllocatorInterface):
 
         if torch.cuda.is_available():
             ptr = lmc_ops.alloc_pinned_ptr(size, 0)
+            array_type = ctypes.c_uint8 * size
+            buf = array_type.from_address(ptr)
+            self.buffer = torch.frombuffer(buf, dtype=torch.uint8)
         else:
-            ptr = alloc_pinned_ptr(size)
-        array_type = ctypes.c_uint8 * size
-        buf = array_type.from_address(ptr)
-        self.buffer = torch.frombuffer(buf, dtype=torch.uint8)
+            self._cpu_tensor: Optional[torch.Tensor] = None
+            self._cpu_tensor = alloc_pinned_ptr(size)
+            self.buffer = self._cpu_tensor
 
         self._unregistered = False
 
