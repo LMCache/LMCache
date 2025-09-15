@@ -389,7 +389,8 @@ def mock_up_broadcast_object_fn(a: Any, i: int) -> None:
 #### Python equivalents of CPP CUDA  functions ####
 def alloc_pinned_numa_ptr(size: int) -> int:
     # Allocate CPU tensor
-    tensor = torch.empty(size, dtype=torch.float32, pin_memory=True)
+    # Requires pin_memory=False for non-CUDA
+    tensor = torch.empty(size, dtype=torch.float32, pin_memory=False)
 
     # First-touch initialization (forces physical allocation)
     tensor.fill_(0.0)
@@ -403,7 +404,8 @@ def alloc_pinned_numa_ptr(size: int) -> int:
 
 def alloc_pinned_ptr(size: int) -> int:
     # Create a 1D uint8 tensor in pinned memory, as uint8 == 1 byte
-    tensor = torch.empty(size, dtype=torch.uint8, pin_memory=True)
+    # Requires pin_memory=False for non-CUDA
+    tensor = torch.empty(size, dtype=torch.uint8, pin_memory=False)
 
     # Return address of first element of tensor
     return tensor.data_ptr()
