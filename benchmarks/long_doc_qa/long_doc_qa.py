@@ -317,17 +317,22 @@ def repeat_prompts(prompts, repeat_count, mode: str):
 
 def add_cache_misses(prompts, hit_miss_ratio):
     """
-    Add cache misses to the prompts.
+    Add cache misses to the prompts and return a boolean mask aligned with prompts.
     """
     if hit_miss_ratio is None:
-        return prompts
+        return prompts, [False] * len(prompts)
 
     hit, miss = map(int, hit_miss_ratio.split(":", 1))
+    period = hit + miss
+    miss_mask = [False] * len(prompts)
 
     for i in range(len(prompts)):
-        if i % (hit + miss) >= hit:
-            prompts[i] = str(random.randint(-10000000, 10000000)) + " " + prompts[i]
-    return prompts
+        # every (hit+miss) window: first `hit` are hits, rest are misses
+        if period and (i % period) >= hit:
+            miss_mask[i] = True
+            prompts[i] = f"{random.randint(-10_000_000, 10_000_000)} {prompts[i]}"
+
+    return prompts, miss_mask
 
 
 def relative_time(df, start_time):
@@ -340,47 +345,62 @@ def relative_time(df, start_time):
 
 
 def visualize_results(warmup_df, benchmark_df):
-    """
-    Separate visualization for warmup and benchmark results.
-    """
+    def plot_bars(df, title, filename):
+        plt.figure(figsize=(12, 6))
 
-    # x axis is prompt id
-    # y axis is time (relative to the start of the benchmark) with three points:
-    # 1. request start
-    # 2. request first token
-    # 3. request end
-    plt.figure(figsize=(10, 5))
-    plt.scatter(
-        warmup_df["prompt_id"], warmup_df["request_start"], label="Request Start"
-    )
-    plt.scatter(
-        warmup_df["prompt_id"], warmup_df["ttft_time"], label="Request first token"
-    )
-    plt.scatter(warmup_df["prompt_id"], warmup_df["request_end"], label="Request End")
-    plt.xlabel("Prompt ID")
-    plt.ylabel("Time (s)")
-    plt.title("Warmup Round")
-    plt.legend()
-    plt.savefig("warmup_round.png")
-    plt.close()
-    plt.figure(figsize=(10, 5))
-    plt.scatter(
-        benchmark_df["prompt_id"], benchmark_df["request_start"], label="Request Start"
-    )
-    plt.scatter(
-        benchmark_df["prompt_id"],
-        benchmark_df["ttft_time"],
-        label="Request first token",
-    )
-    plt.scatter(
-        benchmark_df["prompt_id"], benchmark_df["request_end"], label="Request End"
-    )
-    plt.xlabel("Prompt ID")
-    plt.ylabel("Time (s)")
-    plt.title("Query Round")
-    plt.legend()
-    plt.savefig("query_round.png")
-    plt.close()
+        if "is_miss" in df.columns:
+            is_miss = df["is_miss"]
+        else:
+            is_miss = pd.Series(False, index=df.index)
+
+        hits = df[~is_miss]
+        misses = df[is_miss]
+
+        # Prefill: dark blue (hit), dark orange (miss)
+        if not hits.empty:
+            plt.barh(
+                hits["prompt_id"],
+                hits["ttft_time"] - hits["request_start"],
+                left=hits["request_start"],
+                color="darkblue",
+                label="Loading",  # prefill hits
+            )
+        if not misses.empty:
+            plt.barh(
+                misses["prompt_id"],
+                misses["ttft_time"] - misses["request_start"],
+                left=misses["request_start"],
+                color="darkorange",
+                label="Compute",  # prefill misses
+            )
+
+        # Decode: light blue (hit), light orange (miss)
+        if not hits.empty:
+            plt.barh(
+                hits["prompt_id"],
+                hits["request_end"] - hits["ttft_time"],
+                left=hits["ttft_time"],
+                color="skyblue",
+                label="Decoding after loading",
+            )
+        if not misses.empty:
+            plt.barh(
+                misses["prompt_id"],
+                misses["request_end"] - misses["ttft_time"],
+                left=misses["ttft_time"],
+                color="pink",
+                label="Decoding after compute",
+            )
+
+        plt.xlabel("Time (s)")
+        plt.ylabel("Prompt ID")
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(filename)
+        plt.close()
+
+    plot_bars(warmup_df, "Warmup Round", "warmup_round.png")
+    plot_bars(benchmark_df, "Query Round", "query_round.png")
 
 
 async def main(args):
@@ -411,7 +431,7 @@ async def main(args):
     ]
 
     prompts = repeat_prompts(warmup_prompts, args.repeat_count, mode=args.repeat_mode)
-    prompts = add_cache_misses(prompts, args.hit_miss_ratio)
+    prompts, miss_mask = add_cache_misses(prompts, args.hit_miss_ratio)
 
     write_resp("------warm up round------\n")
     warmup_start_time = time.time()
@@ -442,7 +462,9 @@ async def main(args):
 
     warmup_df = pd.DataFrame([stats.__dict__ for stats in warmup_request_stats])
     relative_time(warmup_df, warmup_start_time)
+    warmup_df["is_miss"] = True
     benchmark_df = pd.DataFrame([stats.__dict__ for stats in benchmark_request_stats])
+    benchmark_df["is_miss"] = miss_mask
     relative_time(benchmark_df, benchmark_start_time)
 
     warmup_df.to_csv("warmup_round.csv", index=False)
