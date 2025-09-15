@@ -38,7 +38,8 @@ jobs:
     strategy:
       matrix:
         python:
-          - "3.9"
+          # Disable 3.9 until code supports it in https://github.com/LMCache/LMCache/pull/1584
+          # - "3.9"
           - "3.10"
           - "3.11"
           - "3.12"
