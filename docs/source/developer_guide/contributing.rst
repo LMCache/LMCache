@@ -173,6 +173,9 @@ Install the dependencies:
 
     pip install -r requirements/docs.txt
 
+
+And also install mermaid cli using `brew` or `npm`.
+
 Build the docs (from :code:`docs/` directory):
 
 .. code-block:: bash

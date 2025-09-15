@@ -4,7 +4,7 @@ Integration
 LMCache acts as a caching middleware that sits between LLM inference engines and storage systems, enabling:
 
 - **Transparent Cache Reuse**: Automatic detection and reuse of previously computed KV caches
-- **Performance Optimization**: 3×–10× reduction in time-to-first-token (TTFT) for repeated content
+- **Performance Optimization**: 3×–10× reduction in time-to-first-token (TTFT) for multi-round conversation and RAG.
 - **Resource Efficiency**: Significant GPU cycle savings through cache reuse
 - **Scalable Architecture**: Support for single-node and multi-node deployments
 
