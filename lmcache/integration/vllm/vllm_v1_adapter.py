@@ -1056,7 +1056,6 @@ class LMCacheConnectorV1Impl:
         if mm_hashes and mm_positions:
             # TODO(Jiayi): Optimize this
             token_ids = torch.tensor(request.prompt_token_ids)
-            mm_hashes, mm_positions = mm_features
             apply_mm_hashes_to_token_ids(token_ids, mm_hashes, mm_positions)
             token_ids = token_ids.tolist()
 
