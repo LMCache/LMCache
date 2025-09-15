@@ -59,6 +59,8 @@ For more information, check out the following:
 Documentation
 -------------
 
+
+
 .. toctree::
    :maxdepth: 2
    :caption: Getting Started
@@ -68,6 +70,13 @@ Documentation
    getting_started/benchmarking
    getting_started/troubleshoot
    getting_started/faq
+
+
+.. toctree::
+   :maxdepth: 2
+   :caption: Integration with LLM serving engines
+
+   integration/index
 
 :raw-html:`<br />`
 
