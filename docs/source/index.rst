@@ -66,8 +66,10 @@ Documentation
    :caption: Getting Started
 
    getting_started/installation
+   getting_started/overview
    getting_started/quickstart/index
    getting_started/benchmarking
+   getting_started/adoption
    getting_started/troubleshoot
    getting_started/faq
 

@@ -3,6 +3,49 @@
 LMCache Plugin Framework
 =========================
 
+Plugin and Backend Extensibility
+--------------------------------
+
+LMCache is designed to be extensible, allowing integration of custom storage backends and plugin scripts without modifying core code. The diagram illustrates two primary extension mechanisms:
+
+.. mermaid::
+
+   flowchart LR
+      subgraph "LMCache Process"
+         direction TB
+         core["LMCache Core Engine (Cache Manager & APIs)"]
+         pluginMgr["Plugin Launcher"]
+         backendMgr["StorageBackend Interface"]
+      end
+
+      pluginMgr -->|"start"| Plugin1["Custom Plugin Script 1"]
+      pluginMgr -->|"start"| Plugin2["Custom Plugin Script 2"]
+
+      backendMgr --> CPUBackend[["CPU Memory Backend"]]
+      backendMgr --> DiskBackend[["Local Disk Backend"]]
+      backendMgr --> RemoteBackend[["Built-in Remote Backends (Redis, InfiniStore, etc.)"]]
+      backendMgr --> CustomBackend[["External Backend (via plugin)"]]
+
+
+**Storage Backend Extensions** (bottom) enable LMCache to interface with new storage or transport systems. Developers can implement the standardized ``StorageBackendInterface`` to create an External Backend (custom storage module), which LMCache will load and use. This is in addition to the built-in backends that ship with LMCache:
+
+- In-memory CPU cache
+- Local disk storage
+- NVIDIA NIXL for peer transfers
+- Remote stores (Redis, Mooncake, etc.)
+
+**Plugin Framework** (top) allows running custom scripts alongside LMCache processes. A plugin can be targeted to the scheduler (controller) or to workers (or all nodes), and runs as a separate process launched by LMCache. Plugins (written in Python, Bash, etc.) can perform tasks such as:
+
+- Logging and metrics reporting
+- Custom cache management logic
+- Health checks and service discovery
+- Observing and interacting with the running LMCache instance
+
+Together, these extension points let users tailor LMCache's functionality and integrate with external systems in a modular way.
+
+Plugin System Overview
+----------------------
+
 The LMCache plugin system allows developers to extend functionality by running custom scripts alongside LMCache processes. Plugins can be written in Python and Bash for now, and are managed by the ``PluginLauncher`` class.
 
 Key Use Cases
