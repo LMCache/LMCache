@@ -111,7 +111,7 @@ theme_options = ThemeOptions(  # Add your theme options.
                 'fill="currentColor"/></svg>'
             ),
         }
-    }
+    },
 )
 
 html_theme_options = asdict(theme_options)
