@@ -302,7 +302,7 @@ class StorageManager:
             # NOTE: the handling of exists_in_put_tasks
             # is done in the backend
             ks, objs = obj_dict[cname]
-            backend.batched_submit_put_task(ks, objs)
+            backend.batched_submit_put_task(ks, objs, transfer_spec=transfer_spec)
 
         if self.lookup_server is not None:
             self.lookup_server.batched_insert(keys)
