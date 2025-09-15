@@ -13,9 +13,10 @@ LMCache extends an LLM inference engine (e.g., vLLM) with a multi-tier KV cache 
 
 LMCache implements a hierarchical storage system with three distinct tiers:
 
-* **GPU Memory (Active Tier)**: Holds the active working set of KV caches that are currently being used by the model
-* **CPU DRAM (Hot Cache)**: Acts as a "hot cache" for recently used KV chunks, using pinned memory for efficient GPU-CPU transfers
-* **Disk/Remote Storage (Cold Tier)**: Provides a large cold tier for infrequently used or overflow caches
+* **GPU Memory**: Holds the active working set of KV caches that are currently being used by the model
+* **CPU DRAM**: Acts as a "hot cache" for recently used KV chunks, using pinned memory for efficient GPU-CPU transfers
+* **Local storage (e.g., local disk, NVMe GDS)**: Provides a large tier for local KV caching (e.g. for long documents)
+* **Remote storage (e.g., Redis, Mooncake, InfiniStore)**: Persistent storage for KV caches. Reliable but not as performant as previous tiers.
 
 **Data Flow and Operations**
 
@@ -101,7 +102,7 @@ Two use cases
 Core Components
 ---------------
 
-**LMCache Connector**
+**LLM Inference Engine Intergration Module (Connector)**
    Integrated into the LLM engine (vLLM), the Connector taps into the paged KV memory manager. During prompt processing, it checks if token sequences were seen before:
 
    * **Cache hit**: Fetches precomputed KV matrices from LMCache, bypassing computation
