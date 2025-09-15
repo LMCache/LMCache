@@ -573,6 +573,9 @@ class WekaGdsBackend(AllocatorBackendInterface):
     def get_allocator_backend(self):
         return self
 
+    def get_memory_allocator(self):
+        return self.memory_allocator
+
     def allocate(
         self,
         shape: torch.Size,

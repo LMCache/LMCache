@@ -251,6 +251,9 @@ class NixlBackend(AllocatorBackendInterface):
     def get_allocator_backend(self):
         return self
 
+    def get_memory_allocator(self):
+        return self.memory_allocator
+
     # TODO (Jiayi): put this in _init__.py later
     @staticmethod
     def CreateNixlBackend(

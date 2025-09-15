@@ -451,6 +451,9 @@ class NixlStorageBackend(AllocatorBackendInterface):
             MemoryFormat.KV_2LTD,
         )
 
+    def get_memory_allocator(self):
+        return self.memory_allocator
+
     def allocate(
         self,
         shape: torch.Size,

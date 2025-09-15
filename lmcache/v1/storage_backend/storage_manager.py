@@ -632,6 +632,21 @@ class StorageManager:
 
         return num_cleared_tokens
 
+    def memcheck(self) -> bool:
+        """
+        Check the integrity of the underlying storage backend's
+        memory allocators
+
+        Returns:
+            True if everything is good otherwise False
+        """
+        for backend in self.storage_backends.values():
+            if not isinstance(backend, AllocatorBackendInterface):
+                continue
+            if not backend.get_memory_allocator().memcheck():
+                return False
+        return True
+
     def close(self):
         for backend in self.storage_backends.values():
             backend.close()

@@ -513,6 +513,9 @@ class LocalCPUBackend(AllocatorBackendInterface):
     def get_allocator_backend(self):
         return self
 
+    def get_memory_allocator(self):
+        return self.memory_allocator
+
     def close(self) -> None:
         self.memory_allocator.close()
         self.clear()

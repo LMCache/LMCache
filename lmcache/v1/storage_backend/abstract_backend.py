@@ -264,6 +264,14 @@ class AllocatorBackendInterface(StorageBackendInterface):
         raise NotImplementedError
 
     @abc.abstractmethod
+    def get_memory_allocator(self) -> MemoryAllocatorInterface:
+        """
+        Returns:
+            The underlying memory allocator
+        """
+        raise NotImplementedError
+
+    @abc.abstractmethod
     def allocate(
         self,
         shape: torch.Size,
