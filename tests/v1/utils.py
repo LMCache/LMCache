@@ -23,7 +23,7 @@ def recover_gpu_connector_states(gpu_connector):
 
 
 def dumb_metadata(fmt="vllm", kv_shape=(32, 2, 256, 8, 128)):
-    return LMCacheEngineMetadata("test-model", 3, 123, fmt, torch.bfloat16, kv_shape)
+    return LMCacheEngineMetadata("test_model", 3, 123, fmt, torch.bfloat16, kv_shape)
 
 
 def dumb_metadata_with_model_name(

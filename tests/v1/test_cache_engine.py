@@ -1278,6 +1278,8 @@ def test_multi_device_backends(autorelease_v1):
     dtype = torch.bfloat16
 
     connector = create_gpu_connector(1024, 32)
+    metadata = dumb_metadata()
+    metadata.model_name = "test-model"  # NOTE: Gds does not accept name with '_'
 
     tokens = generate_tokens(num_tokens, device)
 
@@ -1316,7 +1318,7 @@ def test_multi_device_backends(autorelease_v1):
             LMCacheEngineBuilder.get_or_create(
                 "engine",
                 cfg,
-                dumb_metadata(),
+                metadata,
                 connector,
                 mock_up_broadcast_fn,
                 mock_up_broadcast_object_fn,
