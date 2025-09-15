@@ -1267,6 +1267,7 @@ def test_builder_destroy_multiple_instances(autorelease_v1):
     LMCacheEngineBuilder.destroy(instance_id2)
 
 
+@pytest.mark.skip(reason="Skipping this until we have GDS on CI machine")
 def test_multi_device_backends(autorelease_v1):
     """Test running GPU-related backend with local CPU backends
     together
