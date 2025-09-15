@@ -47,7 +47,6 @@ def run(config: LMCacheEngineConfig, shape, dtype):
             config,
             metadata,
             thread_loop,
-            # LMCacheEngineBuilder._Create_memory_allocator(config, metadata),
         )
         assert len(backends) == 2  # NixlStorageBackend + LocalCPUBackend
         assert BACKEND_NAME in backends
