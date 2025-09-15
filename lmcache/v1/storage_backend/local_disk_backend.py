@@ -42,6 +42,8 @@ class LocalDiskWorker:
 
         # TODO(Jiayi): make executor and its parameters configurable
         self.executor = AsyncPQThreadPoolExecutor(loop, max_workers=4)
+        self.loop = loop
+        self._closed = False
 
     async def submit_task(
         self,
@@ -83,7 +85,11 @@ class LocalDiskWorker:
             return key in self.put_tasks
 
     def close(self):
-        self.executor.shutdown()
+        # Gracefully shut down the executor
+        if self._closed:
+            return
+        self._closed = True
+        self.executor.shutdown(wait=True)
 
 
 class LocalDiskBackend(StorageBackendInterface):
@@ -558,3 +564,5 @@ class LocalDiskBackend(StorageBackendInterface):
             keys = list(self.dict.keys())
         if keys:
             super()._on_evict(keys)
+        # Close worker executor
+        self.disk_worker.close()

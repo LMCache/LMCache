@@ -147,6 +147,9 @@ class MockRedis:
     def exists(self, key):
         return key in self.store
 
+    def delete(self, key):
+        return self.store.pop(key, None) is not None
+
     def scan(self, cursor=0, match=None):
         keys = [s.encode("utf-8") for s in self.store.keys()]
         return (0, keys)
@@ -159,22 +162,63 @@ class MockRedis:
         """Mock implementation of Redis.from_url"""
         return cls(url=url, decode_responses=decode_responses, **kwargs)
 
+    @classmethod
+    def from_pool(cls, pool, **kwargs):
+        """Mock implementation of Redis.from_pool"""
+        return cls(**kwargs)
+
+
+class MockAsyncRedis(MockRedis):
+    """Async version of MockRedis"""
+
+    async def set(self, key, value):
+        self.store[key] = value
+        return True
+
+    async def get(self, key):
+        return self.store.get(key, None)
+
+    async def exists(self, key):
+        return key in self.store
+
+    async def delete(self, key):
+        return self.store.pop(key, None) is not None
+
+    async def close(self):
+        pass
+
+    @classmethod
+    def from_url(cls, url, decode_responses=False, **kwargs):
+        """Mock implementation of Redis.from_url"""
+        return cls(url=url, decode_responses=decode_responses, **kwargs)
+
+    @classmethod
+    def from_pool(cls, pool, **kwargs):
+        """Mock implementation of Redis.from_pool"""
+        return cls(**kwargs)
+
 
 class MockRedisSentinel:
     def __init__(self, hosts_and_ports, socket_timeout=None, **kwargs):
-        self.redis = MockRedis()
         self.hosts_and_ports = hosts_and_ports
         self.socket_timeout = socket_timeout
+        # Create a shared store but separate instances for master/slave
+        self.shared_store = {}
+        self.master_redis = MockRedis()
+        self.slave_redis = MockRedis()
+        # Share the store between master and slave to simulate Redis Sentinel behavior
+        self.master_redis.store = self.shared_store
+        self.slave_redis.store = self.shared_store
 
     def master_for(
         self, service_name, socket_timeout=None, username=None, password=None, **kwargs
     ):
-        return self.redis
+        return self.master_redis
 
     def slave_for(
         self, service_name, socket_timeout=None, username=None, password=None, **kwargs
     ):
-        return self.redis
+        return self.slave_redis
 
 
 @dataclass
@@ -188,13 +232,20 @@ def mock_redis():
     with (
         patch("redis.Redis", MockRedis) as mock_redis_class,
         patch("redis.from_url", MockRedis.from_url),
+        patch("redis.asyncio.Redis", MockAsyncRedis),
+        patch("redis.asyncio.from_url", MockAsyncRedis.from_url),
+        patch("redis.asyncio.ConnectionPool.from_url", lambda url, **kwargs: None),
+        patch("redis.asyncio.Redis.from_pool", MockAsyncRedis.from_pool),
     ):
         yield mock_redis_class
 
 
 @pytest.fixture(scope="function", autouse=True)
 def mock_redis_sentinel():
-    with patch("redis.Sentinel", MockRedisSentinel) as mock:
+    with (
+        patch("redis.Sentinel", MockRedisSentinel) as mock,
+        patch("redis.asyncio.Sentinel", MockRedisSentinel),
+    ):
         yield mock
 
 
