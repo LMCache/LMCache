@@ -1,8 +1,6 @@
 Architecture Overview
 =====================
 
-LMCache operates as a caching middleware between the LLM inference engine and memory/storage subsystems, providing two complementary modes: **Storage Mode** for hierarchical cache management and **Transport Mode** for direct KV cache transfers across processes/nodes.
-
 High-Level System Architecture
 ------------------------------
 

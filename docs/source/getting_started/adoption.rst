@@ -1,5 +1,5 @@
-Real-World Adoption and Use Cases
-==================================
+Real-World Adoption
+===================
 
 Since its release, LMCache has rapidly grown into a key component of the LLM serving stack, attracting contributions and adoption from industry leaders.
 
@@ -30,28 +30,3 @@ Community & Ecosystem
 ---------------------
 
 The project has a vibrant community (5k+ stars on GitHub, as of Aug 2025) and is backed by research from UIUC and UChicago (the CacheGen/CacheBlend papers). Companies like IBM, Red Hat, Nvidia, AWS, and others have shown interest or contributed. For instance, IBM has used LMCache in internal stacks, and AWS Marketplace even lists LMCache as an accelerative layer for certain AI deployments. This broad interest underlines that KV caching is becoming a standard practice in LLM inference, with LMCache leading the charge.
-
-Key Use Cases
--------------
-
-LMCache brings the most benefits in scenarios where inputs have overlap or repetition. Some concrete examples:
-
-Chatbot with Conversation History
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-In multi-turn chats, the context (earlier dialogue) grows and is repeated for each new user query. LMCache will cache the model's processing of that context, so each new turn only computes the incremental parts. This yields much faster responses in later turns since the static history is reused.
-
-Long documents with repeated QA
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-If an LLM is used to analyze or answer questions about a set of documents, the same passages might be referenced often (by the same or different users). With LMCache, once a passage is processed, its KV cache is stored. Any query that involves that passage can skip directly to generation, saving significant compute.
-
-RAG (Retrieval-Augmented Generation)
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-In systems where an LLM reads retrieved knowledge (e.g., top Wikipedia articles) to answer a question, popular articles can be cached. LMCache even supports blending caches from multiple sources – enabling it to merge cached knowledge pieces rather than recompute from scratch how they interact.
-
-Multi-model, Multi-instance Deployments
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-If you host multiple models or many instances, LMCache can share caches among them. For example, if model A and model B both see the same chunk "XYZ" (perhaps they are variants of a base model with different fine-tuning), LMCache's centralized server can let them share the KV for "XYZ" rather than each computing it independently. This is still a developing area, but the concept of a Knowledge Cache service that sits across models is an exciting direction (sometimes referred to as a "content delivery network" for LLMs).

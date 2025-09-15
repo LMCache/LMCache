@@ -1,9 +1,5 @@
-Integration with LLM Serving Engines
-=====================================
-
-
-Overview
---------
+Integration
+===========
 
 LMCache acts as a caching middleware that sits between LLM inference engines and storage systems, enabling:
 
@@ -17,9 +13,9 @@ Supported Engines
 
 LMCache currently supports integration with:
 
-- **vLLM**: High-throughput LLM serving with PagedAttention
-- **SGLang**: Structured generation language for complex LLM applications
-- **TRT-LLM**: Coming soon.
+- **vLLM**
+- **SGLang**
+- **TRT-LLM** (coming soon)
 
 Integration with vLLM
 ---------------------
