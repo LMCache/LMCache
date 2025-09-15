@@ -23,7 +23,7 @@ logger = init_logger(__name__)
 ENGINE_NAME = "vllm-instance"
 
 # Thread-safe singleton storage
-_config_instance = None
+_config_instance: Union[Config, V1Config, None] = None
 _config_lock = threading.Lock()
 
 
@@ -58,11 +58,11 @@ def lmcache_get_or_create_config() -> Union[Config, V1Config]:
                     LMCacheEngineConfig = V1Config  # type: ignore[assignment]
 
                 if "LMCACHE_CONFIG_FILE" not in os.environ:
-                    logger.warn(
+                    logger.warning(
                         "No LMCache configuration file is set. Trying to read"
                         " configurations from the environment variables."
                     )
-                    logger.warn(
+                    logger.warning(
                         "You can set the configuration file through "
                         "the environment variable: LMCACHE_CONFIG_FILE"
                     )
