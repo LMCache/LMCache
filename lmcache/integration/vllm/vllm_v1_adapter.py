@@ -1052,8 +1052,8 @@ class LMCacheConnectorV1Impl:
         token_ids = request.prompt_token_ids
 
         # If the request has multimodal hashes, apply them to the token ids
-        mm_features = extract_mm_features(request)
-        if mm_features[0] != [] and mm_features[1] != []:
+        mm_hashes, mm_positions = extract_mm_features(request)
+        if mm_hashes and mm_positions:
             # TODO(Jiayi): Optimize this
             token_ids = torch.tensor(request.prompt_token_ids)
             mm_hashes, mm_positions = mm_features
