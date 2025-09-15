@@ -1313,7 +1313,8 @@ class LMCacheEngineBuilder:
         metadata: LMCacheEngineMetadata,
         numa_mapping: Optional[NUMAMapping] = None,
     ) -> MemoryAllocatorInterface:
-        raise RuntimeError("_Create_memory_allocator is deprecated!")
+        # NOTE: should remove this function after fixing the unit tests:
+        # raise RuntimeError("_Create_memory_allocator is deprecated!")
         extra_config = config.extra_config
         enable_nixl_storage = extra_config is not None and extra_config.get(
             "enable_nixl_storage"

@@ -16,6 +16,7 @@ from lmcache.utils import CacheEngineKey, _lmcache_nvtx_annotate
 from lmcache.v1.cache_controller.message import KVAdmitMsg, KVEvictMsg
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import (
+    MemoryAllocatorInterface,
     MemoryFormat,
     MemoryObj,
     MixedMemoryAllocator,
@@ -42,16 +43,25 @@ class LocalCPUBackend(AllocatorBackendInterface):
     def __init__(
         self,
         config: LMCacheEngineConfig,
-        metadata: LMCacheEngineMetadata,
+        metadata: Optional[LMCacheEngineMetadata] = None,
         dst_device: str = "cuda",
         lmcache_worker: Optional["LMCacheWorker"] = None,
+        memory_allocator: Optional[MemoryAllocatorInterface] = None,
     ):
         super().__init__(dst_device)
         self.cache_policy = get_cache_policy(config.cache_policy)
         self.hot_cache = self.cache_policy.init_mutable_mapping()
 
         self.use_hot = config.local_cpu
-        self.memory_allocator = self.initialize_allocator(config, metadata)
+        # NOTE: we keep the memory allocator argument for temporary
+        # test compatibility
+        # TODO: fix the tests to get rid the memory allocator
+        assert metadata is not None or memory_allocator is not None
+        self.memory_allocator = (
+            self.initialize_allocator(config, metadata)  # type: ignore
+            if memory_allocator is None
+            else memory_allocator
+        )
         self.lmcache_worker = lmcache_worker
         self.instance_id = config.lmcache_instance_id
         self.cpu_lock = threading.Lock()
