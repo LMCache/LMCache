@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import List, Optional, Sequence
+from typing import List, Optional, Sequence, Union
 import abc
 
 # Third Party
@@ -23,32 +23,28 @@ class P2PMsgBase(msgspec.Struct, tag=True):
 
     pass
 
-class LookupAndRetrieveMsg(P2PMsgBase):
-    """Lookup and retrieve message"""
-
-    # Lookup id
-    lookup_id: str
-
-    #CacheEngineKey in str form
-    keys: list[str]
-
-    # Indexes (remote) of allocated memory objects (to be written)
-    local_indexes: list[int]
 
 class LookupAndRetrieveMsg(P2PMsgBase):
     """Lookup and retrieve message"""
+
+    receiver_id: str
 
     # CacheEngineKey in string form
     keys: list[str]
 
     # Indexes (remote) of allocated memory objects (to be written)
-    local_indexes: list[int]
+    mem_indexes: list[int]
 
 class LookupAndRetrieveRetMsg(P2PMsgBase):
     """Lookup and retrieve message"""
 
     # Number of hit chunks
     num_hit_chunks: int
+
+P2PMsg = Union[
+    LookupAndRetrieveMsg, 
+    LookupAndRetrieveRetMsg,
+]
 
 # NOTE(Jiayi): Several notes about P2PBackend:
 # 1. Put is not supported for now.
@@ -163,12 +159,38 @@ class P2PBackend(StorageBackendInterface):
             # for some backends (e.g., local cpu) as there's overhead for 
             # async function call.
             num_hit_chunks = await self.local_cpu_backend.batched_async_contains(
-
+                lookup_id=lookup_id,
+                keys=keys,
+                pin=True,
             )
             
-            self.local_cpu_backend.batched_get_non_blocking()
+            mem_objs = await self.local_cpu_backend.batched_get_non_blocking(
+                lookup_id=lookup_id,
+                keys=keys[:num_hit_chunks],
+            )
 
+            channel_transfer_spec = {
+                "receiver_id": msg.receiver_id,
+                "remote_indexes": msg.mem_indexes[:num_hit_chunks],
+            }
 
+            # TODO(Jiayi): make this async
+            await self.transfer_channel.async_batched_write(
+                data=mem_objs_to_send,
+                transfer_spec=channel_transfer_spec,
+            )
+
+            ret_msg = LookupAndRetrieveRetMsg(
+                num_hit_chunks=num_hit_chunks,
+            )
+
+            await self.async_peer_socket.send(
+                msgspec.encode(ret_msg, type=P2PMsg)
+            )
+
+            for mem_obj in mem_objs:
+                mem_obj.ref_count_down()
+                mem_obj.unpin()
 
 
     async def _ensure_peer_connection(
@@ -207,8 +229,9 @@ class P2PBackend(StorageBackendInterface):
         local_indexes = self.transfer_channel.get_local_mem_indices(mem_objs)
 
         msg = LookupAndRetrieveMsg(
+            receiver_id=peer_init_url,
             keys=[str(key) for key in keys],
-            local_indexes=local_indexes,
+            mem_indexes=local_indexes,
         )
 
         ret_msg = await self.async_peer_socket.send(
@@ -222,10 +245,20 @@ class P2PBackend(StorageBackendInterface):
             missed_mem_obj.ref_count_down()
 
         return hit_mem_objs
-        
-        
+    
+    def close(
+        self,
+    ) -> None:
+        """
+        Close the P2P backend.
+        """
+        pass
         
     
+    ############################################################
+    # Not-supported functions
+    ############################################################
+
     # NOTE: synchronous contain is not supported for now.
     def contains(self, key: CacheEngineKey, pin: bool = False) -> bool:
         raise NotImplementedError
@@ -267,11 +300,3 @@ class P2PBackend(StorageBackendInterface):
     # NOTE: remove is useless for P2P backend now.
     def remove(self, key: CacheEngineKey, force: bool = True) -> bool:
         return False
-
-    def close(
-        self,
-    ) -> None:
-        """
-        Close the P2P backend.
-        """
-        pass
