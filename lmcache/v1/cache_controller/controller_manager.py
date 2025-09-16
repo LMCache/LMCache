@@ -23,6 +23,7 @@ from lmcache.v1.cache_controller.message import (  # isort: skip
     CompressMsg,
     DecompressMsg,
     DeRegisterMsg,
+    ErrorMsg,
     HealthMsg,
     HeartbeatMsg,
     KVAdmitMsg,
@@ -37,6 +38,8 @@ from lmcache.v1.cache_controller.message import (  # isort: skip
     QueryInstMsg,
     RegisterMsg,
     WorkerMsg,
+    WorkerReqMsg,
+    WorkerReqRetMsg,
 )
 
 logger = init_logger(__name__)
@@ -47,9 +50,9 @@ logger = init_logger(__name__)
 
 
 class LMCacheControllerManager:
-    def __init__(self, controller_url: str):
+    def __init__(self, controller_urls: dict[str, str]):
         self.zmq_context = get_zmq_context()
-        self.controller_url = controller_url
+        self.controller_urls = controller_urls
         # TODO(Jiayi): We might need multiple sockets if there are more
         # controllers. For now, we use a single socket to receive messages
         # for all controllers.
@@ -63,11 +66,18 @@ class LMCacheControllerManager:
         # `issue_control_message`. This will make the system less concurrent.
 
         # Micro controllers
-        self.controller_socket = get_zmq_socket(
+        self.controller_pull_socket = get_zmq_socket(
             self.zmq_context,
-            self.controller_url,
+            self.controller_urls["pull"],
             protocol="tcp",
             role=zmq.PULL,  # type: ignore[attr-defined]
+            bind_or_connect="bind",
+        )
+        self.controller_rep_socket = get_zmq_socket(
+            self.zmq_context,
+            self.controller_urls["reply"],
+            protocol="tcp",
+            role=zmq.REP,  # type: ignore[attr-defined]
             bind_or_connect="bind",
         )
         self.kv_controller = KVController()
@@ -79,7 +89,10 @@ class LMCacheControllerManager:
         )
 
         # post initialization of controllers
-        self.kv_controller.post_init(self.cluster_executor)
+        self.kv_controller.post_init(
+            reg_controller=self.reg_controller,
+            cluster_executor=self.cluster_executor,
+        )
         self.reg_controller.post_init(
             kv_controller=self.kv_controller,
             cluster_executor=self.cluster_executor,
@@ -104,6 +117,11 @@ class LMCacheControllerManager:
             await self.kv_controller.evict(msg)
         else:
             logger.error(f"Unknown worker message type: {msg}")
+    
+    async def handle_worker_req_message(self, msg: WorkerReqMsg) -> WorkerReqRetMsg:
+        if isinstance(msg, BatchedP2PLookupMsg):
+            ret_msg = await self.kv_controller.batched_p2p_lookup(msg)
+        return ret_msg
 
     async def handle_orchestration_message(self, msg: OrchMsg) -> OrchRetMsg:
         if isinstance(msg, LookupMsg):
@@ -130,7 +148,7 @@ class LMCacheControllerManager:
             logger.error(f"Unknown orchestration message type: {msg}")
             raise RuntimeError(f"Unknown orchestration message type: {msg}")
 
-    async def handle_batched_request(self, socket) -> Optional[MsgBase]:
+    async def handle_batched_push_request(self, socket) -> Optional[MsgBase]:
         while True:
             try:
                 parts = await socket.recv_multipart()
@@ -157,8 +175,33 @@ class LMCacheControllerManager:
                         logger.error(f"Unknown message type: {type(msg)}")
             except Exception as e:
                 logger.error(f"Controller Manager error: {e}")
+    
+    async def handle_batched_req_request(self, socket) -> Optional[MsgBase]:
+        while True:
+            try:
+                parts = await socket.recv()
+
+                for part in parts:
+                    # Parse message based on format
+                    if part.startswith(b"{"):
+                        # JSON format - typically from external systems like Mooncake
+                        msg_dict = json.loads(part)
+                        msg = msgspec.convert(msg_dict, type=Msg)
+                    else:
+                        # MessagePack format - internal LMCache communication
+                        msg = msgspec.msgpack.decode(part, type=Msg)
+                    
+                    if isinstance(msg, WorkerReqMsg):
+                        ret_msg = await self.handle_worker_req_message(msg)
+                    else:
+                        logger.error(f"Unknown message type: {type(msg)}")
+                        ret_msg = ErrorMsg(error=f"Unknown message type: {type(msg)}")
+                    await socket.send(msgspec.msgpack.encode(ret_msg))
+            except Exception as e:
+                logger.error(f"Controller Manager error: {e}")
 
     async def start_all(self):
         await asyncio.gather(
-            self.handle_batched_request(self.controller_socket),
+            self.handle_batched_push_request(self.controller_pull_socket),
+            self.handle_batched_req_request(self.controller_rep_socket),
         )

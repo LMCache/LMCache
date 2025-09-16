@@ -30,6 +30,8 @@ from lmcache.v1.cache_controller.message import (
     PinWorkerRetMsg,
     RegisterMsg,
     WorkerMsg,
+    WorkerReqMsg,
+    WorkerReqRetMsg,
 )
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.rpc_utils import (
@@ -70,13 +72,24 @@ class LMCacheWorker:
 
         self.context = get_zmq_context()
 
-        assert config.controller_url is not None
+        assert config.controller_urls is not None
+
+        controller_pull_url = config.controller_urls["pull"]
+        controller_rep_url = config.controller_urls["reply"]
 
         self.push_socket = get_zmq_socket(
             self.context,
-            config.controller_url,
+            controller_pull_url,
             protocol="tcp",
             role=zmq.PUSH,  # type: ignore[attr-defined]
+            bind_or_connect="connect",
+        )
+
+        self.req_socket = get_zmq_socket(
+            self.context,
+            controller_rep_url,
+            protocol="tcp",
+            role=zmq.REQ,  # type: ignore[attr-defined]
             bind_or_connect="connect",
         )
 
@@ -143,11 +156,29 @@ class LMCacheWorker:
                 port=self.lmcache_worker_port,
             )
         )
+    
+    async def async_put_and_wait_msg(
+        self,
+        msg: WorkerReqMsg,    
+    ) -> WorkerReqRetMsg:
+        """
+        Send a message to the controller and wait for the response.
+        """
+
+        self.req_socket.send(msgspec.msgpack.encode(msg))
+        serialized_ret_msg = await self.req_socket.recv()
+        ret_msg = msgspec.msgpack.decode(serialized_ret_msg, type=Msg)
+        return ret_msg
+
+
 
     def put_msg(self, msg: WorkerMsg):
         """
         Put a message into the message queue.
         """
+        # TODO(Jiayi): This might introduce ~0.05ms latency than
+        # a normal function call.
+        # Not sure how much overhead is blocking though.
         self.loop.call_soon_threadsafe(self.msg_queue.put_nowait, msg)
 
     async def batched_get_msg(self, max_bsz: int = 50) -> list[WorkerMsg]:

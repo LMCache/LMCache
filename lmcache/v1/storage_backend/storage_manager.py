@@ -375,6 +375,9 @@ class StorageManager:
         (i.e., prefetching from all backends for the entire request) are done.
         """
         assert self.async_lookup_server is not None
+
+        # FIXME: get actual retrieved lengths from task results
+        # since 
         self.async_lookup_server.send_response_to_scheduler(lookup_id, retrieved_length)
         self.event_manager.update_event_status(
             EventType.LOADING, lookup_id, status=EventStatus.DONE

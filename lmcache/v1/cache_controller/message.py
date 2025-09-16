@@ -16,11 +16,12 @@ class MsgBase(msgspec.Struct, tag=True):  # type: ignore
 # NOTE: The additional layer of abstraction is to
 # differentiate among
 # (1) WorkerMsg: push-pull (lmcache->controller)
-# (2) ControlMessage: req-reply (controller->lmcache)
-# (3) OrchMsg: req-reply (ochestrator->controller)
+# (2) WorkerReqMsg: req-reply (lmcache->controller) 
+# (3) ControlMessage: req-reply (controller->lmcache)
+# (4) OrchMsg: req-reply (ochestrator->controller)
+
+
 """Message from LMCache to Controller"""
-
-
 class WorkerMsg(MsgBase):
     """Message between LMCache and Controller"""
 
@@ -95,11 +96,39 @@ class HeartbeatMsg(RegisterMsg):
         return f"Heartbeat from instance {self.instance_id}, worker {self.worker_id}"
 
 
+"""Worker Request (requiring an reply) Message from LMcache to Controller"""
+class WorkerReqMsg(MsgBase):
+    def describe(self) -> str:
+        return ""
+
+class BatchedP2PLookupMsg(WorkerReqMsg):
+    """Batched P2P lookup message"""
+
+    hashes: list[int]
+    worker_id: int # TP rank
+
+    def describe(self) -> str:
+        return f"Batched P2P lookup for {len(self.keys)} keys, worker id {self.worker_id}"
+
+
+
+"""Worker Request Return Message from Controller back to LMCache"""
+class WorkerReqRetMsg(MsgBase):
+    def describe(self) -> str:
+        return ""
+
+class BatchedP2PLookupRetMsg(WorkerReqRetMsg):
+    """Batched P2P lookup return message"""
+
+    # (instance_id, location, num_hit_chunks, distributed_url)
+    layout_info: list[tuple[str, str, int, str]]
+
+    def describe(self) -> str:
+        return f"The layout info is {self.layout_info}"
+
+
 """Control Message from Controller to LMCache"""
-
-
 class ControlMsg(MsgBase):
-    """Message from Controller to LMCache"""
 
     def describe(self) -> str:
         return ""
@@ -535,4 +564,6 @@ Msg = Union[
     QueryInstMsg,
     QueryInstRetMsg,
     HeartbeatMsg,
+    BatchedP2PLookupMsg,
+    BatchedP2PLookupRetMsg,
 ]

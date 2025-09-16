@@ -180,7 +180,7 @@ class NixlChannel(BaseTransferChannel):
     # Initialization functions end
     ############################################################
 
-    def _get_local_mem_indices(
+    def get_local_mem_indices(
         self, data: Union[list[bytes], list[MemoryObj]]
     ) -> list[int]:
         local_indices = []
@@ -270,7 +270,7 @@ class NixlChannel(BaseTransferChannel):
         handle = self.nixl_agent.make_prepped_xfer(
             "WRITE",
             self.nixl_wrapper.xfer_handler,
-            self._get_local_mem_indices(data),
+            self.get_local_mem_indices(data),
             self.remote_xfer_handlers_dict[transfer_spec["receiver_id"]],
             transfer_spec["remote_indexes"],
         )
@@ -328,7 +328,7 @@ class NixlChannel(BaseTransferChannel):
         handle = self.nixl_agent.make_prepped_xfer(
             "WRITE",
             self.nixl_wrapper.xfer_handler,
-            self._get_local_mem_indices(data),
+            self.get_local_mem_indices(data),
             self.remote_xfer_handlers_dict[transfer_spec["receiver_id"]],
             transfer_spec["remote_indexes"],
         )

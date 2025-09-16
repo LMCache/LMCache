@@ -4,6 +4,8 @@ from dataclasses import dataclass
 
 # First Party
 from lmcache.v1.cache_controller.message import (
+    BatchedP2PLookupMsg,
+    BatchedP2PLookupRetMsg,
     CheckFinishMsg,
     CheckFinishRetMsg,
     ClearMsg,
@@ -51,10 +53,11 @@ class KVController:
         # TODO(Jiayi): remove this hardcode
         self.token_database = ChunkedTokenDatabase()
 
-    def post_init(self, cluster_executor):
+    def post_init(self, reg_controller, cluster_executor):
         """
         Post initialization of the KV controller.
         """
+        self.reg_controller = reg_controller
         self.cluster_executor = cluster_executor
 
     async def admit(self, msg: KVAdmitMsg) -> None:
@@ -159,6 +162,7 @@ class KVController:
         for start, end, key in self.token_database.process_tokens(
             tokens, make_key=False
         ):
+            # TODO(Jiayi): remove this string conversion
             key = str(key)
             if key not in self.kv_pool:
                 break
@@ -166,3 +170,41 @@ class KVController:
             matched_location = self.kv_pool[key][0].location
             layout_info[matched_instance] = (matched_location, end)
         return LookupRetMsg(layout_info=layout_info, event_id=msg.event_id)
+    
+    async def batched_p2p_lookup(
+        self, msg: BatchedP2PLookupMsg
+    ) -> BatchedP2PLookupRetMsg:
+        """
+        Perform batched P2P lookup for multiple keys.
+
+        :param BatchedP2PLookupMsg msg: The batched P2P lookup message containing keys.
+
+        :return: A BatchedP2PLookupRetMsg containing the lookup results.
+        """
+        results = {}
+        worker_id = msg.worker_id
+        num_hit_chunks = 0
+        instance_id = ""
+        location = ""
+        distributed_url = ""
+        for key in msg.hashes:
+            # TODO(Jiayi): remove this string conversion
+            key = str(key)
+            if key not in self.kv_pool:
+                break
+            
+            # TODO(Jiayi): Currently, we use the first rank's
+            # kv chunk metadata to do matching. The matching
+            # logic can be improved.
+
+            first_rank_kv_chunk_meta = self.kv_pool[key][0]
+            instance_id = first_rank_kv_chunk_meta.instance_id
+            location = first_rank_kv_chunk_meta.location
+            distributed_url = self.reg_controller.get_distributed_url(
+                instance_id, worker_id
+            )
+
+        return BatchedP2PLookupRetMsg(
+            layout_info=[
+                (instance_id, location, num_hit_chunks, distributed_url),
+            ]
