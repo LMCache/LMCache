@@ -2,22 +2,18 @@
 # Standard
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Union
-from urllib.parse import urljoin
-import dataclasses
 import os
 import threading
 import time
 
 # Third Party
 from prometheus_client import REGISTRY
-import numpy as np
 import prometheus_client
-import requests
 
 # First Party
 from lmcache.config import LMCacheEngineMetadata
-from lmcache.connections import global_http_connection
 from lmcache.logging import init_logger
+from lmcache.usage_context import ContinuousUsageContext
 from lmcache.utils import thread_safe
 
 logger = init_logger(__name__)
@@ -314,6 +310,7 @@ class LMCStatsMonitor:
 
         self.interval_requested_tokens = 0
         self.interval_hit_tokens = 0
+        self.interval_stored_tokens = 0
         self.interval_lookup_tokens = 0
         self.interval_lookup_hits = 0
         self.interval_vllm_hit_tokens = 0
@@ -982,85 +979,13 @@ class PrometheusLogger:
         return PrometheusLogger._instance
 
 
-@dataclass
-# follows naming convention in usage_context.py
-class CacheUsageMessage:
-    interval_num_stored_tokens: int
-    interval_num_hit_tokens: int
-    interval_stored_kv_size: int
-    message_type: str = "CacheUsageMessage"
-
-
-class LMCacheUsageTrackingLogger:
-    _instance = None
-
-    def __init__(self, metadata: LMCacheEngineMetadata):
-        self.metadata: LMCacheEngineMetadata = metadata
-        self.server_url: str = urljoin(
-            os.getenv("LMCACHE_USAGE_TRACK_URL", "http://stats.lmcache.ai:8080"),
-            "cache-usage",
-        )
-        logger.info(f"sending cache usage stats to {self.server_url}")
-        self.min_logging_interval: int = int(
-            os.getenv("LMCACHE_USAGE_TRACK_INTERVAL", "600")
-        )
-        # send the first message immediately after init
-        self.last_logged_ts: float = -1
-
-        self.interval_num_hit_tokens: int = 0
-        self.interval_num_stored_tokens: int = 0
-        self.kv_sz_per_token_bytes: int = int(
-            np.prod(self.metadata.kv_shape)
-            * self.metadata.kv_dtype.itemsize
-            / self.metadata.kv_shape[2]
-        )
-
-    @staticmethod
-    def GetOrCreate(metadata: LMCacheEngineMetadata) -> "LMCacheUsageTrackingLogger":
-        if LMCacheUsageTrackingLogger._instance is None:
-            LMCacheUsageTrackingLogger._instance = LMCacheUsageTrackingLogger(metadata)
-        if LMCacheUsageTrackingLogger._instance.metadata != metadata:
-            logger.error(
-                "LMCacheUsageTrackingLogger instance already created with"
-                "different metadata. This should not happen except "
-                "in test"
-            )
-        return LMCacheUsageTrackingLogger._instance
-
-    def send_caching_message(self):
-        msg: CacheUsageMessage = CacheUsageMessage(
-            interval_stored_kv_size=self.kv_sz_per_token_bytes
-            * self.interval_num_stored_tokens,
-            interval_num_hit_tokens=self.interval_num_hit_tokens,
-            interval_num_stored_tokens=self.interval_num_stored_tokens,
-        )
-        try:
-            global_http_client = global_http_connection.get_sync_client()
-            if self.server_url is not None:
-                logger.debug("caching usage message sent.")
-                global_http_client.post(
-                    f"{self.server_url}", json=dataclasses.asdict(msg), timeout=5
-                )
-        except requests.exceptions.RequestException:
-            logger.debug("Unable to send lmcache caching usage message...")
-
-    def incr_or_send_stats(self, stats: LMCacheStats):
-        self.interval_num_hit_tokens += stats.interval_hit_tokens
-        self.interval_num_stored_tokens += stats.interval_stored_tokens
-
-        cur_ts: float = time.monotonic()
-        if cur_ts - self.last_logged_ts >= self.min_logging_interval:
-            self.send_caching_message()
-            self.last_logged_ts = cur_ts
-
-
 class LMCacheStatsLogger:
     def __init__(self, metadata: LMCacheEngineMetadata, log_interval: int):
         self.metadata = metadata
         self.log_interval = log_interval
         self.monitor = LMCStatsMonitor.GetOrCreate()
         self.prometheus_logger = PrometheusLogger.GetOrCreate(metadata)
-        self.lmc_usage_logger = LMCacheUsageTrackingLogger.GetOrCreate(metadata)
+        self.lmc_usage_logger = ContinuousUsageContext.GetOrCreate(metadata)
         self.is_running = True
 
         self.thread = threading.Thread(target=self.log_worker, daemon=True)
