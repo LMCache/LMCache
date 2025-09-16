@@ -35,6 +35,7 @@ class FSConnector(RemoteConnector):
         base_paths_str: str,
         loop: asyncio.AbstractEventLoop,
         local_cpu_backend: LocalCPUBackend,
+        relative_tmp_dir: Optional[str],
     ):
         """
         Args:
@@ -51,14 +52,19 @@ class FSConnector(RemoteConnector):
 
         self.loop = loop
         self.local_cpu_backend = local_cpu_backend
+        self.relative_tmp_dir = None if relative_tmp_dir is None else Path(relative_tmp_dir)
+        if self.relative_tmp_dir is not None:
+            assert not self.relative_tmp_dir.is_absolute()
 
-        logger.info(f"Initialized FSConnector with base paths {self.base_paths}")
+        logger.info(f"Initialized FSConnector with base paths {self.base_paths}, relative tmp dir: {self.relative_tmp_dir}")
         # Create directories for all paths
         for path in self.base_paths:
             path.mkdir(parents=True, exist_ok=True)
+            if self.relative_tmp_dir is not None:
+                (path / self.relative_tmp_dir).mkdir(parents=False, exist_ok=True)
 
-    def _get_file_path(self, key: CacheEngineKey) -> Path:
-        """Get file path for the given key"""
+    def _get_file_path(self, key: CacheEngineKey, generate_tmp_path=False) -> (Path, Optional[Path]):
+        """Get file path and tmp path for the given key"""
         # If there's only one path, use it directly
         if len(self.base_paths) == 1:
             base_path = self.base_paths[0]
@@ -69,21 +75,28 @@ class FSConnector(RemoteConnector):
             base_path = self.base_paths[idx]
 
         key_path = key.to_string().replace("/", "-") + ".data"
-        return base_path / key_path
+        data_path = base_path / key_path
+        tmp_path = None
+        if generate_tmp_path:
+            if self.relative_tmp_dir is not None:
+                tmp_path = base_path / self.relative_tmp_dir / key_path
+            else:
+                tmp_path = data_path.with_suffix(".tmp")
+        return data_path, tmp_path
 
     async def exists(self, key: CacheEngineKey) -> bool:
         """Check if key exists in file system"""
-        file_path = self._get_file_path(key)
+        file_path, _ = self._get_file_path(key)
         return await aiofiles.os.path.exists(file_path)
 
     def exists_sync(self, key: CacheEngineKey) -> bool:
         """Check if key exists in file system synchronized"""
-        file_path = self._get_file_path(key)
+        file_path, _ = self._get_file_path(key)
         return os.path.exists(file_path)
 
     async def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         """Get data from file system"""
-        file_path = self._get_file_path(key)
+        file_path, _ = self._get_file_path(key)
 
         try:
             async with aiofiles.open(file_path, "rb") as f:
@@ -134,8 +147,7 @@ class FSConnector(RemoteConnector):
 
     async def put(self, key: CacheEngineKey, memory_obj: MemoryObj):
         """Store data to file system"""
-        final_path = self._get_file_path(key)
-        temp_path = final_path.with_suffix(".tmp")
+        final_path, temp_path = self._get_file_path(key, True)
 
         try:
             # Prepare metadata
