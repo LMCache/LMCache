@@ -6,15 +6,12 @@ chunk_size: 256
 local_cpu: true
 max_local_cpu_size: 64
 
+This_should_not_be_here: "just to test the config file"
+
 internal_api_server_enabled: true
-plugin_locations: ["/usr/local/lib/python3.12/dist-packages/lmcache_frontend/lmcache_plugin/scheduler_lmc_frontend_plugin.py"]
 internal_api_server_socket_path_prefix: "/tmp/lmcache_internal_api_server/socket"
 internal_api_server_include_index_list: [1]
 
 extra_config:
   save_only_first_rank: true
   first_rank_max_local_cpu_size: 64
-  plugin.frontend.port: 7020
-  plugin.frontend.heartbeat-url: "http://dopkvcache.manage.woa.com:8080/lmcache_heartbeat/"
-  plugin.frontend.heartbeat-initial-delay: 30
-  plugin.frontend.heartbeat-interval: 60
