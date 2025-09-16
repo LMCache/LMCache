@@ -119,7 +119,7 @@ run_lmcache_vllmopenai_container() {
     docker_args=(
         --runtime nvidia
         --network host
-        --gpus "device=${best_gpu}"
+        --gpus "\"device=${best_gpu}\""
         --volume ~/.cache/huggingface:/root/.cache/huggingface
         --env VLLM_USE_FLASHINFER_SAMPLER=0
         --env HF_TOKEN="$HF_TOKEN"
