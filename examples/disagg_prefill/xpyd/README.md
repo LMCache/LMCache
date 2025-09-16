@@ -65,7 +65,7 @@ python disagg_proxy_server.py \
 If you have vLLM [benchmark_serving.py](https://github.com/vllm-project/vllm/blob/main/benchmarks/benchmark_serving.py), you can run the following command to benchmark the serving performance of the disaggregated prefill setup:
 
 ```bash
-python benchmark_serving.py --port 9100 --seed $(date +%s) \
+vllm bench serve --port 9100 --seed $(date +%s) \
     --model meta-llama/Llama-3.1-8B-Instruct \
     --dataset-name random --random-input-len 7500 --random-output-len 200 \
     --num-prompts 30 --burstiness 100 --request-rate 1 --ignore-eos
