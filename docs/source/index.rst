@@ -142,7 +142,6 @@ Documentation
 :raw-html:`<br />`
 
 .. toctree::
-   :maxdepth: 2
    :caption: Developer Guide
 
    developer_guide/contributing
@@ -150,6 +149,7 @@ Documentation
    developer_guide/architecture
    developer_guide/integration
    developer_guide/extending_lmcache/index
+   developer_guide/extending_lmcache/plugin
    developer_guide/usage/index
 
 :raw-html:`<br />`
