@@ -114,7 +114,10 @@ class StorageManager:
         )
         self.thread.start()
 
-        dst_device = "cuda"
+        if torch.cuda.is_available():
+            dst_device = "cuda"
+        else:
+            dst_device = "cpu"
         self.storage_backends: OrderedDict[str, StorageBackendInterface] = (
             CreateStorageBackends(
                 config,
@@ -142,7 +145,10 @@ class StorageManager:
         self.async_lookup_server: Optional["LMCacheAsyncLookupServer"] = None
 
         # The cuda stream for internal copies during put
-        self.internal_copy_stream = torch.cuda.Stream()
+        if torch.cuda.is_available():
+            self.internal_copy_stream = torch.cuda.Stream()
+        else:
+            self.internal_copy_stream = None
 
     def post_init(self, **kwargs) -> None:
         if "async_lookup_server" in kwargs:
