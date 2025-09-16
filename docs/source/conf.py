@@ -70,7 +70,6 @@ add_module_names = False
 # html style
 html_title = project
 html_theme = "sphinxawesome_theme"
-# html_theme = "sphinx_rtd_theme"
 html_static_path = ["_static"]
 html_css_files = ["custom.css", "scroll.css"]
 html_favicon = "assets/lmcache-logo.png"

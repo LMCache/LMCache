@@ -60,7 +60,7 @@ Documentation
 -------------
 
 
-..toctree:
+.. toctree::
    :maxdepth: 1
    :caption: Welcome to LMCache
 
@@ -75,8 +75,6 @@ Documentation
    getting_started/benchmarking
    getting_started/troubleshoot
    getting_started/faq
-
-
    
 
 :raw-html:`<br />`
