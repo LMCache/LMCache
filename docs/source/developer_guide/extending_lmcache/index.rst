@@ -103,4 +103,10 @@ Key points and usage of the plugin system:
   - Validate any configuration input (from `LMCACHE_PLUGIN_CONFIG` or elsewhere) before use.
   - If a plugin performs lengthy operations, implement timeouts or periodic logging so you can detect if it hangs, and ensure it does not block LMCache’s normal operation.
 
-Together, these extension points – custom storage backends, remote connectors, and plugin scripts – let users tailor LMCache’s functionality and integrate with external systems in a modular, maintainable way.
+Together, these extension points – custom storage backends, remote connectors, and plugin scripts – let users tailor LMCache's functionality and integrate with external systems in a modular, maintainable way.
+
+.. toctree::
+   :maxdepth: 1
+   :caption: Extending LMCache
+
+   plugin

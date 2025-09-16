@@ -142,15 +142,15 @@ Documentation
 :raw-html:`<br />`
 
 .. toctree::
-   :maxdepth: 1
+   :maxdepth: 2
    :caption: Developer Guide
 
    developer_guide/contributing
    developer_guide/docker_file
    developer_guide/architecture
    developer_guide/integration
+   developer_guide/extending_lmcache/index
    developer_guide/usage/index
-   developer_guide/plugin_framework
 
 :raw-html:`<br />`
 
