@@ -12,3 +12,15 @@ Currently, the controller provides the following APIs:
 - :ref:`Move <move>`: Move the KV cache to a different location.
 - :ref:`Pin <pin>`: Persist the KV cache to prevent it from being evicted.
 - :ref:`CheckFinish <check_finish>`: Check whether a (non-blocking) control event has finished or not.
+
+.. toctree::
+   :maxdepth: 1
+   :hidden:
+
+   clear
+   compress
+   health
+   lookup
+   move
+   pin
+   check_finish
