@@ -155,6 +155,7 @@ class FSConnector(RemoteConnector):
     async def put(self, key: CacheEngineKey, memory_obj: MemoryObj):
         """Store data to file system"""
         final_path, temp_path = self._get_file_path(key, True)
+        assert temp_path is not None
 
         try:
             # Prepare metadata
