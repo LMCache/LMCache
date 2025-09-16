@@ -183,6 +183,9 @@ class LMCFlashInferSparseBackend(AttentionInterface):
     for efficient attention computation.
     """
 
+    # Workspace buffer size in bytes (128 MiB)
+    _WORKSPACE_BUFFER_SIZE_BYTES = 128 * 1024 * 1024
+
     def __init__(
         self,
         vllm_attn: Attention,
@@ -194,7 +197,7 @@ class LMCFlashInferSparseBackend(AttentionInterface):
         self.device = torch.device(f"cuda:{idx}")
 
         self.workspace_buffer = torch.empty(
-            128 * 1024 * 1024, dtype=torch.uint8, device="cuda:0"
+            self._WORKSPACE_BUFFER_SIZE_BYTES, dtype=torch.uint8, device=self.device
         )
 
         self.num_qo_heads = self.vllm_attn_impl.num_heads
