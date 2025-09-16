@@ -533,7 +533,6 @@ def _init_lmcache_engine(
 @dataclass
 class LMCacheConnectorMetadata(KVConnectorMetadata):
     requests: list[ReqMeta] = field(default_factory=list)
-    lookup_requests_in_step: list[str] = field(default_factory=list)
 
     @_lmcache_nvtx_annotate
     def add_request(self, req_meta: ReqMeta) -> None:
@@ -571,7 +570,6 @@ class LMCacheConnectorV1Impl:
                 vllm_config, config
             )
             self._unfinished_requests: dict[str, Request] = {}
-            self._lookup_requests_in_step: list[str] = []
             self.lmcache_engine = None
         else:
             self.lmcache_engine = _init_lmcache_engine(
@@ -1203,10 +1201,6 @@ class LMCacheConnectorV1Impl:
         force_skip_save = self.kv_role == "kv_consumer" or self.force_skip_save
 
         meta = LMCacheConnectorMetadata()
-
-        # set and update lookup requests for unpin
-        meta.lookup_requests_in_step = self._lookup_requests_in_step
-        self._lookup_requests_in_step = []
 
         for finished_req_id in scheduler_output.finished_req_ids:
             self._request_trackers.pop(finished_req_id, None)
