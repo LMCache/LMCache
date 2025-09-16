@@ -3,6 +3,7 @@
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urljoin
 import importlib.metadata
 import os
 import platform
@@ -254,7 +255,9 @@ def InitializeUsageContext(
     metadata: LMCacheEngineMetadata,
     local_log: Optional[str] = None,
 ):
-    server_url = "http://stats.lmcache.ai:8080/endpoint"
+    server_url = urljoin(
+        os.getenv("LMCACHE_USAGE_TRACK_URL", "http://stats.lmcache.ai:8080"), "context"
+    )
     if os.getenv("LMCACHE_TRACK_USAGE") == "false":
         return None
     else:
