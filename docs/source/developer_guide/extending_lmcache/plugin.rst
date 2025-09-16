@@ -69,7 +69,7 @@ Example Plugins
 ---------------
 Python Plugin (``scheduler_foo_plugin.py``):
 
-.. literalinclude:: ../../../..//examples/plugins/scheduler_foo_plugin.py
+.. literalinclude:: ../../../../examples/plugins/scheduler_foo_plugin.py
    :language: python
    :linenos:
 
