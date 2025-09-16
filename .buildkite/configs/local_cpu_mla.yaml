@@ -21,8 +21,6 @@ vllm:
     - "2"
     - "--block-size"
     - "64"
-    - "--enable-expert-parallel"
-    - "--enable-eplb"
     - "--kv-cache-dtype"
     - "fp8_e4m3"
     - "--quantization"
