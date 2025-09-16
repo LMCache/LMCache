@@ -1,15 +1,11 @@
-.. _plugin_framework:
+Extending LMCache
+=================
 
-LMCache Plugin Framework
-=========================
+LMCache is designed to be extensible, allowing integration of custom functionality without modifying the core. The main extension mechanisms are:
 
-Plugin and Backend Extensibility
---------------------------------
-
-.. note::
-   This section is partially AI-generated and may not be 100% accurate. We welcome contributions to improve the documentation.
-
-LMCache is designed to be extensible, allowing integration of custom storage backends and plugin scripts without modifying core code. The diagram illustrates two primary extension mechanisms:
+- **External Storage Backend Framework** – integrate new storage backends (custom cache storage modules) via a standardized interface.
+- **External Remote Connector Framework** – integrate new remote KV store connectors for external/distributed storage systems.
+- **Plugin Framework** – run custom scripts as separate processes alongside LMCache for added functionality.
 
 .. mermaid::
 
@@ -18,118 +14,93 @@ LMCache is designed to be extensible, allowing integration of custom storage bac
          direction TB
          core["LMCache Core Engine (Cache Manager & APIs)"]
          pluginMgr["Plugin Launcher"]
-         backendMgr["StorageBackend Interface"]
+         backendMgr["Storage Backend Interface"]
       end
 
-      pluginMgr -->|"start"| Plugin1["Custom Plugin Script 1"]
-      pluginMgr -->|"start"| Plugin2["Custom Plugin Script 2"]
+      pluginMgr -->|"launch"| plugin1["Custom Plugin Script 1"]
+      pluginMgr -->|"launch"| plugin2["Custom Plugin Script 2"]
 
-      backendMgr --> CPUBackend[["CPU Memory Backend"]]
+      backendMgr --> CPUBackend[["In-Memory CPU Backend"]]
       backendMgr --> DiskBackend[["Local Disk Backend"]]
-      backendMgr --> RemoteBackend[["Built-in Remote Backends (Redis, InfiniStore, etc.)"]]
-      backendMgr --> CustomBackend[["External Backend (via plugin)"]]
+      backendMgr --> NIXLBackend[["NIXL Peer Backend"]]
+      backendMgr --> RemoteBackend[["Remote Backend (built-in connectors)"]]
+      backendMgr --> CustomBackend[["External Backend"]]
 
+      RemoteBackend --> RedisConnector[["Redis Connector (built-in)"]]
+      RemoteBackend --> InfiniConnector[["InfiniStore Connector (built-in)"]]
+      RemoteBackend --> MooncakeConnector[["Mooncake Connector (built-in)"]]
+      RemoteBackend --> CustomConnector[["External Connector"]]
 
-**Storage Backend Extensions** (bottom) enable LMCache to interface with new storage or transport systems. Developers can implement the standardized ``StorageBackendInterface`` to create an External Backend (custom storage module), which LMCache will load and use. This is in addition to the built-in backends that ship with LMCache:
+**External Storage Backends** (bottom section of diagram) enable LMCache to interface with new storage or transport systems. Developers can implement the standardized ``StorageBackendInterface`` to create a custom storage backend module. Such external backends are loaded by LMCache at runtime (via configuration) in addition to the built-in backends that ship with LMCache. Built-in backends include in-memory CPU caching, local disk storage, NVIDIA NIXL (GPU peer-to-peer), and remote stores like Redis, InfiniStore, Mooncake, etc.
 
-- In-memory CPU cache
-- Local disk storage
-- NVIDIA NIXL for peer transfers
-- Remote stores (Redis, Mooncake, etc.)
+To add an external backend, you need to:
 
-**Plugin Framework** (top) allows running custom scripts alongside LMCache processes. A plugin can be targeted to the scheduler (controller) or to workers (or all nodes), and runs as a separate process launched by LMCache. Plugins (written in Python, Bash, etc.) can perform tasks such as:
+1. **Implement** a Python class inheriting from the LMCache ``StorageBackendInterface``, overriding all required methods.
+2. **Install** this backend package in the LMCache environment (so that LMCache can import it).
+3. **Configure** LMCache to use it by adding an entry to the `external_backends` list and specifying the module path and class name in the configuration’s `extra_config`. For example:
 
-- Logging and metrics reporting
-- Custom cache management logic
-- Health checks and service discovery
-- Observing and interacting with the running LMCache instance
+   .. code-block:: yaml
 
-Together, these extension points let users tailor LMCache's functionality and integrate with external systems in a modular way.
+      external_backends: ["my_custom_backend"]
+      extra_config:
+         external_backend.my_custom_backend.module_path: my_package.my_backend_module
+         external_backend.my_custom_backend.class_name: MyCustomBackendClass
 
-Plugin System Overview
-----------------------
+Multiple external backends can be enabled simultaneously. They are initialized during LMCache startup. Note that the order of backends can matter: if multiple backends are used, earlier listed backends have higher priority for cache lookups (i.e. LMCache will check those backends first when retrieving KV entries).
 
-The LMCache plugin system allows developers to extend functionality by running custom scripts alongside LMCache processes. Plugins can be written in Python and Bash for now, and are managed by the ``PluginLauncher`` class.
+**External Remote Connectors** (middle section of diagram) allow LMCache’s remote storage layer to connect to new external KV storage systems. The LMCache `RemoteBackend` uses connector implementations to communicate with various external stores. For example, built-in connectors exist for Redis, InfiniStore, and MooncakeStore. To extend LMCache with a new remote connector, you should:
 
-Key Use Cases
--------------
-- Start metric reporters for centralized monitoring
-- Implement log reporters for log collection systems
-- Report process-level metrics to alerting systems
-- Implement health checks and service discovery
-- Custom cache management operations
+1. **Implement** a class following LMCache’s remote connector interface (similar to existing connectors). This typically involves subclassing the `RemoteConnector` base and providing methods to connect, put, get, etc., for your storage system.
+2. **Expose** your connector for dynamic loading. Each remote connector is associated with a URI scheme in the `remote_url`. For instance, if you create a connector for a new storage called “FooStore” with scheme `foo://`, you will want LMCache to use your class whenever a remote URL starts with `foo://`.
+3. **Configure** LMCache to recognize and load the connector. In recent versions, LMCache supports dynamic loading of external connectors via configuration. For example, you might include in `extra_config`:
 
-Configuration
--------------
-Plugins are configured through environment variables and configuration files:
+   .. code-block:: yaml
 
-Environment Variables:
-- ``LMCACHE_PLUGIN_ROLE``: Process role (e.g., ``SCHEDULER``, ``WORKER``)
-- ``LMCACHE_PLUGIN_CONFIG``: JSON string containing plugin configuration
-- ``LMCACHE_PLUGIN_WORKER_ID``: Current worker ID
-- ``LMCACHE_PLUGIN_WORKER_COUNT``: Total worker count in cluster
+      # Enable custom remote connector for scheme "foo"
+      external_connector.foo.module_path: my_package.my_foostore_connector
+      external_connector.foo.class_name: FooStoreConnector
 
-Configuration File (``lmcache.yaml``):
+   With this configuration, when LMCache sees a `remote_url` like `foo://...`, it will import and use the `FooStoreConnector` class for remote operations.
 
-.. code-block:: yaml
+By implementing a custom connector and configuring it as above, you can integrate new remote backends (databases, distributed KV stores, etc.) without changing LMCache’s core code. The `RemoteConnector` interface typically handles connection setup, data serialization, read/write operations, and error handling for the external store.
 
-    plugin_locations: ["/path/to/plugins"]
-    extra_config:
-      custom_setting: value
+**Plugin Framework** (top section of diagram) allows running custom scripts alongside LMCache processes. A plugin is launched as a separate subprocess by LMCache’s plugin launcher. Plugins can target specific LMCache roles – the scheduler (controller), worker processes, or all nodes – depending on their filename. They can be written in Python, Bash, or other scripting languages, and are useful for tasks such as logging and metrics, custom cache management policies, health checks, or integration with external systems.
 
-Plugin Naming Convention
-------------------------
-Plugin filenames determine execution targets:
+Key points and usage of the plugin system:
 
-Role-Specific Plugins:
-- Format: ``<ROLE>[_<WORKER_ID>][_<DESCRIPTION>].<EXTENSION>``
-- Examples:
+- **Configuration:** You can enable plugins via environment variables and the LMCache config file. Set the `plugin_locations` in your YAML config to point to directories containing plugin scripts. For example:
 
-  - ``scheduler_foo_plugin.py``: Runs only on ``SCHEDULER``
-  - ``worker_0_test.sh``: Runs only on worker ID 0
-  - ``all_plugin.sh``: Runs on all workers
+  .. code-block:: yaml
 
-Notes:
-- Role names are case-insensitive
-- Worker ID must be numeric when specified
-- To target a specific worker ID, the filename must have at least three parts separated by underscores (e.g., `worker_<ID>_<DESCRIPTION>.ext`). A file named `worker_<DESCRIPTION>.ext` will run on all workers.
+     plugin_locations: ["/path/to/plugins"]
+     extra_config:
+        # (optional plugin-specific settings)
 
-Execution Model
----------------
-1. **Interpreter Detection**:
-   - Uses shebang line (e.g., ``#!/opt/venv/bin/python``)
-   - Fallback interpreters:
+  At runtime, LMCache will scan these directories for plugin files.
 
-     - ``.py`` → ``python``
-     - ``.sh`` → ``bash``
+- **Environment Variables:** LMCache provides context to plugins through env vars:
+  - `LMCACHE_PLUGIN_ROLE`: the process role (e.g. `SCHEDULER` or `WORKER`) in which the plugin is running.
+  - `LMCACHE_PLUGIN_CONFIG`: a JSON string for any plugin configuration passed through LMCache.
+  - `LMCACHE_PLUGIN_WORKER_ID`: the ID of the current worker (if running on a worker).
+  - `LMCACHE_PLUGIN_WORKER_COUNT`: total number of worker processes in the LMCache cluster.
 
-2. **Output Handling**:
-   - Stdout/stderr captured continuously
-   - Logged with plugin name prefix
+- **Naming Conventions:** Plugin filenames determine where they execute:
+  - Files prefixed with **`scheduler_`** run only on the scheduler process. *(Example: `scheduler_metrics.py` runs on the scheduler only.)*
+  - Files prefixed with **`worker_`** run on worker processes. If a numeric worker ID is included (e.g. `worker_0_health.sh`), the plugin runs only on that specific worker. If no ID is included (e.g. `worker_logcollector.py`), the plugin will run on **all** workers.
+  - Files prefixed with **`all_`** (or any file without a role prefix) run on all LMCache processes (both the scheduler and every worker). *(Example: `all_monitor.sh` runs on every LMCache node.)*
+  - Role names in filenames are case-insensitive. Ensure worker ID (if specified) is numeric and part of the filename (with underscores separating, e.g. `worker_2_custom.py` has three parts, which targets worker ID 2 specifically).
 
-3. **Process Management**:
-   - Launched as subprocesses
-   - Terminated when parent process exits
+- **Execution Model:** When LMCache starts up, the `PluginLauncher` locates and starts each plugin as a subprocess:
+  1. **Interpreter Selection:** The plugin launcher checks the script’s shebang (e.g. `#!...`) to decide which interpreter to use. If no shebang is provided, it falls back on the file extension (``.py`` uses the default Python interpreter, ``.sh`` uses Bash, etc.).
+  2. **Output Handling:** Stdout and stderr from the plugin processes are captured by LMCache and logged with a prefix (the plugin name), so plugin output appears in LMCache logs for easy debugging/monitoring.
+  3. **Lifecycle:** Plugins are launched when the LMCache process starts (if their naming indicates they should run in that process). They will be automatically terminated when the parent LMCache process exits, ensuring no orphan processes.
 
-Example Plugins
----------------
-Python Plugin (``scheduler_foo_plugin.py``):
+- **Best Practices:** When writing plugins, consider the following guidelines to ensure they work smoothly with LMCache:
+  - Keep plugins lightweight in terms of resource usage and startup time, so they don’t slow down the LMCache process.
+  - Use clear and descriptive filenames to reflect their purpose.
+  - Include proper error handling within your plugin script to avoid unhandled exceptions causing issues.
+  - Use a shebang line at the top of the script for portability (so the correct interpreter is invoked).
+  - Validate any configuration input (from `LMCACHE_PLUGIN_CONFIG` or elsewhere) before use.
+  - If a plugin performs lengthy operations, implement timeouts or periodic logging so you can detect if it hangs, and ensure it does not block LMCache’s normal operation.
 
-.. literalinclude:: ../../../examples/plugins/scheduler_foo_plugin.py
-   :language: python
-   :linenos:
-
-Bash Plugin (``all_plugin.sh``):
-
-.. literalinclude:: ../../../examples/plugins/all_plugin.sh
-   :language: bash
-   :linenos:
-
-Best Practices
---------------
-1. Keep plugins lightweight and efficient
-2. Use descriptive naming conventions
-3. Implement graceful error handling
-4. Include shebang for portability
-5. Validate configuration inputs
-6. Add timeout mechanisms for long operations
+Together, these extension points – custom storage backends, remote connectors, and plugin scripts – let users tailor LMCache’s functionality and integrate with external systems in a modular, maintainable way.
