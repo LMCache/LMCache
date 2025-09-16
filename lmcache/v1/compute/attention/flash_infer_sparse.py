@@ -9,7 +9,7 @@ from flashinfer.page import block_sparse_indices_to_vector_sparse_offsets
 from flashinfer.utils import (
     TensorLayout,
     _check_pos_encoding_mode,
-    _check_shape_dtype_device,
+    check_shape_dtype_device,
     device_support_pdl,
 )
 from vllm.attention import Attention
@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from lmcache.v1.compute.attention.metadata import LMCAttnMetadata
 
 
+# NOTE(Jiayi): This flashinfer version is 0.3.1.
 class HackBSAWrapper(VariableBlockSparseAttentionWrapper):
     def run(
         self,
@@ -103,14 +104,14 @@ class HackBSAWrapper(VariableBlockSparseAttentionWrapper):
                     (q.size(0), q.size(1)), dtype=torch.float32, device=q.device
                 )
             else:
-                _check_shape_dtype_device(
+                check_shape_dtype_device(
                     lse, (q.size(0), q.size(1)), torch.float32, q.device, "lse"
                 )
 
         if out is None:
             out = torch.empty_like(q, dtype=self._o_dtype)
         else:
-            _check_shape_dtype_device(out, q.shape, self._o_dtype, q.device, "out")
+            check_shape_dtype_device(out, q.shape, self._o_dtype, q.device, "out")
 
         if self._backend == "fa3":
             if (
@@ -182,6 +183,9 @@ class LMCFlashInferSparseBackend(AttentionInterface):
     for efficient attention computation.
     """
 
+    # Workspace buffer size in bytes (128 MiB)
+    _WORKSPACE_BUFFER_SIZE_BYTES = 128 * 1024 * 1024
+
     def __init__(
         self,
         vllm_attn: Attention,
@@ -193,7 +197,7 @@ class LMCFlashInferSparseBackend(AttentionInterface):
         self.device = torch.device(f"cuda:{idx}")
 
         self.workspace_buffer = torch.empty(
-            128 * 1024 * 1024, dtype=torch.uint8, device="cuda:0"
+            self._WORKSPACE_BUFFER_SIZE_BYTES, dtype=torch.uint8, device=self.device
         )
 
         self.num_qo_heads = self.vllm_attn_impl.num_heads

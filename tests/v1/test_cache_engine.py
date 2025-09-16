@@ -1265,3 +1265,89 @@ def test_builder_destroy_multiple_instances(autorelease_v1):
 
     # Clean up second instance
     LMCacheEngineBuilder.destroy(instance_id2)
+
+
+@pytest.mark.skip(reason="Skipping this until we have GDS on CI machine")
+def test_multi_device_backends(autorelease_v1):
+    """Test running GPU-related backend with local CPU backends
+    together
+    """
+    device = "cuda"
+    num_tokens = 2000
+    num_blocks = 1000
+    block_size = 16
+    dtype = torch.bfloat16
+
+    connector = create_gpu_connector(1024, 32)
+    metadata = dumb_metadata()
+    metadata.model_name = "test-model"  # NOTE: Gds does not accept name with '_'
+
+    tokens = generate_tokens(num_tokens, device)
+
+    kv_cache = generate_kv_cache_paged_list_tensors(
+        num_blocks, device, block_size, dtype
+    )
+    retrieved_cache = generate_kv_cache_paged_list_tensors(
+        num_blocks, device, block_size, dtype
+    )
+
+    original_retrieved_cache = deepcopy(retrieved_cache)
+
+    slot_mapping = random.sample(range(0, num_blocks * block_size), num_tokens)
+    slot_mapping = torch.tensor(slot_mapping, device=device)
+
+    # Check the kv cache and the retrieval buffer are not the same
+    check_paged_kv_cache_equal(retrieved_cache, original_retrieved_cache, slot_mapping)
+    with pytest.raises(AssertionError):
+        check_paged_kv_cache_equal(retrieved_cache, kv_cache, slot_mapping)
+
+    homedir = os.environ.get("HOME", "/tmp")
+    with tempfile.TemporaryDirectory(
+        dir=homedir, ignore_cleanup_errors=True
+    ) as temp_dir:
+        cfg = LMCacheEngineConfig.from_dict(
+            {
+                "local_cpu": True,
+                "max_local_cpu_size": 5,
+                "gds_path": temp_dir,
+                "cufile_buffer_size": 1024,
+            }
+        )
+        connector = create_gpu_connector(1024, 32)
+
+        engine = autorelease_v1(
+            LMCacheEngineBuilder.get_or_create(
+                "engine",
+                cfg,
+                metadata,
+                connector,
+                mock_up_broadcast_fn,
+                mock_up_broadcast_object_fn,
+            )
+        )
+
+        """ test store """
+        engine.store(tokens=tokens, kvcaches=kv_cache, slot_mapping=slot_mapping)
+        recover_engine_states(engine)
+        time.sleep(3)  # wait a bit to finish the store
+
+        """ Test lookup """
+        ret = engine.lookup(tokens)
+        assert ret == len(tokens)
+
+        ret_cpu = engine.lookup(tokens, search_range=["LocalCPUBackend"])
+        assert ret_cpu == len(tokens)
+
+        ret_gds = engine.lookup(tokens, search_range=["GdsBackend"])
+        assert ret_gds == len(tokens)
+
+        """ Test retrieve """
+        ret_mask = engine.retrieve(
+            tokens, kvcaches=retrieved_cache, slot_mapping=slot_mapping
+        )
+        recover_engine_states(engine)
+        length = torch.sum(ret_mask)
+        assert length == num_tokens
+        check_paged_kv_cache_equal(retrieved_cache, kv_cache, slot_mapping)
+
+        LMCacheEngineBuilder.destroy("engine")

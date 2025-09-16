@@ -100,6 +100,8 @@ ENV MAX_JOBS=${max_jobs}
 ARG nvcc_threads=8
 ENV NVCC_THREADS=$nvcc_threads
 
+ARG VLLM_VERSION=nightly
+
 RUN --mount=type=cache,target=/root/.cache/pip \
     . /opt/venv/bin/activate && \
     uv pip install -r build.txt
@@ -111,15 +113,18 @@ WORKDIR /workspace/LMCache
 
 # Build LMCache.
 # As we are installing vLLM before LMCache, we will implicitly use
-# the same torch version as the vLLM nightly build when running the LMCache build.
+# the same torch version as the vLLM build when running the LMCache build.
 # This means that LMCache is in sync with the vLLM torch version.
-# Stable vLLM release will be used if nightly build is not available.
 RUN --mount=type=cache,target=/root/.cache/ccache,id=ccache \
     --mount=type=cache,target=/root/.cache/uv,id=uv-cache,sharing=locked \
     . /opt/venv/bin/activate && \
-    uv pip install --prerelease=allow 'vllm[runai,tensorizer]' \
-        --extra-index-url https://wheels.vllm.ai/nightly \
-        --index-strategy unsafe-best-match && \
+    if [ "$VLLM_VERSION" = "nightly" ]; then \
+        uv pip install --prerelease=allow 'vllm[runai,tensorizer]' \
+            --extra-index-url https://wheels.vllm.ai/nightly \
+            --index-strategy unsafe-best-match ; \
+    else \
+        uv pip install --prerelease=allow "vllm[runai,tensorizer]==${VLLM_VERSION}" ; \
+    fi && \
     python3 -c 'import torch; print("TORCH=", torch.__version__)' && \
     python3 setup.py bdist_wheel --dist-dir=dist_lmcache && \
     uv pip install ./dist_lmcache/*.whl --verbose

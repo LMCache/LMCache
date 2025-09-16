@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import Optional
+from typing import Optional, Union
 
 # Third Party
 import torch
@@ -40,11 +40,13 @@ class LMCBlender:
         # TODO: remove this hardcode
         self.num_layers = len(vllm_model.model.layers)
 
-        # TODO (Jiayi): make this less hard-coded
+        # TODO(Jiayi): support threshold-based blending
+        # TODO(Jiayi): support different ratios for different layers
+        # TODO(Jiayi): support "skipping blending if hit too short"
         self.common_metadata = LMCBlendCommonMetadata(
-            check_layers=[1],
-            recomp_ratios=[0.15],
-            thresholds=None,
+            check_layers=config.blend_check_layers,
+            recomp_ratios=config.blend_recompute_ratios,
+            thresholds=config.blend_thresholds,
         )
 
         # This will be set during the blending process
@@ -148,13 +150,17 @@ class LMCBlender:
 
     def blend(
         self,
-        tokens: torch.Tensor,
+        tokens: Union[torch.Tensor, list[int]],
         mask: Optional[torch.Tensor] = None,
         **kwargs,
     ):
         """
         Perform blending for the given tokens.
         """
+
+        if isinstance(tokens, list):
+            tokens = torch.tensor(tokens).cuda()
+
         layerwise_blender = self.blend_layer(tokens, mask, **kwargs)
 
         for i in range(self.num_layers + 2):

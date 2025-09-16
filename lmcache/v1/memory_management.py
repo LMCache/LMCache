@@ -634,11 +634,14 @@ class MemoryAllocatorInterface(metaclass=abc.ABCMeta):
         """
         return
 
-    def memcheck(self):
+    def memcheck(self) -> bool:
         """
         Checks the memory allocator for consistency.
+
+        Returns:
+            True if everything is fine otherwise False
         """
-        return
+        return True
 
 
 class TensorMemoryAllocator(MemoryAllocatorInterface):
@@ -1796,10 +1799,10 @@ class CuFileMemoryAllocator(GPUMemoryAllocator):
         return "CuFileMemoryAllocator"
 
 
-class PDCPUMemoryAllocator(MemoryAllocatorInterface):
+class PDMemoryAllocator(MemoryAllocatorInterface):
     """
-    PD + CPU Memory Allocator
-    This is a special allocator makes pd and cpu compatible.
+    PD Memory Allocator
+    This is a paged memory allocator for PD (especially for NIXL).
     """
 
     def __init__(self):
@@ -1819,12 +1822,6 @@ class PDCPUMemoryAllocator(MemoryAllocatorInterface):
             fmt,
         )
 
-    def init_cpu_memory_allocator(
-        self,
-        size: int,
-    ):
-        self.cpu_allocator = MixedMemoryAllocator(size)
-
     def allocate(
         self,
         shape: Union[torch.Size, Tuple[int, ...]],
@@ -1834,8 +1831,6 @@ class PDCPUMemoryAllocator(MemoryAllocatorInterface):
     ) -> Optional[MemoryObj]:
         if allocator_type == "gpu":
             return self.gpu_allocator.allocate(shape, dtype, fmt)
-        elif allocator_type == "cpu":
-            return self.cpu_allocator.allocate(shape, dtype, fmt)
         else:
             raise ValueError(f"Unsupported allocator type: {allocator_type}")
 
@@ -1849,16 +1844,12 @@ class PDCPUMemoryAllocator(MemoryAllocatorInterface):
     ) -> Optional[List[MemoryObj]]:
         if allocator_type == "gpu":
             return self.gpu_allocator.batched_allocate(shape, dtype, batch_size, fmt)
-        elif allocator_type == "cpu":
-            return self.cpu_allocator.batched_allocate(shape, dtype, batch_size, fmt)
         else:
             raise ValueError(f"Unsupported allocator type: {allocator_type}")
 
     def free(self, memory_obj: MemoryObj, allocator_type: Optional[str] = "cpu"):
         if allocator_type == "gpu":
             self.gpu_allocator.free(memory_obj)
-        elif allocator_type == "cpu":
-            self.cpu_allocator.free(memory_obj)
         else:
             raise ValueError(f"Unsupported allocator type: {allocator_type}")
 
@@ -1870,8 +1861,6 @@ class PDCPUMemoryAllocator(MemoryAllocatorInterface):
     ):
         if allocator_type == "gpu":
             self.gpu_allocator.batched_free(memory_objs, update_stats=update_stats)
-        elif allocator_type == "cpu":
-            self.cpu_allocator.batched_free(memory_objs, update_stats=update_stats)
         else:
             raise ValueError(f"Unsupported allocator type: {allocator_type}")
 

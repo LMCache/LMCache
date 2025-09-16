@@ -39,6 +39,19 @@ def _to_int_list(
     return [int(p) for p in parts]
 
 
+def _to_float_list(
+    value: Optional[Union[str, float, list[Any]]],
+) -> Optional[list[float]]:
+    if value is None:
+        return None
+    if isinstance(value, list):
+        return [float(x) for x in value]
+    if isinstance(value, float):
+        return [value]
+    parts = [p.strip() for p in str(value).split(",") if p.strip()]
+    return [float(p) for p in parts]
+
+
 def _to_str_list(
     value: Optional[Union[str, list[str]]],
 ) -> Optional[list[str]]:
@@ -113,7 +126,21 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "default": False,
         "env_converter": _to_bool,
     },
-    "blend_recompute_ratio": {"type": float, "default": 0.15, "env_converter": float},
+    "blend_recompute_ratios": {
+        "type": Optional[list[float]],
+        "default": None,
+        "env_converter": _to_float_list,
+    },
+    "blend_thresholds": {
+        "type": Optional[list[float]],
+        "default": None,
+        "env_converter": _to_float_list,
+    },
+    "blend_check_layers": {
+        "type": list[int],
+        "default": None,
+        "env_converter": _to_int_list,
+    },
     "blend_min_tokens": {"type": int, "default": 256, "env_converter": int},
     "blend_special_str": {"type": str, "default": " # # ", "env_converter": str},
     # P2P configurations
@@ -354,6 +381,7 @@ def _create_config_class():
             "from_legacy": classmethod(_from_legacy),
             "from_file": classmethod(_from_file),
             "from_env": classmethod(_from_env),
+            "update_config_from_env": _update_config_from_env,
             "__str__": lambda self: str(
                 {name: getattr(self, name) for name in _CONFIG_DEFINITIONS}
             ),
@@ -420,7 +448,7 @@ def _to_original_config(self):
         pipelined_backend=False,
         save_decode_cache=self.save_decode_cache,
         enable_blending=self.enable_blending,
-        blend_recompute_ratio=self.blend_recompute_ratio,
+        blend_recompute_ratio=0.15,
         blend_min_tokens=self.blend_min_tokens,
         blend_separator="[BLEND_SEP]",
         blend_add_special_in_precomp=False,
@@ -537,8 +565,8 @@ def _from_file(cls, file_path: str):
     return instance.log_config()
 
 
-def _from_env(cls):
-    """Load configuration from environment variables"""
+def _update_config_from_env(self):
+    """Update an existing config object with environment variable configurations."""
 
     def get_env_name(attr_name: str) -> str:
         return f"LMCACHE_{attr_name.upper()}"
@@ -561,21 +589,24 @@ def _from_env(cls):
     # Resolve aliases and handle deprecated configurations
     resolved_config = _resolve_config_aliases(env_config, "environment variables")
 
-    config_values = {}
+    # Update config object with environment values
     for name, config in _CONFIG_DEFINITIONS.items():
-        value = resolved_config.get(name, config["default"])
-
-        # Convert environment variable values
         if name in resolved_config:
             try:
-                value = config["env_converter"](value)
+                value = resolved_config[name]
+                converted_value = config["env_converter"](value)
+                setattr(self, name, converted_value)
             except (ValueError, json.JSONDecodeError) as e:
                 logger.warning(f"Failed to parse {get_env_name(name)}: {e}")
-                value = config["default"]
+                # Keep existing value if conversion fails
 
-        config_values[name] = value
+    return self
 
-    instance = cls(**config_values)
+
+def _from_env(cls):
+    """Load configuration from environment variables"""
+    instance = cls.from_defaults()
+    _update_config_from_env(instance)
     return instance.log_config()
 
 
