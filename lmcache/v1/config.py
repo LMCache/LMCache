@@ -74,7 +74,14 @@ def _to_bool(
 # Configuration aliases and deprecated mappings
 _CONFIG_ALIASES = {
     # Maps deprecated names to current names
-    "nixl_peer_port": "nixl_receiver_port",
+    "enable_xpyd": "enable_pd",
+    "nixl_peer_host": "pd_peer_host",
+    "nixl_peer_init_port": "pd_peer_init_port",
+    "nixl_peer_alloc_port": "pd_peer_alloc_port",
+    "nixl_proxy_host": "pd_proxy_host",
+    "nixl_proxy_port": "pd_proxy_port",
+    "nixl_buffer_size": "pd_buffer_size",
+    "nixl_role": "pd_role",
 }
 
 _DEPRECATED_CONFIGS = {
