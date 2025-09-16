@@ -121,6 +121,7 @@ run_lmcache_vllmopenai_container() {
         --network host
         --gpus "\"device=${best_gpu}\""
         --volume ~/.cache/huggingface:/root/.cache/huggingface
+        --volume "${CONFIG_DIR}/lmcache_config.yaml:/etc/lmcache/config.yaml:ro"
         --env VLLM_USE_FLASHINFER_SAMPLER=0
         --env HF_TOKEN="$HF_TOKEN"
     )
@@ -169,6 +170,7 @@ run_pd_lmcache() {
         --network host
         --gpus "device=0"
         --volume ~/.cache/huggingface:/root/.cache/huggingface
+        --volume "${CONFIG_DIR}/lmcache_config.yaml:/etc/lmcache/config.yaml:ro"
         --env VLLM_USE_FLASHINFER_SAMPLER=0
         --env HF_TOKEN="$HF_TOKEN"
         --env UCX_TLS=cuda_ipc,cuda_copy,tcp
@@ -212,6 +214,7 @@ run_pd_lmcache() {
         --network host
         --gpus "device=1"
         --volume ~/.cache/huggingface:/root/.cache/huggingface
+        --volume "${CONFIG_DIR}/lmcache_config.yaml:/etc/lmcache/config.yaml:ro"
         --env VLLM_USE_FLASHINFER_SAMPLER=0
         --env HF_TOKEN="$HF_TOKEN"
         --env UCX_TLS=cuda_ipc,cuda_copy,tcp
