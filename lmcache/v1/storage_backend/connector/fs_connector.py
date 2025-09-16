@@ -52,18 +52,25 @@ class FSConnector(RemoteConnector):
 
         self.loop = loop
         self.local_cpu_backend = local_cpu_backend
-        self.relative_tmp_dir = None if relative_tmp_dir is None else Path(relative_tmp_dir)
+        self.relative_tmp_dir = (
+            None if relative_tmp_dir is None else Path(relative_tmp_dir)
+        )
         if self.relative_tmp_dir is not None:
             assert not self.relative_tmp_dir.is_absolute()
 
-        logger.info(f"Initialized FSConnector with base paths {self.base_paths}, relative tmp dir: {self.relative_tmp_dir}")
+        logger.info(
+            f"Initialized FSConnector with base paths {self.base_paths}, "
+            f"relative tmp dir: {self.relative_tmp_dir}"
+        )
         # Create directories for all paths
         for path in self.base_paths:
             path.mkdir(parents=True, exist_ok=True)
             if self.relative_tmp_dir is not None:
                 (path / self.relative_tmp_dir).mkdir(parents=False, exist_ok=True)
 
-    def _get_file_path(self, key: CacheEngineKey, generate_tmp_path=False) -> (Path, Optional[Path]):
+    def _get_file_path(
+        self, key: CacheEngineKey, generate_tmp_path=False
+    ) -> (Path, Optional[Path]):
         """Get file path and tmp path for the given key"""
         # If there's only one path, use it directly
         if len(self.base_paths) == 1:
