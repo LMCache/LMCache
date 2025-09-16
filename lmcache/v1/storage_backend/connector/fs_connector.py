@@ -68,11 +68,8 @@ class FSConnector(RemoteConnector):
             if self.relative_tmp_dir is not None:
                 (path / self.relative_tmp_dir).mkdir(parents=False, exist_ok=True)
 
-    def _get_file_path(
-        self, key: CacheEngineKey, generate_tmp_path=False
-    ) -> Tuple[Path, Optional[Path]]:
-        """Get file path and tmp path for the given key"""
-        # If there's only one path, use it directly
+    def _get_base_path(self, key: CacheEngineKey) -> Path:
+        """Get file base path for the given key"""
         if len(self.base_paths) == 1:
             base_path = self.base_paths[0]
         else:
@@ -81,29 +78,41 @@ class FSConnector(RemoteConnector):
             idx = hash_val % len(self.base_paths)
             base_path = self.base_paths[idx]
 
-        key_path = key.to_string().replace("/", "-") + ".data"
-        data_path = base_path / key_path
-        tmp_path = None
-        if generate_tmp_path:
-            if self.relative_tmp_dir is not None:
-                tmp_path = base_path / self.relative_tmp_dir / key_path
-            else:
-                tmp_path = data_path.with_suffix(".tmp")
-        return data_path, tmp_path
+        return base_path
+
+    def _get_file_name(self, key: CacheEngineKey) -> str:
+        return key.to_string().replace("/", "-") + ".data"
+
+    def _get_file_path(self, key: CacheEngineKey) -> Path:
+        """Get file path for the given key"""
+        base_path = self._get_base_path(key)
+        file_name = self._get_file_name(key)
+        return base_path / file_name
+
+    def _get_file_and_tmp_path(self, key: CacheEngineKey) -> Tuple[Path, Path]:
+        """Get file and tmp path for the given key"""
+        base_path = self._get_base_path(key)
+        file_name = self._get_file_name(key)
+        file_path = base_path / file_name
+        if self.relative_tmp_dir is not None:
+            tmp_path = base_path / self.relative_tmp_dir / file_name
+        else:
+            tmp_path = file_path.with_suffix(".tmp")
+        return file_path, tmp_path
 
     async def exists(self, key: CacheEngineKey) -> bool:
         """Check if key exists in file system"""
-        file_path, _ = self._get_file_path(key)
+        file_path = self._get_file_path(key)
         return await aiofiles.os.path.exists(file_path)
 
     def exists_sync(self, key: CacheEngineKey) -> bool:
         """Check if key exists in file system synchronized"""
-        file_path, _ = self._get_file_path(key)
+        file_path = self._get_file_path(key)
         return os.path.exists(file_path)
 
     async def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         """Get data from file system"""
-        file_path, _ = self._get_file_path(key)
+        file_path = self._get_file_path(key)
 
         try:
             async with aiofiles.open(file_path, "rb") as f:
@@ -154,8 +163,7 @@ class FSConnector(RemoteConnector):
 
     async def put(self, key: CacheEngineKey, memory_obj: MemoryObj):
         """Store data to file system"""
-        final_path, temp_path = self._get_file_path(key, True)
-        assert temp_path is not None
+        final_path, temp_path = self._get_file_and_tmp_path(key)
 
         try:
             # Prepare metadata
