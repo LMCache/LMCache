@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from pathlib import Path
-from typing import List, Optional, no_type_check
+from typing import List, Optional, Tuple, no_type_check
 import asyncio
 import os
 
@@ -70,7 +70,7 @@ class FSConnector(RemoteConnector):
 
     def _get_file_path(
         self, key: CacheEngineKey, generate_tmp_path=False
-    ) -> (Path, Optional[Path]):
+    ) -> Tuple[Path, Optional[Path]]:
         """Get file path and tmp path for the given key"""
         # If there's only one path, use it directly
         if len(self.base_paths) == 1:
