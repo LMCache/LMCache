@@ -829,6 +829,8 @@ class LMCacheEngine:
 
     # TODO(Jiayi): Add p2p + async lookup support.
     # TODO(Jiayi): Add layerwise support.
+    # NOTE(Jiayi): No explicit `touch_cache` is needed in the
+    # CacheEngine level as it is handled inside each backend.
     @_lmcache_nvtx_annotate
     def async_lookup_and_prefetch(
         self,

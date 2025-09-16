@@ -3,7 +3,6 @@
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Generator, Optional, Union
 import os
-import uuid
 
 # Third Party
 from vllm.config import (
@@ -935,8 +934,6 @@ class LMCacheConnectorV1Impl:
         connector_metadata = self._parent._get_connector_metadata()
         assert isinstance(connector_metadata, LMCacheConnectorMetadata)
 
-        self.lmcache_engine.lookup_unpin(connector_metadata.lookup_requests_in_step)
-
         if self.kv_role == "kv_consumer":
             # Don't do save if the role is kv_consumer
             return
@@ -944,6 +941,10 @@ class LMCacheConnectorV1Impl:
         if self.use_layerwise:
             for layerwise_storer in self.layerwise_storers:
                 next(layerwise_storer)
+            lookup_ids = []
+            for request in connector_metadata.requests:
+                lookup_ids.append(request.req_id)
+            self.lmcache_engine.lookup_unpin(lookup_ids)
             return
 
         assert len(self.kv_caches) > 0
@@ -952,6 +953,7 @@ class LMCacheConnectorV1Impl:
         assert self.lmcache_engine is not None
 
         for request in connector_metadata.requests:
+            self.lmcache_engine.lookup_unpin([request.req_id])
             save_spec = request.save_spec
             if (
                 save_spec is None or not save_spec.can_save
@@ -1070,12 +1072,8 @@ class LMCacheConnectorV1Impl:
         request_configs = extract_request_configs(request.sampling_params)
         if self.skip_last_n_tokens > 0:
             token_ids = token_ids[: -self.skip_last_n_tokens]
-        if self.async_loading:
-            lookup_id = request.request_id
-        else:
-            lookup_id = str(uuid.uuid4())
 
-        self._lookup_requests_in_step.append(lookup_id)
+        lookup_id = request.request_id
 
         num_external_hit_tokens = self.lookup_client.lookup(
             token_ids,

@@ -425,14 +425,18 @@ class LocalDiskBackend(StorageBackendInterface):
         pin: bool = False,
     ) -> int:
         num_hit_counts = 0
+        hit_keys = []
         with self.disk_lock:
             for key in keys:
                 if key not in self.dict:
-                    return num_hit_counts
+                    break
                 if pin:
                     self.dict[key].pin()
                     self.keys_in_request.append(key)
                 num_hit_counts += 1
+                hit_keys.append(key)
+            for hit_key in reversed(hit_keys):
+                self.cache_policy.update_on_hit(hit_key, self.dict)
         return num_hit_counts
 
     @_lmcache_nvtx_annotate

@@ -181,15 +181,19 @@ class LocalCPUBackend(AllocatorBackendInterface):
     ) -> int:
         # NOTE(Jiayi): Only prefix chunks are counted.
         num_hit_chunks = 0
+        hit_keys = []
         with self.cpu_lock:
             for key in keys:
                 if key not in self.hot_cache:
-                    return num_hit_chunks
+                    break
                 if pin:
                     self.hot_cache[key].pin()
                     # vllm lookup sets pin to True
                     self.keys_in_request.append(key)
                 num_hit_chunks += 1
+                hit_keys.append(key)
+            for hit_key in reversed(hit_keys):
+                self.cache_policy.update_on_hit(hit_key, self.hot_cache)
         return num_hit_chunks
 
     def pin(self, key: CacheEngineKey) -> bool:
