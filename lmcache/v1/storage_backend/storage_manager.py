@@ -151,7 +151,6 @@ class StorageManager:
                 config,
                 metadata,
                 self.loop,
-                # allocator,
                 dst_device,
                 lmcache_worker,
                 lookup_server,

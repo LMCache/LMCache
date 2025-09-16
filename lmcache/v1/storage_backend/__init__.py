@@ -42,11 +42,6 @@ def create_dynamic_backends(
     Looks for backend configurations in config.extra_config and instantiates
     them using the specified module and class names.
     """
-    logger.warning(
-        "Memory allocator will never be passed from outside since"
-        "PR https://github.com/LMCache/LMCache/pull/1578"
-    )
-
     if not config.extra_config:
         return
 
@@ -69,6 +64,13 @@ def create_dynamic_backends(
                     f"Backend {backend_name} missing module_path or class_name"
                 )
                 continue
+
+            logger.warning(
+                "The 'memory_allocator' argument is deprecated and will "
+                "be ignored. Storage backends now manage their own memory "
+                "allocators since PR "
+                "https://github.com/LMCache/LMCache/pull/1578"
+            )
 
             # Dynamically import the module
             module = importlib.import_module(module_path)
