@@ -26,7 +26,7 @@ class FsConnectorAdapter(ConnectorAdapter):
         relative_tmp_dir = (
             None
             if context.config is None
-            else context.config.get_extra_config_value("relative_tmp_dir", None)
+            else context.config.get_extra_config_value("fs_connector_relative_tmp_dir", None)
         )
         return FSConnector(
             parse_url.path, context.loop, context.local_cpu_backend, relative_tmp_dir
