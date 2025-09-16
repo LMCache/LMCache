@@ -13,11 +13,6 @@ from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.lookup_server import LookupServerInterface
-from lmcache.v1.memory_management import (
-    MemoryAllocatorInterface,
-    NixlCPUMemoryAllocator,
-    PagedTensorMemoryAllocator,
-)
 from lmcache.v1.storage_backend.abstract_backend import StorageBackendInterface
 from lmcache.v1.storage_backend.gds_backend import GdsBackend
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
@@ -36,7 +31,6 @@ def create_dynamic_backends(
     config: LMCacheEngineConfig,
     metadata: LMCacheEngineMetadata,
     loop: asyncio.AbstractEventLoop,
-    memory_allocator: MemoryAllocatorInterface,
     local_cpu_backend: LocalCPUBackend,
     dst_device: str,
     lookup_server: Optional[LookupServerInterface],
@@ -71,6 +65,13 @@ def create_dynamic_backends(
                 )
                 continue
 
+            logger.warning(
+                "The 'memory_allocator' argument is deprecated and will "
+                "be ignored. Storage backends now manage their own memory "
+                "allocators since PR "
+                "https://github.com/LMCache/LMCache/pull/1578"
+            )
+
             # Dynamically import the module
             module = importlib.import_module(module_path)
             # Get the class from the module
@@ -81,7 +82,6 @@ def create_dynamic_backends(
                 config,
                 metadata,
                 loop,
-                memory_allocator,
                 local_cpu_backend,
                 dst_device,
                 lookup_server,
@@ -99,7 +99,6 @@ def CreateStorageBackends(
     config: LMCacheEngineConfig,
     metadata: LMCacheEngineMetadata,
     loop: asyncio.AbstractEventLoop,
-    memory_allocator: MemoryAllocatorInterface,
     dst_device: str = "cuda",
     lmcache_worker: Optional["LMCacheWorker"] = None,
     lookup_server: Optional[LookupServerInterface] = None,
@@ -122,11 +121,15 @@ def CreateStorageBackends(
                 NixlBackend as NixlBackendV3,
             )
 
-            assert isinstance(memory_allocator, NixlCPUMemoryAllocator)
             storage_backends["NixlBackend"] = NixlBackendV3.CreateNixlBackend(
-                config, metadata, memory_allocator
+                config, metadata
             )
         else:
+            # First Party
+            logger.warning(
+                "Latest LMCache uses XpYd code path for 1p1d,"
+                "Please set enable_xpyd to True in config"
+            )
             # First Party
             from lmcache.v1.storage_backend.nixl_backend import NixlBackend
 
@@ -142,7 +145,7 @@ def CreateStorageBackends(
     if not config.enable_nixl or config.local_cpu:
         local_cpu_backend = LocalCPUBackend(
             config,
-            memory_allocator,
+            metadata,
             dst_device,
             lmcache_worker,
         )
@@ -155,16 +158,8 @@ def CreateStorageBackends(
             NixlStorageBackend,
         )
 
-        if not isinstance(memory_allocator, PagedTensorMemoryAllocator):
-            raise TypeError(
-                f"Expected PagedTensorMemoryAllocator,"
-                f" but got {type(memory_allocator).__name__}"
-            )
-
         storage_backends["NixlStorageBackend"] = (
-            NixlStorageBackend.CreateNixlStorageBackend(
-                config, loop, metadata, memory_allocator
-            )
+            NixlStorageBackend.CreateNixlStorageBackend(config, loop, metadata)
         )
 
     if config.local_disk and config.max_local_disk_size > 0:
@@ -176,13 +171,13 @@ def CreateStorageBackends(
         storage_backends[backend_name] = local_disk_backend
 
     if config.weka_path is not None:
-        weka_backend = WekaGdsBackend(config, loop, memory_allocator, dst_device)
+        weka_backend = WekaGdsBackend(config, metadata, loop, dst_device)
         # TODO(Serapheim): there's a chance we don't want the local
         # CPU cache in front of ours. Let's experiment and potentially
         # change that in the future.
         storage_backends[str(weka_backend)] = weka_backend
     if config.gds_path is not None:
-        gds_backend = GdsBackend(config, loop, memory_allocator, dst_device)
+        gds_backend = GdsBackend(config, metadata, loop, dst_device)
         storage_backends[str(gds_backend)] = gds_backend
     if config.remote_url is not None:
         remote_backend = RemoteBackend(
@@ -197,7 +192,6 @@ def CreateStorageBackends(
             config,
             metadata,
             loop,
-            memory_allocator,
             local_cpu_backend,
             dst_device,
             lookup_server,

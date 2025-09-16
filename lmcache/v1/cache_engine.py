@@ -86,7 +86,6 @@ class LMCacheEngine:
         self,
         config: LMCacheEngineConfig,
         metadata: LMCacheEngineMetadata,
-        memory_allocator: MemoryAllocatorInterface,
         token_database: TokenDatabase,
         gpu_connector: GPUConnectorInterface,
         broadcast_fn: Callable[[torch.Tensor, int], None],
@@ -95,7 +94,6 @@ class LMCacheEngine:
         logger.info(f"Creating LMCacheEngine with config: {config}")
         self.config = config
         self.metadata = metadata
-        self.memory_allocator = memory_allocator
         self.token_database = token_database
         self.gpu_connector = gpu_connector
         self.broadcast_fn = broadcast_fn
@@ -130,7 +128,7 @@ class LMCacheEngine:
         self.storage_manager = StorageManager(
             config,
             metadata,
-            self.memory_allocator,
+            # self.memory_allocator,
             event_manager=self.event_manager,
             lmcache_worker=self.lmcache_worker,
             lookup_server=self.lookup_server,
@@ -1040,7 +1038,7 @@ class LMCacheEngine:
         Check the health of the cache engine.
         return: 0 if healthy, otherwise the error code
         """
-        return 0 if self.memory_allocator.memcheck() else -1
+        return 0 if self.storage_manager.memcheck() else -1
 
     def close(self) -> None:
         """Close the cache engine and free all the resources"""
@@ -1052,8 +1050,6 @@ class LMCacheEngine:
             self.lmcache_worker.close()
 
         self.storage_manager.close()
-
-        self.memory_allocator.close()
 
         logger.info("LMCacheEngine closed.")
 
@@ -1316,6 +1312,8 @@ class LMCacheEngineBuilder:
         metadata: LMCacheEngineMetadata,
         numa_mapping: Optional[NUMAMapping] = None,
     ) -> MemoryAllocatorInterface:
+        # NOTE: should remove this function after fixing the unit tests:
+        # raise RuntimeError("_Create_memory_allocator is deprecated!")
         extra_config = config.extra_config
         enable_nixl_storage = extra_config is not None and extra_config.get(
             "enable_nixl_storage"
@@ -1448,16 +1446,12 @@ class LMCacheEngineBuilder:
         if instance_id not in cls._instances:
             numa_mapping = NUMADetector.get_numa_mapping(config)
             logger.info(f"NUMA mapping for instance {instance_id}: {numa_mapping}")
-            memory_allocator = cls._Create_memory_allocator(
-                config, metadata, numa_mapping
-            )
             token_database = cls._Create_token_database(config, metadata)
             stat_logger = LMCacheStatsLogger(metadata, log_interval=10)
 
             engine = LMCacheEngine(
                 config,
                 metadata,
-                memory_allocator,
                 token_database,
                 gpu_connector,
                 broadcast_fn,

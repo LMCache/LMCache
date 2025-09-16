@@ -84,7 +84,7 @@ def test_remote_mla_worker_id_as0(mock_stream):
     from lmcache.v1.memory_management import AdHocMemoryAllocator
 
     pin_allocator = AdHocMemoryAllocator()
-    local_cpu_backend = LocalCPUBackend(config, pin_allocator)
+    local_cpu_backend = LocalCPUBackend(config, memory_allocator=pin_allocator)
 
     loop = asyncio.new_event_loop()
     backend = RemoteBackend(
