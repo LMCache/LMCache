@@ -40,7 +40,7 @@ class NixlBackend(AllocatorBackendInterface):
         self,
         nixl_config: NixlConfigXpYd,
         config: LMCacheEngineConfig,
-        memory_allocator: NixlCPUMemoryAllocator,
+        metadata: LMCacheEngineMetadata,
     ):
         """
         Initialize the Nixl storage backend.
@@ -61,7 +61,7 @@ class NixlBackend(AllocatorBackendInterface):
             NixlRole.RECEIVER,
         ], "Nixl role must be either SENDER or RECEIVER."
 
-        self.memory_allocator = memory_allocator
+        self.memory_allocator = self.initialize_allocator(config, metadata)
 
         self._nixl_channel = NixlChannel(nixl_config, config, self)
 
@@ -100,6 +100,43 @@ class NixlBackend(AllocatorBackendInterface):
         assert isinstance(key, CacheEngineKey)
         with self._data_lock:
             self._data[key] = mem_obj
+
+    def initialize_allocator(
+        self, config: LMCacheEngineConfig, metadata: LMCacheEngineMetadata
+    ) -> NixlCPUMemoryAllocator:
+        # check if PD is enabled
+        assert config.enable_nixl
+        assert config.enable_xpyd, "1p1d also uses XpYd path now"
+
+        # First Party
+        from lmcache.v1.storage_backend.connector.nixl_utils import (
+            get_correct_nixl_device,
+        )
+
+        corrected_device = get_correct_nixl_device(
+            config.nixl_buffer_device,
+            metadata.worker_id,
+        )
+        logger.info(f"Setting cuda device to {corrected_device} ")
+        torch.cuda.set_device(corrected_device)
+
+        # TODO(Jiayi): add numa affinity to nixl_cpu backend too.
+        buffer = torch.empty(
+            config.nixl_buffer_size,
+            dtype=torch.uint8,
+            device=corrected_device,
+        )
+        nixl_cpu_mem_allocator = NixlCPUMemoryAllocator()
+        nixl_cpu_mem_allocator.init_nixl_memory_allocator(
+            buffer,
+            torch.Size(metadata.kv_shape),
+            metadata.kv_dtype,
+            MemoryFormat.KV_2LTD,  # TODO: remove this hardcode
+        )
+
+        # NOTE: we don't initialize CPU memory allocator for NIXL
+        # PD backend anymore
+        return nixl_cpu_mem_allocator
 
     def allocate(
         self,
@@ -202,6 +239,7 @@ class NixlBackend(AllocatorBackendInterface):
         """
         Close the storage backend.
         """
+        self.memory_allocator.close()
         self._nixl_channel.close()
 
     def pin(self, key: CacheEngineKey) -> bool:
@@ -210,12 +248,17 @@ class NixlBackend(AllocatorBackendInterface):
     def unpin(self, key: CacheEngineKey) -> bool:
         return True
 
+    def get_allocator_backend(self):
+        return self
+
+    def get_memory_allocator(self):
+        return self.memory_allocator
+
     # TODO (Jiayi): put this in _init__.py later
     @staticmethod
     def CreateNixlBackend(
         config: LMCacheEngineConfig,
         metadata: LMCacheEngineMetadata,
-        memory_allocator: NixlCPUMemoryAllocator,
     ) -> "NixlBackend":
         """
         Create a Nixl backend with the given configuration.
@@ -228,5 +271,5 @@ class NixlBackend(AllocatorBackendInterface):
         # Create the Nixl config
         nixl_config = NixlConfigXpYd.from_cache_engine_config(config, metadata)
         # Create the Nixl backend
-        backend = NixlBackend(nixl_config, config, memory_allocator)
+        backend = NixlBackend(nixl_config, config, metadata)
         return backend

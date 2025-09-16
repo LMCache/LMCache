@@ -458,6 +458,9 @@ class RemoteBackend(StorageBackendInterface):
     def remove(self, key, force=True):
         raise NotImplementedError("Remote backend does not support remove now.")
 
+    def get_allocator_backend(self):
+        return self.local_cpu_backend
+
     def close(self):
         try:
             assert self.connection is not None

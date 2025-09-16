@@ -11,7 +11,6 @@ import torch
 # First Party
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.utils import CacheEngineKey
-from lmcache.v1.cache_engine import LMCacheEngineBuilder
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import PagedTensorMemoryAllocator
 from lmcache.v1.storage_backend import CreateStorageBackends
@@ -48,7 +47,6 @@ def run(config: LMCacheEngineConfig, shape, dtype):
             config,
             metadata,
             thread_loop,
-            LMCacheEngineBuilder._Create_memory_allocator(config, metadata),
         )
         assert len(backends) == 2  # NixlStorageBackend + LocalCPUBackend
         assert BACKEND_NAME in backends

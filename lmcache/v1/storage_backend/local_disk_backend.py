@@ -558,6 +558,9 @@ class LocalDiskBackend(StorageBackendInterface):
             f"Bandwidth: {size / disk_read_time / 1e6:.2f} MB/s"
         )
 
+    def get_allocator_backend(self):
+        return self.local_cpu_backend
+
     def close(self) -> None:
         self.disk_worker.close()
         with self.disk_lock:

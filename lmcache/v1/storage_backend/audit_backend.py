@@ -224,3 +224,6 @@ class AuditBackend(StorageBackendInterface):
         except Exception as e:
             self._log_operation("BATCHED_REMOVE", start_time, None, False, error=e)
             raise
+
+    def get_allocator_backend(self):
+        return self.real_backend.get_allocator_backend()

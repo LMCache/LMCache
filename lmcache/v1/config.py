@@ -389,6 +389,7 @@ def _create_config_class():
             "from_legacy": classmethod(_from_legacy),
             "from_file": classmethod(_from_file),
             "from_env": classmethod(_from_env),
+            "update_config_from_env": _update_config_from_env,
             "__str__": lambda self: str(
                 {name: getattr(self, name) for name in _CONFIG_DEFINITIONS}
             ),
@@ -572,8 +573,8 @@ def _from_file(cls, file_path: str):
     return instance.log_config()
 
 
-def _from_env(cls):
-    """Load configuration from environment variables"""
+def _update_config_from_env(self):
+    """Update an existing config object with environment variable configurations."""
 
     def get_env_name(attr_name: str) -> str:
         return f"LMCACHE_{attr_name.upper()}"
@@ -596,21 +597,24 @@ def _from_env(cls):
     # Resolve aliases and handle deprecated configurations
     resolved_config = _resolve_config_aliases(env_config, "environment variables")
 
-    config_values = {}
+    # Update config object with environment values
     for name, config in _CONFIG_DEFINITIONS.items():
-        value = resolved_config.get(name, config["default"])
-
-        # Convert environment variable values
         if name in resolved_config:
             try:
-                value = config["env_converter"](value)
+                value = resolved_config[name]
+                converted_value = config["env_converter"](value)
+                setattr(self, name, converted_value)
             except (ValueError, json.JSONDecodeError) as e:
                 logger.warning(f"Failed to parse {get_env_name(name)}: {e}")
-                value = config["default"]
+                # Keep existing value if conversion fails
 
-        config_values[name] = value
+    return self
 
-    instance = cls(**config_values)
+
+def _from_env(cls):
+    """Load configuration from environment variables"""
+    instance = cls.from_defaults()
+    _update_config_from_env(instance)
     return instance.log_config()
 
 
