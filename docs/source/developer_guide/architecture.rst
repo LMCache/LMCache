@@ -27,6 +27,24 @@ When the model generates new key-value (KV) cache chunks on the GPU, LMCache can
 
 This architecture enables LMCache to significantly reduce prefill delays and GPU memory pressure while maintaining high performance through intelligent cache management.
 
+.. mermaid::
+   :align: center
+
+   flowchart TB
+       subgraph "LLM Engine (with LMCache Integration)"
+         direction TB
+         GPU["GPU Memory"]
+         CPU["CPU DRAM"]
+         GPU -- "Offload overflow KV" --> CPU
+         CPU -- "On-demand reuse" --> GPU
+       end
+       Disk[(Disk Storage Backend)]
+       Remote[(Remote Storage Backend)]
+       CPU -- "Async write (LRU evict)" --> Disk
+       CPU -- "Async upload" --> Remote
+       Disk -- "Prefetch hot KV" --> CPU
+       Remote -- "Fetch on reuse" --> CPU
+
 Two modes
 ---------
 
@@ -54,29 +72,6 @@ Two modes
 
 **Transport Mode (Prefill-decode disaggregation)**
    Focuses on accelerating distributed inference by routing KV cache data between nodes in real-time. Enables prefill-decode disaggregation where one server computes KV for prompts and delivers them to another server for generation without recomputation. Uses peer-to-peer channels with communication libraries like NIXL for low-latency, high-bandwidth transfers.
-
-
-.. mermaid::
-
-    flowchart LR
-        subgraph "Node 1"
-          direction TB
-          A1["vLLM + LMCache"]
-          S1[["LMCache Dist. Server"]]
-        end
-        subgraph "Node 2"
-          direction TB
-          A2["vLLM + LMCache"]
-          S2[["LMCache Dist. Server"]]
-        end
-        LS[("Lookup Service")]
-        A1 -- "advertise KV" --> LS
-        A2 -- "advertise KV" --> LS
-        A2 -- "lookup needed KV" --> LS
-        LS -- "owner info" --> A2
-        S1 <-- "KV chunk transfer" --> S2
-        A2 -- "inject received KV" --> A2
-
 
 
 Core Components
