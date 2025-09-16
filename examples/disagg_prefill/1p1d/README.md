@@ -31,7 +31,7 @@ Press `Ctrl+C` to stop the servers.
 If you have vLLM [benchmark_serving.py](https://github.com/vllm-project/vllm/blob/main/benchmarks/benchmark_serving.py), you can run the following command to benchmark the serving performance of the disaggregated prefill setup:
 
 ```bash
-python benchmark_serving.py --port 9100 --seed $(date +%s) \
+vllm bench serve --port 9100 --seed $(date +%s) \
     --model meta-llama/Llama-3.1-8B-Instruct \
     --dataset-name random --random-input-len 7500 --random-output-len 200 \
     --num-prompts 30 --burstiness 100 --request-rate 1 --ignore-eos
@@ -77,5 +77,5 @@ P99 ITL (ms):                            11.43
 #### Log Files
 The main script generates several log files:
 - `prefiller.log` - Logs from the prefill server
-- `decoder.log` and - Logs from the decode server
+- `decoder.log` - Logs from the decode server
 - `proxy.log` - Logs from the proxy server

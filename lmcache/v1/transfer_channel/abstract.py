@@ -12,60 +12,64 @@ class BaseTransferChannel(metaclass=abc.ABCMeta):
     @abc.abstractmethod
     def batched_send(
         self,
-        data: Union[list[bytes], list[MemoryObj]],
+        objects: Union[list[bytes], list[MemoryObj]],
         transfer_spec: Optional[dict] = None,
-    ) -> bool:
+    ) -> int:
         """
         Send a batch of data through the channel.
 
-        :param data: A list of bytes or MemoryObj to be sent.
+        :param objects: A list of bytes or MemoryObj to be sent.
         :param transfer_spec: Additional specifications for the transfer.
 
-        :return: True if the send operation is successful.
+        :return: Number of successfully transferred objects.
         """
         raise NotImplementedError
 
     @abc.abstractmethod
     def batched_recv(
         self,
-        buffer: Union[list[bytes], list[MemoryObj]],
+        buffers: Union[list[bytes], list[MemoryObj]],
         transfer_spec: Optional[dict] = None,
-    ) -> bool:
+    ) -> int:
         """
         Receive a batch of data through the channel.
 
         :param buffer: A list of bytes or MemoryObj to store the received data.
         :param transfer_spec: Additional specifications for the transfer.
+
+        :return: Number of successfully transferred objects.
         """
         raise NotImplementedError
 
     @abc.abstractmethod
     async def async_batched_send(
         self,
-        data: Union[list[bytes], list[MemoryObj]],
+        objects: Union[list[bytes], list[MemoryObj]],
         transfer_spec: Optional[dict] = None,
-    ) -> bool:
+    ) -> int:
         """
         Async send a batch of data through the channel.
 
-        :param data: A list of bytes or MemoryObj to be sent.
+        :param objects: A list of bytes or MemoryObj to be sent.
         :param transfer_spec: Additional specifications for the transfer.
 
-        :return: True if the send operation is successful.
+        :return: Number of successfully transferred objects.
         """
         raise NotImplementedError
 
     @abc.abstractmethod
     async def async_batched_recv(
         self,
-        buffer: Union[list[bytes], list[MemoryObj]],
+        buffers: Union[list[bytes], list[MemoryObj]],
         transfer_spec: Optional[dict] = None,
-    ) -> bool:
+    ) -> int:
         """
-        Async ceceive a batch of data through the channel.
+        Async receive a batch of data through the channel.
 
-        :param buffer: A list of bytes or MemoryObj to store the received data.
+        :param buffers: A list of bytes or MemoryObj to store the received data.
         :param transfer_spec: Additional specifications for the transfer.
+
+        :return: Number of successfully transferred objects.
         """
         raise NotImplementedError
 
@@ -73,56 +77,64 @@ class BaseTransferChannel(metaclass=abc.ABCMeta):
     @abc.abstractmethod
     def batched_write(
         self,
-        data: Union[list[bytes], list[MemoryObj]],
+        objects: Union[list[bytes], list[MemoryObj]],
         transfer_spec: Optional[dict] = None,
-    ) -> bool:
+    ) -> int:
         """
         Write a batch of data through the channel.
 
-        :param data: A list of bytes or MemoryObj to be written.
+        :param objects: A list of bytes or MemoryObj to be written.
         :param transfer_spec: Additional specifications for the transfer.
+
+        :return: Number of successfully transferred objects.
         """
         raise NotImplementedError
 
     @abc.abstractmethod
     def batched_read(
         self,
-        buffer: Union[list[bytes], list[MemoryObj]],
+        buffers: Union[list[bytes], list[MemoryObj]],
         transfer_spec: Optional[dict] = None,
-    ) -> bool:
+    ) -> int:
         """
         Read a batch of data through the channel.
 
-        :param buffer: A list of bytes or MemoryObj to store the read data.
+        :param buffers: A list of bytes or MemoryObj to store the read data.
         :param transfer_spec: Additional specifications for the transfer.
+
+        :return: Number of successfully transferred objects.
         """
         raise NotImplementedError
 
     @abc.abstractmethod
     async def async_batched_write(
         self,
-        data: Union[list[bytes], list[MemoryObj]],
+        objects: Union[list[bytes], list[MemoryObj]],
         transfer_spec: Optional[dict] = None,
-    ) -> bool:
+    ) -> int:
         """
         Async write a batch of data through the channel.
 
-        :param data: A list of bytes or MemoryObj to be written.
+        :param objects: A list of bytes or MemoryObj to be written.
         :param transfer_spec: Additional specifications for the transfer.
+
+        :return: Number of successfully transferred objects.
         """
         raise NotImplementedError
 
     @abc.abstractmethod
     async def async_batched_read(
         self,
-        buffer: Union[list[bytes], list[MemoryObj]],
+        buffers: Union[list[bytes], list[MemoryObj]],
         transfer_spec: Optional[dict] = None,
-    ) -> bool:
+    ) -> int:
         """
         Async read a batch of data through the channel.
 
-        :param buffer: A list of bytes or MemoryObj to store the read data.
+        :param buffers: A list of bytes or MemoryObj to store the read data.
         :param transfer_spec: Additional specifications for the transfer.
+
+        :return: Number of successfully transferred objects.
         """
         raise NotImplementedError
 

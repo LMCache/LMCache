@@ -502,6 +502,7 @@ class LMCacheEngine:
             )
 
         # TODO(Jiayi): Remove the following for loop with batched operations
+        # TODO(Jiayi): Need to refactor the `remove_after_retrieve` logic.
         for key, memory_obj, _, _ in reordered_chunks:
             if self.remove_after_retrieve and not self._is_passive():
                 self.storage_manager.remove(key)

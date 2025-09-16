@@ -412,7 +412,7 @@ class PDBackend(AllocatorBackendInterface):
             # TODO(Jiayi): Consider making this real async
             # Perform the actual transfer
             self.transfer_channel.batched_write(
-                data=mem_objs_to_send,
+                objects=mem_objs_to_send,
                 transfer_spec=channel_transfer_spec,
             )
 
@@ -551,6 +551,8 @@ class PDBackend(AllocatorBackendInterface):
 
         :param key: The key to remove.
         """
+        # TODO(Jiayi): The logic here is confusing. Ref count down
+        # will be done after this function call in cache engine.
         with self.data_lock:
             if mem_obj := self.data.get(key, None):
                 if mem_obj.get_ref_count() == 1:
