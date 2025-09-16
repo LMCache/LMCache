@@ -27,26 +27,8 @@ When the model generates new key-value (KV) cache chunks on the GPU, LMCache can
 
 This architecture enables LMCache to significantly reduce prefill delays and GPU memory pressure while maintaining high performance through intelligent cache management.
 
-.. mermaid::
-   :align: center
-
-   flowchart TB
-       subgraph "LLM Engine (with LMCache Integration)"
-         direction TB
-         GPU["GPU Memory"]
-         CPU["CPU DRAM"]
-         GPU -- "Offload overflow KV" --> CPU
-         CPU -- "On-demand reuse" --> GPU
-       end
-       Disk[(Disk Storage Backend)]
-       Remote[(Remote Storage Backend)]
-       CPU -- "Async write (LRU evict)" --> Disk
-       CPU -- "Async upload" --> Remote
-       Disk -- "Prefetch hot KV" --> CPU
-       Remote -- "Fetch on reuse" --> CPU
-
-Two use cases
--------------
+Two modes
+---------
 
 **Storage Mode (KV cache offloading)**
    LMCache acts as a persistent KV store, optimizing for high reuse across queries or sessions. It offloads infrequently used KV blocks from GPU memory and persists popular caches across sessions, boosting cache hit rates for "hot" content. KV caches survive beyond single inference calls and even process restarts when backed by disk or external storage.

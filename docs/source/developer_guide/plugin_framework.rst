@@ -23,8 +23,8 @@ LMCache is designed to be extensible, allowing integration of custom functionali
       backendMgr --> CPUBackend[["In-Memory CPU Backend"]]
       backendMgr --> DiskBackend[["Local Disk Backend"]]
       backendMgr --> NIXLBackend[["NIXL Peer Backend"]]
-      backendMgr --> RemoteBackend[["Remote Backend (built-in connectors)"]]
       backendMgr --> CustomBackend[["External Backend"]]
+      backendMgr --> RemoteBackend[["Remote connectors"]]
 
       RemoteBackend --> RedisConnector[["Redis Connector (built-in)"]]
       RemoteBackend --> InfiniConnector[["InfiniStore Connector (built-in)"]]
