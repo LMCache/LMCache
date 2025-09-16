@@ -298,9 +298,9 @@ class ContinuousUsageContext:
             ContinuousUsageContext._instance = ContinuousUsageContext(metadata)
         if ContinuousUsageContext._instance.metadata != metadata:
             logger.error(
-                "LMCacheUsageTrackingLogger instance already created with"
+                "ContinuousUsageContext instance already created with"
                 "different metadata. This should not happen except "
-                "in test"
+                "in test."
             )
         return ContinuousUsageContext._instance
 
