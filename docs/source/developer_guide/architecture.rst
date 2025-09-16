@@ -100,7 +100,7 @@ Two use cases
 Core Components
 ---------------
 
-**LLM Inference Engine Intergration Module (Connector)**
+**LLM Inference Engine Integration Module (Connector)**
    Integrated into the LLM engine (vLLM), the Connector taps into the paged KV memory manager. During prompt processing, it checks if token sequences were seen before:
 
    * **Cache hit**: Fetches precomputed KV cache chunks from LMCache, bypassing computation
