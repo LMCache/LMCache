@@ -195,7 +195,10 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
                     self.res_for_each_worker[lookup_id].append(res)
                 all_res = self.res_for_each_worker[lookup_id]
 
-                if len(all_res) == self.tensor_parallel_size:
+                if len(all_res) == self.tensor_parallel_size or (
+                    self.create_lookup_server_only_on_worker_0_for_mla
+                    and len(all_res) == 1
+                ):
                     self.res_for_each_worker.pop(lookup_id)
 
                     # NOTE: it is possible that the number of hit
