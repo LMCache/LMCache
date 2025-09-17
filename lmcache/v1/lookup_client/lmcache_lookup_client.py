@@ -41,6 +41,7 @@ class LMCacheLookupClient(LookupClientInterface):
 
         self.encoder = msgspec.msgpack.Encoder()
         self.ctx = zmq.Context()  # type: ignore[attr-defined]
+        self.config = config
         rpc_port = vllm_config.kv_transfer_config.get_from_extra_config(
             "lmcache_rpc_port", 0
         )
@@ -128,16 +129,62 @@ class LMCacheLookupClient(LookupClientInterface):
                 request_configs_buf,
             ]
 
-        for i in range(ranks):
-            self.sockets[i].send_multipart(msg_buf, copy=False)
-
         results = []
-        # TODO(Jiayi): we can use zmq poll to optimize a bit
-        for i in range(ranks):
-            resp = self.sockets[i].recv()
-            result = int.from_bytes(resp, "big")
-            results.append(result)
+        max_retries = self.config.lookup_max_retries  # Get from config
+        timeout_ms = self.config.lookup_timeout_ms  # Get from config
 
+        for i in range(ranks):
+            socket = self.sockets[i]
+
+            # Set socket timeout
+            socket.setsockopt(zmq.RCVTIMEO, timeout_ms)
+            socket.setsockopt(zmq.SNDTIMEO, timeout_ms)
+
+            retry_count = 0
+            send_success = False
+            recv_success = False
+
+            # Send retry loop
+            while retry_count < max_retries and not send_success:
+                try:
+                    socket.send_multipart(msg_buf, copy=False)
+                    send_success = True
+                except zmq.Again:
+                    retry_count += 1
+                    logger.warning(
+                        f"Send timeout (retry {retry_count}/{max_retries}) for rank {i}"
+                    )
+
+            # If send fails, log error and break
+            if not send_success:
+                logger.error(f"Failed to send to rank {i} after {max_retries} retries")
+                results.append(-1)  # Use -1 to indicate send failure
+                return None
+
+            # Receive retry loop
+            retry_count = 0
+            while retry_count < max_retries and not recv_success:
+                try:
+                    resp = socket.recv()
+                    result = int.from_bytes(resp, "big")
+                    recv_success = True
+                    results.append(result)
+                except zmq.Again:
+                    retry_count += 1
+                    logger.warning(
+                        f"Receive timeout (retry {retry_count}/{max_retries}) "
+                        f"for rank {i}"
+                    )
+
+            # If receive fails, log error
+            if not recv_success:
+                logger.error(
+                    f"Failed to receive from rank {i} after {max_retries} retries"
+                )
+                results.append(-2)  # Use -2 to indicate receive failure
+                return None
+
+        assert len(results) == ranks
         if len(set(results)) > 1:
             logger.warning(
                 f"Lookup results (number of hit tokens) differ "
