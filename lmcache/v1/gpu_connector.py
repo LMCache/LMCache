@@ -229,7 +229,10 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
         slot_mapping: torch.Tensor = kwargs["slot_mapping"]
 
         kv_cache_pointers = self._initialize_pointers(self.kvcaches)
+        # First Party
+        # from lmcache.integration.vllm.utils import ForkedPdb
 
+        # ForkedPdb().set_trace()
         lmc_ops.multi_layer_kv_transfer(
             memory_obj.tensor,
             kv_cache_pointers,
@@ -238,6 +241,7 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
             self.page_buffer_size,
             False,
             self.use_mla,
+            getattr(memory_obj, "transpose", False),
         )
 
     @_lmcache_nvtx_annotate
@@ -272,17 +276,27 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
         slot_mapping: torch.Tensor = kwargs["slot_mapping"]
 
         kv_cache_pointers = self._initialize_pointers(self.kvcaches)
+        # First Party
+        # from lmcache.integration.vllm.utils import ForkedPdb
+
+        # ForkedPdb().set_trace()
 
         with torch.cuda.stream(self.store_stream):
+            # permutation = (
+            #     [memory_obj.tensor.dim() - 1, *range(memory_obj.tensor.dim() - 1)]
+            #     if getattr(memory_obj, "transpose", False)
+            #     else range(memory_obj.tensor.dim())
+            # )
             if self.gpu_buffer is None or end - start != self.gpu_buffer.shape[2]:
                 lmc_ops.multi_layer_kv_transfer(
-                    memory_obj.tensor,
+                    memory_obj.tensor,  # .permute(*permutation),
                     kv_cache_pointers,
                     slot_mapping[start:end],
                     self.kvcaches[0].device,
                     self.page_buffer_size,
                     True,
                     self.use_mla,
+                    getattr(memory_obj, "transpose", False),
                 )
             else:
                 # kvcaches -> gpu_buffer -> memobj
@@ -296,7 +310,9 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
                     self.page_buffer_size,
                     True,
                     self.use_mla,
+                    getattr(memory_obj, "transpose", False),
                 )
+                assert getattr(memory_obj, "transpose", False)
                 memory_obj.tensor.copy_(tmp_gpu_buffer, non_blocking=True)
 
         if not memory_obj.tensor.is_cuda:

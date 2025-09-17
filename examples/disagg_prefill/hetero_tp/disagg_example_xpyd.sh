@@ -116,6 +116,7 @@ main() {
     echo "Please check prefiller.log, decoder.log and proxy.log for logs."
 
     # Launch the proxy first
+    LMCACHE_LOG_LEVEL=DEBUG \
     python3 ../disagg_proxy_server.py \
         --host localhost \
         --port 9487 \
@@ -124,8 +125,8 @@ main() {
         --num-prefillers 1 \
         --decoder-host localhost \
         --decoder-port 7200  \
-        --decoder-init-port 7300 \
-        --decoder-alloc-port 7400 \
+        --decoder-init-port 7300,7301 \
+        --decoder-alloc-port 7400,7401 \
         --proxy-host localhost \
         --proxy-port 7500 \
         --num-decoders 1 \
@@ -139,13 +140,12 @@ main() {
     decoder_pid=$!
     PIDS+=($decoder_pid)
 
-    sleep 5
-    # Launch the second decoder 
-    bash disagg_vllm_launcher.sh decoder2  \
-        > >(tee decoder2.log)  2>&1 &
-    decoder_pid=$!
-    PIDS+=($decoder_pid)
-    wait_for_server 7200
+    # sleep 5
+    # # Launch the second decoder 
+    # bash disagg_vllm_launcher.sh decoder2  \
+    #     > >(tee decoder2.log)  2>&1 &
+    # decoder_pid=$!
+    # PIDS+=($decoder_pid)
     # wait_for_server 7201
 
 
@@ -161,10 +161,13 @@ main() {
     # prefiller2_pid=$!
     # PIDS+=($prefiller2_pid)
 
+    wait_for_server 7200
     wait_for_server 7100
     # wait_for_server 7101
     wait_for_server 9487
 
+    echo "==================================================="
+    echo PIDS: ${PIDS[*]}
     echo "==================================================="
     echo "All servers are up. You can send request now..."
     echo "Press Ctrl-C to terminate all instances."

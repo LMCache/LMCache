@@ -101,7 +101,7 @@ class SaveSpec:
 @dataclass
 class DisaggSpec:
     req_id: str
-    receiver_id: str
+    receiver_id: list[str]
     receiver_host: str
     receiver_init_port: int
     receiver_alloc_port: int
@@ -1299,6 +1299,7 @@ class LMCacheConnectorV1Impl:
 
         lookup_id = request.request_id
 
+        # ForkedPdb().set_trace()
         num_external_hit_tokens = self.lookup_client.lookup(
             token_ids,
             lookup_id=lookup_id,
@@ -1368,16 +1369,18 @@ class LMCacheConnectorV1Impl:
         if kv_transfer_params is not None and "disagg_spec" in kv_transfer_params:
             req_disagg_spec = kv_transfer_params["disagg_spec"]
 
-            receiver_id = req_disagg_spec["receiver_host"] + str(
-                req_disagg_spec["receiver_init_port"]
-            )
+            receiver_ids = [
+                req_disagg_spec["receiver_host"] + str(_receiver_init_port)
+                for _receiver_init_port in req_disagg_spec["receiver_init_port"]
+            ]
 
             disagg_spec = DisaggSpec(
                 req_id=req_disagg_spec["req_id"],
-                receiver_id=receiver_id,
+                receiver_id=receiver_ids,
                 receiver_host=req_disagg_spec["receiver_host"],
                 receiver_init_port=req_disagg_spec["receiver_init_port"],
                 receiver_alloc_port=req_disagg_spec["receiver_alloc_port"],
+                tp_size=req_disagg_spec["receiver_tp_size"],
             )
 
             tmp_disagg_tracker[request.request_id] = disagg_spec

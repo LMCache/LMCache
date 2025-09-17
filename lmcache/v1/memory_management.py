@@ -336,6 +336,7 @@ class TensorMemoryObj(MemoryObj):
         raw_data: torch.Tensor,
         metadata: MemoryObjMetadata,
         parent_allocator: Optional["MemoryAllocatorInterface"],
+        transpose: Optional[bool] = False,
     ):
         assert metadata.dtype is not None, "dtype must be specified for TensorMemoryObj"
         super().__init__(metadata)
@@ -343,6 +344,7 @@ class TensorMemoryObj(MemoryObj):
         self.valid = True
         self.lock = threading.Lock()
         self.parent_allocator = parent_allocator
+        self.transpose = transpose
 
     def invalidate(self):
         self.valid = False
@@ -697,7 +699,12 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
 
     ALIGN_BYTES = 4096
 
-    def __init__(self, tensor: torch.Tensor, align_bytes: int = ALIGN_BYTES):
+    def __init__(
+        self,
+        tensor: torch.Tensor,
+        align_bytes: int = ALIGN_BYTES,
+        transpose: bool = False,
+    ):
         self.buffer = tensor.view(torch.uint8).flatten()
         self.align_bytes = align_bytes
 
@@ -710,6 +717,7 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         self.total_allocated_size = 0
 
         self.stats_monitor = LMCStatsMonitor.GetOrCreate()
+        self.transpose = transpose
 
     @staticmethod
     @_lmcache_nvtx_annotate
@@ -773,6 +781,9 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         assert dtype is not None, "dtype must be specified"
         # Calculate the size of the tensor
         raw_size = TensorMemoryAllocator._Compute_raw_size(shape, dtype)
+        # First Party
+
+        # ForkedPdb().set_trace()
         if raw_size % self.align_bytes != 0:
             aligned_size = TensorMemoryAllocator._Compute_aligned_size(
                 raw_size, self.align_bytes
@@ -817,6 +828,7 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
                 shape, dtype, block.start, aligned_size, 1, 0, fmt
             ),
             parent_allocator=self,
+            transpose=self.transpose,
         )
 
     @_lmcache_nvtx_annotate
@@ -1027,7 +1039,7 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         return "TensorMemoryAllocator"
 
 
-class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
+class PagedTensorMemoryAllocator(MemoryAllocatorInterface):  # HOWKEY
     """
     Implements a paged memory allocator.
     """
@@ -1038,6 +1050,7 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
         shape: torch.Size,
         dtype: torch.dtype,
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
+        transpose: Optional[bool] = False,
     ):
         self.buffer = tensor.view(torch.uint8).flatten()
         self.buffer_size = self.buffer.numel() * self.buffer.element_size()
@@ -1046,6 +1059,7 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
         self.shape = shape
         self.dtype = dtype
         self.fmt = fmt
+        self.transpose = transpose
 
         num_elements = shape.numel()
         self.bytes_per_element = torch.tensor([], dtype=dtype).element_size()
@@ -1071,7 +1085,7 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
             metadata = MemoryObjMetadata(
                 self.shape,
                 self.dtype,
-                idx,
+                idx,  # HOWKEY
                 self.align_bytes,  # 1 page
                 1,  # ref_count=1
                 0,  # pin_count=0
@@ -1081,6 +1095,7 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
                 raw_data=buf,
                 metadata=metadata,
                 parent_allocator=self,
+                transpose=transpose,
             )
             self.free_blocks.append(mem_obj)
 
@@ -1514,7 +1529,9 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
               (2) byte_array buffer memory.
     """
 
-    def __init__(self, size: int, use_paging: bool = False, **kwargs):
+    def __init__(
+        self, size: int, use_paging: bool = False, transpose: bool = False, **kwargs
+    ):
         """
         :param int size: The size of the pinned memory in bytes.
         """
@@ -1541,9 +1558,10 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
                 shape=kwargs["shape"],
                 dtype=kwargs["dtype"],
                 fmt=kwargs["fmt"],
+                transpose=transpose,
             )
         else:
-            self.pin_allocator = TensorMemoryAllocator(self.buffer)
+            self.pin_allocator = TensorMemoryAllocator(self.buffer, transpose=transpose)
 
         self.align_bytes = self.pin_allocator.align_bytes
 
@@ -1899,6 +1917,7 @@ class PagedCpuGpuMemoryAllocator(MemoryAllocatorInterface):
             shape,
             dtype,
             fmt,
+            transpose=True,
         )
         self.align_bytes = self.cpu_allocator.align_bytes
 

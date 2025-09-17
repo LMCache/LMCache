@@ -124,8 +124,8 @@ main() {
         --num-prefillers 1 \
         --decoder-host localhost \
         --decoder-port 7200  \
-        --decoder-init-port 7300 \
-        --decoder-alloc-port 7400 \
+        --decoder-init-port 7300,7301 \
+        --decoder-alloc-port 7400,7401 \
         --proxy-host localhost \
         --proxy-port 7500 \
         --num-decoders 1 \
@@ -139,12 +139,12 @@ main() {
     decoder_pid=$!
     PIDS+=($decoder_pid)
 
-    sleep 5
-    # Launch the second decoder 
-    bash disagg_vllm_launcher.sh decoder2  \
-        > >(tee decoder2.log)  2>&1 &
-    decoder_pid=$!
-    PIDS+=($decoder_pid)
+    # sleep 5
+    # # Launch the second decoder 
+    # bash disagg_vllm_launcher.sh decoder2  \
+    #     > >(tee decoder2.log)  2>&1 &
+    # decoder_pid=$!
+    # PIDS+=($decoder_pid)
     wait_for_server 7200
     # wait_for_server 7201
 

@@ -80,11 +80,7 @@ async def lifespan(app: FastAPI):
     for host, port in prefill_pairs:
         prefiller_base_url = f"http://{host}:{int(port)}"
         prefill_client = httpx.AsyncClient(timeout=None, base_url=prefiller_base_url)
-        app.state.prefill_clients.append(
-            ClientInfo(
-                prefill_client,
-            )
-        )
+        app.state.prefill_clients.append(ClientInfo(prefill_client, pref_ports))
 
     # Build decoder clients with CSV-based broadcast pairing
     dec_hosts = global_args.decoder_host
@@ -308,14 +304,15 @@ async def handle_completions(request: Request):
         # Pick decode client
         decode_client = round_robin_pick_client(app.state.decode_clients, counter)
 
+        num_tp_rank = len(decode_client.init_port or [])
+
         disagg_spec = {
             "req_id": req_id,
             "receiver_host": decode_client.host,
             "receiver_init_port": decode_client.init_port,
             "receiver_alloc_port": decode_client.alloc_port,
-            "receiver_tp_size": len(decode_client.init_port or []),
+            "receiver_tp_size": num_tp_rank,
         }
-        num_tp_rank = len(decode_client.init_port or [])
 
         req_data["kv_transfer_params"] = {
             "ret_first_tok": True,
@@ -366,7 +363,7 @@ async def handle_completions(request: Request):
             ).encode()
 
             # Wait until decode node signals that kv is ready
-            await wait_decode_kv_ready(req_id, num_tp_rank)
+            await wait_decode_kv_ready(req_id, len(prefill_client.init_port or []))
 
             async for chunk in stream_service_response(
                 decode_client.client, "/v1/completions", req_data
@@ -425,7 +422,7 @@ async def handle_chat_completions(request: Request):
             "receiver_alloc_port": decode_client.alloc_port,
         }
 
-        num_tp_rank = len(decode_client.init_port)
+        num_tp_rank = len(decode_client.init_port or [])
 
         req_data["kv_transfer_params"] = {
             "ret_first_tok": True,
