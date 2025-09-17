@@ -182,6 +182,9 @@ class LMCacheLookupClient(LookupClientInterface):
                         f"Receive timeout (retry {retry_count}/{max_retries}) "
                         f"for rank {i}"
                     )
+                except zmq.ZMQError as e:
+                    logger.error(f"ZMQ error during receive from rank {i}: {str(e)}")
+                    return 0
 
             # If receive fails, log error
             if not recv_success:
