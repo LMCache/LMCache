@@ -31,15 +31,6 @@ jobs:
         with:
           python-version: "3.13"
 
-      - name: Setup Node.js 20
-        uses: actions/setup-node@60edb5dd545a775178f52524783378180af0d1f8 # v4.0.2
-        with:
-          node-version: '20'
-
-      - name: Install Mermaid CLI
-        run: |
-          npm install -g @mermaid-js/mermaid-cli@10.9.1
-
       - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
