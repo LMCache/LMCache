@@ -59,19 +59,28 @@ For more information, check out the following:
 Documentation
 -------------
 
+
 .. toctree::
-   :maxdepth: 2
+   :maxdepth: 1
+   :caption: Welcome to LMCache
+
+   self
+
+.. toctree::
+   :maxdepth: 1
    :caption: Getting Started
 
    getting_started/installation
    getting_started/quickstart/index
+   getting_started/benchmarking
    getting_started/troubleshoot
    getting_started/faq
+   
 
 :raw-html:`<br />`
 
 .. toctree::
-   :maxdepth: 2
+   :maxdepth: 1
    :caption: KV Cache offloading and sharing
 
    kv_cache/storage_backends/index
@@ -80,7 +89,7 @@ Documentation
 :raw-html:`<br />`
 
 .. toctree::
-   :maxdepth: 2
+   :maxdepth: 1
    :caption: Disaggregated prefill
 
    disaggregated_prefill/nixl/index
@@ -89,21 +98,15 @@ Documentation
 :raw-html:`<br />`
 
 .. toctree::
-   :maxdepth: 2
+   :maxdepth: 1
    :caption: KV Cache management
 
-   kv_cache_management/controller
-   kv_cache_management/lookup
-   kv_cache_management/persist
-   kv_cache_management/clear
-   kv_cache_management/move
-   kv_cache_management/compress
-   kv_cache_management/check_finish
+   kv_cache_management/index
 
 :raw-html:`<br />`
 
 .. toctree::
-   :maxdepth: 2
+   :maxdepth: 1
    :caption: KV Cache Optimizations
 
    kv_cache_optimizations/compression/index
@@ -112,26 +115,37 @@ Documentation
 :raw-html:`<br />`
 
 .. toctree::
-   :maxdepth: 2
+   :maxdepth: 1
    :caption: Use LMCache in production
 
    production/docker_deployment
    production/kubernetes_deployment
+   production/observability/index
 
 :raw-html:`<br />`
 
 .. toctree::
-   :maxdepth: 2
+   :maxdepth: 1
+   :caption: Internal API Server
+   
+   internal_api_server/internal_api_server
+
+:raw-html:`<br />`
+
+.. toctree::
    :caption: Developer Guide
 
    developer_guide/contributing
    developer_guide/docker_file
+   developer_guide/architecture
+   developer_guide/integration
+   developer_guide/extending_lmcache/index
    developer_guide/usage/index
 
 :raw-html:`<br />`
 
 .. toctree::
-   :maxdepth: 2
+   :maxdepth: 1
    :caption: API Reference
 
    api_reference/configurations
@@ -142,7 +156,7 @@ Documentation
 :raw-html:`<br />`
 
 .. toctree::
-   :maxdepth: 2
+   :maxdepth: 1
    :caption: Community
 
    community/meetings

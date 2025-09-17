@@ -18,10 +18,9 @@ Commandline arguments:
 
     --repeat-mode: The mode to repeat prompts. The supported modes are:
         - 'random': shuffle the prompts randomly. (Default)
-        - 'tile': the entire prompt list is repeated in sequence. (Potentially
-                  lowest cache hit)
+        - 'tile': the entire prompt list is repeated in sequence.
         - 'interleave': each prompt is repeated consecutively before
-                        moving to the next element. (Highest cache hit)
+                        moving to the next element.
 
     --shuffle-seed: Random seed when the repeat mode is "random".
                     (Optional, default: 0)
@@ -44,9 +43,18 @@ Commandline arguments:
     --expected-latency-gain: Expected minimum speed-up in total round time
                             (warmup/query) as a factor, e.g. 4.5 for 4.5×.
                             If actual gain is below this, exits.
+
+    --expected-latency: Expected end to end latency for the first query round.
+    --completions: Use completions API instead of chat completions API
+
+    --visualize: Visualize the results
+
+    --hit-miss-ratio: In query round, control how many of the prompts
+    will miss the cache. For example, 3:1 means every fourth repeated prompt
 """
 
 # Standard
+from dataclasses import dataclass
 import argparse
 import asyncio
 import random
@@ -55,16 +63,27 @@ import time
 
 # Third Party
 from openai import AsyncOpenAI
+import pandas as pd
 
 # Global output filename (set in __main__)
 OUTPUT_FILE = None
+completions_mode = False
+visualize = False
+
+
+@dataclass
+class RequestStats:
+    prompt_id: int
+    request_start: float
+    ttft: float
+    request_end: float
 
 
 def has_content(chunk):
     """
     Check if the chunk has content in the choices.
     Args:
-        chunk: The response chunk from OpenAI API.
+        chunk: The response chunk from OpenAI Chat Completions API.
 
     Returns:
         bool: True if content exists, False otherwise.
@@ -79,11 +98,18 @@ def has_content(chunk):
     )
 
 
+def has_content_completions(chunk):
+    """
+    Completions streaming emits text at choices[0].text.
+    """
+    return bool(chunk.choices) and (chunk.choices[0].text is not None)
+
+
 def extract_content(chunk):
     """
     Extract content from the response chunk.
     Args:
-        chunk: The response chunk from OpenAI API.
+        chunk: The response chunk from OpenAI Chat Completions API.
     Returns:
         str: The content extracted from the chunk.
     """
@@ -93,6 +119,13 @@ def extract_content(chunk):
         return chunk.choices[0].delta.reasoning_content
     else:
         return ""
+
+
+def extract_content_completions(chunk):
+    """
+    Extract content from a Completions stream chunk.
+    """
+    return chunk.choices[0].text or ""
 
 
 def write_resp(text: str):
@@ -108,7 +141,7 @@ def write_resp(text: str):
 
 async def process_single_prompt(
     client, model, prompt, prompt_index, total_prompts, output_len, semaphore
-):
+) -> RequestStats:
     """
     Process a single prompt with the given client and model.
 
@@ -122,13 +155,49 @@ async def process_single_prompt(
         semaphore: Asyncio semaphore to limit concurrent requests.
 
     Returns:
-        float: Time-to-first-token measurement
+        RequestStats: RequestStats object containing the request stats
     """
     async with semaphore:  # Acquire semaphore to limit concurrent requests
         write_resp(f"\n--- Sending prompt {prompt_index + 1}/{total_prompts} ---\n")
+        # a request starts once it acquires the semaphore
         start_time = time.time()
         first_token_time = None
-        words = ""
+
+        if completions_mode:
+            response = await client.completions.create(
+                model=model,
+                prompt=prompt,
+                stream=True,
+                max_tokens=output_len,
+                temperature=0.0,
+                stream_options={"include_usage": True},
+            )
+
+            pieces = []
+            async for chunk in response:
+                if not has_content_completions(chunk):
+                    continue
+
+                content = extract_content_completions(chunk)
+                if first_token_time is None and content.strip():
+                    first_token_time = time.time()
+                pieces.append(content)
+
+            end_time = time.time()
+            final_response = "".join(pieces)
+            write_resp(f"\nResponse of request {prompt_index}: {final_response}\n")
+
+            # ttft is never 0.0 so it is an immediate tell
+            # that the request produced no output
+            ttft = (
+                (first_token_time - start_time) if first_token_time is not None else 0.0
+            )
+            return RequestStats(
+                prompt_id=prompt_index,
+                request_start=start_time,
+                ttft=ttft,
+                request_end=end_time,
+            )
 
         response = await client.chat.completions.create(
             model=model,
@@ -151,21 +220,25 @@ async def process_single_prompt(
                 if first_token_time is None and content != "":
                     first_token_time = time.time()
                 responses.append(content)
-                words += content
 
+        end_time = time.time()
         final_response = "".join(responses)
         write_resp(f"\nResponse of request {prompt_index}: {final_response}\n")
 
-        if first_token_time is not None:
-            return first_token_time - start_time
-        else:
-            # If no content was generated, return a default value
-            return 0.0
+        # ttft is never 0.0 so it is an immediate tell
+        # that the request produced no output
+        ttft = (first_token_time - start_time) if first_token_time is not None else 0.0
+        return RequestStats(
+            prompt_id=prompt_index,
+            request_start=start_time,
+            ttft=ttft,
+            request_end=end_time,
+        )
 
 
 async def test_long_document_qa(
     client, model, prompts=None, output_len=100, max_inflight_requests=10
-):
+) -> list[RequestStats]:
     """
     Test long document QA with the given prompts and sampling parameters.
     Process prompts concurrently with a limit on inflight requests.
@@ -178,15 +251,14 @@ async def test_long_document_qa(
         max_inflight_requests: Maximum number of concurrent requests.
 
     Returns:
-        list: ttfts - a list of time-to-first-token measurements
+        list: request_stats - a list of RequestStats objects
     """
     # Create semaphore to limit concurrent requests
     semaphore = asyncio.Semaphore(max_inflight_requests)
 
     # Create tasks for all prompts
-    tasks = []
-    for i, prompt in enumerate(prompts):
-        task = process_single_prompt(
+    tasks = [
+        process_single_prompt(
             client=client,
             model=model,
             prompt=prompt,
@@ -195,12 +267,13 @@ async def test_long_document_qa(
             output_len=output_len,
             semaphore=semaphore,
         )
-        tasks.append(task)
-
+        for i, prompt in enumerate(prompts)
+    ]
     # Execute all tasks concurrently and collect results
-    ttfts = await asyncio.gather(*tasks)
+    # The semaphore will control max concurrent requests
+    request_stats = await asyncio.gather(*tasks)
 
-    return ttfts
+    return request_stats
 
 
 def repeat_prompts(prompts, repeat_count, mode: str):
@@ -242,6 +315,94 @@ def repeat_prompts(prompts, repeat_count, mode: str):
         )
 
 
+def add_cache_misses(prompts, hit_miss_ratio):
+    """
+    Add cache misses to the prompts and return a boolean mask aligned with prompts.
+    """
+    if hit_miss_ratio is None:
+        return prompts, [False] * len(prompts)
+
+    hit, miss = map(int, hit_miss_ratio.split(":", 1))
+    period = hit + miss
+    miss_mask = [False] * len(prompts)
+
+    for i in range(len(prompts)):
+        # every (hit+miss) window: first `hit` are hits, rest are misses
+        if period and (i % period) >= hit:
+            miss_mask[i] = True
+            prompts[i] = f"{random.randint(-10_000_000, 10_000_000)} {prompts[i]}"
+
+    return prompts, miss_mask
+
+
+def relative_time(df, start_time):
+    """
+    Relative time to the start of the benchmark.
+    """
+    df["request_start"] = df["request_start"] - start_time
+    df["request_end"] = df["request_end"] - start_time
+    df["ttft_time"] = df["request_start"] + df["ttft"]
+
+
+def visualize_results(warmup_df, benchmark_df):
+    def plot_bars(df, title, filename):
+        plt.figure(figsize=(12, 6))
+
+        if "is_miss" in df.columns:
+            is_miss = df["is_miss"]
+        else:
+            is_miss = pd.Series(False, index=df.index)
+
+        hits = df[~is_miss]
+        misses = df[is_miss]
+
+        # Prefill: dark blue (hit), dark orange (miss)
+        if not hits.empty:
+            plt.barh(
+                hits["prompt_id"],
+                hits["ttft_time"] - hits["request_start"],
+                left=hits["request_start"],
+                color="darkblue",
+                label="Loading",  # prefill hits
+            )
+        if not misses.empty:
+            plt.barh(
+                misses["prompt_id"],
+                misses["ttft_time"] - misses["request_start"],
+                left=misses["request_start"],
+                color="darkorange",
+                label="Compute",  # prefill misses
+            )
+
+        # Decode: light blue (hit), light orange (miss)
+        if not hits.empty:
+            plt.barh(
+                hits["prompt_id"],
+                hits["request_end"] - hits["ttft_time"],
+                left=hits["ttft_time"],
+                color="skyblue",
+                label="Decoding after loading",
+            )
+        if not misses.empty:
+            plt.barh(
+                misses["prompt_id"],
+                misses["request_end"] - misses["ttft_time"],
+                left=misses["ttft_time"],
+                color="pink",
+                label="Decoding after compute",
+            )
+
+        plt.xlabel("Time (s)")
+        plt.ylabel("Prompt ID")
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(filename)
+        plt.close()
+
+    plot_bars(warmup_df, "Warmup Round", "warmup_round.png")
+    plot_bars(benchmark_df, "Query Round", "query_round.png")
+
+
 async def main(args):
     random.seed(args.shuffle_seed)
 
@@ -270,10 +431,11 @@ async def main(args):
     ]
 
     prompts = repeat_prompts(warmup_prompts, args.repeat_count, mode=args.repeat_mode)
+    prompts, miss_mask = add_cache_misses(prompts, args.hit_miss_ratio)
 
     write_resp("------warm up round------\n")
     warmup_start_time = time.time()
-    warmup_ttfts = await test_long_document_qa(
+    warmup_request_stats = await test_long_document_qa(
         client=client,
         model=model,
         prompts=warmup_prompts,
@@ -289,7 +451,7 @@ async def main(args):
         time.sleep(sleep_time_after_warmup)
 
     benchmark_start_time = time.time()
-    benchmark_ttfts = await test_long_document_qa(
+    benchmark_request_stats = await test_long_document_qa(
         client=client,
         model=model,
         prompts=prompts,
@@ -298,9 +460,19 @@ async def main(args):
     )
     benchmark_end_time = time.time()
 
+    warmup_df = pd.DataFrame([stats.__dict__ for stats in warmup_request_stats])
+    relative_time(warmup_df, warmup_start_time)
+    warmup_df["is_miss"] = True
+    benchmark_df = pd.DataFrame([stats.__dict__ for stats in benchmark_request_stats])
+    benchmark_df["is_miss"] = miss_mask
+    relative_time(benchmark_df, benchmark_start_time)
+
+    warmup_df.to_csv("warmup_round.csv", index=False)
+    benchmark_df.to_csv("query_round.csv", index=False)
+
     # Print results
-    warmup_mean_ttft = sum(warmup_ttfts) / len(warmup_ttfts)
-    query_mean_ttft = sum(benchmark_ttfts) / len(benchmark_ttfts)
+    warmup_mean_ttft = warmup_df["ttft"].mean()
+    query_mean_ttft = benchmark_df["ttft"].mean()
     CSI = "\x1b["
     RESET = CSI + "0m"
     print(f"{CSI}36;1m\n=== BENCHMARK RESULTS ==={RESET}")
@@ -308,13 +480,16 @@ async def main(args):
     print(
         f"{CSI}33mWarmup round time: {warmup_end_time - warmup_start_time:.3f}s{RESET}"
     )
-    print(f"{CSI}35mWarmup round prompt count: {len(warmup_ttfts)}{RESET}")
+    print(f"{CSI}35mWarmup round prompt count: {len(warmup_df)}{RESET}")
     print(f"{CSI}32mQuery round mean TTFT: {query_mean_ttft:.3f}s{RESET}")
     print(
         f"{CSI}33mQuery round time: "
         f"{benchmark_end_time - benchmark_start_time:.3f}s{RESET}"
     )
-    print(f"{CSI}35mQuery round prompt count: {len(benchmark_ttfts)}{RESET}")
+    print(f"{CSI}35mQuery round prompt count: {len(benchmark_df)}{RESET}")
+
+    if visualize:
+        visualize_results(warmup_df, benchmark_df)
 
     # Validate expected gains as multiplicative speed-ups
     if args.expected_ttft_gain is not None:
@@ -333,8 +508,8 @@ async def main(args):
         query_duration = benchmark_end_time - benchmark_start_time
 
         # compute per-prompt latency before comparing
-        warmup_per_prompt = warmup_duration / len(warmup_ttfts)
-        query_per_prompt = query_duration / len(benchmark_ttfts)
+        warmup_per_prompt = warmup_duration / len(warmup_df)
+        query_per_prompt = query_duration / len(benchmark_df)
         actual_latency_gain = (
             warmup_per_prompt / query_per_prompt
             if query_per_prompt > 0
@@ -345,6 +520,16 @@ async def main(args):
             sys.exit(
                 f"ERROR: latency gain {actual_latency_gain:.2f}× < expected "
                 f"{args.expected_latency_gain:.2f}×"
+            )
+
+    if args.expected_latency is not None:
+        warmup_duration = warmup_end_time - warmup_start_time
+        warmup_per_prompt = warmup_duration / len(warmup_df)
+        print(f"{CSI}34mActual latency: {warmup_per_prompt:.2f}s{RESET}")
+        if warmup_per_prompt > args.expected_latency:
+            sys.exit(
+                f"ERROR: latency {warmup_per_prompt:.2f}s > expected "
+                f"{args.expected_latency:.2f}s"
             )
 
 
@@ -417,7 +602,7 @@ def create_argument_parser():
     parser.add_argument(
         "--max-inflight-requests",
         type=int,
-        default=20,
+        default=2,
         help="Maximum number of concurrent inflight requests",
     )
 
@@ -452,6 +637,35 @@ def create_argument_parser():
             "as a factor, e.g. 4.5 for 4.5×. If actual gain is below this, exits."
         ),
     )
+    parser.add_argument(
+        "--expected-latency",
+        type=float,
+        default=None,
+        help="Expected end to end latency for the first query round.",
+    )
+
+    parser.add_argument(
+        "--completions",
+        action="store_true",
+        help="Use completions API instead of chat completions API",
+    )
+
+    parser.add_argument(
+        "--visualize",
+        action="store_true",
+        help="Visualize the results",
+    )
+
+    parser.add_argument(
+        "--hit-miss-ratio",
+        type=str,
+        default=None,
+        help=(
+            "In query round, control how many of the prompts will miss the cache."
+            "For example, 3:1 means every fourth repeated prompt will be randomized "
+            "to force a cache miss. 2:2 means 2 hits and 2 misses"
+        ),
+    )
 
     return parser
 
@@ -459,5 +673,10 @@ def create_argument_parser():
 if __name__ == "__main__":
     parser = create_argument_parser()
     args = parser.parse_args()
+    completions_mode = args.completions
+    visualize = args.visualize
+    if visualize:
+        # Third Party
+        import matplotlib.pyplot as plt
     OUTPUT_FILE = args.output
     asyncio.run(main(args))

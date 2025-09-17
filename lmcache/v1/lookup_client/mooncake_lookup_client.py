@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Optional, Union
 
 # Third Party
 import torch
@@ -58,10 +58,10 @@ class MooncakeLookupClient(LookupClientInterface):
 
     def lookup(
         self,
-        token_ids: torch.Tensor,
+        token_ids: Union[torch.Tensor, list[int]],
         lookup_id: Optional[str] = None,
         request_configs: Optional[dict] = None,
-    ) -> int:
+    ) -> Optional[int]:
         # process token_ids to cacheengine keys
         keys = []
         ends = []

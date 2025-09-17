@@ -13,6 +13,7 @@ import prometheus_client
 # First Party
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
+from lmcache.usage_context import ContinuousUsageContext
 from lmcache.utils import thread_safe
 
 logger = init_logger(__name__)
@@ -27,8 +28,10 @@ class LMCacheStats:
     interval_lookup_requests: int
     interval_requested_tokens: int
     interval_hit_tokens: int
+    interval_stored_tokens: int
     interval_lookup_tokens: int
     interval_lookup_hits: int
+    interval_vllm_hit_tokens: int
 
     interval_remote_read_requests: int
     interval_remote_read_bytes: int
@@ -119,8 +122,10 @@ class LMCStatsMonitor:
         self.interval_lookup_requests = 0
         self.interval_requested_tokens = 0  # total requested tokens retrieve
         self.interval_hit_tokens = 0  # total hit tokens retrieve
+        self.interval_stored_tokens = 0  # total tokens tored in LMCache
         self.interval_lookup_tokens = 0  # total requested tokens lookup
         self.interval_lookup_hits = 0  # total hit tokens lookup
+        self.interval_vllm_hit_tokens = 0  # total hit tokens in vllm
 
         # remote backends read/write metrics
         self.interval_remote_read_requests = 0
@@ -213,6 +218,7 @@ class LMCStatsMonitor:
             num_tokens=num_tokens, start_time=curr_time, end_time=0
         )
         self.interval_store_requests += 1
+        self.interval_stored_tokens += num_tokens
         self.store_requests[self.store_request_id] = store_stats
         self.store_request_id += 1
         return self.store_request_id - 1
@@ -290,6 +296,10 @@ class LMCStatsMonitor:
     def update_pinned_memory_objs_count(self, delta: int):
         self.pinned_memory_objs_count += delta
 
+    @thread_safe
+    def update_interval_vllm_hit_tokens(self, delta: int):
+        self.interval_vllm_hit_tokens += delta
+
     def _clear(self):
         """
         Clear all the distribution stats
@@ -300,8 +310,10 @@ class LMCStatsMonitor:
 
         self.interval_requested_tokens = 0
         self.interval_hit_tokens = 0
+        self.interval_stored_tokens = 0
         self.interval_lookup_tokens = 0
         self.interval_lookup_hits = 0
+        self.interval_vllm_hit_tokens = 0
 
         self.interval_remote_read_requests = 0
         self.interval_remote_read_bytes = 0
@@ -378,6 +390,7 @@ class LMCStatsMonitor:
             interval_lookup_requests=self.interval_lookup_requests,
             interval_requested_tokens=self.interval_requested_tokens,
             interval_hit_tokens=self.interval_hit_tokens,
+            interval_stored_tokens=self.interval_stored_tokens,
             interval_lookup_tokens=self.interval_lookup_tokens,
             interval_lookup_hits=self.interval_lookup_hits,
             interval_remote_read_requests=self.interval_remote_read_requests,
@@ -405,6 +418,7 @@ class LMCStatsMonitor:
             time_to_store=time_to_store,
             retrieve_speed=retrieve_speed,
             store_speed=store_speed,
+            interval_vllm_hit_tokens=self.interval_vllm_hit_tokens,
         )
         self._clear()
         return ret
@@ -479,6 +493,14 @@ class PrometheusLogger:
             labelnames=labelnames,
         )
 
+        self.counter_num_stored_tokens = self._counter_cls(
+            name="lmcache:num_stored_tokens",
+            documentation=(
+                "Total number of tokens stored in lmcache including evicted ones"
+            ),
+            labelnames=labelnames,
+        )
+
         self.counter_num_lookup_tokens = self._counter_cls(
             name="lmcache:num_lookup_tokens",
             documentation="Total number of tokens requested in lookup from lmcache",
@@ -488,6 +510,12 @@ class PrometheusLogger:
         self.counter_num_lookup_hits = self._counter_cls(
             name="lmcache:num_lookup_hits",
             documentation="Total number of tokens hit in lookup from lmcache",
+            labelnames=labelnames,
+        )
+
+        self.counter_num_vllm_hit_tokens = self._counter_cls(
+            name="lmcache:num_vllm_hit_tokens",
+            documentation="Number of hit tokens in vllm",
             labelnames=labelnames,
         )
 
@@ -830,8 +858,12 @@ class PrometheusLogger:
             self.counter_num_requested_tokens, stats.interval_requested_tokens
         )
         self._log_counter(self.counter_num_hit_tokens, stats.interval_hit_tokens)
+        self._log_counter(self.counter_num_stored_tokens, stats.interval_stored_tokens)
         self._log_counter(self.counter_num_lookup_tokens, stats.interval_lookup_tokens)
         self._log_counter(self.counter_num_lookup_hits, stats.interval_lookup_hits)
+        self._log_counter(
+            self.counter_num_vllm_hit_tokens, stats.interval_vllm_hit_tokens
+        )
 
         self._log_counter(
             self.counter_num_remote_read_requests,
@@ -953,6 +985,7 @@ class LMCacheStatsLogger:
         self.log_interval = log_interval
         self.monitor = LMCStatsMonitor.GetOrCreate()
         self.prometheus_logger = PrometheusLogger.GetOrCreate(metadata)
+        self.lmc_usage_logger = ContinuousUsageContext.GetOrCreate(metadata)
         self.is_running = True
 
         self.thread = threading.Thread(target=self.log_worker, daemon=True)
@@ -962,6 +995,7 @@ class LMCacheStatsLogger:
         while self.is_running:
             stats = self.monitor.get_stats_and_clear()
             self.prometheus_logger.log_prometheus(stats)
+            self.lmc_usage_logger.incr_or_send_stats(stats)
             time.sleep(self.log_interval)
 
     def shutdown(self):

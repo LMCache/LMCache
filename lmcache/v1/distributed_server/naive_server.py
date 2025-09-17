@@ -19,7 +19,12 @@ from lmcache.v1.distributed_server.abstract_server import (  # noqa: E501
 )
 from lmcache.v1.lookup_server import LookupServerInterface
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
-from lmcache.v1.protocol import ClientMetaMessage, Constants, ServerMetaMessage
+from lmcache.v1.protocol import (
+    ClientCommand,
+    ClientMetaMessage,
+    ServerMetaMessage,
+    ServerReturnCode,
+)
 from lmcache.v1.storage_backend.storage_manager import StorageManager
 
 logger = init_logger(__name__)
@@ -91,7 +96,7 @@ class NaiveDistributedServer(DistributedServerInterface):
         )
         if mem_obj is None:
             server_msg = ServerMetaMessage(
-                Constants.SERVER_FAIL,
+                ServerReturnCode.FAIL,
                 0,
                 MemoryFormat(1),
                 torch.float16,
@@ -102,7 +107,7 @@ class NaiveDistributedServer(DistributedServerInterface):
             return None
 
         server_msg = ServerMetaMessage(
-            Constants.SERVER_SUCCESS,
+            ServerReturnCode.SUCCESS,
             0,
             MemoryFormat(1),
             torch.float16,
@@ -163,7 +168,7 @@ class NaiveDistributedServer(DistributedServerInterface):
         )
         if mem_obj is None:
             fail_msg = ServerMetaMessage(
-                Constants.SERVER_FAIL,
+                ServerReturnCode.FAIL,
                 0,
                 MemoryFormat(1),
                 torch.float16,
@@ -175,7 +180,7 @@ class NaiveDistributedServer(DistributedServerInterface):
             return None
 
         success_msg = ServerMetaMessage(
-            Constants.SERVER_SUCCESS,
+            ServerReturnCode.SUCCESS,
             0,
             MemoryFormat(1),
             torch.float16,
@@ -231,7 +236,7 @@ class NaiveDistributedServer(DistributedServerInterface):
         await self.loop.sock_sendall(
             client_socket,
             ClientMetaMessage(
-                Constants.CLIENT_GET,
+                ClientCommand.GET,
                 key,
                 0,
                 MemoryFormat(1),
@@ -244,7 +249,7 @@ class NaiveDistributedServer(DistributedServerInterface):
         data = await self.loop.sock_recv(client_socket, ServerMetaMessage.packlength())
 
         meta = ServerMetaMessage.deserialize(data)
-        if meta.code != Constants.SERVER_SUCCESS:
+        if meta.code != ServerReturnCode.SUCCESS:
             return None
 
         memory_obj = await self.receive_mem_obj(meta, client_socket)
@@ -283,7 +288,7 @@ class NaiveDistributedServer(DistributedServerInterface):
             await self.loop.sock_sendall(
                 client_socket,
                 ClientMetaMessage(
-                    Constants.CLIENT_PUT,
+                    ClientCommand.PUT,
                     key,
                     memory_obj.get_physical_size(),
                     memory_obj.get_memory_format(),
@@ -298,7 +303,7 @@ class NaiveDistributedServer(DistributedServerInterface):
             )
 
             meta = ServerMetaMessage.deserialize(data)
-            if meta.code != Constants.SERVER_SUCCESS:
+            if meta.code != ServerReturnCode.SUCCESS:
                 return False
 
             await self.loop.sock_sendall(client_socket, memory_obj.byte_array)
@@ -333,7 +338,7 @@ class NaiveDistributedServer(DistributedServerInterface):
                 meta = ClientMetaMessage.deserialize(header)
 
                 match meta.command:
-                    case Constants.CLIENT_GET:
+                    case ClientCommand.GET:
                         t0 = time.perf_counter()
 
                         memory_obj = await self.handle_get(meta.key)
@@ -344,7 +349,7 @@ class NaiveDistributedServer(DistributedServerInterface):
                         if memory_obj is not None:
                             writer.write(
                                 ServerMetaMessage(
-                                    Constants.SERVER_SUCCESS,
+                                    ServerReturnCode.SUCCESS,
                                     len(memory_obj.byte_array),
                                     memory_obj.get_memory_format(),
                                     memory_obj.get_dtype(),
@@ -368,7 +373,7 @@ class NaiveDistributedServer(DistributedServerInterface):
                         else:
                             writer.write(
                                 ServerMetaMessage(
-                                    Constants.SERVER_FAIL,
+                                    ServerReturnCode.FAIL,
                                     0,
                                     MemoryFormat(1),
                                     torch.float16,
@@ -377,7 +382,7 @@ class NaiveDistributedServer(DistributedServerInterface):
                             )
                             await writer.drain()
 
-                    case Constants.CLIENT_PUT:
+                    case ClientCommand.PUT:
                         await self.handle_put(meta, reader, writer)
 
         finally:

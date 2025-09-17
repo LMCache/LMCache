@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from concurrent.futures import Future
 from typing import List, Optional, Sequence
 import abc
 
@@ -8,8 +7,15 @@ import abc
 import torch
 
 # First Party
+from lmcache.config import LMCacheEngineMetadata
 from lmcache.utils import CacheEngineKey
-from lmcache.v1.memory_management import MemoryFormat, MemoryObj
+from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.v1.memory_management import (
+    MemoryAllocatorInterface,
+    MemoryFormat,
+    MemoryObj,
+)
+from lmcache.v1.storage_backend.storage_backend_listener import StorageBackendListener
 
 
 class StorageBackendInterface(metaclass=abc.ABCMeta):
@@ -31,6 +37,20 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
             raise
 
         self.dst_device = dst_device
+        self._listener: Optional[StorageBackendListener] = None
+
+    def set_listener(self, listener: StorageBackendListener):
+        """
+        Set the listener to receive events.
+        """
+        self._listener = listener
+
+    def _on_evict(self, keys: List[CacheEngineKey]) -> None:
+        """
+        Evict keys from the storage backend.
+        """
+        if self._listener is not None:
+            self._listener.on_evict(self, keys)
 
     @abc.abstractmethod
     def contains(self, key: CacheEngineKey, pin: bool = False) -> bool:
@@ -78,20 +98,6 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
         raise NotImplementedError
 
     @abc.abstractmethod
-    def submit_prefetch_task(
-        self,
-        key: CacheEngineKey,
-    ) -> bool:
-        """
-        An async function to get the MemoryObj from the storage backend.
-
-        :param CacheEngineKey key: The key of the MemoryObj.
-
-        :return: a future object. None if the key does not exist.
-        """
-        raise NotImplementedError
-
-    @abc.abstractmethod
     def get_blocking(
         self,
         key: CacheEngineKey,
@@ -105,17 +111,36 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
         """
         raise NotImplementedError
 
-    @abc.abstractmethod
-    def get_non_blocking(
+    async def batched_async_contains(
         self,
-        key: CacheEngineKey,
-    ) -> Optional[Future]:
+        lookup_id: str,
+        keys: List[CacheEngineKey],
+        pin: bool = False,
+    ) -> int:
+        """
+        Check whether keys are in the storage backend.
+
+        :param List[CacheEngineKey] keys: The keys of the MemoryObjs.
+
+        :param bool pin: Whether to pin the keys.
+            If True, the corresponding KV caches will be
+            pinned in the storage backend.
+
+        :return: The number of keys that exist in the storage backend.
+        """
+        raise NotImplementedError
+
+    async def batched_get_non_blocking(
+        self,
+        lookup_id: str,
+        keys: list[CacheEngineKey],
+    ) -> list[MemoryObj]:
         """
         A non-blcocking function to get the kv cache from the storage backend.
 
-        :param CacheEngineKey key: The key of the MemoryObj.
+        :param list[CacheEngineKey] keys: The keys of the list of MemoryObjs.
 
-        :return: a future object. None if the key does not exist.
+        :return: a list of Memoryobjs.
         """
         raise NotImplementedError
 
@@ -197,6 +222,16 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
         return num_removed
 
     @abc.abstractmethod
+    def get_allocator_backend(self) -> "AllocatorBackendInterface":
+        """
+        Get the allocator backend that is used by the current storage backend
+        to allocate memory objects during `get` operations.
+
+        :return: an instance of AllocateBackendInterface
+        """
+        raise NotImplementedError
+
+    @abc.abstractmethod
     def close(
         self,
     ) -> None:
@@ -208,10 +243,33 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
 
 class AllocatorBackendInterface(StorageBackendInterface):
     """
-    return self.allocator_backend.allocate(
-        shape, dtype, fmt, eviction=eviction, busy_loop=busy_loop
-    )
+    AllocatorBackendInterface extends the StorageBackendInterface with
+    the ability to actively allocate the memory objects.
     """
+
+    @abc.abstractmethod
+    def initialize_allocator(
+        self, config: LMCacheEngineConfig, metadata: LMCacheEngineMetadata
+    ) -> MemoryAllocatorInterface:
+        """
+        Create the correct memory allocator for the current storage backend
+
+        Args:
+            config: The cache engine config
+            metadata: the cache engine metadata
+
+        Returns:
+            The memory allocator for this storage backend
+        """
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    def get_memory_allocator(self) -> MemoryAllocatorInterface:
+        """
+        Returns:
+            The underlying memory allocator
+        """
+        raise NotImplementedError
 
     @abc.abstractmethod
     def allocate(
@@ -249,7 +307,7 @@ class AllocatorBackendInterface(StorageBackendInterface):
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
         eviction: bool = True,
         busy_loop: bool = True,
-    ) -> Optional[MemoryObj]:
+    ) -> Optional[list[MemoryObj]]:
         """
         Allocates memory in the backend to hold a tensor of the given shape
         in a batched manner. The allocated memory objects will have the same

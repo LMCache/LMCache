@@ -39,6 +39,19 @@ def _to_int_list(
     return [int(p) for p in parts]
 
 
+def _to_float_list(
+    value: Optional[Union[str, float, list[Any]]],
+) -> Optional[list[float]]:
+    if value is None:
+        return None
+    if isinstance(value, list):
+        return [float(x) for x in value]
+    if isinstance(value, float):
+        return [value]
+    parts = [p.strip() for p in str(value).split(",") if p.strip()]
+    return [float(p) for p in parts]
+
+
 def _to_str_list(
     value: Optional[Union[str, list[str]]],
 ) -> Optional[list[str]]:
@@ -48,6 +61,14 @@ def _to_str_list(
         return value
     parts = [p.strip() for p in value.split(",") if p.strip()]
     return [p for p in parts]
+
+
+def _to_bool(
+    value: Optional[Union[bool, int, str]],
+) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in ["true", "1"]
 
 
 # Configuration aliases and deprecated mappings
@@ -68,9 +89,7 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
     "local_cpu": {
         "type": bool,
         "default": True,
-        "env_converter": lambda x: x
-        if isinstance(x, bool)
-        else str(x).lower() in ["true", "1"],
+        "env_converter": _to_bool,
     },
     "max_local_cpu_size": {"type": float, "default": 5.0, "env_converter": float},
     "local_disk": {
@@ -89,16 +108,12 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
     "use_layerwise": {
         "type": bool,
         "default": False,
-        "env_converter": lambda x: x
-        if isinstance(x, bool)
-        else str(x).lower() in ["true", "1"],
+        "env_converter": _to_bool,
     },
     "save_decode_cache": {
         "type": bool,
         "default": False,
-        "env_converter": lambda x: x
-        if isinstance(x, bool)
-        else str(x).lower() in ["true", "1"],
+        "env_converter": _to_bool,
     },
     "pre_caching_hash_algorithm": {
         "type": str,
@@ -109,38 +124,38 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
     "enable_blending": {
         "type": bool,
         "default": False,
-        "env_converter": lambda x: x
-        if isinstance(x, bool)
-        else str(x).lower() in ["true", "1"],
+        "env_converter": _to_bool,
     },
-    "blend_recompute_ratio": {"type": float, "default": 0.15, "env_converter": float},
+    "blend_recompute_ratios": {
+        "type": Optional[list[float]],
+        "default": None,
+        "env_converter": _to_float_list,
+    },
+    "blend_thresholds": {
+        "type": Optional[list[float]],
+        "default": None,
+        "env_converter": _to_float_list,
+    },
+    "blend_check_layers": {
+        "type": list[int],
+        "default": None,
+        "env_converter": _to_int_list,
+    },
     "blend_min_tokens": {"type": int, "default": 256, "env_converter": int},
     "blend_special_str": {"type": str, "default": " # # ", "env_converter": str},
     # P2P configurations
     "enable_p2p": {
         "type": bool,
         "default": False,
-        "env_converter": lambda x: x
-        if isinstance(x, bool)
-        else str(x).lower() in ["true", "1"],
+        "env_converter": _to_bool,
     },
     "lookup_url": {"type": Optional[str], "default": None, "env_converter": str},
     "distributed_url": {"type": Optional[str], "default": None, "env_converter": str},
-    # Error handling
-    "error_handling": {
-        "type": bool,
-        "default": False,
-        "env_converter": lambda x: x
-        if isinstance(x, bool)
-        else str(x).lower() in ["true", "1"],
-    },
     # Controller configurations
     "enable_controller": {
         "type": bool,
         "default": False,
-        "env_converter": lambda x: x
-        if isinstance(x, bool)
-        else str(x).lower() in ["true", "1"],
+        "env_converter": _to_bool,
     },
     "lmcache_instance_id": {
         "type": str,
@@ -172,9 +187,7 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
     "enable_nixl": {
         "type": bool,
         "default": False,
-        "env_converter": lambda x: x
-        if isinstance(x, bool)
-        else str(x).lower() in ["true", "1"],
+        "env_converter": _to_bool,
     },
     "nixl_role": {"type": Optional[str], "default": None, "env_converter": str},
     "nixl_receiver_host": {
@@ -196,9 +209,7 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
     "nixl_enable_gc": {
         "type": bool,
         "default": False,
-        "env_converter": lambda x: x
-        if isinstance(x, bool)
-        else str(x).lower() in ["true", "1"],
+        "env_converter": _to_bool,
     },
     "nixl_backends": {
         "type": Optional[list[str]],
@@ -209,9 +220,7 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
     "enable_xpyd": {
         "type": bool,
         "default": False,
-        "env_converter": lambda x: x
-        if isinstance(x, bool)
-        else str(x).lower() in ["true", "1"],
+        "env_converter": _to_bool,
     },
     "nixl_peer_host": {"type": Optional[str], "default": None, "env_converter": str},
     "nixl_peer_init_port": {
@@ -259,9 +268,7 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
     "save_unfull_chunk": {
         "type": bool,
         "default": True,
-        "env_converter": lambda x: x
-        if isinstance(x, bool)
-        else str(x).lower() in ["true", "1"],
+        "env_converter": _to_bool,
     },
     "blocking_timeout_secs": {"type": int, "default": 10, "env_converter": int},
     "external_lookup_client": {
@@ -272,9 +279,7 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
     "py_enable_gc": {
         "type": bool,
         "default": True,
-        "env_converter": lambda x: x
-        if isinstance(x, bool)
-        else str(x).lower() in ["true", "1"],
+        "env_converter": _to_bool,
     },
     "cache_policy": {
         "type": str,
@@ -286,16 +291,24 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "default": None,
         "env_converter": str,
     },
+    "enable_async_loading": {
+        "type": bool,
+        "default": False,
+        "env_converter": _to_bool,
+    },
     "internal_api_server_enabled": {
         "type": bool,
         "default": False,
-        "env_converter": lambda x: x
-        if isinstance(x, bool)
-        else str(x).lower() in ["true", "1"],
+        "env_converter": _to_bool,
     },
     "internal_api_server_port_start": {
         "type": int,
         "default": 6999,
+        "env_converter": int,
+    },
+    "priority_limit": {
+        "type": Optional[int],
+        "default": None,
         "env_converter": int,
     },
     "internal_api_server_include_index_list": {
@@ -376,6 +389,7 @@ def _create_config_class():
             "from_legacy": classmethod(_from_legacy),
             "from_file": classmethod(_from_file),
             "from_env": classmethod(_from_env),
+            "update_config_from_env": _update_config_from_env,
             "__str__": lambda self: str(
                 {name: getattr(self, name) for name in _CONFIG_DEFINITIONS}
             ),
@@ -442,7 +456,7 @@ def _to_original_config(self):
         pipelined_backend=False,
         save_decode_cache=self.save_decode_cache,
         enable_blending=self.enable_blending,
-        blend_recompute_ratio=self.blend_recompute_ratio,
+        blend_recompute_ratio=0.15,
         blend_min_tokens=self.blend_min_tokens,
         blend_separator="[BLEND_SEP]",
         blend_add_special_in_precomp=False,
@@ -481,9 +495,9 @@ def _from_legacy(cls, **kwargs):
         },
         "local_disk": {
             "local_cpu": False,
-            "max_local_cpu_size": 2,
+            "max_local_cpu_size": 3,
             "local_disk": "local/disk_test/local_disk/",
-            "max_local_disk_size": 5,
+            "max_local_disk_size": 2,
             "remote_url": None,
         },
         "local_cpu_disk": {
@@ -559,8 +573,8 @@ def _from_file(cls, file_path: str):
     return instance.log_config()
 
 
-def _from_env(cls):
-    """Load configuration from environment variables"""
+def _update_config_from_env(self):
+    """Update an existing config object with environment variable configurations."""
 
     def get_env_name(attr_name: str) -> str:
         return f"LMCACHE_{attr_name.upper()}"
@@ -583,21 +597,24 @@ def _from_env(cls):
     # Resolve aliases and handle deprecated configurations
     resolved_config = _resolve_config_aliases(env_config, "environment variables")
 
-    config_values = {}
+    # Update config object with environment values
     for name, config in _CONFIG_DEFINITIONS.items():
-        value = resolved_config.get(name, config["default"])
-
-        # Convert environment variable values
         if name in resolved_config:
             try:
-                value = config["env_converter"](value)
+                value = resolved_config[name]
+                converted_value = config["env_converter"](value)
+                setattr(self, name, converted_value)
             except (ValueError, json.JSONDecodeError) as e:
                 logger.warning(f"Failed to parse {get_env_name(name)}: {e}")
-                value = config["default"]
+                # Keep existing value if conversion fails
 
-        config_values[name] = value
+    return self
 
-    instance = cls(**config_values)
+
+def _from_env(cls):
+    """Load configuration from environment variables"""
+    instance = cls.from_defaults()
+    _update_config_from_env(instance)
     return instance.log_config()
 
 
@@ -619,11 +636,6 @@ def _to_dict(self):
     return {name: getattr(self, name) for name in _CONFIG_DEFINITIONS}
 
 
-def _to_json(self):
-    """Serialize the configuration object to a JSON string."""
-    return json.dumps(self.to_dict(), indent=2)
-
-
 def _from_json(cls, json_str: str):
     """Deserialize a JSON string into a configuration object."""
     try:
@@ -632,6 +644,11 @@ def _from_json(cls, json_str: str):
     except json.JSONDecodeError as e:
         logger.error(f"Invalid JSON input: {e}")
         raise
+
+
+def _to_json(self):
+    """Serialize the configuration object to a JSON string."""
+    return json.dumps(self.to_dict(), indent=2)
 
 
 # Create configuration class

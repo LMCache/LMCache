@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from enum import Enum
+from enum import Enum, auto
 from logging import Logger
 import asyncio
 import collections
@@ -131,8 +131,8 @@ class AsyncLoopWrapper:
 
 
 class PromptBuildMethodType(Enum):
-    QA = 0
-    FEW_SHOT = 1
+    QA = auto()
+    FEW_SHOT = auto()
 
 
 def load_dataset(dataset_path):

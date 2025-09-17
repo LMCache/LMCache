@@ -6,13 +6,6 @@ import random
 import threading
 
 # Third Party
-from utils import (
-    check_paged_kv_cache_equal,
-    check_paged_kv_cache_equal_with_mla,
-    check_sglang_paged_kv_cache_equal,
-    generate_kv_cache_paged_list_tensors,
-    generate_sglang_kv_cache_paged_list_tensors,
-)
 import pytest
 import torch
 
@@ -29,6 +22,16 @@ from lmcache.v1.memory_management import (
     PagedTensorMemoryAllocator,
     PinMemoryAllocator,
     TensorMemoryAllocator,
+)
+
+# Local
+from .utils import (
+    check_paged_kv_cache_equal,
+    check_paged_kv_cache_equal_with_mla,
+    check_sglang_paged_kv_cache_equal,
+    generate_kv_cache_paged_list_tensors,
+    generate_sglang_kv_cache_paged_list_tensors,
+    recover_gpu_connector_states,
 )
 
 
@@ -151,6 +154,7 @@ def test_vllm_paged_connector_v2_with_gpu_and_mla(use_gpu, use_mla):
             slot_mapping=slot_mapping,
             offset=0,
         )
+        recover_gpu_connector_states(connector)
         if use_mla:
             assert memory_obj.metadata.fmt == MemoryFormat.KV_MLA_FMT
         else:
@@ -575,6 +579,7 @@ def test_vllm_paged_connector_v2_to_gpu_bench(benchmark):
         slot_mapping=slot_mapping,
         offset=0,
     )
+    recover_gpu_connector_states(connector)
     assert memory_obj.metadata.fmt == MemoryFormat.KV_2LTD
     benchmark.pedantic(
         connector.to_gpu,

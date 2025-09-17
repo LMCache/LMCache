@@ -1,4 +1,4 @@
-local_cpu: True
+local_cpu: False
 max_local_cpu_size: 5
 max_local_disk_size: 0
 

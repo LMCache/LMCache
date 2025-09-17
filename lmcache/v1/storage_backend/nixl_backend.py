@@ -396,6 +396,11 @@ class NixlBackend(StorageBackendInterface):
     def unpin(self, key: CacheEngineKey) -> bool:
         raise NotImplementedError
 
+    def get_allocator_backend(self):
+        raise RuntimeError(
+            "NixlBackend is deprecated, please use NixlBackendV3 instead"
+        )
+
     @staticmethod
     def CreateNixlBackend(
         config: LMCacheEngineConfig, metadata: LMCacheEngineMetadata

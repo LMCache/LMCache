@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-ServiceKind = Literal["lookup", "offload"]
+ServiceKind = Literal["lookup", "offload", "lookup_worker", "lookup_scheduler"]
 
 
 def get_zmq_context():
@@ -87,7 +87,7 @@ def get_zmq_rpc_path_lmcache(
     if vllm_config is None or vllm_config.kv_transfer_config is None:
         raise ValueError("A valid kv_transfer_config with engine_id is required.")
 
-    if service_name not in {"lookup", "offload"}:
+    if service_name not in {"lookup", "offload", "lookup_worker", "lookup_scheduler"}:
         raise ValueError(
             f"service_name must be 'lookup' or 'offload', got {service_name!r}"
         )

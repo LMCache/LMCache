@@ -33,6 +33,7 @@ class RemoteBackend(StorageBackendInterface):
         dst_device: str = "cuda",
         lookup_server: Optional[LookupServerInterface] = None,
     ):
+        super().__init__(dst_device)
         self.put_tasks: Set[CacheEngineKey] = set()
         self.lock = threading.Lock()
 
@@ -246,12 +247,6 @@ class RemoteBackend(StorageBackendInterface):
             for key, memory_obj in zip(keys, memory_objs, strict=False):
                 self.submit_put_task(key, memory_obj)
 
-    def submit_prefetch_task(
-        self,
-        key: CacheEngineKey,
-    ) -> bool:
-        raise NotImplementedError
-
     @_lmcache_nvtx_annotate
     def get_blocking(
         self,
@@ -298,12 +293,6 @@ class RemoteBackend(StorageBackendInterface):
             f"deserialization takes {(t3 - t2) * 1000:.6f} msec"
         )
         return decompressed_memory_obj
-
-    def get_non_blocking(
-        self,
-        key: CacheEngineKey,
-    ) -> Optional[Future]:
-        raise NotImplementedError
 
     def batched_get_blocking(
         self,
@@ -397,6 +386,61 @@ class RemoteBackend(StorageBackendInterface):
         )
         return decompressed_memory_objs
 
+    async def support_batched_async_contains(self) -> bool:
+        return (
+            self.connection is not None
+            and self.connection.support_batched_async_contains()
+        )
+
+    async def batched_async_contains(
+        self,
+        lookup_id: str,
+        keys: list[CacheEngineKey],
+        pin: bool = False,
+    ) -> int:
+        if self.connection is None:
+            logger.warning("Connection is None in batched_async_contains, returning 0")
+            return 0
+        if self._mla_worker_id_as0_mode:
+            keys = [
+                CacheEngineKey(
+                    key.fmt,
+                    key.model_name,
+                    key.world_size,
+                    0,
+                    key.chunk_hash,
+                    key.request_configs,
+                )
+                for key in keys
+            ]
+
+        try:
+            assert self.connection.support_batched_async_contains(), (
+                f"Connector {self.connection} does not support batched async contains"
+            )
+            return await self.connection.batched_async_contains(lookup_id, keys, pin)
+        except Exception as e:
+            logger.warning(f"Error occurred in batched_async_contains: {e}")
+            return 0
+
+    async def support_batched_get_non_blocking(self) -> bool:
+        return (
+            self.connection is not None
+            and self.connection.support_batched_get_non_blocking()
+        )
+
+    async def batched_get_non_blocking(
+        self,
+        lookup_id: str,
+        keys: List[CacheEngineKey],
+    ) -> List[MemoryObj]:
+        if self.connection is None:
+            logger.warning(
+                "Connection is None in batched_get_non_blocking, returning empty list"
+            )
+            return []
+        return await self.connection.batched_get_non_blocking(lookup_id, keys)
+
     def pin(self, key: CacheEngineKey) -> bool:
         logger.debug(
             "Remote backend does not support pin. "
@@ -413,6 +457,9 @@ class RemoteBackend(StorageBackendInterface):
 
     def remove(self, key, force=True):
         raise NotImplementedError("Remote backend does not support remove now.")
+
+    def get_allocator_backend(self):
+        return self.local_cpu_backend
 
     def close(self):
         try:

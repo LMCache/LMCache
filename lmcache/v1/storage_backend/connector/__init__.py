@@ -109,12 +109,8 @@ class ConnectorAdapter(ABC):
     def __init__(self, schema: str = "") -> None:
         self.schema = schema
 
-    @abstractmethod
     def can_parse(self, url: str) -> bool:
-        """
-        Check if this adapter can parse the given URL.
-        """
-        pass
+        return self.schema != "" and url.startswith(self.schema)
 
     @abstractmethod
     def create_connector(self, context: ConnectorContext) -> RemoteConnector:
@@ -219,6 +215,7 @@ def CreateConnector(
     - audit://host:port[?verify=true|false]
     - fs://[host:port]/path
     - s3://[bucket].s3express-[az_id].[region].amazonaws.com"
+    - mock://[capacity]/?peeking_latency=[ms]&read_throughput=[GB/s]&write_throughput=[GB/s]
     or
     - s3://[bucket].s3.[region].amazonaws.com
 
@@ -234,6 +231,7 @@ def CreateConnector(
     - fs:///tmp/lmcache
     - external://host:0/external_log_connector.lmc_external_log_connector/?connector_name=ExternalLogConnector
     - s3://fakefile--use1-az4--x-s3.s3express-use1-az4.us-east-1.amazonaws.com
+    - mock://100/?peeking_latency=1&read_throughput=2&write_throughput=2
     or
     - s3://fakefile--use1-az4--x-s3.s3.us-east-1.amazonaws.com
 

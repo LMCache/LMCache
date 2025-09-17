@@ -158,30 +158,10 @@ class TestGdsBackend:
         for key in keys:
             assert gds_backend.contains(key)
 
-    def test_submit_prefetch_task_key_not_exists(self, gds_backend):
-        key = create_test_key(1)
-        future = gds_backend.submit_prefetch_task(key)
-        assert future is None
-
-    def test_submit_prefetch_task_key_exists(self, gds_backend):
-        key = create_test_key(0)
-        memory_obj = create_test_memory_obj()
-        gds_backend.insert_key(key, memory_obj)
-        future = gds_backend.submit_prefetch_task(key)
-        # May be None if not CUDA, otherwise should be a Future
-        assert future is None or hasattr(future, "result")
-
     def test_get_blocking_key_not_exists(self, gds_backend):
         key = create_test_key(1)
         result = gds_backend.get_blocking(key)
         assert result is None
-
-    def test_get_non_blocking(self, gds_backend):
-        key = create_test_key(0)
-        memory_obj = create_test_memory_obj()
-        gds_backend.insert_key(key, memory_obj)
-        future = gds_backend.get_non_blocking(key)
-        assert future is None or hasattr(future, "result")
 
     def test_close(self, gds_backend):
         # Should not raise

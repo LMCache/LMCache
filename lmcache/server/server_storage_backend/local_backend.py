@@ -40,7 +40,8 @@ class LMSLocalBackend(LMSBackendInterface):
         self.evictor = DummyEvictor()
 
     def list_keys(self) -> List[str]:
-        return list(self.dict.keys())
+        with self.update_lock:
+            return list(self.dict.keys())
 
     def contains(
         self,

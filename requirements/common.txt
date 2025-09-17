@@ -3,7 +3,6 @@ aiofiles
 aiohttp
 awscrt
 cufile-python
-infinistore
 msgspec
 numpy
 nvtx

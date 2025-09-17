@@ -14,7 +14,6 @@
 # limitations under the License.
 
 # Standard
-from concurrent.futures import Future
 from dataclasses import dataclass
 from typing import List, Optional, Sequence, Set
 import asyncio
@@ -38,11 +37,12 @@ from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import (
+    MemoryFormat,
     MemoryObj,
     MemoryObjMetadata,
     PagedTensorMemoryAllocator,
 )
-from lmcache.v1.storage_backend.abstract_backend import StorageBackendInterface
+from lmcache.v1.storage_backend.abstract_backend import AllocatorBackendInterface
 from lmcache.v1.storage_backend.connector.nixl_utils import get_correct_nixl_device
 
 logger = init_logger(__name__)
@@ -54,7 +54,7 @@ class NixlStorageConfig:
     file_pool_size: int
     buffer_device: str
     path: str
-    backends: list[str]
+    backend: str
 
     @staticmethod
     def validate_nixl_backend(backend: str, device: str):
@@ -92,7 +92,7 @@ class NixlStorageConfig:
             file_pool_size=extra_config.get("nixl_file_pool_size"),
             buffer_device=corrected_device,
             path=extra_config.get("nixl_path"),
-            backends=[extra_config.get("nixl_backend")],
+            backend=extra_config.get("nixl_backend"),
         )
 
 
@@ -143,14 +143,14 @@ class NixlStorageAgent:
         allocator: PagedTensorMemoryAllocator,
         file_pool: NixlFilePool,
         device: str,
-        backends: list[str],
+        backend: str,
     ):
         buffer_ptr = allocator.buffer_ptr
         buffer_size = allocator.buffer_size
         page_size = allocator.align_bytes
 
         self.agent_name = "NixlAgent_" + str(uuid.uuid4())
-        nixl_conf = NixlAgentConfig(backends=backends)
+        nixl_conf = NixlAgentConfig(backends=[backend])
         self.nixl_agent = NixlAgent(self.agent_name, nixl_conf)
 
         device_id = torch.cuda.current_device()
@@ -225,7 +225,7 @@ class NixlStorageAgent:
         self.nixl_agent.deregister_memory(self.reg_descs)
 
 
-class NixlStorageBackend(StorageBackendInterface):
+class NixlStorageBackend(AllocatorBackendInterface):
     """
     Implementation of the StorageBackendInterface for Nixl.
 
@@ -236,8 +236,9 @@ class NixlStorageBackend(StorageBackendInterface):
     def __init__(
         self,
         nixl_config: NixlStorageConfig,
+        config: LMCacheEngineConfig,
+        metadata: LMCacheEngineMetadata,
         loop: asyncio.AbstractEventLoop,
-        memory_allocator: PagedTensorMemoryAllocator,
     ):
         """
         Initialize the Nixl storage backend.
@@ -254,14 +255,15 @@ class NixlStorageBackend(StorageBackendInterface):
         self.progress_lock = threading.Lock()
         self.progress_set: Set[int] = set()
 
-        self.memory_allocator = memory_allocator
+        self.memory_allocator = self.initialize_allocator(config, metadata)
 
         self.file_pool = NixlFilePool(nixl_config.path, nixl_config.file_pool_size)
+
         self.agent = NixlStorageAgent(
-            memory_allocator,
+            self.memory_allocator,
             self.file_pool,
             nixl_config.buffer_device,
-            nixl_config.backends,
+            nixl_config.backend,
         )
 
     def contains(self, key: CacheEngineKey, pin: bool = False) -> bool:
@@ -337,7 +339,7 @@ class NixlStorageBackend(StorageBackendInterface):
         assert shape is not None
         assert fmt is not None
 
-        obj = self.memory_allocator.allocate(shape, dtype, fmt, allocator_type="nixl")
+        obj = self.memory_allocator.allocate(shape, dtype, fmt)
         if obj is None:
             return None
 
@@ -361,17 +363,6 @@ class NixlStorageBackend(StorageBackendInterface):
 
         asyncio.run_coroutine_threadsafe(self.gpu_to_file(keys, memory_objs), self.loop)
 
-    def submit_prefetch_task(self, key: CacheEngineKey) -> bool:
-        """
-        An async function to get the MemoryObj from the storage backend.
-
-        :param key: The key of the MemoryObj.
-
-        :return: True if prefetch succeeded, else False.
-        """
-
-        return False
-
     def get_blocking(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         """
         A blocking function to get the kv cache from the storage backend.
@@ -381,17 +372,12 @@ class NixlStorageBackend(StorageBackendInterface):
         :return: MemoryObj. None if the key does not exist.
         """
 
-        future = self.get_non_blocking(key)
+        future = asyncio.run_coroutine_threadsafe(self.file_to_gpu(key), self.loop)
 
         if future is None:
             return None
 
         return future.result()
-
-    def get_non_blocking(self, key: CacheEngineKey) -> Optional[Future]:
-        future = asyncio.run_coroutine_threadsafe(self.file_to_gpu(key), self.loop)
-
-        return future
 
     def remove(self, key: CacheEngineKey, force: bool = True) -> bool:
         """
@@ -422,12 +408,91 @@ class NixlStorageBackend(StorageBackendInterface):
 
         self.file_pool.close()
 
+        self.memory_allocator.close()
+
+    def initialize_allocator(
+        self,
+        config: LMCacheEngineConfig,
+        metadata: LMCacheEngineMetadata,
+    ) -> PagedTensorMemoryAllocator:
+        extra_config = config.extra_config
+        enable_nixl_storage = extra_config is not None and extra_config.get(
+            "enable_nixl_storage"
+        )
+        assert enable_nixl_storage
+        # First Party
+        from lmcache.v1.storage_backend.connector.nixl_utils import (
+            get_correct_nixl_device,
+        )
+
+        corrected_device = get_correct_nixl_device(
+            config.nixl_buffer_device,
+            metadata.worker_id,
+        )
+
+        buffer = torch.empty(
+            config.nixl_buffer_size,
+            dtype=torch.uint8,
+            device=corrected_device,
+        )
+
+        if corrected_device == "cpu":
+            torch.cuda.cudart().cudaHostRegister(
+                buffer.data_ptr(), config.nixl_buffer_size, 0
+            )
+        else:
+            logger.info(f"Setting cuda device to {corrected_device} ")
+            torch.cuda.set_device(corrected_device)
+
+        return PagedTensorMemoryAllocator(
+            buffer,
+            torch.Size(metadata.kv_shape),
+            metadata.kv_dtype,
+            MemoryFormat.KV_2LTD,
+        )
+
+    def get_memory_allocator(self):
+        return self.memory_allocator
+
+    def allocate(
+        self,
+        shape: torch.Size,
+        dtype: torch.dtype,
+        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
+        eviction: bool = True,
+        busy_loop: bool = True,
+    ) -> Optional[MemoryObj]:
+        if eviction:
+            logger.warning("NixlStorageBackend does not support eviction for now")
+        if busy_loop:
+            logger.warning("NixlStorageBackend does not support busy loop for now")
+
+        return self.memory_allocator.allocate(shape, dtype, fmt)
+
+    def batched_allocate(
+        self,
+        shape: torch.Size,
+        dtype: torch.dtype,
+        batch_size: int,
+        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
+        eviction: bool = True,
+        busy_loop: bool = True,
+    ) -> Optional[list[MemoryObj]]:
+        if eviction:
+            logger.warning("NixlStorageBackend does not support eviction for now")
+        if busy_loop:
+            logger.warning("NixlStorageBackend does not support busy loop for now")
+
+        return self.memory_allocator.batched_allocate(shape, dtype, batch_size, fmt)
+
+    def get_allocator_backend(self):
+        return self
+
     @staticmethod
     def CreateNixlStorageBackend(
         config: LMCacheEngineConfig,
         loop: asyncio.AbstractEventLoop,
         metadata: LMCacheEngineMetadata,
-        memory_allocator: PagedTensorMemoryAllocator,
     ):
         """
         Create a Nixl backend with the given configuration.
@@ -440,5 +505,5 @@ class NixlStorageBackend(StorageBackendInterface):
         # Create the Nixl config
         nixl_config = NixlStorageConfig.from_cache_engine_config(config, metadata)
         # Create the Nixl backend
-        backend = NixlStorageBackend(nixl_config, loop, memory_allocator)
+        backend = NixlStorageBackend(nixl_config, config, metadata, loop)
         return backend
