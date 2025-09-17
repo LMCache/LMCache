@@ -103,6 +103,9 @@ Settings related to cache blending functionality.
    * - blend_recompute_ratios
      - LMCACHE_BLEND_RECOMPUTE_RATIO
      - Ratio of blending recompute. Default: 0.15
+    * - blend_check_layers
+      - LMCACHE_BLEND_CHECK_LAYERS
+      - Layers to determine the recomputed tokens. Default: 1
    * - blend_special_str
      - LMCACHE_BLEND_SPECIAL_STR
      - Separator string for blending. Default: " # # "
