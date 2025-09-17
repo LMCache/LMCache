@@ -531,10 +531,8 @@ class GdsBackend(AllocatorBackendInterface):
         else:
             addr = ctypes.c_void_p(self.cufile_base_pointer)
             dev_offset = memory_obj.metadata.address
-        ret = self._load_gds(
-            path, offset, addr, memory_obj.get_physical_size(), dev_offset
-        )
-        if ret != memory_obj.get_physical_size():
+        ret = self._load_gds(path, offset, addr, memory_obj.get_size(), dev_offset)
+        if ret != memory_obj.get_size():
             if ret < 0:
                 logger.error(
                     f"Error loading {path}: ret: {ret} removing entry from cache"
@@ -546,7 +544,7 @@ class GdsBackend(AllocatorBackendInterface):
                 # remove the entry if it's a persistent problem.
                 logger.error(
                     f"Error loading {path}: got only {ret} bytes "
-                    f"out of {memory_obj.get_physical_size()}, ignoring"
+                    f"out of {memory_obj.get_size()}, ignoring"
                 )
             memory_obj.ref_count_down()
             return None
