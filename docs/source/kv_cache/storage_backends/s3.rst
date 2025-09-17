@@ -79,7 +79,7 @@ S3-Specific (in extra_config)
 * **s3_max_inflight_reqs**: Max simultaneous S3 requests (creates this many /dev/shm buffers and semaphore limit)
 * **s3_prefer_http2**: Enable HTTP/2 with ALPN negotiation (["h2", "http/1.1"])
 * **s3_enable_s3express**: Enable S3 Express One Zone support in AWS CRT client
-* **s3_file_prefix**: Prefix added to S3 object keys (e.g. "cache/" -> "/cache/key_name")
+* **s3_file_prefix**: Prefix for S3 object keys (e.g., `cache` becomes `/cache/key_name`). Avoid leading/trailing slashes.
 * **save_chunk_meta**: Whether to save chunk metadata with data (set False for performance)
 
 The effective concurrency is limited by the minimum of `s3_max_io_concurrency` and `s3_max_inflight_reqs`.
