@@ -1,6 +1,4 @@
-.. _plugin_framework:
-
-LMCache Plugin Framework
+Extending LMCache: Plugin
 =========================
 
 The LMCache plugin system allows developers to extend functionality by running custom scripts alongside LMCache processes. Plugins can be written in Python and Bash for now, and are managed by the ``PluginLauncher`` class.
@@ -27,9 +25,11 @@ Configuration File (``lmcache.yaml``):
 
 .. code-block:: yaml
 
-    plugin_locations: ["/path/to/plugins"]
-    extra_config:
-      custom_setting: value
+   plugin_locations:
+     - "/path/to/plugins"
+
+   extra_config:
+     custom_setting: value
 
 Plugin Naming Convention
 ------------------------
@@ -69,13 +69,13 @@ Example Plugins
 ---------------
 Python Plugin (``scheduler_foo_plugin.py``):
 
-.. literalinclude:: ../../../examples/plugins/scheduler_foo_plugin.py
+.. literalinclude:: ../../../../examples/plugins/scheduler_foo_plugin.py
    :language: python
    :linenos:
 
 Bash Plugin (``all_plugin.sh``):
 
-.. literalinclude:: ../../../examples/plugins/all_plugin.sh
+.. literalinclude:: ../../../../examples/plugins/all_plugin.sh
    :language: bash
    :linenos:
 

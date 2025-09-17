@@ -173,7 +173,7 @@ Install the dependencies:
 
     pip install -r requirements/docs.txt
 
-Build the docs (from :code:`docs/` directory):
+After that, you can build the docs (from :code:`docs/` directory) using `make`:
 
 .. code-block:: bash
 
