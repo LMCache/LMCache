@@ -803,9 +803,8 @@ class NixlReceiver:
                         <= self._receiver_nixl_wrapper.xfer_descs.descCount()
                     ), (
                         f"Requested {prefiller_num_blocks} blocks exceed max "
-                        f"num blocks {
-                            self._receiver_nixl_wrapper.xfer_descs.descCount()
-                        }"
+                        f"num blocks "
+                        f"{self._receiver_nixl_wrapper.xfer_descs.descCount()}"
                     )
                     # match_xfer_descs = self._update_receiver_nixl_wrapper(
                     #     prefiller_num_blocks
