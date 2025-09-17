@@ -2,6 +2,7 @@
 # Standard
 from typing import TYPE_CHECKING, Tuple, Union
 import os
+import threading
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
@@ -21,46 +22,58 @@ from lmcache.v1.config import (
 logger = init_logger(__name__)
 ENGINE_NAME = "vllm-instance"
 
+# Thread-safe singleton storage
+_config_instance: Union[Config, V1Config, None] = None
+_config_lock = threading.Lock()
+
 
 def is_false(value: str) -> bool:
     """Check if the given string value is equivalent to 'false'."""
     return value.lower() in ("false", "0", "no", "n", "off")
 
 
-def lmcache_get_config() -> Union[Config, V1Config]:
+def lmcache_get_or_create_config() -> Union[Config, V1Config]:
     """Get the LMCache configuration from the environment variable
     `LMCACHE_CONFIG_FILE`. If the environment variable is not set, this
     function will return the default configuration.
+
+    This function is thread-safe and implements singleton pattern,
+    ensuring the configuration is loaded only once.
     """
+    global _config_instance
 
-    if is_false(os.getenv("LMCACHE_USE_EXPERIMENTAL", "True")):
-        logger.warning(
-            "Detected LMCACHE_USE_EXPERIMENTAL is set to False. "
-            "Using legacy configuration is deprecated and will "
-            "be remove soon! Please set LMCACHE_USE_EXPERIMENTAL "
-            "to True."
-        )
-        LMCacheEngineConfig = Config  # type: ignore[assignment]
-    else:
-        LMCacheEngineConfig = V1Config  # type: ignore[assignment]
+    # Double-checked locking for thread-safe singleton
+    if _config_instance is None:
+        with _config_lock:
+            if _config_instance is None:  # Check again within lock
+                if is_false(os.getenv("LMCACHE_USE_EXPERIMENTAL", "True")):
+                    logger.warning(
+                        "Detected LMCACHE_USE_EXPERIMENTAL is set to False. "
+                        "Using legacy configuration is deprecated and will "
+                        "be remove soon! Please set LMCACHE_USE_EXPERIMENTAL "
+                        "to True."
+                    )
+                    LMCacheEngineConfig = Config  # type: ignore[assignment]
+                else:
+                    LMCacheEngineConfig = V1Config  # type: ignore[assignment]
 
-    if "LMCACHE_CONFIG_FILE" not in os.environ:
-        logger.warn(
-            "No LMCache configuration file is set. Trying to read"
-            " configurations from the environment variables."
-        )
-        logger.warn(
-            "You can set the configuration file through "
-            "the environment variable: LMCACHE_CONFIG_FILE"
-        )
-        config = LMCacheEngineConfig.from_env()
-    else:
-        config_file = os.environ["LMCACHE_CONFIG_FILE"]
-        logger.info(f"Loading LMCache config file {config_file}")
-        config = LMCacheEngineConfig.from_file(config_file)
-        # Update config from environment variables
-        config.update_config_from_env()
-    return config
+                if "LMCACHE_CONFIG_FILE" not in os.environ:
+                    logger.warning(
+                        "No LMCache configuration file is set. Trying to read"
+                        " configurations from the environment variables."
+                    )
+                    logger.warning(
+                        "You can set the configuration file through "
+                        "the environment variable: LMCACHE_CONFIG_FILE"
+                    )
+                    _config_instance = LMCacheEngineConfig.from_env()
+                else:
+                    config_file = os.environ["LMCACHE_CONFIG_FILE"]
+                    logger.info(f"Loading LMCache config file {config_file}")
+                    _config_instance = LMCacheEngineConfig.from_file(config_file)
+                    # Update config from environment variables
+                    _config_instance.update_config_from_env()
+    return _config_instance
 
 
 def hex_hash_to_int16(s: str) -> int:
@@ -122,7 +135,7 @@ def create_lmcache_metadata(
     # First Party
     from lmcache.config import LMCacheEngineMetadata
 
-    config = lmcache_get_config()
+    config = lmcache_get_or_create_config()
     # Support both vllm_config object and individual config parameters
     if vllm_config is not None:
         model_cfg = vllm_config.model_config
