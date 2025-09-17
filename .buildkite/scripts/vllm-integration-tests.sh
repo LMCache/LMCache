@@ -112,7 +112,7 @@ run_lmcache_vllmopenai_container() {
     LOGFILE="/tmp/build_${BUILD_ID}_${cfg_name}.log"
 
     # Pick the GPUs based on config
-    gpu_count=$(yq -r '.gpu_count // 1' "$cfg_file")
+    gpu_count=$(yq -r '.docker.gpu_count // 1' "$cfg_file")
     source "$ORIG_DIR/.buildkite/scripts/pick-free-gpu.sh" "" "$gpu_count"
     best_gpu="${CUDA_VISIBLE_DEVICES}"
 
@@ -171,7 +171,6 @@ run_pd_lmcache() {
         --network host
         --gpus "device=0"
         --volume ~/.cache/huggingface:/root/.cache/huggingface
-        --volume "${CONFIG_DIR}/lmcache_config.yaml:/etc/lmcache/config.yaml:ro"
         --env VLLM_USE_FLASHINFER_SAMPLER=0
         --env HF_TOKEN="$HF_TOKEN"
         --env UCX_TLS=cuda_ipc,cuda_copy,tcp
@@ -215,7 +214,6 @@ run_pd_lmcache() {
         --network host
         --gpus "device=1"
         --volume ~/.cache/huggingface:/root/.cache/huggingface
-        --volume "${CONFIG_DIR}/lmcache_config.yaml:/etc/lmcache/config.yaml:ro"
         --env VLLM_USE_FLASHINFER_SAMPLER=0
         --env HF_TOKEN="$HF_TOKEN"
         --env UCX_TLS=cuda_ipc,cuda_copy,tcp

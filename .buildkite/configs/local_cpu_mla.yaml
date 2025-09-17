@@ -3,11 +3,10 @@ workload:
   max-inflight-requests: 20
   expected-latency-gain: 1.01
 
-gpu_count: 2
-
 docker:
   env:
     - "LMCACHE_CONFIG_FILE=/etc/lmcache/config.yaml"
+  gpu_count: 2
 
 vllm:
   model: "deepseek-ai/DeepSeek-V2-Lite-Chat"
