@@ -339,7 +339,7 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
     },
     "lookup_timeout_ms": {
         "type": int,
-        "default": 5000,
+        "default": 3000,
         "env_converter": int,
     },
 }

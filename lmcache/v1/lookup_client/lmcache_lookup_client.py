@@ -136,6 +136,11 @@ class LMCacheLookupClient(LookupClientInterface):
         for i in range(ranks):
             socket = self.sockets[i]
 
+            # Check socket state
+            if socket.closed:
+                logger.error(f"Socket for rank {i} is closed")
+                return 0
+
             # Set socket timeout
             socket.setsockopt(zmq.RCVTIMEO, timeout_ms)
             socket.setsockopt(zmq.SNDTIMEO, timeout_ms)
@@ -154,6 +159,9 @@ class LMCacheLookupClient(LookupClientInterface):
                     logger.warning(
                         f"Send timeout (retry {retry_count}/{max_retries}) for rank {i}"
                     )
+                except zmq.ZMQError as e:
+                    logger.error(f"ZMQ error during send to rank {i}: {str(e)}")
+                    return 0
 
             # If send fails, log error and break
             if not send_success:
@@ -198,7 +206,9 @@ class LMCacheLookupClient(LookupClientInterface):
         return True
 
     def close(self):
-        self.socket.close(linger=0)
+        for socket in self.sockets:
+            if not socket.closed:
+                socket.close(linger=0)
 
 
 class LMCacheLookupServer:
