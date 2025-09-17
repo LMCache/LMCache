@@ -515,14 +515,15 @@ class LMCacheEngine:
         retrieved_tokens = torch.sum(ret_mask)
         self.stats_monitor.on_retrieve_finished(monitor_req_id, retrieved_tokens)
         logger.info(
-            "Retrieved %d out of total %d out of total %d tokens. size: %.4f gb,"
+            "Retrieved %d out of %d required tokens (from %d total tokens)."
+            " size: %.4f gb,"
             " cost %.4f ms, throughput: %.4f GB/s;",
             retrieved_tokens,
             num_required_tokens,
             len(tokens),
             tot_kv_size / 1024**3,
             onload_time * 1000,
-            tot_kv_size / onload_time / 1024**3,
+            tot_kv_size / onload_time / 1024**3 if onload_time > 0 else 0,
         )
         return ret_mask
 
