@@ -134,7 +134,7 @@ Troubleshooting
 
 - Clean: `rm -f /dev/shm/my_shm_*`
 
-**Latency**:
+**Latency**::
 
 - Use same region for compute and S3
 
