@@ -6,8 +6,6 @@ chunk_size: 256
 local_cpu: true
 max_local_cpu_size: 64
 
-This_should_not_be_here: "just to test the config file"
-
 internal_api_server_enabled: true
 internal_api_server_socket_path_prefix: "/tmp/lmcache_internal_api_server/socket"
 internal_api_server_include_index_list: [1]
