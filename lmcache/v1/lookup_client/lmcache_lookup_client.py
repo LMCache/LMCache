@@ -158,8 +158,7 @@ class LMCacheLookupClient(LookupClientInterface):
             # If send fails, log error and break
             if not send_success:
                 logger.error(f"Failed to send to rank {i} after {max_retries} retries")
-                results.append(-1)  # Use -1 to indicate send failure
-                return None
+                return 0
 
             # Receive retry loop
             retry_count = 0
@@ -181,8 +180,7 @@ class LMCacheLookupClient(LookupClientInterface):
                 logger.error(
                     f"Failed to receive from rank {i} after {max_retries} retries"
                 )
-                results.append(-2)  # Use -2 to indicate receive failure
-                return None
+                return 0
 
         assert len(results) == ranks
         if len(set(results)) > 1:
