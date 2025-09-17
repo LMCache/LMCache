@@ -101,9 +101,9 @@ Settings related to cache blending functionality.
      - LMCACHE_ENABLE_BLENDING
      - Whether to enable blending. Values: true/false. Default: false
    * - blend_recompute_ratios
-     - LMCACHE_BLEND_RECOMPUTE_RATIO
+     - LMCACHE_BLEND_RECOMPUTE_RATIOS
      - Ratio of blending recompute. Default: 0.15
-    * - blend_check_layers
+   * - blend_check_layers
       - LMCACHE_BLEND_CHECK_LAYERS
       - Layers to determine the recomputed tokens. Default: 1
    * - blend_special_str

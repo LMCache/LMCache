@@ -7,7 +7,7 @@ For example, CacheBlend can combine multiple (pre-)computed KV caches, when thei
 Configuring CacheBlend in RAG scenarios
 -------------------------------------------------
 
-Here, we will explain the code in `example <We have an end-to-end `example <https://github.com/LMCache/LMCache/tree/dev/examples/blend_kv_v1/blend.py>`_>`.
+Here, we will explain the code in our end-to-end `example <https://github.com/LMCache/LMCache/tree/dev/examples/blend_kv_v1/blend.py>`_>.
 
 Below are some blending-related configurations (and explanations):
 
@@ -34,12 +34,11 @@ Below are some blending-related configurations (and explanations):
         os.environ["VLLM_ATTENTION_BACKEND"] = "FLASHINFER"
         os.environ["LMCACHE_EXTRA_CONFIG"] = '{"enable_sparse": true}'
 
-Firstly, we preprocess texts into tokens as the tokenization results of tokenize(txt_1, txt_2) might be different than (tokenize(txt_1), tokenize(txt_2)).
+Firstly, we preprocess texts into tokens, as tokenizing a concatenated string may produce different tokens than concatenating the results of tokenizing each string individually.
 For example, assume we have a system prompt and three text chunks. We need to preprocess them into tokens before sending to the LLM:
 
 .. code-block:: python
 
-    warmup_prompt = tokenizer.encode("Nice to meet you" * 500)[1:]
     sys_prompt = tokenizer.encode("You are a very helpful assistant.")
     chunk1_prompt = tokenizer.encode("Hello, how are you?" * 500)[1:]
     chunk2_prompt = tokenizer.encode("Hello, what's up?" * 500)[1:]
