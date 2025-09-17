@@ -84,6 +84,10 @@ _DEPRECATED_CONFIGS = {
 
 # Single configuration definition center - add new config items only here
 _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
+    # Prefetch disk cache to CPU on startup if persistence is enabled
+    "populate_disk_cache_to_cpu_on_start": {"type": bool, "default": True, "env_converter": _to_bool},
+    # Disk persistence for local disk backend
+    "local_disk_persistence": {"type": bool, "default": False, "env_converter": _to_bool},
     # Basic configurations
     "chunk_size": {"type": int, "default": 256, "env_converter": int},
     "local_cpu": {

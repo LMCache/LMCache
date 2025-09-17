@@ -147,6 +147,41 @@ class LocalDiskBackend(StorageBackendInterface):
         self.stats_monitor = LMCStatsMonitor.GetOrCreate()
         self.usage = 0
 
+        # Disk persistence: repopulate in-memory index from disk if enabled
+        self.local_disk_persistence = getattr(config, "local_disk_persistence", False)
+        self.populate_disk_cache_to_cpu_on_start = getattr(config, "populate_disk_cache_to_cpu_on_start", True)
+        if self.local_disk_persistence:
+            logger.info("Local disk persistence enabled. Scanning for existing cache files...")
+            disk_keys = []
+            for fname in os.listdir(self.path):
+                if not fname.endswith(".pt"):
+                    continue
+                # Remove .pt, replace '-' back to '/' for key string
+                key_str = fname[:-3].replace("-", "/")
+                try:
+                    key = CacheEngineKey.from_string(key_str)
+                except Exception as e:
+                    logger.warning(f"Failed to parse cache key from file {fname}: {e}")
+                    continue
+                fpath = os.path.join(self.path, fname)
+                fsize = os.path.getsize(fpath)
+                # Metadata: shape, dtype, fmt are unknown here, will be filled on first access
+                self.dict[key] = DiskCacheMetadata(fpath, fsize, None, None, None, 0)
+                self.current_cache_size += fsize
+                disk_keys.append(key)
+            logger.info(f"Restored {len(self.dict)} disk cache entries from {self.path}.")
+
+            # Optionally prefetch disk cache to CPU
+            if self.populate_disk_cache_to_cpu_on_start and disk_keys:
+                logger.info(f"Prefetching {len(disk_keys)} disk cache entries to CPU memory...")
+                for key in disk_keys:
+                    # This will load the cache into CPU memory (local_cpu_backend)
+                    try:
+                        _ = self.get_blocking(key)
+                    except Exception as e:
+                        logger.warning(f"Failed to prefetch cache for key {key}: {e}")
+                logger.info("Disk cache prefetch to CPU complete.")
+
     def __str__(self):
         return "LocalDiskBackend"
 
