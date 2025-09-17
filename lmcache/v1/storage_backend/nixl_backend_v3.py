@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from typing import List, Optional, Sequence
+import asyncio
 import threading
 
 # Third Party
@@ -41,6 +42,7 @@ class NixlBackend(AllocatorBackendInterface):
         nixl_config: NixlConfigXpYd,
         config: LMCacheEngineConfig,
         metadata: LMCacheEngineMetadata,
+        loop: asyncio.AbstractEventLoop,
     ):
         """
         Initialize the Nixl storage backend.
@@ -64,6 +66,7 @@ class NixlBackend(AllocatorBackendInterface):
         self.memory_allocator = self.initialize_allocator(config, metadata)
 
         self._nixl_channel = NixlChannel(nixl_config, config, self)
+        self.loop = loop
 
     # TODO(Jiayi): handle `pin` smantics
     def contains(self, key: CacheEngineKey, pin: bool = False) -> bool:
@@ -188,11 +191,15 @@ class NixlBackend(AllocatorBackendInterface):
         for key in keys:
             assert isinstance(key, CacheEngineKey)
 
-        self._nixl_channel.prepare_send(
-            keys=keys,  # type: ignore
-            mem_objs=memory_objs,
-            transfer_spec=transfer_spec,
+        sender_task = asyncio.run_coroutine_threadsafe(
+            self._nixl_channel.prepare_send(
+                keys=keys,  # type: ignore
+                mem_objs=memory_objs,
+                transfer_spec=transfer_spec,
+            ),
+            self.loop,
         )
+        sender_task.result()
 
     def get_blocking(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         """
@@ -266,6 +273,7 @@ class NixlBackend(AllocatorBackendInterface):
     def CreateNixlBackend(
         config: LMCacheEngineConfig,
         metadata: LMCacheEngineMetadata,
+        loop: asyncio.AbstractEventLoop,
     ) -> "NixlBackend":
         """
         Create a Nixl backend with the given configuration.
@@ -278,5 +286,5 @@ class NixlBackend(AllocatorBackendInterface):
         # Create the Nixl config
         nixl_config = NixlConfigXpYd.from_cache_engine_config(config, metadata)
         # Create the Nixl backend
-        backend = NixlBackend(nixl_config, config, metadata)
+        backend = NixlBackend(nixl_config, config, metadata, loop)
         return backend

@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from queue import Queue
 from typing import TYPE_CHECKING, Any, Optional, Union
+import asyncio
 import copy
 import threading
 import time
@@ -261,12 +262,12 @@ class NixlSender:
             blocks_data.append((base_ptr + rank_offset, remote_page_size, self.tp_rank))
         return blocks_data
 
-    def prepare_send(
+    async def prepare_send(
         self,
         keys: list[CacheEngineKey],
         mem_objs: list[MemoryObj],
         transfer_spec=None,
-    ):
+    ) -> None:
         """
         Put the sender task into the request queue.
         """
@@ -329,12 +330,10 @@ class NixlSender:
 
         req_id = sender_task.req_id
 
-        for _receiver_idx, receiver_id in enumerate(receiver_info.receiver_ids):
-            receiver_id = receiver_info.receiver_ids[_receiver_idx]
-
-            block_descs = self.get_block_descs(sender_task, _receiver_idx)
+        async def send_to_receiver(receiver_idx: int, receiver_id: str):
+            block_descs = self.get_block_descs(sender_task, receiver_idx)
             self._sender_nixl_wrapper.update_handler_from_blocks_data(
-                block_descs, _receiver_idx
+                block_descs, receiver_idx
             )
 
             # use remote alloc
@@ -352,14 +351,21 @@ class NixlSender:
             # if the requests in the batch have a large common prefix
             if not local_indexes:
                 logger.debug(
-                    "Sending objs with request ID: %s is not required: "
+                    "Sending objs with request ID: %s to receiver %s is not required: "
                     "all indexes already sent",
                     sender_task.req_id,
+                    receiver_id,
                 )
             else:
                 self._blocking_send(
-                    req_id, _receiver_idx, receiver_info, local_indexes, remote_indexes
+                    req_id, receiver_idx, receiver_info, local_indexes, remote_indexes
                 )
+
+        tasks = [
+            send_to_receiver(idx, rid)
+            for idx, rid in enumerate(receiver_info.receiver_ids)
+        ]
+        await asyncio.gather(*tasks)
 
         logger.debug(f"transfer spec: {transfer_spec}")
         if transfer_spec.is_last_prefill:
@@ -896,17 +902,17 @@ class NixlChannel:
             )
         return self._receiver
 
-    def prepare_send(
+    async def prepare_send(
         self,
         keys: list[CacheEngineKey],
         mem_objs: list[MemoryObj],
         transfer_spec=None,
-    ):
+    ) -> None:
         """Prepare a send transaction by sending the request using
         the side channel.
         """
         sender = self._check_sender()
-        sender.prepare_send(keys, mem_objs, transfer_spec)
+        await sender.prepare_send(keys, mem_objs, transfer_spec)
 
     def close(self):
         """Close all resources."""
