@@ -8,7 +8,7 @@ This section outlines how to enable and configure observability from embedded vL
 
 
 Quick Start Guide
------
+-----------------
 
 1) On vLLM/LMCache side
 ^^^^^^^^^^^^^^^^^^^^^^^

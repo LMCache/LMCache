@@ -4,6 +4,7 @@
 # Standard
 from collections import OrderedDict
 from dataclasses import dataclass
+from enum import IntEnum, auto
 from typing import List, Optional
 import asyncio
 
@@ -12,9 +13,17 @@ from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.memory_management import MemoryObj, MemoryObjMetadata, TensorMemoryObj
 from lmcache.v1.storage_backend.connector.base_connector import RemoteConnector
+from lmcache.v1.storage_backend.job_executor.pq_executor import AsyncPQExecutor
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 
 logger = init_logger(__name__)
+
+
+class Priorities(IntEnum):
+    PEEK = auto()
+    PREFETCH = auto()
+    GET = auto()
+    PUT = auto()
 
 
 @dataclass
@@ -185,14 +194,24 @@ class MockConnector(RemoteConnector):
         self.read_throughput = read_throughput
         self.write_throughput = write_throughput
 
-    async def exists(self, key: CacheEngineKey) -> bool:
+        # only for the async loading codepath
+        # MockConnector is naturally async so we don't need to use a thread pool
+        # for avoiding R-W interference
+        self.pq_executor = AsyncPQExecutor(loop)
+
+    async def _exists(self, key: CacheEngineKey) -> bool:
         await self.pressure_manager.on_exists()
         return await self.lru_store.exists(key)
+
+    async def exists(self, key: CacheEngineKey) -> bool:
+        return await self.pq_executor.submit_job(
+            self._exists, key=key, priority=Priorities.PEEK
+        )
 
     def exists_sync(self, key: CacheEngineKey) -> bool:
         raise NotImplementedError("MockConnector does not support synchronous exists")
 
-    async def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
+    async def _get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         mock_obj = await self.lru_store.get(key)
         if mock_obj is None:
             return None
@@ -209,10 +228,20 @@ class MockConnector(RemoteConnector):
             return None
         return memory_obj
 
-    async def put(self, key: CacheEngineKey, memory_obj: MemoryObj):
+    async def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
+        return await self.pq_executor.submit_job(
+            self._get, key=key, priority=Priorities.GET
+        )
+
+    async def _put(self, key: CacheEngineKey, memory_obj: MemoryObj):
         mock_obj = MockMemoryObj.from_tensor_memory_obj(memory_obj)
         await self.lru_store.put(key, mock_obj)
         await self.pressure_manager.on_put(mock_obj)
+
+    async def put(self, key: CacheEngineKey, memory_obj: MemoryObj):
+        await self.pq_executor.submit_job(
+            self._put, key=key, memory_obj=memory_obj, priority=Priorities.PUT
+        )
 
     async def list(self) -> List[str]:
         keys = await self.lru_store.list()
@@ -221,7 +250,7 @@ class MockConnector(RemoteConnector):
     def support_batched_get(self) -> bool:
         return True
 
-    async def batched_get(
+    async def _batched_get(
         self, keys: List[CacheEngineKey]
     ) -> List[Optional[MemoryObj]]:
         mock_objs = await self.lru_store.batched_get(keys)
@@ -251,8 +280,61 @@ class MockConnector(RemoteConnector):
 
         return memory_objs
 
+    async def batched_get(
+        self, keys: List[CacheEngineKey]
+    ) -> List[Optional[MemoryObj]]:
+        return await self.pq_executor.submit_job(
+            self._batched_get, keys=keys, priority=Priorities.GET
+        )
+
+    def support_batched_async_contains(self) -> bool:
+        return True
+
+    async def _batched_async_contains(
+        self,
+        lookup_id: str,
+        keys: List[CacheEngineKey],
+        pin: bool = False,
+    ) -> int:
+        num_hit_counts = 0
+        for key in keys:
+            await self.pressure_manager.on_exists()
+            if not await self.lru_store.exists(key):
+                return num_hit_counts
+            num_hit_counts += 1
+        return num_hit_counts
+
+    async def batched_async_contains(
+        self,
+        lookup_id: str,
+        keys: List[CacheEngineKey],
+        pin: bool = False,
+    ) -> int:
+        return await self.pq_executor.submit_job(
+            self._batched_async_contains,
+            lookup_id=lookup_id,
+            keys=keys,
+            pin=pin,
+            priority=Priorities.PEEK,
+        )
+
+    def support_batched_get_non_blocking(self) -> bool:
+        return True
+
+    async def batched_get_non_blocking(
+        self,
+        lookup_id: str,
+        keys: List[CacheEngineKey],
+    ) -> List[MemoryObj]:
+        # batched get is already async and the non-blocking element is handled
+        # in the StorageManager
+        return await self.pq_executor.submit_job(
+            self._batched_get, keys=keys, priority=Priorities.PREFETCH
+        )
+
     async def close(self):
         await self.lru_store.close()
+        await self.pq_executor.shutdown(wait=True)
 
     def __repr__(self) -> str:
         return (

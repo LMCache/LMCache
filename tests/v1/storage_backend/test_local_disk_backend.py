@@ -105,7 +105,7 @@ def async_loop():
 def local_cpu_backend(memory_allocator):
     """Create a LocalCPUBackend for testing."""
     config = LMCacheEngineConfig.from_legacy(chunk_size=256)
-    return LocalCPUBackend(config, memory_allocator)
+    return LocalCPUBackend(config, memory_allocator=memory_allocator)
 
 
 @pytest.fixture

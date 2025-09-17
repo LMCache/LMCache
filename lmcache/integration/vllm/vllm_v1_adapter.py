@@ -30,7 +30,8 @@ from lmcache.config import LMCacheEngineMetadata
 from lmcache.integration.vllm.utils import (
     ENGINE_NAME,
     apply_mm_hashes_to_token_ids,
-    lmcache_get_config,
+    extract_mm_features,
+    lmcache_get_or_create_config,
     mla_enabled,
 )
 from lmcache.logging import init_logger
@@ -190,11 +191,7 @@ class RequestTracker:
 
         request_configs = extract_request_configs(new_request.sampling_params)
 
-        mm_hashes, mm_positions = [], []
-        if new_request.mm_features:
-            for f in new_request.mm_features:
-                mm_hashes.append(f.identifier)
-                mm_positions.append(f.mm_position)
+        mm_hashes, mm_positions = extract_mm_features(new_request, modify=True)
 
         return RequestTracker(
             req_id=new_request.req_id,
@@ -304,10 +301,14 @@ class ReqMeta:
         )
 
         # NOTE(vladnosiv): for disagg, you cannot skip saving, as saving is a transfer
+        # Check if request_configs has lmcache.skip_save set to True
+        request_skip = (tracker.request_configs or {}).get("lmcache.skip_save", False)
+
         skip_save = tracker.disagg_spec is None and (
             tracker.skip_save
             or (tracker.num_saved_tokens > 0 and input_token_len < chunk_boundary)
             or (tracker.is_decode_phase and not save_decode_cache)
+            or request_skip
         )
 
         if skip_save and load_spec is None:
@@ -555,7 +556,7 @@ class LMCacheConnectorV1Impl:
         self._parent = parent
         self.kv_role = vllm_config.kv_transfer_config.kv_role
         self.worker_count = vllm_config.parallel_config.tensor_parallel_size
-        config = lmcache_get_config()
+        config = lmcache_get_or_create_config()
         assert isinstance(config, LMCacheEngineConfig), (
             "LMCache v1 configuration is should be passed for vLLM v1."
         )
@@ -851,7 +852,11 @@ class LMCacheConnectorV1Impl:
         if self.kv_role == "kv_consumer":
             # Don't do save if the role is kv_consumer
             return
-
+        if self._parent._connector_metadata is None:
+            logger.warning(
+                "In connector.save_kv_layer, but the connector metadata is None"
+            )
+            return
         connector_metadata = self._parent._get_connector_metadata()
         assert isinstance(connector_metadata, LMCacheConnectorMetadata)
 
@@ -1055,23 +1060,16 @@ class LMCacheConnectorV1Impl:
         token_ids = request.prompt_token_ids
 
         # If the request has multimodal hashes, apply them to the token ids
-        if request.mm_features:
+        mm_hashes, mm_positions = extract_mm_features(request)
+        if mm_hashes and mm_positions:
             # TODO(Jiayi): Optimize this
             token_ids = torch.tensor(request.prompt_token_ids)
-            mm_hashes, mm_positions = zip(
-                *((f.identifier, f.mm_position) for f in request.mm_features)
-            )
-            apply_mm_hashes_to_token_ids(
-                token_ids,
-                list(mm_hashes),
-                list(mm_positions),
-            )
+            apply_mm_hashes_to_token_ids(token_ids, mm_hashes, mm_positions)
             token_ids = token_ids.tolist()
 
         request_configs = extract_request_configs(request.sampling_params)
         if self.skip_last_n_tokens > 0:
             token_ids = token_ids[: -self.skip_last_n_tokens]
-
         if self.async_loading:
             lookup_id = request.request_id
         else:

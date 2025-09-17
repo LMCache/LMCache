@@ -372,36 +372,56 @@ class SegmentTokenDatabase(TokenDatabase):
 
         """
 
-        if not isinstance(tokens, torch.Tensor):
-            tokens = torch.tensor(tokens, dtype=torch.long)
+        if tokens is not None:
+            if not isinstance(tokens, torch.Tensor):
+                tokens = torch.tensor(tokens, dtype=torch.long, device="cpu")
+            else:
+                tokens = tokens.to(device="cpu", dtype=torch.long)
 
-        if mask is not None:
-            num_falses = mask.numel() - mask.long().sum().item()
-        else:
-            num_falses = 0
-        assert num_falses < len(tokens), (
-            "The number of Falses in the mask shouldn't "
-            "be less than the length of tokens."
-        )
+            if mask is not None:
+                num_falses = mask.numel() - mask.long().sum().item()
+            else:
+                num_falses = 0
+            assert num_falses < len(tokens), (
+                "The number of Falses in the mask shouldn't "
+                "be less than the length of tokens."
+            )
 
-        token_chunks = self._fast_split_by_subtensor(tokens)
-        start_idx = 0
-        for idx, token_chunk in enumerate(token_chunks):
-            token_chunk_len = len(token_chunk)
-            end_idx = start_idx + token_chunk_len
-            if idx > 0:
-                start_idx += self.sep_len
-                end_idx += self.sep_len
-                # end_idx = min(end_idx, len(tokens))
-            if start_idx >= num_falses:
+            token_chunks = self._fast_split_by_subtensor(tokens)
+            start_idx = 0
+            for idx, token_chunk in enumerate(token_chunks):
+                token_chunk_len = len(token_chunk)
+                end_idx = start_idx + token_chunk_len
+                if idx > 0:
+                    start_idx += self.sep_len
+                    end_idx += self.sep_len
+                if start_idx >= num_falses:
+                    if make_key:
+                        yield (
+                            start_idx,
+                            end_idx,
+                            self._make_key_by_hash(
+                                self._hash_tokens(token_chunk), request_configs
+                            ),
+                        )
+                    else:
+                        yield start_idx, end_idx, self._hash_tokens(token_chunk)
+                start_idx = end_idx
+        elif hashes is not None:
+            assert offsets is not None, (
+                "If hashes are provided, offsets must also be provided."
+            )
+            start_idx = 0
+            for hash_val, offset in zip(hashes, offsets, strict=False):
+                end_idx = start_idx + offset
                 if make_key:
                     yield (
                         start_idx,
                         end_idx,
-                        self._make_key_by_hash(
-                            self._hash_tokens(token_chunk), request_configs
-                        ),
+                        self._make_key_by_hash(hash_val, request_configs),
                     )
                 else:
-                    yield start_idx, end_idx, self._hash_tokens(token_chunk)
-            start_idx = end_idx
+                    yield start_idx, end_idx, hash_val
+                start_idx = end_idx
+        else:
+            raise ValueError("Either tokens or hashes must be provided.")

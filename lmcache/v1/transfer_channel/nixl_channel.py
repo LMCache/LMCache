@@ -180,15 +180,15 @@ class NixlChannel(BaseTransferChannel):
     # Initialization functions end
     ############################################################
 
-    def get_local_mem_indices(
-        self, data: Union[list[bytes], list[MemoryObj]]
+    def _get_local_mem_indices(
+        self, objects: Union[list[bytes], list[MemoryObj]]
     ) -> list[int]:
         local_indices = []
-        if isinstance(data[0], MemoryObj):
-            for mem_obj in data:
+        if isinstance(objects[0], MemoryObj):
+            for mem_obj in objects:
                 assert isinstance(mem_obj, MemoryObj)
                 local_indices.append(mem_obj.meta.address)
-        elif isinstance(data[0], bytes):
+        elif isinstance(objects[0], bytes):
             raise NotImplementedError(
                 "Sending raw bytes is not supported in NIXL channel"
             )
@@ -197,80 +197,52 @@ class NixlChannel(BaseTransferChannel):
     ### Send and Recv must be called in pair ###
     def batched_send(
         self,
-        data: Union[list[bytes], list[MemoryObj]],
+        objects: Union[list[bytes], list[MemoryObj]],
         transfer_spec: Optional[dict] = None,
-    ) -> bool:
-        """
-        Send a batch of data through the nixl channel.
-
-        :param data: A list of bytes or MemoryObj to be sent.
-        :param transfer_spec: Additional specifications for the transfer.
-
-        :return: True if the send operation is successful.
-        """
+    ) -> int:
         raise NotImplementedError
 
     def batched_recv(
         self,
-        buffer: Union[list[bytes], list[MemoryObj]],
+        buffers: Union[list[bytes], list[MemoryObj]],
         transfer_spec: Optional[dict] = None,
-    ) -> bool:
-        """
-        Receive a batch of data through the nixl channel.
-
-        :param buffer: A list of bytes or MemoryObj to store the received data.
-        :param transfer_spec: Additional specifications for the transfer.
-        """
+    ) -> int:
         raise NotImplementedError
 
     async def async_batched_send(
         self,
-        data: Union[list[bytes], list[MemoryObj]],
+        objects: Union[list[bytes], list[MemoryObj]],
         transfer_spec: Optional[dict] = None,
-    ) -> bool:
-        """
-        Send a batch of data through the nixl channel.
-
-        :param data: A list of bytes or MemoryObj to be sent.
-        :param transfer_spec: Additional specifications for the transfer.
-
-        :return: True if the send operation is successful.
-        """
+    ) -> int:
         raise NotImplementedError
 
     async def async_batched_recv(
         self,
-        buffer: Union[list[bytes], list[MemoryObj]],
+        buffers: Union[list[bytes], list[MemoryObj]],
         transfer_spec: Optional[dict] = None,
-    ) -> bool:
-        """
-        Receive a batch of data through the nixl channel.
-
-        :param buffer: A list of bytes or MemoryObj to store the received data.
-        :param transfer_spec: Additional specifications for the transfer.
-
-        :return: True if the send operation is successful.
-        """
+    ) -> int:
         raise NotImplementedError
 
     ### Read and Write only need to be called on one side ###
     def batched_write(
         self,
-        data: Union[list[bytes], list[MemoryObj]],
+        objects: Union[list[bytes], list[MemoryObj]],
         transfer_spec: Optional[dict] = None,
-    ) -> bool:
+    ) -> int:
         """
         Write a batch of data through the nixl channel.
 
-        :param data: A list of bytes or MemoryObj to be written.
+        :param objects: A list of bytes or MemoryObj to be written.
         :param transfer_spec: Additional specifications for the transfer.
+
+        :return: Number of successfully transferred objects.
         """
         assert transfer_spec is not None
 
         handle = self.nixl_agent.make_prepped_xfer(
             "WRITE",
             self.nixl_wrapper.xfer_handler,
-            self.get_local_mem_indices(data),
+            self._get_local_mem_indices(objects),
             self.remote_xfer_handlers_dict[transfer_spec["receiver_id"]],
             transfer_spec["remote_indexes"],
         )
@@ -285,7 +257,7 @@ class NixlChannel(BaseTransferChannel):
 
             if status == "ERR":
                 logger.error("Error in send operation")
-                raise RuntimeError("Failed to send data to remote peer")
+                raise RuntimeError("Failed to send objects to remote peer")
             elif status == "PROC":
                 time.sleep(wait_time)  # Avoid busy waiting
                 continue
@@ -293,34 +265,28 @@ class NixlChannel(BaseTransferChannel):
             # self._proxy_side_channel.send(notif_msg_bytes)
             break
 
-        return True
+        return len(objects)
 
     def batched_read(
         self,
-        buffer: Union[list[bytes], list[MemoryObj]],
+        buffers: Union[list[bytes], list[MemoryObj]],
         transfer_spec: Optional[dict] = None,
-    ) -> bool:
-        """
-        Read a batch of data through the channel.
-
-        :param buffer: A list of bytes or MemoryObj to store the read data.
-        :param transfer_spec: Additional specifications for the transfer.
-        """
+    ) -> int:
         raise NotImplementedError
 
     async def async_batched_write(
         self,
-        data: Union[list[bytes], list[MemoryObj]],
+        objects: Union[list[bytes], list[MemoryObj]],
         transfer_spec: Optional[dict] = None,
-    ) -> bool:
+    ) -> int:
         """
         Write a batch of data through the channel.
 
-        :param data: A list of bytes or MemoryObj to be written.
+        :param objects: A list of bytes or MemoryObj to be written.
         :param transfer_spec: Additional specifications for the transfer.
             Should contain 'receiver_id' and 'remote_indexes'.
 
-        :return: True if the send operation is successful.
+        :return: Number of successfully transferred objects.
         """
 
         assert transfer_spec is not None
@@ -328,7 +294,7 @@ class NixlChannel(BaseTransferChannel):
         handle = self.nixl_agent.make_prepped_xfer(
             "WRITE",
             self.nixl_wrapper.xfer_handler,
-            self.get_local_mem_indices(data),
+            self._get_local_mem_indices(objects),
             self.remote_xfer_handlers_dict[transfer_spec["receiver_id"]],
             transfer_spec["remote_indexes"],
         )
@@ -343,7 +309,7 @@ class NixlChannel(BaseTransferChannel):
 
             if status == "ERR":
                 logger.error("Error in send operation")
-                raise RuntimeError("Failed to send data to remote peer")
+                raise RuntimeError("Failed to send objects to remote peer")
             elif status == "PROC":
                 await asyncio.sleep(wait_time)  # Avoid busy waiting
                 continue
@@ -351,17 +317,17 @@ class NixlChannel(BaseTransferChannel):
             # self._proxy_side_channel.send(notif_msg_bytes)
             break
 
-        return True
+        return len(objects)
 
     async def async_batched_read(
         self,
-        buffer: Union[list[bytes], list[MemoryObj]],
+        buffers: Union[list[bytes], list[MemoryObj]],
         transfer_spec: Optional[dict] = None,
-    ) -> bool:
+    ) -> int:
         """
         Read a batch of data through the channel.
 
-        :param buffer: A list of bytes or MemoryObj to store the read data.
+        :param buffers: A list of bytes or MemoryObj to store the read data.
         :param transfer_spec: Additional specifications for the transfer.
 
         :return: True if the send operation is successful.

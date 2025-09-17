@@ -17,11 +17,16 @@ import aiofile
 import torch
 
 # First Party
+from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey, DiskCacheMetadata, _lmcache_nvtx_annotate
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.memory_management import MemoryAllocatorInterface, MemoryObj
-from lmcache.v1.storage_backend.abstract_backend import StorageBackendInterface
+from lmcache.v1.memory_management import (
+    CuFileMemoryAllocator,
+    MemoryFormat,
+    MemoryObj,
+)
+from lmcache.v1.storage_backend.abstract_backend import AllocatorBackendInterface
 
 logger = init_logger(__name__)
 
@@ -88,7 +93,7 @@ async def save_metadata(path: str, tmp: str, metadata: bytes):
     os.rename(tmp_path, path)
 
 
-class WekaGdsBackend(StorageBackendInterface):
+class WekaGdsBackend(AllocatorBackendInterface):
     """
     This is a backend that leverages NVIDIA's cuFile API to issue GDS requests
     directly to the Weka Filesystem.  In order to use it, users need to specify
@@ -117,8 +122,8 @@ class WekaGdsBackend(StorageBackendInterface):
     def __init__(
         self,
         config: LMCacheEngineConfig,
+        metadata: LMCacheEngineMetadata,
         loop: asyncio.AbstractEventLoop,
-        memory_allocator: MemoryAllocatorInterface,
         dst_device: str = "cuda",
     ):
         # HACK(Jiayi): cufile import is buggy on some hardware
@@ -133,7 +138,7 @@ class WekaGdsBackend(StorageBackendInterface):
 
         self.config = config
         self.loop = loop
-        self.memory_allocator = memory_allocator
+        self.memory_allocator = self.initialize_allocator(config, metadata)
         self.dst_device = dst_device
 
         assert config.weka_path is not None, (
@@ -558,6 +563,51 @@ class WekaGdsBackend(StorageBackendInterface):
     def remove(self, key, force=True):
         raise NotImplementedError("Remote backend does not support remove now.")
 
+    def initialize_allocator(
+        self, config: LMCacheEngineConfig, metadata: LMCacheEngineMetadata
+    ) -> CuFileMemoryAllocator:
+        assert config.weka_path is not None
+        assert config.cufile_buffer_size is not None
+        return CuFileMemoryAllocator(config.cufile_buffer_size * 1024**2)
+
+    def get_allocator_backend(self):
+        return self
+
+    def get_memory_allocator(self):
+        return self.memory_allocator
+
+    def allocate(
+        self,
+        shape: torch.Size,
+        dtype: torch.dtype,
+        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
+        eviction: bool = True,
+        busy_loop: bool = True,
+    ) -> Optional[MemoryObj]:
+        if busy_loop:
+            logger.warning("Weka Backend does not support allocation with busy loop")
+        if eviction:
+            logger.warning("Weka Backend does not support eviction")
+
+        return self.memory_allocator.allocate(shape, dtype, fmt)
+
+    def batched_allocate(
+        self,
+        shape: torch.Size,
+        dtype: torch.dtype,
+        batch_size: int,
+        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
+        eviction: bool = True,
+        busy_loop: bool = True,
+    ) -> Optional[list[MemoryObj]]:
+        if busy_loop:
+            logger.warning("Weka Backend does not support allocation with busy loop")
+        if eviction:
+            logger.warning("Weka Backend does not support eviction")
+
+        return self.memory_allocator.batched_allocate(shape, dtype, batch_size, fmt)
+
     def close(self) -> None:
+        self.memory_allocator.close()
         self._thread_pool.shutdown(wait=True)
         logger.info("Weka backend closed.")

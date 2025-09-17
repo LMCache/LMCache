@@ -20,7 +20,7 @@ from lmcache.utils import (
     CacheEngineKey,
 )
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.memory_management import MemoryFormat, MemoryObj, PDCPUMemoryAllocator
+from lmcache.v1.memory_management import MemoryFormat, MemoryObj, PDMemoryAllocator
 from lmcache.v1.rpc_utils import get_zmq_socket
 from lmcache.v1.storage_backend.abstract_backend import AllocatorBackendInterface
 from lmcache.v1.transfer_channel.nixl_channel import NixlChannel
@@ -140,7 +140,6 @@ class PDBackend(AllocatorBackendInterface):
         self,
         config: LMCacheEngineConfig,
         metadata: LMCacheEngineMetadata,
-        memory_allocator: PDCPUMemoryAllocator,
     ):
         self.running = True
 
@@ -161,7 +160,8 @@ class PDBackend(AllocatorBackendInterface):
         self.data: dict[CacheEngineKey, MemoryObj] = {}
         self.data_lock = threading.Lock()
 
-        self.memory_allocator = memory_allocator
+        self.memory_allocator = self.initialize_allocator(config, metadata)
+        assert isinstance(self.memory_allocator, PDMemoryAllocator)
 
         # TODO(Jiayi): add async zmq context if we want better asynchrony.
         self.zmq_context = zmq.Context()
@@ -174,7 +174,6 @@ class PDBackend(AllocatorBackendInterface):
                 peer_init_url = (
                     f"{self.pd_config.peer_host}:{self.pd_config.peer_init_port}"
                 )
-            assert isinstance(memory_allocator, PDCPUMemoryAllocator)
             self.transfer_channel = NixlChannel(
                 role=self.pd_config.role,
                 buffer_ptr=self.memory_allocator.gpu_allocator.buffer_ptr,
@@ -202,7 +201,72 @@ class PDBackend(AllocatorBackendInterface):
         self.full_chunk_size = config.chunk_size
 
     def __str__(self):
-        return "PDBackend"
+        return self.__class__.__name__
+
+    def initialize_allocator(
+        self, config: LMCacheEngineConfig, metadata: LMCacheEngineMetadata
+    ) -> PDMemoryAllocator:
+        # First Party
+        from lmcache.v1.transfer_channel.transfer_utils import (
+            get_correct_device,
+        )
+
+        corrected_device = get_correct_device(
+            config.pd_buffer_device,
+            metadata.worker_id,
+        )
+        logger.info(f"Setting cuda device to {corrected_device} ")
+        torch.cuda.set_device(corrected_device)
+
+        # TODO(Jiayi): add numa affinity to pd_cpu backend too.
+        buffer = torch.empty(
+            config.pd_buffer_size,
+            dtype=torch.uint8,
+            device=corrected_device,
+        )
+        pd_mem_allocator = PDMemoryAllocator()
+        pd_mem_allocator.init_gpu_memory_allocator(
+            buffer,
+            torch.Size(metadata.kv_shape),
+            metadata.kv_dtype,
+            MemoryFormat.KV_2LTD,  # TODO: remove this hardcode
+        )
+
+        return pd_mem_allocator
+
+    def get_memory_allocator(self) -> PDMemoryAllocator:
+        return self.memory_allocator
+
+    def get_allocator_backend(self):
+        return self
+
+    def allocate(
+        self,
+        shape: torch.Size,
+        dtype: torch.dtype,
+        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
+        eviction: bool = True,
+        busy_loop: bool = True,
+    ) -> Optional[MemoryObj]:
+        # NOTE: no eviction and busy_loop in PD
+        return self.memory_allocator.allocate(
+            shape=shape, dtype=dtype, fmt=fmt, allocator_type="gpu"
+        )
+
+    # TODO(Jiayi): Please implement batched allocate to reduce memory
+    # allocation overhead.
+    def batched_allocate(
+        self,
+        shape: torch.Size,
+        dtype: Optional[torch.dtype],
+        batch_size: int,
+        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
+        eviction: bool = True,
+        busy_loop: bool = True,
+    ):
+        return self.memory_allocator.batched_allocate(
+            shape, dtype, batch_size, fmt, allocator_type="gpu"
+        )
 
     # NOTE(Jiayi): If two requests have overlapped keys, will
     # the later one cause any problems here?
@@ -217,40 +281,6 @@ class PDBackend(AllocatorBackendInterface):
 
     def exists_in_put_tasks(self, key: CacheEngineKey) -> bool:
         return False
-
-    def allocate(
-        self,
-        shape: torch.Size,
-        dtype: Optional[torch.dtype],
-        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
-        eviction: bool = True,
-        busy_loop: bool = True,
-    ) -> Optional[MemoryObj]:
-        """
-        Allocate a zero-copy write object for the given shape and dtype.
-
-        This will be seen as "adding a new payload" to the backend.
-        """
-
-        # NOTE: no eviction and busy_loop in PD
-        mem_obj = self.memory_allocator.allocate(
-            shape=shape, dtype=dtype, fmt=fmt, allocator_type="gpu"
-        )
-
-        return mem_obj
-
-    def batched_allocate(
-        self,
-        shape: torch.Size,
-        dtype: Optional[torch.dtype],
-        batch_size: int,
-        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
-        eviction: bool = True,
-        busy_loop: bool = True,
-    ):
-        return self.memory_allocator.batched_allocate(
-            shape, dtype, batch_size, fmt, allocator_type="gpu"
-        )
 
     ############################################################
     # Prefiller functions
@@ -382,7 +412,7 @@ class PDBackend(AllocatorBackendInterface):
             # TODO(Jiayi): Consider making this real async
             # Perform the actual transfer
             self.transfer_channel.batched_write(
-                data=mem_objs_to_send,
+                objects=mem_objs_to_send,
                 transfer_spec=channel_transfer_spec,
             )
 
@@ -521,6 +551,8 @@ class PDBackend(AllocatorBackendInterface):
 
         :param key: The key to remove.
         """
+        # TODO(Jiayi): The logic here is confusing. Ref count down
+        # will be done after this function call in cache engine.
         with self.data_lock:
             if mem_obj := self.data.get(key, None):
                 if mem_obj.get_ref_count() == 1:
