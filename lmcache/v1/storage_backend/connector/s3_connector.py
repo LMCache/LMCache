@@ -350,83 +350,90 @@ class S3Connector(RemoteConnector):
     async def batched_get(
         self, keys: List[CacheEngineKey]
     ) -> List[Optional[MemoryObj]]:
+        all_memory_objs: list[Optional[MemoryObj]] = []
+
         done_events = []
         shms: list[Optional[int]] = []
         recv_paths: list[Optional[str]] = []
         memory_objs: list[Optional[MemoryObj]] = []
         obj_sizes = []
 
-        # TODO(Jiayi): Need to resolve this
-        assert len(keys) <= self.s3_max_inflight_reqs, (
-            f"Too many keys {len(keys)} to get in a single pass, "
-            f"max is {self.s3_max_inflight_reqs}"
-        )
+        for start in range(0, len(keys), self.s3_max_inflight_reqs):
+            batch = keys[start : start + self.s3_max_inflight_reqs]
 
-        # TODO(Jiayi): Need some error handling in this loop.
-        for key in keys:
-            key_str = key.to_string()
+            # TODO(Jiayi): Need some error handling in this loop.
+            for key in batch:
+                key_str = key.to_string()
 
-            obj_size = self.object_size_cache.get(key_str, None)
+                obj_size = self.object_size_cache.get(key_str, None)
 
-            if obj_size is None:
-                obj_size = self._get_object_size(key_str)
-                if obj_size <= 0:
-                    obj_sizes.append(0)
-                    memory_objs.append(None)
-                self.object_size_cache[key_str] = obj_size
+                if obj_size is None:
+                    obj_size = self._get_object_size(key_str)
+                    if obj_size <= 0:
+                        obj_sizes.append(0)
+                        memory_objs.append(None)
+                    self.object_size_cache[key_str] = obj_size
 
-            # TODO(Jiayi): A caveat of acquire this semaphore
-            # is that we might face deadlock when `batched_put`
-            # (not supported) is supported in the same fashion.
-            await self.inflight_sema.acquire()
+                # TODO(Jiayi): A caveat of acquire this semaphore
+                # is that we might face deadlock when `batched_put`
+                # (not supported) is supported in the same fashion.
+                await self.inflight_sema.acquire()
 
-            memory_obj = self.local_cpu_backend.allocate(
-                self.meta_shape,
-                self.meta_dtype,
-                self.meta_fmt,
-            )
+                memory_obj = self.local_cpu_backend.allocate(
+                    self.meta_shape,
+                    self.meta_dtype,
+                    self.meta_fmt,
+                )
 
-            obj_sizes.append(obj_size)
-            memory_objs.append(memory_obj)
+                obj_sizes.append(obj_size)
+                memory_objs.append(memory_obj)
 
-            if not memory_obj:
-                shms.append(None)
+                if not memory_obj:
+                    shms.append(None)
+                    self.inflight_sema.release()
+                    continue
+
+                # TODO(Jiayi): Please support this
+                assert obj_size == memory_obj.get_size(), (
+                    "Saving unfull chunk is not supported in S3Connector."
+                )
+
+                done_event = threading.Event()
+                done_events.append(done_event)
+
+                recv_path, shm = self.adhoc_shm_manager.allocate()
+                recv_paths.append(recv_path)
+                self._s3_download(
+                    key_str=key_str,
+                    recv_path=recv_path,
+                    done_event=done_event,
+                )
+                shms.append(shm)
+
+            while not all(e.is_set() for e in done_events):
+                await asyncio.sleep(0.005)
+
+            for obj_size, memory_obj, shm, recv_path in zip(
+                obj_sizes, memory_objs, shms, recv_paths, strict=False
+            ):
+                if memory_obj is None or shm is None:
+                    continue
+
+                dst_ptr = memory_obj.data_ptr
+                ctypes.memmove(dst_ptr, shm, obj_size)
+
+                self.adhoc_shm_manager.free(recv_path, shm)
                 self.inflight_sema.release()
-                continue
 
-            # TODO(Jiayi): Please support this
-            assert obj_size == memory_obj.get_size(), (
-                "Saving unfull chunk is not supported in S3Connector."
-            )
+            all_memory_objs.extend(memory_objs)
 
-            done_event = threading.Event()
-            done_events.append(done_event)
+            done_events.clear()
+            shms.clear()
+            recv_paths.clear()
+            memory_objs.clear()
+            obj_sizes.clear()
 
-            recv_path, shm = self.adhoc_shm_manager.allocate()
-            recv_paths.append(recv_path)
-            self._s3_download(
-                key_str=key_str,
-                recv_path=recv_path,
-                done_event=done_event,
-            )
-            shms.append(shm)
-
-        while not all(e.is_set() for e in done_events):
-            await asyncio.sleep(0.005)
-
-        for obj_size, memory_obj, shm, recv_path in zip(
-            obj_sizes, memory_objs, shms, recv_paths, strict=False
-        ):
-            if memory_obj is None or shm is None:
-                continue
-
-            dst_ptr = memory_obj.data_ptr
-            ctypes.memmove(dst_ptr, shm, obj_size)
-
-            self.adhoc_shm_manager.free(recv_path, shm)
-            self.inflight_sema.release()
-
-        return memory_objs
+        return all_memory_objs
 
     async def _s3_upload(
         self,
