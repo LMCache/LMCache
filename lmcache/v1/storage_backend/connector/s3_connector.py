@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from enum import IntEnum, auto
 from typing import List, Optional
 from urllib.parse import quote as url_quote
 import asyncio
@@ -19,9 +20,17 @@ from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.storage_backend.connector.base_connector import RemoteConnector
+from lmcache.v1.storage_backend.job_executor.pq_executor import AsyncPQExecutor
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 
 logger = init_logger(__name__)
+
+
+class Priorities(IntEnum):
+    PEEK = auto()
+    PREFETCH = auto()
+    GET = auto()
+    PUT = auto()
 
 
 # TODO(Jiayi): Some pending problems.
@@ -145,9 +154,16 @@ class S3Connector(RemoteConnector):
         # TODO(Jiayi): We need to handle cache consistency issues in a systematic way
         # across all connectors.
         # We assume S3 cache is never evicted and read-only for now.
+        # the object size cache does not need protection because
+        # asyncio scheduling is cooperative and not preemptive
         self.object_size_cache: dict[str, int] = {}
+        # claimed semaphore count (in async/batched, we should claim before acquisition
+        # to avoid deadlock and unclaim once acquired)
+        # do not need protection
+        self.claimable_sema_count: int = s3_max_inflight_reqs
 
         self.inflight_sema = asyncio.Semaphore(s3_max_inflight_reqs)
+        self.pq_executor = AsyncPQExecutor(loop)
 
     def post_init(self):
         logger.info("Post-initializing S3 connector")
@@ -239,7 +255,57 @@ class S3Connector(RemoteConnector):
             logger.debug(f"Exception in `_get_object_size`: {e}")
             return 0
         if got["err"] or got["status"] != 200:
-            logger.warning("Encountering error in S3 HEAD request")
+            logger.warning(
+                "Encountering error in S3 HEAD request "
+                f"with error code: {got['status']}"
+            )
+            return 0
+        return got["len"] if got["len"] is not None else 0
+
+    async def _get_object_size_async(self, key_str: str) -> int:
+        headers = HttpHeaders()
+        headers.add("Host", self.s3_endpoint)
+        req = HttpRequest("HEAD", self._format_safe_path(key_str), headers)
+
+        got = {"len": None, "status": None, "err": None}
+
+        def on_headers(status_code, headers, **kwargs):
+            got["status"] = status_code
+            for name, value in headers:
+                if name.lower() == "content-length":
+                    try:
+                        got["len"] = int(value)
+                    except Exception:
+                        pass
+
+        done_event = threading.Event()
+
+        def on_done(error=None, **kwargs):
+            got["err"] = error
+            done_event.set()
+
+        s3.S3Request(
+            client=self.s3_client,
+            type=s3.S3RequestType.DEFAULT,
+            request=req,
+            operation_name="HeadObject",
+            on_headers=on_headers,
+            on_done=on_done,
+            credential_provider=self.credentials_provider,
+            region=self.s3_region,
+        )
+
+        try:
+            while not done_event.is_set():
+                await asyncio.sleep(0.005)
+        except Exception as e:
+            logger.debug(f"Exception in `_get_object_size_async`: {e}")
+            return 0
+        if got["err"] or got["status"] != 200:
+            logger.warning(
+                "Encountering error in S3 HEAD request "
+                f"with error code: {got['status']}"
+            )
             return 0
         return got["len"] if got["len"] is not None else 0
 
@@ -250,7 +316,7 @@ class S3Connector(RemoteConnector):
     def exists_sync(self, key: CacheEngineKey) -> bool:
         key_str = key.to_string()
         if key_str in self.object_size_cache:
-            return True
+            return self.object_size_cache[key_str] > 0
         cache_size = self._get_object_size(key_str)
         if cache_size > 0:
             self.object_size_cache[key_str] = cache_size
@@ -307,6 +373,7 @@ class S3Connector(RemoteConnector):
         if obj_size is None:
             obj_size = self._get_object_size(key_str)
             if obj_size <= 0:
+                self.object_size_cache[key_str] = 0
                 return None
             self.object_size_cache[key_str] = obj_size
 
@@ -362,6 +429,12 @@ class S3Connector(RemoteConnector):
             f"max is {self.s3_max_inflight_reqs}"
         )
 
+        # this operation can be non-atomic because asyncio is
+        # cooperative and not preemptive
+        while len(keys) > self.claimable_sema_count:
+            await asyncio.sleep(0.005)
+        self.claimable_sema_count -= len(keys)
+
         # TODO(Jiayi): Need some error handling in this loop.
         for key in keys:
             key_str = key.to_string()
@@ -371,6 +444,7 @@ class S3Connector(RemoteConnector):
             if obj_size is None:
                 obj_size = self._get_object_size(key_str)
                 if obj_size <= 0:
+                    self.object_size_cache[key_str] = 0
                     obj_sizes.append(0)
                     memory_objs.append(None)
                 self.object_size_cache[key_str] = obj_size
@@ -410,6 +484,10 @@ class S3Connector(RemoteConnector):
                 done_event=done_event,
             )
             shms.append(shm)
+
+        # once we've acquired all of the semaphores, we can actually unclaim
+        # even though we haven't released
+        self.claimable_sema_count += len(keys)
 
         while not all(e.is_set() for e in done_events):
             await asyncio.sleep(0.005)
@@ -464,7 +542,7 @@ class S3Connector(RemoteConnector):
             on_done=on_done,
         )
 
-    async def put(self, key: CacheEngineKey, memory_obj: MemoryObj):
+    async def _put(self, key: CacheEngineKey, memory_obj: MemoryObj):
         """
         Store data to S3
         """
@@ -483,22 +561,89 @@ class S3Connector(RemoteConnector):
         try:
             buffer_ptr = memory_obj.data_ptr
             ctypes.memmove(shm, buffer_ptr, memory_obj.get_physical_size())
-        except Exception as e:
-            logger.error(f"Failed to copy data to S3 buffer: {e}")
-        logger.debug("Data copy to S3 buffer completed")
+            logger.debug("Data copy to S3 buffer completed")
 
-        try:
             done_event = threading.Event()
             await self._s3_upload(key_str, send_path, done_event)
             while not done_event.is_set():
                 await asyncio.sleep(0.005)
+
+            self.object_size_cache[key_str] = memory_obj.get_physical_size()
+            logger.debug(f"Uploaded {key_str} to S3 successfully")
         except Exception as e:
             logger.error(f"Failed to upload {key_str} to S3: {e}")
             raise
         finally:
             self.inflight_sema.release()
             self.adhoc_shm_manager.free(send_path, shm)
-            logger.debug(f"Uploaded {key_str} to S3 successfully")
+
+    async def put(self, key: CacheEngineKey, memory_obj: MemoryObj):
+        return await self.pq_executor.submit_job(
+            self._put,
+            key=key,
+            memory_obj=memory_obj,
+            priority=Priorities.PUT,
+        )
+
+    def support_batched_async_contains(self) -> bool:
+        return True
+
+    async def _batched_async_contains(
+        self, lookup_id: str, keys: List[CacheEngineKey], pin: bool = False
+    ) -> int:
+        num_hit_counts = 0
+        for key in keys:
+            key_str = key.to_string()
+            cached_size = self.object_size_cache.get(key_str, None)
+            if cached_size is not None:
+                if cached_size > 0:
+                    num_hit_counts += 1
+                    continue
+                else:
+                    return num_hit_counts
+
+            obj_size = await self._get_object_size_async(key_str)
+            if not obj_size > 0:
+                self.object_size_cache[key_str] = 0
+                return num_hit_counts
+
+            self.object_size_cache[key_str] = obj_size
+            num_hit_counts += 1
+
+        return num_hit_counts
+
+    async def batched_async_contains(
+        self, lookup_id: str, keys: List[CacheEngineKey], pin: bool = False
+    ) -> int:
+        return await self.pq_executor.submit_job(
+            self._batched_async_contains,
+            lookup_id=lookup_id,
+            keys=keys,
+            pin=pin,
+            priority=Priorities.PEEK,
+        )
+
+    def support_batched_get_non_blocking(self) -> bool:
+        return True
+
+    async def _batched_get_non_blocking(
+        self,
+        lookup_id: str,
+        keys: List[CacheEngineKey],
+    ) -> List[MemoryObj]:
+        # batched get is already a coroutine
+        result = await self.batched_get(keys)
+        return [r for r in result if r is not None]
+
+    async def batched_get_non_blocking(
+        self, lookup_id: str, keys: List[CacheEngineKey]
+    ) -> List[MemoryObj]:
+        return await self.pq_executor.submit_job(
+            self._batched_get_non_blocking,
+            lookup_id=lookup_id,
+            keys=keys,
+            priority=Priorities.PREFETCH,
+        )
 
     async def list(self) -> List[str]:
         raise NotImplementedError
@@ -514,6 +659,12 @@ class S3Connector(RemoteConnector):
         return True
 
     async def close(self):
-        for shm in self.shms:
-            shm.close()
-            shm.unlink()
+        await self.pq_executor.shutdown(wait=True)
+        # let python GC clean up mmap inodes
+        for mm in self.adhoc_shm_manager.mmaps:
+            mm.close()
+        for shm_name in self.adhoc_shm_manager.shm_names:
+            try:
+                os.unlink(shm_name)
+            except FileNotFoundError:
+                pass  # file probably already removed
