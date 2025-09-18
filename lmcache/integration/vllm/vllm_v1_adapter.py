@@ -1295,7 +1295,6 @@ class LMCacheConnectorV1Impl:
                     self._block_size,
                     self._lmcache_chunk_size,
                     load_spec=load_spec,
-                    skip_save=force_skip_save,
                     discard_partial_chunks=self._discard_partial_chunks,
                     save_decode_cache=self._save_decode_cache,
                 )
@@ -1335,7 +1334,6 @@ class LMCacheConnectorV1Impl:
                 self._block_size,
                 self._lmcache_chunk_size,
                 load_spec=load_spec,
-                skip_save=force_skip_save,
                 discard_partial_chunks=self._discard_partial_chunks,
                 save_decode_cache=self._save_decode_cache,
             )
