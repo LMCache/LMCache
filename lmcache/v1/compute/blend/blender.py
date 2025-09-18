@@ -83,6 +83,22 @@ class LMCBlender:
             )
         layer = self.layerwise_model.vllm_model.model.layers[layer_id]
         attn_layer = layer.self_attn
+
+        # Apply q_norm and k_norm for Qwen3 models before rotary embedding
+        if hasattr(attn_layer, "q_norm") and hasattr(attn_layer, "k_norm"):
+            # Qwen3 specific: Apply q_norm and k_norm
+            q_by_head = q.view(
+                *q.shape[:-1], q.shape[-1] // attn_layer.head_dim, attn_layer.head_dim
+            )
+            q_by_head = attn_layer.q_norm(q_by_head)
+            q = q_by_head.view(q.shape)
+
+            k_by_head = k.view(
+                *k.shape[:-1], k.shape[-1] // attn_layer.head_dim, attn_layer.head_dim
+            )
+            k_by_head = attn_layer.k_norm(k_by_head)
+            k = k_by_head.view(k.shape)
+
         q, k = attn_layer.rotary_emb(self.metadata.positions, q, k)
 
         if layer_id in self.common_metadata.check_layers:
