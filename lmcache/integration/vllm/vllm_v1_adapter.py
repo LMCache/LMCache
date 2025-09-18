@@ -21,11 +21,8 @@ from vllm.distributed.parallel_state import (
 from vllm.sampling_params import SamplingParams
 from vllm.utils import cdiv, get_kv_cache_torch_dtype
 from vllm.v1.core.sched.output import SchedulerOutput
-<<<<<<< HEAD
 from vllm.v1.kv_cache_interface import KVCacheConfig
-=======
 from vllm.version import __version__ as VLLM_VERSION
->>>>>>> dev
 import torch
 
 # First Party
@@ -250,16 +247,10 @@ class ReqMeta:
     # Request id
     req_id: str
     # Request tokens
-<<<<<<< HEAD
-    token_ids: torch.Tensor
-    # Slot mappings for each kv cache group
-    # Shape: (num_kv_cache_groups, num_tokens)
+    token_ids: list[int]  # torch.Tensor
+    
     slot_mappings: torch.Tensor
     # Slot mapping for backward compatibility
-=======
-    token_ids: list[int]  # torch.Tensor
-    # Slot mapping
->>>>>>> dev
     slot_mapping: torch.Tensor
 
     # Whether is last prefill or not
@@ -367,7 +358,6 @@ class ReqMeta:
         for kv_cache_group_id, block_ids in tracker.allocated_block_ids.items():
             num_blocks = len(block_ids)
 
-<<<<<<< HEAD
             block_ids = torch.tensor(block_ids, dtype=torch.long)
 
             if len(token_ids) > num_blocks * block_size:
@@ -384,6 +374,8 @@ class ReqMeta:
                     block_size,
                 )
 
+                breakpoint()
+
             block_offsets = torch.arange(0, block_size, dtype=torch.long)
             slot_mapping = (
                 block_offsets.reshape((1, block_size))
@@ -393,26 +385,6 @@ class ReqMeta:
             slot_mapping = slot_mapping.flatten()[: len(token_ids)]
             assert slot_mapping.dtype == torch.long  # TODO: this could be removed
             slot_mappings_list.append(slot_mapping)
-=======
-        if len(token_ids) > num_blocks * block_size:
-            logger.error(
-                "The number of tokens is more than the number of blocks."
-                "Something might be wrong in scheduling logic!"
-            )
-            logger.error(
-                "Num tokens: %d, num blocks: %d, block size: %d",
-                len(token_ids),
-                num_blocks,
-                block_size,
-            )
-
-        block_ids = torch.tensor(tracker.allocated_block_ids, dtype=torch.long)
-        block_offsets = torch.arange(0, block_size, dtype=torch.long)
-        slot_mapping = (
-            block_offsets.reshape((1, block_size))
-            + block_ids.reshape((num_blocks, 1)) * block_size
-        )
->>>>>>> dev
 
         slot_mappings = torch.stack(slot_mappings_list, dim=0)
 
@@ -567,7 +539,8 @@ def _init_lmcache_engine(
                 dtype=kv_dtype,
                 device=device,
             )
-        elif hasattr(vllm_config, "kv_cache_config"):
+        elif kv_cache_config is not None and \
+            len(kv_cache_config.kv_cache_groups) > 1:
             vllm_gpu_connector = VLLMPagedMemLayerwiseGPUConnectorForHybridAlloc(
                 hidden_dim_size,
                 num_layer,

@@ -1020,6 +1020,7 @@ class VLLMPagedMemLayerwiseGPUConnectorForHybridAlloc(GPUConnectorInterface):
         use_gpu: bool = False,
         **kwargs,
     ):
+
         self.hidden_dim_size = hidden_dim_size
         self.num_layers = num_layers
         self.use_gpu = use_gpu
