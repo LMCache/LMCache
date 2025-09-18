@@ -286,7 +286,7 @@ class TestFSConnector:
         # Create new backend instance and verify data persists
         new_local_cpu_backend = LocalCPUBackend(
             LMCacheEngineConfig.from_legacy(chunk_size=256),
-            local_cpu_backend.memory_allocator,
+            memory_allocator=local_cpu_backend.memory_allocator,
         )
         new_backend = RemoteBackend(
             config=config,
