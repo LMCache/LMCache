@@ -97,7 +97,7 @@ def async_loop():
 def local_cpu_backend(memory_allocator):
     """Create a LocalCPUBackend for testing."""
     config = LMCacheEngineConfig.from_legacy(chunk_size=256)
-    return LocalCPUBackend(config, memory_allocator)
+    return LocalCPUBackend(config, memory_allocator=memory_allocator)
 
 
 @pytest.fixture
@@ -193,7 +193,7 @@ class TestFSConnector:
         # Batched put
         futures = [
             remote_backend_with_fs.submit_put_task(key, memory_obj)
-            for key, memory_obj in zip(keys, memory_objs)
+            for key, memory_obj in zip(keys, memory_objs, strict=False)
         ]
         for future in filter(None, futures):
             future.result(timeout=5.0)
@@ -207,7 +207,7 @@ class TestFSConnector:
 
         assert results is not None
         assert len(results) == 3
-        for result, original in zip(results, memory_objs):
+        for result, original in zip(results, memory_objs, strict=False):
             assert result is not None
             assert result.metadata.shape == original.metadata.shape
             assert result.metadata.dtype == original.metadata.dtype
@@ -286,7 +286,7 @@ class TestFSConnector:
         # Create new backend instance and verify data persists
         new_local_cpu_backend = LocalCPUBackend(
             LMCacheEngineConfig.from_legacy(chunk_size=256),
-            local_cpu_backend.memory_allocator,
+            memory_allocator=local_cpu_backend.memory_allocator,
         )
         new_backend = RemoteBackend(
             config=config,

@@ -33,15 +33,16 @@ If you require a different version of torch for the LMCache instance that you bu
 This compatibility matrix accounts for dependencies as well as connector API changes. Please raise an issue on GitHub if you encounter any incompatibilities.
 
 .. csv-table::
-   :header: "", "LMCache 0.3.5 (Aug 28)", "LMCache 0.3.4 (Aug 24)", "LMCache 0.3.3 (Aug 1)", "LMCache 0.3.2 (Jul 14)", "LMCache 0.3.1 (June 25)", "LMCache 0.3.0 (May 28)"
-   :widths: 20, 15, 15, 15, 15, 15, 15
+   :header: "", "LMCache 0.3.6 (Sep 15)", "LMCache 0.3.5 (Aug 28)", "LMCache 0.3.4 (Aug 24)", "LMCache 0.3.3 (Aug 1)", "LMCache 0.3.2 (Jul 14)", "LMCache 0.3.1 (June 25)", "LMCache 0.3.0 (May 28)"
+   :widths: 20, 15, 15, 15, 15, 15, 15, 15
 
-   "vLLM 0.10.1.x (Aug 19)", "✅", "❌", "✅", "✅", "✅", "❌"
-   "vLLM 0.10.0.x (Jul 24)", "✅", "❌", "✅", "✅", "✅", "❌"
-   "vLLM 0.9.2.x (Jul 3)", "✅", "❌", "✅", "✅", "✅", "❌"
-   "vLLM 0.9.1.x (June 10)", "✅", "❌", "✅", "✅", "❌", "❌"
-   "vLLM 0.9.0.x (May 14)", "✅", "❌", "✅", "✅", "❌", "❌"
-   "vLLM 0.8.5.x (Apr 28)", "✅", "❌", "✅", "✅", "❌", "✅"
+   "vLLM 0.10.2.x (Sep 13)", "✅", "✅", "❌", "✅", "✅", "✅", "❌"
+   "vLLM 0.10.1.x (Aug 19)", "❌", "✅", "❌", "✅", "✅", "✅", "❌"
+   "vLLM 0.10.0.x (Jul 24)", "❌", "✅", "❌", "✅", "✅", "✅", "❌"
+   "vLLM 0.9.2.x (Jul 3)", "❌", "✅", "❌", "✅", "✅", "✅", "❌"
+   "vLLM 0.9.1.x (June 10)", "❌", "✅", "❌", "✅", "✅", "❌", "❌"
+   "vLLM 0.9.0.x (May 14)", "❌", "✅", "❌", "✅", "✅", "❌", "❌"
+   "vLLM 0.8.5.x (Apr 28)", "❌", "✅", "❌", "✅", "✅", "❌", "✅"
 
 
 Notable Change List: 
