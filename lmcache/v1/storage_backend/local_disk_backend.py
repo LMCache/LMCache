@@ -312,7 +312,6 @@ class LocalDiskBackend(StorageBackendInterface):
             return None
 
         self.cache_policy.update_on_put(key)
-        logger.debug(f"HOWDY disk_put_ref_up, {memory_obj}")
         memory_obj.ref_count_up()
 
         asyncio.run_coroutine_threadsafe(
@@ -468,7 +467,6 @@ class LocalDiskBackend(StorageBackendInterface):
         fmt = memory_obj.metadata.fmt
         cached_positions = memory_obj.metadata.cached_positions
         # `submit_put_task` above
-        logger.debug(f"HOWDY disk_put_ref_down, {memory_obj}")
         memory_obj.ref_count_down()
 
         self.insert_key(key, size, shape, dtype, fmt, cached_positions=cached_positions)

@@ -522,7 +522,6 @@ class LMCacheEngine:
         for key, memory_obj, _, _ in reordered_chunks:
             if self.remove_after_retrieve and not self._is_passive():
                 self.storage_manager.remove(key)
-            logger.debug("HOWDY engine_ret_ref_cnt_down")
             memory_obj.ref_count_down()
 
         onload_time = time.perf_counter() - t

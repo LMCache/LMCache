@@ -396,7 +396,6 @@ class StorageManager:
 
         for cname, (ks, objs) in obj_dict.items():
             for memory_obj in objs:
-                logger.debug(f"HOWDY bk: {cname} stm_batch_put_ref_cnt_down, {memory_obj}")
                 memory_obj.ref_count_down()
 
     def get(
@@ -809,6 +808,7 @@ class StorageManager:
         for backend_name, backend in self.storage_backends.items():
             if locations is None or backend_name in locations:
                 for key in keys:
+                    logger.debug(f"HOWDY unpinning {key} in {backend_name}")
                     backend.unpin(key)
 
     def clear(

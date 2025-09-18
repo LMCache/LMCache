@@ -230,7 +230,6 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
 
         kv_cache_pointers = self._initialize_pointers(self.kvcaches)
         # First Party
-        # from lmcache.integration.vllm.utils import ForkedPdb
 
         # ForkedPdb().set_trace()
         lmc_ops.multi_layer_kv_transfer(
@@ -243,6 +242,12 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
             self.use_mla,
             getattr(memory_obj, "transpose", False),
         )
+        last_pos = slot_mapping[start:end][-1].item()
+        page_idx, in_page_idx = divmod(last_pos, 16)
+        for _head in [0, 3]:
+            for _kv in range(2):
+                logger.debug(f"HOWDYkv? {_kv}, Head {_head}")
+                logger.debug(self.kvcaches[0][_kv, page_idx, in_page_idx, _head, :])
 
     @_lmcache_nvtx_annotate
     def from_gpu(self, memory_obj: MemoryObj, start: int, end: int, **kwargs):
@@ -277,16 +282,15 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
 
         kv_cache_pointers = self._initialize_pointers(self.kvcaches)
         # First Party
-        # from lmcache.integration.vllm.utils import ForkedPdb
-
+        last_pos = slot_mapping[start:end][-1].item()
+        page_idx, in_page_idx = divmod(last_pos, 16)
+        for _head in [0, 3, -1]:
+            for _kv in range(2):
+                logger.debug(f"HOWDYkv? {_kv}, Head {_head}")
+                logger.debug(self.kvcaches[0][_kv, page_idx, in_page_idx, _head, :])
         # ForkedPdb().set_trace()
 
         with torch.cuda.stream(self.store_stream):
-            # permutation = (
-            #     [memory_obj.tensor.dim() - 1, *range(memory_obj.tensor.dim() - 1)]
-            #     if getattr(memory_obj, "transpose", False)
-            #     else range(memory_obj.tensor.dim())
-            # )
             if self.gpu_buffer is None or end - start != self.gpu_buffer.shape[2]:
                 lmc_ops.multi_layer_kv_transfer(
                     memory_obj.tensor,  # .permute(*permutation),
@@ -298,6 +302,7 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
                     self.use_mla,
                     getattr(memory_obj, "transpose", False),
                 )
+
             else:
                 # kvcaches -> gpu_buffer -> memobj
                 assert self.gpu_buffer.device == self.kvcaches[0].device
@@ -312,7 +317,6 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
                     self.use_mla,
                     getattr(memory_obj, "transpose", False),
                 )
-                assert getattr(memory_obj, "transpose", False)
                 memory_obj.tensor.copy_(tmp_gpu_buffer, non_blocking=True)
 
         if not memory_obj.tensor.is_cuda:

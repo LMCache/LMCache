@@ -77,10 +77,12 @@ async def lifespan(app: FastAPI):
     prefill_pairs = pair_hosts_and_ports(
         pref_hosts, pref_ports, global_args.num_prefillers
     )
-    for host, port in prefill_pairs:
+    for host, port in prefill_pairs[:1]:
         prefiller_base_url = f"http://{host}:{int(port)}"
         prefill_client = httpx.AsyncClient(timeout=None, base_url=prefiller_base_url)
-        app.state.prefill_clients.append(ClientInfo(prefill_client, pref_ports))
+        app.state.prefill_clients.append(
+            ClientInfo(prefill_client, init_port=pref_ports)
+        )
 
     # Build decoder clients with CSV-based broadcast pairing
     dec_hosts = global_args.decoder_host
@@ -94,7 +96,7 @@ async def lifespan(app: FastAPI):
         len(dec_hosts) == 1 and len(dec_ports) == 1 and global_args.num_decoders > 1
     )
 
-    for i, (host, port) in enumerate(decoder_pairs):
+    for i, (host, port) in enumerate(decoder_pairs[:1]):
         decoder_base_url = f"http://{host}:{int(port)}"
         decode_client = httpx.AsyncClient(timeout=None, base_url=decoder_base_url)
         if incremental_mode:
@@ -302,7 +304,9 @@ async def handle_completions(request: Request):
         req_data["max_tokens"] = 1
 
         # Pick decode client
-        decode_client = round_robin_pick_client(app.state.decode_clients, counter)
+        decode_client = app.state.decode_clients[
+            0
+        ]  # round_robin_pick_client(app.state.decode_clients, counter)
 
         num_tp_rank = len(decode_client.init_port or [])
 

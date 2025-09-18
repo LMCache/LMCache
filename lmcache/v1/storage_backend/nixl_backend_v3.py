@@ -80,11 +80,8 @@ class NixlBackend(AllocatorBackendInterface):
         """
         assert isinstance(key, CacheEngineKey)
         with self._data_lock:
-            logger.debug(f"HOWDYcontain?: {key} || {self._data.keys()}")
             if mem_obj := self._data.get(key, None):
-                logger.debug(f"HOWDYcontain_found: {key}")
                 if pin:
-                    logger.debug(f"HOWDYcontain_ref_up: {mem_obj}")
                     mem_obj.ref_count_up()
                 return True
             return False
@@ -104,7 +101,6 @@ class NixlBackend(AllocatorBackendInterface):
         mem_obj: MemoryObj,
     ):
         assert isinstance(key, CacheEngineKey)
-        logger.debug(f"HOWDYput: {key} || {mem_obj}")
         with self._data_lock:
             self._data[key] = mem_obj
 
@@ -186,7 +182,6 @@ class NixlBackend(AllocatorBackendInterface):
         transfer_spec=None,
     ) -> None:
         for mem_obj in memory_objs:
-            logger.debug(f"HOWDYbatched_ref_up: {mem_obj}")
             mem_obj.ref_count_up()
         for key in keys:
             assert isinstance(key, CacheEngineKey)
@@ -255,11 +250,9 @@ class NixlBackend(AllocatorBackendInterface):
         self._nixl_channel.close()
 
     def pin(self, key: CacheEngineKey) -> bool:
-        logger.debug(f"HOWDYpin: {key}")
         return True
 
     def unpin(self, key: CacheEngineKey) -> bool:
-        logger.debug(f"HOWDYunpin: {key}")
         return True
 
     def get_allocator_backend(self):

@@ -309,6 +309,11 @@ class CacheEngineKey:
             self.dtype,
             self.request_configs,
         )
+    def update_rank_info_from_nixl(
+        self, world_size: Optional[int] = None, worker_id: Optional[int] = None
+    ):
+        self.world_size = world_size or self.world_size
+        self.worker_id = worker_id or self.worker_id
 
 
 @dataclass(slots=True)
