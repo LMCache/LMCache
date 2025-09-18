@@ -9,6 +9,7 @@
 
 # Standard
 from dataclasses import asdict
+from typing import Any
 import os
 import sys
 
@@ -32,7 +33,9 @@ extensions = [
     "sphinx.ext.viewcode",
     "sphinx.ext.napoleon",
     "sphinx.ext.autosectionlabel",
+    "sphinxcontrib.mermaid",
     # "sphinx_copybutton",
+    "sphinx_multiversion",
 ]
 
 copybutton_prompt_text = r"^(\$ |>>> |\# )"
@@ -59,7 +62,7 @@ autodoc.ClassDocumenter = MockedClassDocumenter
 # }
 
 templates_path = ["_templates"]
-exclude_patterns = []
+exclude_patterns: list[Any] = []
 add_module_names = False
 
 # -- Options for HTML output -------------------------------------------------
@@ -109,7 +112,7 @@ theme_options = ThemeOptions(  # Add your theme options.
                 'fill="currentColor"/></svg>'
             ),
         }
-    }
+    },
 )
 
 html_theme_options = asdict(theme_options)
@@ -150,8 +153,25 @@ autodoc_mock_imports = [
     "lmcache.c_ops",
     "aiofiles",
     "zmq",
-    "infinistore",
     "transformers",
     "safetensors",
     "torch.Tensor",
 ]
+
+# -- sphinx-multiversion configuration -------------------------------------------
+
+# Whitelist pattern for tags (build docs for all v* tags)
+smv_tag_whitelist = r"^v\d+\.\d+.*$"
+
+# Whitelist pattern for branches (build docs for dev and main)
+smv_branch_whitelist = r"^(dev|main)$"
+
+# Pattern for released versions (tags only)
+smv_released_pattern = r"^tags/v.*$"
+
+# Remote whitelist pattern (for security)
+smv_remote_whitelist = r"^(origin)$"
+
+# Output directories
+smv_latest_version = "dev"  # Point latest to dev branch
+smv_prefer_remote_refs = False

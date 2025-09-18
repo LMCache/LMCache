@@ -101,6 +101,7 @@ def precompute_all_kv(config: PrecomputeConfig) -> Tuple[int, int, str]:
             doc_prompts, _ = build_qa_prompt(example, "")
         elif config.prompt_build_method == PromptBuildMethodType.FEW_SHOT:
             doc_prompts, _ = build_fewshot_prompt(example)
+        assert doc_prompts is not None
         # NOTE: Do not need chat template here.
         # It should only affect system prompt and query prompt.
         token_cnt = 0

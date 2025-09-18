@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from copy import deepcopy
-from enum import Enum
+from enum import Enum, auto
 from typing import TYPE_CHECKING, List, Optional, Tuple, Union
 import dataclasses
 
@@ -64,19 +64,19 @@ VLLM_SCHEDULER_CONFIG: Optional[SchedulerConfig] = None
 
 
 class StoreStatus(Enum):
-    PREFILL = 1
-    CHUNK_PREFILL = 2
-    DECODE = 3
-    SUFFIX_PREFILL = 4
-    NONE = 5
+    PREFILL = auto()
+    CHUNK_PREFILL = auto()
+    DECODE = auto()
+    SUFFIX_PREFILL = auto()
+    NONE = auto()
 
 
 class RetrieveStatus(Enum):
-    PREFILL = 1  # include (1) normal_prefill
+    PREFILL = auto()  # include (1) normal_prefill
     # (2) chunk_prefill_last
     # (3) prefix_prefill
-    CHUNK_PREFILL = 2  # not last chunk
-    NONE = 4
+    CHUNK_PREFILL = auto()  # not last chunk
+    NONE = auto()
 
 
 def broadcast_seq_group_list(

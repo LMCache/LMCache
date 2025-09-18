@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Standard
-from concurrent.futures import Future
-from typing import List, Optional
+from typing import List, Optional, Sequence
 import time
 
 # First Party
@@ -20,6 +19,7 @@ class AuditBackend(StorageBackendInterface):
     """
 
     def __init__(self, real_backend: StorageBackendInterface):
+        super().__init__(real_backend.dst_device)
         self.real_backend = real_backend
         self.logger = logger.getChild("audit")
         self.logger.info(
@@ -106,49 +106,58 @@ class AuditBackend(StorageBackendInterface):
             self._log_operation("EXISTS_IN_PUT_TASKS", start_time, key, False, error=e)
             raise
 
-    def submit_prefetch_task(
-        self,
-        key: CacheEngineKey,
-    ) -> bool:
-        start_time = time.perf_counter()
-        try:
-            result = self.real_backend.submit_prefetch_task(key)
-            self._log_operation("SUBMIT_PREFETCH_TASK", start_time, key, True, result)
-            return result
-        except Exception as e:
-            self._log_operation("SUBMIT_PREFETCH_TASK", start_time, key, False, error=e)
-            raise
-
     def batched_submit_put_task(
         self,
-        keys: List[CacheEngineKey],
+        keys: Sequence[CacheEngineKey],
         memory_objs: List[MemoryObj],
         transfer_spec=None,
-    ) -> Optional[List[Future]]:
+    ) -> None:
         sizes = [len(obj.byte_array) for obj in memory_objs]
         start_time = time.perf_counter()
         try:
-            result = self.real_backend.batched_submit_put_task(
-                keys, memory_objs, transfer_spec
-            )
+            self.real_backend.batched_submit_put_task(keys, memory_objs, transfer_spec)
             self._log_operation(
                 "BATCHED_SUBMIT_PUT_TASK", start_time, None, True, size=sum(sizes)
             )
-            return result
         except Exception as e:
             self._log_operation(
                 "BATCHED_SUBMIT_PUT_TASK", start_time, None, False, error=e
             )
             raise
 
-    def get_non_blocking(self, key: CacheEngineKey) -> Optional[Future]:
+    async def batched_get_non_blocking(
+        self,
+        lookup_id: str,
+        keys: list[CacheEngineKey],
+    ) -> list[MemoryObj]:
         start_time = time.perf_counter()
         try:
-            result = self.real_backend.get_non_blocking(key)
-            self._log_operation("GET_NON_BLOCKING", start_time, key, True)
+            result = await self.real_backend.batched_get_non_blocking(lookup_id, keys)
+            self._log_operation("BATCHED_GET_NON_BLOCKING", start_time, None, True)
             return result
         except Exception as e:
-            self._log_operation("GET_NON_BLOCKING", start_time, key, False, error=e)
+            self._log_operation(
+                "BATCHED_GET_NON_BLOCKING", start_time, None, False, error=e
+            )
+            raise
+
+    async def batched_async_contains(
+        self,
+        lookup_id: str,
+        keys: list[CacheEngineKey],
+        pin: bool = False,
+    ) -> int:
+        start_time = time.perf_counter()
+        try:
+            result = await self.real_backend.batched_async_contains(
+                lookup_id, keys, pin
+            )
+            self._log_operation("BATCHED_ASYNC_CONTAINS", start_time, None, True)
+            return result
+        except Exception as e:
+            self._log_operation(
+                "BATCHED_ASYNC_CONTAINS", start_time, None, False, error=e
+            )
             raise
 
     def pin(self, key: CacheEngineKey) -> bool:
@@ -215,3 +224,6 @@ class AuditBackend(StorageBackendInterface):
         except Exception as e:
             self._log_operation("BATCHED_REMOVE", start_time, None, False, error=e)
             raise
+
+    def get_allocator_backend(self):
+        return self.real_backend.get_allocator_backend()

@@ -45,39 +45,32 @@ Configuration
 
    .. code-block:: yaml
 
-       # Disable CPU offloading since we're using NIXL for transfer
        local_cpu: False
-       max_local_cpu_size: 0
-       max_local_disk_size: 0
-       remote_serde: NULL
 
-       # NIXL configuration for KV cache transfer
-       enable_nixl: True
-       nixl_role: "sender"          # Prefiller acts as KV cache sender
-       nixl_receiver_host: "localhost"  # Host where decoder is running
-       nixl_receiver_port: 55555        # Port where decoder is listening
-       nixl_buffer_size: 1073741824  # 1GB buffer for KV cache transfer
+       # PD-related configurations
+       enable_pd: True
+       transfer_channel: "nixl"  # Using NIXL for transfer
+       pd_role: "sender"          # Prefiller acts as KV cache sender
+       pd_proxy_host: "localhost" # Host where proxy server is running
+       pd_proxy_port: 7500        # Port where proxy server is listening
+       pd_buffer_size: 1073741824  # 1GB buffer for KV cache transfer
        nixl_buffer_device: "cuda"   # Use GPU memory for buffer
-       nixl_enable_gc: True         # Enable garbage collection
 
 2. **Decoder Server Configuration** (``lmcache-decoder-config.yaml``):
 
    .. code-block:: yaml
 
-       # Disable CPU offloading since we're using NIXL for transfer
        local_cpu: False
-       max_local_cpu_size: 0
-       max_local_disk_size: 0
-       remote_serde: NULL
 
-       # NIXL configuration for KV cache transfer
-       enable_nixl: True
-       nixl_role: "receiver"        # Decoder acts as KV cache receiver
-       nixl_receiver_host: "localhost"  # Host where decoder is listening
-       nixl_receiver_port: 55555        # Port where decoder is listening
-       nixl_buffer_size: 1073741824  # 1GB buffer for KV cache transfer
-       nixl_buffer_device: "cuda"   # Use GPU memory for buffer
-       nixl_enable_gc: True         # Enable garbage collection
+       # PD-related configurations
+       enable_pd: True
+       transfer_channel: "nixl" # Using NIXL for transfer
+       pd_role: "receiver"        # Decoder acts as KV cache receiver
+       pd_peer_host: "localhost"  # Host where decoder is listening
+       pd_peer_init_port: 7300    # Port where initialization happens
+       pd_peer_alloc_port: 7400   # Port for memory allocation
+       pd_buffer_size: 1073741824  # 1GB buffer for KV cache transfer
+       pd_buffer_device: "cuda"   # Use GPU memory for buffer
 
 Step-by-Step Setup
 ------------------
@@ -102,7 +95,7 @@ Step-by-Step Setup
               LMCACHE_CONFIG_FILE=lmcache-decoder-config.yaml \
               CUDA_VISIBLE_DEVICES=1 \
               vllm serve meta-llama/Llama-3.1-8B-Instruct \
-              --port 8200 \
+              --port 7200 \
               --disable-log-requests \
               --kv-transfer-config \
               '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_consumer","kv_connector_extra_config": {"discard_partial_chunks": false, "lmcache_rpc_port": "consumer1"}}'
@@ -115,7 +108,7 @@ Step-by-Step Setup
               LMCACHE_CONFIG_FILE=lmcache-prefiller-config.yaml \
               CUDA_VISIBLE_DEVICES=0 \
               vllm serve meta-llama/Llama-3.1-8B-Instruct \
-              --port 8100 \
+              --port 7100 \
               --disable-log-requests \
               --kv-transfer-config \
               '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_producer","kv_connector_extra_config": {"discard_partial_chunks": false, "lmcache_rpc_port": "producer1"}}'
@@ -126,15 +119,19 @@ Step-by-Step Setup
 
       .. code-block:: bash
 
-          wget https://raw.githubusercontent.com/vllm-project/vllm/main/examples/others/lmcache/disagg_prefill_lmcache_v1/disagg_proxy_server.py
-
-          python3 disagg_proxy_server.py \
-              --host localhost \
-              --port 9000 \
-              --prefiller-host localhost \
-              --prefiller-port 8100 \
-              --decoder-host localhost \
-              --decoder-port 8200
+          python3 ../disagg_proxy_server.py \
+            --host localhost \
+            --port 9100 \
+            --prefiller-host localhost \
+            --prefiller-port 7100 \
+            --num-prefillers 1 \
+            --decoder-host localhost \
+            --decoder-port 7200  \
+            --decoder-init-port 7300 \
+            --decoder-alloc-port 7400 \
+            --proxy-host localhost \
+            --proxy-port 7500 \
+            --num-decoders 1
 
 .. note::
 
@@ -146,9 +143,9 @@ Step-by-Step Setup
 
    The servers are ready when you can access:
    
-   * Prefiller: ``http://localhost:8100/v1/completions``
-   * Decoder: ``http://localhost:8200/v1/completions``
-   * Proxy: ``http://localhost:9000/v1/completions``
+   * Prefiller: ``http://localhost:7100/v1/completions``
+   * Decoder: ``http://localhost:7200/v1/completions``
+   * Proxy: ``http://localhost:9100/v1/completions``
 
 Usage
 -----
@@ -206,6 +203,6 @@ Troubleshooting
 Common issues and solutions:
 
 1. **GPU Requirements**: Ensure you have at least 2 GPUs available
-2. **Port Conflicts**: Check if ports 8100, 8200, and 9000 are available
+2. **Port Conflicts**: Check if ports used above are available
 3. **HF Token**: Verify your token starts with ``hf_`` and has necessary model access
 4. **CUDA Errors**: Ensure CUDA_VISIBLE_DEVICES is set correctly for each server

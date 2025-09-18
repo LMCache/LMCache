@@ -41,9 +41,6 @@ class RedisSentinelConnectorAdapter(ConnectorAdapter):
     def __init__(self) -> None:
         super().__init__("redis-sentinel://")
 
-    def can_parse(self, url: str) -> bool:
-        return url.startswith(self.schema)
-
     def create_connector(self, context: ConnectorContext) -> RemoteConnector:
         # Local
         from .redis_connector import RedisSentinelConnector
@@ -63,6 +60,7 @@ class RedisSentinelConnectorAdapter(ConnectorAdapter):
 
         # Parse host and port
         hosts_and_ports: List[Tuple[str, int]] = []
+        assert self.schema is not None
         for sub_url in url.split(","):
             if not sub_url.startswith(self.schema):
                 sub_url = self.schema + sub_url

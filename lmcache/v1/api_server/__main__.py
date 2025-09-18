@@ -72,7 +72,7 @@ def create_app(controller_url: str) -> FastAPI:
     @app.post("/query_instance")
     async def query_instance(req: QueryInstRequest):
         try:
-            event_id = ("QueryInst" + str(uuid.uuid4()),)
+            event_id = "QueryInst" + str(uuid.uuid4())
             msg = QueryInstMsg(
                 event_id=event_id,
                 ip=req.ip,

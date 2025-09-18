@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from typing import Any
 
 # Third Party
 from fastapi import APIRouter
@@ -33,7 +34,7 @@ async def run_script(request: Request):
             },
             "app": request.app,
         }
-        restricted_locals = {}
+        restricted_locals: dict[str, Any] = {}
 
         exec(script_content, restricted_globals, restricted_locals)
 

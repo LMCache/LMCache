@@ -7,10 +7,10 @@ steps:
       uv venv --python 3.12 .venv-$BUILDKITE_BUILD_ID
       source .venv-$BUILDKITE_BUILD_ID/bin/activate
 
-      uv pip install --upgrade pip setuptools wheel
+      uv pip install --upgrade pip setuptools wheel 
       uv pip install -r requirements/common.txt
       uv pip install -r requirements/test.txt
-      uv pip install -e .
+      uv pip install -e . --no-build-isolation
       uv pip install matplotlib
       uv pip install pandas
       uv pip install -U vllm --pre --extra-index-url https://wheels.vllm.ai/nightly

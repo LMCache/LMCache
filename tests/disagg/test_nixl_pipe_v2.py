@@ -41,7 +41,7 @@ def generate_test_data(
                 model_name="test_model",
                 world_size=1,
                 worker_id=0,
-                chunk_hash=f"test_{i}",
+                chunk_hash=i,
             )
         )
         obj = allocator.allocate(shape, dtype, fmt=MemoryFormat.KV_2LTD)
@@ -139,9 +139,9 @@ if __name__ == "__main__":
                 # Use the new allocate_for_write method
                 transfer_start = time.time()
                 new_obj = pipe.allocate_for_write(
-                    obj.tensor.shape, obj.tensor.dtype, obj.metadata.fmt
+                    obj.get_shape(), obj.get_dtype(), obj.metadata.fmt
                 )
-                if new_obj is not None:
+                if new_obj is not None and new_obj.tensor is not None:
                     # Copy data from original object to the new one
                     new_obj.tensor.copy_(obj.tensor)
                     total_size += new_obj.get_size()
@@ -171,7 +171,9 @@ if __name__ == "__main__":
                 nobj_before = len(received_objs)
                 for idx, obj in enumerate(new_objs):
                     cloned_tensor = obj.tensor.detach().clone()
-                    received_objs.append(TensorMemoryObj(cloned_tensor, obj.metadata))
+                    received_objs.append(
+                        TensorMemoryObj(cloned_tensor, obj.metadata, None)
+                    )
 
                     # Simulate some work: 20ms per 10 objects
                     if args.simulate_work and len(received_objs) % 10 == 0:
@@ -197,6 +199,8 @@ if __name__ == "__main__":
             for i, (received_obj, original_obj) in enumerate(
                 zip(received_objs, objs, strict=False)
             ):
+                assert received_obj.tensor is not None
+                assert original_obj.tensor is not None
                 assert torch.allclose(received_obj.tensor, original_obj.tensor), (
                     f"Data mismatch at index {i}: received "
                     f"{received_obj.tensor.mean()} "

@@ -3,12 +3,12 @@ aiofiles
 aiohttp
 awscrt
 cufile-python
-infinistore
 msgspec
 numpy
 nvtx
 prometheus_client >= 0.18.0
 psutil
+py-cpuinfo
 pyyaml
 pyzmq >= 25.0.0
 redis

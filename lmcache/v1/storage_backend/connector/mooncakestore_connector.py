@@ -286,25 +286,27 @@ class MooncakestoreConnector(RemoteConnector):
         memory_objs: list[Optional[MemoryObj]] = []
         valid_idx: list[int] = []
 
+        key_strs: list[str] = []
+        buffer_ptrs: list[int] = []
+        buffer_sizes: list[int] = []
+
         for i, _ in enumerate(keys):
             buf = self.local_cpu_backend.allocate(
                 self.meta_shape, self.meta_dtype, self.meta_fmt
             )
             memory_objs.append(buf)
-            if buf is not None:
+            buf_tensor = buf.tensor
+            if buf is not None and buf_tensor is not None:
                 valid_idx.append(i)
+
+                # Prepare the argument lists for the C++ call
+                key_strs.append(keys[i].to_string())
+                buffer_ptrs.append(buf_tensor.data_ptr())
+                buffer_sizes.append(buf_tensor.numel() * buf_tensor.element_size())
 
         if not valid_idx:
             logger.warning("Batch-get aborted: unable to allocate any buffers.")
             return [None] * len(keys)
-
-        # Build the argument lists for the C++ call
-        key_strs = [keys[i].to_string() for i in valid_idx]
-        buffer_ptrs = [memory_objs[i].tensor.data_ptr() for i in valid_idx]
-        buffer_sizes = [
-            memory_objs[i].tensor.numel() * memory_objs[i].tensor.element_size()
-            for i in valid_idx
-        ]
 
         try:
             # Single RPC call for multiple chunks
@@ -322,17 +324,17 @@ class MooncakestoreConnector(RemoteConnector):
                     logger.warning(
                         f"batch_get_into failed for key {keys[i]} (code={n_read})"
                     )
-                    memory_objs[i].ref_count_down()
+                    memory_objs[i].ref_count_down()  # type: ignore
                     continue
 
                 try:
                     results[i] = self.reshape_partial_chunk(
-                        memory_objs[i],
+                        memory_objs[i],  # type: ignore
                         n_read,
                     )
                 except Exception as exc:
                     logger.error(f"Reshape failed for key {keys[i]}: {exc}")
-                    memory_objs[i].ref_count_down()
+                    memory_objs[i].ref_count_down()  # type: ignore
 
             return results
 
@@ -340,7 +342,7 @@ class MooncakestoreConnector(RemoteConnector):
             logger.error(f"batch_get_into threw exception: {str(exc)}")
             # Release any buffers we successfully allocated
             for i in valid_idx:
-                memory_objs[i].ref_count_down()
+                memory_objs[i].ref_count_down()  # type: ignore
             return [None] * len(keys)
 
     async def _batch_get_buffer(
@@ -358,7 +360,7 @@ class MooncakestoreConnector(RemoteConnector):
             logger.error(f"batch_get_buffer failed: {str(e)}")
             return [None] * len(keys)
 
-        results = []
+        results: list[Optional[MemoryObj]] = []
         for i, buffer in enumerate(buffers):
             if buffer is None:
                 logger.warning(f"Buffer {i} is None for key {key_strs[i]}")
@@ -444,8 +446,10 @@ class MooncakestoreConnector(RemoteConnector):
         This is used when save_chunk_meta=False (matches _batch_get_into).
         """
         try:
-            buffer_ptr = memory_obj.tensor.data_ptr()
-            buffer_size = memory_obj.tensor.numel() * memory_obj.tensor.element_size()
+            tensor = memory_obj.tensor
+            assert tensor is not None
+            buffer_ptr = tensor.data_ptr()
+            buffer_size = tensor.numel() * tensor.element_size()
 
             await asyncio.wait_for(
                 asyncio.to_thread(

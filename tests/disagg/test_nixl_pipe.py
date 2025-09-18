@@ -36,7 +36,7 @@ def generate_test_data(
                 model_name="test_model",
                 world_size=1,
                 worker_id=0,
-                chunk_hash=f"test_{i}",
+                chunk_hash=i,
             )
         )
         obj = allocator.allocate(shape, dtype, fmt=MemoryFormat.KV_2LTD)
@@ -160,6 +160,8 @@ if __name__ == "__main__":
 
             # Check if the received objects are the same as the original objects
             for received_obj, original_obj in zip(received_objs, objs, strict=False):
+                assert received_obj.tensor is not None
+                assert original_obj.tensor is not None
                 assert torch.allclose(received_obj.tensor, original_obj.tensor), (
                     f"Data mismatch: received {received_obj.tensor.mean()}"
                     f" but expected {original_obj.tensor.mean()}"

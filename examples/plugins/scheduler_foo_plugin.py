@@ -10,7 +10,7 @@ import signal
 import time
 
 # First Party
-from lmcache.integration.vllm.utils import lmcache_get_config
+from lmcache.integration.vllm.utils import lmcache_get_or_create_config
 from lmcache.v1.config import LMCacheEngineConfig
 
 
@@ -30,7 +30,7 @@ try:
     config = LMCacheEngineConfig.from_json(config_str)
 except json.JSONDecodeError as e:
     print(f"Error parsing LMCACHE_PLUGIN_CONFIG: {e}")
-    config = lmcache_get_config()
+    config = lmcache_get_or_create_config()
 
 print(
     f"Python plugin running with role: {role}, worker_id: {worker_id}, "

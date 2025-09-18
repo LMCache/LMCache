@@ -77,13 +77,42 @@ class InstrumentedRemoteConnector(RemoteConnector):
     async def ping(self) -> int:
         return await self._connector.ping()
 
+    def support_batched_put(self) -> bool:
+        return self._connector.support_batched_put()
+
     def support_batched_get(self) -> bool:
         return self._connector.support_batched_get()
+
+    def support_batched_async_contains(self) -> bool:
+        return self._connector.support_batched_async_contains()
+
+    async def batched_async_contains(
+        self,
+        lookup_id: str,
+        keys: List[CacheEngineKey],
+        pin: bool = False,
+    ) -> int:
+        return await self._connector.batched_async_contains(lookup_id, keys, pin)
+
+    def support_batched_get_non_blocking(self) -> bool:
+        return self._connector.support_batched_get_non_blocking()
+
+    async def batched_get_non_blocking(
+        self,
+        lookup_id: str,
+        keys: List[CacheEngineKey],
+    ) -> List[MemoryObj]:
+        return await self._connector.batched_get_non_blocking(lookup_id, keys)
 
     async def batched_get(
         self, keys: List[CacheEngineKey]
     ) -> List[Optional[MemoryObj]]:
         return await self._connector.batched_get(keys)
+
+    async def batched_put(
+        self, keys: List[CacheEngineKey], memory_objs: List[MemoryObj]
+    ):
+        return await self._connector.batched_put(keys, memory_objs)
 
     def __repr__(self) -> str:
         return f"InstrumentedRemoteConnector({self._connector})"

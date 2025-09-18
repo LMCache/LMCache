@@ -223,5 +223,57 @@ class RemoteConnector(metaclass=abc.ABCMeta):
         """
         raise NotImplementedError
 
+    def support_batched_put(self) -> bool:
+        """
+        Check if the connector supports batched put
+        Returns:
+            True if batched put is supported, False otherwise
+        """
+        return False
+
+    async def batched_put(
+        self, keys: List[CacheEngineKey], memory_objs: List[MemoryObj]
+    ):
+        """
+        Batched put the memory_objs with the corresponding keys
+        Input:
+            keys: the keys of the corresponding objects
+            memory_objs: the memory_objs of the corresponding keys
+        """
+        raise NotImplementedError
+
+    def support_batched_async_contains(self) -> bool:
+        """
+        Connectors that support batched async contains should override this method.
+        """
+        return False
+
+    async def batched_async_contains(
+        self,
+        lookup_id: str,
+        keys: List[CacheEngineKey],
+        pin: bool = False,
+    ) -> int:
+        """
+        Check if the remote server contains the keys
+        """
+        raise NotImplementedError
+
+    def support_batched_get_non_blocking(self) -> bool:
+        """
+        Connectors that support batched get non-blocking should override this method.
+        """
+        return False
+
+    async def batched_get_non_blocking(
+        self,
+        lookup_id: str,
+        keys: List[CacheEngineKey],
+    ) -> List[MemoryObj]:
+        """
+        Batched get the memory_objs of the corresponding keys
+        """
+        raise NotImplementedError
+
     def __repr__(self) -> str:
         return f"<{self.__class__.__name__}>"

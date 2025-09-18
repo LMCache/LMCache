@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from typing import Optional
 import logging
 
 # Third Party
@@ -10,7 +11,9 @@ router = APIRouter()
 
 
 @router.get("/loglevel")
-async def get_or_set_log_level(logger_name: str = None, level: str = None):
+async def get_or_set_log_level(
+    logger_name: Optional[str] = None, level: Optional[str] = None
+):
     """
     Get or set the log level for a logger.
     - No parameters: List all loggers and their levels.
