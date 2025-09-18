@@ -116,7 +116,6 @@ main() {
     echo "Please check prefiller.log, decoder.log and proxy.log for logs."
 
     # Launch the proxy first
-    LMCACHE_LOG_LEVEL=DEBUG \
     python3 ../disagg_proxy_server.py \
         --host localhost \
         --port 9487 \
@@ -130,40 +129,27 @@ main() {
         --proxy-host localhost \
         --proxy-port 7500 \
         --num-decoders 1 \
-        > >(tee proxy.log)    2>&1 &
+        > >(tee proxy2.log)   2>&1 &
     proxy_pid=$!
     PIDS+=($proxy_pid)
 
     # Launch the decoder
-    bash disagg_vllm_launcher.sh decoder1  \
-        > >(tee decoder1.log)  2>&1 &
+    bash disagg_vllm_launcher.sh decoder1 meta-llama/Llama-3.1-8B-Instruct \
+        > >(tee decoder1.log) 2>&1 &
     decoder_pid=$!
     PIDS+=($decoder_pid)
 
-    # sleep 5
-    # # Launch the second decoder 
-    # bash disagg_vllm_launcher.sh decoder2  \
-    #     > >(tee decoder2.log)  2>&1 &
-    # decoder_pid=$!
-    # PIDS+=($decoder_pid)
-    # wait_for_server 7201
-
 
     # Launch the prefillers next
-    bash disagg_vllm_launcher.sh prefiller1 \
+    bash disagg_vllm_launcher.sh prefiller1 meta-llama/Llama-3.1-8B-Instruct \
         > >(tee prefiller1.log) 2>&1 &
     prefiller_pid=$!
     PIDS+=($prefiller_pid)
 
     sleep 5  # Don't launch the second prefiller too quickly
-    # bash disagg_vllm_launcher.sh prefiller2 \
-    #     > >(tee prefiller2.log) 2>&1 &
-    # prefiller2_pid=$!
-    # PIDS+=($prefiller2_pid)
 
     wait_for_server 7200
     wait_for_server 7100
-    # wait_for_server 7101
     wait_for_server 9487
 
     echo "==================================================="

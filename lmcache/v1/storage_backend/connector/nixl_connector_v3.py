@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from queue import Queue
 from typing import TYPE_CHECKING, Any, Optional, Union
+import asyncio
 import copy
 import threading
 import time
@@ -25,6 +26,7 @@ from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import (
     MemoryFormat,
     MemoryObj,
+    PagedTensorMemoryAllocator,
 )
 from lmcache.v1.storage_backend.connector.nixl_utils import NixlConfigXpYd, NixlRole
 
@@ -160,7 +162,7 @@ class NixlSenderTask:
         shape = list(shape)
         # TODO(novahow): remove this hardcode which assumes the hidden dim is -1
         shape[-1] //= tp_ratio
-        logger.debug(f"HOWDYshape after tp split: {shape}")
+        logger.debug(f"Memobj shape after TP split: {shape}")
         dtype = TORCH_DTYPE_TO_STR_DTYPE[self.mem_objs[0].meta.dtype]
         token_dim = fmt.token_dim()
         last_chunk_toks = self.mem_objs[-1].meta.shape[token_dim]
@@ -219,9 +221,7 @@ class NixlSender:
         self.memory_allocator = backend.memory_allocator
 
         self._sender_nixl_wrapper = NixlAgentWrapper(
-            buffer_ptr=self.memory_allocator.nixl_allocator.buffer_ptr,
-            buffer_size=self.memory_allocator.nixl_allocator.buffer_size,
-            page_size=self.memory_allocator.nixl_allocator.align_bytes,
+            allocator=self.memory_allocator.nixl_allocator,
             tp_rank=tp_rank,
         )
         self._nixl_agent = self._sender_nixl_wrapper.agent
@@ -254,17 +254,20 @@ class NixlSender:
 
         self.tp_rank = tp_rank
         self.receiver_tp_size = 1
+        self._backend = backend
         self.sender_tp_size = tp_world_size
         self.tp_ratio = 1
         self.remote_page_size = -1
 
-    def get_block_descs(
-        self, sender_task: NixlSenderTask, remote_tp_group_rank: int
-    ) -> list[tuple[int, ...]]:
+    """
+    Get the block descriptors for sending to 
+    the given remote tensor parallel group rank.
+    """
+
+    def get_block_descs(self, remote_tp_group_rank: int) -> list[tuple[int, ...]]:
         buffer_size = self.memory_allocator.nixl_allocator.buffer_size
-        local_page_size = self.memory_allocator.nixl_allocator.align_bytes
+        local_page_size = self._sender_nixl_wrapper.page_size
         remote_page_size = local_page_size // self.tp_ratio
-        assert len(sender_task.keys) == len(sender_task.mem_objs)
         assert remote_tp_group_rank < self.tp_ratio
         assert self.remote_page_size == remote_page_size, (
             f"remote page size {self.remote_page_size} != calculated remote page size "
@@ -347,8 +350,8 @@ class NixlSender:
 
         req_id = sender_task.req_id
 
-        async def send_to_receiver(receiver_idx: int, receiver_id: str):
-            block_descs = self.get_block_descs(sender_task, receiver_idx)
+        def send_to_receiver(receiver_idx: int, receiver_id: str):
+            block_descs = self.get_block_descs(receiver_idx)
             self._sender_nixl_wrapper.update_handler_from_blocks_data(
                 block_descs, receiver_idx
             )
@@ -378,19 +381,22 @@ class NixlSender:
                     req_id, receiver_idx, receiver_info, local_indexes, remote_indexes
                 )
 
-        # HOWTODO: make this async again
-        # tasks = [
-        #     send_to_receiver(idx, rid)
-        #     for idx, rid in enumerate(receiver_info.receiver_ids)
-        # ]
-        # await asyncio.gather(*tasks)
-        for idx, rid in enumerate(receiver_info.receiver_ids):
-            world_size = len(receiver_info.receiver_ids)
-            await send_to_receiver(
-                world_size - idx - 1, receiver_info.receiver_ids[world_size - idx - 1]
-            )
+        # TODO(novahow): this still seems serialized even with asyncio,
+        # need to dive deeper into nixl repo
+        # Standard
+        import concurrent.futures as cf
 
-        logger.debug(f"transfer spec: {transfer_spec}")
+        with cf.ThreadPoolExecutor(max_workers=self.tp_ratio) as executor:
+            tasks = [
+                asyncio.wrap_future(
+                    executor.submit(send_to_receiver, idx, rid),
+                    loop=self._backend.loop,
+                )
+                for idx, rid in enumerate(receiver_info.receiver_ids)
+            ]
+            await asyncio.gather(*tasks)
+
+        logger.debug(f"nixl transfer spec: {transfer_spec}")
         if transfer_spec.is_last_prefill:
             # Notify the proxy that the transfer is done
             notif_msg = NixlProxyNotif(req_id=req_id)
@@ -445,19 +451,36 @@ class NixlSender:
             receiver_id,
             req_id,
         )
-        logger.debug(
-            f"HOWDYlocal_indexes: {local_indexes}, remote_indexes: {remote_indexes}, "
-            f"receiver_idx: {receiver_idx}, receiver_id: {receiver_id} "
-            f"local_indexes len: {len(local_indexes)}, "
-            f"remote_indexes len: {len(remote_indexes)}"
-        )
+
+        per_chunk_tokens = len(self._sender_nixl_wrapper.per_chunk_range)
+        # NOTE(novahow) update indexes with per_chunk_tokens
+        # for example if chunk_size is 256, the chunk_id is 1,
+        # then this would map to token 256~511
+        expanded_local_indexes = [
+            expanded_idx
+            for idx in local_indexes
+            for expanded_idx in (
+                self._sender_nixl_wrapper.per_chunk_range + (idx * per_chunk_tokens)
+            ).tolist()
+        ]
+
+        expanded_remote_indexes = [
+            expanded_idx
+            for idx in remote_indexes
+            for expanded_idx in (
+                self._sender_nixl_wrapper.per_chunk_range + (idx * per_chunk_tokens)
+            ).tolist()
+        ]
+
+        # expanded_local_indexes = local_indexes
+        # expanded_remote_indexes = remote_indexes
 
         handle = self._nixl_agent.make_prepped_xfer(
             "WRITE",
             self._sender_nixl_wrapper.xfer_handlers[receiver_idx],
-            local_indexes,
+            expanded_local_indexes,
             self._remote_xfer_handlers_dict[receiver_id],
-            remote_indexes,
+            expanded_remote_indexes,
             # notif_msg_bytes,
         )
 
@@ -628,9 +651,7 @@ class NixlReceiver:
 
         self.device = nixl_config.buffer_device
         self._receiver_nixl_wrapper = NixlAgentWrapper(
-            buffer_ptr=self.memory_allocator.nixl_allocator.buffer_ptr,
-            buffer_size=self.memory_allocator.nixl_allocator.buffer_size,
-            page_size=self.memory_allocator.nixl_allocator.align_bytes,
+            self.memory_allocator.nixl_allocator,
             tp_rank=tp_rank,
             backends=nixl_config.backends,
         )
@@ -699,7 +720,8 @@ class NixlReceiver:
 
         for idx, key_str in enumerate(alloc_request.keys):
             key = CacheEngineKey.from_string(key_str)
-            # TODO: this directly modifies the key attributes, which is not clean
+            # TODO(novahow): this directly modifies the key attributes,
+            # which is not clean
             key.update_rank_info_from_nixl(self._receiver_tp_size, self._tp_rank)
             if self._backend.contains(key, pin=True):
                 already_send_indexes.append(idx)
@@ -725,10 +747,6 @@ class NixlReceiver:
                 wait_time /= decay
                 mem_obj = self._backend.allocate(torch.Size(shape), dtype, fmt)
 
-            logger.debug(
-                f"HOWDYAllocated memory object of "
-                f"shape {shape} for key {key}: {mem_obj}, "
-            )
             alloc_indexes.append(mem_obj.meta.address)
             self._backend.put(key, mem_obj)
 
@@ -823,7 +841,7 @@ class NixlReceiver:
 
                     resp = NixlMemRegResponse(
                         receiver_xfer_dlist_bytes=local_xfer_descs,
-                        page_size=self.memory_allocator.nixl_allocator.align_bytes,
+                        page_size=self._receiver_nixl_wrapper.page_size,
                         tp_rank=self._tp_rank,
                     )
 
@@ -947,9 +965,7 @@ class NixlAgentWrapper:
 
     def __init__(
         self,
-        buffer_ptr: int,
-        buffer_size: int,
-        page_size: int,
+        allocator: PagedTensorMemoryAllocator,
         tp_rank: int,
         backends: Optional[list[str]] = None,
     ):
@@ -986,6 +1002,27 @@ class NixlAgentWrapper:
             nixl_agent_config(backends=backends),
         )
 
+        buffer_ptr = allocator.buffer_ptr
+        buffer_size = allocator.buffer_size
+
+        self.cache_shape = allocator.shape
+        assert allocator.fmt == MemoryFormat.KV_2LTD, (
+            f"Only support KV_2LTD format, got {allocator.fmt}"
+        )
+        # per_token size
+        # TODO(novahow) now we're transferring token by token due to
+        # the shape for nixl needs to be [TD2L], consider making it
+        # block by block in the future
+        # TODO(novahow) check if the shape could be divided by tp_ratio
+        self.page_size = (
+            allocator.shape.numel()
+            // allocator.shape[allocator.fmt.token_dim()]
+            * allocator.dtype.itemsize
+        )
+        self.per_chunk_range = torch.arange(
+            allocator.shape[allocator.fmt.token_dim()], dtype=torch.long
+        )
+        # self.page_size = allocator.align_bytes
         # Register the memory
         memory_desc = [(buffer_ptr, buffer_size, tp_rank, "")]
         # TODO(Jiayi): remove hardcode `mem_type`
@@ -994,8 +1031,8 @@ class NixlAgentWrapper:
 
         # Create xfer handlers
         xfer_desc = []
-        for base_addr in range(buffer_ptr, buffer_ptr + buffer_size, page_size):
-            xfer_desc.append((base_addr, page_size, tp_rank))
+        for base_addr in range(buffer_ptr, buffer_ptr + buffer_size, self.page_size):
+            xfer_desc.append((base_addr, self.page_size, tp_rank))
 
         xfer_descs = nixl_agent.get_xfer_descs(xfer_desc, mem_type="cuda")
 

@@ -808,7 +808,6 @@ class StorageManager:
         for backend_name, backend in self.storage_backends.items():
             if locations is None or backend_name in locations:
                 for key in keys:
-                    logger.debug(f"HOWDY unpinning {key} in {backend_name}")
                     backend.unpin(key)
 
     def clear(

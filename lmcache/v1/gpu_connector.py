@@ -244,10 +244,6 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
         )
         last_pos = slot_mapping[start:end][-1].item()
         page_idx, in_page_idx = divmod(last_pos, 16)
-        for _head in [0, 3]:
-            for _kv in range(2):
-                logger.debug(f"HOWDYkv? {_kv}, Head {_head}")
-                logger.debug(self.kvcaches[0][_kv, page_idx, in_page_idx, _head, :])
 
     @_lmcache_nvtx_annotate
     def from_gpu(self, memory_obj: MemoryObj, start: int, end: int, **kwargs):
@@ -281,14 +277,6 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
         slot_mapping: torch.Tensor = kwargs["slot_mapping"]
 
         kv_cache_pointers = self._initialize_pointers(self.kvcaches)
-        # First Party
-        last_pos = slot_mapping[start:end][-1].item()
-        page_idx, in_page_idx = divmod(last_pos, 16)
-        for _head in [0, 3, -1]:
-            for _kv in range(2):
-                logger.debug(f"HOWDYkv? {_kv}, Head {_head}")
-                logger.debug(self.kvcaches[0][_kv, page_idx, in_page_idx, _head, :])
-        # ForkedPdb().set_trace()
 
         with torch.cuda.stream(self.store_stream):
             if self.gpu_buffer is None or end - start != self.gpu_buffer.shape[2]:

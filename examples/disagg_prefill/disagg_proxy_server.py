@@ -77,6 +77,7 @@ async def lifespan(app: FastAPI):
     prefill_pairs = pair_hosts_and_ports(
         pref_hosts, pref_ports, global_args.num_prefillers
     )
+
     for host, port in prefill_pairs[:1]:
         prefiller_base_url = f"http://{host}:{int(port)}"
         prefill_client = httpx.AsyncClient(timeout=None, base_url=prefiller_base_url)
@@ -96,7 +97,7 @@ async def lifespan(app: FastAPI):
         len(dec_hosts) == 1 and len(dec_ports) == 1 and global_args.num_decoders > 1
     )
 
-    for i, (host, port) in enumerate(decoder_pairs[:1]):
+    for i, (host, port) in enumerate(decoder_pairs):
         decoder_base_url = f"http://{host}:{int(port)}"
         decode_client = httpx.AsyncClient(timeout=None, base_url=decoder_base_url)
         if incremental_mode:
@@ -304,9 +305,7 @@ async def handle_completions(request: Request):
         req_data["max_tokens"] = 1
 
         # Pick decode client
-        decode_client = app.state.decode_clients[
-            0
-        ]  # round_robin_pick_client(app.state.decode_clients, counter)
+        decode_client = round_robin_pick_client(app.state.decode_clients, counter)
 
         num_tp_rank = len(decode_client.init_port or [])
 
@@ -367,6 +366,10 @@ async def handle_completions(request: Request):
             ).encode()
 
             # Wait until decode node signals that kv is ready
+            # TODO(novahow): this was originally num_tp_rank
+            # which is decoder's tensor parallel size
+            # but it seems that prefiller is the one that sends
+            # the signal, so we should use its tp size instead
             await wait_decode_kv_ready(req_id, len(prefill_client.init_port or []))
 
             async for chunk in stream_service_response(
@@ -497,6 +500,10 @@ async def handle_chat_completions(request: Request):
                 "data: " + json.dumps(head_chunk, separators=(",", ":")) + "\n\n"
             ).encode()
 
+            # TODO(novahow): this was originally num_tp_rank
+            # which is decoder's tensor parallel size
+            # but it seems that prefiller is the one that sends
+            # the signal, so we should use its tp size instead?
             await wait_decode_kv_ready(req_id, num_tp_rank)
 
             # Stream and convert completion format chunks to chat completion format

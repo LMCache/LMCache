@@ -168,9 +168,10 @@ key_value_offset(const int k_or_v, const int layer_idx, const int token_idx,
                  const int scalar_offset, const int scalars_per_token,
                  const int num_tokens, const int num_layers, const int num_kv) {
   if (transpose) {
-    return scalar_offset * num_kv * num_layers * num_tokens +
-           num_layers * num_tokens * k_or_v + layer_idx * num_tokens +
-           token_idx;
+    // [2LTD->TD2L]
+    return token_idx * scalars_per_token * num_kv * num_layers +
+           scalar_offset * num_kv * num_layers + k_or_v * num_layers +
+           layer_idx;
   }
   return k_or_v * num_layers * num_tokens * scalars_per_token +
          layer_idx * num_tokens * scalars_per_token +
