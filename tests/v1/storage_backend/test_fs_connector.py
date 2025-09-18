@@ -193,7 +193,7 @@ class TestFSConnector:
         # Batched put
         futures = [
             remote_backend_with_fs.submit_put_task(key, memory_obj)
-            for key, memory_obj in zip(keys, memory_objs)
+            for key, memory_obj in zip(keys, memory_objs, strict=False)
         ]
         for future in filter(None, futures):
             future.result(timeout=5.0)
@@ -207,7 +207,7 @@ class TestFSConnector:
 
         assert results is not None
         assert len(results) == 3
-        for result, original in zip(results, memory_objs):
+        for result, original in zip(results, memory_objs, strict=False):
             assert result is not None
             assert result.metadata.shape == original.metadata.shape
             assert result.metadata.dtype == original.metadata.dtype
