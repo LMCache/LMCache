@@ -85,6 +85,16 @@ class AdhocSharedMemoryManager:
         self.shm_buffers.append(shm)
         self.shm_names.append(shm_name)
 
+    def close(self):
+        # let python GC clean up mmap inodes
+        for mm in self.adhoc_shm_manager.mmaps:
+            mm.close()
+        for shm_name in self.adhoc_shm_manager.shm_names:
+            try:
+                os.unlink(shm_name)
+            except FileNotFoundError:
+                pass  # file probably already removed
+
 
 class S3Connector(RemoteConnector):
     """
@@ -640,11 +650,4 @@ class S3Connector(RemoteConnector):
 
     async def close(self):
         await self.pq_executor.shutdown(wait=True)
-        # let python GC clean up mmap inodes
-        for mm in self.adhoc_shm_manager.mmaps:
-            mm.close()
-        for shm_name in self.adhoc_shm_manager.shm_names:
-            try:
-                os.unlink(shm_name)
-            except FileNotFoundError:
-                pass  # file probably already removed
+        self.adhoc_shm_manager.close()
