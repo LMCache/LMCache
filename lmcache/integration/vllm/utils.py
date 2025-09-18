@@ -60,6 +60,7 @@ def lmcache_get_config() -> Union[Config, V1Config]:
         config = LMCacheEngineConfig.from_file(config_file)
         # Update config from environment variables
         config.update_config_from_env()
+    config.log_config()
     return config
 
 

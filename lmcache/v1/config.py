@@ -477,7 +477,7 @@ def _from_defaults(cls, **kwargs):
         config_values[name] = kwargs.get(name, config["default"])
 
     instance = cls(**config_values)
-    return instance.log_config()
+    return instance
 
 
 def _from_legacy(cls, **kwargs):
@@ -541,7 +541,7 @@ def _from_legacy(cls, **kwargs):
             config_values[name] = config["default"]
 
     instance = cls(**config_values)
-    return instance.log_config()
+    return instance
 
 
 def _from_file(cls, file_path: str):
@@ -570,7 +570,7 @@ def _from_file(cls, file_path: str):
         config_values[name] = value
 
     instance = cls(**config_values)
-    return instance.log_config()
+    return instance
 
 
 def _update_config_from_env(self):
@@ -615,7 +615,7 @@ def _from_env(cls):
     """Load configuration from environment variables"""
     instance = cls.from_defaults()
     _update_config_from_env(instance)
-    return instance.log_config()
+    return instance
 
 
 def _from_dict(cls, config_dict: dict):
@@ -628,7 +628,7 @@ def _from_dict(cls, config_dict: dict):
             value = config["env_converter"](value)
         config_values[name] = value
     instance = cls(**config_values)
-    return instance.log_config()
+    return instance
 
 
 def _to_dict(self):
