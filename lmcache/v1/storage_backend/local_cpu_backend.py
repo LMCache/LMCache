@@ -243,23 +243,27 @@ class LocalCPUBackend(AllocatorBackendInterface):
         return True
 
     def initialize_allocator(
-        self, config: LMCacheEngineConfig, metadata: LMCacheEngineMetadata
+        self,
+        config: LMCacheEngineConfig,
+        metadata: Optional[LMCacheEngineMetadata] = None,
     ) -> MixedMemoryAllocator:
         cpu_size = config.max_local_cpu_size
-        # save_only_first_rank only works when use mla
-        save_only_first_rank = (
-            config.get_extra_config_value("save_only_first_rank", metadata.use_mla)
-            and metadata.use_mla
-        )
 
-        if save_only_first_rank and metadata.is_first_rank():
-            # Only the first rank will save the cache,
-            # so we need to set it lager than other ranks
-            cpu_size = (
-                config.extra_config.get("first_rank_max_local_cpu_size", cpu_size)
-                if config.extra_config
-                else cpu_size
+        if metadata is not None:
+            # save_only_first_rank only works when use mla
+            save_only_first_rank = (
+                config.get_extra_config_value("save_only_first_rank", metadata.use_mla)
+                and metadata.use_mla
             )
+
+            if save_only_first_rank and metadata.is_first_rank():
+                # Only the first rank will save the cache,
+                # so we need to set it lager than other ranks
+                cpu_size = (
+                    config.extra_config.get("first_rank_max_local_cpu_size", cpu_size)
+                    if config.extra_config
+                    else cpu_size
+                )
 
         # Detect the numa mapping
         numa_mapping = NUMADetector.get_numa_mapping(config)
