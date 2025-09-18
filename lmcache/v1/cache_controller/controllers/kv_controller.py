@@ -48,7 +48,7 @@ class KVController:
         # redis. We might need a local cache for handling
         # messages like `check_finish`. Or everything should be
         # written to redis.
-        self.kv_pool: dict[str, list[KVChunkMetadata]] = {}
+        self.kv_pool: dict[int, list[KVChunkMetadata]] = {}
 
         # TODO(Jiayi): remove this hardcode
         self.token_database = ChunkedTokenDatabase()
@@ -66,7 +66,7 @@ class KVController:
         """
         instance_id = msg.instance_id
         worker_id = msg.worker_id
-        key = str(msg.key)
+        key = msg.key
         location = msg.location
         if key not in self.kv_pool:
             self.kv_pool[key] = []
@@ -78,7 +78,7 @@ class KVController:
         """
         instance_id = msg.instance_id
         worker_id = msg.worker_id
-        key = str(msg.key)
+        key = msg.key
         location = msg.location
 
         if key not in self.kv_pool:
@@ -162,15 +162,13 @@ class KVController:
         for start, end, key in self.token_database.process_tokens(
             tokens, make_key=False
         ):
-            # TODO(Jiayi): remove this string conversion
-            key = str(key)
             if key not in self.kv_pool:
                 break
             matched_instance = self.kv_pool[key][0].instance_id
             matched_location = self.kv_pool[key][0].location
             layout_info[matched_instance] = (matched_location, end)
         return LookupRetMsg(layout_info=layout_info, event_id=msg.event_id)
-    
+
     async def batched_p2p_lookup(
         self, msg: BatchedP2PLookupMsg
     ) -> BatchedP2PLookupRetMsg:
@@ -181,7 +179,7 @@ class KVController:
 
         :return: A BatchedP2PLookupRetMsg containing the lookup results.
         """
-        results = {}
+
         worker_id = msg.worker_id
         num_hit_chunks = 0
         instance_id = ""
@@ -189,10 +187,9 @@ class KVController:
         distributed_url = ""
         for key in msg.hashes:
             # TODO(Jiayi): remove this string conversion
-            key = str(key)
             if key not in self.kv_pool:
                 break
-            
+
             # TODO(Jiayi): Currently, we use the first rank's
             # kv chunk metadata to do matching. The matching
             # logic can be improved.
@@ -200,11 +197,12 @@ class KVController:
             first_rank_kv_chunk_meta = self.kv_pool[key][0]
             instance_id = first_rank_kv_chunk_meta.instance_id
             location = first_rank_kv_chunk_meta.location
-            distributed_url = self.reg_controller.get_distributed_url(
+            peer_init_url = self.reg_controller.get_distributed_url(
                 instance_id, worker_id
             )
 
         return BatchedP2PLookupRetMsg(
             layout_info=[
-                (instance_id, location, num_hit_chunks, distributed_url),
+                (instance_id, location, num_hit_chunks, peer_init_url),
             ]
+        )

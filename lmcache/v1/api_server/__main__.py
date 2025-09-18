@@ -307,8 +307,8 @@ def main():
     parser.add_argument("--host", type=str, default="0.0.0.0")
     parser.add_argument("--port", type=int, default=9000)
     parser.add_argument(
-        "--monitor-ports", 
-        type=dict[str, int], 
+        "--monitor-ports",
+        type=dict[str, int],
         default={"pull": 9001, "reply": 9002},
     )
 

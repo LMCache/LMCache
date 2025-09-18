@@ -1,21 +1,37 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import List, Optional, Sequence, Union
-import abc
+from typing import TYPE_CHECKING, List, Optional, Sequence, Union
+import asyncio
 
 # Third Party
-import torch
 import msgspec
+import torch
+import zmq
 
 # First Party
+from lmcache.config import LMCacheEngineMetadata
+from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
-from lmcache.v1.memory_management import MemoryFormat, MemoryObj
-from lmcache.v1.storage_backend.storage_backend_listener import StorageBackendListener
 from lmcache.v1.cache_controller.message import (
     BatchedP2PLookupMsg,
     BatchedP2PLookupRetMsg,
 )
+from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.v1.memory_management import (
+    MemoryFormat,
+    MemoryObj,
+    PagedMixedMemoryAllocator,
+)
 from lmcache.v1.rpc_utils import get_zmq_context, get_zmq_socket
+from lmcache.v1.storage_backend.abstract_backend import StorageBackendInterface
+from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
+from lmcache.v1.transfer_channel import CreateTransferChannel
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.worker import LMCacheWorker
+
+logger = init_logger(__name__)
 
 
 class P2PMsgBase(msgspec.Struct, tag=True):
@@ -24,7 +40,7 @@ class P2PMsgBase(msgspec.Struct, tag=True):
     pass
 
 
-class LookupAndRetrieveMsg(P2PMsgBase):
+class BatchedLookupAndGetMsg(P2PMsgBase):
     """Lookup and retrieve message"""
 
     receiver_id: str
@@ -35,15 +51,17 @@ class LookupAndRetrieveMsg(P2PMsgBase):
     # Indexes (remote) of allocated memory objects (to be written)
     mem_indexes: list[int]
 
-class LookupAndRetrieveRetMsg(P2PMsgBase):
+
+class BatchedLookupAndGetRetMsg(P2PMsgBase):
     """Lookup and retrieve message"""
 
     # Number of hit chunks
     num_hit_chunks: int
 
+
 P2PMsg = Union[
-    LookupAndRetrieveMsg, 
-    LookupAndRetrieveRetMsg,
+    BatchedLookupAndGetMsg,
+    BatchedLookupAndGetRetMsg,
 ]
 
 # NOTE(Jiayi): Several notes about P2PBackend:
@@ -52,57 +70,81 @@ P2PMsg = Union[
 # 3. Lookup is currently three-tier:
 #    (1) local (local lookup cache) -> remote peer (goto (3) if hit)
 #    (2) controller -> remote peer (goto (3) if hit)
-#    (3) remote peer -> kv abd real retrieved lengths
+#    (3) remote peer -> kv and real retrieved lengths
+
 
 # TODO(Jiayi): handle asymmetric TP.
 class P2PBackend(StorageBackendInterface):
     def __init__(
         self,
         config: LMCacheEngineConfig,
+        metadata: LMCacheEngineMetadata,
         loop: asyncio.AbstractEventLoop,
         local_cpu_backend: LocalCPUBackend,
-        dst_device: str = "cuda",
-        lmcache_worker: Optional["LMCacheWorker"] = None,
+        lmcache_worker: "LMCacheWorker",
     ):
-        super().__init__(dst_device=dst_device)
         self.config = config
         self.loop = loop
-        self.local_cpu_backend = local_cpu_backend
         self.lmcache_worker = lmcache_worker
-        
-        # A CacheEngineKey (in int form) -> a list of 
-        # (peer_init_url, peer_url ,location)
-        self.local_lookup_cache = {}
+
+        assert config.peer_init_host is not None, "peer_init_host must be specified"
+        assert config.peer_init_ports is not None, "peer_init_port must be specified"
+
+        # tp rank is worker id for now
+        self.tp_rank = metadata.worker_id
+
+        self.peer_init_host = config.p2p_init_host
+        self.peer_init_port = config.p2p_init_ports[self.tp_rank]
+        self.peer_init_url = f"{self.peer_init_host}:{self.peer_init_port}"
+
+        self.peer_lookup_host = config.peer_lookup_host
+        self.peer_lookup_port = config.peer_lookup_ports[self.tp_rank]
+        self.peer_lookup_url = f"{self.peer_lookup_host}:{self.peer_lookup_port}"
+
+        # A CacheEngineKey (in int form) -> a list of
+        # (peer_init_url, peer_lookup_url, location)
+        self.local_lookup_cache: dict[int, tuple[str, str, str]] = {}
         # A set of peer_init_urls
-        self.initialized_peers: set[str] = set()
+        self.peer_id_to_lookup_url_mapping: dict[str, str] = {}
 
-        # A lookup_id -> (peer_init_url, peer_url, location)
-        self.lookup_id_to_peer_mapping: dict[str, tuple[str, str]] = {}
+        # A lookup_id -> (peer_init_url, peer_lookup_url, location)
+        self.lookup_id_to_peer_mapping: dict[str, tuple[str, str, str]] = {}
 
-        # FIXME: 
-        self.tp_rank
-        self.transfer_channel
+        self.dtype = metadata.kv_dtype
+        self.full_size_shape = list(metadata.kv_shape)
+        # TODO(Jiayi): remove this hardcode
+        self.fmt: MemoryFormat = MemoryFormat.KV_2LTD
 
-        self.allocator_backend = 
-        self.full_size_shape =
-        self.fmt: MemoryFormat =
-        self.dtype =
+        # TODO(Jiayi): support gpu and local storage p2p as well.
+        self.local_cpu_backend = local_cpu_backend
+        self.memory_allocator = local_cpu_backend.get_memory_allocator()
+        assert isinstance(self.memory_allocator, PagedMixedMemoryAllocator)
 
-        self.context = 
-        self.async_peer_socket =
+        # FIXME: We need to change buffer_ptr...
+        self.transfer_channel = CreateTransferChannel(
+            channel_type=config.transfer_channel,
+            role="both",
+            buffer_ptr=self.memory_allocator.cpu_allocator.buffer_ptr,
+            buffer_size=self.memory_allocator.cpu_allocator.buffer_size,
+            align_bytes=self.memory_allocator.cpu_allocator.align_bytes,
+            tp_rank=self.tp_rank,
+            peer_init_url=self.peer_init_url,
+            peer_lookup_url=self.peer_lookup_url,
+            backends=config.nixl_backends,
+        )
+
+        self.context = get_zmq_context()
+        self.async_peer_socket = get_zmq_socket(
+            self.context,
+            self.peer_lookup_url,
+            "tcp",
+            zmq.REP,
+            "bind",
+        )
 
         self.running = True
 
-        # TODO(Jiayi): support local storage as well.
-        self.local_cpu_backend = 
-
-    # TODO(Jiayi): make this async function as well.
-    def _ensure_peer_connection(
-        self,
-        peer_id: str,
-    ) -> None:
-        pass
-
+        # FIXME: UCX_TLS=rc to enbal infiniband
 
     async def batched_async_contains(
         self,
@@ -110,13 +152,12 @@ class P2PBackend(StorageBackendInterface):
         keys: List[CacheEngineKey],
         pin: bool = False,
     ) -> int:
-
         # Convert to hashes (int form)
         hashes = [key.chunk_hash for key in keys]
 
         # Tier 1 lookup: local lookup cache
         # TODO(Jiayi): Please implement the local lookup cache.
-        
+
         # Tier 2 lookup in controller
         msg = BatchedP2PLookupMsg(
             worker_id=self.tp_rank,
@@ -124,46 +165,48 @@ class P2PBackend(StorageBackendInterface):
         )
         ret_msg = await self.lmcache_worker.async_put_and_wait_msg(msg)
         assert isinstance(ret_msg, BatchedP2PLookupRetMsg)
-        
+
         # NOTE(Jiayi): For now we only support one peer hit.
         layout_info = ret_msg.layout_info[0]
-        _, location, num_hit_chunks, peer_init_url, peer_url = layout_info
+        _, location, num_hit_chunks, peer_init_url = layout_info
 
         if num_hit_chunks > 0:
+            await self._ensure_peer_connection(peer_init_url)
             self.lookup_id_to_peer_mapping[lookup_id] = (
-                peer_init_url, peer_url, location
+                peer_init_url,
+                self.peer_id_to_lookup_url_mapping[peer_init_url],
+                location,
             )
-
 
         # TODO(Jiayi): We could potentially update the local cache here.
         # Or we can update after tier 3 lookup.
-        
-        # NOTE(Jiayi): Tier 3 lookup is in function 
-        # `batched_get_non_blocking`. 
+
+        # NOTE(Jiayi): Tier 3 lookup is in function
+        # `batched_get_non_blocking`.
 
         return num_hit_chunks
-    
+
     async def _handle_batched_get_non_blocking(self):
         """
-        Handle `LookupAndRetrieveMsg` issued by peers in `batched_get_non_blocking`.
+        Handle `BatchedLookupAndGetMsg` issued by peers in `batched_get_non_blocking`.
         """
         while self.running:
             msg_bytes = await self.async_peer_socket.recv()
             msg = msgspec.decode(msg_bytes, type=P2PMsg)
-            assert isinstance(msg, LookupAndRetrieveMsg)
+            assert isinstance(msg, BatchedLookupAndGetMsg)
 
             lookup_id = msg.lookup_id
             keys = [CacheEngineKey.from_str(key) for key in msg.keys]
 
             # TODO(Jiayi): Optimally, there's no need to use async call
-            # for some backends (e.g., local cpu) as there's overhead for 
+            # for some backends (e.g., local cpu) as there's overhead for
             # async function call.
             num_hit_chunks = await self.local_cpu_backend.batched_async_contains(
                 lookup_id=lookup_id,
                 keys=keys,
                 pin=True,
             )
-            
+
             mem_objs = await self.local_cpu_backend.batched_get_non_blocking(
                 lookup_id=lookup_id,
                 keys=keys[:num_hit_chunks],
@@ -180,32 +223,29 @@ class P2PBackend(StorageBackendInterface):
                 transfer_spec=channel_transfer_spec,
             )
 
-            ret_msg = LookupAndRetrieveRetMsg(
+            ret_msg = BatchedLookupAndGetRetMsg(
                 num_hit_chunks=num_hit_chunks,
             )
 
-            await self.async_peer_socket.send(
-                msgspec.encode(ret_msg, type=P2PMsg)
-            )
+            await self.async_peer_socket.send(msgspec.encode(ret_msg, type=P2PMsg))
 
             for mem_obj in mem_objs:
                 mem_obj.ref_count_down()
                 mem_obj.unpin()
 
-
     async def _ensure_peer_connection(
         self,
         peer_init_url: str,
     ) -> None:
-        if peer_init_url in self.initialized_peers:
+        if peer_init_url in self.peer_id_to_lookup_url_mapping:
             return
-        
-        await self.transfer_channel.async_lazy_init_peer_connection(
-            peer_id=peer_init_url,
-            peer_init_url=peer_init_url)
-        
-        self.initialized_peers.add(peer_init_url)
 
+        init_ret_msg = await self.transfer_channel.async_lazy_init_peer_connection(
+            peer_id=peer_init_url, peer_init_url=peer_init_url
+        )
+
+        peer_lookup_url = init_ret_msg.peer_lookup_url
+        self.peer_id_to_lookup_url_mapping[peer_init_url] = peer_lookup_url
 
     async def batched_get_non_blocking(
         self,
@@ -213,30 +253,29 @@ class P2PBackend(StorageBackendInterface):
         keys: list[CacheEngineKey],
         offsets: list[int],
     ) -> list[MemoryObj]:
+        peer_init_url, peer_lookup_url, location = self.lookup_id_to_peer_mapping[
+            lookup_id
+        ]
 
-        peer_init_url, peer_url, location = self.lookup_id_to_peer_mapping[lookup_id]
-        await self._ensure_peer_connection(peer_init_url)
-        
         mem_objs = []
-        for key in keys:
-            shape = self.full_size_shape[self.fmt.token_dim()]
-
-            # FIXME: check signiture
-            mem_obj = self.allocator_backend.allocate(
-                torch.Size(shape), self.dtype, self.fmt)
+        for idx, key in enumerate(keys):
+            shape = self.full_size_shape.copy()
+            shape[self.fmt.token_dim()] = offsets[idx]
+            mem_obj = self.local_cpu_backend.allocate(
+                torch.Size(shape), self.dtype, self.fmt
+            )
             mem_objs.append(mem_obj)
-        
+
         local_indexes = self.transfer_channel.get_local_mem_indices(mem_objs)
 
-        msg = LookupAndRetrieveMsg(
+        # NOTE(Jiayi): Tier 3 lookup is batched with retrieval.
+        msg = BatchedLookupAndGetMsg(
             receiver_id=peer_init_url,
             keys=[str(key) for key in keys],
             mem_indexes=local_indexes,
         )
 
-        ret_msg = await self.async_peer_socket.send(
-            msgspec.encode(msg, type=P2PMsg)
-        )
+        ret_msg = await self.async_peer_socket.send(msgspec.encode(msg, type=P2PMsg))
 
         num_hit_chunks = ret_msg.num_hit_chunks
 
@@ -245,7 +284,7 @@ class P2PBackend(StorageBackendInterface):
             missed_mem_obj.ref_count_down()
 
         return hit_mem_objs
-    
+
     def close(
         self,
     ) -> None:
@@ -253,8 +292,7 @@ class P2PBackend(StorageBackendInterface):
         Close the P2P backend.
         """
         pass
-        
-    
+
     ############################################################
     # Not-supported functions
     ############################################################

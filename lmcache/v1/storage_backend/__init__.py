@@ -17,6 +17,7 @@ from lmcache.v1.storage_backend.abstract_backend import StorageBackendInterface
 from lmcache.v1.storage_backend.gds_backend import GdsBackend
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.v1.storage_backend.local_disk_backend import LocalDiskBackend
+from lmcache.v1.storage_backend.p2p_backend import P2PBackend
 from lmcache.v1.storage_backend.remote_backend import RemoteBackend
 from lmcache.v1.storage_backend.weka_gds_backend import WekaGdsBackend
 
@@ -132,6 +133,17 @@ def CreateStorageBackends(
         )
         backend_name = str(local_cpu_backend)
         storage_backends[backend_name] = local_cpu_backend
+
+    if config.enable_p2p:
+        p2p_backend = P2PBackend(
+            config,
+            metadata,
+            loop,
+            local_cpu_backend,
+            lmcache_worker,
+        )
+        backend_name = str(p2p_backend)
+        storage_backends[backend_name] = p2p_backend
 
     if enable_nixl_storage:
         # First Party

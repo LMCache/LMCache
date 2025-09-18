@@ -24,6 +24,9 @@ if TYPE_CHECKING:
 # First Party
 from lmcache.v1.rpc_utils import get_zmq_socket
 from lmcache.v1.transfer_channel.abstract import BaseTransferChannel
+from lmcache.v1.transfer_channel.transfer_utils import (
+    InitSideMsg,
+)
 
 logger = init_logger(__name__)
 
@@ -66,17 +69,20 @@ class NixlChannel(BaseTransferChannel):
         self.side_channels = []
         self.running_threads = []
 
+        if "peer_lookup_url" in kwargs:
+            # needed for P2P backend
+            self.peer_lookup_url = kwargs["peer_lookup_url"]
         self._init_side_channels(peer_init_url=kwargs["peer_init_url"])
 
     ############################################################
     # Initialization functions
     ############################################################
-    def lazy_init_peer_connection(self, **kwargs):
-        assert "peer_init_url" in kwargs
-        assert "peer_id" in kwargs
-        peer_init_url = kwargs["peer_init_url"]
-        peer_id = kwargs["peer_id"]
-
+    def lazy_init_peer_connection(
+        self,
+        peer_id: str,
+        peer_init_url: str,
+        init_side_msg: Optional[InitSideMsg] = None,
+    ) -> Optional[InitSideMsg]:
         # Initialize temporary socket for nixl initialization
         init_tmp_socket = get_zmq_socket(
             self.zmq_context,
@@ -111,7 +117,16 @@ class NixlChannel(BaseTransferChannel):
             remote_agent_name, remote_xfer_dlist
         )
         self.remote_xfer_handlers_dict[peer_id] = remote_xfer_handlers
+
+        init_ret_msg: Optional[InitSideMsg] = None
+        if init_side_msg is not None:
+            init_ret_msg = self.send_init_side_msg(
+                init_tmp_socket,
+                init_side_msg,
+            )
+
         init_tmp_socket.close()
+        return init_ret_msg
 
     def _init_side_channels(self, **kwargs):
         peer_init_url = kwargs["peer_init_url"]
@@ -147,7 +162,9 @@ class NixlChannel(BaseTransferChannel):
 
                 logger.debug("Received initialization request")
 
-                req = msgspec.msgpack.decode(req_bytes, type=NixlMsg)
+                req = msgspec.msgpack.decode(
+                    req_bytes, type=Union[NixlMsg, InitSideMsg]
+                )
 
                 if isinstance(req, NixlInitRequest):
                     self.nixl_agent.add_remote_agent(req.local_meta_bytes)
@@ -168,6 +185,9 @@ class NixlChannel(BaseTransferChannel):
                     )
 
                     logger.debug("Replying mem register response")
+                else:
+                    self.handle_init_side_msg(req)
+                    logger.debug("Replying P2P init side response")
 
                 self.init_side_channel.send(msgspec.msgpack.encode(resp))
 

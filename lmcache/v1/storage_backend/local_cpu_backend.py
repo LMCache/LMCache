@@ -20,6 +20,7 @@ from lmcache.v1.memory_management import (
     MemoryFormat,
     MemoryObj,
     MixedMemoryAllocator,
+    PagedMixedMemoryAllocator,
 )
 from lmcache.v1.storage_backend.abstract_backend import AllocatorBackendInterface
 from lmcache.v1.storage_backend.cache_policy import get_cache_policy
@@ -244,7 +245,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
 
     def initialize_allocator(
         self, config: LMCacheEngineConfig, metadata: LMCacheEngineMetadata
-    ) -> MixedMemoryAllocator:
+    ) -> MemoryAllocatorInterface:
         cpu_size = config.max_local_cpu_size
         # save_only_first_rank only works when use mla
         save_only_first_rank = (
@@ -264,10 +265,22 @@ class LocalCPUBackend(AllocatorBackendInterface):
         # Detect the numa mapping
         numa_mapping = NUMADetector.get_numa_mapping(config)
         logger.info(f"NUMA mapping {numa_mapping}")
-        return MixedMemoryAllocator(
-            int(cpu_size * 1024**3),
-            numa_mapping=numa_mapping,
-        )
+
+        if config.enable_p2p:
+            paged_mem_allocator = PagedMixedMemoryAllocator()
+            paged_mem_allocator.init_cpu_memory_allocator(
+                int(cpu_size * 1024**3),
+                shape=torch.Size(metadata.kv_shape),
+                dtype=metadata.kv_dtype,
+                fmt=MemoryFormat.KV_2LTD,  # TODO: remove this hardcode
+                numa_mapping=numa_mapping,
+            )
+            return paged_mem_allocator
+        else:
+            return MixedMemoryAllocator(
+                int(cpu_size * 1024**3),
+                numa_mapping=numa_mapping,
+            )
 
     @_lmcache_nvtx_annotate
     def allocate(

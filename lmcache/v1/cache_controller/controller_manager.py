@@ -18,6 +18,7 @@ from lmcache.v1.rpc_utils import (
 )
 
 from lmcache.v1.cache_controller.message import (  # isort: skip
+    BatchedP2PLookupMsg,
     CheckFinishMsg,
     ClearMsg,
     CompressMsg,
@@ -117,7 +118,7 @@ class LMCacheControllerManager:
             await self.kv_controller.evict(msg)
         else:
             logger.error(f"Unknown worker message type: {msg}")
-    
+
     async def handle_worker_req_message(self, msg: WorkerReqMsg) -> WorkerReqRetMsg:
         if isinstance(msg, BatchedP2PLookupMsg):
             ret_msg = await self.kv_controller.batched_p2p_lookup(msg)
@@ -175,7 +176,7 @@ class LMCacheControllerManager:
                         logger.error(f"Unknown message type: {type(msg)}")
             except Exception as e:
                 logger.error(f"Controller Manager error: {e}")
-    
+
     async def handle_batched_req_request(self, socket) -> Optional[MsgBase]:
         while True:
             try:
@@ -190,13 +191,14 @@ class LMCacheControllerManager:
                     else:
                         # MessagePack format - internal LMCache communication
                         msg = msgspec.msgpack.decode(part, type=Msg)
-                    
+
                     if isinstance(msg, WorkerReqMsg):
                         ret_msg = await self.handle_worker_req_message(msg)
+                        await socket.send(msgspec.msgpack.encode(ret_msg))
                     else:
                         logger.error(f"Unknown message type: {type(msg)}")
-                        ret_msg = ErrorMsg(error=f"Unknown message type: {type(msg)}")
-                    await socket.send(msgspec.msgpack.encode(ret_msg))
+                        err_msg = ErrorMsg(error=f"Unknown message type: {type(msg)}")
+                        await socket.send(msgspec.msgpack.encode(err_msg))
             except Exception as e:
                 logger.error(f"Controller Manager error: {e}")
 

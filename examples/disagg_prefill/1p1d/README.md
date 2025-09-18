@@ -77,5 +77,5 @@ P99 ITL (ms):                            11.43
 #### Log Files
 The main script generates several log files:
 - `prefiller.log` - Logs from the prefill server
-- `decoder.log` and - Logs from the decode server
+- `decoder.log` - Logs from the decode server
 - `proxy.log` - Logs from the proxy server

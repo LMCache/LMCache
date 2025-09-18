@@ -156,8 +156,12 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "default": False,
         "env_converter": _to_bool,
     },
-    "lookup_url": {"type": Optional[str], "default": None, "env_converter": str},
-    "distributed_url": {"type": Optional[str], "default": None, "env_converter": str},
+    "p2p_init_host": {"type": Optional[str], "default": None, "env_converter": str},
+    "p2p_init_ports": {
+        "type": Optional[list[int]],
+        "default": None,
+        "env_converter": _to_int_list,
+    },
     # Controller configurations
     "enable_controller": {
         "type": bool,
@@ -169,11 +173,20 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "default": "lmcache_default_instance",
         "env_converter": str,
     },
-    "controller_url": {"type": Optional[str], "default": None, "env_converter": str},
-    "lmcache_worker_port": {
-        "type": Optional[int],
+    "controller_pull_url": {
+        "type": Optional[str],
         "default": None,
-        "env_converter": int,
+        "env_converter": str,
+    },
+    "controller_reply_url": {
+        "type": Optional[str],
+        "default": None,
+        "env_converter": str,
+    },
+    "lmcache_worker_ports": {
+        "type": Optional[list[int]],
+        "default": None,
+        "env_converter": _to_int_list,
     },
     # LMCache Worker heartbeat
     # the lmcache_worker_heartbeat_delay_time means that delay a period of time

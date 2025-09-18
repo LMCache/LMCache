@@ -46,7 +46,6 @@ from lmcache.v1.memory_management import (  # noqa: E501
     MemoryObjMetadata,
     MixedMemoryAllocator,
     PagedTensorMemoryAllocator,
-    PDCPUMemoryAllocator,
     TensorMemoryObj,
 )
 from lmcache.v1.storage_backend.storage_manager import StorageManager
@@ -1319,7 +1318,6 @@ class LMCacheEngineBuilder:
         enable_nixl_storage = extra_config is not None and extra_config.get(
             "enable_nixl_storage"
         )
-
 
         if enable_nixl_storage:
             # TODO(Jiayi): weird to import from transfer utils.

@@ -72,10 +72,11 @@ class LMCacheWorker:
 
         self.context = get_zmq_context()
 
-        assert config.controller_urls is not None
+        assert config.controller_pull_url is not None
+        assert config.controller_reply_url is not None
 
-        controller_pull_url = config.controller_urls["pull"]
-        controller_rep_url = config.controller_urls["reply"]
+        controller_pull_url = config.controller_pull_url
+        controller_rep_url = config.controller_reply_url
 
         self.push_socket = get_zmq_socket(
             self.context,
@@ -85,25 +86,24 @@ class LMCacheWorker:
             bind_or_connect="connect",
         )
 
-        self.req_socket = get_zmq_socket(
-            self.context,
-            controller_rep_url,
-            protocol="tcp",
-            role=zmq.REQ,  # type: ignore[attr-defined]
-            bind_or_connect="connect",
-        )
+        if config.controller_reply_url is not None:
+            self.req_socket = get_zmq_socket(
+                self.context,
+                controller_rep_url,
+                protocol="tcp",
+                role=zmq.REQ,  # type: ignore[attr-defined]
+                bind_or_connect="connect",
+            )
 
-        # TODO(Jiayi): Make this less hard-coded
-        lmcache_worker_port = config.lmcache_worker_port
-        assert lmcache_worker_port is not None
-        # TODO(Jiayi): Make this port assignment smarter
-        lmcache_worker_port += self.worker_id
+        lmcache_worker_port = config.lmcache_worker_ports[self.worker_id]
 
         self.lmcache_worker_internal_url = f"*:{lmcache_worker_port}"
         self.lmcache_worker_ip = get_ip()
         self.lmcache_worker_port = lmcache_worker_port
 
-        self.distributed_url = config.distributed_url
+        self.peer_init_host = config.peer_init_host
+        self.peer_init_port = config.peer_init_ports[self.worker_id]
+        self.peer_init_url = f"{self.peer_init_host}:{self.peer_init_port}"
 
         self.reply_socket = get_zmq_socket(
             self.context,
@@ -139,7 +139,7 @@ class LMCacheWorker:
                 worker_id=self.worker_id,
                 ip=self.lmcache_worker_ip,
                 port=self.lmcache_worker_port,
-                distributed_url=self.distributed_url,
+                distributed_url=self.peer_init_url,
             )
         )
 
@@ -156,10 +156,10 @@ class LMCacheWorker:
                 port=self.lmcache_worker_port,
             )
         )
-    
+
     async def async_put_and_wait_msg(
         self,
-        msg: WorkerReqMsg,    
+        msg: WorkerReqMsg,
     ) -> WorkerReqRetMsg:
         """
         Send a message to the controller and wait for the response.
@@ -169,8 +169,6 @@ class LMCacheWorker:
         serialized_ret_msg = await self.req_socket.recv()
         ret_msg = msgspec.msgpack.decode(serialized_ret_msg, type=Msg)
         return ret_msg
-
-
 
     def put_msg(self, msg: WorkerMsg):
         """
@@ -221,7 +219,7 @@ class LMCacheWorker:
                         worker_id=self.worker_id,
                         ip=self.lmcache_worker_ip,
                         port=self.lmcache_worker_port,
-                        distributed_url=self.distributed_url,
+                        distributed_url=self.peer_init_url,
                     )
                 )
                 await asyncio.sleep(self.config.lmcache_worker_heartbeat_time)
