@@ -15,7 +15,7 @@
 
 # Standard
 from dataclasses import dataclass
-from typing import List, Optional, Sequence, Set
+from typing import List, Optional, Sequence, Set, cast
 import asyncio
 import os
 import threading
@@ -326,30 +326,42 @@ class NixlStorageBackend(AllocatorBackendInterface):
             with self.progress_lock:
                 self.progress_set.discard(key.chunk_hash)
 
-    async def file_to_gpu(self, key: CacheEngineKey) -> Optional[MemoryObj]:
+    async def file_to_gpu(
+        self, keys: list[CacheEngineKey]
+    ) -> list[Optional[MemoryObj]]:
+        obj_list: list[Optional[MemoryObj]] = []
+        mem_indices = []
+        file_indices = []
         with self.key_lock:
-            metadata = self.key_dict.get(key.chunk_hash)
-            if metadata is None:
-                return None
+            for key in keys:
+                metadata = self.key_dict.get(key.chunk_hash)
+                if metadata is None:
+                    obj_list.append(None)
+                    continue
 
-        dtype = metadata.dtype
-        shape = metadata.shape
-        fmt = metadata.fmt
-        assert dtype is not None
-        assert shape is not None
-        assert fmt is not None
+                dtype = metadata.dtype
+                shape = metadata.shape
+                fmt = metadata.fmt
+                assert dtype is not None
+                assert shape is not None
+                assert fmt is not None
 
-        obj = self.memory_allocator.allocate(shape, dtype, fmt)
-        if obj is None:
-            return None
+                obj = self.memory_allocator.allocate(shape, dtype, fmt)
+                assert obj is not None
 
-        handle = self.agent.get_file_to_gpu_handle(
-            [obj.metadata.address], [metadata.address]
-        )
+                obj_list.append(obj)
+
+                mem_indices.append(obj.metadata.address)
+                file_indices.append(metadata.address)
+
+        if not mem_indices:
+            return obj_list
+
+        handle = self.agent.get_file_to_gpu_handle(mem_indices, file_indices)
         self.agent.post_blocking(handle)
         self.agent.release_handle(handle)
 
-        return obj
+        return obj_list
 
     def batched_submit_put_task(
         self,
@@ -372,12 +384,22 @@ class NixlStorageBackend(AllocatorBackendInterface):
         :return: MemoryObj. None if the key does not exist.
         """
 
-        future = asyncio.run_coroutine_threadsafe(self.file_to_gpu(key), self.loop)
+        future = asyncio.run_coroutine_threadsafe(self.file_to_gpu([key]), self.loop)
 
         if future is None:
             return None
 
-        return future.result()
+        obj_list = future.result()
+        return obj_list[0]
+
+    async def batched_get_non_blocking(
+        self,
+        lookup_id: str,
+        keys: list[CacheEngineKey],
+    ) -> list[MemoryObj]:
+        obj_list = await self.file_to_gpu(keys)
+        assert None not in obj_list
+        return cast(list[MemoryObj], obj_list)
 
     def remove(self, key: CacheEngineKey, force: bool = True) -> bool:
         """

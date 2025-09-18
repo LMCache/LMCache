@@ -31,7 +31,7 @@ from lmcache.integration.vllm.utils import (
     ENGINE_NAME,
     apply_mm_hashes_to_token_ids,
     extract_mm_features,
-    lmcache_get_config,
+    lmcache_get_or_create_config,
     mla_enabled,
 )
 from lmcache.logging import init_logger
@@ -52,9 +52,6 @@ from lmcache.v1.lookup_client.lmcache_async_lookup_client import (
 )
 from lmcache.v1.offload_server.zmq_server import ZMQOffloadServer
 from lmcache.v1.plugin.plugin_launcher import PluginLauncher
-from lmcache.v1.storage_backend.connector.nixl_connector_v3 import (
-    NixlReceiverInfo,
-)
 
 if TYPE_CHECKING:
     # Third Party
@@ -89,7 +86,10 @@ class SaveSpec:
 @dataclass
 class DisaggSpec:
     req_id: str
-    receiver_info: NixlReceiverInfo
+    receiver_id: str
+    receiver_host: str
+    receiver_init_port: int
+    receiver_alloc_port: int
     is_last_prefill: bool = False
     num_transferred_tokens: int = 0
 
@@ -394,7 +394,7 @@ class ReqMeta:
 
 
 def need_gpu_interm_buffer(lmcache_config: LMCacheEngineConfig):
-    if lmcache_config.enable_nixl:
+    if lmcache_config.enable_pd:
         return False
     else:
         return True
@@ -556,7 +556,7 @@ class LMCacheConnectorV1Impl:
         self._parent = parent
         self.kv_role = vllm_config.kv_transfer_config.kv_role
         self.worker_count = vllm_config.parallel_config.tensor_parallel_size
-        config = lmcache_get_config()
+        config = lmcache_get_or_create_config()
         assert isinstance(config, LMCacheEngineConfig), (
             "LMCache v1 configuration is should be passed for vLLM v1."
         )
@@ -603,7 +603,8 @@ class LMCacheConnectorV1Impl:
                 get_tensor_model_parallel_rank(),
             )
 
-            if self.async_loading:
+            # In case of MLA, the lookup server is only created on worker 0
+            if self.async_loading and self.lookup_server is not None:
                 assert isinstance(self.lookup_server, LMCacheAsyncLookupServer)
                 self.lmcache_engine.post_init(async_lookup_server=self.lookup_server)
 
@@ -1145,16 +1146,13 @@ class LMCacheConnectorV1Impl:
             receiver_id = req_disagg_spec["receiver_host"] + str(
                 req_disagg_spec["receiver_init_port"]
             )
-            receiver_info = NixlReceiverInfo(
+
+            disagg_spec = DisaggSpec(
+                req_id=req_disagg_spec["req_id"],
                 receiver_id=receiver_id,
                 receiver_host=req_disagg_spec["receiver_host"],
                 receiver_init_port=req_disagg_spec["receiver_init_port"],
                 receiver_alloc_port=req_disagg_spec["receiver_alloc_port"],
-            )
-
-            disagg_spec = DisaggSpec(
-                req_id=req_disagg_spec["req_id"],
-                receiver_info=receiver_info,
             )
 
             tmp_disagg_tracker[request.request_id] = disagg_spec

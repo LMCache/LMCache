@@ -40,13 +40,11 @@ from lmcache.v1.gpu_connector import (
 from lmcache.v1.lookup_server import LookupServerInterface, RedisLookupServer
 from lmcache.v1.memory_management import CuFileMemoryAllocator  # noqa: E501
 from lmcache.v1.memory_management import (  # noqa: E501
-    AdHocMemoryAllocator,
     MemoryAllocatorInterface,
     MemoryFormat,
     MemoryObj,
     MemoryObjMetadata,
     MixedMemoryAllocator,
-    NixlCPUMemoryAllocator,
     PagedTensorMemoryAllocator,
     TensorMemoryObj,
 )
@@ -136,10 +134,9 @@ class LMCacheEngine:
 
         # HACK: remove this in the future
         # NOTE (Jiayi): This is currently used to support
-        # dropping the kv cache in nixl backend at decoder.
-        self.remove_after_retrieve = (
-            config.enable_nixl and config.nixl_role == "receiver"
-        )
+        # dropping the kv cache from the buffer in PD backend
+        # at decoder.
+        self.remove_after_retrieve = config.enable_pd and config.pd_role == "receiver"
 
         self.distributed_server: Optional[DistributedServerInterface] = None
 
@@ -505,6 +502,7 @@ class LMCacheEngine:
             )
 
         # TODO(Jiayi): Remove the following for loop with batched operations
+        # TODO(Jiayi): Need to refactor the `remove_after_retrieve` logic.
         for key, memory_obj, _, _ in reordered_chunks:
             if self.remove_after_retrieve and not self._is_passive():
                 self.storage_manager.remove(key)
@@ -1306,6 +1304,8 @@ class LMCacheEngineBuilder:
     _metadatas: Dict[str, LMCacheEngineMetadata] = {}
     _stat_loggers: Dict[str, LMCacheStatsLogger] = {}
 
+    # TODO(Jiayi): Please remove this helper function in the future.
+    # Currently, it's only used for testing.
     @staticmethod
     def _Create_memory_allocator(
         config: LMCacheEngineConfig,
@@ -1318,50 +1318,15 @@ class LMCacheEngineBuilder:
         enable_nixl_storage = extra_config is not None and extra_config.get(
             "enable_nixl_storage"
         )
-        if config.enable_nixl and not enable_nixl_storage:
-            assert config.nixl_buffer_device is not None
-            # TODO (Jiayi): make this less hacky
-            if config.enable_xpyd:
-                # First Party
-                from lmcache.v1.storage_backend.connector.nixl_utils import (
-                    get_correct_nixl_device,
-                )
-
-                corrected_device = get_correct_nixl_device(
-                    config.nixl_buffer_device,
-                    metadata.worker_id,
-                )
-                logger.info(f"Setting cuda device to {corrected_device} ")
-                torch.cuda.set_device(corrected_device)
-
-                # TODO(Jiayi): add numa affinity to nixl_cpu backend too.
-                buffer = torch.empty(
-                    config.nixl_buffer_size,
-                    dtype=torch.uint8,
-                    device=corrected_device,
-                )
-                nixl_cpu_mem_allocator = NixlCPUMemoryAllocator()
-                nixl_cpu_mem_allocator.init_nixl_memory_allocator(
-                    buffer,
-                    torch.Size(metadata.kv_shape),
-                    metadata.kv_dtype,
-                    MemoryFormat.KV_2LTD,  # TODO: remove this hardcode
-                )
-                if config.local_cpu:
-                    max_local_cpu_size = config.max_local_cpu_size
-                    nixl_cpu_mem_allocator.init_cpu_memory_allocator(
-                        int(max_local_cpu_size * 1024**3)
-                    )
-                return nixl_cpu_mem_allocator
-            return AdHocMemoryAllocator(config.nixl_buffer_device)
 
         if enable_nixl_storage:
+            # TODO(Jiayi): weird to import from transfer utils.
             # First Party
-            from lmcache.v1.storage_backend.connector.nixl_utils import (
-                get_correct_nixl_device,
+            from lmcache.v1.transfer_channel.transfer_utils import (
+                get_correct_device,
             )
 
-            corrected_device = get_correct_nixl_device(
+            corrected_device = get_correct_device(
                 config.nixl_buffer_device,
                 metadata.worker_id,
             )

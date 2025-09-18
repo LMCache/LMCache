@@ -1,4 +1,6 @@
 local_cpu: False
+max_local_cpu_size: 0
+max_local_disk_size: 0
 
 enable_pd: True
 transfer_channel: "nixl"

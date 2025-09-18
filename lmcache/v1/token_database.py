@@ -166,7 +166,7 @@ class ChunkedTokenDatabase(TokenDatabase):
                         "For consistent caching, set: export PYTHONHASHSEED=0 "
                         "before the engine starts."
                     )
-                if config.enable_nixl:
+                if config.enable_pd:
                     logger.error(
                         "P/D Disaggregation detected "
                         "but PYTHONHASHSEED not set. "

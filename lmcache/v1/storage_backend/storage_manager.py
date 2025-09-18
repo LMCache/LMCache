@@ -157,7 +157,7 @@ class StorageManager:
             )
         )
 
-        self.enable_nixl = config.enable_nixl
+        self.enable_pd = config.enable_pd
 
         self.allocator_backend = self._get_allocator_backend(config)
         if config.local_cpu:
@@ -195,8 +195,8 @@ class StorageManager:
     def _get_allocator_backend(
         self, config: LMCacheEngineConfig
     ) -> AllocatorBackendInterface:
-        if self.enable_nixl:
-            allocator_backend = self.storage_backends["NixlBackend"]
+        if self.enable_pd:
+            allocator_backend = self.storage_backends["PDBackend"]
         else:
             allocator_backend = self.storage_backends["LocalCPUBackend"]
         assert isinstance(allocator_backend, AllocatorBackendInterface)
@@ -327,7 +327,7 @@ class StorageManager:
             # are allocated by the allocator backend.
             memory_obj = backend.get_blocking(key)
             if memory_obj:
-                if backend_name not in ["LocalCPUBackend", "NixlBackend"]:
+                if backend_name not in ["LocalCPUBackend", "PDBackend"]:
                     local_cpu_backend = self.storage_backends["LocalCPUBackend"]
                     assert isinstance(local_cpu_backend, LocalCPUBackend)
                     local_cpu_backend.submit_put_task(key, memory_obj)
@@ -513,8 +513,8 @@ class StorageManager:
             if search_range and backend_name not in search_range:
                 continue
 
-            # NOTE(Jiayi): We do not pin for NixlBackend
-            if backend_name == "NixlBackend":
+            # NOTE(Jiayi): We do not pin for PDBackend
+            if backend_name == "PDBackend":
                 pin = False
 
             if backend.contains(key, pin):

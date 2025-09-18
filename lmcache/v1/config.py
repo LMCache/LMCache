@@ -74,7 +74,14 @@ def _to_bool(
 # Configuration aliases and deprecated mappings
 _CONFIG_ALIASES = {
     # Maps deprecated names to current names
-    "nixl_peer_port": "nixl_receiver_port",
+    "enable_xpyd": "enable_pd",
+    "nixl_peer_host": "pd_peer_host",
+    "nixl_peer_init_port": "pd_peer_init_port",
+    "nixl_peer_alloc_port": "pd_peer_alloc_port",
+    "nixl_proxy_host": "pd_proxy_host",
+    "nixl_proxy_port": "pd_proxy_port",
+    "nixl_buffer_size": "pd_buffer_size",
+    "nixl_role": "pd_role",
 }
 
 _DEPRECATED_CONFIGS = {
@@ -183,58 +190,50 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "default": None,
         "env_converter": int,
     },
-    # Nixl configurations
-    "enable_nixl": {
+    # PD-related configurations
+    "enable_pd": {
         "type": bool,
         "default": False,
         "env_converter": _to_bool,
     },
-    "nixl_role": {"type": Optional[str], "default": None, "env_converter": str},
-    "nixl_receiver_host": {
+    "pd_role": {"type": Optional[str], "default": None, "env_converter": str},
+    "pd_buffer_size": {"type": Optional[int], "default": None, "env_converter": int},
+    "pd_buffer_device": {
         "type": Optional[str],
         "default": None,
         "env_converter": str,
     },
-    "nixl_receiver_port": {
-        "type": Optional[int],
+    "pd_peer_host": {"type": Optional[str], "default": None, "env_converter": str},
+    "pd_peer_init_port": {
+        "type": Optional[list[int]],
         "default": None,
-        "env_converter": int,
+        "env_converter": _to_int_list,
     },
-    "nixl_buffer_size": {"type": Optional[int], "default": None, "env_converter": int},
-    "nixl_buffer_device": {
-        "type": Optional[str],
+    "pd_peer_alloc_port": {
+        "type": Optional[list[int]],
         "default": None,
-        "env_converter": str,
+        "env_converter": _to_int_list,
     },
-    "nixl_enable_gc": {
-        "type": bool,
-        "default": False,
-        "env_converter": _to_bool,
-    },
+    "pd_proxy_host": {"type": Optional[str], "default": None, "env_converter": str},
+    "pd_proxy_port": {"type": Optional[int], "default": None, "env_converter": int},
+    # Transfer-related configurations
+    "transfer_channel": {"type": Optional[str], "default": None, "env_converter": str},
+    # Nixl-related configurations
     "nixl_backends": {
         "type": Optional[list[str]],
         "default": None,
         "env_converter": _to_str_list,
     },
-    # Experimental Nixl configurations
-    "enable_xpyd": {
-        "type": bool,
-        "default": False,
-        "env_converter": _to_bool,
-    },
-    "nixl_peer_host": {"type": Optional[str], "default": None, "env_converter": str},
-    "nixl_peer_init_port": {
-        "type": Optional[list[int]],
+    "nixl_buffer_size": {
+        "type": Optional[int],
         "default": None,
-        "env_converter": _to_int_list,
+        "env_converter": int,
     },
-    "nixl_peer_alloc_port": {
-        "type": Optional[list[int]],
+    "nixl_buffer_device": {
+        "type": Optional[str],
         "default": None,
-        "env_converter": _to_int_list,
+        "env_converter": str,
     },
-    "nixl_proxy_host": {"type": Optional[str], "default": None, "env_converter": str},
-    "nixl_proxy_port": {"type": Optional[int], "default": None, "env_converter": int},
     # Storage paths
     "weka_path": {"type": Optional[str], "default": None, "env_converter": str},
     "gds_path": {"type": Optional[str], "default": None, "env_converter": str},
@@ -411,16 +410,16 @@ def _validate_config(self):
     enable_nixl_storage = self.extra_config is not None and self.extra_config.get(
         "enable_nixl_storage"
     )
-    if self.enable_nixl:
-        assert self.nixl_role is not None
-        assert self.nixl_buffer_size is not None
-        assert self.nixl_buffer_device is not None
+    if self.enable_pd:
+        assert self.pd_role is not None
+        assert self.pd_buffer_size is not None
+        assert self.pd_buffer_device is not None
 
-        assert self.remote_url is None, "Nixl only supports remote_url=None"
+        assert self.remote_url is None, "PD only supports remote_url=None"
         assert self.save_decode_cache is False, (
-            "Nixl only supports save_decode_cache=False"
+            "PD only supports save_decode_cache=False"
         )
-        assert self.enable_p2p is False, "Nixl only supports enable_p2p=False"
+        assert self.enable_p2p is False, "PD only supports enable_p2p=False"
 
     if enable_nixl_storage:
         assert self.extra_config.get("nixl_backend") is not None

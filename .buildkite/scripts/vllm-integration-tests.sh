@@ -179,7 +179,7 @@ run_pd_lmcache() {
         [[ -n $e ]] && prefiller_docker_args+=(--env "$e")
     done < <(yq -r '.env[]?' <<<"$prefiller_docker")
     proxy=$(yq -er '."proxy-port"' <<<"$prefiller_docker" 2>/dev/null)
-    prefiller_docker_args+=(--env "LMCACHE_NIXL_PROXY_PORT=$proxy")
+    prefiller_docker_args+=(--env "LMCACHE_PD_PROXY_PORT=$proxy")
 
     # vllm args
     prefiller_vllm_model="$(yq -r '.model' <<<"$prefiller_vllm")"
@@ -222,9 +222,9 @@ run_pd_lmcache() {
         [[ -n $e ]] && decoder_docker_args+=(--env "$e")
     done < <(yq -r '.env[]?' <<<"$decoder_docker")
     init=$(yq -er '."init-port"' <<<"$decoder_docker" 2>/dev/null)
-    decoder_docker_args+=(--env "LMCACHE_NIXL_PEER_INIT_PORT=$init")
+    decoder_docker_args+=(--env "LMCACHE_PD_PEER_INIT_PORT=$init")
     alloc=$(yq -er '."alloc-port"' <<<"$decoder_docker" 2>/dev/null)
-    decoder_docker_args+=(--env "LMCACHE_NIXL_PEER_ALLOC_PORT=$alloc")
+    decoder_docker_args+=(--env "LMCACHE_PD_PEER_ALLOC_PORT=$alloc")
 
     # vllm args
     decoder_vllm_model="$(yq -r '.model' <<<"$decoder_vllm")"

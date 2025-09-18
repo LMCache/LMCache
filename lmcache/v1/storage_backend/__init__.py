@@ -114,35 +114,16 @@ def CreateStorageBackends(
         "enable_nixl_storage"
     )
 
-    if config.enable_nixl:
-        if config.enable_xpyd:
-            # First Party
-            from lmcache.v1.storage_backend.nixl_backend_v3 import (
-                NixlBackend as NixlBackendV3,
-            )
+    if config.enable_pd:
+        # First Party
+        from lmcache.v1.storage_backend.pd_backend import PDBackend
 
-            storage_backends["NixlBackend"] = NixlBackendV3.CreateNixlBackend(
-                config, metadata
-            )
-        else:
-            # First Party
-            logger.warning(
-                "Latest LMCache uses XpYd code path for 1p1d,"
-                "Please set enable_xpyd to True in config"
-            )
-            # First Party
-            from lmcache.v1.storage_backend.nixl_backend import NixlBackend
-
-            storage_backends["NixlBackend"] = NixlBackend.CreateNixlBackend(
-                config, metadata
-            )
-
-        assert config.nixl_buffer_device is not None
+        storage_backends["PDBackend"] = PDBackend(config, metadata)
 
     # TODO(Jiayi): The hierarchy is fixed for now
     # NOTE(Jiayi): The local_cpu backend is always created because
     # other backends might need it as a buffer.
-    if not config.enable_nixl or config.local_cpu:
+    if not config.enable_pd or config.local_cpu:
         local_cpu_backend = LocalCPUBackend(
             config,
             metadata,
@@ -186,7 +167,7 @@ def CreateStorageBackends(
         backend_name = str(remote_backend)
         storage_backends[backend_name] = remote_backend
 
-    if not config.enable_nixl or config.local_cpu:
+    if not config.enable_pd or config.local_cpu:
         # Create dynamic backends from configuration
         create_dynamic_backends(
             config,
