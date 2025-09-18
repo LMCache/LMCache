@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import Any, List, Optional, Sequence
+from typing import TYPE_CHECKING, Any, List, Optional, Sequence
 import abc
+import asyncio
 
 # Third Party
 import torch
@@ -10,17 +11,27 @@ import torch
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.v1.lookup_server import LookupServerInterface
 from lmcache.v1.memory_management import (
     MemoryAllocatorInterface,
     MemoryFormat,
     MemoryObj,
 )
 
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.storage_backend import LocalCPUBackend
+
 
 class StorageBackendInterface(metaclass=abc.ABCMeta):
     def __init__(
         self,
         dst_device: str = "cuda",
+        config: Optional[LMCacheEngineConfig] = None,
+        metadata: Optional[LMCacheEngineMetadata] = None,
+        local_cpu_backend: Optional["LocalCPUBackend"] = None,
+        lookup_server: Optional[LookupServerInterface] = None,
+        loop: Optional[asyncio.AbstractEventLoop] = None,
     ):
         """
         Initialize the storage backend.

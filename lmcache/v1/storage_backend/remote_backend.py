@@ -31,7 +31,7 @@ class RemoteBackend(StorageBackendInterface):
         local_cpu_backend: LocalCPUBackend,
         dst_device: str = "cuda",
     ):
-        super().__init__(dst_device)
+        super().__init__(dst_device=dst_device)
         self.put_tasks: Set[CacheEngineKey] = set()
         self.lock = threading.Lock()
 

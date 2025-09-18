@@ -78,11 +78,11 @@ def create_dynamic_backends(
 
             # Create the backend instance
             backend_instance = backend_class(
-                config,
-                metadata,
-                loop,
-                local_cpu_backend,
-                dst_device,
+                config=config,
+                dst_device=dst_device,
+                metadata=metadata,
+                local_cpu_backend=local_cpu_backend,
+                loop=loop,
             )
 
             # Add to storage backends
