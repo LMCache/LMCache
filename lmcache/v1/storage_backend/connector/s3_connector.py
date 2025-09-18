@@ -147,9 +147,9 @@ class S3Connector(RemoteConnector):
             bootstrap=client_bootstrap,
             region=s3_region,
             credential_provider=self.credentials_provider,
-            enable_s3express=False,  # CHANGE ME BACK BEFORE PR!
+            enable_s3express=False,  # enable for s3express
             tls_connection_options=tls_opts,
-            tls_mode=s3.S3RequestTlsMode.DISABLED,  # CHANGE ME BACK BEFORE PR!
+            tls_mode=s3.S3RequestTlsMode.DISABLED,  # only for non-AWS services
         )
 
         # TODO(Jiayi): We need to handle cache consistency issues in a systematic way
