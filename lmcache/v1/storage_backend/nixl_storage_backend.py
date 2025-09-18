@@ -56,6 +56,7 @@ class NixlStorageConfig:
     buffer_device: str
     path: str
     backend: str
+    backend_params: dict[str, str]
 
     @staticmethod
     def validate_nixl_backend(backend: str, device: str):
@@ -88,6 +89,10 @@ class NixlStorageConfig:
             backend, config.nixl_buffer_device
         ), "Invalid NIXL backend & device combination"
 
+        backend_params = extra_config.get("nixl_backend_params")
+        if backend_params is None:
+            backend_params = {}
+
         corrected_device = get_correct_device(
             config.nixl_buffer_device, metadata.worker_id
         )
@@ -98,6 +103,7 @@ class NixlStorageConfig:
             buffer_device=corrected_device,
             path=path,
             backend=backend,
+            backend_params=backend_params,
         )
 
 
@@ -175,14 +181,16 @@ class NixlStorageAgent:
         pool: NixlDescPool,
         device: str,
         backend: str,
+        backend_params: dict[str, str],
     ):
         buffer_ptr = allocator.buffer_ptr
         buffer_size = allocator.buffer_size
         page_size = allocator.align_bytes
 
         self.agent_name = "NixlAgent_" + str(uuid.uuid4())
-        nixl_conf = NixlAgentConfig(backends=[backend])
+        nixl_conf = NixlAgentConfig(backends=[])
         self.nixl_agent = NixlAgent(self.agent_name, nixl_conf)
+        self.nixl_agent.create_backend(backend, backend_params)
 
         device_id = torch.cuda.current_device()
         self.init_mem_handlers(device, buffer_ptr, buffer_size, page_size, device_id)
@@ -335,6 +343,7 @@ class NixlStorageBackend(AllocatorBackendInterface):
             self.pool,
             nixl_config.buffer_device,
             nixl_config.backend,
+            nixl_config.backend_params,
         )
 
     def contains(self, key: CacheEngineKey, pin: bool = False) -> bool:
