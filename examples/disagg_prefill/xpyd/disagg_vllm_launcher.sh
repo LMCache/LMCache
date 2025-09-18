@@ -11,8 +11,8 @@ if [[ $# -lt 1 ]]; then
 fi
 
 if [[ $# -eq 1 ]]; then
-    echo "Using default model: meta-llama/Llama-3.2-3B"
-    MODEL="meta-llama/Llama-3.2-3B"
+    echo "Using default model: meta-llama/Llama-3.1-8B-Instruct"
+    MODEL="meta-llama/Llama-3.1-8B-Instruct"
 else
     echo "Using model: $2"
     MODEL=$2
@@ -25,16 +25,14 @@ if [[ $1 == "prefiller1" ]]; then
 
     UCX_TLS=cuda_ipc,cuda_copy,tcp \
         LMCACHE_CONFIG_FILE=$prefill_config_file \
-        LMCACHE_LOG_LEVEL=DEBUG \
         VLLM_ENABLE_V1_MULTIPROCESSING=1 \
         VLLM_WORKER_MULTIPROC_METHOD=spawn \
-        CUDA_VISIBLE_DEVICES=0,1 \
+        CUDA_VISIBLE_DEVICES=0 \
         vllm serve $MODEL \
         --port 7100 \
         --disable-log-requests \
         --enforce-eager \
         --no-enable-prefix-caching \
-        --tensor-parallel-size 2 \
         --kv-transfer-config \
         '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_producer","kv_connector_extra_config": {"discard_partial_chunks": false, "lmcache_rpc_port": "producer1"}}'
 
@@ -44,7 +42,6 @@ elif [[ $1 == "prefiller2" ]]; then
 
     UCX_TLS=cuda_ipc,cuda_copy,tcp \
         LMCACHE_CONFIG_FILE=$prefill_config_file \
-        LMCACHE_LOG_LEVEL=DEBUG \
         VLLM_ENABLE_V1_MULTIPROCESSING=1 \
         VLLM_WORKER_MULTIPROC_METHOD=spawn \
         CUDA_VISIBLE_DEVICES=1 \
@@ -64,16 +61,14 @@ elif [[ $1 == "decoder1" ]]; then
 
     UCX_TLS=cuda_ipc,cuda_copy,tcp \
         LMCACHE_CONFIG_FILE=$decode_config_file \
-        LMCACHE_LOG_LEVEL=DEBUG \
         VLLM_ENABLE_V1_MULTIPROCESSING=1 \
         VLLM_WORKER_MULTIPROC_METHOD=spawn \
-        CUDA_VISIBLE_DEVICES=2,3 \
+        CUDA_VISIBLE_DEVICES=2 \
         vllm serve $MODEL \
         --port 7200 \
         --disable-log-requests \
         --enforce-eager \
         --no-enable-prefix-caching \
-        --tensor-parallel-size 2 \
         --kv-transfer-config \
         '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_consumer","kv_connector_extra_config": {"discard_partial_chunks": false, "lmcache_rpc_port": "consumer1", "skip_last_n_tokens": 1}}'
 
@@ -83,7 +78,6 @@ elif [[ $1 == "decoder2" ]]; then
 
     UCX_TLS=cuda_ipc,cuda_copy,tcp \
         LMCACHE_CONFIG_FILE=$decode_config_file \
-        LMCACHE_LOG_LEVEL=DEBUG \
         VLLM_ENABLE_V1_MULTIPROCESSING=1 \
         VLLM_WORKER_MULTIPROC_METHOD=spawn \
         CUDA_VISIBLE_DEVICES=3 \
