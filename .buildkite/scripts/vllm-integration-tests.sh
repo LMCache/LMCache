@@ -122,7 +122,7 @@ run_lmcache_vllmopenai_container() {
         --network host
         --gpus "\"device=${best_gpu}\""
         --volume ~/.cache/huggingface:/root/.cache/huggingface
-        --volume "${CONFIG_DIR}/lmcache_config.yaml:/etc/lmcache/config.yaml:ro"
+        --volume "${CONFIG_DIR}/lmcache_configs:/etc/lmcache:ro"
         --env VLLM_USE_FLASHINFER_SAMPLER=0
         --env HF_TOKEN="$HF_TOKEN"
     )
