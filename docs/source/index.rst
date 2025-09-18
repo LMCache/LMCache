@@ -61,13 +61,13 @@ Documentation
 
 
 .. toctree::
-   :maxdepth: 1
+   :maxdepth: 2
    :caption: Welcome to LMCache
 
    self
 
 .. toctree::
-   :maxdepth: 1
+   :maxdepth: 2
    :caption: Getting Started
 
    getting_started/installation
@@ -80,7 +80,7 @@ Documentation
 :raw-html:`<br />`
 
 .. toctree::
-   :maxdepth: 1
+   :maxdepth: 2
    :caption: KV Cache offloading and sharing
 
    kv_cache/storage_backends/index
@@ -89,7 +89,7 @@ Documentation
 :raw-html:`<br />`
 
 .. toctree::
-   :maxdepth: 1
+   :maxdepth: 2
    :caption: Disaggregated prefill
 
    disaggregated_prefill/nixl/index
@@ -98,7 +98,7 @@ Documentation
 :raw-html:`<br />`
 
 .. toctree::
-   :maxdepth: 1
+   :maxdepth: 2
    :caption: KV Cache management
 
    kv_cache_management/index
@@ -106,7 +106,7 @@ Documentation
 :raw-html:`<br />`
 
 .. toctree::
-   :maxdepth: 1
+   :maxdepth: 2
    :caption: KV Cache Optimizations
 
    kv_cache_optimizations/compression/index
@@ -115,7 +115,7 @@ Documentation
 :raw-html:`<br />`
 
 .. toctree::
-   :maxdepth: 1
+   :maxdepth: 2
    :caption: Use LMCache in production
 
    production/docker_deployment
@@ -125,7 +125,7 @@ Documentation
 :raw-html:`<br />`
 
 .. toctree::
-   :maxdepth: 1
+   :maxdepth: 2
    :caption: Internal API Server
    
    internal_api_server/internal_api_server
@@ -145,7 +145,7 @@ Documentation
 :raw-html:`<br />`
 
 .. toctree::
-   :maxdepth: 1
+   :maxdepth: 2
    :caption: API Reference
 
    api_reference/configurations
@@ -156,7 +156,7 @@ Documentation
 :raw-html:`<br />`
 
 .. toctree::
-   :maxdepth: 1
+   :maxdepth: 2
    :caption: Community
 
    community/meetings
