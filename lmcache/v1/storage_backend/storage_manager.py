@@ -453,7 +453,11 @@ class StorageManager:
             num_total_hit_chunks += num_hit_chunks
 
             loading_task = asyncio.create_task(
-                backend.batched_get_non_blocking(lookup_id, keys[:num_hit_chunks])
+                backend.batched_get_non_blocking(
+                    lookup_id, 
+                    keys[:num_hit_chunks],
+                    cum_chunk_lengths[:num_hit_chunks+1],
+                )
             )
             loading_task.add_done_callback(
                 functools.partial(
@@ -468,6 +472,7 @@ class StorageManager:
             if num_total_hit_chunks == num_total_chunks:
                 break
             keys = keys[num_hit_chunks:]
+            cum_chunk_lengths = cum_chunk_lengths[num_hit_chunks:]
 
         # If no chunks were hit across all backends, respond immediately and return.
         if num_total_hit_chunks == 0:
@@ -484,7 +489,7 @@ class StorageManager:
         )
         all_done.add_done_callback(
             lambda future: self.prefetch_all_done_callback(
-                future, lookup_id, cum_chunk_lengths[num_total_hit_chunks]
+                future, lookup_id, cum_chunk_lengths[0]
             )
         )
 

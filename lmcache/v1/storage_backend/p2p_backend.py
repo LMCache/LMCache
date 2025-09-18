@@ -26,6 +26,9 @@ from lmcache.v1.rpc_utils import get_zmq_context, get_zmq_socket
 from lmcache.v1.storage_backend.abstract_backend import StorageBackendInterface
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.v1.transfer_channel import CreateTransferChannel
+from lmcache.v1.transfer_channel.transfer_utils import (
+    P2PInitSideRetMsg,
+)
 
 if TYPE_CHECKING:
     # First Party
@@ -131,6 +134,7 @@ class P2PBackend(StorageBackendInterface):
             peer_init_url=self.peer_init_url,
             peer_lookup_url=self.peer_lookup_url,
             backends=config.nixl_backends,
+            event_loop=loop,
         )
 
         self.context = get_zmq_context()
@@ -217,9 +221,8 @@ class P2PBackend(StorageBackendInterface):
                 "remote_indexes": msg.mem_indexes[:num_hit_chunks],
             }
 
-            # TODO(Jiayi): make this async
             await self.transfer_channel.async_batched_write(
-                data=mem_objs_to_send,
+                data=mem_objs,
                 transfer_spec=channel_transfer_spec,
             )
 
@@ -227,7 +230,7 @@ class P2PBackend(StorageBackendInterface):
                 num_hit_chunks=num_hit_chunks,
             )
 
-            await self.async_peer_socket.send(msgspec.encode(ret_msg, type=P2PMsg))
+            await self.async_peer_socket.send(msgspec.msgpack.encode(ret_msg))
 
             for mem_obj in mem_objs:
                 mem_obj.ref_count_down()
@@ -243,7 +246,7 @@ class P2PBackend(StorageBackendInterface):
         init_ret_msg = await self.transfer_channel.async_lazy_init_peer_connection(
             peer_id=peer_init_url, peer_init_url=peer_init_url
         )
-
+        assert isinstance(init_ret_msg, P2PInitSideRetMsg)
         peer_lookup_url = init_ret_msg.peer_lookup_url
         self.peer_id_to_lookup_url_mapping[peer_init_url] = peer_lookup_url
 
@@ -253,9 +256,9 @@ class P2PBackend(StorageBackendInterface):
         keys: list[CacheEngineKey],
         offsets: list[int],
     ) -> list[MemoryObj]:
-        peer_init_url, peer_lookup_url, location = self.lookup_id_to_peer_mapping[
+        peer_init_url, peer_lookup_url, location = self.lookup_id_to_peer_mapping.pop(
             lookup_id
-        ]
+        )
 
         mem_objs = []
         for idx, key in enumerate(keys):
@@ -275,7 +278,7 @@ class P2PBackend(StorageBackendInterface):
             mem_indexes=local_indexes,
         )
 
-        ret_msg = await self.async_peer_socket.send(msgspec.encode(msg, type=P2PMsg))
+        ret_msg = await self.async_peer_socket.send(msgspec.msgpack.encode(msg))
 
         num_hit_chunks = ret_msg.num_hit_chunks
 
@@ -284,6 +287,9 @@ class P2PBackend(StorageBackendInterface):
             missed_mem_obj.ref_count_down()
 
         return hit_mem_objs
+
+    def get_allocator_backend(self):
+        return self.local_cpu_backend
 
     def close(
         self,

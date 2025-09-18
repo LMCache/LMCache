@@ -20,13 +20,29 @@ class BaseTransferChannel(metaclass=abc.ABCMeta):
     ### Initialization-related functions ###
     @abc.abstractmethod
     def lazy_init_peer_connection(
-        self, peer_id: str, peer_init_url: str
+        self,
+        peer_id: str,
+        peer_init_url: str,
+        init_side_msg: Optional[InitSideMsg] = None,
     ) -> Optional[InitSideMsg]:
         """
         Lazily initialize the connection to a peer.
 
         peer_id: The ID of the peer to connect to.
         peer_init_url: The URL used to initialize the connection.
+        """
+
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    async def async_lazy_init_peer_connection(
+        self,
+        peer_id: str,
+        peer_init_url: str,
+        init_side_msg: Optional[InitSideMsg] = None,
+    ) -> Optional[InitSideMsg]:
+        """
+        Async version of `lazy_init_peer_connection`.
         """
 
         raise NotImplementedError
@@ -77,6 +93,39 @@ class BaseTransferChannel(metaclass=abc.ABCMeta):
         )
 
         return init_ret_msg
+
+    async def async_send_init_side_msg(
+        self,
+        init_tmp_socket: zmq.Socket,
+        init_side_msg: InitSideMsg,
+    ) -> InitSideMsg:
+        """
+        Async version of send_init_side_msg.
+        """
+        init_msg_bytes = msgspec.msgpack.encode(init_side_msg)
+        init_tmp_socket.send(init_msg_bytes)
+
+        init_ret_msg_bytes = await init_tmp_socket.recv()
+        init_ret_msg = msgspec.msgpack.decode(
+            init_ret_msg_bytes,
+            type=InitSideMsg,
+        )
+
+        return init_ret_msg
+
+    ### Utility functions ###
+    @abc.abstractmethod
+    def get_local_mem_indices(
+        self, objects: Union[list[bytes], list[MemoryObj]]
+    ) -> list[int]:
+        """
+        Get the memory indices of objects.
+
+        :param objects: A list of bytes or MemoryObj to be checked.
+
+        :return: The memory indices of the objects.
+        """
+        raise NotImplementedError
 
     ### Send and Recv must be called in pair ###
     @abc.abstractmethod

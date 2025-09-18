@@ -2,6 +2,9 @@
 # Standard
 from typing import Union
 
+# Third Party
+import msgspec
+
 
 def get_correct_device(device: str, worker_id: int) -> str:
     """
