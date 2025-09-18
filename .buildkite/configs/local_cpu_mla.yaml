@@ -5,7 +5,7 @@ workload:
 
 docker:
   env:
-    - "LMCACHE_CONFIG_FILE=/etc/lmcache/config.yaml"
+    - "LMCACHE_CONFIG_FILE=/etc/lmcache/local_cpu_mla.yaml"
   gpu_count: 2
 
 vllm:
