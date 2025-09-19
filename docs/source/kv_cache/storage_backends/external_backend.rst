@@ -1,14 +1,18 @@
-External Storage Backends
-=========================
+Configurable Storage Backends
+=============================
 
-LMCache supports integrating custom storage backends through dynamic loading. This allows extending cache storage capabilities without modifying core code.
+LMCache supports integrating custom storage backends through dynamic loading or plug and play capability. This allows extending cache storage capabilities without modifying core code.
 
 Backend Definition Requirements
 -------------------------------
-1. Inherit from ``StorageBackendInterface``
-2. Add constructor with the same signature as ``StorageBackendInterface``
-3. Implement all abstract methods
-4. Package as an installable Python module
+1. Inherit from ``ConfigurableStorageBackendInterface``
+2. Implement all the abstract methods of the parent interface of ``ConfigurableStorageBackendInterface``- ``StorageBackendInterface``
+3. Package as an installable Python module
+
+.. note::
+
+  The interface constructor is the instantiation contract that the LMCache loading system will use when loading configurable storage backends.
+  If you wish to implement a constructor, it should have the same parameter signature and call the interface constructor.
 
 How to Integrate the Backend with LMCache
 -----------------------------------------

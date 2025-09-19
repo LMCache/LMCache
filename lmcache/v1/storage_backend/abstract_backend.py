@@ -27,11 +27,6 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
     def __init__(
         self,
         dst_device: str = "cuda",
-        config: Optional[LMCacheEngineConfig] = None,
-        metadata: Optional[LMCacheEngineMetadata] = None,
-        local_cpu_backend: Optional["LocalCPUBackend"] = None,
-        lookup_server: Optional[LookupServerInterface] = None,
-        loop: Optional[asyncio.AbstractEventLoop] = None,
     ):
         """
         Initialize the storage backend.
@@ -334,3 +329,42 @@ class AllocatorBackendInterface(StorageBackendInterface):
         :rtype: Optional[MemoryObj]
         """
         raise NotImplementedError
+
+
+class ConfigurableStorageBackendInterface(StorageBackendInterface):
+    """The Configurable Storage Backend Interface needs to be implemented
+    when you want to add a storage backend in a configurable or plug and play
+    fashion."""
+
+    def __init__(
+        self,
+        dst_device: str = "cuda",
+        config: Optional[LMCacheEngineConfig] = None,
+        metadata: Optional[LMCacheEngineMetadata] = None,
+        local_cpu_backend: Optional["LocalCPUBackend"] = None,
+        lookup_server: Optional[LookupServerInterface] = None,
+        loop: Optional[asyncio.AbstractEventLoop] = None,
+    ):
+        """
+        Initialize a configurable storage backend. This constructor will be called
+        when loading the configurable storage backends from the configuration file.
+
+        :param str dst_device: The target device for tensor operations
+            (e.g., "cuda" or "cpu").
+        :param LMCacheEngineConfig config: Optional configuration object for the
+            cache engine.
+        :param LMCacheEngineMetadata metadata: Optional metadata describing the cache
+            engine state or version.
+        :param LocalCPUBackend local_cpu_backend: Optional backend for local CPU-based
+            inference or caching.
+        :param LookupServerInterface lookup_server: Optional interface to a remote
+            lookup server for distributed caching.
+        :param asyncio.AbstractEventLoop loop: Optional asyncio event loop for
+            asynchronous operations.
+        """
+        super().__init__(dst_device=dst_device)
+        self.config = config
+        self.metadata = metadata
+        self.local_cpu_backend = local_cpu_backend
+        self.lookup_server = lookup_server
+        self.loop = loop
