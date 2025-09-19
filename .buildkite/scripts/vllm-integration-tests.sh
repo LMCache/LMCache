@@ -86,6 +86,12 @@ build_lmcache_vllmopenai_image() {
     ./test-build.sh
 }
 
+build_vllm_backward_compatibility_image() {
+    cp vllm_backward_compatibility_build.sh test-build-vllm-bc.sh
+    chmod 755 test-build-vllm-bc.sh
+    ./test-build-vllm-bc.sh
+}
+
 wait_for_openai_api_server() {
     local port="$1"
     local model="$2"
@@ -413,6 +419,7 @@ cd docker/
 
 # Create the container image
 build_lmcache_vllmopenai_image
+build_vllm_backward_compatibility_image
 
 ########
 # MAIN #
