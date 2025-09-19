@@ -25,6 +25,18 @@ How to Integrate the Backend with LMCache
       external_backend.<backend_name>.module_path: <module_path>
       external_backend.<backend_name>.class_name: <class_name>
 
+An example configuration for a logging backend is as follows:
+
+.. code-block:: yaml
+
+    chunk_size: 64
+    local_cpu: False
+    max_local_cpu_size: 5
+    external_backends: "log_external_backend"
+    extra_config:
+      external_backend.log_external_backend.module_path: lmc_external_log_backend.lmc_external_log_backend
+      external_backend.log_external_backend.class_name: ExternalLogBackend
+
 .. note::
 
    - Backends are initialized in order during LMCache startup - earlier backends have higher priority during cache lookups
