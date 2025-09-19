@@ -12,6 +12,7 @@ import pytest
 import torch
 
 # First Party
+from lmcache.config import LMCacheEngineMetadata
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import AdHocMemoryAllocator, MemoryFormat, MemoryObj
@@ -41,6 +42,18 @@ def create_test_memory_obj(
     return memory_obj
 
 
+def create_test_metadata():
+    """Create a test metadata for LMCacheEngineMetadata."""
+    return LMCacheEngineMetadata(
+        model_name="test_model",
+        world_size=1,
+        worker_id=0,
+        fmt="vllm",
+        kv_dtype=torch.bfloat16,
+        kv_shape=(28, 2, 256, 8, 128),
+    )
+
+
 @pytest.fixture
 def temp_gds_path():
     temp_dir = tempfile.mkdtemp()
@@ -61,18 +74,14 @@ def async_loop():
 
 
 @pytest.fixture
-def memory_allocator():
-    return AdHocMemoryAllocator(device="cpu")
-
-
-@pytest.fixture
-def gds_backend(temp_gds_path, async_loop, memory_allocator):
+def gds_backend(temp_gds_path, async_loop):
     config = create_test_config(temp_gds_path)
+    metadata = create_test_metadata()
     return GdsBackend(
         config=config,
         loop=async_loop,
-        memory_allocator=memory_allocator,
-        dst_device="cuda",
+        metadata=metadata,
+        dst_device="cuda" if torch.cuda.is_available() else "cpu",
     )
 
 
@@ -83,16 +92,16 @@ def gds_backend(temp_gds_path, async_loop, memory_allocator):
 @pytest.mark.skipif(sys.platform != "linux", reason="TestGdsBackend runs only on Linux")
 @pytest.mark.skip(reason="Thisn currently fails on the test system")
 class TestGdsBackend:
-    def test_init(self, temp_gds_path, async_loop, memory_allocator):
+    def test_init(self, temp_gds_path, async_loop):
         config = create_test_config(temp_gds_path)
+        metadata = create_test_metadata()
         backend = GdsBackend(
             config=config,
             loop=async_loop,
-            memory_allocator=memory_allocator,
-            dst_device="cuda",
+            metadata=metadata,
+            dst_device="cuda" if torch.cuda.is_available() else "cpu",
         )
         assert backend.gds_path == temp_gds_path
-        assert backend.memory_allocator == memory_allocator
         assert backend.dst_device in ("cuda", "cpu")
         assert os.path.exists(temp_gds_path)
 
