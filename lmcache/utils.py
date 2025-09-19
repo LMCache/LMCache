@@ -384,26 +384,3 @@ def mock_up_broadcast_fn(t: torch.Tensor, i: int) -> None:
 
 def mock_up_broadcast_object_fn(a: Any, i: int) -> None:
     raise NotImplementedError("Calling invalid broadcast object function")
-
-
-#### Python equivalents of CPP CUDA  functions ####
-def alloc_pinned_numa_ptr(size: int) -> torch.Tensor:
-    # Create a 1D uint8 CPU tensor in pinned memory, as uint8 == 1 byte
-    # Requires pin_memory=False for non-CUDA
-    tensor = torch.empty(size, dtype=torch.uint8, pin_memory=False)
-
-    # First-touch initialization (forces physical allocation)
-    tensor.fill_(0.0)
-
-    return tensor
-
-
-def alloc_pinned_ptr(size: int) -> torch.Tensor:
-    # Create a 1D uint8 tensor in pinned memory, as uint8 == 1 byte
-    # Requires pin_memory=False for non-CUDA
-    tensor = torch.empty(size, dtype=torch.uint8, pin_memory=False)
-
-    # First-touch initialization (forces physical allocation)
-    tensor.fill_(0.0)
-
-    return tensor

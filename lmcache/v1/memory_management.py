@@ -16,13 +16,14 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.observability import LMCStatsMonitor
-from lmcache.utils import (
-    _lmcache_nvtx_annotate,
+from lmcache.non_cuda_equivalents import (
     alloc_pinned_numa_ptr,
     alloc_pinned_ptr,
 )
+from lmcache.observability import LMCStatsMonitor
+from lmcache.utils import _lmcache_nvtx_annotate
 from lmcache.v1.system_detection import NUMAMapping
+
 if torch.cuda.is_available():
     # First Party
     import lmcache.c_ops as lmc_ops
