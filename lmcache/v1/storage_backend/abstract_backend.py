@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import List, Optional, Sequence
+from typing import Any, List, Optional, Sequence
 import abc
 
 # Third Party
@@ -81,15 +81,13 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
         self,
         keys: Sequence[CacheEngineKey],
         objs: List[MemoryObj],
-        transfer_spec=None,
+        transfer_spec: Any = None,
     ) -> None:
         """
         An async function to put the MemoryObj into the storage backend.
 
         :param List[CacheEngineKey] keys: The keys of the MemoryObjs.
         :param List[MemoryObj] objs: The MemoryObjs to be stored.
-
-        :return: Nothing
 
         :note: This function will have the side effect that modifies the
             underlying key-value mappings in the storage backend. The side
@@ -134,6 +132,7 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
         self,
         lookup_id: str,
         keys: list[CacheEngineKey],
+        transfer_spec: Any = None,
     ) -> list[MemoryObj]:
         """
         A non-blcocking function to get the kv cache from the storage backend.

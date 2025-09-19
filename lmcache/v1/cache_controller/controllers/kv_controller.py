@@ -184,7 +184,7 @@ class KVController:
         num_hit_chunks = 0
         instance_id = ""
         location = ""
-        distributed_url = ""
+        peer_init_url = ""
         for key in msg.hashes:
             # TODO(Jiayi): remove this string conversion
             if key not in self.kv_pool:

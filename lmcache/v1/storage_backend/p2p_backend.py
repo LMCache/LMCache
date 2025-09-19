@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import TYPE_CHECKING, List, Optional, Sequence, Union
+from typing import TYPE_CHECKING, Any, List, Optional, Sequence, Union
 import asyncio
 
 # Third Party
@@ -254,16 +254,22 @@ class P2PBackend(StorageBackendInterface):
         self,
         lookup_id: str,
         keys: list[CacheEngineKey],
-        offsets: list[int],
+        transfer_spec: Any = None,
     ) -> list[MemoryObj]:
         peer_init_url, peer_lookup_url, location = self.lookup_id_to_peer_mapping.pop(
             lookup_id
         )
 
+        assert isinstance(transfer_spec, dict)
+        cum_chunk_lengths = transfer_spec.get("cum_chunk_lengths", None)
+        assert cum_chunk_lengths is not None, "cum_chunk_lengths must be provided"
+
         mem_objs = []
         for idx, key in enumerate(keys):
             shape = self.full_size_shape.copy()
-            shape[self.fmt.token_dim()] = offsets[idx]
+            shape[self.fmt.token_dim()] = (
+                cum_chunk_lengths[idx + 1] - cum_chunk_lengths[idx]
+            )
             mem_obj = self.local_cpu_backend.allocate(
                 torch.Size(shape), self.dtype, self.fmt
             )
@@ -316,7 +322,7 @@ class P2PBackend(StorageBackendInterface):
         self,
         keys: Sequence[CacheEngineKey],
         objs: List[MemoryObj],
-        transfer_spec=None,
+        transfer_spec: Any = None,
     ) -> None:
         raise NotImplementedError
 

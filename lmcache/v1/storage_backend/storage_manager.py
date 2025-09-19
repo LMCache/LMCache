@@ -454,9 +454,9 @@ class StorageManager:
 
             loading_task = asyncio.create_task(
                 backend.batched_get_non_blocking(
-                    lookup_id, 
+                    lookup_id,
                     keys[:num_hit_chunks],
-                    cum_chunk_lengths[:num_hit_chunks+1],
+                    {"cum_chunk_lengths": cum_chunk_lengths[: num_hit_chunks + 1]},
                 )
             )
             loading_task.add_done_callback(

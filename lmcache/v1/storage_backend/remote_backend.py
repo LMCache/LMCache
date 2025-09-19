@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from concurrent.futures import Future, TimeoutError
-from typing import List, Optional, Sequence, Set
+from typing import Any, List, Optional, Sequence, Set
 import asyncio
 import threading
 import time
@@ -214,7 +214,7 @@ class RemoteBackend(StorageBackendInterface):
         self,
         keys: Sequence[CacheEngineKey],
         memory_objs: List[MemoryObj],
-        transfer_spec=None,
+        transfer_spec: Any = None,
     ) -> None:
         if self.connection is None:
             logger.warning(
@@ -433,6 +433,7 @@ class RemoteBackend(StorageBackendInterface):
         self,
         lookup_id: str,
         keys: List[CacheEngineKey],
+        transfer_spec: Any = None,
     ) -> List[MemoryObj]:
         if self.connection is None:
             logger.warning(

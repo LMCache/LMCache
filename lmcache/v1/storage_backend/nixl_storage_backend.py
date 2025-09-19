@@ -15,7 +15,7 @@
 
 # Standard
 from dataclasses import dataclass
-from typing import List, Optional, Sequence, Set
+from typing import Any, List, Optional, Sequence, Set
 import asyncio
 import os
 import threading
@@ -355,7 +355,7 @@ class NixlStorageBackend(AllocatorBackendInterface):
         self,
         keys: Sequence[CacheEngineKey],
         memory_objs: List[MemoryObj],
-        transfer_spec=None,
+        transfer_spec: Any = None,
     ) -> None:
         with self.progress_lock:
             for key in keys:

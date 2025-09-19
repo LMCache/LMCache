@@ -2,7 +2,7 @@
 
 # Standard
 from dataclasses import dataclass
-from typing import List, Optional, Sequence, Union
+from typing import Any, List, Optional, Sequence, Union
 import threading
 import time
 
@@ -359,7 +359,7 @@ class PDBackend(AllocatorBackendInterface):
         self,
         keys: Sequence[CacheEngineKey],
         memory_objs: List[MemoryObj],
-        transfer_spec=None,
+        transfer_spec: Any = None,
     ) -> None:
         for mem_obj in memory_objs:
             mem_obj.ref_count_up()

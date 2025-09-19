@@ -113,7 +113,10 @@ class BatchedP2PLookupMsg(WorkerReqMsg):
     worker_id: int  # TP rank
 
     def describe(self) -> str:
-        return f"Batched P2P lookup for {len(self.hashes)} keys, worker id {self.worker_id}"
+        return (
+            f"Batched P2P lookup for {len(self.hashes)} keys, w"
+            "orker id {self.worker_id}"
+        )
 
 
 """Worker Request Return Message from Controller back to LMCache"""
