@@ -22,8 +22,8 @@ How to Integrate the Backend with LMCache
     max_local_cpu_size: 5
     external_backends: <backend_name>
     extra_config:
-      external_backend.log_external_backend.module_path: <module_path>
-      external_backend.log_external_backend.class_name: <class_name>
+      external_backend.<backend_name>.module_path: <module_path>
+      external_backend.<backend_name>.class_name: <class_name>
 
 .. note::
 
