@@ -28,7 +28,7 @@ How to Integrate the Backend with LMCache
 .. note::
 
    - Backends are initialized in order during LMCache startup - earlier backends have higher priority during cache lookups
-   - ``external_backends`.<backend_name>` distinguishes the different dynamic loaded backends
+   - ``external_backends.<backend_name>`` distinguishes the different dynamic loaded backends
 
 Backend Implementation Example
 ------------------------------
