@@ -11,7 +11,7 @@ Backend Definition Requirements
 4. Package as an installable Python module
 
 How to Integrate the Backend with LMCache
--------------------------------------
+-----------------------------------------
 1. Install your backend package in the LMCache environment
 2. Add ``external_backends`` and its related ``module_path`` and ``class_name`` to ``extra_config`` section of LMCache configuration as follows:
 
