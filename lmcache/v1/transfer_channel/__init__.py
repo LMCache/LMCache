@@ -7,6 +7,7 @@ from lmcache.v1.transfer_channel.nixl_channel import NixlChannel
 # TODO(Jiayi): Refactor this function when we support more channels.
 def CreateTransferChannel(
     channel_type: str,
+    async_mode: bool,
     role: str,
     buffer_ptr: int,
     buffer_size: int,
@@ -21,6 +22,7 @@ def CreateTransferChannel(
         "`backends` must be provided to create nixl transfer channel."
     )
     transfer_channel = NixlChannel(
+        async_mode=async_mode,
         role=role,
         buffer_ptr=buffer_ptr,
         buffer_size=buffer_size,

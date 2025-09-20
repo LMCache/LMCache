@@ -26,10 +26,6 @@ from lmcache.observability import LMCacheStatsLogger, LMCStatsMonitor
 from lmcache.usage_context import InitializeUsageContext
 from lmcache.utils import CacheEngineKey, _lmcache_nvtx_annotate
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.distributed_server import (
-    DistributedServerInterface,
-    NaiveDistributedServer,
-)
 from lmcache.v1.event_manager import EventManager, EventType
 from lmcache.v1.gpu_connector import (
     GPUConnectorInterface,
@@ -37,7 +33,7 @@ from lmcache.v1.gpu_connector import (
     VLLMBufferLayerwiseGPUConnector,
     VLLMPagedMemLayerwiseGPUConnector,
 )
-from lmcache.v1.lookup_server import LookupServerInterface, RedisLookupServer
+from lmcache.v1.lookup_server import LookupServerInterface
 from lmcache.v1.memory_management import CuFileMemoryAllocator  # noqa: E501
 from lmcache.v1.memory_management import (  # noqa: E501
     MemoryAllocatorInterface,
@@ -101,7 +97,6 @@ class LMCacheEngine:
             self.config.get_extra_config_value("save_only_first_rank", metadata.use_mla)
             and metadata.use_mla
         )
-        self.enable_p2p = config.enable_p2p
 
         self.enable_controller = config.enable_controller
 
@@ -109,8 +104,6 @@ class LMCacheEngine:
         multiprocessing.set_start_method("spawn", force=True)
 
         self.lookup_server: Optional[LookupServerInterface] = None
-        if self.enable_p2p:
-            self.lookup_server = RedisLookupServer(config)
 
         # avoid circular import
         # First Party
@@ -137,18 +130,6 @@ class LMCacheEngine:
         # dropping the kv cache from the buffer in PD backend
         # at decoder.
         self.remove_after_retrieve = config.enable_pd and config.pd_role == "receiver"
-
-        self.distributed_server: Optional[DistributedServerInterface] = None
-
-        if self.enable_p2p or self.enable_controller:
-            self.distributed_loop = asyncio.get_event_loop()
-            assert isinstance(self.storage_manager, StorageManager)
-            self.distributed_server = NaiveDistributedServer(
-                self.storage_manager,
-                self.lookup_server,
-                self.distributed_loop,
-                config,
-            )
 
         self.use_layerwise = config.use_layerwise
         self.num_layers = metadata.kv_shape[0]
@@ -697,11 +678,6 @@ class LMCacheEngine:
             if pin:
                 assert lookup_id is not None, "lookup_id is required when pin is True"
 
-            # secondary lookup on p2p (via lookup_server) if enabled
-            search_p2p = self.enable_p2p and (
-                search_range is None or "p2p" in search_range
-            )
-
             for start, end, key in self.token_database.process_tokens(
                 tokens=tokens,
                 hashes=hashes,
@@ -721,10 +697,6 @@ class LMCacheEngine:
                             key_single_layer, search_range, pin
                         ):
                             found = True
-                        if search_p2p:
-                            assert self.lookup_server is not None
-                            if self.lookup_server.lookup(key_single_layer):
-                                found = True
                     if found:
                         if pin:
                             self.lookup_pins[lookup_id].extend(  # type: ignore
@@ -743,12 +715,6 @@ class LMCacheEngine:
                         prev_end = end
                         continue
 
-                    if search_p2p:
-                        assert self.lookup_server is not None
-                        # TODO(Jiayi): We need to support pin for remote lookup
-                        if self.lookup_server.lookup(key):
-                            prev_end = end
-                            continue
                     end = prev_end
                     return prev_end
 
@@ -760,6 +726,7 @@ class LMCacheEngine:
             if pin:
                 self.storage_manager.touch_cache()
 
+    # FIXME
     @_lmcache_nvtx_annotate
     def move(
         self,
@@ -772,58 +739,59 @@ class LMCacheEngine:
         """
         Perform cross-node move of the KV cache.
         """
-        assert self.distributed_server is not None, (
-            "Distributed server should be initialized for move operation"
-        )
+        return 0
+        # assert self.distributed_server is not None, (
+        #     "Distributed server should be initialized for move operation"
+        # )
 
-        num_tokens = self.lookup(
-            tokens,
-            search_range=old_position,
-            lookup_id=event_id,
-            pin=True,
-        )
+        # num_tokens = self.lookup(
+        #     tokens,
+        #     search_range=old_position,
+        #     lookup_id=event_id,
+        #     pin=True,
+        # )
 
-        if not num_tokens:
-            logger.debug("Move is not performed as there are no tokens to move.")
-            return 0
+        # if not num_tokens:
+        #     logger.debug("Move is not performed as there are no tokens to move.")
+        #     return 0
 
-        keys = self.lookup_pins[event_id]
+        # keys = self.lookup_pins[event_id]
 
-        memory_objs = self.storage_manager.batched_get(
-            keys=keys,
-            location=old_position,
-        )
-        assert memory_objs is not None, "Failed to get memory objects to move"
-        logger.debug(
-            f"Trying to send {len(memory_objs)} memory objects to {new_position}"
-        )
+        # memory_objs = self.storage_manager.batched_get(
+        #     keys=keys,
+        #     location=old_position,
+        # )
+        # assert memory_objs is not None, "Failed to get memory objects to move"
+        # logger.debug(
+        #     f"Trying to send {len(memory_objs)} memory objects to {new_position}"
+        # )
 
-        future = asyncio.run_coroutine_threadsafe(
-            self.distributed_server.batched_issue_put(
-                keys,
-                memory_objs,  # type: ignore
-                new_position[0],
-                new_position[1],
-            ),
-            self.distributed_loop,
-        )
+        # future = asyncio.run_coroutine_threadsafe(
+        #     self.distributed_server.batched_issue_put(
+        #         keys,
+        #         memory_objs,  # type: ignore
+        #         new_position[0],
+        #         new_position[1],
+        #     ),
+        #     self.distributed_loop,
+        # )
 
-        future.add_done_callback(
-            lambda f: [m.unpin() for m in memory_objs]  # type: ignore
-        )
+        # future.add_done_callback(
+        #     lambda f: [m.unpin() for m in memory_objs]  # type: ignore
+        # )
 
-        if not do_copy:
-            remove_callback = lambda f: self.storage_manager.batched_remove(
-                keys, locations=[old_position]
-            )
-            future.add_done_callback(remove_callback)
+        # if not do_copy:
+        #     remove_callback = lambda f: self.storage_manager.batched_remove(
+        #         keys, locations=[old_position]
+        #     )
+        #     future.add_done_callback(remove_callback)
 
-        future.result()
+        # future.result()
 
-        logger.debug(f"Moving {num_tokens} token from {old_position} to {new_position}")
-        return num_tokens
+        # logger.debug(f"Moving {num_tokens} token from
+        #  {old_position} to {new_position}")
+        # return num_tokens
 
-    # TODO(Jiayi): Add p2p + async lookup support.
     # TODO(Jiayi): Add layerwise support.
     @_lmcache_nvtx_annotate
     def async_lookup_and_prefetch(
@@ -1041,9 +1009,6 @@ class LMCacheEngine:
     def close(self) -> None:
         """Close the cache engine and free all the resources"""
 
-        if self.enable_p2p and self.distributed_server:
-            self.distributed_server.close()
-
         if self.lmcache_worker is not None:
             self.lmcache_worker.close()
 
@@ -1147,22 +1112,6 @@ class LMCacheEngine:
                 # we support it.
                 location = self.storage_manager.contains(key)
                 if location is None:
-                    # TODO(Jiayi): Need to refactor P2P as a storage backend to
-                    # clean up the following code.
-                    if self.enable_p2p and self.distributed_server:
-                        future_memory_obj = asyncio.run_coroutine_threadsafe(
-                            self.distributed_server.issue_get(key),
-                            self.distributed_loop,
-                        )
-                        memory_obj = future_memory_obj.result()
-                        if memory_obj:
-                            reordered_chunks.append((key, memory_obj, start, end))
-                            ret_mask[start:end] = True
-                        else:
-                            # NOTE: break for P2P retrieve KV because of no required
-                            # memory obj
-                            break
-                        continue
                     break
 
                 # NOTE: Here we make the assumption that the underlying

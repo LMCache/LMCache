@@ -101,9 +101,9 @@ class LMCacheWorker:
         self.lmcache_worker_ip = get_ip()
         self.lmcache_worker_port = lmcache_worker_port
 
-        self.peer_init_host = config.peer_init_host
-        self.peer_init_port = config.peer_init_ports[self.worker_id]
-        self.peer_init_url = f"{self.peer_init_host}:{self.peer_init_port}"
+        self.p2p_host = config.p2p_host
+        self.p2p_init_port = config.p2p_init_ports[self.worker_id]
+        self.p2p_init_url = f"{self.p2p_host}:{self.p2p_init_port}"
 
         self.reply_socket = get_zmq_socket(
             self.context,
@@ -139,7 +139,7 @@ class LMCacheWorker:
                 worker_id=self.worker_id,
                 ip=self.lmcache_worker_ip,
                 port=self.lmcache_worker_port,
-                distributed_url=self.peer_init_url,
+                distributed_url=self.p2p_init_url,
             )
         )
 
@@ -219,7 +219,7 @@ class LMCacheWorker:
                         worker_id=self.worker_id,
                         ip=self.lmcache_worker_ip,
                         port=self.lmcache_worker_port,
-                        distributed_url=self.peer_init_url,
+                        distributed_url=self.p2p_init_url,
                     )
                 )
                 await asyncio.sleep(self.config.lmcache_worker_heartbeat_time)

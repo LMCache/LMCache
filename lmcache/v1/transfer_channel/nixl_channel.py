@@ -22,13 +22,45 @@ if TYPE_CHECKING:
     from nixl._api import NixlAgent
 
 # First Party
-from lmcache.v1.rpc_utils import get_zmq_socket
+from lmcache.v1.rpc_utils import get_zmq_context, get_zmq_socket
 from lmcache.v1.transfer_channel.abstract import BaseTransferChannel
 from lmcache.v1.transfer_channel.transfer_utils import (
-    InitSideMsg,
+    InitSideMsgBase,
+    InitSideRetMsgBase,
+    SideMsg,
 )
 
 logger = init_logger(__name__)
+
+
+class NixlMsgBase(msgspec.Struct, tag=True):
+    """Base class for all nixl-related messages"""
+
+    pass
+
+
+class NixlInitRequest(NixlMsgBase):
+    local_meta_bytes: bytes  # Metadata from the sender nixl agent
+
+
+class NixlMemRegRequest(NixlMsgBase):
+    remote_agent_name: bytes
+    local_id: str
+    local_xfer_dlist_bytes: bytes
+
+
+class NixlInitResponse(NixlMsgBase):
+    remote_agent_name: bytes
+    remote_meta_bytes: bytes  # Metadata from the receiver nixl agent
+
+
+class NixlMemRegResponse(NixlMsgBase):
+    remote_xfer_dlist_bytes: bytes  # Serialized transfer descriptors for the receiver
+
+
+NixlMsg = Union[
+    NixlInitRequest, NixlInitResponse, NixlMemRegRequest, NixlMemRegResponse
+]
 
 
 class NixlChannel(BaseTransferChannel):
@@ -60,8 +92,9 @@ class NixlChannel(BaseTransferChannel):
         )
         self.nixl_agent = self.nixl_wrapper.agent
 
-        # FIXME: add async zmq context
-        self.zmq_context = zmq.Context()
+        # Used for P2P
+        self.peer_lookup_url = kwargs.get("peer_lookup_url", None)
+
         self.running = True
         self.remote_xfer_handlers_dict: dict[
             str, NixlAgent.nixl_prepped_dlist_handle
@@ -70,25 +103,22 @@ class NixlChannel(BaseTransferChannel):
         self.side_channels: list[zmq.Socket] = []
         self.running_threads: list[threading.Thread] = []
 
-        if "peer_lookup_url" in kwargs:
-            # needed for P2P backend
-            self.peer_lookup_url = kwargs["peer_lookup_url"]
+        self.async_mode = async_mode
+        self.peer_init_url = kwargs["peer_init_url"]
+        self.event_loop = kwargs.get("event_loop", None)
 
-        self._init_side_channels(
-            peer_init_url=kwargs["peer_init_url"],
-            async_mode=async_mode,
-            event_loop=kwargs.get("event_loop", None),
-        )
+        self._init_side_channels()
 
     ############################################################
     # Initialization functions
     ############################################################
     def lazy_init_peer_connection(
         self,
+        local_id: str,
         peer_id: str,
         peer_init_url: str,
-        init_side_msg: Optional[InitSideMsg] = None,
-    ) -> Optional[InitSideMsg]:
+        init_side_msg: Optional[InitSideMsgBase] = None,
+    ) -> Optional[InitSideRetMsgBase]:
         # Initialize temporary socket for nixl initialization
         init_tmp_socket = get_zmq_socket(
             self.zmq_context,
@@ -111,12 +141,20 @@ class NixlChannel(BaseTransferChannel):
         remote_agent_name = self.nixl_agent.add_remote_agent(remote_meta_bytes)
 
         # Register remote memory
-        nixl_mem_reg_req = NixlMemRegRequest()
+        local_xfer_dlist_bytes = self.nixl_agent.get_serialized_descs(
+            self.nixl_wrapper.xfer_descs
+        )
+        nixl_mem_reg_req = NixlMemRegRequest(
+            remote_agent_name=nixl_init_resp.remote_agent_name,
+            local_id=local_id,
+            local_xfer_dlist_bytes=local_xfer_dlist_bytes,
+        )
         init_tmp_socket.send(msgspec.msgpack.encode(nixl_mem_reg_req))
         nixl_mem_reg_resp_bytes = init_tmp_socket.recv()
         nixl_mem_reg_resp = msgspec.msgpack.decode(
             nixl_mem_reg_resp_bytes, type=NixlMsg
         )
+
         remote_xfer_dlist_bytes = nixl_mem_reg_resp.remote_xfer_dlist_bytes
         remote_xfer_dlist = self.nixl_agent.deserialize_descs(remote_xfer_dlist_bytes)
         remote_xfer_handlers = self.nixl_agent.prep_xfer_dlist(
@@ -124,7 +162,8 @@ class NixlChannel(BaseTransferChannel):
         )
         self.remote_xfer_handlers_dict[peer_id] = remote_xfer_handlers
 
-        init_ret_msg: Optional[InitSideMsg] = None
+        # Send side message if any
+        init_ret_msg: Optional[InitSideRetMsgBase] = None
         if init_side_msg is not None:
             init_ret_msg = self.send_init_side_msg(
                 init_tmp_socket,
@@ -136,10 +175,11 @@ class NixlChannel(BaseTransferChannel):
 
     async def async_lazy_init_peer_connection(
         self,
+        local_id: str,
         peer_id: str,
         peer_init_url: str,
-        init_side_msg: Optional[InitSideMsg] = None,
-    ) -> Optional[InitSideMsg]:
+        init_side_msg: Optional[InitSideMsgBase] = None,
+    ) -> Optional[InitSideRetMsgBase]:
         # Initialize temporary socket for nixl initialization
         init_tmp_socket = get_zmq_socket(
             self.zmq_context,
@@ -148,13 +188,11 @@ class NixlChannel(BaseTransferChannel):
             zmq.REQ,
             "connect",
         )
-
         # Build and send init request
         nixl_init_req = NixlInitRequest(
             local_meta_bytes=self.nixl_agent.get_agent_metadata(),
         )
         await init_tmp_socket.send(msgspec.msgpack.encode(nixl_init_req))
-
         # Wait remote agent metadata and register remote agent
         nixl_init_resp_bytes = await init_tmp_socket.recv()
         nixl_init_resp = msgspec.msgpack.decode(nixl_init_resp_bytes, type=NixlMsg)
@@ -162,12 +200,21 @@ class NixlChannel(BaseTransferChannel):
         remote_agent_name = self.nixl_agent.add_remote_agent(remote_meta_bytes)
 
         # Register remote memory
-        nixl_mem_reg_req = NixlMemRegRequest()
+        local_xfer_dlist_bytes = self.nixl_agent.get_serialized_descs(
+            self.nixl_wrapper.xfer_descs
+        )
+        nixl_mem_reg_req = NixlMemRegRequest(
+            remote_agent_name=nixl_init_resp.remote_agent_name,
+            local_id=local_id,
+            local_xfer_dlist_bytes=local_xfer_dlist_bytes,
+        )
+
         await init_tmp_socket.send(msgspec.msgpack.encode(nixl_mem_reg_req))
         nixl_mem_reg_resp_bytes = await init_tmp_socket.recv()
         nixl_mem_reg_resp = msgspec.msgpack.decode(
             nixl_mem_reg_resp_bytes, type=NixlMsg
         )
+
         remote_xfer_dlist_bytes = nixl_mem_reg_resp.remote_xfer_dlist_bytes
         remote_xfer_dlist = self.nixl_agent.deserialize_descs(remote_xfer_dlist_bytes)
         remote_xfer_handlers = self.nixl_agent.prep_xfer_dlist(
@@ -175,7 +222,8 @@ class NixlChannel(BaseTransferChannel):
         )
         self.remote_xfer_handlers_dict[peer_id] = remote_xfer_handlers
 
-        init_ret_msg: Optional[InitSideMsg] = None
+        # Send side message if any
+        init_ret_msg: Optional[InitSideRetMsgBase] = None
         if init_side_msg is not None:
             init_ret_msg = await self.async_send_init_side_msg(
                 init_tmp_socket,
@@ -185,35 +233,71 @@ class NixlChannel(BaseTransferChannel):
         init_tmp_socket.close()
         return init_ret_msg
 
-    def _init_side_channels(self, async_mode: bool, **kwargs):
-        peer_init_url = kwargs["peer_init_url"]
-        if peer_init_url is None:
+    def _init_side_channels(self):
+        if self.peer_init_url is None:
             return
 
-        # Initialize initialization side channels
-        self.init_side_channel = get_zmq_socket(
-            self.zmq_context,
-            peer_init_url,
-            "tcp",
-            zmq.REP,
-            "bind",
-        )
-        self.side_channels.append(self.init_side_channel)
-
-        if async_mode:
-            assert "event_loop" in kwargs
-            event_loop = kwargs["event_loop"]
+        if self.async_mode:
             # Start listening coroutine for initialization side channel
-            asyncio.run_coroutine_threadsafe(self._async_init_loop(), event_loop)
+            asyncio.run_coroutine_threadsafe(self._async_init_loop(), self.event_loop)
         else:
             # Start listening thread for initialization side channel
             self.init_thread = threading.Thread(target=self._init_loop, daemon=True)
             self.init_thread.start()
             self.running_threads.append(self.init_thread)
 
-    # FIXME: make async
+    def _handle_init_msg(
+        self, req: Union[NixlMsg, InitSideMsgBase]
+    ) -> Union[NixlMsg, InitSideRetMsgBase]:
+        resp: Union[NixlMsg, InitSideRetMsgBase]
+        if isinstance(req, NixlInitRequest):
+            agent_name = self.nixl_agent.add_remote_agent(req.local_meta_bytes)
+
+            resp = NixlInitResponse(
+                remote_agent_name=agent_name,
+                remote_meta_bytes=self.nixl_agent.get_agent_metadata(),
+            )
+
+            logger.info("Replying initialization response")
+
+        elif isinstance(req, NixlMemRegRequest):
+            local_xfer_descs = self.nixl_agent.get_serialized_descs(
+                self.nixl_wrapper.xfer_descs
+            )
+
+            remote_xfer_dlist_bytes = req.local_xfer_dlist_bytes
+            remote_xfer_dlist = self.nixl_agent.deserialize_descs(
+                remote_xfer_dlist_bytes
+            )
+            remote_xfer_handlers = self.nixl_agent.prep_xfer_dlist(
+                req.remote_agent_name, remote_xfer_dlist
+            )
+            self.remote_xfer_handlers_dict[req.local_id] = remote_xfer_handlers
+
+            resp = NixlMemRegResponse(
+                remote_xfer_dlist_bytes=local_xfer_descs,
+            )
+
+            logger.info("Replying mem register response")
+        elif isinstance(req, InitSideMsgBase):
+            resp = self.handle_init_side_msg(req)
+            logger.info("Replying P2P init side response")
+        else:
+            raise ValueError(f"Unsupported InitMsg type: {type(req)}")
+
+        return resp
+
     def _init_loop(self):
-        local_meta = self.nixl_agent.get_agent_metadata()
+        self.zmq_context = get_zmq_context(use_asyncio=False)
+        # Initialize initialization side channels
+        self.init_side_channel = get_zmq_socket(
+            self.zmq_context,
+            self.peer_init_url,
+            "tcp",
+            zmq.REP,
+            "bind",
+        )
+        self.side_channels.append(self.init_side_channel)
 
         # NOTE: Initialization has to be two stages:
         # (1) Exchanging the metadata.
@@ -226,34 +310,11 @@ class NixlChannel(BaseTransferChannel):
             try:
                 req_bytes = self.init_side_channel.recv()
 
-                logger.debug("Received initialization request")
+                logger.info("Received initialization request")
 
-                req = msgspec.msgpack.decode(
-                    req_bytes, type=Union[NixlMsg, InitSideMsg]
-                )
+                req = msgspec.msgpack.decode(req_bytes, type=Union[NixlMsg, SideMsg])
 
-                if isinstance(req, NixlInitRequest):
-                    self.nixl_agent.add_remote_agent(req.local_meta_bytes)
-
-                    resp = NixlInitResponse(
-                        remote_meta_bytes=local_meta,
-                    )
-
-                    logger.debug("Replying initialization response")
-
-                elif isinstance(req, NixlMemRegRequest):
-                    local_xfer_descs = self.nixl_agent.get_serialized_descs(
-                        self.nixl_wrapper.xfer_descs
-                    )
-
-                    resp = NixlMemRegResponse(
-                        remote_xfer_dlist_bytes=local_xfer_descs,
-                    )
-
-                    logger.debug("Replying mem register response")
-                else:
-                    self.handle_init_side_msg(req)
-                    logger.debug("Replying P2P init side response")
+                resp = self._handle_init_msg(req)
 
                 self.init_side_channel.send(msgspec.msgpack.encode(resp))
 
@@ -263,40 +324,28 @@ class NixlChannel(BaseTransferChannel):
                     time.sleep(0.01)
 
     async def _async_init_loop(self):
-        local_meta = self.nixl_agent.get_agent_metadata()
+        self.zmq_context = get_zmq_context()
+
+        # Initialize initialization side channels
+        self.init_side_channel = get_zmq_socket(
+            self.zmq_context,
+            self.peer_init_url,
+            "tcp",
+            zmq.REP,
+            "bind",
+        )
+        self.side_channels.append(self.init_side_channel)
+        logger.info("Starting async initialization loop")
 
         while self.running:
             try:
                 req_bytes = await self.init_side_channel.recv()
 
-                logger.debug("Received initialization request")
+                logger.info("Received initialization request")
 
-                req = msgspec.msgpack.decode(
-                    req_bytes, type=Union[NixlMsg, InitSideMsg]
-                )
+                req = msgspec.msgpack.decode(req_bytes, type=Union[NixlMsg, SideMsg])
 
-                if isinstance(req, NixlInitRequest):
-                    self.nixl_agent.add_remote_agent(req.local_meta_bytes)
-
-                    resp = NixlInitResponse(
-                        remote_meta_bytes=local_meta,
-                    )
-
-                    logger.debug("Replying initialization response")
-
-                elif isinstance(req, NixlMemRegRequest):
-                    local_xfer_descs = self.nixl_agent.get_serialized_descs(
-                        self.nixl_wrapper.xfer_descs
-                    )
-
-                    resp = NixlMemRegResponse(
-                        remote_xfer_dlist_bytes=local_xfer_descs,
-                    )
-
-                    logger.debug("Replying mem register response")
-                else:
-                    self.handle_init_side_msg(req)
-                    logger.debug("Replying P2P init side response")
+                resp = self._handle_init_msg(req)
 
                 await self.init_side_channel.send(msgspec.msgpack.encode(resp))
 
@@ -435,7 +484,6 @@ class NixlChannel(BaseTransferChannel):
             self.remote_xfer_handlers_dict[transfer_spec["receiver_id"]],
             transfer_spec["remote_indexes"],
         )
-
         self.nixl_agent.transfer(handle)
 
         # TODO(Jiayi) tune hyperparameters
@@ -453,7 +501,6 @@ class NixlChannel(BaseTransferChannel):
             assert status == "DONE", f"Transfer status is {status}, expected DONE"
             # self._proxy_side_channel.send(notif_msg_bytes)
             break
-
         return len(objects)
 
     async def async_batched_read(
@@ -555,30 +602,3 @@ class NixlAgentWrapper:
         self.reg_descs = reg_descs
         self.xfer_descs = xfer_descs
         self.xfer_handler = xfer_handler
-
-
-class NixlMsgBase(msgspec.Struct, tag=True):
-    """Base class for all nixl-related messages"""
-
-    pass
-
-
-class NixlInitRequest(NixlMsgBase):
-    local_meta_bytes: bytes  # Metadata from the sender nixl agent
-
-
-class NixlMemRegRequest(NixlMsgBase):
-    pass
-
-
-class NixlInitResponse(NixlMsgBase):
-    remote_meta_bytes: bytes  # Metadata from the receiver nixl agent
-
-
-class NixlMemRegResponse(NixlMsgBase):
-    remote_xfer_dlist_bytes: bytes  # Serialized transfer descriptors for the receiver
-
-
-NixlMsg = Union[
-    NixlInitRequest, NixlInitResponse, NixlMemRegRequest, NixlMemRegResponse
-]

@@ -168,11 +168,19 @@ class PDBackend(AllocatorBackendInterface):
 
         # Initialize transfer channel
         peer_init_url = None
+        self.local_id = ""
+        # TODO(Jiayi): both sender and receiver have to have
+        # peer_init_url if they want to do instance flip.
         if self.pd_config.peer_init_port is not None:
             peer_init_url = (
                 f"{self.pd_config.peer_host}:{self.pd_config.peer_init_port}"
             )
+            self.local_id = self.pd_config.peer_host + str(
+                self.pd_config.peer_init_port
+            )
+
         self.transfer_channel = CreateTransferChannel(
+            async_mode=False,
             channel_type=config.transfer_channel,
             role=self.pd_config.role,
             buffer_ptr=self.memory_allocator.gpu_allocator.buffer_ptr,
@@ -299,7 +307,7 @@ class PDBackend(AllocatorBackendInterface):
 
         # Establish the connection with the receiver/decoder
         self.transfer_channel.lazy_init_peer_connection(
-            peer_id=receiver_id, peer_init_url=receiver_init_url
+            local_id=self.local_id, peer_id=receiver_id, peer_init_url=receiver_init_url
         )
 
         # Set up the memory allocation socket

@@ -156,8 +156,13 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "default": False,
         "env_converter": _to_bool,
     },
-    "p2p_init_host": {"type": Optional[str], "default": None, "env_converter": str},
+    "p2p_host": {"type": Optional[str], "default": None, "env_converter": str},
     "p2p_init_ports": {
+        "type": Optional[list[int]],
+        "default": None,
+        "env_converter": _to_int_list,
+    },
+    "p2p_lookup_ports": {
         "type": Optional[list[int]],
         "default": None,
         "env_converter": _to_int_list,
@@ -417,8 +422,14 @@ def _create_config_class():
 def _validate_config(self):
     """Validate configuration"""
     if self.enable_p2p:
-        assert self.lookup_url is not None
-        assert self.distributed_url is not None
+        assert self.enable_controller
+        assert self.controller_pull_url is not None
+        assert self.controller_reply_url is not None
+        assert self.lmcache_worker_ports is not None
+        assert self.p2p_host is not None
+        assert self.p2p_init_ports is not None
+        assert self.p2p_lookup_ports is not None
+        assert self.transfer_channel is not None
 
     enable_nixl_storage = self.extra_config is not None and self.extra_config.get(
         "enable_nixl_storage"

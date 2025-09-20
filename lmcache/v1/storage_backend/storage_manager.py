@@ -409,6 +409,10 @@ class StorageManager:
         self.event_manager.update_event_status(
             EventType.LOADING, lookup_id, status=EventStatus.DONE
         )
+        logger.info(
+            f"Responding to scheduler for lookup id {lookup_id}"
+            f" with retrieved length {retrieved_length}"
+        )
         self.async_lookup_server.send_response_to_scheduler(lookup_id, retrieved_length)
 
     async def async_lookup_and_prefetch(
@@ -438,6 +442,8 @@ class StorageManager:
         # than the prefix chunks.
         # TODO(Jiayi): We need to change/optimize this for non-prefix
         # based retrieval patterns or cases where middle chunks are missing.
+
+        # FIXME: Handle the last backend
 
         num_total_chunks = len(keys)
         num_total_hit_chunks = 0
@@ -469,10 +475,11 @@ class StorageManager:
 
             loading_tasks.append(loading_task)
 
+            cum_chunk_lengths = cum_chunk_lengths[num_hit_chunks:]
+
             if num_total_hit_chunks == num_total_chunks:
                 break
             keys = keys[num_hit_chunks:]
-            cum_chunk_lengths = cum_chunk_lengths[num_hit_chunks:]
 
         # If no chunks were hit across all backends, respond immediately and return.
         if num_total_hit_chunks == 0:

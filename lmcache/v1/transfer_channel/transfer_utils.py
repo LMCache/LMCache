@@ -25,7 +25,14 @@ def get_correct_device(device: str, worker_id: int) -> str:
         raise ValueError(f"Invalid device: {device}")
 
 
-class InitSideMsgBase(msgspec.Struct, tag=True):
+class SideMsgBase(msgspec.Struct, tag=True):
+    """Base class for all side-related messages during initialization"""
+
+    pass
+
+
+# Side messages during initialization
+class InitSideMsgBase(SideMsgBase):
     """Base class for all side-related messages during initialization"""
 
     pass
@@ -37,13 +44,20 @@ class P2PInitSideMsg(InitSideMsgBase):
     pass
 
 
-class P2PInitSideRetMsg(InitSideMsgBase):
+# Side return messages during initialization
+class InitSideRetMsgBase(SideMsgBase):
+    """Base class for all side-related messages during initialization"""
+
+    pass
+
+
+class P2PInitSideRetMsg(InitSideRetMsgBase):
     """P2P specific initialization return message"""
 
     peer_lookup_url: str
 
 
-InitSideMsg = Union[
+SideMsg = Union[
     P2PInitSideMsg,
     P2PInitSideRetMsg,
 ]

@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 from typing import Dict, List, Optional, Tuple
 import argparse
 import asyncio
+import json
 import uuid
 
 # Third Party
@@ -308,7 +309,7 @@ def main():
     parser.add_argument("--port", type=int, default=9000)
     parser.add_argument(
         "--monitor-ports",
-        type=dict[str, int],
+        type=json.loads,
         default={"pull": 9001, "reply": 9002},
     )
 
@@ -322,7 +323,7 @@ def main():
         app = create_app(controller_urls)
 
         logger.info(f"Starting LMCache controller at {args.host}:{args.port}")
-        logger.info(f"Monitoring lmcache workers at port {args.monitor_port}")
+        logger.info(f"Monitoring lmcache workers at ports {args.monitor_ports}")
 
         uvicorn.run(app, host=args.host, port=args.port)
     except TimeoutError as e:

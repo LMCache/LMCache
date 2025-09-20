@@ -10,9 +10,11 @@ import zmq
 # First Party
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.transfer_channel.transfer_utils import (
-    InitSideMsg,
+    InitSideMsgBase,
+    InitSideRetMsgBase,
     P2PInitSideMsg,
     P2PInitSideRetMsg,
+    SideMsg,
 )
 
 
@@ -21,15 +23,21 @@ class BaseTransferChannel(metaclass=abc.ABCMeta):
     @abc.abstractmethod
     def lazy_init_peer_connection(
         self,
+        local_id: str,
         peer_id: str,
         peer_init_url: str,
-        init_side_msg: Optional[InitSideMsg] = None,
-    ) -> Optional[InitSideMsg]:
+        init_side_msg: Optional[InitSideMsgBase] = None,
+    ) -> Optional[InitSideRetMsgBase]:
         """
         Lazily initialize the connection to a peer.
 
+        :param local_id: The ID of itself.
         peer_id: The ID of the peer to connect to.
         peer_init_url: The URL used to initialize the connection.
+        init_side_msg: An optional side message to be sent to the peer
+        during initialization.
+
+        :return: An optional side message received from the peer.
         """
 
         raise NotImplementedError
@@ -37,10 +45,11 @@ class BaseTransferChannel(metaclass=abc.ABCMeta):
     @abc.abstractmethod
     async def async_lazy_init_peer_connection(
         self,
+        local_id: str,
         peer_id: str,
         peer_init_url: str,
-        init_side_msg: Optional[InitSideMsg] = None,
-    ) -> Optional[InitSideMsg]:
+        init_side_msg: Optional[InitSideMsgBase] = None,
+    ) -> Optional[InitSideRetMsgBase]:
         """
         Async version of `lazy_init_peer_connection`.
         """
@@ -49,15 +58,15 @@ class BaseTransferChannel(metaclass=abc.ABCMeta):
 
     def handle_init_side_msg(
         self,
-        req: InitSideMsg,
-    ) -> Optional[InitSideMsg]:
+        req: InitSideMsgBase,
+    ) -> InitSideRetMsgBase:
         """
         Handle side messages during initialization.
 
         :param req: The initialization-related side message
         received from the peer.
 
-        :return: An optional side message received from the peer.
+        :return: A side message to be sent back to the peer.
         """
         if isinstance(req, P2PInitSideMsg):
             assert hasattr(self, "peer_lookup_url"), (
@@ -67,13 +76,13 @@ class BaseTransferChannel(metaclass=abc.ABCMeta):
                 peer_lookup_url=self.peer_lookup_url,
             )
         else:
-            return None
+            raise ValueError(f"Unsupported InitSideMsg type: {type(req)}")
 
     def send_init_side_msg(
         self,
         init_tmp_socket: zmq.Socket,
-        init_side_msg: InitSideMsg,
-    ) -> InitSideMsg:
+        init_side_msg: InitSideMsgBase,
+    ) -> InitSideRetMsgBase:
         """
         Send side messages during initialization.
 
@@ -89,7 +98,7 @@ class BaseTransferChannel(metaclass=abc.ABCMeta):
         init_ret_msg_bytes = init_tmp_socket.recv()
         init_ret_msg = msgspec.msgpack.decode(
             init_ret_msg_bytes,
-            type=InitSideMsg,
+            type=SideMsg,
         )
 
         return init_ret_msg
@@ -97,18 +106,18 @@ class BaseTransferChannel(metaclass=abc.ABCMeta):
     async def async_send_init_side_msg(
         self,
         init_tmp_socket: zmq.Socket,
-        init_side_msg: InitSideMsg,
-    ) -> InitSideMsg:
+        init_side_msg: InitSideMsgBase,
+    ) -> InitSideRetMsgBase:
         """
         Async version of send_init_side_msg.
         """
         init_msg_bytes = msgspec.msgpack.encode(init_side_msg)
-        init_tmp_socket.send(init_msg_bytes)
+        await init_tmp_socket.send(init_msg_bytes)
 
         init_ret_msg_bytes = await init_tmp_socket.recv()
         init_ret_msg = msgspec.msgpack.decode(
             init_ret_msg_bytes,
-            type=InitSideMsg,
+            type=SideMsg,
         )
 
         return init_ret_msg

@@ -180,25 +180,24 @@ class LMCacheControllerManager:
     async def handle_batched_req_request(self, socket) -> Optional[MsgBase]:
         while True:
             try:
-                parts = await socket.recv()
+                part = await socket.recv()
 
-                for part in parts:
-                    # Parse message based on format
-                    if part.startswith(b"{"):
-                        # JSON format - typically from external systems like Mooncake
-                        msg_dict = json.loads(part)
-                        msg = msgspec.convert(msg_dict, type=Msg)
-                    else:
-                        # MessagePack format - internal LMCache communication
-                        msg = msgspec.msgpack.decode(part, type=Msg)
+                # Parse message based on format
+                if part.startswith(b"{"):
+                    # JSON format - typically from external systems like Mooncake
+                    msg_dict = json.loads(part)
+                    msg = msgspec.convert(msg_dict, type=Msg)
+                else:
+                    # MessagePack format - internal LMCache communication
+                    msg = msgspec.msgpack.decode(part, type=Msg)
 
-                    if isinstance(msg, WorkerReqMsg):
-                        ret_msg = await self.handle_worker_req_message(msg)
-                        await socket.send(msgspec.msgpack.encode(ret_msg))
-                    else:
-                        logger.error(f"Unknown message type: {type(msg)}")
-                        err_msg = ErrorMsg(error=f"Unknown message type: {type(msg)}")
-                        await socket.send(msgspec.msgpack.encode(err_msg))
+                if isinstance(msg, WorkerReqMsg):
+                    ret_msg = await self.handle_worker_req_message(msg)
+                    await socket.send(msgspec.msgpack.encode(ret_msg))
+                else:
+                    logger.error(f"Unknown message type: {type(msg)}")
+                    err_msg = ErrorMsg(error=f"Unknown message type: {type(msg)}")
+                    await socket.send(msgspec.msgpack.encode(err_msg))
             except Exception as e:
                 logger.error(f"Controller Manager error: {e}")
 
