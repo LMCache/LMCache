@@ -209,6 +209,8 @@ class LocalDiskBackend(StorageBackendInterface):
         return data_path + _METADATA_SUFFIX
 
     def _write_metadata_file(self, metadata: DiskCacheMetadata) -> None:
+        if not self.local_disk_persistence:
+            return        
         if metadata.shape is None or metadata.dtype is None:
             raise ValueError("Metadata must contain shape and dtype to persist to disk")
 
@@ -286,6 +288,8 @@ class LocalDiskBackend(StorageBackendInterface):
         return size_int, shape, dtype, fmt
 
     def _remove_metadata_file(self, data_path: str) -> None:
+        if not self.local_disk_persistence:
+            return
         meta_path = self._metadata_path(data_path)
         try:
             os.remove(meta_path)

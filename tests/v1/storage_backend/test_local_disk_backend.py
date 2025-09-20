@@ -265,6 +265,35 @@ class TestLocalDiskBackend:
         assert memory_obj is not None
         local_disk_backend.local_cpu_backend.memory_allocator.close()
 
+    def test_metadata_not_written_without_persistence(
+        self, temp_disk_path, async_loop, memory_allocator
+    ):
+        """Metadata sidecar files are skipped when persistence is disabled."""
+        config = create_test_config(
+            temp_disk_path,
+            local_disk_persistence=False,
+        )
+        cpu_backend = LocalCPUBackend(config, memory_allocator=memory_allocator)
+        backend = LocalDiskBackend(
+            config=config,
+            loop=async_loop,
+            local_cpu_backend=cpu_backend,
+            dst_device="cuda",
+        )
+
+        key = create_test_key(99)
+        memory_obj = create_test_memory_obj()
+        data_path = backend._key_to_path(key)
+        meta_path = data_path + ".meta"
+
+        try:
+            backend.async_save_bytes_to_disk(key, memory_obj)
+            assert os.path.exists(data_path)
+            assert not os.path.exists(meta_path)
+        finally:
+            backend.close()
+            cpu_backend.memory_allocator.close()
+
     def test_disk_persistence_restore_and_prefetch(
         self, temp_disk_path, async_loop, memory_allocator
     ):
