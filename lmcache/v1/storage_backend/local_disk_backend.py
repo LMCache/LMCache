@@ -238,8 +238,8 @@ class LocalDiskBackend(StorageBackendInterface):
         try:
             with open(meta_path, "r", encoding="utf-8") as f:
                 metadata = json.load(f)
-        except Exception as e:
-            logger.warning("Failed to read metadata file %s: %s", meta_path, e)
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning("Failed to read metadata file %s: %s", meta_path, exc)
             return None
 
         version = metadata.get("version")
@@ -313,9 +313,9 @@ class LocalDiskBackend(StorageBackendInterface):
             key_str = entry[:-3].replace("-", "/")
             try:
                 key = CacheEngineKey.from_string(key_str)
-            except Exception as e:
+            except ValueError as exc:
                 logger.warning(
-                    "Failed to parse cache key from file %s: %s", entry, e
+                    "Failed to parse cache key from file %s: %s", entry, exc
                 )
                 continue
 
@@ -353,8 +353,8 @@ class LocalDiskBackend(StorageBackendInterface):
             memory_obj: Optional[MemoryObj] = None
             try:
                 memory_obj = self.get_blocking(key)
-            except Exception as e:
-                logger.warning("Failed to prefetch cache for key %s: %s", key, e)
+            except (IOError, FileNotFoundError) as exc:
+                logger.warning("Failed to prefetch cache for key %s: %s", key, exc)
                 continue
 
             if memory_obj is None:
@@ -363,9 +363,9 @@ class LocalDiskBackend(StorageBackendInterface):
 
             try:
                 self.local_cpu_backend.submit_put_task(key, memory_obj)
-            except Exception as e:
+            except (RuntimeError, MemoryError) as exc:
                 logger.warning(
-                    "Failed to populate CPU cache for persisted key %s: %s", key, e
+                    "Failed to populate CPU cache for persisted key %s: %s", key, exc
                 )
             finally:
                 memory_obj.ref_count_down()
@@ -477,8 +477,8 @@ class LocalDiskBackend(StorageBackendInterface):
 
         try:
             self._write_metadata_file(metadata_entry)
-        except Exception as e:
-            logger.warning("Failed to persist metadata for key %s: %s", key, e)
+        except (ValueError, OSError) as exc:
+            logger.warning("Failed to persist metadata for key %s: %s", key, exc)
 
         # push kv admit msg
         if self.lmcache_worker is not None and not has_stored:
