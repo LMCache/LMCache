@@ -41,14 +41,18 @@ class MockLMCacheWorker:
         self.messages.append(msg)
 
 
-def create_test_config(disk_path: str, max_disk_size: float = 1.0):
+def create_test_config(
+    disk_path: str, max_disk_size: float = 1.0, **overrides
+):
     """Create a test configuration for LocalDiskBackend."""
-    config = LMCacheEngineConfig.from_defaults(
+    config_kwargs = dict(
         chunk_size=256,
         local_disk=disk_path,
         max_local_disk_size=max_disk_size,
         lmcache_instance_id="test_instance",
     )
+    config_kwargs.update(overrides)
+    config = LMCacheEngineConfig.from_defaults(**config_kwargs)
     return config
 
 
@@ -260,3 +264,103 @@ class TestLocalDiskBackend:
         )
         assert memory_obj is not None
         local_disk_backend.local_cpu_backend.memory_allocator.close()
+
+    def test_disk_persistence_restore_and_prefetch(
+        self, temp_disk_path, async_loop, memory_allocator
+    ):
+        """Disk entries are restored and prefetched to CPU on restart."""
+        config = create_test_config(
+            temp_disk_path,
+            local_disk_persistence=True,
+            populate_disk_cache_to_cpu_on_start=True,
+        )
+        cpu_backend = LocalCPUBackend(config, memory_allocator=memory_allocator)
+        backend = LocalDiskBackend(
+            config=config,
+            loop=async_loop,
+            local_cpu_backend=cpu_backend,
+            dst_device="cuda",
+        )
+
+        key = create_test_key(42)
+        memory_obj = create_test_memory_obj()
+        data_path = backend._key_to_path(key)
+        meta_path = data_path + ".meta"
+
+        try:
+            backend.async_save_bytes_to_disk(key, memory_obj)
+            assert os.path.exists(data_path)
+            assert os.path.exists(meta_path)
+        finally:
+            backend.close()
+            cpu_backend.memory_allocator.close()
+
+        restore_config = create_test_config(
+            temp_disk_path,
+            local_disk_persistence=True,
+            populate_disk_cache_to_cpu_on_start=True,
+        )
+        restore_cpu_backend = LocalCPUBackend(
+            restore_config, memory_allocator=memory_allocator
+        )
+        restored_backend = LocalDiskBackend(
+            config=restore_config,
+            loop=async_loop,
+            local_cpu_backend=restore_cpu_backend,
+            dst_device="cuda",
+        )
+
+        try:
+            assert key in restored_backend.dict
+            restored_meta = restored_backend.dict[key]
+            assert restored_meta.shape == memory_obj.metadata.shape
+            assert restored_meta.dtype == memory_obj.metadata.dtype
+            assert restored_meta.fmt == memory_obj.metadata.fmt
+            assert restored_meta.size == os.path.getsize(data_path)
+            assert restored_backend.current_cache_size == float(restored_meta.size)
+            assert restored_backend.usage == restored_meta.size
+
+            cpu_obj = restored_backend.local_cpu_backend.get_blocking(key)
+            assert cpu_obj is not None
+            assert cpu_obj.metadata.shape == memory_obj.metadata.shape
+            assert cpu_obj.metadata.dtype == memory_obj.metadata.dtype
+            cpu_obj.ref_count_down()
+        finally:
+            restored_backend.close()
+            restore_cpu_backend.memory_allocator.close()
+
+    def test_remove_deletes_metadata_file(
+        self, temp_disk_path, async_loop, memory_allocator
+    ):
+        """Removing an entry deletes both data and metadata files."""
+        config = create_test_config(
+            temp_disk_path,
+            local_disk_persistence=True,
+        )
+        cpu_backend = LocalCPUBackend(config, memory_allocator=memory_allocator)
+        backend = LocalDiskBackend(
+            config=config,
+            loop=async_loop,
+            local_cpu_backend=cpu_backend,
+            dst_device="cuda",
+        )
+
+        key = create_test_key(55)
+        memory_obj = create_test_memory_obj()
+        data_path = backend._key_to_path(key)
+        meta_path = data_path + ".meta"
+
+        try:
+            backend.async_save_bytes_to_disk(key, memory_obj)
+            assert os.path.exists(data_path)
+            assert os.path.exists(meta_path)
+
+            removed = backend.remove(key)
+            assert removed
+            assert not os.path.exists(data_path)
+            assert not os.path.exists(meta_path)
+            assert key not in backend.dict
+            assert backend.usage == 0
+        finally:
+            backend.close()
+            cpu_backend.memory_allocator.close()
