@@ -277,13 +277,40 @@ class LocalDiskBackend(StorageBackendInterface):
 
         size = metadata.get("size")
         if size is None:
-            size_int = os.path.getsize(data_path)
+            try:
+                size_int = os.path.getsize(data_path)
+            except OSError as exc:
+                logger.warning(
+                    "Failed to stat data file for %s when size missing: %s",
+                    data_path,
+                    exc,
+                )
+                size_int = 0
         else:
             try:
                 size_int = int(size)
             except (TypeError, ValueError):
                 logger.warning("Invalid size metadata for %s: %s", data_path, size)
-                size_int = os.path.getsize(data_path)
+                try:
+                    size_int = os.path.getsize(data_path)
+                except OSError as exc:
+                    logger.warning(
+                        "Failed to stat data file for %s when size invalid: %s",
+                        data_path,
+                        exc,
+                    )
+                    size_int = 0
+            else:
+                if size_int <= 0:
+                    try:
+                        size_int = os.path.getsize(data_path)
+                    except OSError as exc:
+                        logger.warning(
+                            "Failed to stat data file for %s when size non-positive: %s",
+                            data_path,
+                            exc,
+                        )
+                        size_int = 0
 
         return size_int, shape, dtype, fmt
 
@@ -428,8 +455,13 @@ class LocalDiskBackend(StorageBackendInterface):
             return False
 
         path = meta.path
-        size = meta.size
-        self.usage -= size
+        size = int(meta.size)
+        if size <= 0:
+            try:
+                size = os.path.getsize(path)
+            except OSError:
+                size = 0
+        self.usage = max(0, self.usage - size)
         self.stats_monitor.update_local_storage_usage(self.usage)
 
         # NOTE: The following code will cause deadlock
@@ -501,7 +533,7 @@ class LocalDiskBackend(StorageBackendInterface):
         self.disk_worker.insert_put_task(key)
 
         # TODO(Jiayi): Fragmentation is not considered here.
-        required_size = memory_obj.get_physical_size()
+        required_size = memory_obj.get_size()
         all_evict_keys = []
         evict_success = True
         with self.disk_lock:
@@ -674,8 +706,8 @@ class LocalDiskBackend(StorageBackendInterface):
         buffer = memory_obj.byte_array
         path = self._key_to_path(key)
 
-        size = len(buffer)
-        self.usage += size
+        data_size = len(buffer)
+        self.usage += data_size
         self.stats_monitor.update_local_storage_usage(self.usage)
 
         # TODO(Jiayi): need to add ref count in disk memory object
@@ -685,13 +717,13 @@ class LocalDiskBackend(StorageBackendInterface):
         # `submit_put_task` above.
         # Ref count down better be before `insert_key` for testing
         # purposes (e.g., testing mem_leak).
-        size = memory_obj.get_physical_size()
+        stored_size = data_size
         shape = memory_obj.metadata.shape
         dtype = memory_obj.metadata.dtype
         fmt = memory_obj.metadata.fmt
         memory_obj.ref_count_down()
 
-        self.insert_key(key, size, shape, dtype, fmt)
+        self.insert_key(key, stored_size, shape, dtype, fmt)
 
         self.disk_worker.remove_put_task(key)
 
