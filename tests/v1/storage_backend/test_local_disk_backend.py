@@ -4,6 +4,7 @@ import asyncio
 import os
 import shutil
 import tempfile
+import threading
 
 # Third Party
 import pytest
@@ -98,7 +99,23 @@ def async_loop():
     """Create an asyncio event loop for testing."""
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
+
+    loop_started = threading.Event()
+
+    def _run_loop() -> None:
+        asyncio.set_event_loop(loop)
+        loop_started.set()
+        loop.run_forever()
+
+    loop_thread = threading.Thread(target=_run_loop, name="test-async-loop")
+    loop_thread.start()
+    loop_started.wait()
+
     yield loop
+
+    loop.call_soon_threadsafe(loop.stop)
+    loop_thread.join()
+    asyncio.set_event_loop(None)
     loop.close()
 
 
