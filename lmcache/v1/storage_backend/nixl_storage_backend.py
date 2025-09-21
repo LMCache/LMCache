@@ -396,6 +396,7 @@ class NixlStorageBackend(AllocatorBackendInterface):
         self,
         lookup_id: str,
         keys: list[CacheEngineKey],
+        transfer_spec: Any = None,
     ) -> list[MemoryObj]:
         obj_list = await self.file_to_gpu(keys)
         assert None not in obj_list

@@ -248,7 +248,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
         self,
         config: LMCacheEngineConfig,
         metadata: Optional[LMCacheEngineMetadata] = None,
-    ) -> MixedMemoryAllocator:
+    ) -> MemoryAllocatorInterface:
         cpu_size = config.max_local_cpu_size
 
         if metadata is not None:
@@ -272,6 +272,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
         logger.info(f"NUMA mapping {numa_mapping}")
 
         if config.enable_p2p:
+            assert metadata is not None
             paged_mem_allocator = PagedMixedMemoryAllocator()
             paged_mem_allocator.init_cpu_memory_allocator(
                 int(cpu_size * 1024**3),
