@@ -56,6 +56,10 @@ class LMCacheLookupClient(LookupClientInterface):
         self.sockets = []
         if self.create_lookup_server_only_on_worker_0_for_mla:
             ranks = 1
+
+        # Set timeout values from config
+        timeout_ms = config.lookup_timeout_ms
+
         for tp_rank in range(ranks):
             socket_path = get_zmq_rpc_path_lmcache(
                 vllm_config, "lookup", rpc_port, tp_rank
@@ -70,6 +74,10 @@ class LMCacheLookupClient(LookupClientInterface):
                 zmq.REQ,  # type: ignore[attr-defined]
                 bind=False,
             )
+
+            # Set socket timeout during initialization
+            socket.setsockopt(zmq.RCVTIMEO, timeout_ms)
+            socket.setsockopt(zmq.SNDTIMEO, timeout_ms)
 
             self.sockets.append(socket)
 
@@ -130,68 +138,21 @@ class LMCacheLookupClient(LookupClientInterface):
             ]
 
         results = []
-        max_retries = self.config.lookup_max_retries  # Get from config
-        timeout_ms = self.config.lookup_timeout_ms  # Get from config
+        try:
+            for i in range(ranks):
+                self.sockets[i].send_multipart(msg_buf, copy=False)
 
-        for i in range(ranks):
-            socket = self.sockets[i]
-
-            # Check socket state
-            if socket.closed:
-                logger.error(f"Socket for rank {i} is closed")
-                return 0
-
-            # Set socket timeout
-            socket.setsockopt(zmq.RCVTIMEO, timeout_ms)
-            socket.setsockopt(zmq.SNDTIMEO, timeout_ms)
-
-            retry_count = 0
-            send_success = False
-            recv_success = False
-
-            # Send retry loop
-            while retry_count < max_retries and not send_success:
-                try:
-                    socket.send_multipart(msg_buf, copy=False)
-                    send_success = True
-                except zmq.Again:
-                    retry_count += 1
-                    logger.warning(
-                        f"Send timeout (retry {retry_count}/{max_retries}) for rank {i}"
-                    )
-                except zmq.ZMQError as e:
-                    logger.error(f"ZMQ error during send to rank {i}: {str(e)}")
-                    return 0
-
-            # If send fails, log error and break
-            if not send_success:
-                logger.error(f"Failed to send to rank {i} after {max_retries} retries")
-                return 0
-
-            # Receive retry loop
-            retry_count = 0
-            while retry_count < max_retries and not recv_success:
-                try:
-                    resp = socket.recv()
-                    result = int.from_bytes(resp, "big")
-                    recv_success = True
-                    results.append(result)
-                except zmq.Again:
-                    retry_count += 1
-                    logger.warning(
-                        f"Receive timeout (retry {retry_count}/{max_retries}) "
-                        f"for rank {i}"
-                    )
-                except zmq.ZMQError as e:
-                    logger.error(f"ZMQ error during receive from rank {i}: {str(e)}")
-                    return 0
-
-            # If receive fails, log error
-            if not recv_success:
-                logger.error(
-                    f"Failed to receive from rank {i} after {max_retries} retries"
-                )
-                return 0
+            # TODO(Jiayi): we can use zmq poll to optimize a bit
+            for i in range(ranks):
+                resp = self.sockets[i].recv()
+                result = int.from_bytes(resp, "big")
+                results.append(result)
+        except zmq.Again:
+            logger.error(f"Timeout occurred for rank {i}")
+            return 0
+        except zmq.ZMQError as e:
+            logger.error(f"ZMQ error for rank {i}: {str(e)}")
+            return 0
 
         assert len(results) == ranks
         if len(set(results)) > 1:
