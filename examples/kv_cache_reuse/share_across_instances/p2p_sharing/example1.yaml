@@ -16,3 +16,6 @@ lmcache_instance_id: "lmcache_instance_1"
 controller_pull_url: "localhost:8300"
 controller_reply_url: "localhost:8400"
 lmcache_worker_ports: 8500
+
+extra_config:
+  lookup_backoff_time: 0.001

@@ -116,15 +116,15 @@ class P2PBackend(StorageBackendInterface):
         # A lookup_id -> (peer_init_url, peer_lookup_url, location)
         self.lookup_id_to_peer_mapping: dict[str, tuple[str, str, str]] = {}
 
-        self.dtype = metadata.kv_dtype
-        self.full_size_shape = list(metadata.kv_shape)
-        # TODO(Jiayi): remove this hardcode
-        self.fmt: MemoryFormat = MemoryFormat.KV_2LTD
-
         # TODO(Jiayi): support gpu and local storage p2p as well.
         self.local_cpu_backend = local_cpu_backend
         self.memory_allocator = local_cpu_backend.get_memory_allocator()
         assert isinstance(self.memory_allocator, PagedMixedMemoryAllocator)
+
+        self.dtype = metadata.kv_dtype
+        self.full_size_shape = list(self.memory_allocator.cpu_allocator.shape)
+        # TODO(Jiayi): remove this hardcode
+        self.fmt: MemoryFormat = MemoryFormat.KV_2LTD
 
         self.transfer_channel = CreateTransferChannel(
             channel_type=config.transfer_channel,
