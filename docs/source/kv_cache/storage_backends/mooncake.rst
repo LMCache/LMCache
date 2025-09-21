@@ -22,7 +22,7 @@ Key Features
 - **RDMA optimization**: Built on Transfer Engine with support for TCP, RDMA (InfiniBand/RoCEv2/eRDMA/NVIDIA GPUDirect)
 - **Dynamic resource scaling**: Supports dynamically adding and removing nodes for elastic resource management
 
-For detailed architecture information, see the `Mooncake Architecture Guide <https://github.com/kvcache-ai/Mooncake/blob/main/doc/en/mooncake-store-preview.md>`_.
+For detailed architecture information, see the `Mooncake Architecture Guide <https://github.com/kvcache-ai/Mooncake/blob/main/doc/en/mooncake-store.md>`_.
 
 Quick Start
 -----------
