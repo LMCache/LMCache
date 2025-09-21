@@ -74,13 +74,15 @@ class LMCacheControllerManager:
             role=zmq.PULL,  # type: ignore[attr-defined]
             bind_or_connect="bind",
         )
-        self.controller_rep_socket = get_zmq_socket(
-            self.zmq_context,
-            self.controller_urls["reply"],
-            protocol="tcp",
-            role=zmq.REP,  # type: ignore[attr-defined]
-            bind_or_connect="bind",
-        )
+
+        if self.controller_urls["reply"] is not None:
+            self.controller_rep_socket = get_zmq_socket(
+                self.zmq_context,
+                self.controller_urls["reply"],
+                protocol="tcp",
+                role=zmq.REP,  # type: ignore[attr-defined]
+                bind_or_connect="bind",
+            )
         self.kv_controller = KVController()
         self.reg_controller = RegistrationController()
 
@@ -202,7 +204,11 @@ class LMCacheControllerManager:
                 logger.error(f"Controller Manager error: {e}")
 
     async def start_all(self):
+        tasks = []
+        if self.controller_urls["reply"] is not None:
+            tasks.append(self.handle_batched_req_request(self.controller_rep_socket))
+        tasks.append(self.handle_batched_push_request(self.controller_pull_socket))
         await asyncio.gather(
-            self.handle_batched_push_request(self.controller_pull_socket),
-            self.handle_batched_req_request(self.controller_rep_socket),
+            *tasks,
+            return_exceptions=True,
         )

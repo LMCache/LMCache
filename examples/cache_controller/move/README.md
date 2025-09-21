@@ -46,7 +46,7 @@ curl -X POST http://localhost:8000/tokenize \
 
 You should be able to see the returned token ids as:
 ```plaintext
-{"count":12,"max_model_len":4096,"tokens":[128000,849,21435,279,26431,315,85748,6636,304,4221,4211,13],"token_strs":null}
+{"count":12,"tokens":[128000,849,21435,279,26431,315,85748,6636,304,4221,4211,13],"token_strs":null}
 ```
 
 5. Move the request's KV cache from vllm engine 1's CPU to vllm engine 2's CPU using request's token ids:

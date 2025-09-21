@@ -82,6 +82,8 @@ _CONFIG_ALIASES = {
     "nixl_proxy_port": "pd_proxy_port",
     "nixl_buffer_size": "pd_buffer_size",
     "nixl_role": "pd_role",
+    "controller_url": "controller_pull_url",
+    "lmcache_worker_port": "lmcache_worker_ports",
 }
 
 _DEPRECATED_CONFIGS = {

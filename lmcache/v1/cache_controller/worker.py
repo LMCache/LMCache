@@ -73,11 +73,8 @@ class LMCacheWorker:
         self.context = get_zmq_context()
 
         assert config.controller_pull_url is not None
-        assert config.controller_reply_url is not None
 
         controller_pull_url = config.controller_pull_url
-        controller_rep_url = config.controller_reply_url
-
         self.push_socket = get_zmq_socket(
             self.context,
             controller_pull_url,
@@ -87,6 +84,7 @@ class LMCacheWorker:
         )
 
         if config.controller_reply_url is not None:
+            controller_rep_url = config.controller_reply_url
             self.req_socket = get_zmq_socket(
                 self.context,
                 controller_rep_url,

@@ -310,16 +310,33 @@ def main():
     parser.add_argument(
         "--monitor-ports",
         type=json.loads,
-        default={"pull": 9001, "reply": 9002},
+        default=None,
+        help='JSON string of monitor ports, e.g. \'{"pull": 8300, "reply": 8400}\'',
+    )
+    parser.add_argument(
+        "--monitor-port",
+        type=int,
+        default=9001,
+        help="The controller pull port to maintain backward compatibility.",
     )
 
     args = parser.parse_args()
 
     try:
-        controller_urls = {
-            "pull": f"{args.host}:{args.monitor_ports['pull']}",
-            "reply": f"{args.host}:{args.monitor_ports['reply']}",
-        }
+        if args.monitor_ports is not None:
+            controller_urls = {
+                "pull": f"{args.host}:{args.monitor_ports['pull']}",
+                "reply": f"{args.host}:{args.monitor_ports['reply']}",
+            }
+        else:
+            logger.warning(
+                "Argument --monitor-port will be deprecated soon. "
+                "Please use --monitor-ports instead."
+            )
+            controller_urls = {
+                "pull": f"{args.host}:{args.monitor_port}",
+                "reply": None,
+            }
         app = create_app(controller_urls)
 
         logger.info(f"Starting LMCache controller at {args.host}:{args.port}")
