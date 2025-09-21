@@ -327,7 +327,6 @@ class NixlChannel(BaseTransferChannel):
                     time.sleep(0.01)
 
     async def _async_init_loop(self):
-        
         # Initialize initialization side channels
         self.init_side_channel = get_zmq_socket(
             self.zmq_context,
