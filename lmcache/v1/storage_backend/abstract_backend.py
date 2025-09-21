@@ -80,6 +80,17 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
         """
         raise NotImplementedError
 
+    async def async_batched_submit_put_task(
+        self,
+        keys: Sequence[CacheEngineKey],
+        objs: List[MemoryObj],
+        transfer_spec: Any = None,
+    ) -> None:
+        """
+        An async version of batched_submit_put_task.
+        """
+        raise NotImplementedError
+
     @abc.abstractmethod
     def get_blocking(
         self,

@@ -65,18 +65,34 @@ class BatchedLookupAndGetRetMsg(P2PMsgBase):
     num_hit_chunks: int
 
 
+class BatchedLookupAndPutMsg(P2PMsgBase):
+    """Lookup and retrieve message"""
+
+    sender_id: str
+
+    # CacheEngineKey in string form
+    keys: list[str]
+
+    # Number of tokens for each chunk
+    offsets: list[int]
+
+    # Indexes (remote) of allocated memory objects (to be read)
+    mem_indexes: list[int]
+
+
+class BatchedLookupAndPutRetMsg(P2PMsgBase):
+    """Lookup and retrieve message"""
+
+    # Number of read chunks
+    num_read_chunks: int
+
+
 P2PMsg = Union[
     BatchedLookupAndGetMsg,
     BatchedLookupAndGetRetMsg,
+    BatchedLookupAndPutMsg,
+    BatchedLookupAndPutRetMsg,
 ]
-
-# NOTE(Jiayi): Several notes about P2PBackend:
-# 1. Put is not supported for now.
-# 2. Only async contains and async get are supported.
-# 3. Lookup is currently three-tier:
-#    (1) local (local lookup cache) -> remote peer (goto (3) if hit)
-#    (2) controller -> remote peer (goto (3) if hit)
-#    (3) remote peer -> kv and real retrieved lengths
 
 
 # TODO(Jiayi): handle asymmetric TP.
@@ -143,7 +159,7 @@ class P2PBackend(StorageBackendInterface):
         self.running = True
         self.lookup_url_to_socket_mapping: dict[str, zmq.Socket] = {}
         self.lookup_url_to_lock_mapping: dict[str, asyncio.Lock] = {}
-        asyncio.run_coroutine_threadsafe(self._handle_batched_get_non_blocking(), loop)
+        asyncio.run_coroutine_threadsafe(self._handle_peer_requests(), loop)
 
     async def batched_async_contains(
         self,
@@ -182,12 +198,12 @@ class P2PBackend(StorageBackendInterface):
         # TODO(Jiayi): We could potentially update the local cache here.
         # Or we can update after tier 3 lookup.
 
-        # NOTE(Jiayi): Tier 3 lookup is in function
-        # `batched_get_non_blocking`.
+        # NOTE(Jiayi): Tier 3 lookup is batched together with get
+        # in function `batched_get_non_blocking`.
 
         return num_hit_chunks
 
-    async def _handle_batched_get_non_blocking(self):
+    async def _handle_peer_requests(self):
         """
         Handle `BatchedLookupAndGetMsg` issued by peers in `batched_get_non_blocking`.
         """
@@ -207,45 +223,87 @@ class P2PBackend(StorageBackendInterface):
         while self.running:
             msg_bytes = await self.async_peer_socket.recv()
             msg = msgspec.msgpack.decode(msg_bytes, type=P2PMsg)
-            assert isinstance(msg, BatchedLookupAndGetMsg)
 
-            logger.info("Received P2P batched get msg")
+            if isinstance(msg, BatchedLookupAndGetMsg):
+                logger.info("Received P2P batched get msg")
 
-            lookup_id = msg.lookup_id
-            receiver_id = msg.receiver_id
-            remote_mem_indexes = msg.mem_indexes
+                lookup_id = msg.lookup_id
+                receiver_id = msg.receiver_id
+                remote_mem_indexes = msg.mem_indexes
+                keys = [CacheEngineKey.from_string(key) for key in msg.keys]
 
-            keys = [CacheEngineKey.from_string(key) for key in msg.keys]
+                # TODO(Jiayi): Optimally, there's no need to use async call
+                # for some backends (e.g., local cpu) as there's overhead for
+                # async function call.
+                num_hit_chunks = await self.local_cpu_backend.batched_async_contains(
+                    lookup_id=lookup_id,
+                    keys=keys,
+                    pin=True,
+                )
 
-            # TODO(Jiayi): Optimally, there's no need to use async call
-            # for some backends (e.g., local cpu) as there's overhead for
-            # async function call.
-            num_hit_chunks = await self.local_cpu_backend.batched_async_contains(
-                lookup_id=lookup_id,
-                keys=keys,
-                pin=True,
-            )
+                mem_objs = await self.local_cpu_backend.batched_get_non_blocking(
+                    lookup_id=lookup_id,
+                    keys=keys[:num_hit_chunks],
+                )
 
-            mem_objs = await self.local_cpu_backend.batched_get_non_blocking(
-                lookup_id=lookup_id,
-                keys=keys[:num_hit_chunks],
-            )
+                channel_transfer_spec = {
+                    "receiver_id": receiver_id,
+                    "remote_indexes": remote_mem_indexes[:num_hit_chunks],
+                }
+                await self.transfer_channel.async_batched_write(
+                    objects=mem_objs,
+                    transfer_spec=channel_transfer_spec,
+                )
 
-            channel_transfer_spec = {
-                "receiver_id": receiver_id,
-                "remote_indexes": remote_mem_indexes[:num_hit_chunks],
-            }
-            await self.transfer_channel.async_batched_write(
-                objects=mem_objs,
-                transfer_spec=channel_transfer_spec,
-            )
-            ret_msg = BatchedLookupAndGetRetMsg(
-                num_hit_chunks=num_hit_chunks,
-            )
+                ret_msg = BatchedLookupAndGetRetMsg(
+                    num_hit_chunks=num_hit_chunks,
+                )
 
-            for mem_obj in mem_objs:
-                mem_obj.ref_count_down()
-                mem_obj.unpin()
+                for mem_obj in mem_objs:
+                    mem_obj.ref_count_down()
+                    mem_obj.unpin()
+            elif isinstance(msg, BatchedLookupAndPutMsg):
+                logger.info("Received P2P batched put msg")
+
+                lookup_id = msg.lookup_id
+                sender_id = msg.sender_id
+                r_mem_indexes = msg.mem_indexes
+                keys = [CacheEngineKey.from_string(key) for key in msg.keys]
+                offsets = msg.offsets
+
+                # TODO(Jiayi): Need to support more backends
+                r_mem_indexes_to_read = []
+                keys_to_read = []
+                local_mem_objs = []
+                for idx, key in enumerate(keys):
+                    if self.local_cpu_backend.contains(key, pin=True):
+                        continue
+                    r_mem_indexes_to_read.append(r_mem_indexes[idx])
+                    shape = self.full_size_shape.copy()
+                    shape[self.fmt.token_dim()] = offsets[idx]
+                    local_mem_obj = self.local_cpu_backend.allocate(
+                        torch.Size(shape), self.dtype, self.fmt
+                    )
+                    local_mem_objs.append(local_mem_obj)
+                    keys_to_read.append(key)
+
+                channel_transfer_spec = {
+                    "sender_id": sender_id,
+                    "remote_indexes": r_mem_indexes_to_read,
+                }
+                await self.transfer_channel.async_batched_read(
+                    buffers=local_mem_objs,
+                    transfer_spec=channel_transfer_spec,
+                )
+
+                self.local_cpu_backend.batched_submit_put_task(
+                    keys=keys_to_read,
+                    memory_objs=local_mem_objs,
+                )
+
+                ret_msg = BatchedLookupAndPutRetMsg(
+                    num_hit_chunks=len(local_mem_objs),
+                )
 
             await self.async_peer_socket.send(msgspec.msgpack.encode(ret_msg))
 
@@ -332,6 +390,44 @@ class P2PBackend(StorageBackendInterface):
             missed_mem_obj.ref_count_down()
         return hit_mem_objs
 
+    # NOTE: put-related functions are not supported for now.
+    async def async_batched_submit_put_task(
+        self,
+        keys: Sequence[CacheEngineKey],
+        objs: List[MemoryObj],
+        transfer_spec: Any = None,
+    ) -> None:
+        # Code path for `move` operation in controller.
+        assert isinstance(transfer_spec, dict)
+        assert "peer_init_url" in transfer_spec
+        assert "offsets" in transfer_spec
+
+        peer_init_url = transfer_spec["peer_init_url"]
+        offsets = transfer_spec["offsets"]
+
+        await self._ensure_peer_connection(transfer_spec["peer_init_url"])
+
+        str_keys = [key.to_string() for key in keys]
+        local_indexes = self.transfer_channel.get_local_mem_indices(objs)
+
+        msg = BatchedLookupAndPutMsg(
+            sender_id=self.peer_init_url,
+            keys=str_keys,
+            offsets=offsets,
+            mem_indexes=local_indexes,
+        )
+
+        peer_lookup_url = self.peer_id_to_lookup_url_mapping[peer_init_url]
+        lookup_socket = self.lookup_url_to_socket_mapping[peer_lookup_url]
+        lookup_lock = self.lookup_url_to_lock_mapping[peer_lookup_url]
+
+        async with lookup_lock:
+            await lookup_socket.send(msgspec.msgpack.encode(msg))
+            ret_msg_bytes = await lookup_socket.recv()
+        ret_msg = msgspec.msgpack.decode(ret_msg_bytes, type=P2PMsg)
+
+        return ret_msg.num_read_chunks
+
     def get_allocator_backend(self):
         return self.local_cpu_backend
 
@@ -355,7 +451,6 @@ class P2PBackend(StorageBackendInterface):
     def exists_in_put_tasks(self, key: CacheEngineKey) -> bool:
         raise NotImplementedError
 
-    # NOTE: put-related functions are not supported for now.
     def batched_submit_put_task(
         self,
         keys: Sequence[CacheEngineKey],

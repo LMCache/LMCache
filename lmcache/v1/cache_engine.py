@@ -735,58 +735,55 @@ class LMCacheEngine:
         """
         Perform cross-node move of the KV cache.
         """
-        return 0
-        # assert self.distributed_server is not None, (
-        #     "Distributed server should be initialized for move operation"
-        # )
 
-        # num_tokens = self.lookup(
-        #     tokens,
-        #     search_range=old_position,
-        #     lookup_id=event_id,
-        #     pin=True,
-        # )
+        num_tokens = self.lookup(
+            tokens,
+            search_range=old_position,
+            lookup_id=event_id,
+            pin=True,
+        )
 
-        # if not num_tokens:
-        #     logger.debug("Move is not performed as there are no tokens to move.")
-        #     return 0
+        if not num_tokens:
+            logger.debug("Move is not performed as there are no tokens to move.")
+            return 0
 
-        # keys = self.lookup_pins[event_id]
+        keys = self.lookup_pins[event_id]
 
-        # memory_objs = self.storage_manager.batched_get(
-        #     keys=keys,
-        #     location=old_position,
-        # )
-        # assert memory_objs is not None, "Failed to get memory objects to move"
-        # logger.debug(
-        #     f"Trying to send {len(memory_objs)} memory objects to {new_position}"
-        # )
+        memory_objs = self.storage_manager.batched_get(
+            keys=keys,
+            location=old_position,
+        )
+        assert memory_objs is not None, "Failed to get memory objects to move"
+        logger.debug(
+            f"Trying to send {len(memory_objs)} memory objects to {new_position}"
+        )
 
-        # future = asyncio.run_coroutine_threadsafe(
-        #     self.distributed_server.batched_issue_put(
-        #         keys,
-        #         memory_objs,  # type: ignore
-        #         new_position[0],
-        #         new_position[1],
-        #     ),
-        #     self.distributed_loop,
-        # )
+        # TODO: reduce loops
+        token_dim = memory_objs[0].fmt.token_dim()  # type: ignore
+        offsets = [m.shape[token_dim] for m in memory_objs]  # type: ignore
 
-        # future.add_done_callback(
-        #     lambda f: [m.unpin() for m in memory_objs]  # type: ignore
-        # )
+        transfer_spec = {
+            "peer_init_url": new_position[0],
+            "offsets": offsets,
+        }
 
-        # if not do_copy:
-        #     remove_callback = lambda f: self.storage_manager.batched_remove(
-        #         keys, locations=[old_position]
-        #     )
-        #     future.add_done_callback(remove_callback)
+        future = asyncio.run_coroutine_threadsafe(
+            self.storage_manager.batched_put(
+                keys,
+                memory_objs,  # type: ignore
+                transfer_spec=transfer_spec,
+                location="P2PBackend",
+            ),
+            self.storage_manager.loop,
+        )
 
-        # future.result()
+        future.result()
 
-        # logger.debug(f"Moving {num_tokens} token from
-        #  {old_position} to {new_position}")
-        # return num_tokens
+        if not do_copy:
+            self.storage_manager.batched_remove(keys, locations=[old_position])
+
+        logger.debug(f"Moving {num_tokens} token from {old_position} to {new_position}")
+        return num_tokens
 
     # TODO(Jiayi): Add layerwise support.
     @_lmcache_nvtx_annotate

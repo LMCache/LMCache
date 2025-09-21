@@ -218,12 +218,11 @@ class StorageManager:
 
         memory_obj.ref_count_down()
 
-    # TODO(Jiayi): location and transfer_spec might be redundant
     def batched_put(
         self,
         keys: Sequence[CacheEngineKey],
         memory_objs: List[MemoryObj],
-        transfer_spec=None,  # TODO(Jiayi): add type check
+        transfer_spec=None,
         location: Optional[str] = None,
     ) -> None:
         """

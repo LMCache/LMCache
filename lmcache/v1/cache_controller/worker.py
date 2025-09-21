@@ -266,7 +266,9 @@ class LMCacheWorker:
                             "Prefetch from controller is not implemented yet."
                         )
                     else:
-                        assert self.lmcache_engine.distributed_server is not None
+                        assert new_position[1] == "cpu", (
+                            "Only support moving to cpu for now."
+                        )
                         logger.debug("Executing cross-node move operation.")
                         num_tokens = self.lmcache_engine.move(
                             tokens=tokens,
