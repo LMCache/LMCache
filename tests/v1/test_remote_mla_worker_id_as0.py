@@ -92,7 +92,6 @@ def test_remote_mla_worker_id_as0(mock_stream):
         metadata=metadata,
         loop=loop,
         local_cpu_backend=local_cpu_backend,
-        lookup_server=None,
     )
     backend.connection = MockConnector()
 
@@ -114,7 +113,6 @@ def test_remote_mla_worker_id_as0(mock_stream):
         metadata=metadata0,
         loop=loop,
         local_cpu_backend=local_cpu_backend,
-        lookup_server=None,
     )
     backend0.connection = backend.connection
     # Create key
