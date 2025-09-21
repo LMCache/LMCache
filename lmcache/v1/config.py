@@ -332,11 +332,6 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "env_converter": _to_str_list,
     },
     # Lookup client configurations
-    "lookup_max_retries": {
-        "type": int,
-        "default": 3,
-        "env_converter": int,
-    },
     "lookup_timeout_ms": {
         "type": int,
         "default": 3000,
