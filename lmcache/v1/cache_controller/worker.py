@@ -256,8 +256,8 @@ class LMCacheWorker:
                     if new_position[0] == self.lmcache_worker_internal_url:
                         # TODO(Jiayi): currently we only support moving from
                         # local disk to local cpu.
-                        assert old_position[1] == "disk"
-                        assert new_position[1] == "cpu"
+                        assert old_position[1] == "LocalDiskBackend"
+                        assert new_position[1] == "LocalCPUBackend"
                         assert do_copy
 
                         # TODO(Jiayi): We need to align prefetch and move.
@@ -266,7 +266,7 @@ class LMCacheWorker:
                             "Prefetch from controller is not implemented yet."
                         )
                     else:
-                        assert new_position[1] == "cpu", (
+                        assert new_position[1] == "LocalCPUBackend", (
                             "Only support moving to cpu for now."
                         )
                         logger.debug("Executing cross-node move operation.")

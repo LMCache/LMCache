@@ -161,6 +161,9 @@ class P2PBackend(StorageBackendInterface):
         self.lookup_url_to_lock_mapping: dict[str, asyncio.Lock] = {}
         asyncio.run_coroutine_threadsafe(self._handle_peer_requests(), loop)
 
+    def __str__(self) -> str:
+        return "P2PBackend"
+
     async def batched_async_contains(
         self,
         lookup_id: str,
@@ -265,18 +268,17 @@ class P2PBackend(StorageBackendInterface):
             elif isinstance(msg, BatchedLookupAndPutMsg):
                 logger.info("Received P2P batched put msg")
 
-                lookup_id = msg.lookup_id
                 sender_id = msg.sender_id
                 r_mem_indexes = msg.mem_indexes
                 keys = [CacheEngineKey.from_string(key) for key in msg.keys]
                 offsets = msg.offsets
 
-                # TODO(Jiayi): Need to support more backends
+                # TODO(Jiayi): Need to support more backend
                 r_mem_indexes_to_read = []
                 keys_to_read = []
                 local_mem_objs = []
                 for idx, key in enumerate(keys):
-                    if self.local_cpu_backend.contains(key, pin=True):
+                    if self.local_cpu_backend.contains(key, pin=False):
                         continue
                     r_mem_indexes_to_read.append(r_mem_indexes[idx])
                     shape = self.full_size_shape.copy()
@@ -302,7 +304,7 @@ class P2PBackend(StorageBackendInterface):
                 )
 
                 ret_msg = BatchedLookupAndPutRetMsg(
-                    num_hit_chunks=len(local_mem_objs),
+                    num_read_chunks=len(local_mem_objs),
                 )
 
             await self.async_peer_socket.send(msgspec.msgpack.encode(ret_msg))
@@ -445,7 +447,7 @@ class P2PBackend(StorageBackendInterface):
 
     # NOTE: synchronous contain is not supported for now.
     def contains(self, key: CacheEngineKey, pin: bool = False) -> bool:
-        raise NotImplementedError
+        return False
 
     # NOTE: put-related functions are not supported for now.
     def exists_in_put_tasks(self, key: CacheEngineKey) -> bool:

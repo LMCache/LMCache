@@ -517,7 +517,34 @@ class NixlChannel(BaseTransferChannel):
 
         :return: True if the send operation is successful.
         """
-        raise NotImplementedError
+
+        assert transfer_spec is not None
+
+        handle = self.nixl_agent.make_prepped_xfer(
+            "READ",
+            self.nixl_wrapper.xfer_handler,
+            self.get_local_mem_indices(buffers),
+            self.remote_xfer_handlers_dict[transfer_spec["sender_id"]],
+            transfer_spec["remote_indexes"],
+        )
+        self.nixl_agent.transfer(handle)
+
+        # TODO(Jiayi) tune hyperparameters
+        wait_time = 0.001
+        while True:
+            status = self.nixl_agent.check_xfer_state(handle)
+            logger.debug(f"Transfer status: {status}")
+
+            if status == "ERR":
+                logger.error("Error in send operation")
+                raise RuntimeError("Failed to send objects to remote peer")
+            elif status == "PROC":
+                await asyncio.sleep(wait_time)  # Avoid busy waiting
+                continue
+            assert status == "DONE", f"Transfer status is {status}, expected DONE"
+            # self._proxy_side_channel.send(notif_msg_bytes)
+            break
+        return len(buffers)
 
     ############################################################
     # Cleanup-related functions

@@ -759,20 +759,22 @@ class LMCacheEngine:
         )
 
         # TODO: reduce loops
-        token_dim = memory_objs[0].fmt.token_dim()  # type: ignore
-        offsets = [m.shape[token_dim] for m in memory_objs]  # type: ignore
+        token_dim = memory_objs[0].meta.fmt.token_dim()  # type: ignore
+        offsets = [m.meta.shape[token_dim] for m in memory_objs]  # type: ignore
 
         transfer_spec = {
             "peer_init_url": new_position[0],
             "offsets": offsets,
         }
 
+        logger.info(self.storage_manager.storage_backends)
+        p2p_backend = self.storage_manager.storage_backends["P2PBackend"]
+
         future = asyncio.run_coroutine_threadsafe(
-            self.storage_manager.batched_put(
+            p2p_backend.async_batched_submit_put_task(
                 keys,
                 memory_objs,  # type: ignore
                 transfer_spec=transfer_spec,
-                location="P2PBackend",
             ),
             self.storage_manager.loop,
         )
