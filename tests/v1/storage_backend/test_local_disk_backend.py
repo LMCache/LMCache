@@ -133,12 +133,17 @@ def local_cpu_backend(memory_allocator):
 def local_disk_backend(temp_disk_path, async_loop, local_cpu_backend):
     """Create a LocalDiskBackend for testing."""
     config = create_test_config(temp_disk_path)
-    return LocalDiskBackend(
+    backend = LocalDiskBackend(
         config=config,
         loop=async_loop,
         local_cpu_backend=local_cpu_backend,
         dst_device="cuda",
     )
+
+    try:
+        yield backend
+    finally:
+        backend.close()
 
 
 class TestLocalDiskBackend:
@@ -154,16 +159,18 @@ class TestLocalDiskBackend:
             dst_device="cuda",
         )
 
-        assert backend.dst_device == "cuda"
-        assert backend.local_cpu_backend == local_cpu_backend
-        assert backend.path == temp_disk_path
-        assert os.path.exists(temp_disk_path)
-        assert backend.lmcache_worker is None
-        assert backend.instance_id == "test_instance"
-        assert backend.usage == 0
-        assert len(backend.dict) == 0
-
-        local_cpu_backend.memory_allocator.close()
+        try:
+            assert backend.dst_device == "cuda"
+            assert backend.local_cpu_backend == local_cpu_backend
+            assert backend.path == temp_disk_path
+            assert os.path.exists(temp_disk_path)
+            assert backend.lmcache_worker is None
+            assert backend.instance_id == "test_instance"
+            assert backend.usage == 0
+            assert len(backend.dict) == 0
+        finally:
+            backend.close()
+            local_cpu_backend.memory_allocator.close()
 
     def test_init_with_lookup_server_and_worker(
         self, temp_disk_path, async_loop, local_cpu_backend
@@ -180,9 +187,11 @@ class TestLocalDiskBackend:
             lmcache_worker=lmcache_worker,
         )
 
-        assert backend.lmcache_worker == lmcache_worker
-
-        local_cpu_backend.memory_allocator.close()
+        try:
+            assert backend.lmcache_worker == lmcache_worker
+        finally:
+            backend.close()
+            local_cpu_backend.memory_allocator.close()
 
     def test_str(self, local_disk_backend):
         """Test string representation."""
