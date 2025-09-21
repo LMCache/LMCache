@@ -351,7 +351,7 @@ class StorageManager:
         self,
         task: asyncio.Future,
         lookup_id: str,
-        retrieved_length: int,
+        cum_last_tier_chunk_lengths: list[int],
     ) -> None:
         """
         Callback function when all prefetch tasks
@@ -361,6 +361,9 @@ class StorageManager:
         self.event_manager.update_event_status(
             EventType.LOADING, lookup_id, status=EventStatus.DONE
         )
+        res = task.result()
+        last_tier_retrieved_chunks = len(res[-1])
+        retrieved_length = cum_last_tier_chunk_lengths[last_tier_retrieved_chunks]
         logger.info(
             f"Responding to scheduler for lookup id {lookup_id}"
             f" with retrieved length {retrieved_length}"
@@ -395,10 +398,13 @@ class StorageManager:
         # TODO(Jiayi): We need to change/optimize this for non-prefix
         # based retrieval patterns or cases where middle chunks are missing.
 
-        # FIXME: Handle the last backend
+        # NOTE(Jiayi): We can tolerate the last tier to have fewer loaded
+        # chunks than its lookup result indicated. This is especially helpful
+        # for P2PBackend.
 
         num_total_chunks = len(keys)
         num_total_hit_chunks = 0
+        cum_chunk_lengths_total = cum_chunk_lengths[:]
         loading_tasks = []
         for backend_name, backend in self.storage_backends.items():
             if search_range and backend_name not in search_range:
@@ -448,7 +454,9 @@ class StorageManager:
         )
         all_done.add_done_callback(
             lambda future: self.prefetch_all_done_callback(
-                future, lookup_id, cum_chunk_lengths[0]
+                future,
+                lookup_id,
+                cum_chunk_lengths_total[num_total_hit_chunks - num_hit_chunks :],
             )
         )
 

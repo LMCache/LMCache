@@ -123,6 +123,8 @@ class P2PBackend(StorageBackendInterface):
         self.peer_lookup_port = config.p2p_lookup_ports[self.tp_rank]
         self.peer_lookup_url = f"{self.peer_host}:{self.peer_lookup_port}"
 
+        self.lmcache_instance_id = config.lmcache_instance_id
+
         # A CacheEngineKey (in int form) -> a list of
         # (peer_init_url, peer_lookup_url, location)
         self.local_lookup_cache: dict[int, tuple[str, str, str]] = {}
@@ -178,6 +180,7 @@ class P2PBackend(StorageBackendInterface):
 
         # Tier 2 lookup in controller
         msg = BatchedP2PLookupMsg(
+            instance_id=self.lmcache_instance_id,
             worker_id=self.tp_rank,
             hashes=hashes,
         )

@@ -181,6 +181,7 @@ class KVController:
         """
 
         worker_id = msg.worker_id
+        query_instance_id = msg.instance_id
         num_hit_chunks = 0
         instance_id = ""
         location = ""
@@ -190,16 +191,35 @@ class KVController:
             if key not in self.kv_pool:
                 break
 
-            # TODO(Jiayi): Currently, we use the first rank's
+            # TODO(Jiayi): Currently, we use the first matched
             # kv chunk metadata to do matching. The matching
             # logic can be improved.
+            # TODO(Jiayi): The KV Cache could be from different
+            # instances. We need to handle this case as well.
+            matched_kv_chunk_meta = None
+            for kv_chunk_meta in self.kv_pool[key]:
+                if kv_chunk_meta.instance_id != query_instance_id:
+                    # Found a matching instance_id that's not the
+                    # same as the query_instance_id.
+                    matched_kv_chunk_meta = kv_chunk_meta
+                    break
 
-            first_rank_kv_chunk_meta = self.kv_pool[key][0]
-            instance_id = first_rank_kv_chunk_meta.instance_id
-            location = first_rank_kv_chunk_meta.location
-            peer_init_url = self.reg_controller.get_distributed_url(
-                instance_id, worker_id
-            )
+            if matched_kv_chunk_meta is None:
+                break
+            if (
+                instance_id != ""
+                and instance_id != matched_kv_chunk_meta.instance_id
+                or location != matched_kv_chunk_meta.location
+            ):
+                # We have already found a different instance_id
+                # before. Stop here.
+                break
+            elif instance_id == "":
+                instance_id = matched_kv_chunk_meta.instance_id
+                location = matched_kv_chunk_meta.location
+                peer_init_url = self.reg_controller.get_distributed_url(
+                    instance_id, worker_id
+                )
             num_hit_chunks += 1
 
         return BatchedP2PLookupRetMsg(

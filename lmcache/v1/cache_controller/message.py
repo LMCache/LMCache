@@ -110,12 +110,14 @@ class BatchedP2PLookupMsg(WorkerReqMsg):
     """Batched P2P lookup message"""
 
     hashes: list[int]
+    instance_id: str
     worker_id: int  # TP rank
 
     def describe(self) -> str:
         return (
-            f"Batched P2P lookup for {len(self.hashes)} keys, w"
-            "orker id {self.worker_id}"
+            f"Batched P2P lookup for {len(self.hashes)} keys from "
+            f"instance id {self.instance_id} and "
+            f"worker id {self.worker_id}"
         )
 
 
