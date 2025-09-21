@@ -216,7 +216,7 @@ Configuration
 Additional Resources
 --------------------
 
-- `Mooncake Store Architecture <https://github.com/kvcache-ai/Mooncake/blob/main/doc/en/mooncake-store-preview.md>`_
+- `Mooncake Store Architecture <https://github.com/kvcache-ai/Mooncake/blob/main/doc/en/mooncake-store.md>`_
 - `Transfer Engine Documentation <https://github.com/kvcache-ai/Mooncake/blob/main/doc/en/transfer-engine.md>`_
 - `Build Instructions <https://github.com/kvcache-ai/Mooncake/blob/main/doc/en/build.md>`_
 - `GitHub Repository <https://github.com/kvcache-ai/Mooncake>`_
