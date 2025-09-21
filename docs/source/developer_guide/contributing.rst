@@ -90,7 +90,7 @@ The following prerequisites are required:
 The following tools are required:
 
 - `git <https://git-scm.com>`_
-- `python <https://www.python.org>`_ (v3.9 -- v3.13)
+- `python <https://www.python.org>`_ (v3.10 -- v3.13)
 - `pip <https://pypi.org/project/pip/>`_ (v23.0+)
 
 The first step is to install the necessary Python packages required for development. The commands to do this are as follows:

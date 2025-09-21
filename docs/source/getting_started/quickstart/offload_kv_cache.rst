@@ -16,7 +16,6 @@ Before you begin, make sure you have:
 
 - vLLM v1 with LMCache installed (see :doc:`Installation <../installation>`)
 - A GPU that can run a LLM
-- `Logged into HuggingFace <https://huggingface.co/docs/huggingface_hub/en/guides/cli#huggingface-cli-login>`_ using a token with gated access permission (required for model downloads)
 
 
 Use CPU offloading in offline inference
@@ -54,7 +53,7 @@ Next, configure vLLM with LMCache integration:
 
     # Initialize LLM with LMCache configuration
     # Adjust gpu_memory_utilization based on your GPU memory
-    llm = LLM(model="meta-llama/Meta-Llama-3.1-8B-Instruct",
+    llm = LLM(model="Qwen/Qwen3-8B",
               kv_transfer_config=ktc,
               max_model_len=8000,
               gpu_memory_utilization=0.8)
@@ -100,26 +99,17 @@ This indicates that the KV cache has been successfully offloaded to CPU memory.
 Use CPU offloading in online inference
 --------------------------------------
 
-This section demonstrates how to use CPU memory offloading in online serving scenarios. The setup involves two main steps: creating a configuration file and launching the vLLM server.
+This section demonstrates how to use CPU memory offloading in online serving scenarios. 
 
-First, create a configuration file named ``lmcache_config.yaml`` with the following content:
+.. note::
+    LMCache supports extensive configuration through a ``lmcache_config.yaml`` file where you can customize chunk sizes, memory limits, storage backends, and more. We'll cover advanced configuration options in later examples. For now, let's run a minimal example with default configuration.
 
-.. code-block:: yaml
-
-    # Basic configurations
-    chunk_size: 256
-    
-    # CPU offloading configurations
-    local_cpu: true
-    max_local_cpu_size: 5.0  # 5GB CPU memory limit
-    
-Next, launch the vLLM server with LMCache integration. Here's an example command:
+Launch the vLLM server with LMCache integration using environment variables. Here's an example command:
 
 .. code-block:: bash
 
-    LMCACHE_CONFIG_FILE=/path/to/lmcache_config.yaml \
     vllm serve \
-        meta-llama/Llama-3.1-8B-Instruct \
+        Qwen/Qwen3-8B \
         --kv-transfer-config \
         '{"kv_connector":"LMCacheConnectorV1",
           "kv_role":"kv_both"
@@ -139,8 +129,8 @@ Once the server is running, you can send requests to it using curl. Here's an ex
     curl http://localhost:8000/v1/completions \
       -H "Content-Type: application/json" \
       -d '{
-        "model": "meta-llama/Llama-3.1-8B-Instruct",
-        "prompt": "<|begin_of_text|><|system|>\nYou are a helpful AI assistant.\n<|user|>\nWhat is the capital of France?\n<|assistant|>",
+        "model": "Qwen/Qwen3-8B",
+        "prompt": "<|im_start|>system\nYou are a helpful AI assistant.<|im_end|>\n<|im_start|>user\nWhat is the capital of France?<|im_end|>\n<|im_start|>assistant\n",
         "max_tokens": 100,
         "temperature": 0.7
       }'
@@ -169,7 +159,6 @@ Prerequisites (Setup)
 ~~~~~~~~~~~~~~~~~~~~~~
 
 - At least 24GB GPU memory
-- Access to model ``meta-llama/Meta-Llama-3.1-8B-Instruct``
 - Sufficient CPU memory (LMCache will use 15 GB by default in this example).
 
 Example script
@@ -261,7 +250,7 @@ Save the following script as ``cpu-offloading.py``:
         
         return prompts
 
-    def initialize_llm(model_name="meta-llama/Meta-Llama-3.1-8B-Instruct", max_len=16384, enable_lmcache=True):
+    def initialize_llm(model_name="Qwen/Qwen3-8B", max_len=16384, enable_lmcache=True):
         """
         Initialize the LLM with appropriate configurations.
         Args:

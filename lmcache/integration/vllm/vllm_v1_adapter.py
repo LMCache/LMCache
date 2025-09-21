@@ -603,7 +603,8 @@ class LMCacheConnectorV1Impl:
                 get_tensor_model_parallel_rank(),
             )
 
-            if self.async_loading:
+            # In case of MLA, the lookup server is only created on worker 0
+            if self.async_loading and self.lookup_server is not None:
                 assert isinstance(self.lookup_server, LMCacheAsyncLookupServer)
                 self.lmcache_engine.post_init(async_lookup_server=self.lookup_server)
 

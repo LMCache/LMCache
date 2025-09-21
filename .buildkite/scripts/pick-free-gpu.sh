@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 
-# Usage: source pick-free-gpu.sh <MIN_FREE_MEM_MB>
+# Usage: source pick-free-gpu.sh <MIN_FREE_MEM_MB> <GPU_COUNT>
+# Selects the specified number of best available GPUs
 MIN_FREE_MEM="${1:-10000}"    # in MiB (default: 10 GB)
+REQUESTED_GPU_COUNT="${2:-1}" # number of GPUs to select (default: 1)
 MAX_UTIL=20                   # hardcoded utilization threshold (%)
 GPU_LIMIT=4                   # reserves GPU 0-3 for CI/Build
 # 30 minutes
@@ -34,14 +36,25 @@ while true; do
   )
 
   if [ "${#candidates[@]}" -gt 0 ]; then
-    # select the GPU with the maximum free memory
-    IFS=',' read -r _ _ chosen_gpu <<< "$(
+    # select the top N GPUs with the maximum free memory
+    mapfile -t top_gpus < <(
       printf "%s\n" "${candidates[@]}" \
         | sort -t',' -k1,1 -nr \
-        | head -n1
-    )"
-    export CUDA_VISIBLE_DEVICES="${chosen_gpu}"
-    echo "✅ Selected GPU #${chosen_gpu} (CUDA_VISIBLE_DEVICES=${chosen_gpu})"
+        | head -n"${REQUESTED_GPU_COUNT}" \
+        | awk -F',' '{print $3}'
+    )
+    
+    if [ "${#top_gpus[@]}" -eq 1 ]; then
+      # Only one GPU found/requested
+      export CUDA_VISIBLE_DEVICES="${top_gpus[0]}"
+      echo "✅ Selected GPU #${top_gpus[0]} (CUDA_VISIBLE_DEVICES=${top_gpus[0]})"
+    else
+      # Multiple GPUs found/requested
+      chosen_gpus=$(IFS=','; echo "${top_gpus[*]}")
+      export CUDA_VISIBLE_DEVICES="${chosen_gpus}"
+      gpu_list=$(printf "#%s," "${top_gpus[@]}")
+      echo "✅ Selected GPUs ${gpu_list%,} (CUDA_VISIBLE_DEVICES=${chosen_gpus})"
+    fi
     break
   fi
 

@@ -87,7 +87,8 @@ Settings related to cache blending functionality.
 
 .. note::
 
-    Cache blending is not supported in the latest version. We are working on it and will add it back soon.
+    We have an end-to-end `example <https://github.com/LMCache/LMCache/tree/dev/examples/blend_kv_v1>`_.
+    We also have more :doc:`detailed documentation <../kv_cache_optimizations/blending>`.
 
 .. list-table::
    :header-rows: 1
@@ -99,12 +100,12 @@ Settings related to cache blending functionality.
    * - enable_blending
      - LMCACHE_ENABLE_BLENDING
      - Whether to enable blending. Values: true/false. Default: false
-   * - blend_recompute_ratio
-     - LMCACHE_BLEND_RECOMPUTE_RATIO
+   * - blend_recompute_ratios
+     - LMCACHE_BLEND_RECOMPUTE_RATIOS
      - Ratio of blending recompute. Default: 0.15
-   * - blend_min_tokens
-     - LMCACHE_BLEND_MIN_TOKENS
-     - Minimum number of tokens for blending. Default: 256
+   * - blend_check_layers
+     - LMCACHE_BLEND_CHECK_LAYERS
+     - Layers to determine the recomputed tokens. Default: 1
    * - blend_special_str
      - LMCACHE_BLEND_SPECIAL_STR
      - Separator string for blending. Default: " # # "

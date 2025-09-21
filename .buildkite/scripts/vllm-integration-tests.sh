@@ -111,16 +111,18 @@ run_lmcache_vllmopenai_container() {
     local cfg_name="$3"
     LOGFILE="/tmp/build_${BUILD_ID}_${cfg_name}.log"
 
-    # Pick the GPU with the largest free memory
-    source "$ORIG_DIR/.buildkite/scripts/pick-free-gpu.sh" ""
+    # Pick the GPUs based on config
+    gpu_count=$(yq -r '.docker.gpu_count // 1' "$cfg_file")
+    source "$ORIG_DIR/.buildkite/scripts/pick-free-gpu.sh" "" "$gpu_count"
     best_gpu="${CUDA_VISIBLE_DEVICES}"
 
     # docker args
     docker_args=(
         --runtime nvidia
         --network host
-        --gpus "device=${best_gpu}"
+        --gpus "\"device=${best_gpu}\""
         --volume ~/.cache/huggingface:/root/.cache/huggingface
+        --volume "${CONFIG_DIR}/lmcache_configs:/etc/lmcache:ro"
         --env VLLM_USE_FLASHINFER_SAMPLER=0
         --env HF_TOKEN="$HF_TOKEN"
     )

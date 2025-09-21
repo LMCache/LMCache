@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from pathlib import Path
-from typing import List, Optional, no_type_check
+from typing import List, Optional, Tuple, no_type_check
 import asyncio
 import os
 
@@ -35,6 +35,7 @@ class FSConnector(RemoteConnector):
         base_paths_str: str,
         loop: asyncio.AbstractEventLoop,
         local_cpu_backend: LocalCPUBackend,
+        relative_tmp_dir: Optional[str],
     ):
         """
         Args:
@@ -51,15 +52,24 @@ class FSConnector(RemoteConnector):
 
         self.loop = loop
         self.local_cpu_backend = local_cpu_backend
+        self.relative_tmp_dir = (
+            None if relative_tmp_dir is None else Path(relative_tmp_dir)
+        )
+        if self.relative_tmp_dir is not None:
+            assert not self.relative_tmp_dir.is_absolute()
 
-        logger.info(f"Initialized FSConnector with base paths {self.base_paths}")
+        logger.info(
+            f"Initialized FSConnector with base paths {self.base_paths}, "
+            f"relative tmp dir: {self.relative_tmp_dir}"
+        )
         # Create directories for all paths
         for path in self.base_paths:
             path.mkdir(parents=True, exist_ok=True)
+            if self.relative_tmp_dir is not None:
+                (path / self.relative_tmp_dir).mkdir(parents=False, exist_ok=True)
 
-    def _get_file_path(self, key: CacheEngineKey) -> Path:
-        """Get file path for the given key"""
-        # If there's only one path, use it directly
+    def _get_base_path(self, key: CacheEngineKey) -> Path:
+        """Get file base path for the given key"""
         if len(self.base_paths) == 1:
             base_path = self.base_paths[0]
         else:
@@ -68,8 +78,27 @@ class FSConnector(RemoteConnector):
             idx = hash_val % len(self.base_paths)
             base_path = self.base_paths[idx]
 
-        key_path = key.to_string().replace("/", "-") + ".data"
-        return base_path / key_path
+        return base_path
+
+    def _get_file_name(self, key: CacheEngineKey) -> str:
+        return key.to_string().replace("/", "-") + ".data"
+
+    def _get_file_path(self, key: CacheEngineKey) -> Path:
+        """Get file path for the given key"""
+        base_path = self._get_base_path(key)
+        file_name = self._get_file_name(key)
+        return base_path / file_name
+
+    def _get_file_and_tmp_path(self, key: CacheEngineKey) -> Tuple[Path, Path]:
+        """Get file and tmp path for the given key"""
+        base_path = self._get_base_path(key)
+        file_name = self._get_file_name(key)
+        file_path = base_path / file_name
+        if self.relative_tmp_dir is not None:
+            tmp_path = base_path / self.relative_tmp_dir / file_name
+        else:
+            tmp_path = file_path.with_suffix(".tmp")
+        return file_path, tmp_path
 
     async def exists(self, key: CacheEngineKey) -> bool:
         """Check if key exists in file system"""
@@ -134,8 +163,7 @@ class FSConnector(RemoteConnector):
 
     async def put(self, key: CacheEngineKey, memory_obj: MemoryObj):
         """Store data to file system"""
-        final_path = self._get_file_path(key)
-        temp_path = final_path.with_suffix(".tmp")
+        final_path, temp_path = self._get_file_and_tmp_path(key)
 
         try:
             # Prepare metadata

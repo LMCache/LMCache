@@ -648,7 +648,7 @@ class GdsBackend(AllocatorBackendInterface):
                 fd,
                 file_size,
                 prot=mmap.PROT_READ,
-                flags=mmap.MAP_PRIVATE | mmap.MAP_POPULATE,
+                flags=mmap.MAP_PRIVATE | mmap.MAP_POPULATE,  # type: ignore [attr-defined]
             )
             os.close(fd)
 

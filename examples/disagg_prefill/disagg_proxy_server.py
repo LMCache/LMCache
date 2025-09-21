@@ -72,7 +72,7 @@ async def lifespan(app: FastAPI):
             raise ValueError(
                 "Length mismatch between hosts and ports lists for pairing"
             )
-        return list(zip(hosts, ports))
+        return list(zip(hosts, ports, strict=False))
 
     prefill_pairs = pair_hosts_and_ports(
         pref_hosts, pref_ports, global_args.num_prefillers
