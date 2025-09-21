@@ -24,7 +24,6 @@ Start vllm engine 2 at port 8011:
 ```bash
 PYTHONHASHSEED=123 UCX_TLS=rc CUDA_VISIBLE_DEVICES=1 LMCACHE_CONFIG_FILE=example2.yaml vllm serve meta-llama/Meta-Llama-3.1-8B-Instruct  --gpu-memory-utilization 0.8 --port 8011 --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1", "kv_role":"kv_both"}'  
 ```
-Note that the two p2p initialization ports will start at port 8200 and 8201.
 
 
 3. Send request to vllm engine 1:  
