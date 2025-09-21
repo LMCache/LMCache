@@ -33,7 +33,6 @@ from lmcache.v1.gpu_connector import (
     VLLMBufferLayerwiseGPUConnector,
     VLLMPagedMemLayerwiseGPUConnector,
 )
-from lmcache.v1.lookup_server import LookupServerInterface
 from lmcache.v1.memory_management import CuFileMemoryAllocator  # noqa: E501
 from lmcache.v1.memory_management import (  # noqa: E501
     MemoryAllocatorInterface,
@@ -103,8 +102,6 @@ class LMCacheEngine:
         # NOTE: Unix systems use fork by default
         multiprocessing.set_start_method("spawn", force=True)
 
-        self.lookup_server: Optional[LookupServerInterface] = None
-
         # avoid circular import
         # First Party
         from lmcache.v1.cache_controller import LMCacheWorker
@@ -122,7 +119,6 @@ class LMCacheEngine:
             # self.memory_allocator,
             event_manager=self.event_manager,
             lmcache_worker=self.lmcache_worker,
-            lookup_server=self.lookup_server,
         )
 
         # HACK: remove this in the future

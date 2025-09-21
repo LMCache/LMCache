@@ -20,7 +20,6 @@ from lmcache.utils import (
 )
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.event_manager import EventManager, EventStatus, EventType
-from lmcache.v1.lookup_server import LookupServerInterface
 from lmcache.v1.memory_management import (
     MemoryFormat,
     MemoryObj,
@@ -31,7 +30,6 @@ from lmcache.v1.storage_backend.abstract_backend import (
     StorageBackendInterface,
 )
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
-from lmcache.v1.storage_backend.storage_backend_listener import StorageBackendListener
 
 if TYPE_CHECKING:
     # First Party
@@ -100,41 +98,12 @@ class StorageManager:
     The StorageManager is responsible for managing the storage backends.
     """
 
-    class _CPUDiskListener(StorageBackendListener):
-        def __init__(self, storage_manager: "StorageManager"):
-            self.storage_manager = storage_manager
-
-        def on_evict(
-            self, backend: StorageBackendInterface, keys: List[CacheEngineKey]
-        ):
-            """
-            remove keys from lookup server only if they don't exist in local backends.
-
-            :param StorageBackendInterface backend: The backend that evicted the keys.
-            :param List[CacheEngineKey] keys: The keys that were evicted.
-            """
-            if self.storage_manager.lookup_server is None:
-                return
-
-            search_range = ["LocalCPUBackend", "LocalDiskBackend"]
-            if str(backend) in search_range:
-                search_range.remove(str(backend))
-
-            keys_to_remove = []
-            for key in keys:
-                if not self.storage_manager.contains(key, search_range=search_range):
-                    keys_to_remove.append(key)
-
-            if keys_to_remove:
-                self.storage_manager.lookup_server.batched_remove(keys_to_remove)
-
     def __init__(
         self,
         config: LMCacheEngineConfig,
         metadata: LMCacheEngineMetadata,
         event_manager: EventManager,
         lmcache_worker: Optional["LMCacheWorker"] = None,
-        lookup_server: Optional[LookupServerInterface] = None,
     ):
         self.loop = asyncio.new_event_loop()
 
@@ -153,7 +122,6 @@ class StorageManager:
                 self.loop,
                 dst_device,
                 lmcache_worker,
-                lookup_server,
             )
         )
 
@@ -165,8 +133,6 @@ class StorageManager:
 
         self.manager_lock = threading.Lock()
 
-        self.lookup_server = lookup_server
-
         self.lmcache_worker = lmcache_worker
         self.instance_id = config.lmcache_instance_id
         self.worker_id = metadata.worker_id
@@ -177,16 +143,6 @@ class StorageManager:
 
         # The cuda stream for internal copies during put
         self.internal_copy_stream = torch.cuda.Stream()
-
-        self._cpu_disk_listener = self._CPUDiskListener(self)
-        if "LocalCPUBackend" in self.storage_backends:
-            self.storage_backends["LocalCPUBackend"].set_listener(
-                self._cpu_disk_listener
-            )
-        if "LocalDiskBackend" in self.storage_backends:
-            self.storage_backends["LocalDiskBackend"].set_listener(
-                self._cpu_disk_listener
-            )
 
     def post_init(self, **kwargs) -> None:
         if "async_lookup_server" in kwargs:
@@ -302,9 +258,6 @@ class StorageManager:
             # is done in the backend
             ks, objs = obj_dict[cname]
             backend.batched_submit_put_task(ks, objs, transfer_spec=transfer_spec)
-
-        if self.lookup_server is not None:
-            self.lookup_server.batched_insert(keys)
 
         for cname, (ks, objs) in obj_dict.items():
             for memory_obj in objs:

@@ -15,7 +15,6 @@ from lmcache.v1.memory_management import (
     MemoryFormat,
     MemoryObj,
 )
-from lmcache.v1.storage_backend.storage_backend_listener import StorageBackendListener
 
 
 class StorageBackendInterface(metaclass=abc.ABCMeta):
@@ -37,20 +36,6 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
             raise
 
         self.dst_device = dst_device
-        self._listener: Optional[StorageBackendListener] = None
-
-    def set_listener(self, listener: StorageBackendListener):
-        """
-        Set the listener to receive events.
-        """
-        self._listener = listener
-
-    def _on_evict(self, keys: List[CacheEngineKey]) -> None:
-        """
-        Evict keys from the storage backend.
-        """
-        if self._listener is not None:
-            self._listener.on_evict(self, keys)
 
     @abc.abstractmethod
     def contains(self, key: CacheEngineKey, pin: bool = False) -> bool:

@@ -12,7 +12,6 @@ from lmcache.logging import init_logger
 from lmcache.observability import LMCStatsMonitor
 from lmcache.utils import CacheEngineKey, _lmcache_nvtx_annotate
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.lookup_server import LookupServerInterface
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.storage_backend.abstract_backend import StorageBackendInterface
 from lmcache.v1.storage_backend.connector import CreateConnector
@@ -31,7 +30,6 @@ class RemoteBackend(StorageBackendInterface):
         loop: asyncio.AbstractEventLoop,
         local_cpu_backend: LocalCPUBackend,
         dst_device: str = "cuda",
-        lookup_server: Optional[LookupServerInterface] = None,
     ):
         super().__init__(dst_device)
         self.put_tasks: Set[CacheEngineKey] = set()

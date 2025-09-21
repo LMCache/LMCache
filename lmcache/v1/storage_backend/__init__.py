@@ -12,7 +12,6 @@ import torch
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.lookup_server import LookupServerInterface
 from lmcache.v1.storage_backend.abstract_backend import StorageBackendInterface
 from lmcache.v1.storage_backend.gds_backend import GdsBackend
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
@@ -34,7 +33,6 @@ def create_dynamic_backends(
     loop: asyncio.AbstractEventLoop,
     local_cpu_backend: LocalCPUBackend,
     dst_device: str,
-    lookup_server: Optional[LookupServerInterface],
     storage_backends: OrderedDict[str, StorageBackendInterface],
 ) -> None:
     """
@@ -85,7 +83,6 @@ def create_dynamic_backends(
                 loop,
                 local_cpu_backend,
                 dst_device,
-                lookup_server,
             )
 
             # Add to storage backends
@@ -102,7 +99,6 @@ def CreateStorageBackends(
     loop: asyncio.AbstractEventLoop,
     dst_device: str = "cuda",
     lmcache_worker: Optional["LMCacheWorker"] = None,
-    lookup_server: Optional[LookupServerInterface] = None,
 ) -> OrderedDict[str, StorageBackendInterface]:
     # Replace 'cuda' with 'cuda:<device id>'
     if dst_device == "cuda":
@@ -174,7 +170,11 @@ def CreateStorageBackends(
         storage_backends[str(gds_backend)] = gds_backend
     if config.remote_url is not None:
         remote_backend = RemoteBackend(
-            config, metadata, loop, local_cpu_backend, dst_device, lookup_server
+            config,
+            metadata,
+            loop,
+            local_cpu_backend,
+            dst_device,
         )
         backend_name = str(remote_backend)
         storage_backends[backend_name] = remote_backend
@@ -187,7 +187,6 @@ def CreateStorageBackends(
             loop,
             local_cpu_backend,
             dst_device,
-            lookup_server,
             storage_backends,
         )
 

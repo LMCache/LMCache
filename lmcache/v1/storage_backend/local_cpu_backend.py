@@ -344,8 +344,6 @@ class LocalCPUBackend(AllocatorBackendInterface):
                         self.stats_monitor.update_local_cpu_evict_failed_count(
                             num_candidates
                         )
-                if evict_keys:
-                    super()._on_evict(evict_keys)
 
             if wait_other_requests:
                 if not busy_loop:
@@ -458,8 +456,6 @@ class LocalCPUBackend(AllocatorBackendInterface):
                         self.stats_monitor.update_local_cpu_evict_failed_count(
                             num_candidates
                         )
-                if evict_keys:
-                    super()._on_evict(evict_keys)
 
             if wait_other_requests:
                 if not busy_loop:
@@ -519,8 +515,6 @@ class LocalCPUBackend(AllocatorBackendInterface):
         # TODO(Jiayi): might not be accurate if we don't calculate
         # `num_cleared_token` and remove the keys in an atomic way.
         self.batched_remove(clear_keys)
-        if clear_keys:
-            super()._on_evict(clear_keys)
 
         return num_cleared_tokens
 

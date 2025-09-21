@@ -301,9 +301,6 @@ class LocalDiskBackend(StorageBackendInterface):
             if evict_success:
                 self.current_cache_size += required_size
 
-        if all_evict_keys:
-            self._on_evict(all_evict_keys)
-
         if not evict_success:
             return None
 
@@ -563,10 +560,4 @@ class LocalDiskBackend(StorageBackendInterface):
         return self.local_cpu_backend
 
     def close(self) -> None:
-        self.disk_worker.close()
-        with self.disk_lock:
-            keys = list(self.dict.keys())
-        if keys:
-            super()._on_evict(keys)
-        # Close worker executor
         self.disk_worker.close()
