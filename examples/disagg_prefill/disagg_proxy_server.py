@@ -157,9 +157,9 @@ class StatsCalculator:
         output_str = (
             f"\nNum requests: {len(self._stats)}"
             + "\nPrefill node TTFT stats:"
-            + f"\n - Average (ms): {np.mean(np_arr)}"
-            + f"\n - Median (ms): {np.median(np_arr)}"
-            + f"\n - 99th Percentile (ms): {np.percentile(np_arr, 99)}\n"
+            + f"\n - Average (ms): {np.mean(np_arr) * 1000}"
+            + f"\n - Median (ms): {np.median(np_arr) * 1000}"
+            + f"\n - 99th Percentile (ms): {np.percentile(np_arr, 99) * 1000}\n"
         )
         print(
             "===============================",
