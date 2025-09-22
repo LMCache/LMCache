@@ -23,7 +23,7 @@ from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import (
     MemoryFormat,
     MemoryObj,
-    PagedMixedMemoryAllocator,
+    PagedCpuGpuMemoryAllocator,
 )
 from lmcache.v1.rpc_utils import get_zmq_context, get_zmq_socket
 from lmcache.v1.storage_backend.abstract_backend import AllocatorBackendInterface
@@ -159,7 +159,7 @@ class PDBackend(AllocatorBackendInterface):
         self.data_lock = threading.Lock()
 
         self.memory_allocator = self.initialize_allocator(config, metadata)
-        assert isinstance(self.memory_allocator, PagedMixedMemoryAllocator)
+        assert isinstance(self.memory_allocator, PagedCpuGpuMemoryAllocator)
 
         # TODO(Jiayi): add async zmq context if we want better asynchrony.
         self.zmq_context = get_zmq_context(use_asyncio=False)
@@ -207,7 +207,7 @@ class PDBackend(AllocatorBackendInterface):
 
     def initialize_allocator(
         self, config: LMCacheEngineConfig, metadata: LMCacheEngineMetadata
-    ) -> PagedMixedMemoryAllocator:
+    ) -> PagedCpuGpuMemoryAllocator:
         # First Party
         from lmcache.v1.transfer_channel.transfer_utils import (
             get_correct_device,
@@ -220,7 +220,7 @@ class PDBackend(AllocatorBackendInterface):
         logger.info(f"Setting cuda device to {corrected_device} ")
         torch.cuda.set_device(corrected_device)
 
-        paged_mem_allocator = PagedMixedMemoryAllocator()
+        paged_mem_allocator = PagedCpuGpuMemoryAllocator()
         paged_mem_allocator.init_gpu_memory_allocator(
             config.pd_buffer_size,
             torch.Size(metadata.kv_shape),
@@ -231,7 +231,7 @@ class PDBackend(AllocatorBackendInterface):
 
         return paged_mem_allocator
 
-    def get_memory_allocator(self) -> PagedMixedMemoryAllocator:
+    def get_memory_allocator(self) -> PagedCpuGpuMemoryAllocator:
         return self.memory_allocator
 
     def get_allocator_backend(self):

@@ -20,7 +20,7 @@ from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import (
     MemoryFormat,
     MemoryObj,
-    PagedMixedMemoryAllocator,
+    PagedCpuGpuMemoryAllocator,
 )
 from lmcache.v1.rpc_utils import get_zmq_context, get_zmq_socket
 from lmcache.v1.storage_backend.abstract_backend import StorageBackendInterface
@@ -137,7 +137,7 @@ class P2PBackend(StorageBackendInterface):
         # TODO(Jiayi): support gpu and local storage p2p as well.
         self.local_cpu_backend = local_cpu_backend
         self.memory_allocator = local_cpu_backend.get_memory_allocator()
-        assert isinstance(self.memory_allocator, PagedMixedMemoryAllocator)
+        assert isinstance(self.memory_allocator, PagedCpuGpuMemoryAllocator)
 
         self.dtype = metadata.kv_dtype
         self.full_size_shape = list(self.memory_allocator.cpu_allocator.shape)

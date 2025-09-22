@@ -20,7 +20,7 @@ from lmcache.v1.memory_management import (
     MemoryFormat,
     MemoryObj,
     MixedMemoryAllocator,
-    PagedMixedMemoryAllocator,
+    PagedCpuGpuMemoryAllocator,
 )
 from lmcache.v1.storage_backend.abstract_backend import AllocatorBackendInterface
 from lmcache.v1.storage_backend.cache_policy import get_cache_policy
@@ -283,7 +283,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
                     meta_shape[3] * meta_shape[4],
                 ]
             )
-            paged_mem_allocator = PagedMixedMemoryAllocator()
+            paged_mem_allocator = PagedCpuGpuMemoryAllocator()
             paged_mem_allocator.init_cpu_memory_allocator(
                 int(cpu_size * 1024**3),
                 shape=new_shape,

@@ -1809,7 +1809,7 @@ class CuFileMemoryAllocator(GPUMemoryAllocator):
         return "CuFileMemoryAllocator"
 
 
-class PagedMixedMemoryAllocator(MemoryAllocatorInterface):
+class PagedCpuGpuMemoryAllocator(MemoryAllocatorInterface):
     """
     Paged Memory Allocator for both CPU and GPU memory.
     This is a paged memory allocator for PD and P2P sharing

@@ -16,6 +16,23 @@ def CreateTransferChannel(
     peer_init_url: str,
     **kwargs,
 ) -> BaseTransferChannel:
+    """
+    Create a transfer channel based on the specified channel type.
+    Currently, only "nixl" channel type is supported.
+
+    :param channel_type: Type of the transfer channel (e.g., "nixl").
+    :param async_mode: Whether to operate in asynchronous mode.
+    :param role: Role of the channel (e.g., "both", "sender" or "receiver").
+    :param buffer_ptr: Pointer to the pre-allocated buffer.
+    :param buffer_size: Size of the pre-allocated buffer in bytes.
+    :param align_bytes: Alignment requirement in bytes.
+    :param tp_rank: Tensor parallel rank of the current process.
+    :param peer_init_url: Initialization URL for the peer.
+    :kwargs: Additional keyword arguments specific to the channel type.
+
+    :return: An instance of the specified transfer channel.
+    """
+
     assert channel_type in ["nixl"], f"Unsupported channel type: {channel_type}"
 
     assert "backends" in kwargs, (
