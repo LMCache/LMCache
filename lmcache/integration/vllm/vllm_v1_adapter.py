@@ -2,6 +2,7 @@
 # Standard
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Generator, Optional, Union
+import json
 import os
 import uuid
 
@@ -730,9 +731,6 @@ class LMCacheConnectorV1Impl:
                 ),
             },
         }
-
-        # Standard
-        import json
 
         return json.dumps(inference_info, indent=2, default=str)
 
