@@ -490,6 +490,7 @@ class LMCacheEngine:
                 reordered_chunks,
                 ret_mask,
             )
+        torch.cuda.synchronize()
 
         # NOTE(Jiayi): memory_obj doesn't have to be a pinned
         # cpu tensor for the sake of performance.
