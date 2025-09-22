@@ -16,10 +16,6 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.non_cuda_equivalents import (
-    alloc_pinned_numa_ptr,
-    alloc_pinned_ptr,
-)
 from lmcache.observability import LMCStatsMonitor
 from lmcache.utils import _lmcache_nvtx_annotate
 from lmcache.v1.system_detection import NUMAMapping
@@ -27,6 +23,9 @@ from lmcache.v1.system_detection import NUMAMapping
 if torch.cuda.is_available():
     # First Party
     import lmcache.c_ops as lmc_ops
+else:
+    # First Party
+    import lmcache.non_cuda_equivalents as lmc_ops
 
 
 logger = init_logger(__name__)
@@ -304,7 +303,7 @@ def _allocate_cpu_memory(
 ) -> torch.Tensor:
     if numa_mapping:
         if torch.cuda.is_available():
-                current_device_id = torch.cuda.current_device()
+            current_device_id = torch.cuda.current_device()
         else:
             current_device_id = 0
         gpu_to_numa_mapping = numa_mapping.gpu_to_numa_mapping
@@ -312,25 +311,14 @@ def _allocate_cpu_memory(
             f"Current device {current_device_id} is not in the GPU NUMA mapping."
         )
         numa_id = gpu_to_numa_mapping[current_device_id]
-        if torch.cuda.is_available():
-            ptr = lmc_ops.alloc_pinned_numa_ptr(size, numa_id)
-        else:
-            _cpu_tensor: Optional[torch.Tensor] = None
-            _cpu_tensor = alloc_pinned_numa_ptr(size)
+        ptr = lmc_ops.alloc_pinned_numa_ptr(size, numa_id)
     else:
-        if torch.cuda.is_available():
-                ptr = lmc_ops.alloc_pinned_ptr(size, 0)
-        else:
-            _cpu_tensor: Optional[torch.Tensor] = None  # type: ignore[no-redef]
-            _cpu_tensor = alloc_pinned_ptr(size)
+        ptr = lmc_ops.alloc_pinned_ptr(size, 0)
 
-    if torch.cuda.is_available():
-        array_type = ctypes.c_uint8 * size
-        buf = array_type.from_address(ptr)
-        buffer = torch.frombuffer(buf, dtype=torch.uint8)
-    else:
-        buffer = _cpu_tensor
-
+    array_type = ctypes.c_uint8 * size
+    buf = array_type.from_address(ptr)
+    buffer = torch.frombuffer(buf, dtype=torch.uint8)
+    
     return buffer
 
 
@@ -1419,16 +1407,10 @@ class PinMemoryAllocator(MemoryAllocatorInterface):
         :param int size: The size of the pinned memory in bytes.
         """
 
-        if torch.cuda.is_available():
-            ptr = lmc_ops.alloc_pinned_ptr(size, 0)
-            array_type = ctypes.c_uint8 * size
-            buf = array_type.from_address(ptr)
-            self.buffer = torch.frombuffer(buf, dtype=torch.uint8)
-        else:
-            self._cpu_tensor: Optional[torch.Tensor] = None
-            self._cpu_tensor = alloc_pinned_ptr(size)
-            self.buffer = self._cpu_tensor
-
+        ptr = lmc_ops.alloc_pinned_ptr(size, 0)
+        array_type = ctypes.c_uint8 * size
+        buf = array_type.from_address(ptr)
+        self.buffer = torch.frombuffer(buf, dtype=torch.uint8)
         self._unregistered = False
 
         self.allocator: MemoryAllocatorInterface
@@ -1499,7 +1481,7 @@ class PinMemoryAllocator(MemoryAllocatorInterface):
         if not self._unregistered:
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
-                lmc_ops.free_pinned_ptr(self.buffer.data_ptr())
+            lmc_ops.free_pinned_ptr(self.buffer.data_ptr())
             self._unregistered = True
 
     def __str__(self):
@@ -1638,10 +1620,10 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
         if not self._unregistered:
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
-                if self.numa_mapping:
-                    lmc_ops.free_pinned_numa_ptr(self.buffer.data_ptr(), self.size)
-                else:
-                    lmc_ops.free_pinned_ptr(self.buffer.data_ptr())
+            if self.numa_mapping:
+                lmc_ops.free_pinned_numa_ptr(self.buffer.data_ptr(), self.size)
+            else:
+                lmc_ops.free_pinned_ptr(self.buffer.data_ptr())
             self._unregistered = True
 
     def __str__(self):
