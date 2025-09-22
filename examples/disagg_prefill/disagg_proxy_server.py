@@ -153,13 +153,13 @@ class StatsCalculator:
 
     def _log_stats(self):
         # Print average, median, and 99th percentile
-        np_arr = np.array(self._stats)
+        np_arr = np.array(self._stats) * 1000
         output_str = (
             f"\nNum requests: {len(self._stats)}"
             + "\nPrefill node TTFT stats:"
-            + f"\n - Average (ms): {np.mean(np_arr) * 1000}"
-            + f"\n - Median (ms): {np.median(np_arr) * 1000}"
-            + f"\n - 99th Percentile (ms): {np.percentile(np_arr, 99) * 1000}\n"
+            + f"\n - Average (ms): {np.mean(np_arr)}"
+            + f"\n - Median (ms): {np.median(np_arr)}"
+            + f"\n - 99th Percentile (ms): {np.percentile(np_arr, 99)}\n"
         )
         print(
             "===============================",
