@@ -35,7 +35,7 @@ def create_test_key(key_id: int = 0) -> CacheEngineKey:
 
 
 def create_test_memory_obj(
-    shape=(2, 16, 8, 128), dtype=torch.bfloat16, device="cpu"
+    shape=(2, 16, 8, 128), dtype=torch.bfloat16, device="cuda"
 ) -> MemoryObj:
     allocator = AdHocMemoryAllocator(device=device)
     memory_obj = allocator.allocate(shape, dtype, fmt=MemoryFormat.KV_T2D)
@@ -81,7 +81,7 @@ def gds_backend(temp_gds_path, async_loop):
         config=config,
         loop=async_loop,
         metadata=metadata,
-        dst_device="cuda" if torch.cuda.is_available() else "cpu",
+        dst_device="cuda:0",
     )
 
 
@@ -99,10 +99,10 @@ class TestGdsBackend:
             config=config,
             loop=async_loop,
             metadata=metadata,
-            dst_device="cuda" if torch.cuda.is_available() else "cpu",
+            dst_device="cuda:0",
         )
         assert backend.gds_path == temp_gds_path
-        assert backend.dst_device in ("cuda", "cpu")
+        assert backend.dst_device == "cuda:0"
         assert os.path.exists(temp_gds_path)
 
     def test_str(self, gds_backend):
@@ -145,7 +145,7 @@ class TestGdsBackend:
     )
     async def test_submit_put_task_and_get_blocking(self, gds_backend):
         key = create_test_key(0)
-        memory_obj = create_test_memory_obj(device="cpu")
+        memory_obj = create_test_memory_obj(device="cuda")
         # submit_put_task returns a Future
         future = gds_backend.submit_put_task(key, memory_obj)
         assert future is not None
@@ -162,7 +162,7 @@ class TestGdsBackend:
     @pytest.mark.asyncio
     async def test_batched_submit_put_task(self, gds_backend):
         keys = [create_test_key(i) for i in range(2, 5)]
-        memory_objs = [create_test_memory_obj(device="cpu") for _ in range(3)]
+        memory_objs = [create_test_memory_obj(device="cuda") for _ in range(3)]
         futures = gds_backend.batched_submit_put_task(keys, memory_objs)
         assert futures is not None
         assert len(futures) == 3
@@ -183,7 +183,5 @@ class TestGdsBackend:
 
     def test_pin_unpin_not_implemented(self, gds_backend):
         key = create_test_key(0)
-        with pytest.raises(NotImplementedError):
-            gds_backend.pin(key)
-        with pytest.raises(NotImplementedError):
-            gds_backend.unpin(key)
+        assert not gds_backend.pin(key)
+        assert not gds_backend.unpin(key)
