@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import TYPE_CHECKING, Any, List, Optional, Sequence
+from concurrent.futures import Future
+from typing import TYPE_CHECKING, Any, List, Optional, Sequence, Union
 import abc
 import asyncio
 
@@ -72,12 +73,17 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
         keys: Sequence[CacheEngineKey],
         objs: List[MemoryObj],
         transfer_spec: Any = None,
-    ) -> None:
+    ) -> Union[List[Future], None]:
         """
         An async function to put the MemoryObj into the storage backend.
 
         :param List[CacheEngineKey] keys: The keys of the MemoryObjs.
         :param List[MemoryObj] objs: The MemoryObjs to be stored.
+
+        :return:  Union[List[Future], None]: A list of `Future` objects if the
+        storage persistence operation is asynchronous and is successful.
+        `None` if the operation is synchronous, or the asynchronous fails
+        or is skipped.
 
         :note: This function will have the side effect that modifies the
             underlying key-value mappings in the storage backend. The side

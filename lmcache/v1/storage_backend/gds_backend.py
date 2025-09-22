@@ -408,9 +408,12 @@ class GdsBackend(AllocatorBackendInterface):
         keys: Sequence[CacheEngineKey],
         memory_objs: List[MemoryObj],
         transfer_spec: Any = None,
-    ) -> None:
+    ) -> List[Future]:
+        futures = []
         for key, memory_obj in zip(keys, memory_objs, strict=False):
-            self.submit_put_task(key, memory_obj)
+            future = self.submit_put_task(key, memory_obj)
+            futures.append(future)
+        return futures
 
     async def _async_save_bytes_to_disk(
         self,
