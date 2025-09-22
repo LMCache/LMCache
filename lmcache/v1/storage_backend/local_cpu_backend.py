@@ -273,10 +273,20 @@ class LocalCPUBackend(AllocatorBackendInterface):
 
         if config.enable_p2p:
             assert metadata is not None
+            meta_shape = torch.Size(metadata.kv_shape)
+            # TODO(Jiayi): remove this hardcode
+            new_shape = torch.Size(
+                [
+                    meta_shape[1],
+                    meta_shape[0],
+                    meta_shape[2],
+                    meta_shape[3] * meta_shape[4],
+                ]
+            )
             paged_mem_allocator = PagedMixedMemoryAllocator()
             paged_mem_allocator.init_cpu_memory_allocator(
                 int(cpu_size * 1024**3),
-                shape=torch.Size(metadata.kv_shape),
+                shape=new_shape,
                 dtype=metadata.kv_dtype,
                 fmt=MemoryFormat.KV_2LTD,  # TODO: remove this hardcode
                 numa_mapping=numa_mapping,
@@ -318,8 +328,6 @@ class LocalCPUBackend(AllocatorBackendInterface):
         memory_obj = self.memory_allocator.allocate(shape, dtype, fmt)
         if memory_obj is not None or not eviction:
             return memory_obj
-
-        assert isinstance(self.memory_allocator, MixedMemoryAllocator)
 
         evict_keys_count = 0
         num_attempts = 0

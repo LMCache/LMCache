@@ -206,9 +206,8 @@ class KVController:
 
             if matched_kv_chunk_meta is None:
                 break
-            if (
-                instance_id != ""
-                and instance_id != matched_kv_chunk_meta.instance_id
+            if instance_id != "" and (
+                instance_id != matched_kv_chunk_meta.instance_id
                 or location != matched_kv_chunk_meta.location
             ):
                 # We have already found a different instance_id

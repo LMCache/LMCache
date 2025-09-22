@@ -404,6 +404,7 @@ class StorageManager:
 
         num_total_chunks = len(keys)
         num_total_hit_chunks = 0
+        num_last_tier_hit_chunks = 0
         cum_chunk_lengths_total = cum_chunk_lengths[:]
         loading_tasks = []
         for backend_name, backend in self.storage_backends.items():
@@ -413,6 +414,8 @@ class StorageManager:
 
             if num_hit_chunks == 0:
                 continue
+
+            num_last_tier_hit_chunks = num_hit_chunks
 
             num_total_hit_chunks += num_hit_chunks
 
@@ -452,11 +455,14 @@ class StorageManager:
             lookup_id,
             all_done,
         )
+
         all_done.add_done_callback(
             lambda future: self.prefetch_all_done_callback(
                 future,
                 lookup_id,
-                cum_chunk_lengths_total[num_total_hit_chunks - num_hit_chunks :],
+                cum_chunk_lengths_total[
+                    num_total_hit_chunks - num_last_tier_hit_chunks :
+                ],
             )
         )
 
