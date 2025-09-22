@@ -26,7 +26,10 @@ async def get_inference_info(request: Request, format: Optional[str] = None):
 
     try:
         inference_info = lmcache_adapter.get_inference_info()
-        return PlainTextResponse(content=inference_info, media_type="application/json")
+        return PlainTextResponse(
+            content=json.dumps(inference_info, indent=2, default=str),
+            media_type="application/json",
+        )
     except Exception as e:
         error_info = {"error": "Failed to get inference info", "message": str(e)}
         return PlainTextResponse(

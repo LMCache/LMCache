@@ -2,7 +2,6 @@
 # Standard
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Generator, Optional, Union
-import json
 import os
 import uuid
 
@@ -675,11 +674,11 @@ class LMCacheConnectorV1Impl:
             f"{getattr(self.lmcache_engine, 'metadata', None)}"
         )
 
-    def get_inference_info(self) -> str:
+    def get_inference_info(self) -> dict:
         """Get inference information including vLLM config and related details.
 
         Returns:
-            str: JSON string containing inference information
+            dict: Dictionary containing inference information
         """
         # Get vLLM config information
         vllm_config = self._vllm_config
@@ -697,25 +696,17 @@ class LMCacheConnectorV1Impl:
                 ),
                 "vocab_size": getattr(vllm_config.model_config, "vocab_size", None),
                 "num_layers": getattr(
-                    vllm_config.model_config, "get_num_layers", lambda x: None
-                )(vllm_config.parallel_config)
-                if hasattr(vllm_config.model_config, "get_num_layers")
-                else None,
+                    vllm_config.model_config, "get_num_layers", lambda _: None
+                )(vllm_config.parallel_config),
                 "num_attention_heads": getattr(
-                    vllm_config.model_config, "get_num_attention_heads", lambda x: None
-                )(vllm_config.parallel_config)
-                if hasattr(vllm_config.model_config, "get_num_attention_heads")
-                else None,
+                    vllm_config.model_config, "get_num_attention_heads", lambda _: None
+                )(vllm_config.parallel_config),
                 "num_kv_heads": getattr(
-                    vllm_config.model_config, "get_num_kv_heads", lambda x: None
-                )(vllm_config.parallel_config)
-                if hasattr(vllm_config.model_config, "get_num_kv_heads")
-                else None,
+                    vllm_config.model_config, "get_num_kv_heads", lambda _: None
+                )(vllm_config.parallel_config),
                 "head_size": getattr(
                     vllm_config.model_config, "get_head_size", lambda: None
-                )()
-                if hasattr(vllm_config.model_config, "get_head_size")
-                else None,
+                )(),
             },
             "cache_config": {
                 "block_size": getattr(vllm_config.cache_config, "block_size", None),
@@ -732,7 +723,7 @@ class LMCacheConnectorV1Impl:
             },
         }
 
-        return json.dumps(inference_info, indent=2, default=str)
+        return inference_info
 
     def get_inference_version(self) -> str:
         """Get vLLM version information.
