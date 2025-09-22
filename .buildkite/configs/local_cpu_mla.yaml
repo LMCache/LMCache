@@ -7,6 +7,7 @@ docker:
   env:
     - "LMCACHE_CONFIG_FILE=/etc/lmcache/local_cpu_mla.yaml"
   gpu_count: 2
+  vllm_backward_compatibility: true
 
 vllm:
   model: "deepseek-ai/DeepSeek-V2-Lite-Chat"

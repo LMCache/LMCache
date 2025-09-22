@@ -122,6 +122,9 @@ run_lmcache_vllmopenai_container() {
     source "$ORIG_DIR/.buildkite/scripts/pick-free-gpu.sh" "" "$gpu_count"
     best_gpu="${CUDA_VISIBLE_DEVICES}"
 
+    # Check if using vLLM backward compatibility mode (defaults to false if omitted)
+    use_vllm_bc=$(yq -r '.docker.vllm_backward_compatibility // false' "$cfg_file")
+
     # docker args
     docker_args=(
         --runtime nvidia
@@ -139,8 +142,16 @@ run_lmcache_vllmopenai_container() {
     # vllm args
     vllm_model="$(yq -r '.model' <<<"$vllm")"
     mapfile -t vllm_cli_args < <(yq -r '.args // [] | .[]' <<<"$vllm")
+    
+    # Select Docker image based on backward compatibility flag
+    if [ "$use_vllm_bc" = "true" ]; then
+        docker_image="lmcache/vllm-openai:vllm_backward_compatibility_build-latest"
+    else
+        docker_image="lmcache/vllm-openai:build-latest"
+    fi
+    
     cmd_args=(
-        lmcache/vllm-openai:build-latest
+        "$docker_image"
         "$vllm_model"
     )
     cmd_args+=("${vllm_cli_args[@]}")
