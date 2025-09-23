@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import Union, Optional
+from typing import Optional, Union
 
 # Third Party
 import torch
@@ -18,9 +18,12 @@ HitLimitLookupClient now is used for test, when lookup is called, cal the cache 
 - if the cache hit < hit_limit_upper, direct return the result
 - if the cache hit > hit_limit_upper, re-compute the result by hit_limit_upper
 """
+
 class HitLimitLookupClient(LookupClientInterface):
 
-    def __init__(self, actual_lookup_client: LookupClientInterface, config: LMCacheEngineConfig):
+    def __init__(
+        self, actual_lookup_client: LookupClientInterface, config: LMCacheEngineConfig
+    ):
         assert config.hit_limit_upper is not None and 0 <= config.hit_limit_upper <= 1
         self.actual_lookup_client = actual_lookup_client
         self.hit_limit_upper = config.hit_limit_upper
@@ -34,7 +37,7 @@ class HitLimitLookupClient(LookupClientInterface):
         self,
         token_ids: Union[torch.Tensor, list[int]],
         lookup_id: str,
-        request_configs: Optional[dict] = None
+        request_configs: Optional[dict] = None,
     ) -> Optional[int]:
         # get real hit tokens
         result = self.actual_lookup_client.lookup(token_ids, lookup_id, request_configs)
@@ -46,7 +49,11 @@ class HitLimitLookupClient(LookupClientInterface):
             if current_hit_rate > self.hit_limit_upper:
                 origin_result = result
                 # align to chunk size
-                new_result = int(total_tokens_length * self.hit_limit_upper) // self.chunk_size * self.chunk_size
+                new_result = (
+                    int(total_tokens_length * self.hit_limit_upper)
+                    // self.chunk_size
+                    * self.chunk_size
+                )
                 # check again
                 result = min(result, new_result)
                 logger.debug(
