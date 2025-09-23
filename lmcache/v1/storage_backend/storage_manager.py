@@ -2,7 +2,7 @@
 # Standard
 from collections import OrderedDict
 from concurrent.futures import Future
-from typing import TYPE_CHECKING, Generator, List, Optional, Sequence
+from typing import TYPE_CHECKING, Any, Coroutine, Generator, List, Optional, Sequence
 import asyncio
 import functools
 import threading
@@ -92,6 +92,46 @@ def allocate_and_copy_objects(
 
     stream.synchronize()
     return keys[: len(allocated_objects)], allocated_objects
+
+
+class WeightedSemaphore:
+    def __init__(self, value: int):
+        self._value = value
+        self._max = value
+        self._cond = asyncio.Condition()
+
+    async def acquire(self, n: int = 1) -> None:
+        async with self._cond:
+            await self._cond.wait_for(lambda: self._value >= n)
+            self._value -= n
+
+    async def release(self, n: int = 1) -> None:
+        async with self._cond:
+            self._value = min(self._value + n, self._max)
+            self._cond.notify_all()
+
+
+class AsyncSerializer:
+    """
+    Prevent race conditions where multiple batched_get's cause the local CPU
+    backend to allocate memory objects in parallel and get deadlocked.
+    """
+
+    def __init__(
+        self,
+        allocator_backend: AllocatorBackendInterface,
+        loop: asyncio.AbstractEventLoop,
+    ):
+        self.chunk_budget = allocator_backend.calculate_chunk_budget()
+        self._sem = WeightedSemaphore(self.chunk_budget)
+        self.loop = loop
+
+    async def run(self, coro: Coroutine, num_chunks: int) -> Any:
+        await self._sem.acquire(num_chunks)
+        try:
+            return await coro
+        finally:
+            await self._sem.release(num_chunks)
 
 
 # TODO: extend this class to implement caching policies and eviction policies
@@ -191,6 +231,7 @@ class StorageManager:
     def post_init(self, **kwargs) -> None:
         if "async_lookup_server" in kwargs:
             self.async_lookup_server = kwargs.pop("async_lookup_server")
+            self.async_serializer = AsyncSerializer(self.allocator_backend, self.loop)
 
     def _get_allocator_backend(
         self, config: LMCacheEngineConfig
@@ -377,7 +418,12 @@ class StorageManager:
             backend = self.storage_backends[location]
             # TODO(Jiayi): need to make async loading and layerwise compatible
             task = asyncio.run_coroutine_threadsafe(
-                backend.batched_get_non_blocking("fake_lookup_id", keys_multi_chunk),
+                self.async_serializer.run(
+                    backend.batched_get_non_blocking(
+                        "fake_lookup_id", keys_multi_chunk
+                    ),
+                    len(keys_multi_chunk),
+                ),
                 self.loop,
             )
             yield task

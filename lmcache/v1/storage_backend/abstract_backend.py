@@ -328,3 +328,10 @@ class AllocatorBackendInterface(StorageBackendInterface):
         :rtype: Optional[MemoryObj]
         """
         raise NotImplementedError
+
+    @abc.abstractmethod
+    def calculate_chunk_budget(self) -> int:
+        """
+        Calculate the chunk budget for the allocator backend.
+        """
+        raise NotImplementedError
