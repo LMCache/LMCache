@@ -68,7 +68,7 @@ class LMCacheLookupClient(LookupClientInterface):
                 f"lmcache lookup client connect to tp_rank {tp_rank} "
                 f"with socket path {socket_path}"
             )
-            socket = self.socket = make_zmq_socket(
+            socket = make_zmq_socket(
                 self.ctx,
                 socket_path,
                 zmq.REQ,  # type: ignore[attr-defined]
@@ -171,8 +171,16 @@ class LMCacheLookupClient(LookupClientInterface):
 
     def close(self):
         for socket in self.sockets:
-            if not socket.closed:
+            try:
                 socket.close(linger=0)
+            except Exception as e:
+                logger.warning(f"Error closing socket: {e}")
+
+        try:
+            if self.ctx:
+                self.ctx.term()
+        except Exception as e:
+            logger.warning(f"Error terminating ZMQ context: {e}")
 
 
 class LMCacheLookupServer:

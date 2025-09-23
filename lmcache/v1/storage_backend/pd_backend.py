@@ -2,7 +2,7 @@
 
 # Standard
 from dataclasses import dataclass
-from typing import List, Optional, Sequence, Union
+from typing import Any, List, Optional, Sequence, Union
 import threading
 import time
 
@@ -20,10 +20,14 @@ from lmcache.utils import (
     CacheEngineKey,
 )
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.memory_management import MemoryFormat, MemoryObj, PDMemoryAllocator
-from lmcache.v1.rpc_utils import get_zmq_socket
+from lmcache.v1.memory_management import (
+    MemoryFormat,
+    MemoryObj,
+    PagedCpuGpuMemoryAllocator,
+)
+from lmcache.v1.rpc_utils import get_zmq_context, get_zmq_socket
 from lmcache.v1.storage_backend.abstract_backend import AllocatorBackendInterface
-from lmcache.v1.transfer_channel.nixl_channel import NixlChannel
+from lmcache.v1.transfer_channel import CreateTransferChannel
 from lmcache.v1.transfer_channel.transfer_utils import get_correct_device
 
 logger = init_logger(__name__)
@@ -143,13 +147,7 @@ class PDBackend(AllocatorBackendInterface):
     ):
         self.running = True
 
-        # TODO: verify if this is needed
-        # Third Party
-        from vllm.distributed.parallel_state import (
-            get_tensor_model_parallel_rank,
-        )
-
-        self.tp_rank = get_tensor_model_parallel_rank()
+        self.tp_rank = metadata.worker_id
 
         self.pd_config = PDConfig.from_cache_engine_config(
             config, metadata, self.tp_rank
@@ -161,33 +159,37 @@ class PDBackend(AllocatorBackendInterface):
         self.data_lock = threading.Lock()
 
         self.memory_allocator = self.initialize_allocator(config, metadata)
-        assert isinstance(self.memory_allocator, PDMemoryAllocator)
+        assert isinstance(self.memory_allocator, PagedCpuGpuMemoryAllocator)
 
         # TODO(Jiayi): add async zmq context if we want better asynchrony.
-        self.zmq_context = zmq.Context()
+        self.zmq_context = get_zmq_context(use_asyncio=False)
         self.running_threads: list[threading.Thread] = []
         self.side_channels: list[zmq.Socket] = []
-        # TODO: Have an init_channel function.
-        if config.transfer_channel == "nixl":
-            peer_init_url = None
-            if self.pd_config.peer_init_port is not None:
-                peer_init_url = (
-                    f"{self.pd_config.peer_host}:{self.pd_config.peer_init_port}"
-                )
-            self.transfer_channel = NixlChannel(
-                role=self.pd_config.role,
-                buffer_ptr=self.memory_allocator.gpu_allocator.buffer_ptr,
-                buffer_size=self.memory_allocator.gpu_allocator.buffer_size,
-                align_bytes=self.memory_allocator.gpu_allocator.align_bytes,
-                tp_rank=self.tp_rank,
-                peer_init_url=peer_init_url,
-                backends=config.nixl_backends,
+
+        # Initialize transfer channel
+        peer_init_url = None
+        self.local_id = ""
+        # TODO(Jiayi): both sender and receiver have to have
+        # peer_init_url if they want to do instance flip.
+        if self.pd_config.peer_init_port is not None:
+            peer_init_url = (
+                f"{self.pd_config.peer_host}:{self.pd_config.peer_init_port}"
             )
-        else:
-            raise ValueError(
-                f"PD backend only supports nixl transfer channel for now, "
-                f"got {config.transfer_channel}"
+            self.local_id = self.pd_config.peer_host + str(
+                self.pd_config.peer_init_port
             )
+
+        self.transfer_channel = CreateTransferChannel(
+            async_mode=False,
+            channel_type=config.transfer_channel,
+            role=self.pd_config.role,
+            buffer_ptr=self.memory_allocator.gpu_allocator.buffer_ptr,
+            buffer_size=self.memory_allocator.gpu_allocator.buffer_size,
+            align_bytes=self.memory_allocator.gpu_allocator.align_bytes,
+            tp_rank=self.tp_rank,
+            peer_init_url=peer_init_url,
+            backends=config.nixl_backends,
+        )
 
         if self.pd_config.role == "sender":
             self._init_sender()
@@ -205,7 +207,7 @@ class PDBackend(AllocatorBackendInterface):
 
     def initialize_allocator(
         self, config: LMCacheEngineConfig, metadata: LMCacheEngineMetadata
-    ) -> PDMemoryAllocator:
+    ) -> PagedCpuGpuMemoryAllocator:
         # First Party
         from lmcache.v1.transfer_channel.transfer_utils import (
             get_correct_device,
@@ -218,23 +220,18 @@ class PDBackend(AllocatorBackendInterface):
         logger.info(f"Setting cuda device to {corrected_device} ")
         torch.cuda.set_device(corrected_device)
 
-        # TODO(Jiayi): add numa affinity to pd_cpu backend too.
-        buffer = torch.empty(
+        paged_mem_allocator = PagedCpuGpuMemoryAllocator()
+        paged_mem_allocator.init_gpu_memory_allocator(
             config.pd_buffer_size,
-            dtype=torch.uint8,
-            device=corrected_device,
-        )
-        pd_mem_allocator = PDMemoryAllocator()
-        pd_mem_allocator.init_gpu_memory_allocator(
-            buffer,
             torch.Size(metadata.kv_shape),
             metadata.kv_dtype,
             MemoryFormat.KV_2LTD,  # TODO: remove this hardcode
+            corrected_device,
         )
 
-        return pd_mem_allocator
+        return paged_mem_allocator
 
-    def get_memory_allocator(self) -> PDMemoryAllocator:
+    def get_memory_allocator(self) -> PagedCpuGpuMemoryAllocator:
         return self.memory_allocator
 
     def get_allocator_backend(self):
@@ -310,7 +307,7 @@ class PDBackend(AllocatorBackendInterface):
 
         # Establish the connection with the receiver/decoder
         self.transfer_channel.lazy_init_peer_connection(
-            peer_id=receiver_id, peer_init_url=receiver_init_url
+            local_id=self.local_id, peer_id=receiver_id, peer_init_url=receiver_init_url
         )
 
         # Set up the memory allocation socket
@@ -370,7 +367,7 @@ class PDBackend(AllocatorBackendInterface):
         self,
         keys: Sequence[CacheEngineKey],
         memory_objs: List[MemoryObj],
-        transfer_spec=None,
+        transfer_spec: Any = None,
     ) -> None:
         for mem_obj in memory_objs:
             mem_obj.ref_count_up()

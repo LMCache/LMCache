@@ -15,7 +15,7 @@
 
 # Standard
 from dataclasses import dataclass
-from typing import List, Optional, Sequence, Set, cast
+from typing import Any, List, Optional, Sequence, Set, cast
 import asyncio
 import os
 import threading
@@ -367,7 +367,7 @@ class NixlStorageBackend(AllocatorBackendInterface):
         self,
         keys: Sequence[CacheEngineKey],
         memory_objs: List[MemoryObj],
-        transfer_spec=None,
+        transfer_spec: Any = None,
     ) -> None:
         with self.progress_lock:
             for key in keys:
@@ -396,6 +396,7 @@ class NixlStorageBackend(AllocatorBackendInterface):
         self,
         lookup_id: str,
         keys: list[CacheEngineKey],
+        transfer_spec: Any = None,
     ) -> list[MemoryObj]:
         obj_list = await self.file_to_gpu(keys)
         assert None not in obj_list

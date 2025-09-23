@@ -39,7 +39,7 @@ from lmcache.observability import LMCStatsMonitor
 from lmcache.utils import _lmcache_nvtx_annotate
 from lmcache.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
 from lmcache.v1.compute.blend import LMCBlenderBuilder
-from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.v1.config import LMCacheEngineConfig, _validate_and_set_config_value
 from lmcache.v1.gpu_connector import (
     VLLMBufferLayerwiseGPUConnector,
     VLLMPagedMemGPUConnectorV2,
@@ -560,7 +560,23 @@ class LMCacheConnectorV1Impl:
         assert isinstance(config, LMCacheEngineConfig), (
             "LMCache v1 configuration is should be passed for vLLM v1."
         )
+        # Put the leading with "lmcache." and matched configs from
+        # vllm extra_config to the config
+        kv_connector_extra_config = (
+            vllm_config.kv_transfer_config.kv_connector_extra_config
+        )
+        if kv_connector_extra_config:
+            for key, value in kv_connector_extra_config.items():
+                if key.startswith("lmcache."):
+                    config_key = key[8:]  # Remove "lmcache." prefix
+                    if _validate_and_set_config_value(config, config_key, value):
+                        logger.info(
+                            f"Updated config {config_key} from vLLM "
+                            f"extra config: {value}"
+                        )
+
         self.config = config
+
         self.async_loading = config.enable_async_loading
         self.layerwise_retrievers: list[
             Generator[Optional[torch.Tensor], None, None]

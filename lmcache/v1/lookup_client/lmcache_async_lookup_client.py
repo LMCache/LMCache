@@ -143,6 +143,7 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
             # -1 indicates not found; None indicates ongoing.
             req_status = self.reqs_status.get(lookup_id, -1)
             if req_status is None:
+                time.sleep(self.lookup_backoff_time)
                 return None
             elif req_status != -1:
                 self.reqs_status.pop(lookup_id)
