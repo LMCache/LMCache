@@ -495,6 +495,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
         Returns:
             int: The estimated chunk budget for concurrent allocations
         """
+        logger.info("Attempting to calculate chunk budget for async loading")
         assert isinstance(self.memory_allocator, MixedMemoryAllocator)
         assert self.metadata is not None, (
             "metadata required for chunk budget calculation"
@@ -512,13 +513,25 @@ class LocalCPUBackend(AllocatorBackendInterface):
         hidden_dim = num_heads * head_size
         dtype_size = self.metadata.kv_dtype.itemsize
 
-        if self.layerwise:
-            # layerwise: [chunk_tokens, kv_size, hidden_dim]
-            chunk_bytes = chunk_tokens * kv_size * hidden_dim * dtype_size
-        else:
-            # full: [kv_size, num_layers, chunk_tokens, hidden_dim]
-            chunk_bytes = kv_size * num_layers * chunk_tokens * hidden_dim * dtype_size
+        # account for tensor parallelism - each rank stores a fraction of the hidden dim
+        world_size = self.metadata.world_size
+        hidden_dim_per_rank = hidden_dim // world_size
 
+        if self.layerwise:
+            # layerwise: [chunk_tokens, kv_size, hidden_dim_per_rank]
+            chunk_bytes = chunk_tokens * kv_size * hidden_dim_per_rank * dtype_size
+        else:
+            # full: [kv_size, num_layers, chunk_tokens, hidden_dim_per_rank]
+            chunk_bytes = (
+                kv_size * num_layers * chunk_tokens * hidden_dim_per_rank * dtype_size
+            )
+        logger.info(
+            f"Stats received: num_layers={num_layers}, kv_size={kv_size}, "
+            f"chunk_tokens={chunk_tokens}, head_dim={head_size}, "
+            f"dtype_size={dtype_size}, world_size={world_size}, "
+            f"hidden_dim={hidden_dim}, hidden_dim_per_rank={hidden_dim_per_rank}"
+        )
+        logger.info(f"Calculated bytes per chunk: {chunk_bytes}")
         # add alignment overhead
         # (MixedMemoryAllocator uses TensorMemoryAllocator with 4KB alignment)
         alignment = 4096
@@ -529,6 +542,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
 
         # conservative 75% utilization to account for fragmentation
         chunk_budget = int(max_chunks * 0.75)
+        logger.info(f"Chunk budget calculated: {chunk_budget}")
         return chunk_budget
 
     def get_keys(self) -> List[CacheEngineKey]:
