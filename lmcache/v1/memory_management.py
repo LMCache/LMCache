@@ -318,7 +318,7 @@ def _allocate_cpu_memory(
     array_type = ctypes.c_uint8 * size
     buf = array_type.from_address(ptr)
     buffer = torch.frombuffer(buf, dtype=torch.uint8)
-    
+
     return buffer
 
 
