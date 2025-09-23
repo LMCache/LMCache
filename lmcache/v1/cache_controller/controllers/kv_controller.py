@@ -4,6 +4,8 @@ from dataclasses import dataclass
 
 # First Party
 from lmcache.v1.cache_controller.message import (
+    BatchedP2PLookupMsg,
+    BatchedP2PLookupRetMsg,
     CheckFinishMsg,
     CheckFinishRetMsg,
     ClearMsg,
@@ -46,15 +48,16 @@ class KVController:
         # redis. We might need a local cache for handling
         # messages like `check_finish`. Or everything should be
         # written to redis.
-        self.kv_pool: dict[str, list[KVChunkMetadata]] = {}
+        self.kv_pool: dict[int, list[KVChunkMetadata]] = {}
 
         # TODO(Jiayi): remove this hardcode
         self.token_database = ChunkedTokenDatabase()
 
-    def post_init(self, cluster_executor):
+    def post_init(self, reg_controller, cluster_executor):
         """
         Post initialization of the KV controller.
         """
+        self.reg_controller = reg_controller
         self.cluster_executor = cluster_executor
 
     async def admit(self, msg: KVAdmitMsg) -> None:
@@ -63,7 +66,7 @@ class KVController:
         """
         instance_id = msg.instance_id
         worker_id = msg.worker_id
-        key = str(msg.key)
+        key = msg.key
         location = msg.location
         if key not in self.kv_pool:
             self.kv_pool[key] = []
@@ -75,7 +78,7 @@ class KVController:
         """
         instance_id = msg.instance_id
         worker_id = msg.worker_id
-        key = str(msg.key)
+        key = msg.key
         location = msg.location
 
         if key not in self.kv_pool:
@@ -159,10 +162,67 @@ class KVController:
         for start, end, key in self.token_database.process_tokens(
             tokens, make_key=False
         ):
-            key = str(key)
             if key not in self.kv_pool:
                 break
             matched_instance = self.kv_pool[key][0].instance_id
             matched_location = self.kv_pool[key][0].location
             layout_info[matched_instance] = (matched_location, end)
         return LookupRetMsg(layout_info=layout_info, event_id=msg.event_id)
+
+    async def batched_p2p_lookup(
+        self, msg: BatchedP2PLookupMsg
+    ) -> BatchedP2PLookupRetMsg:
+        """
+        Perform batched P2P lookup for multiple keys.
+
+        :param BatchedP2PLookupMsg msg: The batched P2P lookup message containing keys.
+
+        :return: A BatchedP2PLookupRetMsg containing the lookup results.
+        """
+
+        worker_id = msg.worker_id
+        query_instance_id = msg.instance_id
+        num_hit_chunks = 0
+        instance_id = ""
+        location = ""
+        peer_init_url = ""
+        for key in msg.hashes:
+            # TODO(Jiayi): remove this string conversion
+            if key not in self.kv_pool:
+                break
+
+            # TODO(Jiayi): Currently, we use the first matched
+            # kv chunk metadata to do matching. The matching
+            # logic can be improved.
+            # TODO(Jiayi): The KV Cache could be from different
+            # instances. We need to handle this case as well.
+            matched_kv_chunk_meta = None
+            for kv_chunk_meta in self.kv_pool[key]:
+                if kv_chunk_meta.instance_id != query_instance_id:
+                    # Found a matching instance_id that's not the
+                    # same as the query_instance_id.
+                    matched_kv_chunk_meta = kv_chunk_meta
+                    break
+
+            if matched_kv_chunk_meta is None:
+                break
+            if instance_id != "" and (
+                instance_id != matched_kv_chunk_meta.instance_id
+                or location != matched_kv_chunk_meta.location
+            ):
+                # We have already found a different instance_id
+                # before. Stop here.
+                break
+            elif instance_id == "":
+                instance_id = matched_kv_chunk_meta.instance_id
+                location = matched_kv_chunk_meta.location
+                peer_init_url = self.reg_controller.get_distributed_url(
+                    instance_id, worker_id
+                )
+            num_hit_chunks += 1
+
+        return BatchedP2PLookupRetMsg(
+            layout_info=[
+                (instance_id, location, num_hit_chunks, peer_init_url),
+            ]
+        )

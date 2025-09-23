@@ -82,6 +82,8 @@ _CONFIG_ALIASES = {
     "nixl_proxy_port": "pd_proxy_port",
     "nixl_buffer_size": "pd_buffer_size",
     "nixl_role": "pd_role",
+    "controller_url": "controller_pull_url",
+    "lmcache_worker_port": "lmcache_worker_ports",
 }
 
 _DEPRECATED_CONFIGS = {
@@ -156,8 +158,17 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "default": False,
         "env_converter": _to_bool,
     },
-    "lookup_url": {"type": Optional[str], "default": None, "env_converter": str},
-    "distributed_url": {"type": Optional[str], "default": None, "env_converter": str},
+    "p2p_host": {"type": Optional[str], "default": None, "env_converter": str},
+    "p2p_init_ports": {
+        "type": Optional[list[int]],
+        "default": None,
+        "env_converter": _to_int_list,
+    },
+    "p2p_lookup_ports": {
+        "type": Optional[list[int]],
+        "default": None,
+        "env_converter": _to_int_list,
+    },
     # Controller configurations
     "enable_controller": {
         "type": bool,
@@ -169,11 +180,20 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "default": "lmcache_default_instance",
         "env_converter": str,
     },
-    "controller_url": {"type": Optional[str], "default": None, "env_converter": str},
-    "lmcache_worker_port": {
-        "type": Optional[int],
+    "controller_pull_url": {
+        "type": Optional[str],
         "default": None,
-        "env_converter": int,
+        "env_converter": str,
+    },
+    "controller_reply_url": {
+        "type": Optional[str],
+        "default": None,
+        "env_converter": str,
+    },
+    "lmcache_worker_ports": {
+        "type": Optional[list[int]],
+        "default": None,
+        "env_converter": _to_int_list,
     },
     # LMCache Worker heartbeat
     # the lmcache_worker_heartbeat_delay_time means that delay a period of time
@@ -330,6 +350,12 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "default": None,
         "env_converter": _to_str_list,
     },
+    # Lookup client configurations
+    "lookup_timeout_ms": {
+        "type": int,
+        "default": 3000,
+        "env_converter": int,
+    },
 }
 
 
@@ -404,8 +430,14 @@ def _create_config_class():
 def _validate_config(self):
     """Validate configuration"""
     if self.enable_p2p:
-        assert self.lookup_url is not None
-        assert self.distributed_url is not None
+        assert self.enable_controller
+        assert self.controller_pull_url is not None
+        assert self.controller_reply_url is not None
+        assert self.lmcache_worker_ports is not None
+        assert self.p2p_host is not None
+        assert self.p2p_init_ports is not None
+        assert self.p2p_lookup_ports is not None
+        assert self.transfer_channel is not None
 
     enable_nixl_storage = self.extra_config is not None and self.extra_config.get(
         "enable_nixl_storage"

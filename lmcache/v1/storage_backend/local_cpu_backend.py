@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from concurrent.futures import Future
-from typing import TYPE_CHECKING, List, Optional, Sequence
+from typing import TYPE_CHECKING, Any, List, Optional, Sequence
 import threading
 import time
 
@@ -20,6 +20,7 @@ from lmcache.v1.memory_management import (
     MemoryFormat,
     MemoryObj,
     MixedMemoryAllocator,
+    PagedCpuGpuMemoryAllocator,
 )
 from lmcache.v1.storage_backend.abstract_backend import AllocatorBackendInterface
 from lmcache.v1.storage_backend.cache_policy import get_cache_policy
@@ -144,7 +145,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
         self,
         keys: Sequence[CacheEngineKey],
         memory_objs: List[MemoryObj],
-        transfer_spec=None,
+        transfer_spec: Any = None,
     ) -> None:
         """
         Synchronously put the MemoryObjs into the local cpu backend.
@@ -174,6 +175,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
         self,
         lookup_id: str,
         keys: list[CacheEngineKey],
+        transfer_spec: Any = None,
     ) -> list[MemoryObj]:
         mem_objs = []
         with self.cpu_lock:
@@ -246,7 +248,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
         self,
         config: LMCacheEngineConfig,
         metadata: Optional[LMCacheEngineMetadata] = None,
-    ) -> MixedMemoryAllocator:
+    ) -> MemoryAllocatorInterface:
         cpu_size = config.max_local_cpu_size
 
         if metadata is not None:
@@ -268,10 +270,33 @@ class LocalCPUBackend(AllocatorBackendInterface):
         # Detect the numa mapping
         numa_mapping = NUMADetector.get_numa_mapping(config)
         logger.info(f"NUMA mapping {numa_mapping}")
-        return MixedMemoryAllocator(
-            int(cpu_size * 1024**3),
-            numa_mapping=numa_mapping,
-        )
+
+        if config.enable_p2p:
+            assert metadata is not None
+            meta_shape = torch.Size(metadata.kv_shape)
+            # TODO(Jiayi): remove this hardcode
+            new_shape = torch.Size(
+                [
+                    meta_shape[1],
+                    meta_shape[0],
+                    meta_shape[2],
+                    meta_shape[3] * meta_shape[4],
+                ]
+            )
+            paged_mem_allocator = PagedCpuGpuMemoryAllocator()
+            paged_mem_allocator.init_cpu_memory_allocator(
+                int(cpu_size * 1024**3),
+                shape=new_shape,
+                dtype=metadata.kv_dtype,
+                fmt=MemoryFormat.KV_2LTD,  # TODO: remove this hardcode
+                numa_mapping=numa_mapping,
+            )
+            return paged_mem_allocator
+        else:
+            return MixedMemoryAllocator(
+                int(cpu_size * 1024**3),
+                numa_mapping=numa_mapping,
+            )
 
     @_lmcache_nvtx_annotate
     def allocate(
@@ -304,8 +329,6 @@ class LocalCPUBackend(AllocatorBackendInterface):
         if memory_obj is not None or not eviction:
             return memory_obj
 
-        assert isinstance(self.memory_allocator, MixedMemoryAllocator)
-
         evict_keys_count = 0
         num_attempts = 0
         while True:
@@ -334,8 +357,6 @@ class LocalCPUBackend(AllocatorBackendInterface):
                         self.stats_monitor.update_local_cpu_evict_failed_count(
                             num_candidates
                         )
-                if evict_keys:
-                    super()._on_evict(evict_keys)
 
             if wait_other_requests:
                 if not busy_loop:
@@ -448,8 +469,6 @@ class LocalCPUBackend(AllocatorBackendInterface):
                         self.stats_monitor.update_local_cpu_evict_failed_count(
                             num_candidates
                         )
-                if evict_keys:
-                    super()._on_evict(evict_keys)
 
             if wait_other_requests:
                 if not busy_loop:
@@ -509,8 +528,6 @@ class LocalCPUBackend(AllocatorBackendInterface):
         # TODO(Jiayi): might not be accurate if we don't calculate
         # `num_cleared_token` and remove the keys in an atomic way.
         self.batched_remove(clear_keys)
-        if clear_keys:
-            super()._on_evict(clear_keys)
 
         return num_cleared_tokens
 

@@ -2,25 +2,25 @@
 This is an example to demonstrate how to move/migrate a request's KV cache across LMCacheEngines externally.
 
 ## Prerequisites
-Your server should have at least 2 GPUs.  
+Your server should have at least 2 GPUs. [NIXL](https://github.com/ai-dynamo/nixl) is required to be installed.
 
-This will use port 8000 and 8001 for 2 vllms and port 8002 and 8003 for the corresponding LMCache workers. Also, ports 8004 and 8005 are used for p2p KV cache transfer. The controller itself occupies port 9000 and 9001.
+This will use port 8000 and 8001 for 2 vllms and port 8500 and 8501 for the corresponding LMCache workers. Also, ports 8200, 8201, 8202 and 8203 are used for p2p KV cache transfer. The controller itself occupies port 9000, 8300 and 9400.
 
 ## Steps
 1. Start two vllm engines at port 8000 and port 8001:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 LMCACHE_CONFIG_FILE=instance1.yaml vllm serve meta-llama/Llama-3.1-8B-Instruct --max-model-len 4096  --gpu-memory-utilization 0.8 --port 8000 --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1", "kv_role":"kv_both"}'
+PYTHONHASHSEED=123 UCX_TLS=rc CUDA_VISIBLE_DEVICES=0 LMCACHE_CONFIG_FILE=instance1.yaml vllm serve meta-llama/Llama-3.1-8B-Instruct --gpu-memory-utilization 0.8 --port 8000 --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1", "kv_role":"kv_both"}'
 ```
 
 ```bash
-CUDA_VISIBLE_DEVICES=1 LMCACHE_CONFIG_FILE=instance2.yaml vllm serve meta-llama/Llama-3.1-8B-Instruct --max-model-len 4096  --gpu-memory-utilization 0.8 --port 8001 --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1", "kv_role":"kv_both"}'
+PYTHONHASHSEED=123 UCX_TLS=rc CUDA_VISIBLE_DEVICES=1 LMCACHE_CONFIG_FILE=instance2.yaml vllm serve meta-llama/Llama-3.1-8B-Instruct --gpu-memory-utilization 0.8 --port 8001 --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1", "kv_role":"kv_both"}'
 ```
 
 2. Start the lmcache controller at port 9000 and the monitor at port 9001:
 
 ```bash
-lmcache_controller --host localhost --port 9000 --monitor-port 9001
+PYTHONHASHSEED=123 lmcache_controller --host localhost --port 9000 --monitor-ports '{"pull": 8300, "reply": 8400}'
 ```
 
 3. Send a request to vllm engine 1:  
@@ -46,7 +46,7 @@ curl -X POST http://localhost:8000/tokenize \
 
 You should be able to see the returned token ids as:
 ```plaintext
-{"count":12,"max_model_len":4096,"tokens":[128000,849,21435,279,26431,315,85748,6636,304,4221,4211,13],"token_strs":null}
+{"count":12,"tokens":[128000,849,21435,279,26431,315,85748,6636,304,4221,4211,13],"token_strs":null}
 ```
 
 5. Move the request's KV cache from vllm engine 1's CPU to vllm engine 2's CPU using request's token ids:
