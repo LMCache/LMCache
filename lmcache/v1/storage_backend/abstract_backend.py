@@ -11,7 +11,6 @@ import torch
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.lookup_server import LookupServerInterface
 from lmcache.v1.memory_management import (
     MemoryAllocatorInterface,
     MemoryFormat,
@@ -342,7 +341,6 @@ class ConfigurableStorageBackendInterface(StorageBackendInterface):
         config: Optional[LMCacheEngineConfig] = None,
         metadata: Optional[LMCacheEngineMetadata] = None,
         local_cpu_backend: Optional["LocalCPUBackend"] = None,
-        lookup_server: Optional[LookupServerInterface] = None,
         loop: Optional[asyncio.AbstractEventLoop] = None,
     ):
         """
@@ -357,8 +355,6 @@ class ConfigurableStorageBackendInterface(StorageBackendInterface):
             engine state or version.
         :param LocalCPUBackend local_cpu_backend: Optional backend for local CPU-based
             inference or caching.
-        :param LookupServerInterface lookup_server: Optional interface to a remote
-            lookup server for distributed caching.
         :param asyncio.AbstractEventLoop loop: Optional asyncio event loop for
             asynchronous operations.
         """
@@ -366,5 +362,4 @@ class ConfigurableStorageBackendInterface(StorageBackendInterface):
         self.config = config
         self.metadata = metadata
         self.local_cpu_backend = local_cpu_backend
-        self.lookup_server = lookup_server
         self.loop = loop
