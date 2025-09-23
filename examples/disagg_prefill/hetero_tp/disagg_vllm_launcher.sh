@@ -24,6 +24,7 @@ if [[ $1 == "prefiller1" ]]; then
     prefill_config_file=$SCRIPT_DIR/configs/lmcache-prefiller-config.yaml
 
     UCX_TLS=cuda_ipc,cuda_copy,tcp \
+        LMCACHE_LOG_LEVEL=DEBUG \
         LMCACHE_CONFIG_FILE=$prefill_config_file \
         VLLM_ENABLE_V1_MULTIPROCESSING=1 \
         VLLM_WORKER_MULTIPROC_METHOD=spawn \
@@ -60,6 +61,7 @@ elif [[ $1 == "decoder1" ]]; then
     decode_config_file=$SCRIPT_DIR/configs/lmcache-decoder-1-config.yaml
 
     UCX_TLS=cuda_ipc,cuda_copy,tcp \
+        LMCACHE_LOG_LEVEL=DEBUG \
         LMCACHE_CONFIG_FILE=$decode_config_file \
         VLLM_ENABLE_V1_MULTIPROCESSING=1 \
         VLLM_WORKER_MULTIPROC_METHOD=spawn \

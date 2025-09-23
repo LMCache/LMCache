@@ -103,8 +103,9 @@ class DisaggSpec:
     req_id: str
     receiver_id: list[str]
     receiver_host: str
-    receiver_init_port: int
-    receiver_alloc_port: int
+    receiver_init_port: list[int]
+    receiver_alloc_port: list[int]
+    tp_size: int
     is_last_prefill: bool = False
     num_transferred_tokens: int = 0
 
@@ -1382,6 +1383,9 @@ class LMCacheConnectorV1Impl:
                 receiver_alloc_port=req_disagg_spec["receiver_alloc_port"],
                 tp_size=req_disagg_spec["receiver_tp_size"],
             )
+            # First Party
+
+            # ForkedPdb().set_trace()
 
             tmp_disagg_tracker[request.request_id] = disagg_spec
         self._unfinished_requests[request.request_id] = request

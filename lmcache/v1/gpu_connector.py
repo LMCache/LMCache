@@ -244,6 +244,11 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
         )
         last_pos = slot_mapping[start:end][-1].item()
         page_idx, in_page_idx = divmod(last_pos, 16)
+        logger.debug(f"HOWDYpage? {memory_obj.tensor.shape}")
+        for _head in [0, -1]:
+            for _kv in range(2):
+                logger.debug(f"HOWDYkv? {_kv}, Head {_head}")
+                logger.debug(self.kvcaches[0][_kv, page_idx, in_page_idx, _head, :])
 
     @_lmcache_nvtx_annotate
     def from_gpu(self, memory_obj: MemoryObj, start: int, end: int, **kwargs):
@@ -306,7 +311,13 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
                     getattr(memory_obj, "transpose", False),
                 )
                 memory_obj.tensor.copy_(tmp_gpu_buffer, non_blocking=True)
-
+            last_pos = slot_mapping[start:end][-1].item()
+            page_idx, in_page_idx = divmod(last_pos, 16)
+            logger.debug(f"HOWDYpage? {memory_obj.tensor.shape}")
+            for _head in [0, 3, -3, -1]:
+                for _kv in range(2):
+                    logger.debug(f"HOWDYkv? {_kv}, Head {_head}")
+                    logger.debug(self.kvcaches[0][_kv, page_idx, in_page_idx, _head, :])
         if not memory_obj.tensor.is_cuda:
             # Force a synchronize if the target buffer is NOT CUDA device
             # NOTE: for better performance, we may not want to sync for every

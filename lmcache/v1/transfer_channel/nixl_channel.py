@@ -9,12 +9,14 @@ import uuid
 
 # Third Party
 import msgspec
+import torch
 import zmq
 
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.memory_management import (
     MemoryObj,
+    PagedTensorMemoryMetadata,
 )
 
 if TYPE_CHECKING:
@@ -31,7 +33,6 @@ from lmcache.v1.transfer_channel.transfer_utils import (
 )
 
 logger = init_logger(__name__)
-
 
 class NixlMsgBase(msgspec.Struct, tag=True):
     """Base class for all nixl-related messages"""
@@ -52,6 +53,7 @@ class NixlMemRegRequest(NixlMsgBase):
 class NixlInitResponse(NixlMsgBase):
     remote_agent_name: bytes
     remote_meta_bytes: bytes  # Metadata from the receiver nixl agent
+    remote_tp_size: int
 
 
 class NixlMemRegResponse(NixlMsgBase):
@@ -61,6 +63,10 @@ class NixlMemRegResponse(NixlMsgBase):
 NixlMsg = Union[
     NixlInitRequest, NixlInitResponse, NixlMemRegRequest, NixlMemRegResponse
 ]
+@dataclass
+class TPWorkerInfo:
+    tp_rank: int
+    tp_size: int
 
 
 class NixlChannel(BaseTransferChannel):
@@ -70,11 +76,10 @@ class NixlChannel(BaseTransferChannel):
         **kwargs,
     ):
         assert "role" in kwargs
-        assert "buffer_ptr" in kwargs
-        assert "buffer_size" in kwargs
-        assert "align_bytes" in kwargs
-        assert "tp_rank" in kwargs
+        assert "allocator_meta" in kwargs
+        assert "tp_info" in kwargs
         assert "peer_init_url" in kwargs
+        enable_asym_tp = kwargs.get("enable_asym_tp", False)
 
         if "backends" in kwargs:
             backends = kwargs["backends"]
@@ -82,13 +87,14 @@ class NixlChannel(BaseTransferChannel):
             backends = ["UCX"]
 
         self.role = kwargs["role"]
+        self.allocator_meta: PagedTensorMemoryMetadata = kwargs["allocator_meta"]
+        self.tp_info: TPWorkerInfo = kwargs["tp_info"]
 
         self.nixl_wrapper = NixlAgentWrapper(
-            buffer_ptr=kwargs["buffer_ptr"],
-            buffer_size=kwargs["buffer_size"],
-            page_size=kwargs["align_bytes"],
-            tp_rank=kwargs["tp_rank"],
+            allocator_meta=self.allocator_meta,
+            tp_rank=self.tp_info.tp_rank,
             backends=backends,
+            enable_asym_tp=enable_asym_tp,
         )
         self.nixl_agent = self.nixl_wrapper.agent
 
@@ -121,6 +127,7 @@ class NixlChannel(BaseTransferChannel):
         local_id: str,
         peer_id: str,
         peer_init_url: str,
+        peer_tp_size: int,
         init_side_msg: Optional[InitSideMsgBase] = None,
     ) -> Optional[InitSideRetMsgBase]:
         # Initialize temporary socket for nixl initialization
@@ -140,9 +147,15 @@ class NixlChannel(BaseTransferChannel):
 
         # Wait remote agent metadata and register remote agent
         nixl_init_resp_bytes = init_tmp_socket.recv()
-        nixl_init_resp = msgspec.msgpack.decode(nixl_init_resp_bytes, type=NixlMsg)
+        nixl_init_resp: NixlInitResponse = msgspec.msgpack.decode(
+            nixl_init_resp_bytes, type=NixlMsg
+        )
         remote_meta_bytes = nixl_init_resp.remote_meta_bytes
         remote_agent_name = self.nixl_agent.add_remote_agent(remote_meta_bytes)
+        remote_tp_size = nixl_init_resp.remote_tp_size
+        assert peer_tp_size == remote_tp_size, (
+            f"Peer tp size {peer_tp_size} does not match remote agent tp size {remote_tp_size}"
+        )
 
         # Register remote memory
         local_xfer_dlist_bytes = self.nixl_agent.get_serialized_descs(
@@ -155,7 +168,7 @@ class NixlChannel(BaseTransferChannel):
         )
         init_tmp_socket.send(msgspec.msgpack.encode(nixl_mem_reg_req))
         nixl_mem_reg_resp_bytes = init_tmp_socket.recv()
-        nixl_mem_reg_resp = msgspec.msgpack.decode(
+        nixl_mem_reg_resp: NixlMemRegResponse = msgspec.msgpack.decode(
             nixl_mem_reg_resp_bytes, type=NixlMsg
         )
 
@@ -409,6 +422,16 @@ class NixlChannel(BaseTransferChannel):
     ############################################################
     # Read/Write functions
     ############################################################
+    def _to_ranged_indices(self, indices: list[int]) -> list[int]:
+        per_chunk_tokens = len(self.nixl_wrapper.per_chunk_range)
+        expanded_indexes = [
+            expanded_idx
+            for idx in indices
+            for expanded_idx in (
+                self.nixl_wrapper.per_chunk_range + (idx * per_chunk_tokens)
+            ).tolist()
+        ]
+        return expanded_indexes
 
     ### Read and Write only need to be called on one side ###
     def batched_write(
@@ -428,10 +451,10 @@ class NixlChannel(BaseTransferChannel):
 
         handle = self.nixl_agent.make_prepped_xfer(
             "WRITE",
-            self.nixl_wrapper.xfer_handler,
-            self.get_local_mem_indices(objects),
+            self.nixl_wrapper.xfer_handlers[transfer_spec["receiver_id"]],
+            self._to_ranged_indices(self._get_local_mem_indices(objects)),
             self.remote_xfer_handlers_dict[transfer_spec["receiver_id"]],
-            transfer_spec["remote_indexes"],
+            self._to_ranged_indices(transfer_spec["remote_indexes"]),
         )
 
         self.nixl_agent.transfer(handle)
@@ -477,11 +500,13 @@ class NixlChannel(BaseTransferChannel):
         """
 
         assert transfer_spec is not None
+        # First Party
 
+        # ForkedPdb().set_trace()
         handle = self.nixl_agent.make_prepped_xfer(
             "WRITE",
-            self.nixl_wrapper.xfer_handler,
-            self.get_local_mem_indices(objects),
+            self.nixl_wrapper.xfer_handlers[transfer_spec["receiver_id"]],
+            self._get_local_mem_indices(objects),
             self.remote_xfer_handlers_dict[transfer_spec["receiver_id"]],
             transfer_spec["remote_indexes"],
         )
@@ -555,11 +580,37 @@ class NixlChannel(BaseTransferChannel):
         for thread in self.running_threads:
             thread.join()
         self.zmq_context.term()
-        self.nixl_agent.deregister_memory(self.nixl_wrapper.reg_descs)
-        self.nixl_agent.release_dlist_handle(self.nixl_wrapper.xfer_handler)
-
+        self.nixl_agent.deregister_memory(self.reg_descs)
+        for xfer_handler in self.nixl_wrapper.xfer_handlers.values():
+            self.nixl_agent.release_dlist_handle(xfer_handler)
         for remote_xfer_handler in self.remote_xfer_handlers_dict.values():
             self.nixl_agent.release_dlist_handle(remote_xfer_handler)
+
+    def get_block_descs(
+        self, remote_tp_group_rank: int, dp_ratio: int
+    ) -> list[tuple[int, ...]]:
+        buffer_size = self.allocator_meta.buffer_size
+        local_page_size = self.nixl_wrapper.page_size
+        remote_page_size = local_page_size // dp_ratio
+        assert remote_tp_group_rank < dp_ratio
+        # TODO(novahow) add this check back
+        # assert self.remote_page_size == remote_page_size, (
+        #     f"remote page size {self.remote_page_size} != calculated remote page size "
+        #     f"{remote_page_size}"
+        # )
+        blocks_data: list[tuple[int, ...]] = []
+        base_ptr = self.allocator_meta.buffer_ptr
+        for base_addr in range(base_ptr, base_ptr + buffer_size, local_page_size):
+            rank_offset = (remote_page_size) * remote_tp_group_rank
+            blocks_data.append(
+                (base_addr + rank_offset, remote_page_size, self.tp_info.tp_rank)
+            )
+        return blocks_data
+
+    def update_agent_from_blocks_data(
+        self, blocks_data: list[tuple[int, ...]], receiver_id: str
+    ):
+        self.nixl_wrapper.update_handler_from_blocks_data(blocks_data, receiver_id)
 
 
 @dataclass
@@ -571,11 +622,10 @@ class NixlAgentWrapper:
 
     def __init__(
         self,
-        buffer_ptr: int,
-        buffer_size: int,
-        page_size: int,
+        allocator_meta: PagedTensorMemoryMetadata,
         tp_rank: int,
         backends: list[str],
+        enable_asym_tp: bool = False,
     ):
         """
         Initialize the NIXL agent.
@@ -611,6 +661,10 @@ class NixlAgentWrapper:
             nixl_agent_config(backends=backends),
         )
 
+        buffer_ptr = allocator_meta.buffer_ptr
+        buffer_size = allocator_meta.buffer_size
+        page_size = allocator_meta.align_bytes
+
         # Register the memory
         # The four fields are (base_addr, length, dev_id, meta_info)
         # https://github.com/ai-dynamo/nixl/blob/main/src/api/cpp/nixl_descriptors.h#L152
@@ -619,15 +673,45 @@ class NixlAgentWrapper:
         reg_descs = nixl_agent.get_reg_descs(memory_desc, mem_type="cuda")
         nixl_agent.register_memory(reg_descs)
 
+        self.page_size = (
+            (
+                allocator_meta.shape.numel()
+                // allocator_meta.shape[allocator_meta.fmt.token_dim()]
+                * allocator_meta.dtype.itemsize
+            )
+            if enable_asym_tp
+            else page_size
+        )
+        self.per_chunk_range = (
+            torch.arange(
+                allocator_meta.shape[allocator_meta.fmt.token_dim()], dtype=torch.long
+            )
+            if enable_asym_tp
+            else torch.arange(1)
+        )
         # Create xfer handlers
         xfer_desc = []
-        for base_addr in range(buffer_ptr, buffer_ptr + buffer_size, page_size):
-            xfer_desc.append((base_addr, page_size, tp_rank))
+        for base_addr in range(buffer_ptr, buffer_ptr + buffer_size, self.page_size):
+            xfer_desc.append((base_addr, self.page_size, tp_rank))
 
         xfer_descs = nixl_agent.get_xfer_descs(xfer_desc, mem_type="cuda")
-        xfer_handler = nixl_agent.prep_xfer_dlist("", xfer_descs, mem_type="cuda")
 
-        self.agent = nixl_agent
+        self.agent: NixlAgent = nixl_agent
         self.reg_descs = reg_descs
         self.xfer_descs = xfer_descs
-        self.xfer_handler = xfer_handler
+        self.xfer_handlers: dict[str, Any] = {}
+
+    def update_handler_from_blocks_data(
+        self, blocks_data: list[tuple[int, ...]], receiver_id: str
+    ):
+        xfer_descs = self.agent.get_xfer_descs(blocks_data, mem_type="cuda")
+        xfer_handler = self.agent.prep_xfer_dlist(
+            "NIXL_INIT_AGENT", xfer_descs, mem_type="cuda"
+        )
+        # First Party
+
+        # ForkedPdb().set_trace()
+        self.xfer_handlers[receiver_id] = xfer_handler
+
+
+

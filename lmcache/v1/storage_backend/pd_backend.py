@@ -3,6 +3,9 @@
 # Standard
 from dataclasses import dataclass
 from typing import Any, List, Optional, Sequence, Union
+from enum import Enum
+import asyncio
+import concurrent.futures as cf
 import threading
 import time
 
@@ -27,7 +30,8 @@ from lmcache.v1.memory_management import (
 )
 from lmcache.v1.rpc_utils import get_zmq_context, get_zmq_socket
 from lmcache.v1.storage_backend.abstract_backend import AllocatorBackendInterface
-from lmcache.v1.transfer_channel import CreateTransferChannel
+from lmcache.v1.transfer_channel import CreateTransferChannel, BaseTransferChannel
+from lmcache.v1.transfer_channel.nixl_channel import TPWorkerInfo
 from lmcache.v1.transfer_channel.transfer_utils import get_correct_device
 
 logger = init_logger(__name__)
@@ -67,8 +71,50 @@ PDMsg = Union[AllocRequest, AllocResponse, ProxyNotif]
 
 
 @dataclass
+class TPRankRecvInfo:
+    group_tp_rank: int
+    receiver_id: str
+    receiver_init_url: str
+    receiver_mem_alloc_url: str
+
+
+class NixlReceiverInfo:
+    def __init__(
+        self,
+        receiver_ids: list[str],
+        receiver_host: str,
+        receiver_init_port: list[int],
+        receiver_alloc_port: list[int],
+    ):
+        self.receiver_ids = receiver_ids
+        self.receiver_host = receiver_host
+        self.receiver_init_port = receiver_init_port
+        self.receiver_alloc_port = receiver_alloc_port
+
+    def get_world_receivers(self) -> list[TPRankRecvInfo]:
+        assert len(self.receiver_ids) == len(self.receiver_init_port)
+        assert len(self.receiver_ids) == len(self.receiver_alloc_port)
+        return [
+            TPRankRecvInfo(
+                group_tp_rank=tp_rank,
+                receiver_id=self.receiver_ids[tp_rank],
+                receiver_init_url=f"{self.receiver_host}:{self.receiver_init_port[tp_rank]}",
+                receiver_mem_alloc_url=f"{self.receiver_host}:{self.receiver_alloc_port[tp_rank]}",
+            )
+            for tp_rank in range(len(self.receiver_ids))
+        ]
+
+
+class PDRole(Enum):
+    SENDER = "sender"
+    RECEIVER = "receiver"
+    # TODO(novahow): for role switch
+    BOTH = "both"
+
+
+@dataclass
 class PDConfig:
-    role: str
+    role: PDRole
 
     peer_host: str
     peer_init_port: int
@@ -80,6 +126,8 @@ class PDConfig:
     buffer_size: int
     buffer_device: str
 
+    enable_asym_tp: bool = False
+
     @staticmethod
     def from_cache_engine_config(
         config: LMCacheEngineConfig,
@@ -88,10 +136,10 @@ class PDConfig:
     ) -> "PDConfig":
         """Convert the LMCacheEngineConfig to PDConfig"""
 
-        role = config.pd_role
+        role = PDRole(config.pd_role)
 
         # TODO(Jiayi): Could be both if we want to do dynamic role switch.
-        assert role in ["sender", "receiver"], (
+        assert role in [PDRole.SENDER, PDRole.RECEIVER], (
             f"Invalid role: {config.pd_role}, must be either sender or receiver"
         )
 
@@ -129,6 +177,7 @@ class PDConfig:
             proxy_port=config.pd_proxy_port,
             buffer_size=config.pd_buffer_size,
             buffer_device=corrected_device,
+            enable_asym_tp=config.enable_asym_tp,
         )
 
 
@@ -144,14 +193,23 @@ class PDBackend(AllocatorBackendInterface):
         self,
         config: LMCacheEngineConfig,
         metadata: LMCacheEngineMetadata,
+        loop: asyncio.AbstractEventLoop,
     ):
         self.running = True
 
         self.tp_rank = metadata.worker_id
+        # TODO: verify if this is needed
+        # Third Party
+        from vllm.distributed.parallel_state import (
+            get_tensor_model_parallel_world_size,
+        )
+
+        self.tp_world_size = get_tensor_model_parallel_world_size()
 
         self.pd_config = PDConfig.from_cache_engine_config(
             config, metadata, self.tp_rank
         )
+        self.loop = loop
 
         # NOTE(Jiayi): sender/prefiller will not use this pool;
         # only receiver/decoder will.
@@ -179,28 +237,31 @@ class PDBackend(AllocatorBackendInterface):
                 self.pd_config.peer_init_port
             )
 
-        self.transfer_channel = CreateTransferChannel(
+        self.transfer_channel: BaseTransferChannel = CreateTransferChannel(
             async_mode=False,
             channel_type=config.transfer_channel,
             role=self.pd_config.role,
-            buffer_ptr=self.memory_allocator.gpu_allocator.buffer_ptr,
-            buffer_size=self.memory_allocator.gpu_allocator.buffer_size,
-            align_bytes=self.memory_allocator.gpu_allocator.align_bytes,
-            tp_rank=self.tp_rank,
+            allocator_meta=self.memory_allocator.gpu_allocator.metadata,
+            tp_info=TPWorkerInfo(
+                tp_rank=self.tp_rank,
+                tp_size=self.tp_world_size,
+            ),
             peer_init_url=peer_init_url,
             backends=config.nixl_backends,
+            enable_asym_tp=config.enable_asym_tp,
         )
 
-        if self.pd_config.role == "sender":
+        if self.pd_config.role == PDRole.SENDER:
             self._init_sender()
             self.initialized_peers: set[str] = set()
             self.mem_alloc_sockets: dict[str, zmq.Socket] = {}
-        elif self.pd_config.role == "receiver":
+        elif self.pd_config.role == PDRole.RECEIVER:
             self._init_receiver()
         else:
-            raise ValueError("Invalid PD role.")
+            raise ValueError(f"Invalid PD role: {self.pd_config.role}")
 
         self.full_chunk_size = config.chunk_size
+        self.dp_ratio = 1
 
     def __str__(self):
         return self.__class__.__name__
@@ -227,6 +288,7 @@ class PDBackend(AllocatorBackendInterface):
             metadata.kv_dtype,
             MemoryFormat.KV_2LTD,  # TODO: remove this hardcode
             corrected_device,
+            transpose=config.enable_asym_tp,
         )
 
         return paged_mem_allocator
@@ -298,33 +360,37 @@ class PDBackend(AllocatorBackendInterface):
 
     def _ensure_peer_connection(
         self,
-        receiver_id: str,
-        receiver_host: str,
-        receiver_init_port: int,
-        receiver_alloc_port: int,
+        receiver_info: NixlReceiverInfo,
     ) -> None:
-        if receiver_id in self.initialized_peers:
-            return
+        # First Party
 
-        receiver_init_url = f"{receiver_host}:{receiver_init_port}"
-        receiver_mem_alloc_url = f"{receiver_host}:{receiver_alloc_port}"
+        # ForkedPdb().set_trace()
+        for receiver in receiver_info.get_world_receivers():
+            receiver_id = receiver.receiver_id
+            receiver_init_url = receiver.receiver_init_url
+            receiver_mem_alloc_url = receiver.receiver_mem_alloc_url
+            if receiver_id in self.initialized_peers:
+                continue
 
-        # Establish the connection with the receiver/decoder
-        self.transfer_channel.lazy_init_peer_connection(
-            local_id=self.local_id, peer_id=receiver_id, peer_init_url=receiver_init_url
-        )
+            # Establish the connection with the receiver/decoder
+            self.transfer_channel.lazy_init_peer_connection(
+                local_id=self.local_id,
+                peer_id=receiver_id,
+                peer_init_url=receiver_init_url,
+                peer_tp_size=len(receiver_info.receiver_ids),
+            )
 
-        # Set up the memory allocation socket
-        mem_alloc_socket = get_zmq_socket(
-            self.zmq_context,
-            receiver_mem_alloc_url,
-            "tcp",
-            zmq.REQ,
-            "connect",
-        )
-        self.mem_alloc_sockets[receiver_id] = mem_alloc_socket
+            # Set up the memory allocation socket
+            mem_alloc_socket = get_zmq_socket(
+                self.zmq_context,
+                receiver_mem_alloc_url,
+                "tcp",
+                zmq.REQ,
+                "connect",
+            )
+            self.mem_alloc_sockets[receiver_id] = mem_alloc_socket
 
-        self.initialized_peers.add(receiver_id)
+            self.initialized_peers.add(receiver_id)
 
     def _remote_allocate(
         self, receiver_id: str, alloc_request: AllocRequest
@@ -357,7 +423,12 @@ class PDBackend(AllocatorBackendInterface):
         last_chunk_toks = mem_objs[-1].meta.shape[token_dim]
 
         str_keys = [key.to_string() for key in keys]
-
+        shape = list(shape)
+        assert (
+            fmt == MemoryFormat.KV_2LTD or self.dp_ratio == 1
+        ), """Asymmetric tensor parallelism is only supported
+            for KV_2LTD format for now."""
+        shape[-1] //= self.dp_ratio
         return AllocRequest(
             keys=str_keys,
             fmt=fmt.value,
@@ -376,56 +447,99 @@ class PDBackend(AllocatorBackendInterface):
         for mem_obj in memory_objs:
             mem_obj.ref_count_up()
 
-        receiver_init_port = transfer_spec.receiver_init_port[self.tp_rank]
-        receiver_alloc_port = transfer_spec.receiver_alloc_port[self.tp_rank]
-        receiver_id = transfer_spec.receiver_host + str(receiver_init_port)
-        receiver_host = transfer_spec.receiver_host
+        # Third Party
+        from vllm.distributed.utils import divide
 
-        self._ensure_peer_connection(
-            receiver_id=receiver_id,
-            receiver_host=receiver_host,
+        self.dp_ratio = divide(
+            len(transfer_spec.receiver_init_port), self.tp_world_size
+        )
+        # NOTE(novahow), assume dp_ratio = 2
+        # rank 0 on P maps to rank [0,1] on D
+        receiver_init_port = transfer_spec.receiver_init_port[
+            self.tp_rank * self.dp_ratio : (self.tp_rank + 1) * self.dp_ratio
+        ]
+        receiver_alloc_port = transfer_spec.receiver_alloc_port[
+            self.tp_rank * self.dp_ratio : (self.tp_rank + 1) * self.dp_ratio
+        ]
+        # receiver_id = transfer_spec.receiver_host + str(receiver_init_port)
+        # receiver_host = transfer_spec.receiver_host
+        receiver_info = NixlReceiverInfo(
+            receiver_ids=transfer_spec.receiver_id,
+            receiver_host=transfer_spec.receiver_host,
             receiver_init_port=receiver_init_port,
             receiver_alloc_port=receiver_alloc_port,
         )
 
+        self._ensure_peer_connection(
+            receiver_info,
+        )
+
         # Allocate remote memory objects
         alloc_request = self._get_remote_alloc_request(keys, memory_objs)
-        alloc_response = self._remote_allocate(receiver_id, alloc_request)
-        already_sent_indexes = alloc_response.already_sent_indexes
-        remote_indexes = alloc_response.remote_indexes
+        all_sent_indexes = set(range(len(alloc_request.keys)))
+        any_remote_indexes: set[int] = set()
 
-        # Filter out already sent memory objects and free them
-        mem_objs_to_send = []
-        for idx, mem_obj in enumerate(memory_objs):
-            if idx in already_sent_indexes:
-                mem_obj.ref_count_down()
-            else:
-                mem_objs_to_send.append(mem_obj)
+        with cf.ThreadPoolExecutor(self.dp_ratio) as executor:
+            blocking_send_tasks = []
+            for receiver_rank, receiver in enumerate(
+                receiver_info.get_world_receivers()
+            ):
+                alloc_response = self._remote_allocate(
+                    receiver.receiver_id, alloc_request
+                )
+                already_sent_indexes = alloc_response.already_sent_indexes
+                remote_indexes = alloc_response.remote_indexes
+                all_sent_indexes.difference_update(set(remote_indexes))
+                mem_objs_to_send = []
+                for idx, mem_obj in enumerate(memory_objs):
+                    if idx not in already_sent_indexes:
+                        mem_objs_to_send.append(mem_obj)
+                        any_remote_indexes.add(idx)
 
-        if mem_objs_to_send:
-            # TODO(Jiayi): make this decoupled with transfer channel
-            # Construct transfer spec
-            channel_transfer_spec = {
-                "receiver_id": receiver_id,
-                "remote_indexes": remote_indexes,
-            }
+                if mem_objs_to_send:
+                    # TODO(Jiayi): make this decoupled with transfer channel
+                    # Construct transfer spec
+                    channel_transfer_spec = {
+                        "receiver_id": receiver.receiver_id,
+                        "remote_indexes": remote_indexes,
+                    }
 
-            # TODO(Jiayi): Consider making this real async
-            # Perform the actual transfer
-            self.transfer_channel.batched_write(
-                objects=mem_objs_to_send,
-                transfer_spec=channel_transfer_spec,
-            )
+                    blocks_data = self.transfer_channel.get_block_descs(
+                        receiver_rank,
+                        self.dp_ratio,
+                    )
+                    self.transfer_channel.update_agent_from_blocks_data(
+                        blocks_data, receiver.receiver_id
+                    )
+
+                    # TODO(Jiayi): Consider making this real async
+                    # Perform the actual transfer
+                    blocking_send_tasks.append(
+                        executor.submit(
+                            self.transfer_channel.batched_write,
+                            objects=mem_objs_to_send,
+                            transfer_spec=channel_transfer_spec,
+                        )
+                    )
+                else:
+                    logger.debug(
+                        f"All memory objects have been already sent to the remote peer {receiver}."
+                        " Skipping transfer."
+                    )
+
+                # Filter out already sent memory objects and free them
+            mem_objs_to_send = []
+            for idx, mem_obj in enumerate(memory_objs):
+                if idx in all_sent_indexes:
+                    mem_obj.ref_count_down()
+
+            for task in cf.as_completed(blocking_send_tasks):
+                task.result()
 
             # TODO(Jiayi): consider moving this to the transfer channel
             # since we might want the transfer to be async.
-            for mem_obj in mem_objs_to_send:
-                mem_obj.ref_count_down()
-        else:
-            logger.debug(
-                "All memory objects have been already sent to the remote peer."
-                " Skipping transfer."
-            )
+            for idx in any_remote_indexes:
+                memory_objs[idx].ref_count_down()
 
         if transfer_spec.is_last_prefill:
             # Notify the proxy that the transfer is done
@@ -468,6 +582,7 @@ class PDBackend(AllocatorBackendInterface):
 
         for idx, key_str in enumerate(alloc_request.keys):
             key = CacheEngineKey.from_string(key_str)
+            key.update_rank_info_from_nixl(self.tp_world_size, self.tp_rank)
             if self.contains(key, pin=True):
                 already_send_indexes.append(idx)
                 continue

@@ -590,6 +590,13 @@ class BytesBufferMemoryObj(MemoryObj):
         return not self.is_pinned
 
 
+@dataclass
+class AllocatorMetadataBase:
+    shape: torch.Size
+    dtype: Optional[torch.dtype]
+    fmt: MemoryFormat
+
+
 class MemoryAllocatorInterface(metaclass=abc.ABCMeta):
     @abc.abstractmethod
     def allocate(
@@ -1028,6 +1035,13 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         return "TensorMemoryAllocator"
 
 
+@dataclass
+class PagedTensorMemoryMetadata(AllocatorMetadataBase):
+    align_bytes: int
+    buffer_ptr: int
+    buffer_size: int
+
+
 class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
     """
     Implements a paged memory allocator.
@@ -1284,6 +1298,17 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
     def __del__(self):
         # FIXME: NIXL-related memory leak should be handled somewhere (else).
         del self.buffer
+
+    @property
+    def metadata(self):
+        return PagedTensorMemoryMetadata(
+            shape=self.shape,
+            dtype=self.dtype,
+            fmt=self.fmt,
+            align_bytes=self.align_bytes,
+            buffer_ptr=self.buffer_ptr,
+            buffer_size=self.buffer_size,
+        )
 
 
 class BufferAllocator(MemoryAllocatorInterface):
@@ -1877,6 +1902,7 @@ class PagedCpuGpuMemoryAllocator(MemoryAllocatorInterface):
         dtype: torch.dtype,
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
         device: str = "cuda",
+        transpose: bool = False,
     ):
         self.gpu_buffer = torch.empty(
             size,
@@ -1888,6 +1914,7 @@ class PagedCpuGpuMemoryAllocator(MemoryAllocatorInterface):
             shape,
             dtype,
             fmt,
+            transpose=transpose,
         )
 
     def init_cpu_memory_allocator(
@@ -1897,6 +1924,7 @@ class PagedCpuGpuMemoryAllocator(MemoryAllocatorInterface):
         dtype: torch.dtype,
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
         numa_mapping: Optional[NUMAMapping] = None,
+        transpose: bool = False,
     ):
         self.cpu_buffer = _allocate_cpu_memory(size, numa_mapping)
         self.cpu_allocator = PagedTensorMemoryAllocator(
@@ -1904,7 +1932,7 @@ class PagedCpuGpuMemoryAllocator(MemoryAllocatorInterface):
             shape,
             dtype,
             fmt,
-            transpose=True,
+            transpose=transpose,
         )
         self.align_bytes = self.cpu_allocator.align_bytes
 

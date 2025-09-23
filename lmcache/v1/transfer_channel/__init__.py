@@ -2,6 +2,7 @@
 # First Party
 from lmcache.v1.transfer_channel.abstract import BaseTransferChannel
 from lmcache.v1.transfer_channel.nixl_channel import NixlChannel
+from lmcache.v1.memory_management import PagedTensorMemoryMetadata
 
 
 # TODO(Jiayi): Refactor this function when we support more channels.
@@ -9,9 +10,7 @@ def CreateTransferChannel(
     channel_type: str,
     async_mode: bool,
     role: str,
-    buffer_ptr: int,
-    buffer_size: int,
-    align_bytes: int,
+    allocator_meta: PagedTensorMemoryMetadata,
     tp_rank: int,
     peer_init_url: str,
     **kwargs,
@@ -41,9 +40,7 @@ def CreateTransferChannel(
     transfer_channel = NixlChannel(
         async_mode=async_mode,
         role=role,
-        buffer_ptr=buffer_ptr,
-        buffer_size=buffer_size,
-        align_bytes=align_bytes,
+        allocator_meta=allocator_meta,
         tp_rank=tp_rank,
         peer_init_url=peer_init_url,
         **kwargs,
