@@ -110,9 +110,17 @@ class WeightedSemaphore:
         self._cond = asyncio.Condition()
 
     async def acquire(self, n: int = 1) -> None:
+        if n > self._max:
+            raise ValueError(
+                f"Cannot acquire more than {self._max} chunks"
+                "Please set the max local cpu size to a larger value"
+            )
+
         async with self._cond:
+            logger.info(f"Attempting to acquire {n} chunks")
             await self._cond.wait_for(lambda: self._value >= n)
             self._value -= n
+            logger.info(f"Acquired {n} chunks, remaining chunks: {self._value}")
 
     async def release(self, n: int = 1) -> None:
         async with self._cond:
