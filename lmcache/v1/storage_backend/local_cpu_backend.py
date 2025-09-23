@@ -533,9 +533,6 @@ class LocalCPUBackend(AllocatorBackendInterface):
         hidden_dim = num_heads * head_size
         dtype_size = self.metadata.kv_dtype.itemsize
 
-        # account for tensor parallelism - each rank stores a fraction of the hidden dim
-        world_size = self.metadata.world_size
-
         if self.layerwise:
             # layerwise: [chunk_tokens, kv_size, hidden_dim]
             chunk_bytes = chunk_tokens * kv_size * hidden_dim * dtype_size
@@ -545,7 +542,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
         logger.info(
             f"Stats received: num_layers={num_layers}, kv_size={kv_size}, "
             f"chunk_tokens={chunk_tokens}, head_dim={head_size}, "
-            f"dtype_size={dtype_size}, world_size={world_size}, "
+            f"dtype_size={dtype_size}, "
             f"hidden_dim={hidden_dim}"
         )
         logger.info(f"Calculated bytes per chunk per rank: {chunk_bytes}")

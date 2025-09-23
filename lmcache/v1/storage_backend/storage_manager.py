@@ -112,6 +112,7 @@ class WeightedSemaphore:
     async def acquire(self, n: int = 1) -> None:
         if n > self._chunk_budget_cap:
             raise ValueError(
+                f"Trying to acquire {n} chunks, "
                 f"Cannot acquire more than {self._chunk_budget_cap} chunks"
                 "Please set the max local cpu size to a larger value"
             )
