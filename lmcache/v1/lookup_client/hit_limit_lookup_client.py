@@ -19,6 +19,7 @@ HitLimitLookupClient now is used for test, when lookup is called, cal the cache 
 - if the cache hit > hit_limit_upper, re-compute the result by hit_limit_upper
 """
 
+
 class HitLimitLookupClient(LookupClientInterface):
     def __init__(
         self, actual_lookup_client: LookupClientInterface, config: LMCacheEngineConfig
