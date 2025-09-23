@@ -451,8 +451,9 @@ class StorageManager:
             location = "LocalCPUBackend"
 
         for keys_multi_chunk in keys:
+            # Retrieve all chunks for one layer
             backend = self.storage_backends[location]
-
+            # TODO(Jiayi): need to make async loading and layerwise compatible
             task = asyncio.run_coroutine_threadsafe(
                 self.async_serializer.run(
                     backend.batched_get_non_blocking(
