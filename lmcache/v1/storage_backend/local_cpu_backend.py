@@ -538,10 +538,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
         # calculate budget with safety margin
         max_chunks = total_memory // aligned_chunk_bytes
 
-        # conservative 50% utilization to account for fragmentation
-        # it is physically impossible to have more fragmentation than 50%
-        chunk_budget = int(max_chunks * 0.50)
-        logger.info(f"Chunk budget calculated: {chunk_budget}")
+        chunk_budget = int(max_chunks)
         return chunk_budget
 
     def get_keys(self) -> List[CacheEngineKey]:

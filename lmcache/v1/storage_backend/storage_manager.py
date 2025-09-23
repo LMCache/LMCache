@@ -5,7 +5,6 @@ from concurrent.futures import Future
 from typing import (
     TYPE_CHECKING,
     Any,
-    Callable,
     Coroutine,
     Generator,
     List,
@@ -104,30 +103,44 @@ def allocate_and_copy_objects(
 
 
 class WeightedSemaphore:
-    def __init__(self, value: int):
-        self._value = value
-        self._max = value
+    def __init__(self, chunk_budget: int):
+        # it is physically impossible to have more fragmentation than 50%
+        # so we can safely allocate half of the chunk budget for concurrent requests
+        self._concurrent_budget_cap = chunk_budget // 2
+        self._chunk_budget_cap = chunk_budget
+        self._current_chunks = self._concurrent_budget_cap
         self._cond = asyncio.Condition()
 
     async def acquire(self, n: int = 1) -> None:
-        if n > self._max:
+        if n > self._chunk_budget_cap:
             raise ValueError(
-                f"Cannot acquire more than {self._max} chunks"
+                f"Cannot acquire more than {self._chunk_budget_cap} chunks"
                 "Please set the max local cpu size to a larger value"
             )
 
         async with self._cond:
             logger.info(f"WeightedSemaphore: Attempting to acquire {n} chunks")
-            await self._cond.wait_for(lambda: self._value >= n)
-            self._value -= n
+            if n <= self._concurrent_budget_cap:
+                await self._cond.wait_for(lambda: self._current_chunks >= n)
+                self._current_chunks -= n
+            else:
+                # Oversized case: require exclusive access
+                await self._cond.wait_for(
+                    lambda: self._current_chunks == self._concurrent_budget_cap
+                )
+                # Reserve everything
+                self._current_chunks = 0
             logger.info(
                 f"WeightedSemaphore: Acquired {n} chunks, "
-                f"remaining chunks: {self._value}"
+                f"remaining chunks: {self._current_chunks}"
             )
 
     async def release(self, n: int = 1) -> None:
         async with self._cond:
-            self._value = min(self._value + n, self._max)
+            if n <= self._concurrent_budget_cap:
+                self._current_chunks += n
+            else:
+                self._current_chunks = self._concurrent_budget_cap
             self._cond.notify_all()
 
 
@@ -148,18 +161,12 @@ class AsyncSerializer:
 
     async def run(
         self,
-        coro_fn: Callable[[], Coroutine[Any, Any, Any]],
+        coro_fn: Coroutine[Any, Any, Any],
         num_chunks: int,
     ) -> Any:
-        logger.info(f"AsyncSerializer: Attempting to acquire {num_chunks} chunks")
         await self._sem.acquire(num_chunks)
-        logger.info(
-            f"AsyncSerializer: Acquired {num_chunks} chunks, "
-            f"remaining chunks: {self._sem._value}"
-        )
         try:
-            coro = coro_fn()  # Create coroutine AFTER acquiring semaphore
-            return await coro
+            return await coro_fn
         finally:
             await self._sem.release(num_chunks)
 
@@ -446,14 +453,13 @@ class StorageManager:
         for keys_multi_chunk in keys:
             backend = self.storage_backends[location]
 
-            def make_coro(
-                backend: StorageBackendInterface = backend,
-                kmc: list[CacheEngineKey] = keys_multi_chunk,
-            ) -> Coroutine[Any, Any, Any]:
-                return backend.batched_get_non_blocking("fake_lookup_id", kmc)
-
             task = asyncio.run_coroutine_threadsafe(
-                self.async_serializer.run(make_coro, len(keys_multi_chunk)),
+                self.async_serializer.run(
+                    backend.batched_get_non_blocking(
+                        "fake_lookup_id", keys_multi_chunk
+                    ),
+                    len(keys_multi_chunk),
+                ),
                 self.loop,
             )
             yield task
@@ -529,7 +535,10 @@ class StorageManager:
             num_total_hit_chunks += num_hit_chunks
 
             loading_task = asyncio.create_task(
-                backend.batched_get_non_blocking(lookup_id, keys[:num_hit_chunks])
+                self.async_serializer.run(
+                    backend.batched_get_non_blocking(lookup_id, keys[:num_hit_chunks]),
+                    num_hit_chunks,
+                )
             )
             loading_task.add_done_callback(
                 functools.partial(
