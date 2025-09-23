@@ -220,11 +220,6 @@ class RemoteBackend(StorageBackendInterface):
             )
             return
         if self.connection.support_batched_put():
-            if self.connection is None:
-                logger.warning(
-                    "Connection is None in batched_submit_put_task, returning None"
-                )
-                return
             if self._mla_worker_id_as0_mode:
                 return
 
