@@ -133,9 +133,11 @@ Compatibility Matrix
 
 This compatibility matrix accounts for dependencies as well as connector API changes. Please raise an issue on GitHub if you encounter any incompatibilities.
 
-🕯️: torch version incompatibility (still compatible if using ``--no-build-isolation``)
-❌: API incompatibility
-✅: compatible out of the box (wheels only)
+- 🕯️: torch version incompatibility (still compatible if using ``--no-build-isolation``)
+
+- ❌: API incompatibility
+
+- ✅: compatible out of the box (wheels only)
 
 .. csv-table::
    :header: "", "LMCache 0.3.7 (Sep 22)", "LMCache 0.3.6 (Sep 15)", "LMCache 0.3.5 (Aug 28)", "LMCache 0.3.4 (Aug 24)", "LMCache 0.3.3 (Aug 1)", "LMCache 0.3.2 (Jul 14)", "LMCache 0.3.1 (June 25)", "LMCache 0.3.0 (May 28)"

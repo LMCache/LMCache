@@ -416,8 +416,11 @@ async def main(args):
     random.seed(args.shuffle_seed)
 
     # Create the OpenAI client
+    # No timeout: some benchmarks can take 4-5 minutes per request
     client = AsyncOpenAI(
-        base_url=f"http://localhost:{args.port}/v1", api_key="sk-dummy"
+        base_url=f"http://localhost:{args.port}/v1",
+        api_key="sk-dummy",
+        timeout=None,
     )
     model = args.model
 

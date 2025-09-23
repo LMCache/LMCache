@@ -531,7 +531,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
             f"dtype_size={dtype_size}, world_size={world_size}, "
             f"hidden_dim={hidden_dim}, hidden_dim_per_rank={hidden_dim_per_rank}"
         )
-        logger.info(f"Calculated bytes per chunk: {chunk_bytes}")
+        logger.info(f"Calculated bytes per chunk per rank: {chunk_bytes}")
         # add alignment overhead
         # (MixedMemoryAllocator uses TensorMemoryAllocator with 4KB alignment)
         alignment = 4096
