@@ -44,13 +44,16 @@ class LMCLlamaModel(LMCBaseModel):
             dtype=dtype,
         )
 
-    def preprocess_attention_qk(self, q: torch.Tensor, k: torch.Tensor, attn_layer):
+    def preprocess_attention_qk(
+        self, q: torch.Tensor, k: torch.Tensor, positions: torch.Tensor, attn_layer
+    ):
         """
         Llama model Q/K preprocessing - no special processing needed
 
         Args:
             q: Query tensor
             k: Key tensor
+            positions: token positions for positional encoding
             attn_layer: Attention layer
 
         Returns:

@@ -64,13 +64,16 @@ class LMCBaseModel(nn.Module, ABC):
             dtype=dtype,
         )
 
-    def preprocess_attention_qk(self, q: torch.Tensor, k: torch.Tensor, attn_layer):
+    def preprocess_attention_qk(
+        self, q: torch.Tensor, k: torch.Tensor, positions: torch.Tensor, attn_layer
+    ):
         """
         Model-specific Q/K preprocessing, subclasses can override this method
 
         Args:
             q: Query tensor
             k: Key tensor
+            positions: token positions for positional encoding
             attn_layer: Attention layer
 
         Returns:
@@ -118,8 +121,7 @@ class LMCBaseModel(nn.Module, ABC):
                 dim=-1,
             )
 
-            # Model-specific Q/K preprocessing
-            q, k = self.preprocess_attention_qk(q, k, layer.self_attn)
+            # Note: Q/K preprocessing (norm + RoPE) is handled in blender with positions
 
             # Process QKV through blender
             q, k, v, residual, attn_output, attn_metadata = self.blender.process_qkv(

@@ -46,13 +46,20 @@ class LMCQwen3Model(LMCBaseModel):
             dtype=dtype,
         )
 
-    def preprocess_attention_qk(self, q: torch.Tensor, k: torch.Tensor, attn_layer):
+    def preprocess_attention_qk(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        positions: torch.Tensor,
+        attn_layer,
+    ):
         """
-        Qwen3-specific Q/K preprocessing - apply q_norm and k_norm
+        Qwen3-specific Q/K preprocessing - apply q_norm, k_norm and RoPE
 
         Args:
             q: Query tensor
             k: Key tensor
+            positions: token positions for RoPE
             attn_layer: Attention layer
 
         Returns:
@@ -71,5 +78,9 @@ class LMCQwen3Model(LMCBaseModel):
 
             q = apply_norm(q, attn_layer.q_norm)
             k = apply_norm(k, attn_layer.k_norm)
+
+        # Apply rotary embedding after normalization
+        if hasattr(attn_layer, "rotary_emb"):
+            q, k = attn_layer.rotary_emb(positions, q, k)
 
         return q, k

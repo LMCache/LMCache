@@ -84,10 +84,10 @@ class LMCBlender:
         layer = self.layerwise_model.vllm_model.model.layers[layer_id]
         attn_layer = layer.self_attn
 
-        # Use model-specific Q/K preprocessing method
-        q, k = self.layerwise_model.preprocess_attention_qk(q, k, attn_layer)
-
-        q, k = attn_layer.rotary_emb(self.metadata.positions, q, k)
+        # Use model-specific Q/K preprocessing method (includes norm + RoPE)
+        q, k = self.layerwise_model.preprocess_attention_qk(
+            q, k, self.metadata.positions, attn_layer
+        )
 
         if layer_id in self.common_metadata.check_layers:
             diff_k = torch.sum(
