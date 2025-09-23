@@ -22,6 +22,6 @@ vllm:
     - "--block-size"
     - "64"
     - "--kv-cache-dtype"
-    - "fp8_e4m3"
+    - "fp8"
     - "--quantization"
     - "fp8"
