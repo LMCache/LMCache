@@ -503,6 +503,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
 
         total_memory = int(self.config.max_local_cpu_size * 1024**3)
         chunk_tokens = self.config.chunk_size
+        # already accounted for parallelism
         kv_shape = (
             self.metadata.kv_shape
         )  # [num_layers, kv_size, chunk_size, num_heads, head_size]
@@ -515,21 +516,18 @@ class LocalCPUBackend(AllocatorBackendInterface):
 
         # account for tensor parallelism - each rank stores a fraction of the hidden dim
         world_size = self.metadata.world_size
-        hidden_dim_per_rank = hidden_dim // world_size
 
         if self.layerwise:
-            # layerwise: [chunk_tokens, kv_size, hidden_dim_per_rank]
-            chunk_bytes = chunk_tokens * kv_size * hidden_dim_per_rank * dtype_size
+            # layerwise: [chunk_tokens, kv_size, hidden_dim]
+            chunk_bytes = chunk_tokens * kv_size * hidden_dim * dtype_size
         else:
-            # full: [kv_size, num_layers, chunk_tokens, hidden_dim_per_rank]
-            chunk_bytes = (
-                kv_size * num_layers * chunk_tokens * hidden_dim_per_rank * dtype_size
-            )
+            # full: [kv_size, num_layers, chunk_tokens, hidden_dim]
+            chunk_bytes = kv_size * num_layers * chunk_tokens * hidden_dim * dtype_size
         logger.info(
             f"Stats received: num_layers={num_layers}, kv_size={kv_size}, "
             f"chunk_tokens={chunk_tokens}, head_dim={head_size}, "
             f"dtype_size={dtype_size}, world_size={world_size}, "
-            f"hidden_dim={hidden_dim}, hidden_dim_per_rank={hidden_dim_per_rank}"
+            f"hidden_dim={hidden_dim}"
         )
         logger.info(f"Calculated bytes per chunk per rank: {chunk_bytes}")
         # add alignment overhead

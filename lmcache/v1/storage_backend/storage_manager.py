@@ -117,10 +117,13 @@ class WeightedSemaphore:
             )
 
         async with self._cond:
-            logger.info(f"Attempting to acquire {n} chunks")
+            logger.info(f"WeightedSemaphore: Attempting to acquire {n} chunks")
             await self._cond.wait_for(lambda: self._value >= n)
             self._value -= n
-            logger.info(f"Acquired {n} chunks, remaining chunks: {self._value}")
+            logger.info(
+                f"WeightedSemaphore: Acquired {n} chunks, "
+                f"remaining chunks: {self._value}"
+            )
 
     async def release(self, n: int = 1) -> None:
         async with self._cond:
@@ -148,7 +151,12 @@ class AsyncSerializer:
         coro_fn: Callable[[], Coroutine[Any, Any, Any]],
         num_chunks: int,
     ) -> Any:
+        logger.info(f"AsyncSerializer: Attempting to acquire {num_chunks} chunks")
         await self._sem.acquire(num_chunks)
+        logger.info(
+            f"AsyncSerializer: Acquired {num_chunks} chunks, "
+            f"remaining chunks: {self._sem._value}"
+        )
         try:
             coro = coro_fn()  # Create coroutine AFTER acquiring semaphore
             return await coro

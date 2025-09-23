@@ -90,7 +90,7 @@ Fill out the [interest form](https://forms.gle/mQfQDUXbKfp2St1z7), [sign up for 
 
 The community meeting [Zoom Link]( https://uchicago.zoom.us/j/6603596916?pwd=Z1E5MDRWUSt2am5XbEt4dTFkNGx6QT09) for LMCache is hosted bi-weekly. All are welcome to join!
 
-Meetings are held bi-weekly on: Tuesdays at 9:00 AM PT – [Add to Google Calendar](https://calendar.google.com/calendar/event?action=TEMPLATE&tmeid=MjR2djZ0bWl0MWQxNTJlcjkwNmloYXZoZXNfMjAyNTA5MjNUMTYwMDAwWiBzbHNoZW5AdGVuc29ybWVzaC5haQ&tmsrc=slshen%40tensormesh.ai&scp=ALL)
+Meetings are held bi-weekly on: Tuesdays at 9:00 AM PT – [Add to Google Calendar](https://calendar.google.com/calendar/u/0/r?cid=Y19mNGY2ZmMwZjUxMWYyYTZmZmE1ZTVlMGI2Yzk2NmFmZjNhM2Y4ODZiZmU5OTU5MDJlMmE3ZmUyOGZmZThlOWY5QGdyb3VwLmNhbGVuZGFyLmdvb2dsZS5jb20)
 
 We keep notes from each meeting on this [document](https://docs.google.com/document/d/1_Fl3vLtERFa3vTH00cezri78NihNBtSClK-_1tSrcow) for summaries of standups, discussion, and action items.
 
