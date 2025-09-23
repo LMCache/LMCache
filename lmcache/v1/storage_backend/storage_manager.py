@@ -2,7 +2,16 @@
 # Standard
 from collections import OrderedDict
 from concurrent.futures import Future
-from typing import TYPE_CHECKING, Any, Coroutine, Generator, List, Optional, Sequence
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Coroutine,
+    Generator,
+    List,
+    Optional,
+    Sequence,
+)
 import asyncio
 import functools
 import threading
@@ -126,9 +135,14 @@ class AsyncSerializer:
         self._sem = WeightedSemaphore(self.chunk_budget)
         self.loop = loop
 
-    async def run(self, coro: Coroutine, num_chunks: int) -> Any:
+    async def run(
+        self,
+        coro_fn: Callable[[], Coroutine[Any, Any, Any]],
+        num_chunks: int,
+    ) -> Any:
         await self._sem.acquire(num_chunks)
         try:
+            coro = coro_fn()  # Create coroutine AFTER acquiring semaphore
             return await coro
         finally:
             await self._sem.release(num_chunks)
@@ -414,16 +428,16 @@ class StorageManager:
             location = "LocalCPUBackend"
 
         for keys_multi_chunk in keys:
-            # Retrieve all chunks for one layer
             backend = self.storage_backends[location]
-            # TODO(Jiayi): need to make async loading and layerwise compatible
+
+            def make_coro(
+                backend: StorageBackendInterface = backend,
+                kmc: list[CacheEngineKey] = keys_multi_chunk,
+            ) -> Coroutine[Any, Any, Any]:
+                return backend.batched_get_non_blocking("fake_lookup_id", kmc)
+
             task = asyncio.run_coroutine_threadsafe(
-                self.async_serializer.run(
-                    backend.batched_get_non_blocking(
-                        "fake_lookup_id", keys_multi_chunk
-                    ),
-                    len(keys_multi_chunk),
-                ),
+                self.async_serializer.run(make_coro, len(keys_multi_chunk)),
                 self.loop,
             )
             yield task
