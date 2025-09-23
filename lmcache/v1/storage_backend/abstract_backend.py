@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import List, Optional, Sequence
+from typing import Any, List, Optional, Sequence
 import abc
 
 # Third Party
@@ -15,7 +15,6 @@ from lmcache.v1.memory_management import (
     MemoryFormat,
     MemoryObj,
 )
-from lmcache.v1.storage_backend.storage_backend_listener import StorageBackendListener
 
 
 class StorageBackendInterface(metaclass=abc.ABCMeta):
@@ -37,20 +36,6 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
             raise
 
         self.dst_device = dst_device
-        self._listener: Optional[StorageBackendListener] = None
-
-    def set_listener(self, listener: StorageBackendListener):
-        """
-        Set the listener to receive events.
-        """
-        self._listener = listener
-
-    def _on_evict(self, keys: List[CacheEngineKey]) -> None:
-        """
-        Evict keys from the storage backend.
-        """
-        if self._listener is not None:
-            self._listener.on_evict(self, keys)
 
     @abc.abstractmethod
     def contains(self, key: CacheEngineKey, pin: bool = False) -> bool:
@@ -81,7 +66,7 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
         self,
         keys: Sequence[CacheEngineKey],
         objs: List[MemoryObj],
-        transfer_spec=None,
+        transfer_spec: Any = None,
     ) -> None:
         """
         An async function to put the MemoryObj into the storage backend.
@@ -89,11 +74,20 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
         :param List[CacheEngineKey] keys: The keys of the MemoryObjs.
         :param List[MemoryObj] objs: The MemoryObjs to be stored.
 
-        :return: Nothing
-
         :note: This function will have the side effect that modifies the
             underlying key-value mappings in the storage backend. The side
             effect may change the result of lookup and get.
+        """
+        raise NotImplementedError
+
+    async def async_batched_submit_put_task(
+        self,
+        keys: Sequence[CacheEngineKey],
+        objs: List[MemoryObj],
+        transfer_spec: Any = None,
+    ) -> None:
+        """
+        An async version of batched_submit_put_task.
         """
         raise NotImplementedError
 
@@ -134,6 +128,7 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
         self,
         lookup_id: str,
         keys: list[CacheEngineKey],
+        transfer_spec: Any = None,
     ) -> list[MemoryObj]:
         """
         A non-blcocking function to get the kv cache from the storage backend.

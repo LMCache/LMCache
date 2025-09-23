@@ -41,6 +41,7 @@ class LMCacheLookupClient(LookupClientInterface):
 
         self.encoder = msgspec.msgpack.Encoder()
         self.ctx = zmq.Context()  # type: ignore[attr-defined]
+        self.config = config
         rpc_port = vllm_config.kv_transfer_config.get_from_extra_config(
             "lmcache_rpc_port", 0
         )
@@ -55,6 +56,10 @@ class LMCacheLookupClient(LookupClientInterface):
         self.sockets = []
         if self.create_lookup_server_only_on_worker_0_for_mla:
             ranks = 1
+
+        # Set timeout values from config
+        timeout_ms = config.lookup_timeout_ms
+
         for tp_rank in range(ranks):
             socket_path = get_zmq_rpc_path_lmcache(
                 vllm_config, "lookup", rpc_port, tp_rank
@@ -69,6 +74,10 @@ class LMCacheLookupClient(LookupClientInterface):
                 zmq.REQ,  # type: ignore[attr-defined]
                 bind=False,
             )
+
+            # Set socket timeout during initialization
+            socket.setsockopt(zmq.RCVTIMEO, timeout_ms)
+            socket.setsockopt(zmq.SNDTIMEO, timeout_ms)
 
             self.sockets.append(socket)
 
@@ -128,16 +137,24 @@ class LMCacheLookupClient(LookupClientInterface):
                 request_configs_buf,
             ]
 
-        for i in range(ranks):
-            self.sockets[i].send_multipart(msg_buf, copy=False)
-
         results = []
-        # TODO(Jiayi): we can use zmq poll to optimize a bit
-        for i in range(ranks):
-            resp = self.sockets[i].recv()
-            result = int.from_bytes(resp, "big")
-            results.append(result)
+        try:
+            for i in range(ranks):
+                self.sockets[i].send_multipart(msg_buf, copy=False)
 
+            # TODO(Jiayi): we can use zmq poll to optimize a bit
+            for i in range(ranks):
+                resp = self.sockets[i].recv()
+                result = int.from_bytes(resp, "big")
+                results.append(result)
+        except zmq.Again:
+            logger.error(f"Timeout occurred for rank {i}")
+            return 0
+        except zmq.ZMQError as e:
+            logger.error(f"ZMQ error for rank {i}: {str(e)}")
+            return 0
+
+        assert len(results) == ranks
         if len(set(results)) > 1:
             logger.warning(
                 f"Lookup results (number of hit tokens) differ "
@@ -153,7 +170,9 @@ class LMCacheLookupClient(LookupClientInterface):
         return True
 
     def close(self):
-        self.socket.close(linger=0)
+        for socket in self.sockets:
+            if not socket.closed:
+                socket.close(linger=0)
 
 
 class LMCacheLookupServer:

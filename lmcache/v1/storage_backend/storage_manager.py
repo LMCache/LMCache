@@ -20,7 +20,6 @@ from lmcache.utils import (
 )
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.event_manager import EventManager, EventStatus, EventType
-from lmcache.v1.lookup_server import LookupServerInterface
 from lmcache.v1.memory_management import (
     MemoryFormat,
     MemoryObj,
@@ -31,7 +30,6 @@ from lmcache.v1.storage_backend.abstract_backend import (
     StorageBackendInterface,
 )
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
-from lmcache.v1.storage_backend.storage_backend_listener import StorageBackendListener
 
 if TYPE_CHECKING:
     # First Party
@@ -100,41 +98,12 @@ class StorageManager:
     The StorageManager is responsible for managing the storage backends.
     """
 
-    class _CPUDiskListener(StorageBackendListener):
-        def __init__(self, storage_manager: "StorageManager"):
-            self.storage_manager = storage_manager
-
-        def on_evict(
-            self, backend: StorageBackendInterface, keys: List[CacheEngineKey]
-        ):
-            """
-            remove keys from lookup server only if they don't exist in local backends.
-
-            :param StorageBackendInterface backend: The backend that evicted the keys.
-            :param List[CacheEngineKey] keys: The keys that were evicted.
-            """
-            if self.storage_manager.lookup_server is None:
-                return
-
-            search_range = ["LocalCPUBackend", "LocalDiskBackend"]
-            if str(backend) in search_range:
-                search_range.remove(str(backend))
-
-            keys_to_remove = []
-            for key in keys:
-                if not self.storage_manager.contains(key, search_range=search_range):
-                    keys_to_remove.append(key)
-
-            if keys_to_remove:
-                self.storage_manager.lookup_server.batched_remove(keys_to_remove)
-
     def __init__(
         self,
         config: LMCacheEngineConfig,
         metadata: LMCacheEngineMetadata,
         event_manager: EventManager,
         lmcache_worker: Optional["LMCacheWorker"] = None,
-        lookup_server: Optional[LookupServerInterface] = None,
     ):
         self.loop = asyncio.new_event_loop()
 
@@ -153,7 +122,6 @@ class StorageManager:
                 self.loop,
                 dst_device,
                 lmcache_worker,
-                lookup_server,
             )
         )
 
@@ -165,8 +133,6 @@ class StorageManager:
 
         self.manager_lock = threading.Lock()
 
-        self.lookup_server = lookup_server
-
         self.lmcache_worker = lmcache_worker
         self.instance_id = config.lmcache_instance_id
         self.worker_id = metadata.worker_id
@@ -177,16 +143,6 @@ class StorageManager:
 
         # The cuda stream for internal copies during put
         self.internal_copy_stream = torch.cuda.Stream()
-
-        self._cpu_disk_listener = self._CPUDiskListener(self)
-        if "LocalCPUBackend" in self.storage_backends:
-            self.storage_backends["LocalCPUBackend"].set_listener(
-                self._cpu_disk_listener
-            )
-        if "LocalDiskBackend" in self.storage_backends:
-            self.storage_backends["LocalDiskBackend"].set_listener(
-                self._cpu_disk_listener
-            )
 
     def post_init(self, **kwargs) -> None:
         if "async_lookup_server" in kwargs:
@@ -262,12 +218,11 @@ class StorageManager:
 
         memory_obj.ref_count_down()
 
-    # TODO(Jiayi): location and transfer_spec might be redundant
     def batched_put(
         self,
         keys: Sequence[CacheEngineKey],
         memory_objs: List[MemoryObj],
-        transfer_spec=None,  # TODO(Jiayi): add type check
+        transfer_spec=None,
         location: Optional[str] = None,
     ) -> None:
         """
@@ -302,9 +257,6 @@ class StorageManager:
             # is done in the backend
             ks, objs = obj_dict[cname]
             backend.batched_submit_put_task(ks, objs, transfer_spec=transfer_spec)
-
-        if self.lookup_server is not None:
-            self.lookup_server.batched_insert(keys)
 
         for cname, (ks, objs) in obj_dict.items():
             for memory_obj in objs:
@@ -399,7 +351,7 @@ class StorageManager:
         self,
         task: asyncio.Future,
         lookup_id: str,
-        retrieved_length: int,
+        cum_last_tier_chunk_lengths: list[int],
     ) -> None:
         """
         Callback function when all prefetch tasks
@@ -408,6 +360,13 @@ class StorageManager:
         assert self.async_lookup_server is not None
         self.event_manager.update_event_status(
             EventType.LOADING, lookup_id, status=EventStatus.DONE
+        )
+        res = task.result()
+        last_tier_retrieved_chunks = len(res[-1])
+        retrieved_length = cum_last_tier_chunk_lengths[last_tier_retrieved_chunks]
+        logger.info(
+            f"Responding to scheduler for lookup id {lookup_id}"
+            f" with retrieved length {retrieved_length}"
         )
         self.async_lookup_server.send_response_to_scheduler(lookup_id, retrieved_length)
 
@@ -439,8 +398,14 @@ class StorageManager:
         # TODO(Jiayi): We need to change/optimize this for non-prefix
         # based retrieval patterns or cases where middle chunks are missing.
 
+        # NOTE(Jiayi): We can tolerate the last tier to have fewer loaded
+        # chunks than its lookup result indicated. This is especially helpful
+        # for P2PBackend.
+
         num_total_chunks = len(keys)
         num_total_hit_chunks = 0
+        num_last_tier_hit_chunks = 0
+        cum_chunk_lengths_total = cum_chunk_lengths[:]
         loading_tasks = []
         for backend_name, backend in self.storage_backends.items():
             if search_range and backend_name not in search_range:
@@ -450,10 +415,16 @@ class StorageManager:
             if num_hit_chunks == 0:
                 continue
 
+            num_last_tier_hit_chunks = num_hit_chunks
+
             num_total_hit_chunks += num_hit_chunks
 
             loading_task = asyncio.create_task(
-                backend.batched_get_non_blocking(lookup_id, keys[:num_hit_chunks])
+                backend.batched_get_non_blocking(
+                    lookup_id,
+                    keys[:num_hit_chunks],
+                    {"cum_chunk_lengths": cum_chunk_lengths[: num_hit_chunks + 1]},
+                )
             )
             loading_task.add_done_callback(
                 functools.partial(
@@ -464,6 +435,8 @@ class StorageManager:
             )
 
             loading_tasks.append(loading_task)
+
+            cum_chunk_lengths = cum_chunk_lengths[num_hit_chunks:]
 
             if num_total_hit_chunks == num_total_chunks:
                 break
@@ -482,9 +455,14 @@ class StorageManager:
             lookup_id,
             all_done,
         )
+
         all_done.add_done_callback(
             lambda future: self.prefetch_all_done_callback(
-                future, lookup_id, cum_chunk_lengths[num_total_hit_chunks]
+                future,
+                lookup_id,
+                cum_chunk_lengths_total[
+                    num_total_hit_chunks - num_last_tier_hit_chunks :
+                ],
             )
         )
 

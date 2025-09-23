@@ -72,7 +72,7 @@ async def lifespan(app: FastAPI):
             raise ValueError(
                 "Length mismatch between hosts and ports lists for pairing"
             )
-        return list(zip(hosts, ports))
+        return list(zip(hosts, ports, strict=False))
 
     prefill_pairs = pair_hosts_and_ports(
         pref_hosts, pref_ports, global_args.num_prefillers
@@ -153,7 +153,7 @@ class StatsCalculator:
 
     def _log_stats(self):
         # Print average, median, and 99th percentile
-        np_arr = np.array(self._stats)
+        np_arr = np.array(self._stats) * 1000
         output_str = (
             f"\nNum requests: {len(self._stats)}"
             + "\nPrefill node TTFT stats:"

@@ -15,7 +15,7 @@
 
 # Standard
 from dataclasses import dataclass
-from typing import List, Optional, Sequence, Set, cast
+from typing import Any, List, Optional, Sequence, Set, cast
 import asyncio
 import os
 import threading
@@ -43,7 +43,7 @@ from lmcache.v1.memory_management import (
     PagedTensorMemoryAllocator,
 )
 from lmcache.v1.storage_backend.abstract_backend import AllocatorBackendInterface
-from lmcache.v1.storage_backend.connector.nixl_utils import get_correct_nixl_device
+from lmcache.v1.transfer_channel.transfer_utils import get_correct_device
 
 logger = init_logger(__name__)
 
@@ -83,7 +83,7 @@ class NixlStorageConfig:
             extra_config.get("nixl_backend"), config.nixl_buffer_device
         ), "Invalid NIXL backend & device combination"
 
-        corrected_device = get_correct_nixl_device(
+        corrected_device = get_correct_device(
             config.nixl_buffer_device, metadata.worker_id
         )
 
@@ -367,7 +367,7 @@ class NixlStorageBackend(AllocatorBackendInterface):
         self,
         keys: Sequence[CacheEngineKey],
         memory_objs: List[MemoryObj],
-        transfer_spec=None,
+        transfer_spec: Any = None,
     ) -> None:
         with self.progress_lock:
             for key in keys:
@@ -396,6 +396,7 @@ class NixlStorageBackend(AllocatorBackendInterface):
         self,
         lookup_id: str,
         keys: list[CacheEngineKey],
+        transfer_spec: Any = None,
     ) -> list[MemoryObj]:
         obj_list = await self.file_to_gpu(keys)
         assert None not in obj_list
@@ -442,12 +443,7 @@ class NixlStorageBackend(AllocatorBackendInterface):
             "enable_nixl_storage"
         )
         assert enable_nixl_storage
-        # First Party
-        from lmcache.v1.storage_backend.connector.nixl_utils import (
-            get_correct_nixl_device,
-        )
-
-        corrected_device = get_correct_nixl_device(
+        corrected_device = get_correct_device(
             config.nixl_buffer_device,
             metadata.worker_id,
         )

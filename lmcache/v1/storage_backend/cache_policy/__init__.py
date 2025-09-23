@@ -1,4 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
+# Standard
+from typing import Dict, Type
+
 # First Party
 from lmcache.v1.storage_backend.cache_policy.base_policy import BaseCachePolicy
 from lmcache.v1.storage_backend.cache_policy.fifo import FIFOCachePolicy
@@ -6,22 +9,37 @@ from lmcache.v1.storage_backend.cache_policy.lfu import LFUCachePolicy
 from lmcache.v1.storage_backend.cache_policy.lru import LRUCachePolicy
 from lmcache.v1.storage_backend.cache_policy.mru import MRUCachePolicy
 
+# Cache policy mapping
+POLICY_MAPPING: Dict[str, Type[BaseCachePolicy]] = {
+    "LRU": LRUCachePolicy,
+    "LFU": LFUCachePolicy,
+    "FIFO": FIFOCachePolicy,
+    "MRU": MRUCachePolicy,
+}
+
 
 def get_cache_policy(policy_name: str) -> BaseCachePolicy:
     """
     Factory function to get the cache policy instance based on the policy name.
+
+    Args:
+        policy_name: Name of the cache policy (case-insensitive, e.g., "LRU", "lru").
+
+    Returns:
+        Instance of the corresponding cache policy.
+
+    Raises:
+        ValueError: If the policy name is not supported.
     """
-    supported_policies = ["LRU", "LFU", "FIFO", "MRU"]
-    if policy_name == "LRU":
-        return LRUCachePolicy()
-    elif policy_name == "LFU":
-        return LFUCachePolicy()
-    elif policy_name == "FIFO":
-        return FIFOCachePolicy()
-    elif policy_name == "MRU":
-        return MRUCachePolicy()
-    else:
+    if not policy_name:
+        raise ValueError("Cache policy name cannot be empty")
+
+    upper_policy_name = policy_name.upper()
+
+    try:
+        return POLICY_MAPPING[upper_policy_name]()
+    except KeyError:
         raise ValueError(
-            f"Unknown cache policy: {policy_name}"
-            f" Supported policies are: {supported_policies}"
-        )
+            f"Unknown cache policy: {upper_policy_name}."
+            f" Supported policies are: {list(POLICY_MAPPING.keys())}"
+        ) from None

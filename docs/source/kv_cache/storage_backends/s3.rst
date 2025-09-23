@@ -1,0 +1,141 @@
+S3 Backend
+==========
+
+Example Configurations
+----------------------
+
+Basic S3 Configuration
+~~~~~~~~~~~~~~~~~~~~~~~
+
+.. code-block:: yaml
+
+   chunk_size: 256
+   local_cpu: False
+   save_unfull_chunk: False
+   remote_url: "s3://your-bucket-name"
+   remote_serde: "naive"
+   blocking_timeout_secs: 100
+   extra_config:
+     s3_region: "us-east-1"
+     s3_max_io_concurrency: 64
+     s3_max_inflight_reqs: 64
+
+S3 Express One Zone
+~~~~~~~~~~~~~~~~~~~
+
+.. code-block:: yaml
+
+   chunk_size: 256
+   local_cpu: False
+   save_unfull_chunk: False
+   remote_url: "s3://{BUCKET_NAME}.s3express-{AZ_ID}.{REGION}.amazonaws.com"
+   remote_serde: "naive"
+   blocking_timeout_secs: 100
+   extra_config:
+     s3_max_io_concurrency: 64
+     s3_max_inflight_reqs: 64
+     s3_prefer_http2: True
+     s3_region: "{REGION}"
+     s3_enable_s3express: True
+     s3_file_prefix: "{FILE_PREFIX}"
+
+CoreWeave (S3-compatible)
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. code-block:: yaml
+
+   chunk_size: 256
+   local_cpu: False
+   max_local_cpu_size: 50
+   save_unfull_chunk: False
+   enable_async_loading: True
+   remote_url: "s3://test-127.cwlota.com"
+   remote_serde: "naive"
+   blocking_timeout_secs: 100
+   extra_config:
+     s3_max_io_concurrency: 320
+     s3_max_inflight_reqs: 320
+     s3_prefer_http2: False
+     s3_region: "US-WEST-04A"
+     s3_enable_s3express: False
+     save_chunk_meta: False
+     s3_file_prefix: "test-2"
+
+**Note**: `cwlota.com` is CoreWeave's S3-compatible Cloud Storage that caches for GPU locality. Set `s3_enable_s3express: False` for non-AWS services.
+
+Configuration Parameters
+------------------------
+
+* **remote_url**: S3 bucket URL (`s3://bucket-name`)
+* **save_unfull_chunk**: Save partial chunks (default: True, **must be False for S3**)
+* **enable_async_loading**: Async loading (default: False)
+* **blocking_timeout_secs**: Timeout seconds (default: 10)
+
+S3-Specific (in extra_config)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+* **s3_region**: AWS region for S3 client (required)
+* **s3_max_io_concurrency**: Max concurrent I/O operations for event loop group (controls AWS CRT threading)
+* **s3_max_inflight_reqs**: Max simultaneous S3 requests (creates this many /dev/shm buffers and semaphore limit)
+* **s3_prefer_http2**: Enable HTTP/2 with ALPN negotiation (["h2", "http/1.1"])
+* **s3_enable_s3express**: Enable S3 Express One Zone support in AWS CRT client
+* **s3_file_prefix**: Prefix for S3 object keys (e.g., `cache` becomes `/cache/key_name`). Avoid leading/trailing slashes.
+* **save_chunk_meta**: Whether to save chunk metadata with data (set False for performance)
+
+The effective concurrency is limited by the minimum of `s3_max_io_concurrency` and `s3_max_inflight_reqs`.
+
+/dev/shm Configuration
+----------------------
+
+/dev/shm is used as the tmpfs that S3 can use to transfer only into RAM instead of having to touch a block device. 
+
+Memory Requirements and Configuration Calculation
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Calculate total memory needed:
+
+.. code-block::
+
+   # GB / token should be the aggregated size across TP workers of KV Cache size
+   (GB / token) * chunk_size * s3_max_inflight_reqs + max_local_cpu_size * num_tp_workers <= available_pinned_memory
+
+Calculate s3_max_inflight_reqs based on /dev/shm:
+
+.. code-block::
+
+   s3_max_inflight_reqs <= (GB in /dev/shm) / (chunk_size_GB_per_TP) / (TP_count)
+
+Check current size:
+
+.. code-block:: bash
+
+   df -h /dev/shm
+
+Increase size:
+
+.. code-block:: bash
+
+   sudo mount -o remount,size=256G /dev/shm
+
+Clean up LMCache files:
+
+.. code-block:: bash
+
+   rm -f /dev/shm/my_shm_*
+
+Troubleshooting
+---------------
+
+**Memory:**:
+
+- Check: `df -h /dev/shm`
+
+- Fix: Increase `/dev/shm` size or reduce `s3_max_inflight_reqs` or `max_local_cpu_size`
+
+- Clean: `rm -f /dev/shm/my_shm_*`
+
+**Latency**::
+
+- Use same region for compute and S3
+
+- Consider S3 Express One Zone
