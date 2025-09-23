@@ -20,7 +20,6 @@ HitLimitLookupClient now is used for test, when lookup is called, cal the cache 
 """
 
 class HitLimitLookupClient(LookupClientInterface):
-
     def __init__(
         self, actual_lookup_client: LookupClientInterface, config: LMCacheEngineConfig
     ):
@@ -58,7 +57,8 @@ class HitLimitLookupClient(LookupClientInterface):
                 result = min(result, new_result)
                 logger.debug(
                     f"hit limit upper: {self.hit_limit_upper} is smaller than "
-                    f"the real hit rate {current_hit_rate}, the origin result is {origin_result}, "
+                    f"the real hit rate {current_hit_rate}, "
+                    f"the origin result is {origin_result}, "
                     f"the new result is {new_result}, the final result is {result}"
                 )
         return result
