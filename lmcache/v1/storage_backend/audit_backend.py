@@ -19,7 +19,7 @@ class AuditBackend(StorageBackendInterface):
     """
 
     def __init__(self, real_backend: StorageBackendInterface):
-        super().__init__(real_backend.dst_device)
+        super().__init__(dst_device=real_backend.dst_device)
         self.real_backend = real_backend
         self.logger = logger.getChild("audit")
         self.logger.info(

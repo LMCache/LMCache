@@ -13,7 +13,10 @@ from lmcache.utils import _lmcache_nvtx_annotate
 from lmcache.v1.compute.blend.utils import LMCBlenderBuilder
 from lmcache.v1.memory_management import GPUMemoryAllocator  # noqa: E501
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
-import lmcache.c_ops as lmc_ops
+
+if torch.cuda.is_available():
+    # First Party
+    import lmcache.c_ops as lmc_ops
 
 logger = init_logger(__name__)
 

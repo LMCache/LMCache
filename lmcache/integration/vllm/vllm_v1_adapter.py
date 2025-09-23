@@ -554,6 +554,7 @@ class LMCacheConnectorV1Impl:
         parent: KVConnectorBase_V1,
     ):
         self._parent = parent
+        self._vllm_config = vllm_config
         self.kv_role = vllm_config.kv_transfer_config.kv_role
         self.worker_count = vllm_config.parallel_config.tensor_parallel_size
         config = lmcache_get_or_create_config()
@@ -688,6 +689,65 @@ class LMCacheConnectorV1Impl:
             "lmcache cache_engine metadata: "
             f"{getattr(self.lmcache_engine, 'metadata', None)}"
         )
+
+    def get_inference_info(self) -> dict:
+        """Get inference information including vLLM config and related details.
+
+        Returns:
+            dict: Dictionary containing inference information
+        """
+        # Get vLLM config information
+        vllm_config = self._vllm_config
+
+        # Use vLLM config's string representation and add specific configs
+        inference_info = {
+            "vllm_version": VLLM_VERSION,
+            "lmcache_version": utils.get_version(),
+            "vllm_config": str(vllm_config),
+            "model_config": {
+                "model": getattr(vllm_config.model_config, "model", None),
+                "dtype": str(getattr(vllm_config.model_config, "dtype", None)),
+                "max_model_len": getattr(
+                    vllm_config.model_config, "max_model_len", None
+                ),
+                "vocab_size": getattr(vllm_config.model_config, "vocab_size", None),
+                "num_layers": getattr(
+                    vllm_config.model_config, "get_num_layers", lambda _: None
+                )(vllm_config.parallel_config),
+                "num_attention_heads": getattr(
+                    vllm_config.model_config, "get_num_attention_heads", lambda _: None
+                )(vllm_config.parallel_config),
+                "num_kv_heads": getattr(
+                    vllm_config.model_config, "get_num_kv_heads", lambda _: None
+                )(vllm_config.parallel_config),
+                "head_size": getattr(
+                    vllm_config.model_config, "get_head_size", lambda: None
+                )(),
+            },
+            "cache_config": {
+                "block_size": getattr(vllm_config.cache_config, "block_size", None),
+                "cache_dtype": str(
+                    getattr(vllm_config.cache_config, "cache_dtype", None)
+                ),
+                "gpu_memory_utilization": getattr(
+                    vllm_config.cache_config, "gpu_memory_utilization", None
+                ),
+                "swap_space": getattr(vllm_config.cache_config, "swap_space", None),
+                "enable_prefix_caching": getattr(
+                    vllm_config.cache_config, "enable_prefix_caching", None
+                ),
+            },
+        }
+
+        return inference_info
+
+    def get_inference_version(self) -> str:
+        """Get vLLM version information.
+
+        Returns:
+            str: vLLM version string
+        """
+        return VLLM_VERSION
 
     @_lmcache_nvtx_annotate
     def _init_kv_caches_from_forward_context(self, forward_context: "ForwardContext"):

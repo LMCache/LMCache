@@ -33,6 +33,10 @@ from .utils import (
 )
 
 
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="TODO: Add non-CUDA implementation to VLLMPagedMemGPUConnectorV2",
+)
 def test_paged_same_retrieve_store(autorelease_v1):
     device = "cuda"
     fmt = "vllm"
@@ -112,6 +116,10 @@ def test_paged_same_retrieve_store(autorelease_v1):
 @pytest.mark.parametrize("chunk_size", [128, 256])
 @pytest.mark.parametrize("backend", ["cpu", "local_disk", "remote", "remote_cachegen"])
 @pytest.mark.parametrize("lmserver_v1_process", ["cpu"], indirect=True)
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="TODO: Add non-CUDA implementation to VLLMPagedMemGPUConnectorV2",
+)
 def test_paged_retrieve_prefix(
     fmt, chunk_size, backend, lmserver_v1_process, autorelease_v1
 ):
@@ -224,6 +232,10 @@ def test_paged_retrieve_prefix(
     ["cpu", "local_disk", "remote"],
 )
 @pytest.mark.parametrize("lmserver_v1_process", ["cpu"], indirect=True)
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="TODO: Add non-CUDA implementation to VLLMPagedMemGPUConnectorV2",
+)
 def test_paged_store_offset(
     fmt, chunk_size, backend, lmserver_v1_process, autorelease_v1
 ):
@@ -327,6 +339,10 @@ def test_paged_store_offset(
         # "cpu",
         "local_disk"
     ],
+)
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="TODO: Add non-CUDA implementation to VLLMPagedMemGPUConnectorV2",
 )
 def test_paged_mixed_retrieve(fmt, chunk_size, backend, autorelease_v1):
     device = "cuda"
@@ -462,6 +478,10 @@ def test_paged_mixed_retrieve(fmt, chunk_size, backend, autorelease_v1):
 
 
 @pytest.mark.parametrize("fmt", ["vllm"])
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="TODO: Add non-CUDA implementation to VLLMPagedMemGPUConnectorV2",
+)
 def test_paged_store_kv_tensors_mask(fmt, autorelease_v1):
     device = "cuda"
     num_tokens = 1000
@@ -618,6 +638,10 @@ def test_paged_store_kv_tensors_mask(fmt, autorelease_v1):
     ],
 )
 @pytest.mark.parametrize("lmserver_v1_process", ["cpu"], indirect=True)
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="TODO: Add non-CUDA implementation to VLLMPagedMemGPUConnectorV2",
+)
 def test_paged_hierarchy_retrieve(
     fmt, chunk_size, backend, retrieve_from, lmserver_v1_process, autorelease_v1
 ):
@@ -750,6 +774,10 @@ def test_paged_hierarchy_retrieve(
         "local_disk",
     ],
 )
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="TODO: Add non-CUDA implementation to VLLMPagedMemGPUConnectorV2",
+)
 def test_paged_prefetch_retrieve(backend, prefetch_from, autorelease_v1):
     device = "cuda"
     num_tokens = 2000
@@ -878,6 +906,10 @@ def test_paged_prefetch_retrieve(backend, prefetch_from, autorelease_v1):
 )
 @pytest.mark.no_shared_allocator
 @pytest.mark.parametrize("lmserver_v1_process", ["cpu"], indirect=True)
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="TODO: Add non-CUDA implementation to VLLMPagedMemGPUConnectorV2",
+)
 def test_paged_mem_leak(fmt, chunk_size, backend, lmserver_v1_process, autorelease_v1):
     url = None
     if "remote" in backend:
@@ -964,6 +996,10 @@ def test_paged_mem_leak(fmt, chunk_size, backend, lmserver_v1_process, autorelea
     ],
 )
 @pytest.mark.no_shared_allocator
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="TODO: Add non-CUDA implementation to VLLMPagedMemGPUConnectorV2",
+)
 def test_paged_retrieve_after_eviction(fmt, chunk_size, backend, autorelease_v1):
     device = "cuda"
     # NOTE: The default backend cache size is 2 GB.
@@ -1102,6 +1138,10 @@ def test_builder(autorelease_v1):
 
 
 @pytest.mark.no_shared_allocator
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="TODO: Add non-CUDA implementation to VLLMPagedMemGPUConnectorV2",
+)
 def test_force_store_wait(autorelease_v1):
     device = "cuda"
     fmt = "vllm"
@@ -1166,6 +1206,10 @@ def test_force_store_wait(autorelease_v1):
             assert engine.lookup(t) == len(t)
 
 
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="TODO: Add non-CUDA implementation to VLLMPagedMemGPUConnectorV2",
+)
 def test_builder_destroy(autorelease_v1):
     """Test the destroy method of LMCacheEngineBuilder"""
     instance_id = "test_destroy"
@@ -1214,6 +1258,10 @@ def test_builder_destroy(autorelease_v1):
     LMCacheEngineBuilder.destroy("non_existent_id")  # Should not raise
 
 
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="TODO: Add non-CUDA implementation to VLLMPagedMemGPUConnectorV2",
+)
 def test_builder_destroy_multiple_instances(autorelease_v1):
     """Test destroying one instance doesn't affect others"""
     instance_id1 = "test_destroy_1"

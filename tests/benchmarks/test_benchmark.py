@@ -83,6 +83,10 @@ def create_config():
 @pytest.mark.no_shared_allocator
 @pytest.mark.benchmark(group="store")
 @pytest.mark.parametrize("backend", ["cpu", "disk", "fsconnector"])
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="TODO: Add non-CUDA implementation to VLLMPagedMemGPUConnectorV2",
+)
 def test_store_1GB(benchmark, backend, create_config, autorelease_v1):
     """
     In this test, it will run engine.store to store 10GB data in total.
@@ -181,6 +185,10 @@ def test_store_1GB(benchmark, backend, create_config, autorelease_v1):
 @pytest.mark.no_shared_allocator
 @pytest.mark.benchmark(group="retrieve")
 @pytest.mark.parametrize("backend", ["cpu", "disk", "fsconnector"])
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="TODO: Add non-CUDA implementation to VLLMPagedMemGPUConnectorV2",
+)
 def test_retrieve_1GB_allhit(benchmark, backend, create_config, autorelease_v1):
     """
     In this test, it will run engine.retrieve to retrieve 10GB data in total.
@@ -288,6 +296,10 @@ def test_retrieve_1GB_allhit(benchmark, backend, create_config, autorelease_v1):
 @pytest.mark.no_shared_allocator
 @pytest.mark.benchmark(group="lookup")
 @pytest.mark.parametrize("backend", ["cpu", "disk", "fsconnector"])
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="TODO: Add non-CUDA implementation to VLLMPagedMemGPUConnectorV2",
+)
 def test_lookup_20K_tokens(benchmark, backend, create_config, autorelease_v1):
     """
     In this test, it will run engine.lookup to lookup 200K tokens in total.

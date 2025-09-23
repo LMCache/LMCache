@@ -19,7 +19,14 @@ from lmcache.logging import init_logger
 from lmcache.observability import LMCStatsMonitor
 from lmcache.utils import _lmcache_nvtx_annotate
 from lmcache.v1.system_detection import NUMAMapping
-import lmcache.c_ops as lmc_ops
+
+if torch.cuda.is_available():
+    # First Party
+    import lmcache.c_ops as lmc_ops
+else:
+    # First Party
+    import lmcache.non_cuda_equivalents as lmc_ops
+
 
 logger = init_logger(__name__)
 
@@ -295,7 +302,10 @@ def _allocate_cpu_memory(
     numa_mapping: Optional[NUMAMapping] = None,
 ) -> torch.Tensor:
     if numa_mapping:
-        current_device_id = torch.cuda.current_device()
+        if torch.cuda.is_available():
+            current_device_id = torch.cuda.current_device()
+        else:
+            current_device_id = 0
         gpu_to_numa_mapping = numa_mapping.gpu_to_numa_mapping
         assert current_device_id in gpu_to_numa_mapping, (
             f"Current device {current_device_id} is not in the GPU NUMA mapping."
@@ -304,9 +314,11 @@ def _allocate_cpu_memory(
         ptr = lmc_ops.alloc_pinned_numa_ptr(size, numa_id)
     else:
         ptr = lmc_ops.alloc_pinned_ptr(size, 0)
+
     array_type = ctypes.c_uint8 * size
     buf = array_type.from_address(ptr)
     buffer = torch.frombuffer(buf, dtype=torch.uint8)
+
     return buffer
 
 
@@ -1399,7 +1411,6 @@ class PinMemoryAllocator(MemoryAllocatorInterface):
         array_type = ctypes.c_uint8 * size
         buf = array_type.from_address(ptr)
         self.buffer = torch.frombuffer(buf, dtype=torch.uint8)
-
         self._unregistered = False
 
         self.allocator: MemoryAllocatorInterface
@@ -1468,7 +1479,8 @@ class PinMemoryAllocator(MemoryAllocatorInterface):
 
     def close(self):
         if not self._unregistered:
-            torch.cuda.synchronize()
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
             lmc_ops.free_pinned_ptr(self.buffer.data_ptr())
             self._unregistered = True
 
@@ -1606,7 +1618,8 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
 
     def close(self):
         if not self._unregistered:
-            torch.cuda.synchronize()
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
             if self.numa_mapping:
                 lmc_ops.free_pinned_numa_ptr(self.buffer.data_ptr(), self.size)
             else:
@@ -1632,6 +1645,9 @@ class GPUMemoryAllocator(MemoryAllocatorInterface):
         :param int size: The size of the GPU memory in bytes.
         :param Optional[int] align_bytes: The byte alignment for allocations.
         """
+        if not torch.cuda.is_available():
+            device = "cpu"
+
         self.tensor = torch.empty(size, dtype=torch.uint8, device=device)
 
         self.allocator: MemoryAllocatorInterface
@@ -1713,7 +1729,10 @@ class AdHocMemoryAllocator(MemoryAllocatorInterface):
         """
         :param str device: The device of the ad hoc memory allocator.
         """
-        self.device = device
+        if not torch.cuda.is_available():
+            self.device = "cpu"
+        else:
+            self.device = device
 
     @_lmcache_nvtx_annotate
     def allocate(
@@ -1797,7 +1816,10 @@ class CuFileMemoryAllocator(GPUMemoryAllocator):
         if device is None:
             # TODO(Serapheim): Ideally we'd get the device from the upper
             # layer - for now just use the current device.
-            device = f"cuda:{torch.cuda.current_device()}"
+            if torch.cuda.is_available():
+                device = f"cuda:{torch.cuda.current_device()}"
+            else:
+                device = "cpu:0"
         super().__init__(size, device, align_bytes=4096)
         self.base_pointer = self.tensor.data_ptr()
         cuFileBufRegister(ctypes.c_void_p(self.base_pointer), size, flags=0)

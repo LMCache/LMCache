@@ -134,7 +134,7 @@ class WekaGdsBackend(AllocatorBackendInterface):
         self.cufile = cufile
 
         assert dst_device.startswith("cuda")
-        super().__init__(dst_device)
+        super().__init__(dst_device=dst_device)
 
         self.config = config
         self.loop = loop

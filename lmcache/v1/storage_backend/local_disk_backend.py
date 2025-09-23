@@ -101,7 +101,11 @@ class LocalDiskBackend(StorageBackendInterface):
         dst_device: str = "cuda",
         lmcache_worker: Optional["LMCacheWorker"] = None,
     ):
-        super().__init__(dst_device)
+        if torch.cuda.is_available():
+            super().__init__(dst_device)
+        else:
+            super().__init__("cpu")
+
         self.cache_policy = get_cache_policy(config.cache_policy)
         self.dict = self.cache_policy.init_mutable_mapping()
 

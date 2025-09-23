@@ -9,6 +9,8 @@ import time
 import pytest
 import torch
 
+pytest.importorskip("nixl", reason="nixl package is required for nixl tests")
+
 # First Party
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
