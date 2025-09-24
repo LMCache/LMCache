@@ -663,8 +663,7 @@ class LMCacheConnectorV1Impl:
 
         # TODO(baoloongmao): Internal api server & plugin framework support dp > 1
         if (
-            vllm_config.parallel_config.data_parallel_size_local == 1
-            or vllm_config.parallel_config.data_parallel_rank_local == 0
+            vllm_config.parallel_config.data_parallel_rank_local == 0
         ):
             # Start internal API server if enabled
             # The enabled check is in the InternalAPIServer constructor
