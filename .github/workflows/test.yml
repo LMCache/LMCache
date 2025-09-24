@@ -76,7 +76,7 @@ jobs:
           python -m pip install -r requirements/test.txt
           python -m pip install -r requirements/common.txt
 
-      - name: "Run non-CUDA unit tests (v1/storage_backend)"
+      - name: "Run non-CUDA unit tests"
         run: |
           pytest
 

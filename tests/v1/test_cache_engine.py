@@ -1315,6 +1315,10 @@ def test_builder_destroy_multiple_instances(autorelease_v1):
     LMCacheEngineBuilder.destroy(instance_id2)
 
 
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="Requires CUDA for test_multi_device_backends",
+)
 def test_multi_device_backends(autorelease_v1):
     """Test running GPU-related backend with local CPU backends
     together
