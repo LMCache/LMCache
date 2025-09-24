@@ -109,7 +109,6 @@ static StagingBuf* acquire_buf(cudaStream_t s) {
           return &b;
         }
         if (cudaEventQuery(b.done) == cudaSuccess) {
-          b.in_flight = false;
           b.in_flight = true;
           return &b;
         }
