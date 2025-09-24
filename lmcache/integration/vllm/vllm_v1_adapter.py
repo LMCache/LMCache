@@ -1132,7 +1132,7 @@ class LMCacheConnectorV1Impl:
         ):
             return 0
 
-        self._requests_priority[request.request_id] = request.priority
+        self._requests_priority[request.request_id] = getattr(request, "priority", 0)
 
         token_ids = request.prompt_token_ids
 
