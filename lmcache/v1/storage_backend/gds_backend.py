@@ -2,7 +2,7 @@
 # Standard
 from collections import OrderedDict
 from concurrent.futures import Future
-from typing import Any, List, Optional, Sequence, Tuple
+from typing import Any, List, Optional, Sequence, Tuple, Union
 import asyncio
 import ctypes
 import json
@@ -408,7 +408,7 @@ class GdsBackend(AllocatorBackendInterface):
         keys: Sequence[CacheEngineKey],
         memory_objs: List[MemoryObj],
         transfer_spec: Any = None,
-    ) -> List[Future]:
+    ) -> Union[List[Future], None]:
         futures = []
         for key, memory_obj in zip(keys, memory_objs, strict=False):
             future = self.submit_put_task(key, memory_obj)
