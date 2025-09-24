@@ -70,11 +70,6 @@ class LocalCPUBackend(AllocatorBackendInterface):
         self.instance_id = config.lmcache_instance_id
         self.cpu_lock = threading.Lock()
 
-        if torch.cuda.is_available():
-            self.stream = torch.cuda.Stream()
-        else:  # CPU doesn't need streams
-            self.stream = None
-
         self.stats_monitor = LMCStatsMonitor.GetOrCreate()
 
         self.layerwise = config.use_layerwise
