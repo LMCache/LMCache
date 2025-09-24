@@ -80,6 +80,17 @@ def allocate_and_copy_objects(
         gran = int(gran_env)
     except Exception:
         gran = 0
+    # Latency-sensitive knobs
+    try:
+        max_items_env = os.getenv("LMCACHE_COALESCE_MAX_ITEMS", "8")
+        max_items = int(max_items_env)
+    except Exception:
+        max_items = 8
+    try:
+        max_group_bytes_env = os.getenv("LMCACHE_COALESCE_MAX_GROUP_BYTES", "0")
+        max_group_bytes = int(max_group_bytes_env)
+    except Exception:
+        max_group_bytes = 0
     # When gran>0, accumulate per-base chunks for a single coalesced launch
     # plan_map: base_ptr(int) -> list of (src_ptr, len, dst_off)
     plan_map: dict[int, list[tuple[int, int, int]]] = {} if gran > 0 else {}
@@ -138,10 +149,27 @@ def allocate_and_copy_objects(
             except Exception:
                 pass
             for base, items in plan_map.items():
+                # Heuristic bypass for small batches to reduce latency
+                total_bytes_all = sum(int(sz) for _, sz, _ in items)
+                if len(items) < 2 or total_bytes_all < 2 * gran:
+                    # Fall back to per-object copies
+                    for src_ptr, size_b, dst_off in items:
+                        add_h2d_raw(int(size_b))
+                        # Build temporary tensors is expensive; rely on ext memcpy if available
+                        try:
+                            ext.memcpy_h2d_async(
+                                int(base + dst_off), int(src_ptr), int(size_b)
+                            )
+                        except Exception:
+                            # As a fallback, do nothing here; the high-level path
+                            # already issued copies for OFF case
+                            pass
+                        add_h2d(int(size_b))
+                    continue
+
                 # Build ChunkEx list sorted by dst_off
                 ChunkEx = ext.ChunkEx
                 chunk_list = []
-                total_bytes = 0
                 for src_ptr, size_b, dst_off in items:
                     ce = ChunkEx()
                     ce.src = int(src_ptr)
@@ -149,17 +177,39 @@ def allocate_and_copy_objects(
                     ce.dst = int(base)
                     ce.dst_off = int(dst_off)
                     chunk_list.append(ce)
-                    total_bytes += int(size_b)
-                # Single call will internally batch contiguous ranges
-                ext.build_pack_and_h2d_batches(
-                    int(base),
-                    chunk_list,
-                    int(gran),
-                    int(max(gran, 64 * 1024 * 1024)),
-                    8,
-                )
-                add_h2d(total_bytes)
-                add_h2d_coalesced(total_bytes)
+                chunk_list.sort(key=lambda ce: int(ce.dst_off))
+
+                # Window by max_items and optional max_group_bytes for latency
+                start_idx = 0
+                n = len(chunk_list)
+                while start_idx < n:
+                    end_idx = min(n, start_idx + max(1, max_items))
+                    if max_group_bytes and max_group_bytes > 0:
+                        # shrink window to respect max_group_bytes
+                        acc = 0
+                        cut = start_idx
+                        while cut < end_idx and (
+                            acc + int(chunk_list[cut].len)
+                        ) <= max_group_bytes:
+                            acc += int(chunk_list[cut].len)
+                            cut += 1
+                        if cut == start_idx:
+                            # single very large item, send as is
+                            cut = start_idx + 1
+                        end_idx = cut
+
+                    window = chunk_list[start_idx:end_idx]
+                    win_bytes = sum(int(ce.len) for ce in window)
+                    ext.build_pack_and_h2d_batches(
+                        int(base),
+                        window,
+                        int(gran),
+                        int(max(gran, 64 * 1024 * 1024)),
+                        8,
+                    )
+                    add_h2d(int(win_bytes))
+                    add_h2d_coalesced(int(win_bytes))
+                    start_idx = end_idx
 
     stream.synchronize()
     return keys[: len(allocated_objects)], allocated_objects
