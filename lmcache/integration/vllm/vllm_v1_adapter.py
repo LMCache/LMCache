@@ -410,8 +410,18 @@ def _calculate_mtp_layers(vllm_config, model_config):
                 model_config.hf_config, "num_nextn_predict_layers", 0
             )
         elif vllm_config.speculative_config.use_eagle():
-            # EAGLE typically adds one decoder layer as the draft model for spec decode
-            num_mtp_layers = 1
+            try:
+                draft_model_config = vllm_config.speculative_config.draft_model_config
+                num_mtp_layers = draft_model_config.get_num_layers(
+                    vllm_config.parallel_config
+                )
+                logger.info(f"EAGLE detected {num_mtp_layers} extra layer(s)")
+            except Exception:
+                logger.info(
+                    "EAGLE detected, but failed to get the number of extra layers"
+                    "falling back to 1"
+                )
+                num_mtp_layers = 1
             logger.info(f"EAGLE detected, adding {num_mtp_layers} extra layer(s)")
     return num_mtp_layers
 
